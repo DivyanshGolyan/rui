@@ -27,6 +27,8 @@ permissions:
   contents: read
   pull-requests: read
   actions: read
+  # Aggregates read GitHub's annotations to name a lost or never-acquired runner.
+  checks: read
 
 concurrency:
   group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}${{ inputs.promotion && '-promotion' || '' }}
@@ -571,6 +573,17 @@ jobs:
             test "$NATIVE_RESULT" = skipped
             test "$TYPECHECK_RESULT" = skipped
           fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ failure() }}
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
+          sparse-checkout: tests/ci
+          persist-credentials: false
+      - name: Name each failed job and its cause
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tests/ci/failure_cause.py explain
   macos_suites:
     name: macos suites (${{ matrix.name }})
     needs: [plan, macos_build, macos_build_unit]
@@ -653,6 +666,17 @@ jobs:
           if [ "$SPLIT" = true ]; then test "$UNIT_RESULT" = success; else test "$UNIT_RESULT" = skipped; fi
           test "$BUILD_RESULT" = success
           test "$NATIVE_RESULT" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ failure() }}
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
+          sparse-checkout: tests/ci
+          persist-credentials: false
+      - name: Name each failed job and its cause
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tests/ci/failure_cause.py explain
   previous_release_upgrade:
     needs: plan
     # Upgrade, installer and Store-format paths only; promotion runs it for every batch.
@@ -690,7 +714,7 @@ jobs:
           CACHE_RESULT: ${{ needs.cache_execution.result }}
         run: |
           set -euo pipefail
-          test "$DRAFT" = false
+          if [ "$DRAFT" != false ]; then echo '::error::A draft never admits: mark the PR ready for review.'; exit 1; fi
           test "$PLAN_RESULT" = success
           test "$LINUX_RESULT" = success
           case "$CHANGE_KIND" in
@@ -729,3 +753,14 @@ jobs:
             false) test "$CACHE_RESULT" = skipped ;;
             *) echo 'Missing or invalid cache selection' >&2; exit 1 ;;
           esac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ failure() }}
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
+          sparse-checkout: tests/ci
+          persist-credentials: false
+      - name: Name each failed job and its cause
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tests/ci/failure_cause.py explain

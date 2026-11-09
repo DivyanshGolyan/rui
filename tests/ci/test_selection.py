@@ -382,7 +382,7 @@ class SelectionTest(unittest.TestCase):
         job = re.search(r'(?ms)^  linux:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow)[1]
         expression = re.search(r'if: \$\{\{ (.*?) \}\}', job)[1]
         expression = re.sub(r'!(?!=)', 'not ', expression.replace('&&', 'and').replace('||', 'or'))
-        script = dedent(job.split('run: |\n', 1)[1])
+        script = dedent(job.split('run: |\n', 1)[1].split('\n      - ', 1)[0])
         cases = []
         for targets in ('[]', ''):  # Documentation and duplicate-push suppression.
             cases.append((targets, 'success', 'success', 'skipped', 'skipped', False, 'success'))
@@ -501,7 +501,7 @@ class SelectionTest(unittest.TestCase):
         self.assertIn('!cancelled()', expression)
         expression = re.sub(r'!(?!=)', 'not ', expression.replace('&&', 'and').replace('||', 'or'))
         self.assertIn('always()', gate)
-        script = dedent(gate.split('run: |\n', 1)[1])
+        script = dedent(gate.split('run: |\n', 1)[1].split('\n      - ', 1)[0])
         for split in ('true', 'false'):
             for unit in ('success', 'skipped', 'failure', 'cancelled'):
                 for build, native in (('success', 'success'), ('failure', 'skipped'),

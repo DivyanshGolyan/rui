@@ -165,6 +165,7 @@ Ready PRs, promotions and the documentation lane never rerun.
 Qualification keeps one job per target. macOS packs native work into at most three workers: execution plus portable logic, callers, and remaining native targets.
 Composed gates, long witnesses, launch, Debug admission, reply delivery and H2 stay isolated from other target batches.
 The `linux` and `macos` statuses fail if any selected job fails or is cancelled.
+A failing aggregate names each failed job of its run and whether infrastructure or a check failed it ([failure_cause.py](tests/ci/failure_cause.py)), so a red never reads only as an exit code.
 Use unsplit `zig build check-full` for single-machine isolated-latency or release evidence.
 
 Driver `fixture passed: exit=0 elapsed=1.234s` records (`failed` on nonzero exit) attribute fixture cost, not CPU time, isolated latency or speedup.
@@ -249,6 +250,8 @@ The API-only cleanup job runs trusted main code with cache-deletion permission a
 CI uses only standard `ubuntu-24.04` and Apple Silicon `macos-15` runners, plus `ubuntu-24.04-arm` for the Linux arm64 release build, in this public repository, with no paid host or storage expansion.
 Free eligibility does not prove capacity; report the actual runner outcome and do not raise paid spend silently.
 Apart from the shard rerun above, test execution has no automatic retry.
+Infrastructure failures are not test execution: [Retry infrastructure failures](.github/workflows/infra-retry.yml) reruns a PR run's failed jobs once when every failure was infrastructure (no runner took or kept the job, or a step that only fetches, installs or starts services failed with a network error such as GitHub's 504) and the run still tests the PR's head.
+A build or test step's failure, a later attempt or any check failure in the run never reruns, and a rerun job's tests had not run.
 
 ### Hosted qualification
 
