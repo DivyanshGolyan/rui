@@ -16,6 +16,7 @@ const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
 const model_list = @import("model_list.zig");
 const store = @import("store.zig");
+const session_report_reply = @import("session_report_reply.zig");
 const launch_frame = @import("launch_frame.zig");
 const core_tools = @import("core_tools.zig");
 const Hole = protocol.Hole;
@@ -356,10 +357,7 @@ const ToolNameList = struct {
     pub fn openapi_inline(d: *Document) !Value {
         return d.object(.{
             .type = Value{ .string = "array" },
-            .items = try d.object(.{
-                .type = Value{ .string = "string" },
-                .pattern = Value{ .string = std.fmt.comptimePrint("^[A-Za-z0-9_-]{{1,{d}}}$", .{protocol.max_tool_name_bytes}) },
-            }),
+            .items = try toolName(d),
             .maxItems = Value{ .integer = protocol.max_tools },
             .uniqueItems = Value{ .bool = true },
             .@"x-rui-max-bytes" = Value{ .integer = protocol.max_tool_list_name_bytes },
@@ -370,6 +368,14 @@ const ToolNameList = struct {
         try out.print("[\"{s}\"]", .{@tagName(std.meta.tags(Tool)[0])});
     }
 };
+
+/// A tool name (`tool_name.valid`).
+fn toolName(d: *Document) !Value {
+    return d.object(.{
+        .type = Value{ .string = "string" },
+        .pattern = Value{ .string = std.fmt.comptimePrint("^[A-Za-z0-9_-]{{1,{d}}}$", .{protocol.max_tool_name_bytes}) },
+    });
+}
 
 /// Fields after `output_schema` are optional to the parser, in any order;
 /// the client always sends all four, in this order. Creation requires model,
@@ -540,6 +546,7 @@ pub const Document = struct {
         if (@hasDecl(T, "openapi_inline")) return T.openapi_inline(d);
         if (@hasDecl(T, "openapi_list")) return d.object(.{ .type = Value{ .string = "array" }, .items = try d.typeRef(T.openapi_list) });
         if (@hasDecl(T, "openapi_tools")) return ToolNameList.openapi_inline(d);
+        if (@hasDecl(T, "openapi_tool_name")) return toolName(d);
         if (@hasDecl(T, "openapi_content")) return Content.openapi_inline(d);
         const name = comptime componentName(T);
         if (!d.schemas.contains(name)) {
@@ -832,10 +839,10 @@ pub const Document = struct {
                 .report => {
                     var content: ObjectMap = .empty;
                     const reply_name = try std.fmt.allocPrint(d.arena, "{s}Reply", .{base});
-                    const shapes = store.session_report_shapes;
+                    const shapes = session_report_reply.shapes;
                     try d.schemas.put(d.arena, reply_name, try d.anyOf(&.{
                         try d.shapeSchema(shapes.current),
-                        try d.shapeSchema(shapes.full),
+                        try d.shapeSchema(shapes.full_head ++ .{ ",\"full\":", Hole{ .json = store.SessionReportFull } } ++ shapes.tail),
                         try d.shapeSchema(shapes.missing_current),
                         try d.shapeSchema(shapes.missing_full),
                     }));
@@ -1481,7 +1488,7 @@ test "catalog full report schema represents turnless catalog source facts" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var document: Document = .init(arena.allocator());
-    const shape = try document.shapeSchema(store.session_report_shapes.conversation);
+    const shape = try document.shapeSchema(store.SessionReportFull.Conversation.json_shape);
     const json = try std.json.parseFromSliceLeaky(
         Value,
         arena.allocator(),

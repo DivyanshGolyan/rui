@@ -4641,7 +4641,7 @@ fn writeSkillForTesting(setup: *PreparationTestSetup, path: []const u8, bytes: [
 
 fn skillReportForTesting(setup: *PreparationTestSetup, session: []const u8) ![]u8 {
     var used: std.atomic.Value(u64) = .init(0);
-    var report = try setup.storage.captureSessionReport(session, .{
+    var report = try store.testingCaptureSessionReport(&setup.storage, session, .{
         .scratch_path = setup.root,
         .scratch_budget = .{ .used = &used, .limit = 4 * 1024 * 1024 },
         .request_number = 291,

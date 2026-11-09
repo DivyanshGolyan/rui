@@ -37,13 +37,7 @@ pub fn Reply(comptime Capture: type) type {
                 .created_at = values.created_at,
                 .revision = values.revision,
                 .end = values.end,
-                .first_message = if (values.first_message) |first| .{
-                    .position = first.position,
-                    .admission = first.admission,
-                    .admitted_at = first.admitted_at,
-                    .sender = if (first.sender) |sender| .{ .session = sender } else null,
-                    .content = .{ .length = first.length, .digest = first.digest },
-                } else null,
+                .first_message = if (values.first_message) |first| .fromCore(first) else null,
                 .work = &work,
                 .peers = &peers,
             };

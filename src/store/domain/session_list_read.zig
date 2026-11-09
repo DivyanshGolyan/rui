@@ -360,7 +360,7 @@ fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const List
     if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
     const work = try rows[index].work.work(row.created_at.get(), now_ms);
     const permission_mode = try configuration_domain.permissionMode(row.permission_mode);
-    const first = try report_domain.firstMessage(row, rows[index].first);
+    const first_message = try report_domain.firstMessage(row, rows[index].first);
     return .{
         .archive_state = row.archive_state,
         .reference = row.session_ref.slice(),
@@ -374,14 +374,7 @@ fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const List
         .created_at = row.created_at.get(),
         .revision = row.revision.get(),
         .end = row.next_position.get() - 1,
-        .first_message = if (first) |message| .{
-            .position = message.position,
-            .admission = message.admission,
-            .admitted_at = message.admitted_at,
-            .sender = if (message.sender) |sender| sender.session else null,
-            .length = message.content.length,
-            .digest = message.content.digest,
-        } else null,
+        .first_message = first_message,
         .work = work,
         .peers = .{ .from_person_at = if (row.from_person_at) |at| at.get() else null },
     };

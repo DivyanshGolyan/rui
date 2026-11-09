@@ -1,4 +1,6 @@
-//! Session reports and lists rendered as JSON, and failed-response capture.
+//! Session report capture, the readers the Current report shares with
+//! lists and inspection, the Full profile's history rendered as JSON, and
+//! failed-response capture.
 
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
@@ -6,18 +8,14 @@ const named_scratch = @import("../../named_scratch.zig");
 const protocol = @import("../../protocol.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
-const content_string = @import("../../content_string.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const tool_name = @import("../../tool_name.zig");
-const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
-const built_in_tool = @import("../../built_in_tool.zig");
-const cli_value = @import("../../cli_value.zig");
 const mutation_answer = @import("../../mutation_answer.zig");
 const provider_name = @import("../../provider_name.zig");
 const session_archive = @import("../../session_archive.zig");
 const session_id = @import("../../session_id.zig");
-const wire_version = @import("../../wire_version.zig").wire_version;
+const session_list = @import("../../session_list.zig");
 const ScratchBudget = @import("../../ScratchBudget.zig");
 const model_capability = @import("../../model_capability.zig");
 const tool_catalog = @import("../../tool_record.zig");
@@ -34,14 +32,12 @@ const action_domain = @import("action.zig");
 const command_domain = @import("command.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
-const model_admission_domain = @import("model_admission.zig");
 const skills_domain = @import("skills.zig");
 const reads_domain = @import("reads.zig");
 const store_schema = @import("../schema.zig");
 const turn_domain = @import("turn.zig");
 const AttemptBinding = store_core.AttemptBinding;
 const ContentReference = content_domain.ContentReference;
-const CurrentConfiguration = configuration_domain.CurrentConfiguration;
 const RevisionContentField = configuration_domain.RevisionContentField;
 const TurnOutcome = turn_domain.TurnOutcome;
 const max_action_resolution_code_bytes = action_domain.max_action_resolution_code_bytes;
@@ -49,21 +45,6 @@ const max_permission_decision_bytes = command_domain.max_permission_decision_byt
 pub const ReadAccess = reads_domain.ReadAccess;
 const SessionText = Bounded(session_id.max_reference_bytes);
 const Code = Bounded(outcome_code.max_bytes);
-
-pub const SessionReportExecution = struct {
-    dispatch_fenced: bool,
-    custody_occupied: usize,
-    scratch_used_bytes: u64,
-};
-
-pub const SessionReportOptions = struct {
-    scratch_path: []const u8,
-    scratch_budget: ScratchBudget,
-    request_number: u64,
-    profile: cli_value.ReportProfile = .current,
-    execution: SessionReportExecution,
-    fail_unlink: bool = false,
-};
 
 pub const SessionReport = struct {
     pub const read_window_bytes = 64 * 1024;
@@ -212,10 +193,6 @@ pub const SessionReportCapture = struct {
             run_start = index + 1;
         }
         if (run_start != value.len) try self.append(value[run_start..]);
-    }
-
-    fn appendContentReference(self: *SessionReportCapture, reference: ContentReference) !void {
-        try self.appendShape(protocol.content_reference_shape, .{ reference.length, reference.digest });
     }
 
     fn appendBareContentReference(self: *SessionReportCapture, reference: ContentReference) !void {
@@ -382,7 +359,7 @@ pub const FirstCandidates = struct {
 pub const person_message_sql = "SELECT admitted_at FROM message_admission @index(message_admission_person) " ++
     "WHERE session_ref=?1 AND sender_session_ref IS NULL ORDER BY admission_position DESC LIMIT 1";
 
-const person_message = rsql.Read(.{
+pub const person_message = rsql.Read(.{
     .sql = person_message_sql,
     .Args = struct { session: []const u8 },
     .Row = struct { admitted_at: rsql.Positive },
@@ -408,7 +385,7 @@ const FirstMessageColumns = struct {
     first_private: ?bool,
 };
 
-const first_message = rsql.Read(.{
+pub const first_message = rsql.Read(.{
     .sql = "SELECT " ++ first_message_columns ++ " FROM message_admission m " ++ first_content_join ++ " WHERE m.admission_id=?2 AND m.session_ref=?1",
     .Args = struct { session: []const u8, first: u64 },
     .Row = FirstMessageColumns,
@@ -442,85 +419,17 @@ pub fn sortedToolNames(names: ?[]const u8, sorted: *[tool_catalog.max_tools][]co
 /// The first Message of a row with `FirstMessageColumns`, read for the
 /// admission `first` (0 for none). Content that is private is
 /// `CorruptStore`.
-pub fn firstMessage(row: anytype, first: u64) error{CorruptStore}!?protocol.FirstMessage {
+pub fn firstMessage(row: anytype, first: u64) error{CorruptStore}!?session_list.FirstMessage {
     if (first == 0) return null;
     if (row.first_private orelse return error.CorruptStore) return error.CorruptStore;
     return .{
         .position = (row.first_position orelse return error.CorruptStore).get(),
         .admission = (row.first_admission orelse return error.CorruptStore).get(),
         .admitted_at = (row.first_admitted_at orelse return error.CorruptStore).get(),
-        .sender = if (row.first_sender) |sender| .{ .session = sender } else null,
-        .content = .{ .length = row.first_length orelse return error.CorruptStore, .digest = row.first_digest orelse return error.CorruptStore },
+        .sender = row.first_sender,
+        .length = row.first_length orelse return error.CorruptStore,
+        .digest = row.first_digest orelse return error.CorruptStore,
     };
-}
-
-/// A Session report on the report's Access `a`: its saved Session and
-/// Current facts (`renderHead`), then, for the Full profile, its history
-/// (`renderFull`), all under one Entry, so one snapshot.
-pub fn renderSessionReport(
-    a: *ReadAccess,
-    session_ref: []const u8,
-    profile: cli_value.ReportProfile,
-    execution: SessionReportExecution,
-    capture: *SessionReportCapture,
-) !void {
-    if (!try renderHead(a, session_ref, profile, capture)) return;
-    if (profile == .full) try renderFull(a, session_ref, capture);
-    try capture.append(",\"execution\":");
-    try capture.appendShape(ExecutionJson.json_shape, .{ execution.dispatch_fenced, execution.custody_occupied, execution.scratch_used_bytes });
-    try capture.append("}");
-}
-
-/// Wire shapes for the report envelope written by `renderHead` and
-/// `renderSessionReport`. Full history is present only for the full profile.
-pub const json_shapes = struct {
-    pub const conversation = @import("report_full_shape.zig").Full.Conversation.json_shape;
-    const H = protocol.Hole;
-    const head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_report\",\"profile\":\""};
-    const current_head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\""};
-    const facts = .{ "\",\"session\":", H{ .json = CurrentJson.Settings }, ",\"archive_state\":\"", H{ .tag = session_archive.State }, "\",\"pending_messages\":\"", H.decimal, "\",\"work\":", H{ .json = CurrentJson.Work }, ",\"peers\":", H{ .json = protocol.PeerFacts }, ",\"first_message\":", H{ .optional_json = protocol.FirstMessage }, ",\"selected_message\":", H{ .optional_string = idempotency_key.max_bytes }, ",\"recent_messages\":", ListOf(CurrentJson.Recent), ",\"actions\":", H{ .json = CurrentJson.Actions }, ",\"rejected_calls\":", H{ .json = CurrentJson.RejectedCalls }, ",\"actionable_permissions\":", ListOf(CurrentJson.Actionable) };
-    const tail = .{ ",\"execution\":", H{ .json = ExecutionJson }, "}" };
-    const missing = "\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}";
-    pub const current = current_head ++ .{"current"} ++ facts ++ tail;
-    pub const full = head ++ .{"full"} ++ facts ++ .{ ",\"full\":", H{ .json = @import("report_full_shape.zig").Full } } ++ tail;
-    pub const missing_current = current_head ++ .{"current" ++ missing};
-    pub const missing_full = head ++ .{"full" ++ missing};
-};
-
-fn ListOf(comptime T: type) type {
-    return struct {
-        pub const openapi_list = T;
-    };
-}
-
-/// Execution counters are supplied by the Host, not read from the Store.
-pub const ExecutionJson = struct {
-    pub const json_shape = .{ "{\"status\":\"partial\",\"dispatch_fenced\":", protocol.Hole.boolean, ",\"custody_occupied\":\"", protocol.Hole.decimal, "\",\"scratch_used_bytes\":\"", protocol.Hole.decimal, "\",\"unavailable\":[\"structured_output\"]}" };
-};
-
-/// A report's head, whose rounds tests count: round 1 reads the saved
-/// Session, and a missing one ends the report there, with its execution
-/// (false); the Current facts follow (`renderCurrent`). Not inlined: the
-/// saved Session lives in its frame, which returns before any history
-/// content is read.
-pub noinline fn renderHead(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, capture: *SessionReportCapture) !bool {
-    var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
-    var found: store_access.Found = undefined;
-    configuration_domain.readSaved(a, session_ref, &current, &found);
-    try a.run();
-    if (found.get()) try configuration_domain.checkSaved(&current);
-    try capture.append("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_report\"");
-    // Host-global execution counters and retry clocks are not Session-token facts.
-    if (profile == .current) try capture.append(",\"delta\":\"full\",\"since\":null");
-    try capture.append(",\"profile\":\"");
-    try capture.append(@tagName(profile));
-    try capture.append("\",\"session\":");
-    if (!found.get()) {
-        try capture.append("null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}");
-        return false;
-    }
-    try renderCurrent(a, session_ref, &current, capture);
-    return true;
 }
 
 /// The active Turn's Operations that proposed calls: each resolved with
@@ -627,558 +536,6 @@ pub const SessionCounts = struct {
         return .{ .pending = pending.pending, .actions = actions.actions, .rejected = rejected.rejected };
     }
 };
-
-/// The Message the active Turn started from: an active Turn owns the
-/// selection even if a successor is queued.
-const selected_active = rsql.Read(.{
-    .sql = "SELECT m.command_key FROM turn t @index(turn_one_active_per_session) JOIN message_admission m ON m.admission_id=t.first_admission_id " ++
-        "WHERE t.session_ref=?1 AND t.outcome_code IS NULL",
-    .Args = struct { session: []const u8 },
-    .Row = SelectedRow,
-    .cardinality = .each,
-});
-
-const SelectedRow = struct { command_key: Bounded(idempotency_key.max_bytes) };
-
-/// Without an active Turn, the oldest Message queued after the latest
-/// stop's cutoff ?2.
-const selected_queued = rsql.Read(.{
-    .sql = "SELECT command_key FROM message_admission @index(message_admission_session_pending) " ++
-        "WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2 ORDER BY admission_id LIMIT 1",
-    .Args = struct { session: []const u8, cutoff: u64 },
-    .Row = SelectedRow,
-    .cardinality = .each,
-});
-
-/// The ten newest Messages of terminal Turns. CROSS JOIN fixes the
-/// indexed order, Turns newest first and then their admissions, so LIMIT
-/// stops after ten Messages, even when older history or other Sessions
-/// grow.
-const recent_messages = rsql.Read(.{
-    .sql = "SELECT t.turn_id,m.command_key,t.outcome_code FROM turn t @index(turn_session_latest) " ++
-        "CROSS JOIN message_admission m @index(message_admission_session_order) " ++
-        "WHERE t.session_ref=?1 AND t.outcome_code IS NOT NULL AND m.session_ref=t.session_ref AND m.turn_id=t.turn_id " ++
-        "ORDER BY t.turn_id DESC,m.admission_id DESC LIMIT 10",
-    .Args = struct { session: []const u8 },
-    .Row = struct { turn_id: rsql.Positive, command_key: Bounded(idempotency_key.max_bytes), outcome_code: Code },
-    .cardinality = .each,
-});
-
-/// The active Turn's current Operation's unresolved Actions, with each
-/// call's line for its presentation.
-const unresolved_actions = rsql.Read(.{
-    .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,revision.permission_mode,@payload(call_name) AS tool_name," ++
-        "call_id.byte_length AS call_id_length,call_id.digest AS call_id_digest,arguments.byte_length AS arguments_length,arguments.digest AS arguments_digest," ++
-        "call_name.digest AS name_digest," ++ action_domain.mcpServerSql("a", "operation") ++ " AS server,tool_call.description FROM turn active @index(turn_one_active_per_session) " ++
-        "CROSS JOIN action_operation a ON a.parent_operation_id=active.operation_id " ++
-        "CROSS JOIN model_operation operation ON operation.operation_id=a.parent_operation_id " ++
-        "CROSS JOIN session_revision revision ON revision.session_ref=a.session_ref AND revision.revision=a.permission_revision " ++
-        "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
-        "CROSS JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
-        "CROSS JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
-        "CROSS JOIN content call_name ON call_name.content_id=tool_call.name_content_id " ++
-        "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND a.resolution_code IS NULL ORDER BY a.action_id",
-    .Args = struct { session: []const u8 },
-    .Row = struct {
-        action_id: rsql.Positive,
-        parent_operation_id: rsql.Positive,
-        call_ordinal: u64,
-        permission_revision: rsql.Positive,
-        authorized: bool,
-        permission_mode: u1,
-        tool_name: Bounded(tool_catalog.max_name_bytes),
-        call_id_length: u64,
-        call_id_digest: [32]u8,
-        arguments_length: u64,
-        arguments_digest: [32]u8,
-        name_digest: [32]u8,
-        server: ?Bounded(64),
-        description: ?Description,
-    },
-    .cardinality = .each,
-});
-
-const Description = Bounded(tool_presentation.max_description_bytes);
-
-/// The CTE `publications`: each active Operation's tool group
-/// publication, as main's outcome facts gave it, its largest acceptance
-/// when every call has one and none otherwise. Grouped once per
-/// Operation, so a list joins it per row without rescanning the
-/// Operation's calls. The rule over `active_tool_calls` proved every
-/// call of each listed Operation valid in an earlier round of this
-/// Access, under the Entry that excludes every writer, so its Operation
-/// has as many calls as call items. By the schema's CHECKs a call has an
-/// acceptance exactly when it is rejected (`model_tool_call`'s) or its
-/// Action resolved (`action_operation`'s), main's terminal calls, so this
-/// counts what main counted.
-const publications_sql = "WITH publications AS (SELECT operation.operation_id," ++
-    "CASE WHEN count(*)=count(coalesce(sibling.acceptance_position,sibling_action.acceptance_position)) " ++
-    "THEN max(coalesce(sibling.acceptance_position,sibling_action.acceptance_position)) END AS publication " ++
-    "FROM turn active @index(turn_one_active_per_session) " ++
-    "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
-    "CROSS JOIN model_tool_call sibling ON sibling.operation_id=operation.operation_id " ++
-    "LEFT JOIN action_operation sibling_action ON sibling_action.parent_operation_id=sibling.operation_id AND sibling_action.call_ordinal=sibling.call_ordinal " ++
-    "WHERE active.session_ref=?1 AND active.outcome_code IS NULL GROUP BY operation.operation_id) ";
-
-/// The active Turn's resolved Actions, with each call's line and its
-/// group's publication for its presentation. An Action's call is its
-/// foreign key.
-const resolved_actions = rsql.Read(.{
-    .sql = publications_sql ++ "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.resolution_code,a.acceptance_position," ++
-        "result.byte_length AS result_length,result.digest AS result_digest,tool_call.description,publications.publication " ++
-        "FROM turn active @index(turn_one_active_per_session) " ++
-        "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
-        "CROSS JOIN action_operation a ON a.parent_operation_id=operation.operation_id " ++
-        "CROSS JOIN content result ON result.content_id=a.resolution_content_id " ++
-        "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
-        "LEFT JOIN publications ON publications.operation_id=operation.operation_id " ++
-        "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND a.resolution_code IS NOT NULL ORDER BY a.action_id",
-    .Args = struct { session: []const u8 },
-    .Row = struct {
-        action_id: rsql.Positive,
-        parent_operation_id: rsql.Positive,
-        call_ordinal: u64,
-        resolution_code: Bounded(32),
-        acceptance_position: rsql.Positive,
-        result_length: u64,
-        result_digest: [32]u8,
-        description: ?Description,
-        publication: ?rsql.Positive,
-    },
-    .cardinality = .each,
-});
-
-/// The active Turn's rejected calls, with each one's line and its group's
-/// publication for its presentation.
-const rejected_calls = rsql.Read(.{
-    .sql = publications_sql ++ "SELECT tool_call.operation_id,tool_call.call_ordinal,tool_call.rejection_code,tool_call.acceptance_position," ++
-        "rejection.byte_length AS rejection_length,rejection.digest AS rejection_digest,name.byte_length AS name_length,name.digest AS name_digest," ++
-        "call_id.byte_length AS call_id_length,call_id.digest AS call_id_digest,arguments.byte_length AS arguments_length,arguments.digest AS arguments_digest," ++
-        "tool_call.description,publications.publication " ++
-        "FROM turn active @index(turn_one_active_per_session) " ++
-        "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
-        "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
-        "CROSS JOIN content name ON name.content_id=tool_call.name_content_id " ++
-        "CROSS JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
-        "CROSS JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
-        "CROSS JOIN content rejection ON rejection.content_id=tool_call.rejection_content_id " ++
-        "LEFT JOIN publications ON publications.operation_id=operation.operation_id " ++
-        "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND tool_call.rejection_code IS NOT NULL " ++
-        "ORDER BY tool_call.operation_id,tool_call.call_ordinal",
-    .Args = struct { session: []const u8 },
-    .Row = struct {
-        operation_id: rsql.Positive,
-        call_ordinal: u64,
-        rejection_code: Bounded(32),
-        acceptance_position: rsql.Positive,
-        rejection_length: u64,
-        rejection_digest: [32]u8,
-        name_length: u64,
-        name_digest: [32]u8,
-        call_id_length: u64,
-        call_id_digest: [32]u8,
-        arguments_length: u64,
-        arguments_digest: [32]u8,
-        description: ?Description,
-        publication: ?rsql.Positive,
-    },
-    .cardinality = .each,
-});
-
-/// The active Turn's current Operation's Actions awaiting permission.
-const actionable_permissions = rsql.Read(.{
-    .sql = "SELECT action.action_id,action.permission_revision FROM turn active @index(turn_one_active_per_session) " ++
-        "JOIN action_operation action ON action.parent_operation_id=active.operation_id " ++
-        "WHERE active.session_ref=?1 AND active.outcome_code IS NULL " ++
-        "AND action.resolution_code IS NULL AND action.authorized=0 ORDER BY action.action_id",
-    .Args = struct { session: []const u8 },
-    .Row = struct { action_id: rsql.Positive, permission_revision: rsql.Positive },
-    .cardinality = .each,
-});
-
-/// The names main gave the Current report's failed steps; any other is
-/// `CorruptStore`, main's answer for content metadata. A presentation's
-/// reads, which main named apart, are its list's own columns now, so
-/// they take its list's name.
-pub const current_failures = .{
-    .{ archive_state, error.SessionReadFailed },
-    .{ selected_active, error.TurnReadFailed },
-    .{ selected_queued, error.MessageAdmissionReadFailed },
-    .{ recent_messages, error.TurnReadFailed },
-    .{ unresolved_actions, error.ActionReadFailed },
-    .{ resolved_actions, error.ActionReadFailed },
-    .{ rejected_calls, error.CallReadFailed },
-    .{ actionable_permissions, error.ActionReadFailed },
-} ++ session_count_failures ++ model_admission_domain.compaction_failures ++ report_failures;
-
-/// Ends a round of the Current report, naming a failed step by
-/// `current_failures`.
-fn runCurrent(a: *ReadAccess) !void {
-    return store_access.runNamed(a, current_failures, error.CorruptStore);
-}
-
-/// What the Current report reads before its lists.
-const CurrentFacts = struct {
-    archive: archive_state.Result = null,
-    instructions: content_domain.content_metadata.Row = undefined,
-    output_schema: content_domain.content_metadata.Row = undefined,
-    counts: SessionCounts,
-    compaction: model_admission_domain.CompactionRead,
-    work: WorkRead,
-    person: person_message.Result = null,
-    first: FirstCandidates = .{},
-    first_row: first_message.Result = null,
-    active: reads_domain.First(SelectedRow) = .{},
-    queued: reads_domain.First(SelectedRow) = .{},
-    outcome: content_domain.content_metadata.Row = undefined,
-    /// In the Store's scratch (`Store.reportScratch`): over 4 KiB.
-    tools: *set_names.Row,
-    tools_found: store_access.Found = undefined,
-};
-
-/// The names of the tool set ?1, joined (`tool_set.namesSql`).
-const set_names = rsql.Read(.{
-    .sql = "SELECT " ++ tool_set.namesSql("s.tool_set_id") ++ " AS names," ++ tool_set.namesSql("?2") ++ " AS loaded_names FROM tool_set s WHERE s.tool_set_id=?1",
-    .Args = struct { set: u64, loaded: u64 },
-    .Row = struct { names: ?Bounded(tool_set.max_names_bytes), loaded_names: ?Bounded(tool_set.max_names_bytes) },
-    .cardinality = .optional,
-});
-
-/// The Current report after its saved Session, in the rounds its reads'
-/// dependencies take. Round 2: the instructions' and output schema's
-/// metadata, the counts' first round (`SessionCounts`), the latest Turn
-/// for `context_estimate` (`CompactionRead`), the work's latest Turn, the
-/// latest Message from no Session, both first-Message seeks and the
-/// active Turn's Message. Round 3: the counts' second round, the queued Message
-/// when no Turn is active, the work's second stage, the first Message's
-/// row, the latest outcome's content metadata and the compaction facts'
-/// next stage. The work's and compaction facts' later stages share the
-/// rounds after it. Then each list, in a round of its own; the active
-/// Turn's lists only when it counts an Action or rejected call to list.
-/// Not inlined, so its reads take no slot in the Full profile's frames.
-noinline fn renderCurrent(a: *ReadAccess, session_ref: []const u8, current: *const CurrentConfiguration, capture: *SessionReportCapture) !void {
-    const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
-    var facts: CurrentFacts = .{
-        .counts = .{ .session = session_ref },
-        .compaction = .init(session_ref, current.next_position, current.provider, current.model.slice(), policy),
-        .work = .{ .session = session_ref },
-        .tools = a.store.reportScratch(set_names.Row),
-    };
-    // `checkSaved` refused a missing or zero instructions id and a zero
-    // output schema id. A negative id is `CorruptStore` without a read,
-    // where main read it and found no row unless one had that id.
-    const instructions_id = current.instructions_id.?;
-    if (instructions_id < 0 or (current.output_schema_id orelse 1) < 0) return error.CorruptStore;
-    const metadata = content_domain.content_metadata;
-    a.read(metadata, .{ .content_id = @intCast(instructions_id) }, &facts.instructions);
-    if (current.output_schema_id) |content_id| a.read(metadata, .{ .content_id = @intCast(content_id) }, &facts.output_schema);
-    a.read(archive_state, .{ .session = session_ref }, &facts.archive);
-    facts.counts.queue(a);
-    _ = facts.compaction.queue(a);
-    _ = facts.work.queue(a);
-    a.read(person_message, .{ .session = session_ref }, &facts.person);
-    a.readInto(set_names, .{ .set = current.tool_set_id, .loaded = current.loaded_tool_set_id orelse current.tool_set_id }, facts.tools, &facts.tools_found);
-    facts.first.queue(a, session_ref);
-    a.readEach(selected_active, .{ .session = session_ref }, 1, &facts.active);
-    try runCurrent(a);
-    try facts.compaction.advance();
-    try facts.work.advance();
-
-    facts.counts.queuePending(a);
-    if (facts.active.row == null) a.readEach(selected_queued, .{ .session = session_ref, .cutoff = facts.counts.stopCutoff() }, 1, &facts.queued);
-    const admission = facts.first.admission();
-    if (admission != 0) a.read(first_message, .{ .session = session_ref, .first = admission }, &facts.first_row);
-    // The work's latest Turn is read, so its outcome is known.
-    const outcome = facts.work.outcome();
-    if (outcome) |found| if (found.content_id) |content_id| a.read(metadata, .{ .content_id = content_id }, &facts.outcome);
-    var work_more = facts.work.queue(a);
-    var compaction_more = facts.compaction.queue(a);
-    while (true) {
-        try runCurrent(a);
-        if (work_more) try facts.work.advance();
-        if (compaction_more) try facts.compaction.advance();
-        work_more = facts.work.queue(a);
-        compaction_more = facts.compaction.queue(a);
-        if (!work_more and !compaction_more) break;
-    }
-    const counted = try facts.counts.judge();
-    if (admission != 0 and facts.first_row == null) return error.CorruptStore;
-
-    try capture.append("{\"reference\":");
-    try capture.appendJsonString(session_ref);
-    try capture.append(",\"parent\":");
-    if (current.parent_ref) |*parent| try capture.appendJsonString(parent.slice()) else try capture.append("null");
-    try capture.append(",\"workspace\":");
-    try capture.appendJsonString(current.workspace.slice());
-    try capture.append(",\"provider\":");
-    try capture.appendJsonString(@tagName(current.provider));
-    try capture.append(",\"model\":");
-    try capture.appendJsonString(current.model.slice());
-    try capture.append(",\"compaction_trigger\":");
-    try capture.appendFmt("\"{d}\"", .{policy.compaction_trigger});
-    try capture.append(",\"context_estimate\":");
-    if (turn_policy.comparedPressure(facts.compaction.facts)) |value| try capture.appendFmt("\"{d}\"", .{@min(value, std.math.maxInt(i64))}) else try capture.append("null");
-    try capture.appendFmt(",\"output_reservation\":\"{d}\",\"compaction_trigger_override\":", .{policy.output_reservation});
-    if (current.compaction_trigger) |value| try capture.appendFmt("\"{d}\"", .{value}) else try capture.append("null");
-    try capture.append(",\"output_reservation_override\":");
-    if (current.output_reservation) |value| try capture.appendFmt("\"{d}\"", .{value}) else try capture.append("null");
-    try capture.append(",\"reasoning_effort\":");
-    try appendNullableEffort(configuration_domain.effectiveReasoningEffort(current), capture);
-    try capture.append(",\"reasoning_effort_override\":");
-    try appendNullableEffort(current.reasoning_effort, capture);
-    try capture.appendFmt(",\"revision\":\"{d}\",\"tools\":", .{current.revision});
-    if (!facts.tools_found.get()) return error.CorruptStore;
-    try capture.appendTools(if (facts.tools.names) |*names| names.slice() else null);
-    try capture.append(",\"loaded_tools\":");
-    try capture.appendTools(if (facts.tools.loaded_names) |*names| names.slice() else null);
-    try capture.append(",\"permission_mode\":");
-    try capture.appendPermissionMode(current.permission_mode);
-    try capture.append(",\"instructions\":");
-    try capture.appendBareContentReference(.{ .length = facts.instructions.byte_length, .digest = facts.instructions.digest });
-    try capture.append(",\"output_schema\":");
-    if (current.output_schema_id != null) {
-        try capture.appendBareContentReference(.{ .length = facts.output_schema.byte_length, .digest = facts.output_schema.digest });
-    } else {
-        try capture.append("null");
-    }
-    try capture.append(",\"label\":");
-    if (current.label) |*label| try capture.appendJsonString(label.slice()) else try capture.append("null");
-    try capture.appendFmt(",\"created_at\":\"{d}\"}},\"archive_state\":\"{s}\",\"pending_messages\":\"{d}\",\"work\":", .{ current.created_at, @tagName(archiveStateFromIntent(facts.archive)), counted.pending });
-    const work: protocol.SessionWork = .fromCore(try facts.work.work(current.created_at, std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange));
-    try capture.appendShape(.{"{"} ++ protocol.SessionWork.fields, work.args());
-    if (outcome) |found| {
-        try capture.append(",\"latest_outcome\":{\"code\":");
-        try capture.appendJsonString(found.code);
-        try capture.append(",\"content\":");
-        if (found.content_id != null) {
-            try capture.appendBareContentReference(.{ .length = facts.outcome.byte_length, .digest = facts.outcome.digest });
-        } else {
-            try capture.append("null");
-        }
-        try capture.append("}}");
-    } else try capture.append(",\"latest_outcome\":null}");
-    try capture.append(",\"peers\":");
-    const peers: protocol.PeerFacts = .{ .from_person_at = if (facts.person) |found| found.admitted_at.get() else null };
-    try capture.appendShape(.{protocol.Hole{ .json = protocol.PeerFacts }}, .{peers});
-    try capture.append(",\"first_message\":");
-    try capture.appendShape(.{protocol.Hole{ .optional_json = protocol.FirstMessage }}, .{if (facts.first_row) |*found| try firstMessage(found, admission) else null});
-    try capture.append(",\"selected_message\":");
-    if (facts.active.row orelse facts.queued.row) |selected| try capture.appendJsonString(selected.command_key.slice()) else try capture.append("null");
-    try capture.append(",\"recent_messages\":[");
-    try renderList(a, recent_messages, .{ .session = session_ref }, 10, renderRecent, capture);
-    try capture.appendFmt("],\"actions\":{{\"count\":\"{d}\",\"unresolved\":[", .{counted.actions});
-    if (counted.actions != 0) try renderList(a, unresolved_actions, .{ .session = session_ref }, std.math.maxInt(u64), renderUnresolved, capture);
-    try capture.append("],\"resolved\":[");
-    if (counted.actions != 0) try renderList(a, resolved_actions, .{ .session = session_ref }, std.math.maxInt(u64), renderResolved, capture);
-    try capture.appendFmt("]}},\"rejected_calls\":{{\"count\":\"{d}\",\"items\":[", .{counted.rejected});
-    if (counted.rejected != 0) try renderList(a, rejected_calls, .{ .session = session_ref }, std.math.maxInt(u64), renderRejected, capture);
-    try capture.append("]},\"actionable_permissions\":[");
-    if (counted.actions != 0) try renderList(a, actionable_permissions, .{ .session = session_ref }, std.math.maxInt(u64), renderActionable, capture);
-    try capture.append("]");
-}
-
-/// Markers for the parts `renderCurrent` and its row renderers write by
-/// hand. Shared work, peer, Message and presentation fields use their wire
-/// types' shapes rather than a second description here.
-pub const CurrentJson = struct {
-    const H = protocol.Hole;
-    pub const ToolNames = struct {
-        pub const openapi_tools = true;
-    };
-    pub const Reference = protocol.ActivityItem.Content;
-    pub const TextReference = struct {
-        pub const json_shape = protocol.content_reference_shape;
-    };
-    pub const Settings = struct {
-        pub const json_shape = .{
-            "{\"reference\":",                     H{ .string = session_id.max_reference_bytes },
-            ",\"parent\":",                        H{ .optional_string = session_id.bytes },
-            ",\"workspace\":",                     H{ .string = workspace_path.max_bytes },
-            ",\"provider\":\"",                    H{ .tag = provider_name.Provider },
-            "\",\"model\":",                       H{ .string = model_capability.max_model_bytes },
-            ",\"compaction_trigger\":\"",          H.decimal,
-            "\",\"context_estimate\":",            H.optional_id,
-            ",\"output_reservation\":\"",          H.decimal,
-            "\",\"compaction_trigger_override\":", H.optional_id,
-            ",\"output_reservation_override\":",   H.optional_id,
-            ",\"reasoning_effort\":",              H{ .optional_tag = model_capability.ReasoningEffort },
-            ",\"reasoning_effort_override\":",     H{ .optional_tag = model_capability.ReasoningEffort },
-            ",\"revision\":\"",                    H.decimal,
-            "\",\"tools\":",                       ToolNames,
-            ",\"loaded_tools\":",                  ToolNames,
-            ",\"permission_mode\":\"",             H{ .tag = cli_value.PermissionMode },
-            "\",\"instructions\":",                H{ .json = Reference },
-            ",\"output_schema\":",                 H{ .optional_json = Reference },
-            ",\"label\":",                         H{ .optional_string = tool_presentation.max_label_bytes },
-            ",\"created_at\":\"",                  H.decimal,
-            "\"}",
-        };
-    };
-    pub const Outcome = struct {
-        pub const json_shape = .{ "{\"code\":", H{ .string = outcome_code.max_bytes }, ",\"content\":", H{ .optional_json = Reference }, "}" };
-    };
-    pub const Work = struct {
-        pub const json_shape = .{"{"} ++ protocol.SessionWork.fields ++ .{ ",\"latest_outcome\":", H{ .optional_json = Outcome }, "}" };
-    };
-    pub const Recent = struct {
-        pub const json_shape = .{ "{\"turn\":\"", H.decimal, "\",\"message\":", H{ .string = idempotency_key.max_bytes }, ",\"outcome\":", H{ .string = outcome_code.max_bytes }, "}" };
-    };
-    pub const Unresolved = struct {
-        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"tool\":\"", H{ .tag = built_in_tool.BuiltInTool }, "\",\"permission_revision\":\"", H.decimal, "\",\"authorization\":\"", H{ .tag = enum { core, pending, bypass, allow_once } }, "\",\"call_id\":", H{ .json = TextReference }, ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
-    };
-    pub const Resolved = struct {
-        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = max_action_resolution_code_bytes }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
-    };
-    pub const Rejected = struct {
-        pub const json_shape = .{ "{\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = 32 }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = TextReference }, ",\"name\":", H{ .json = TextReference }, ",\"call_id\":", H{ .json = TextReference }, ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
-    };
-    pub const Actions = struct {
-        pub const json_shape = .{ "{\"count\":\"", H.decimal, "\",\"unresolved\":", ListOf(Unresolved), ",\"resolved\":", ListOf(Resolved), "}" };
-    };
-    pub const RejectedCalls = struct {
-        pub const json_shape = .{ "{\"count\":\"", H.decimal, "\",\"items\":", ListOf(Rejected), "}" };
-    };
-    pub const Actionable = struct {
-        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"permission_revision\":\"", H.decimal, "\"}" };
-    };
-};
-
-/// One list of the Current report, in a round of its own, rendered as it
-/// steps, so it keeps no row: `limit` bounds only a list whose text does.
-/// A row that failed to render did before any later row's step failed,
-/// so its error is main's first.
-fn renderList(a: *ReadAccess, comptime S: type, args: S.Args, limit: u64, comptime renderRow: anytype, capture: *SessionReportCapture) !void {
-    var render: ListRender(S.Row, renderRow) = .{ .capture = capture };
-    a.readEach(S, args, limit, &render);
-    const ran = runCurrent(a);
-    if (render.failure) |err| return err;
-    try ran;
-}
-
-/// Renders a list's rows, comma separated; after a failure it renders
-/// nothing more.
-fn ListRender(comptime Row: type, comptime renderRow: anytype) type {
-    return struct {
-        capture: *SessionReportCapture,
-        first: bool = true,
-        failure: ?Failure = null,
-
-        const Failure = @typeInfo(@typeInfo(@TypeOf(renderRow)).@"fn".return_type.?).error_union.error_set;
-
-        pub fn visit(render: *@This(), row: *const Row) bool {
-            render.renderOne(row) catch |err| {
-                render.failure = err;
-                return false;
-            };
-            return true;
-        }
-
-        fn renderOne(render: *@This(), row: *const Row) Failure!void {
-            if (!render.first) try render.capture.append(",");
-            render.first = false;
-            try renderRow(render.capture, row);
-        }
-    };
-}
-
-fn renderRecent(capture: *SessionReportCapture, row: *const recent_messages.Row) !void {
-    try capture.appendShape(CurrentJson.Recent.json_shape, .{ row.turn_id.get(), row.command_key.slice(), row.outcome_code.slice() });
-}
-
-fn renderUnresolved(capture: *SessionReportCapture, row: *const unresolved_actions.Row) !void {
-    // The insert authorizes every Action proposed under `bypass`.
-    if (row.permission_mode == 1 and !row.authorized) return error.CorruptStore;
-    const built_in = actionTool(&row.name_digest);
-    const mcp = row.server != null;
-    if (row.server) |server| {
-        if (!tool_name.valid(server.slice()) or built_in != null) return error.CorruptStore;
-    }
-    // A non-built-in Action must name an MCP member of its frozen offer.
-    // Built-in checks remain strict; provider tools never create Actions.
-    const name = if (mcp) row.tool_name.slice() else @tagName(built_in orelse return error.CorruptStore);
-    if (mcp and !tool_name.valid(name)) return error.CorruptStore;
-    const core = !mcp and tool_catalog.Runner.of(tool_catalog.record(built_in.?)) == .core;
-    // Settlement authorizes a core call at once, with no decision.
-    if (core and !row.authorized) return error.CorruptStore;
-    try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"tool\":\"{s}\",\"permission_revision\":\"{d}\",\"authorization\":\"{s}\",\"call_id\":", .{
-        row.action_id.get(),
-        row.parent_operation_id.get(),
-        row.call_ordinal,
-        name,
-        row.permission_revision.get(),
-        if (core) "core" else if (!row.authorized) "pending" else if (row.permission_mode == 1) "bypass" else "allow_once",
-    });
-    try capture.appendContentReference(.{ .length = row.call_id_length, .digest = row.call_id_digest });
-    if (row.server) |server| {
-        try capture.append(",\"server\":");
-        try capture.appendJsonString(server.slice());
-    }
-    try capture.append(",\"arguments\":");
-    try capture.appendContentReference(.{ .length = row.arguments_length, .digest = row.arguments_digest });
-    // Unresolved, and not rejected: the rule proved a call with an Action
-    // has no rejection, so main's code, either one's, is none.
-    try appendPresentation(capture, try reads_domain.presentationOf(row.description, null, row.authorized, null));
-    try capture.append("}");
-}
-
-/// The built-in tool whose name has `digest`, among those an Action runs.
-fn actionTool(digest: *const [32]u8) ?built_in_tool.BuiltInTool {
-    for (std.enums.values(built_in_tool.BuiltInTool)) |tool| {
-        const owned = tool_catalog.record(tool);
-        if (owned.owner == .rui and std.mem.eql(u8, digest, &content_string.digest(owned.name))) return tool;
-    }
-    return null;
-}
-
-fn renderResolved(capture: *SessionReportCapture, row: *const resolved_actions.Row) !void {
-    try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"code\":", .{
-        row.action_id.get(),
-        row.parent_operation_id.get(),
-        row.call_ordinal,
-    });
-    try capture.appendJsonString(row.resolution_code.slice());
-    try capture.appendFmt(",\"acceptance_position\":\"{d}\",\"result\":", .{row.acceptance_position.get()});
-    try capture.appendContentReference(.{ .length = row.result_length, .digest = row.result_digest });
-    // Main's code was the rejection's, else the resolution's; the rule
-    // proved a call with an Action has no rejection. A code decides the
-    // outcome, so whether the Action was authorized is not weighed.
-    try appendPresentation(capture, try reads_domain.presentationOf(row.description, try presentedCode(row.resolution_code.slice()), null, optional(row.publication)));
-    try capture.append("}");
-}
-
-fn renderRejected(capture: *SessionReportCapture, row: *const rejected_calls.Row) !void {
-    try capture.appendFmt("{{\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"code\":", .{ row.operation_id.get(), row.call_ordinal });
-    try capture.appendJsonString(row.rejection_code.slice());
-    try capture.appendFmt(",\"acceptance_position\":\"{d}\",\"result\":", .{row.acceptance_position.get()});
-    try capture.appendContentReference(.{ .length = row.rejection_length, .digest = row.rejection_digest });
-    try capture.append(",\"name\":");
-    try capture.appendContentReference(.{ .length = row.name_length, .digest = row.name_digest });
-    try capture.append(",\"call_id\":");
-    try capture.appendContentReference(.{ .length = row.call_id_length, .digest = row.call_id_digest });
-    try capture.append(",\"arguments\":");
-    try capture.appendContentReference(.{ .length = row.arguments_length, .digest = row.arguments_digest });
-    // A code decides the outcome, so no authorization is weighed.
-    try appendPresentation(capture, try reads_domain.presentationOf(row.description, try presentedCode(row.rejection_code.slice()), null, optional(row.publication)));
-    try capture.append("}");
-}
-
-fn renderActionable(capture: *SessionReportCapture, row: *const actionable_permissions.Row) !void {
-    try capture.appendShape(CurrentJson.Actionable.json_shape, .{ row.action_id.get(), row.permission_revision.get() });
-}
-
-/// A stored outcome code as a presentation's: one it does not name is
-/// `CorruptStore`, as main's decode answered.
-fn presentedCode(code: []const u8) error{CorruptStore}!tool_presentation.ToolPresentation.Code {
-    return std.meta.stringToEnum(tool_presentation.ToolPresentation.Code, code) orelse error.CorruptStore;
-}
-
-fn appendPresentation(capture: *SessionReportCapture, presentation: tool_presentation.ToolPresentation) !void {
-    var buffer: [protocol.ToolPresentationJson.max_json_bytes]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    try (protocol.ToolPresentationJson{ .value = presentation }).writeJson(&writer);
-    try capture.append(",\"presentation\":");
-    try capture.append(writer.buffered());
-}
 
 // `@payload` reads one MySQL chunk.
 comptime {

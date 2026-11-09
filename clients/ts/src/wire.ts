@@ -3333,6 +3333,18 @@ export interface components {
             call_id: components["schemas"]["domainreportCurrentJsonTextReference"];
             arguments: components["schemas"]["domainreportCurrentJsonTextReference"];
             presentation: components["schemas"]["ToolPresentation"];
+        } | {
+            action: components["schemas"]["Decimal"];
+            parent_operation: components["schemas"]["Decimal"];
+            call_ordinal: components["schemas"]["Decimal"];
+            tool: string;
+            permission_revision: components["schemas"]["Decimal"];
+            /** @enum {string} */
+            authorization: "core" | "pending" | "bypass" | "allow_once";
+            call_id: components["schemas"]["domainreportCurrentJsonTextReference"];
+            server: string;
+            arguments: components["schemas"]["domainreportCurrentJsonTextReference"];
+            presentation: components["schemas"]["ToolPresentation"];
         };
         domainreportCurrentJsonWork: {
             state: components["schemas"]["WorkStateJson"];

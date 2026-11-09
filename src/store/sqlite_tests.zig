@@ -31,6 +31,7 @@ const model_settlement_domain = @import("domain/model_settlement.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
 const session_list_read_domain = @import("domain/session_list_read.zig");
+const session_report_read_domain = @import("domain/session_report_read.zig");
 const session_list_reply = @import("../session_list_reply.zig");
 const store_schema = @import("schema.zig");
 const sqlite = @import("sqlite.zig");
@@ -1005,7 +1006,7 @@ test "canonical report and Action read failures fence later commands" {
     var report_root: [protocol.max_store_bytes]u8 = undefined;
     const report_root_length = try report_tmp.dir.realPath(std.testing.io, &report_root);
     var report_used = std.atomic.Value(u64).init(0);
-    try std.testing.expectError(error.CorruptStore, report_store.captureSessionReport(allocated_session_0.slice(), .{
+    try std.testing.expectError(error.CorruptStore, tests.testingCaptureSessionReport(&report_store, allocated_session_0.slice(), .{
         .scratch_path = report_root[0..report_root_length],
         .scratch_budget = .{ .used = &report_used, .limit = 1024 * 1024 },
         .request_number = 1,
@@ -2441,7 +2442,7 @@ test "Current report work is independent of terminal tool history" {
             var counter: Counter = .{};
             c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, Counter.progress, &counter);
             defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
-            var report = try storage.captureSessionReport(session.slice(), .{
+            var report = try tests.testingCaptureSessionReport(&storage, session.slice(), .{
                 .scratch_path = root[0..root_length],
                 .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
                 .request_number = 1,
@@ -7452,8 +7453,8 @@ test "a Current report's presentation reads answer their list's name" {
     // Turn proposes an asked-for call, whose Action waits, and a call of
     // an unknown tool, which is rejected.
     inline for (.{
-        .{ namedStatementForTesting(report_domain.current_failures, null, "a.resolution_code IS NULL ORDER BY a.action_id"), error.ActionReadFailed },
-        .{ namedStatementForTesting(report_domain.current_failures, null, "CROSS JOIN content rejection"), error.CallReadFailed },
+        .{ namedStatementForTesting(session_report_read_domain.current_failures, null, "a.resolution_code IS NULL ORDER BY a.action_id"), error.ActionReadFailed },
+        .{ namedStatementForTesting(session_report_read_domain.current_failures, null, "CROSS JOIN content rejection"), error.CallReadFailed },
     }) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
