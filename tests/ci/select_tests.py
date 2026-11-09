@@ -17,7 +17,7 @@ from strict_paths import strict
 FRONTEND = ("src/AnswerRenderer.zig", "src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig",
             "src/session_departure.zig", "src/SessionScreen.zig", "src/SessionTerminal.zig",
             "src/session_view.zig", "src/session_history.zig", "src/session_reads.zig", "src/ClientTask.zig",
-            "src/ConversationViewport.zig", "src/Terminal*", "src/session_sequence_model_test.zig", "src/overview_view.zig", "src/session_reading.zig", "src/session_notice.zig", "src/submission_state.zig", "src/session_keys.zig",
+            "src/ConversationViewport.zig", "src/Terminal*", "src/session_sequence_model_test.zig", "src/overview_view.zig", "src/session_reading.zig", "src/session_notice.zig", "src/submission_state.zig", "src/session_keys.zig", "src/session_upgrade.zig",
             "src/Overview.zig", "src/keymap.zig", "src/status_page.zig", "src/command_value.zig", "src/home_path.zig")
 PTY_TARGETS = ("terminal-restoration-integration", "canonical-failure-integration")
 # Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
@@ -91,7 +91,7 @@ RULES = (
      ("test-logic", *PTY_TARGETS), ("test-logic", *PTY_TARGETS),
      "Terminal layout and input values retain their separate logic root and native wiring"),
     (("src/overview_view.zig", "src/attention.zig", "src/model_picker.zig", "src/session_reading.zig",
-      "src/session_notice.zig", "src/submission_state.zig", "src/session_keys.zig"), ("test-logic",), ("test-logic",),
+      "src/session_notice.zig", "src/submission_state.zig", "src/session_keys.zig", "src/session_upgrade.zig"), ("test-logic",), ("test-logic",),
      "Overview and conversation decisions over values; their shells' owners select native checks"),
     (("src/failure_class.zig",), ("test-logic", "test"), ("test-logic", "test"),
      "What a saved failure code lets the person do; the conversation view renders it"),

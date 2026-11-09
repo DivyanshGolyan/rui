@@ -25,6 +25,7 @@ const session_keys = @import("session_keys.zig");
 const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
 const UpgradePanel = @import("UpgradePanel.zig");
+const session_upgrade = @import("session_upgrade.zig");
 const Self = @This();
 
 const reads = @import("session_reads.zig");
@@ -75,9 +76,7 @@ saved_requests: reads.SavedRequests = .{},
 /// are listed.
 recover_line: [slash_commands_shared.recover_line_bytes]u8 = undefined,
 reader: Task = .{},
-upgrade_requested: bool = false,
-upgrade_blocked: bool = false,
-upgrade_reobserving: bool = false,
+upgrade: session_upgrade.Upgrade = .{},
 // The reader's only context; the UI reads its result after join.
 job: Job = .{},
 // When the next live read may start.
@@ -590,12 +589,12 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         .archive, .unarchive, .upgrade, .exit, .model => true,
         else => false,
     };
-    if (self.upgradeHeld() and !admitted_elsewhere) {
+    if (self.upgrade.held() and !admitted_elsewhere) {
         self.notice = upgrade_recovery;
         return;
     }
     switch (parsed) {
-        .upgrade => self.upgrade_requested = true,
+        .upgrade => self.upgrade.requested = true,
         .archive => try self.perform(.archive),
         .unarchive => try self.converse(.unarchive),
         .exit => self.leaving = .detached,
@@ -813,11 +812,7 @@ test "frontend cleanup joins both borrowers before reporting restoration failure
     }
 }
 
-const upgrade_recovery = "! Host requests paused after Upgrade; draft and original retained. /upgrade or use the selected Rui in a new terminal.";
-
-fn upgradeHeld(self: *const Self) bool {
-    return self.upgrade_requested or self.upgrade_blocked or self.upgrade_reobserving;
-}
+const upgrade_recovery = session_upgrade.recovery;
 
 fn quiesceUpgrade(self: *Self) !bool {
     self.notice = "Upgrade: waiting for Client borrowers; draft and original retained.";
@@ -840,28 +835,19 @@ fn quiesceUpgrade(self: *Self) !bool {
 
 fn showUpgrade(self: *Self) !void {
     const outcome = try UpgradePanel.run(self.init, self.store, self.terminal, &self.input.stream, self.interrupted);
-    self.upgrade_requested = false;
     self.applyUpgrade(outcome);
     if (self.lender.upgrade) |handoff| {
-        _ = try handoff(self.lender.context, if (self.upgrade_blocked) .incompatible else .ready);
+        _ = try handoff(self.lender.context, if (self.upgrade.after == .blocked) .incompatible else .ready);
     }
 }
 
 fn applyUpgrade(self: *Self, outcome: UpgradePanel.Outcome) void {
-    switch (outcome) {
-        .unchanged => {},
-        .compatible => {
-            self.upgrade_blocked = false;
-            self.poll_at = 0;
-            self.upgrade_reobserving = true;
-            self.reading.prepared_action = null;
-        },
-        .incompatible => {
-            self.upgrade_blocked = true;
-            self.upgrade_reobserving = false;
-        },
+    self.upgrade.close(outcome);
+    if (outcome == .compatible) {
+        self.poll_at = 0;
+        self.reading.prepared_action = null;
     }
-    self.notice = if (self.upgrade_blocked) upgrade_recovery else "Upgrade closed; draft and original retained. No work was resent.";
+    self.notice = self.upgrade.notice();
     self.dirty = true;
 }
 
@@ -891,49 +877,48 @@ fn startQueuedCommand(self: *Self) !void {
 fn driveActive(self: *Self) !void {
     while (self.leaving == null) {
         if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-        if (!self.upgrade_requested and !self.upgrade_blocked) {
+        if (self.upgrade.lends()) {
             if (try self.lender.service(self.lender.context)) self.dirty = true;
         }
         const size = self.terminal.geometry();
         if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
-        if (self.upgrade_requested) {
-            const ready = self.quiesceUpgrade() catch |err| {
-                if (err == error.CanonicalStoreFailure) return err;
-                self.upgrade_requested = false;
-                self.upgrade_blocked = true;
-                self.upgrade_reobserving = false;
-                var writer = std.Io.Writer.fixed(&self.notice_buffer);
-                try writer.print("! Upgrade could not settle Client work: {s}. Draft and original retained; /upgrade to retry.", .{@errorName(err)});
-                self.notice = writer.buffered();
-                self.dirty = true;
-                if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, .incompatible);
-                continue;
-            };
-            if (ready) try self.showUpgrade();
-            if (self.dirty or self.terminal.screen.stale()) _ = try self.draw();
-            _ = try self.step(16);
-            continue;
-        }
-        if (self.upgrade_blocked) {
-            if (self.notice == null) self.notice = upgrade_recovery;
-            if (self.dirty or self.terminal.screen.stale()) _ = try self.draw();
-            _ = try self.step(16);
-            continue;
-        }
-        if (self.upgrade_reobserving) {
-            if (self.reader.thread != null and self.reader.completed()) {
-                self.settleReader() catch |err| {
+        // An Upgrade's pass ends with a frame and a wait even when it closes
+        // the panel or settles the read; Host work resumes on the next.
+        const phase = self.upgrade.phase();
+        switch (phase) {
+            .quiescing => {
+                const ready = self.quiesceUpgrade() catch |err| {
                     if (err == error.CanonicalStoreFailure) return err;
-                    self.upgrade_blocked = true;
-                    self.upgrade_reobserving = false;
+                    self.upgrade.fail();
                     var writer = std.Io.Writer.fixed(&self.notice_buffer);
-                    try writer.print("! Reattach failed: {s}. Draft and original retained; /upgrade or reopen with selected Rui.", .{@errorName(err)});
+                    try writer.print("! Upgrade could not settle Client work: {s}. Draft and original retained; /upgrade to retry.", .{@errorName(err)});
                     self.notice = writer.buffered();
+                    self.dirty = true;
                     if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, .incompatible);
+                    continue;
                 };
-                self.withdrawDecided();
-            }
-            if (self.upgrade_reobserving and self.reader.thread == null) try self.launch(self.freeze(.activity), reads.scan);
+                if (ready) try self.showUpgrade();
+            },
+            .blocked => if (self.notice == null) {
+                self.notice = upgrade_recovery;
+            },
+            .reobserving => {
+                if (self.reader.thread != null and self.reader.completed()) {
+                    self.settleReader() catch |err| {
+                        if (err == error.CanonicalStoreFailure) return err;
+                        self.upgrade.fail();
+                        var writer = std.Io.Writer.fixed(&self.notice_buffer);
+                        try writer.print("! Reattach failed: {s}. Draft and original retained; /upgrade or reopen with selected Rui.", .{@errorName(err)});
+                        self.notice = writer.buffered();
+                        if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, .incompatible);
+                    };
+                    self.withdrawDecided();
+                }
+                if (self.upgrade.after == .reobserving and self.reader.thread == null) try self.launch(self.freeze(.activity), reads.scan);
+            },
+            .active => {},
+        }
+        if (phase != .active) {
             if (self.dirty or self.terminal.screen.stale()) _ = try self.draw();
             _ = try self.step(16);
             continue;
@@ -1295,7 +1280,7 @@ fn beginMessage(self: *Self, intent: Submission.Intent) !void {
 
 /// A queued or running command holds the choice until it completes.
 fn commandActive(self: *const Self) bool {
-    return self.upgradeHeld() or self.input.queuedCommand() != null or self.inspection.command_running;
+    return self.upgrade.held() or self.input.queuedCommand() != null or self.inspection.command_running;
 }
 
 /// What a key does in a conversation, beside the draft or an Action's choice.
@@ -1303,7 +1288,7 @@ const ConversationAction = session_keys.Action;
 const conversation_keys = session_keys.keys;
 
 fn perform(self: *Self, action: ConversationAction) !void {
-    if (self.upgradeHeld() and (action == .recover or action == .expand)) {
+    if (self.upgrade.held() and (action == .recover or action == .expand)) {
         self.notice = upgrade_recovery;
         return;
     }
@@ -1372,7 +1357,7 @@ fn converse(self: *Self, input: overview_view.ConversationInput) !void {
         .other => false,
         .stop, .archive, .unarchive, .confirm_archive => true,
     };
-    if (host_intent and self.upgradeHeld()) {
+    if (host_intent and self.upgrade.held()) {
         self.notice = upgrade_recovery;
         return;
     }
@@ -1681,12 +1666,12 @@ fn commandLine(self: *Self) !void {
         switch (self.input.append(taken.rest)) {
             .refused => |why| self.notice = refusedNotice(why),
             else => if (taken.runs) {
-                defer if (!self.upgradeHeld()) self.input.clear();
+                defer if (!self.upgrade.held()) self.input.clear();
                 try self.slashCommand(self.input.composition().bytes);
             },
         }
     } else {
-        defer if (!self.upgradeHeld()) self.input.clear();
+        defer if (!self.upgrade.held()) self.input.clear();
         try self.slashCommand(self.input.composition().bytes);
     }
 }
@@ -1755,7 +1740,7 @@ fn settleReader(self: *Self) !void {
     const end = self.joinReader();
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
     // A fatal failure leaves command output for exit to print.
-    if (end.failure(reader_policy.settleMode(self.upgrade_requested, self.input.queuedCommand() != null))) |err| return err;
+    if (end.failure(reader_policy.settleMode(self.upgrade.requested, self.input.queuedCommand() != null))) |err| return err;
     const phase = self.reading.phase;
     const inspection = self.readInspection();
     if (end == .complete) switch (reader_policy.shows(phase, inspection)) {
@@ -2069,7 +2054,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         self.live.view = result.live;
         self.live.cursor = result.cursor;
         self.reading.opening = false;
-        self.upgrade_reobserving = false;
+        self.upgrade.reobserved();
         if (self.reading.phase == .permission) {
             self.reading.prepared_action = result.action;
             self.reading.prepared_summary = result.summary;
@@ -3992,7 +3977,7 @@ test "upgrade command stays local and preserves the actual draft cursor and orig
     const before = self.input.composition();
     const revision = self.input.revision;
     try self.commandLine();
-    try std.testing.expect(self.upgrade_requested);
+    try std.testing.expect(self.upgrade.requested);
     try std.testing.expectEqualStrings(before.bytes, self.input.composition().bytes);
     try std.testing.expectEqual(before.cursor, self.input.composition().cursor);
     try std.testing.expectEqual(revision, self.input.revision);
@@ -4011,7 +3996,7 @@ test "upgrade outcomes retain Unicode draft cursor selection and unresolved orig
     defer std.testing.allocator.destroy(self);
     inline for (std.enums.values(UpgradePanel.Outcome)) |outcome| {
         for ([_]bool{ false, true }) |blocked| {
-            self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .upgrade_blocked = blocked };
+            self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .upgrade = .{ .after = if (blocked) .blocked else .open } };
             self.input.init();
             const original = self.input.submitText("the original request");
             self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('H') };
@@ -4028,8 +4013,8 @@ test "upgrade outcomes retain Unicode draft cursor selection and unresolved orig
             try std.testing.expectEqualStrings("the original request", try self.input.message(original));
             try std.testing.expectEqualStrings(&@as([36]u8, @splat('H')), &self.submission.view().?.key);
             try std.testing.expect(self.reader.thread == null and self.submission.task.thread == null);
-            try std.testing.expectEqual(outcome == .compatible, self.upgrade_reobserving);
-            try std.testing.expectEqual(if (outcome == .unchanged) blocked else outcome == .incompatible, self.upgrade_blocked);
+            try std.testing.expectEqual(outcome == .compatible, self.upgrade.after == .reobserving);
+            try std.testing.expectEqual(if (outcome == .unchanged) blocked else outcome == .incompatible, self.upgrade.after == .blocked);
             if (outcome != .unchanged or blocked) try std.testing.expect(self.commandActive());
         }
     }
@@ -4043,7 +4028,7 @@ test "upgrade quiescing reobservation and protocol holds refuse a fresh Message 
     screen.* = .{ .colour = false };
     var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
     for (0..3) |hold| {
-        self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false, .reading = .{ .opening = false }, .upgrade_requested = hold == 0, .upgrade_reobserving = hold == 1, .upgrade_blocked = hold == 2 };
+        self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false, .reading = .{ .opening = false }, .upgrade = .{ .requested = hold == 0, .after = if (hold == 1) .reobserving else if (hold == 2) .blocked else .open } };
         self.input.init();
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         _ = self.input.append("never send before safe reattachment");
@@ -4382,9 +4367,7 @@ test "upgrade holds classify every lender intent before forwarding and allow loc
         try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
         defer overview.state.deinit();
         held.self.lender = overview.lender();
-        held.self.upgrade_requested = hold == 0;
-        held.self.upgrade_blocked = hold == 1;
-        held.self.upgrade_reobserving = hold == 2;
+        held.self.upgrade = .{ .requested = hold == 0, .after = if (hold == 1) .blocked else if (hold == 2) .reobserving else .open };
         overview.state.prompt = .{ .stop = "k7m2qx".*, .action = .archive };
         try held.self.converse(input);
         try std.testing.expectEqual(@as(usize, 0), overview.host_inputs);
@@ -4423,9 +4406,7 @@ test "upgrade holds refuse archive shortcuts confirmations and slash commands wi
         });
         const before = held.self.input.composition();
         const revision = held.self.input.revision;
-        held.self.upgrade_requested = hold == 0;
-        held.self.upgrade_blocked = hold == 1;
-        held.self.upgrade_reobserving = hold == 2;
+        held.self.upgrade = .{ .requested = hold == 0, .after = if (hold == 1) .blocked else if (hold == 2) .reobserving else .open };
         if (path == .confirm or path == .kitty_confirm) overview.state.prompt = .{ .stop = "k7m2qx".*, .action = .archive };
         try sendKeys(&held.self, switch (path) {
             .alt_a => "\x1ba",
@@ -4462,7 +4443,7 @@ test "upgrade reobservation retains a refused archive command from the completio
         held.self.lender = overview.lender();
         try sendKeys(&held.self, line);
         try held.settle();
-        held.self.upgrade_reobserving = true;
+        held.self.upgrade.after = .reobserving;
         try sendKeys(&held.self, "\r");
         try std.testing.expectEqualStrings(if (std.mem.eql(u8, line, "/arch")) "/archive" else "/unarchive", held.self.input.composition().bytes);
         try std.testing.expectEqual(@as(usize, 0), overview.host_inputs);
