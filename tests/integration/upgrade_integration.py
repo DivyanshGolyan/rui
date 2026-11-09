@@ -28,7 +28,7 @@ import threading
 import host_process
 import os_semantics
 from host_process import canonical_fixture_root, dispose_all, start_ready_process, stop_process, wait_for
-from terminal_process import COLUMNS, ROWS, terminal_process
+from terminal_process import COLUMNS, ROWS, read_output, terminal_process
 from terminal_screen import ScreenCapture, shown
 
 
@@ -556,7 +556,7 @@ class TerminalScreen:
 
     def read_output(self):
         try:
-            data = os.read(self.master, 65536)
+            data = read_output(self.master, 65536)
         except BlockingIOError:
             data = b""
         if data:

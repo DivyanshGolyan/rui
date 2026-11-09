@@ -4,9 +4,10 @@
 const std = @import("std");
 const catalog = @import("skills.zig");
 const protocol = @import("protocol.zig");
+const wire_request = @import("wire_request.zig");
 const storage = @import("store.zig");
 
-pub fn initial(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, key: []const u8, configuration: *const protocol.Configuration, home: ?[]const u8) !?*const storage.InitialSkills {
+pub fn initial(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, key: []const u8, configuration: *const wire_request.Configuration, home: ?[]const u8) !?*const storage.InitialSkills {
     if (try store.commandExists(key)) return null;
     return captureInitial(allocator, scratch_allocator, io, if (configuration.workspace.state == .value) configuration.workspace.value.slice() else "/", home);
 }

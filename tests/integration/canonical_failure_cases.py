@@ -6,7 +6,7 @@ import errno
 import json
 import os
 import pty
-from terminal_process import COLUMNS, ROWS, open_pty
+from terminal_process import COLUMNS, ROWS, open_pty, spawn
 from terminal_screen import ScreenCapture, shown
 import select
 import shutil
@@ -329,7 +329,7 @@ def interactive_cases(state, binding=False, null_code=False):
             try:
                 if line is None or route == "/v1/control/permission-decision":
                     proxy = ReplyProxy(host, route, rewrite)
-                caller = subprocess.Popen([str(fixture.RUI), *args],
+                caller = spawn([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                     pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 if line is None:
@@ -555,7 +555,7 @@ def permission_read_cases(state):
             original = termios.tcgetattr(slave)
             caller = None
             try:
-                caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
+                caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 try:
                     output, errors = human.terminal_exit(caller, master, timeout=10)
@@ -615,7 +615,7 @@ def permission_read_cases(state):
         original = termios.tcgetattr(slave)
         caller = None
         try:
-            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), details_session],
+            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), details_session],
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             human.read_terminal(master, "› ")
             os.write(master, b"/details\n")

@@ -226,8 +226,8 @@ class SelectionTest(unittest.TestCase):
                 self.assertEqual({target for target in request | readers if not covered(target, targets)}, set())
 
     def test_cli_configuration_surface_runs_the_measurement_configure_contract(self):
-        for path in ("src/cli_args.zig", "src/client.zig", "src/product_defaults.zig", "src/protocol.zig",
-                     "src/store/domain/configuration.zig", "openapi.json"):
+        for path in ("src/cli_args.zig", "src/client.zig", "src/configure_input.zig", "src/product_defaults.zig",
+                     "src/protocol.zig", "src/store/domain/configuration.zig", "openapi.json"):
             result = select([path], "review", AVAILABLE)
             for family in ("targets", "native_targets"):
                 with self.subTest(path=path, family=family):
@@ -703,7 +703,7 @@ class SelectionTest(unittest.TestCase):
                 (["tests/ci/requirements.txt"], {driver, admission, publication, artifact}),
                 (["build.zig"], {driver, admission}),
                 ([".github/workflows/release.yml"], {admission}),
-                (["src/protocol.zig"], {driver}),
+                (["src/wire_version.zig"], {driver}),
                 (["tests/integration/check.sh"], {driver}),
                 (["tests/integration/host_process.py", "src/cli.zig"], {driver})):
             for phase in ("development", "review"):

@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const wire_request = @import("wire_request.zig");
 
 /// Presets live in their launch frame, never in the Store. The spec's JSON
 /// strings and objects are borrowed for the Host's life, not copied per slot.
@@ -208,7 +209,7 @@ pub const StartAgent = struct {
     instructions: ?[]const u8 = null,
     output_schema: ?[]const u8 = null,
     attached: bool,
-    configuration: protocol.Configuration,
+    configuration: wire_request.Configuration,
 };
 
 pub const StartAgentCheck = union(enum) {
@@ -293,11 +294,11 @@ pub fn checkStartAgentWithPresets(arena: std.mem.Allocator, bytes: []const u8, p
 
 /// The single agent-spec parser for start_agent, launch presets and creation
 /// seeds. It writes in place; content borrows `arena` through Store admission.
-pub fn parseAgentSpec(arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *protocol.Configuration) error{OutOfMemory}!StartAgentCheck {
+pub fn parseAgentSpec(arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *wire_request.Configuration) error{OutOfMemory}!StartAgentCheck {
     return parseAgentSpecFor(arena, spec, configuration, false);
 }
 
-fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *protocol.Configuration, comptime inherits_parent: bool) error{OutOfMemory}!StartAgentCheck {
+fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *wire_request.Configuration, comptime inherits_parent: bool) error{OutOfMemory}!StartAgentCheck {
     // D221 applies after preset resolution too: no preset can change these.
     if (inherits_parent) {
         if (spec.contains("workspace")) return refused("spec.workspace: an agent always works in your Workspace");
@@ -1040,7 +1041,7 @@ test "start_agent presets cannot supply provider or workspace even with override
     defer memory.deinit();
     const arena = memory.allocator();
     const start = try arena.create(StartAgent);
-    const configuration = try arena.create(protocol.Configuration);
+    const configuration = try arena.create(wire_request.Configuration);
     for ([_][]const u8{ "provider", "workspace" }) |field| {
         const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
             \\{"model":"model-a","effort":"low","compactAt":1000,"tools":[],"permissionMode":"ask"}

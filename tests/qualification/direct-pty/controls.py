@@ -48,13 +48,13 @@ def probe(binary, output, name):
         elif name == "pty-after-open":
             target = patch.object(driver, "open_pty", signal_after(driver.open_pty))
         elif name == "caller-after-launch":
-            original = subprocess.Popen
+            original = driver.spawn
             def launch(args, *rest, **kwargs):
                 value = original(args, *rest, **kwargs)
                 if args[1:3] == ["session", "resume"]:
                     os.kill(os.getpid(), signal.SIGTERM)
                 return value
-            target = patch.object(subprocess, "Popen", launch)
+            target = patch.object(driver, "spawn", launch)
         else:
             raise ValueError(name)
         with target:
