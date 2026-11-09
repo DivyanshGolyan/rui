@@ -432,7 +432,7 @@ pub const AuthWorker = struct {
     authentication: providers_module.Authentication,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
-    state: enum { idle, requested, ready, in_use, refreshed, failed } = .idle,
+    state: State = .idle,
     // Only .ready/.in_use own this final storage. The execution thread borrows
     // it through launch; the worker never publishes a value copy of the lease.
     credential: providers_module.Lease = undefined,
@@ -440,12 +440,12 @@ pub const AuthWorker = struct {
     /// in the execution Workspace, so only the pages an acquisition writes
     /// become resident; a refresh maps its own storage for the call.
     work: providers_module.Authentication.Work = undefined,
-    failure: ?anyerror = null,
-    /// Set with .requested for a forced refresh at this rejected generation.
-    refresh_generation: ?u64 = null,
-    refresh_result: bool = false,
     stopping: bool = false,
 
+    /// A launch lease, or a forced refresh at the rejected generation.
+    const Job = union(enum) { acquire, refresh: u64 };
+    /// .requested stays set while the worker runs its job outside the lock.
+    const State = union(enum) { idle, requested: Job, ready, in_use, refreshed: bool, failed: anyerror };
     const Result = union(enum) { ready: *const providers_module.Lease, refreshed: bool, failed: anyerror };
 
     /// Only the execution thread requests and takes, so an idle worker stays
@@ -457,42 +457,32 @@ pub const AuthWorker = struct {
     }
 
     pub fn request(self: *AuthWorker) void {
-        self.requestJob(null);
+        self.requestJob(.acquire);
     }
 
     pub fn requestRefresh(self: *AuthWorker, generation: u64) void {
-        self.requestJob(generation);
+        self.requestJob(.{ .refresh = generation });
     }
 
-    fn requestJob(self: *AuthWorker, refresh_generation: ?u64) void {
+    fn requestJob(self: *AuthWorker, job: Job) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         std.debug.assert(self.state == .idle);
-        self.refresh_generation = refresh_generation;
-        self.state = .requested;
+        self.state = .{ .requested = job };
         self.condition.broadcast(self.io);
     }
 
     pub fn take(self: *AuthWorker) ?Result {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return switch (self.state) {
-            .idle, .requested, .in_use => null,
-            .ready => result: {
-                self.state = .in_use;
-                break :result .{ .ready = &self.credential };
-            },
-            .refreshed => result: {
-                self.state = .idle;
-                break :result .{ .refreshed = self.refresh_result };
-            },
-            .failed => result: {
-                const err = self.failure.?;
-                self.failure = null;
-                self.state = .idle;
-                break :result .{ .failed = err };
-            },
+        const result: Result = switch (self.state) {
+            .idle, .requested, .in_use => return null,
+            .ready => .{ .ready = &self.credential },
+            .refreshed => |refreshed| .{ .refreshed = refreshed },
+            .failed => |err| .{ .failed = err },
         };
+        self.state = if (result == .ready) .in_use else .idle;
+        return result;
     }
 
     pub fn finish(self: *AuthWorker) void {
@@ -522,37 +512,17 @@ pub const AuthWorker = struct {
                 self.mutex.unlock(self.io);
                 return;
             }
-            const refresh_generation = self.refresh_generation;
-            self.refresh_generation = null;
+            const job = self.state.requested;
             self.mutex.unlock(self.io);
-            const refreshed: ?bool = if (refresh_generation) |generation|
-                self.authentication.refresh(self.io, generation) catch |err| {
-                    self.publishFailure(err);
-                    continue;
-                }
-            else refreshed: {
-                self.authentication.acquire(self.io, &self.work, &self.credential) catch |err| {
-                    self.publishFailure(err);
-                    continue;
-                };
-                break :refreshed null;
+            const answer: State = switch (job) {
+                .acquire => if (self.authentication.acquire(self.io, &self.work, &self.credential)) |_| .ready else |err| .{ .failed = err },
+                .refresh => |generation| if (self.authentication.refresh(self.io, generation)) |refreshed| .{ .refreshed = refreshed } else |err| .{ .failed = err },
             };
             self.mutex.lockUncancelable(self.io);
-            if (refreshed) |value| {
-                self.refresh_result = value;
-                self.state = .refreshed;
-            } else self.state = .ready;
+            self.state = answer;
             self.condition.broadcast(self.io);
             self.mutex.unlock(self.io);
         }
-    }
-
-    fn publishFailure(self: *AuthWorker, err: anyerror) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        self.failure = err;
-        self.state = .failed;
-        self.condition.broadcast(self.io);
     }
 };
 
