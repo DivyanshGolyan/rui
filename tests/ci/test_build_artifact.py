@@ -461,8 +461,7 @@ class PrModeTest(unittest.TestCase):
                 command = run.call_args.args[0]
                 self.assertEqual("-Dpr-ci=true" in command, fast)
                 self.assertEqual("-j8" in command, fast)
-                run_selected.execute(["check"], None)
-                self.assertEqual("-Dpr-ci=true" in run.call_args.args[0], fast)
+                self.assertEqual("-Dpr-ci=true" in run_selected.command(["check"]), fast)
 
 
 if __name__ == '__main__':

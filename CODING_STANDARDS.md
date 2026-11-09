@@ -165,6 +165,8 @@ Before every push, including review-fix rounds and after merging main, run only 
 - `python3 tests/ci/prepush.py`, which selects local feedback from the committed diff against the merge base.
   Use `--plan` to inspect its commands without executing them.
   It checks whitespace, formatting for changed Zig files, undefined names in changed Python files, and caller-error coverage for changed CLI owners.
+  Whitespace errors in committed lines, a stale `openapi.json` and a stale `clients/ts/src/wire.ts` are fixed in the working tree and still fail the run until the fix is committed.
+  A `src/store/schema.zig` change runs `tests/ci/schema_number.py --check`, which takes the next Store schema number from `origin/main` as it is now, not from the merge base.
   Source changes run their applicable import, provider, wire, fixture, platform and Store policy tests.
   CI Python owners run their corresponding test file when one exists; shared or unmapped policy inputs run the policy suite.
   Client changes run the existing TypeScript check instead of an unrelated Zig build.
@@ -172,6 +174,7 @@ Before every push, including review-fix rounds and after merging main, run only 
   Zig and manifest changes select the macOS type check only when those inputs have build targets of their own.
   Deleted files still select owner checks, and mixed changes union checks without repeating them.
   Commands read working-tree contents; unstaged and untracked-only changes do not select checks.
+  Orb setup installs it as a git pre-push hook that runs `--quick`, everything above except the Zig builds; elsewhere install it once with `python3 tests/ci/prepush.py --install-hook`.
 - the touched owners' focused tests (`-Dtest-filter`)
 - a mutation that reverts each fix and shows its new test fails
 
@@ -210,7 +213,7 @@ A signature that already fails on main is not permission to bypass admission.
 Assertions, unexplained timeouts and unknown results require diagnosis, not replay.
 Pause the affected outcome, not independent work; a publication failure does not create another main admission gate.
 Diagnostic reruns need no routine grant; state the hypothesis or correction and preserve every failure.
-An unexplained fail-then-pass is not reliable green.
+An unexplained fail-then-pass is not reliable green; only a [listed flake](VERIFICATION.md#listed-flakes)'s signature may fail then pass.
 
 Required checks execute on the gated tip; build caches accelerate compilation and never cache test acceptance.
 Keep results in PR checks and existing artifacts rather than growing coordination records.

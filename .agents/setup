@@ -228,6 +228,16 @@ started=$SECONDS
 GOTOOLCHAIN=local go -C "$repo_root/tests/qualification" mod download
 printf 'Go measurement dependencies ready in %ss.\n' "$((SECONDS - started))"
 
+step 'Installing the pre-push checks'
+started=$SECONDS
+# The policy tests' packages and ruff, the client's generator, then the hook
+# that runs `prepush.py --quick` before each push.
+python3 -m pip install --user --quiet --disable-pip-version-check \
+    -r "$repo_root/tests/integration/requirements.txt" -r "$repo_root/tests/ci/requirements.txt"
+npm --prefix "$repo_root/clients/ts" ci --ignore-scripts --no-audit --no-fund --silent
+python3 "$repo_root/tests/ci/prepush.py" --install-hook
+printf 'Pre-push checks ready in %ss.\n' "$((SECONDS - started))"
+
 step 'Orb setup complete'
 zig version
 go version
