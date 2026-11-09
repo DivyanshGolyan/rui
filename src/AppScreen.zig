@@ -14,6 +14,8 @@ fn Screen(comptime Content: type) type {
         content: *Content,
         input: *InputArea,
         header: ?vxfw.Widget = null,
+        tail: ?vxfw.Widget = null,
+        marker: ?vxfw.Widget = null,
         overlay: ?vxfw.Widget = null,
         userdata: *anyopaque,
         on_event: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event) anyerror!void,
@@ -31,7 +33,7 @@ fn Screen(comptime Content: type) type {
             const self: *Self = @ptrCast(@alignCast(raw));
             const size = ctx.max.size();
             if (size.width == 0 or size.height == 0) return .empty(self.widget());
-            const children = try ctx.arena.alloc(vxfw.SubSurface, 4);
+            const children = try ctx.arena.alloc(vxfw.SubSurface, 6);
             var used: usize = 0;
             const input = try self.input.widget().draw(ctx.withConstraints(.{}, ctx.max));
             const input_row = size.height - input.size.height;
@@ -42,14 +44,27 @@ fn Screen(comptime Content: type) type {
                 used += 1;
                 top = drawn.size.height;
             }
-            const content_max: vxfw.MaxSize = .{ .width = size.width, .height = input_row - top };
+            const above_input: vxfw.MaxSize = .{ .width = size.width, .height = input_row - top };
+            var content_end = input_row;
+            if (self.tail) |tail| {
+                const drawn = try tail.draw(ctx.withConstraints(.{}, above_input));
+                content_end -= drawn.size.height;
+                children[used] = .{ .origin = .{ .row = content_end, .col = 0 }, .surface = drawn };
+                used += 1;
+            }
+            const content_max: vxfw.MaxSize = .{ .width = size.width, .height = content_end - top };
             children[used] = .{ .origin = .{ .row = top, .col = 0 }, .surface = try self.content.widget().draw(ctx.withConstraints(.{}, content_max)) };
             used += 1;
             children[used] = .{ .origin = .{ .row = input_row, .col = 0 }, .surface = input };
             used += 1;
+            if (content_end > top) if (self.marker) |marker| {
+                const drawn = try marker.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 }));
+                children[used] = .{ .origin = .{ .row = content_end - 1, .col = size.width - drawn.size.width }, .surface = drawn, .z_index = 1 };
+                used += 1;
+            };
             if (self.overlay) |overlay| {
-                const drawn = try overlay.draw(ctx.withConstraints(.{}, content_max));
-                children[used] = .{ .origin = .{ .row = input_row - drawn.size.height, .col = 0 }, .surface = drawn };
+                const drawn = try overlay.draw(ctx.withConstraints(.{}, above_input));
+                children[used] = .{ .origin = .{ .row = input_row - drawn.size.height, .col = 0 }, .surface = drawn, .z_index = 2 };
                 used += 1;
             }
             return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children[0..used] };
@@ -97,4 +112,28 @@ test "App screens compose content input facts status and an overlay without owni
         try std.testing.expectEqual(@as(usize, 4), editor.cursor);
     }
     try std.testing.expectEqual(@as(usize, 2), events);
+    const header: vxfw.Text = .{ .text = "Counts" };
+    const tail: vxfw.Text = .{ .text = "Working\nQueued" };
+    const marker: vxfw.Text = .{ .text = "Up" };
+    session.header = header.widget();
+    session.tail = tail.widget();
+    session.marker = marker.widget();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+    const active = try session.widget().draw(ctx);
+    try std.testing.expectEqual(@as(usize, 6), active.children.len);
+    try std.testing.expectEqual(@as(i17, 17), active.children[1].origin.row);
+    try std.testing.expectEqual(@as(u16, 16), active.children[2].surface.size.height);
+    try std.testing.expectEqual(@as(i17, 19), active.children[3].origin.row);
+    try std.testing.expectEqual(vxfw.RelativePoint{ .row = 16, .col = 78 }, active.children[4].origin);
+    try std.testing.expectEqual(@as(u8, 1), active.children[4].z_index);
+    try std.testing.expectEqual(@as(u8, 2), active.children[5].z_index);
+    session.tail = null;
+    const browsing = try session.widget().draw(ctx);
+    try std.testing.expectEqual(@as(u16, 18), browsing.children[1].surface.size.height);
+    try std.testing.expectEqual(vxfw.RelativePoint{ .row = 18, .col = 78 }, browsing.children[3].origin);
+    for ([_]vxfw.Size{ .{ .width = 1, .height = 1 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 0 } }) |size| {
+        const tiny = try session.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height }));
+        try std.testing.expect(tiny.size.width <= size.width and tiny.size.height <= size.height);
+        for (tiny.children) |child| try std.testing.expect(child.z_index != 1);
+    }
 }
