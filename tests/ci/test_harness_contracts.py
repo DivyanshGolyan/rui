@@ -596,10 +596,14 @@ FIXTURE_LIBRARY_ENTRIES = {
 
 
 def fixture_imports(root):
-    """(importer, fixture) for each tests/integration module or shell script
-    that imports a Python fixture: a module with a main block or a script
+    """(importer, fixture) for each tests/integration, qualification or research
+    module, or tests/integration shell script, that imports a Python fixture: a
+    tests/integration module with a main block or a script
     build.zig or check.sh launches. Imports are the edges select_tests.Graph
-    follows, so a change to one fixture selects only the targets that run it."""
+    follows, so a change to one fixture selects only the targets that run it.
+    Harnesses outside tests/integration run only on scheduled or manual jobs,
+    so they too import libraries, never an entry script whose cases may move.
+    tests/ci tests may import a fixture to test its parts."""
     from select_tests import PYTHON_IMPORT
     directory = root / "tests/integration"
     fixtures = {path.relative_to(root).as_posix() for path in directory.glob("*.py")
@@ -612,7 +616,8 @@ def fixture_imports(root):
                          for name in re.findall(launched, (root / launcher).read_text())}
     fixtures -= FIXTURE_LIBRARY_ENTRIES.keys()
     found = set()
-    for path in sorted([*directory.glob("*.py"), *directory.glob("*.sh")]):
+    for path in sorted([*directory.glob("*.py"), *directory.glob("*.sh"),
+                        *(root / "tests/qualification").rglob("*.py"), *(root / "research").rglob("*.py")]):
         importer = path.relative_to(root).as_posix()
         for match in PYTHON_IMPORT.finditer(path.read_text()):
             for module in (match[1] and [match[1]] or re.split(r"\s*,\s*", match[2])):
@@ -644,11 +649,14 @@ class FixtureImportTest(unittest.TestCase):
                 "d_integration.sh": "python3 - <<'PY'\nimport a_integration\nPY\n",
             }.items():
                 (root / "tests/integration" / name).write_text(source)
+            (root / "tests/qualification/harness").mkdir(parents=True)
+            (root / "tests/qualification/harness/run.py").write_text("from a_integration import ReplyProxy\n")
             (root / "build.zig").write_text('run.addFileArg(b.path("tests/integration/launched.py"));\n')
             self.assertEqual(fixture_imports(root),
                              [("tests/integration/b_integration.py", "tests/integration/a_integration.py"),
                               ("tests/integration/c_fixture.py", "tests/integration/launched.py"),
-                              ("tests/integration/d_integration.sh", "tests/integration/a_integration.py")])
+                              ("tests/integration/d_integration.sh", "tests/integration/a_integration.py"),
+                              ("tests/qualification/harness/run.py", "tests/integration/a_integration.py")])
 
 
 class FixtureEntryTest(unittest.TestCase):
