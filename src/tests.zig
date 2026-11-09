@@ -70,6 +70,7 @@ test {
     _ = @import("core_tools.zig");
     _ = @import("read_transcript.zig");
     _ = @import("find_tools.zig");
+    _ = @import("find_tools_tests.zig");
     _ = @import("skills.zig");
     _ = @import("session_skills.zig");
     _ = @import("client.zig");
