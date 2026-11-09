@@ -131,6 +131,7 @@ test {
     _ = @import("request_encoding.zig");
     _ = @import("ResponseTiming.zig");
     _ = @import("ConversationViewport.zig");
+    _ = @import("transcript_selection.zig");
     _ = @import("SessionInput.zig");
     _ = @import("TerminalFrame.zig");
     _ = @import("TerminalInput.zig");
