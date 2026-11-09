@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -77,7 +78,8 @@ else:
     if flaky.exists():
         flaky.unlink()
         sys.exit(9)
-    binary = Path('.zig-cache/o/ci-compiled/unit-native-tests')
+    root = 'unit-store-tests' if 'test-store' in sys.argv else 'unit-native-tests'
+    binary = Path('.zig-cache/o/ci-compiled') / root
     if not binary.exists():
         binary = Path('.zig-cache/o/ci-compiled/test-tests')
     sys.exit(subprocess.run([str(binary)]).returncode)
@@ -257,7 +259,7 @@ else:
         native.chmod(0o751)
         for name in ('unit-store-tests',):
             binary = unit_root / name
-            binary.write_text('#!/bin/sh\n# ' + name + '\nexit 0\n')
+            binary.write_text('#!/bin/sh\necho store >> "$GATE_LOG"\nexit 0\n')
             binary.chmod(0o751)
         rest = build_artifact.roots()['binaries'] / 'ci-cpu.json'
         rest.write_text('{}')
@@ -283,6 +285,19 @@ else:
             self.assertEqual(restored.stat().st_mode & 0o777, 0o751)
         self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), 'downloaded source')
         self.assertTrue((build_artifact.roots()['binaries'] / 'test-logic_tests').exists())
+
+    def test_split_target_runs_its_restored_root(self):
+        for target, root in (('test-native', 'unit-native-tests'), ('test-store', 'unit-store-tests')):
+            with self.subTest(target=target):
+                self.inputs['targets'] = [target, 'test-logic']
+                self.split_downloads()
+                build_artifact.restore(['202', '201'], self.inputs['targets'])
+                self.assertTrue((build_artifact.roots()['binaries'] / root).is_file())
+                self.assertEqual(self.gates(targets=json.dumps([target])),
+                                 ['producer' if target == 'test-native' else 'store'])
+                shutil.rmtree(self.root / 'unit-bin')
+                for name in ('unit-native-tests', 'unit-store-tests'):
+                    (build_artifact.roots()['binaries'] / name).unlink()
 
     def test_split_rejects_tampered_or_missing_additional_unit_roots(self):
         self.split_downloads()

@@ -6,6 +6,9 @@
 //! only the sets saved after it.
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const content_string = @import("../../content_string.zig");
+const tool_name = @import("../../tool_name.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
 const tool_catalog = @import("../../tools.zig");
 const rsql = @import("../rsql.zig");
 const content_domain = @import("content.zig");
@@ -60,7 +63,7 @@ pub fn maskSql(comptime set_column: []const u8) []const u8 {
 
 /// A Rui SQL expression for the names of the set `set_column`'s members,
 /// joined by commas in no set order, since ordering them would sort; NULL
-/// for an empty set. A name has no comma (`protocol.validToolName`), and
+/// for an empty set. A name has no comma (`tool_name.valid`), and
 /// a Session's names, as configure bounds them, fit `max_names_bytes`.
 pub fn namesSql(comptime set_column: []const u8) []const u8 {
     return "(SELECT @list(tool.name) FROM tool_set_member member " ++
@@ -68,7 +71,7 @@ pub fn namesSql(comptime set_column: []const u8) []const u8 {
 }
 
 /// The longest `namesSql` text of a Session's set.
-pub const max_names_bytes = protocol.max_tool_names_bytes;
+pub const max_names_bytes = tool_name.max_names_bytes;
 
 /// SQL for the mask of every built-in in any set of `session`'s revisions
 /// up to `revision`, until the wire names tools.
@@ -256,9 +259,9 @@ pub const catalog_records = rsql.Read(.{
     .Args = struct { set: u64, ordinal: u64 },
     .Row = struct {
         ordinal: u64,
-        name: protocol.Bounded(tool_catalog.max_name_bytes),
+        name: Bounded(tool_catalog.max_name_bytes),
         owner: tool_catalog.Owner,
-        server: protocol.Bounded(tool_catalog.max_server_bytes),
+        server: Bounded(tool_catalog.max_server_bytes),
         description_id: rsql.Positive,
         description_length: u64,
         description_digest: [32]u8,
@@ -283,9 +286,9 @@ pub fn insertCatalog(a: anytype, catalog: *const tool_catalog.Catalog, digest: *
         .name = each.name,
         .owner = each.owner,
         .server = each.server,
-        .description = protocol.contentDigest(each.description),
+        .description = content_string.digest(each.description),
         .description_bytes = each.description.len,
-        .input_schema = protocol.contentDigest(each.input_schema),
+        .input_schema = content_string.digest(each.input_schema),
         .input_schema_bytes = each.input_schema.len,
     });
 }
@@ -309,7 +312,7 @@ pub const Selection = struct {
     /// and finishSelection's inserted members must use the same source.
     pub fn ofSaved(a: anytype, source_set: u64, names: *const protocol.ToolsField) !Selection {
         var selected: SavedSelection = .{ .names = names };
-        a.readEach(selection_records, .{ .set = source_set }, protocol.max_tools + 1, &selected);
+        a.readEach(selection_records, .{ .set = source_set }, tool_name.max_tools + 1, &selected);
         try a.run();
         if (selected.count != names.count) return error.CorruptStore;
         return .{ .names = names, .digest = selected.digest.final() };
@@ -323,9 +326,9 @@ const selection_records = rsql.Read(.{
         "JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id WHERE member.tool_set_id=?1 ORDER BY tool.name",
     .Args = struct { set: u64 },
     .Row = struct {
-        name: protocol.Bounded(tool_catalog.max_name_bytes),
+        name: Bounded(tool_catalog.max_name_bytes),
         owner: tool_catalog.Owner,
-        server: protocol.Bounded(tool_catalog.max_server_bytes),
+        server: Bounded(tool_catalog.max_server_bytes),
         description: [32]u8,
         input_schema: [32]u8,
     },

@@ -1,8 +1,9 @@
 """Infrastructure failures retry once; every other failure stays a check failure.
 
 Logs and annotations are trimmed from real Selected checks runs: 42582862053
-(GitHub answered 504), 41856442475 (no runner acquired macos_build) and
-42267648425 (pip could not resolve its host).
+(GitHub answered 504), 41856442475 (no runner acquired macos_build),
+42267648425 (pip could not resolve its host) and 42644396665 (Codeberg sent
+no bytes before curl's deadline).
 """
 from pathlib import Path
 import re
@@ -27,6 +28,12 @@ PIP_UNRESOLVED = """\
 2026-11-06T18:07:19.1272140Z   WARNING: Retrying (Retry(total=0)) after connection broken by 'NameResolutionError("HTTPSConnection(host='files.pythonhosted.org', port=443): Failed to resolve")'
 2026-11-06T18:07:19.1371600Z error: connection-failed
 2026-11-06T18:07:19.2200090Z ##[error]Process completed with exit code 1.
+"""
+CODEBERG_TIMEOUT = """\
+2026-11-09T15:28:08.2115305Z Preparing pinned translate_c dependency ...
+2026-11-09T15:32:41.2263935Z   0     0    0     0    0     0      0      0 --:--:--  0:01:30 --:--:--     0
+2026-11-09T15:32:41.2264391Z curl: (28) Operation timed out after 90001 milliseconds with 0 bytes received
+2026-11-09T15:32:41.2320703Z ##[error]Process completed with exit code 28.
 """
 CHECKSUM = """\
 2026-11-09T08:02:56.2973521Z ##[group]Run set -euo pipefail
@@ -56,6 +63,9 @@ class CauseTest(unittest.TestCase):
         setup = job("macos_build", step("Run ./.github/actions/setup", "failure",
                                         "2026-11-06T18:05:00Z", "2026-11-06T18:07:19Z"))
         self.assertEqual(cause(setup, [], PIP_UNRESOLVED)[0], "infra")
+        stalled = job("macos_typecheck", step("Run ./.github/actions/setup", "failure",
+                                              "2026-11-09T15:28:00Z", "2026-11-09T15:32:41Z"))
+        self.assertEqual(cause(stalled, [], CODEBERG_TIMEOUT)[0], "infra")
 
     def test_the_same_network_text_in_a_test_step_is_a_check_failure(self):
         # A Host crash resets every suite's connection (#915); that is a product bug.

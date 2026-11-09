@@ -29,6 +29,10 @@ pub const read_only_directory = switch (tag) {
 /// malloc_trim returns them. Other C libraries have no malloc_trim.
 pub const glibc_malloc = tag == .linux and builtin.link_libc and builtin.target.isGnuLibC();
 
+/// Linux reports a process's memory in /proc/self/status and smaps_rollup;
+/// Darwin has no /proc.
+pub const proc_memory = tag == .linux;
+
 /// Linux queues a connect beyond a full listen backlog until it times out;
 /// Darwin refuses it at once.
 pub const full_backlog_blocks_connect = tag == .linux;
