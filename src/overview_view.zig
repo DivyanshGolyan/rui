@@ -413,6 +413,24 @@ pub const Ran = struct {
     /// The default saved defaults now give the next Session, after a
     /// `/setup` that ran; null leaves the one in force.
     default: ?Default = null,
+
+    /// A command that printed `printed` bytes, the first of which `kept`
+    /// holds, and ran to the end if `ok`. Its failure counts as one while
+    /// it ran only once its output went to the page (`rendering`); before
+    /// that it never started.
+    pub fn of(kept: []const u8, printed: usize, ok: bool, rendering: bool) Ran {
+        return .{
+            .output = kept[0..@min(printed, max_output_bytes)],
+            .cut = printed > max_output_bytes,
+            .outcome = if (ok) .done else if (rendering) .failed else .not_run,
+        };
+    }
+
+    /// The shell reads the default saved defaults now give only after a
+    /// `/setup` that ran.
+    pub fn readsDefault(self: Ran, name: commands.Name) bool {
+        return self.outcome == .done and name == .setup;
+    }
 };
 
 /// The most a command's output the overview keeps.
@@ -8259,4 +8277,22 @@ test "while a start waits the composer is frozen, and the archive prompt still t
     try std.testing.expectEqual(Route.frozen, state.route(.text, false));
     state.prompt = .{ .stop = "k7m2qx".*, .action = .archive };
     try std.testing.expectEqual(Route{ .input = .{ .composer = .none } }, state.route(.enter, false));
+}
+
+test "a command's output is cut at what the overview keeps, and its failure ends the overview only once its output was kept" {
+    var kept: [max_output_bytes + 1]u8 = @splat('x');
+    const whole = Ran.of(&kept, 5, true, true);
+    try std.testing.expectEqual(@as(usize, 5), whole.output.len);
+    try std.testing.expect(!whole.cut and whole.outcome == .done and whole.default == null);
+    const full = Ran.of(&kept, max_output_bytes, true, false);
+    try std.testing.expect(full.output.len == max_output_bytes and !full.cut);
+    const cut = Ran.of(&kept, max_output_bytes + 1, true, true);
+    try std.testing.expect(cut.output.len == max_output_bytes and cut.cut);
+    try std.testing.expectEqual(.failed, Ran.of(&kept, 0, false, true).outcome);
+    try std.testing.expectEqual(.not_run, Ran.of(&kept, 0, false, false).outcome);
+    // Only a /setup that ran reads the saved defaults again.
+    try std.testing.expect(whole.readsDefault(.setup));
+    try std.testing.expect(!whole.readsDefault(.rename));
+    try std.testing.expect(!Ran.of(&kept, 0, false, true).readsDefault(.setup));
+    try std.testing.expect(!Ran.of(&kept, 0, false, false).readsDefault(.setup));
 }

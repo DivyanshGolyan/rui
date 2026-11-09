@@ -804,14 +804,10 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         }),
         .command => |command| {
             const output = &self.output;
-            const ran: view.Ran = .{
-                .output = output.bytes[0..@min(output.len, view.max_output_bytes)],
-                .cut = output.len > view.max_output_bytes,
-                // As a conversation drops an inspection that could not
-                // start, the overview says only that it did not run.
-                .outcome = if (outcome) |_| .done else |_| if (output.kept) .failed else .not_run,
-                .default = if (outcome) |_| if (command.name == .setup) self.savedDefault() else null else |_| null,
-            };
+            // As a conversation drops an inspection that could not start,
+            // the overview says only that it did not run.
+            var ran: view.Ran = .of(&output.bytes, output.len, if (outcome) |_| true else |_| false, output.kept);
+            if (ran.readsDefault(command.name)) ran.default = self.savedDefault();
             const next = self.event(.{ .ran = ran });
             // As in a conversation, a command that failed while it ran ends
             // the overview, and its failure is the one reported, not one
