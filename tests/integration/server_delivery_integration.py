@@ -16,10 +16,10 @@ import tempfile
 import threading
 import time
 
-import control_integration as control
+import control_fixture as control
 import model_fixture as model
 import host_process
-from host_process import HostDiagnostics, PeerCensus, canonical_fixture_root, dispose_all, stop_process
+from host_process import HostDiagnostics, PeerCensus, canonical_fixture_root, dispose_all, stop_process, wait_for
 from product_defaults import DEFAULTS, context_window
 
 
@@ -164,7 +164,7 @@ def main():
             session = peers.call("configure", lambda: control.configure(state, store, "reply-config"))
             peers.call("message", lambda: control.message(state, store, "reply-message", session, "answer"))
             deadline = time.monotonic() + 8
-            control.wait_for(lambda: peers.call("observe", lambda: control.observe(store, "reply-message", deadline=deadline),
+            wait_for(lambda: peers.call("observe", lambda: control.observe(store, "reply-message", deadline=deadline),
                                                deadline=deadline).get("result", {}).get("status")
                              == "completed", "saved answer", deadline=deadline)
             baseline = resources(host.pid)
@@ -239,7 +239,7 @@ def main():
             assert stopped.stderr.splitlines()[-1].startswith(f"rui: the Host acknowledged the pause but still holds this Store after {DEFAULTS.host_shutdown_seconds} seconds"), stopped
             for request in stop_requests:
                 peers.release(request, stop_deadline)
-            control.wait_for(lambda: not pathlib.Path(sock).exists(), "listener closure with ten readers held")
+            wait_for(lambda: not pathlib.Path(sock).exists(), "listener closure with ten readers held")
             with (store / "host.lock").open("rb") as lease:
                 try:
                     fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)

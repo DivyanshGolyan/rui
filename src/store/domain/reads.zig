@@ -5,9 +5,23 @@
 //! only what an earlier round's rows name.
 
 const std = @import("std");
+const command_reply = @import("../../command_reply.zig");
 const word_search = @import("../../word_search.zig");
 const pages = @import("../../os/pages.zig");
 const protocol = @import("../../protocol.zig");
+const conversation_read = @import("../../conversation_read.zig");
+const activity_read = @import("../../activity_read.zig");
+const session_field = @import("../../session_field.zig");
+const tool_proposal = @import("../../tool_proposal.zig");
+const workspace_path = @import("../../workspace_path.zig");
+const outcome_code = @import("../../outcome_code.zig");
+const content_string = @import("../../content_string.zig");
+const tool_presentation = @import("../../tool_presentation.zig");
+const idempotency_key = @import("../../idempotency_key.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
+const provider_name = @import("../../provider_name.zig");
+const session_archive = @import("../../session_archive.zig");
+const session_id = @import("../../session_id.zig");
 const session_work = @import("../../session_work.zig");
 const codec_abi = @import("../../codec_abi.zig");
 const output_format = @import("../../output_format.zig");
@@ -33,7 +47,7 @@ const content_metadata = content_domain.content_metadata;
 /// The Access every entry point here reads through.
 pub const ReadAccess = store_access.Access(.read, error{});
 
-const SessionText = protocol.Bounded(protocol.max_session_bytes);
+const SessionText = Bounded(session_id.max_reference_bytes);
 
 /// The rows of an `.each` read, up to `max`, kept in the caller's frame.
 /// The visit that fills the last slot stops the read, so it steps at most
@@ -250,7 +264,7 @@ fn activityKindCode(kind: protocol.ActivityItem.Kind) u5 {
 }
 
 /// `kinds` as the sources' integer: bit `k` for each kind code `k`.
-fn activityKinds(kinds: protocol.ActivityPage.Kinds) u64 {
+fn activityKinds(kinds: activity_read.ActivityPage.Kinds) u64 {
     var bits: u64 = 0;
     var iterator = kinds.iterator();
     while (iterator.next()) |kind| bits |= @as(u64, 1) << activityKindCode(kind);
@@ -332,81 +346,34 @@ pub const queued = rsql.Read(.{
     .cardinality = .each,
 });
 
-pub const PublicConversationItem = struct {
-    position: u64,
-    ordinal: u64, // Zero for User/Assistant; one-based call ordinal in a completed Tool Result group.
-    kind: protocol.ConversationItemKind,
-    content: ContentReference,
-    presentation: ?protocol.ToolPresentation = null,
-    admitted_at: ?u64 = null, // The Host wall-clock second a User item was admitted.
-    sender: ?protocol.NamedPeer = null, // A User item's sending peer Session.
-};
+pub const PublicConversationItem = command_reply.PublicConversationItem;
 
-pub const PublicConversationPage = struct {
-    pub const capacity = protocol.public_conversation_page_items;
-    end: u64,
-    items: [capacity]PublicConversationItem = undefined,
-    count: usize = 0,
-    more: bool = false,
-};
+pub const PublicConversationPage = command_reply.PublicConversationPage;
 
-pub const MessageObservation = struct {
-    content: ContentReference,
-    queue: ?AcceptedMessageQueue = null,
-    admitted_at: u64 = 0,
-    /// The Session's complete work, only while this admission can advance.
-    work: ?session_work.Work = null,
-    recovery: Recovery = .{},
-};
+pub const MessageObservation = command_reply.MessageObservation;
 
-pub const Recovery = struct {
-    pub const capacity = protocol.message_recovery_limit;
-    calls: [capacity]UnknownOutcome = undefined,
-    count: u8 = 0,
-    more: bool = false,
-};
+pub const Recovery = command_reply.Recovery;
 
-pub const UnknownOutcome = protocol.MessageUnknownOutcome;
+pub const UnknownOutcome = command_reply.UnknownOutcome;
 
-pub const AcceptedMessageQueue = struct {
-    admission_id: u64,
-    state: State,
-
-    pub const State = union(enum) {
-        queued,
-        excluded: struct { code: protocol.Bounded(protocol.max_code_bytes) },
-        processing: AttemptBinding,
-        completed: struct {
-            binding: AttemptBinding,
-            answer: ContentReference,
-        },
-        cancelled: struct {
-            binding: AttemptBinding,
-            code: protocol.Bounded(protocol.max_code_bytes),
-        },
-        failed: struct {
-            binding: AttemptBinding,
-            code: protocol.Bounded(protocol.max_code_bytes),
-        },
-    };
-};
+pub const AcceptedMessageQueue = command_reply.AcceptedMessageQueue;
 
 pub const SessionObservation = struct {
     found: bool = false,
-    archive_state: protocol.SessionArchiveState = .active,
-    session: protocol.Bounded(protocol.max_session_bytes) = .{},
-    workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
-    provider: ?protocol.Provider = null,
-    model: protocol.Bounded(protocol.max_model_bytes) = .{},
+    archive_state: session_archive.State = .active,
+    session: Bounded(session_id.max_reference_bytes) = .{},
+    workspace: Bounded(workspace_path.max_bytes) = .{},
+    provider: ?provider_name.Provider = null,
+    model: Bounded(model_capability.max_model_bytes) = .{},
     revision: u64 = 0,
     tools_mask: u8 = 0,
     compaction_trigger: ?u64 = null,
     output_reservation: u64 = 0,
     compaction_trigger_override: ?u64 = null,
     output_reservation_override: ?u64 = null,
-    reasoning_effort: ?protocol.ReasoningEffort = null,
-    reasoning_effort_override: ?protocol.ReasoningEffort = null,
-    permission_mode: protocol.Bounded(16) = .{},
+    reasoning_effort: ?model_capability.ReasoningEffort = null,
+    reasoning_effort_override: ?model_capability.ReasoningEffort = null,
+    permission_mode: Bounded(16) = .{},
     instructions: ContentReference = .{ .length = 0, .digest = @splat(0) },
     output_schema: ?ContentReference = null,
     pending_messages: u64 = 0,
@@ -532,7 +499,7 @@ const public_page = rsql.Read(.{
 /// when no hosted call was there. The rows' own reads follow
 /// (`readPublicRows`), each round shared by every row, and the cursor's
 /// content metadata shares their first.
-pub fn publicConversationPage(a: *ReadAccess, request: *const protocol.ConversationPage, page: *PublicConversationPage) !void {
+pub fn publicConversationPage(a: *ReadAccess, request: *const conversation_read.ConversationPage, page: *PublicConversationPage) !void {
     if (request.end > std.math.maxInt(i64) or request.before_position > std.math.maxInt(i64) or
         request.before_ordinal > std.math.maxInt(i64) or
         (request.end == 0 and request.before_position != 0) or
@@ -550,7 +517,7 @@ pub fn publicConversationPage(a: *ReadAccess, request: *const protocol.Conversat
     var rows: Collected(public_page.Row, PublicConversationPage.capacity + 1) = .{};
     a.readEach(public_page, .{ .session = session, .end = end, .before_position = request.before_position, .before_ordinal = request.before_ordinal }, rows.items.len, &rows);
     // A cursor names an item: a hosted call, or an item with content.
-    var hosted_cursor: protocol.ToolPresentation = undefined;
+    var hosted_cursor: tool_presentation.ToolPresentation = undefined;
     var hosted: HostedRead = .{ .position = request.before_position, .presentation = &hosted_cursor };
     var cursor: PublicContentRead = .{ .position = request.before_position, .ordinal = request.before_ordinal };
     if (request.before_position != 0) {
@@ -583,7 +550,7 @@ pub fn publicConversationPage(a: *ReadAccess, request: *const protocol.Conversat
             4 => .tool_result,
             5 => .hosted_call,
             else => return error.CorruptStore,
-        }, .content = .{ .length = 0, .digest = protocol.contentDigest("") } };
+        }, .content = .{ .length = 0, .digest = content_string.digest("") } };
         if (row.kind == 5) {
             if (row.ordinal != 0) return error.CorruptStore;
         } else if ((row.content_id orelse 0) == 0 or (row.kind == 4) != (row.ordinal > 0)) return error.CorruptStore;
@@ -612,7 +579,7 @@ noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const pu
     if (lower <= upper) a.read(missing_assistant_entry, .{ .session = session, .lower = lower, .upper = upper }, &missing);
     for (items, reads[0..items.len]) |*item, *read| {
         if (item.kind == .hosted_call) {
-            item.presentation = @as(protocol.ToolPresentation, undefined);
+            item.presentation = @as(tool_presentation.ToolPresentation, undefined);
             read.* = .{ .reads = .{ .hosted = .{ .position = item.position, .presentation = &item.presentation.? } } };
             read.reads.hosted.queue(a, session);
         } else {
@@ -637,7 +604,7 @@ noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const pu
                 read.label.queue(a);
             }
             if (found.tool_operation) |operation| {
-                item.presentation = @as(protocol.ToolPresentation, undefined);
+                item.presentation = @as(tool_presentation.ToolPresentation, undefined);
                 read.presentation = .init(operation, item.ordinal - 1, item.position, &item.presentation.?);
                 read.presentation.queue(a);
             }
@@ -665,7 +632,7 @@ noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const pu
     if (missing != null) return error.CorruptStore;
 }
 
-pub fn openPublicConversationContent(a: *ReadAccess, request: *const protocol.ConversationContent) !ContentLocation {
+pub fn openPublicConversationContent(a: *ReadAccess, request: *const conversation_read.ConversationContent) !ContentLocation {
     if (request.position == 0 or request.position > std.math.maxInt(i64) or
         request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
     const content = try publicConversationContent(a, request.session.slice(), request.position, request.ordinal);
@@ -873,15 +840,15 @@ fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64,
 }
 
 /// A call's line and outcome, with the item that proposed it.
-const tool_presentation = rsql.Read(.{
+const stored_presentation = rsql.Read(.{
     .sql = "SELECT tool_call.description,coalesce(tool_call.rejection_code,a.resolution_code) AS code,a.authorized,item.session_ref,item.session_position " ++
         "FROM model_tool_call tool_call LEFT JOIN action_operation a ON a.parent_operation_id=tool_call.operation_id AND a.call_ordinal=tool_call.call_ordinal " ++
         "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
         "WHERE tool_call.operation_id=?1 AND tool_call.call_ordinal=?2",
     .Args = struct { operation: u64, ordinal: u64 },
     .Row = struct {
-        description: ?protocol.Bounded(protocol.max_tool_description_bytes),
-        code: ?protocol.ToolPresentation.Code,
+        description: ?Bounded(tool_presentation.max_description_bytes),
+        code: ?tool_presentation.ToolPresentation.Code,
         authorized: ?bool,
         session_ref: SessionText,
         session_position: rsql.Positive,
@@ -896,28 +863,28 @@ const tool_presentation = rsql.Read(.{
 const PresentationRead = struct {
     operation: u64,
     ordinal: u64,
-    out: *protocol.ToolPresentation,
+    out: *tool_presentation.ToolPresentation,
     /// The call's item, whose Proposal the next round reads.
     session: SessionText = undefined,
     proposal: ProposalRead = undefined,
-    code: ?protocol.ToolPresentation.Code = null,
+    code: ?tool_presentation.ToolPresentation.Code = null,
     authorized: ?bool = null,
     count: RowCount = .{},
 
-    fn init(operation: u64, ordinal: u64, publication_position: ?u64, out: *protocol.ToolPresentation) PresentationRead {
+    fn init(operation: u64, ordinal: u64, publication_position: ?u64, out: *tool_presentation.ToolPresentation) PresentationRead {
         out.* = .{ .description = null, .code = .unresolved, .publication_position = publication_position };
         return .{ .operation = operation, .ordinal = ordinal, .out = out };
     }
 
     fn queue(read: *PresentationRead, a: *ReadAccess) void {
-        readRow(a, tool_presentation, .{ .operation = read.operation, .ordinal = read.ordinal }, read);
+        readRow(a, stored_presentation, .{ .operation = read.operation, .ordinal = read.ordinal }, read);
     }
 
-    pub fn visit(read: *PresentationRead, row: *const tool_presentation.Row) bool {
+    pub fn visit(read: *PresentationRead, row: *const stored_presentation.Row) bool {
         return visitRow(read, row);
     }
 
-    fn keep(read: *PresentationRead, row: *const tool_presentation.Row) error{CorruptStore}!void {
+    fn keep(read: *PresentationRead, row: *const stored_presentation.Row) error{CorruptStore}!void {
         read.out.description = row.description;
         read.code = row.code;
         read.authorized = row.authorized;
@@ -946,13 +913,13 @@ const PresentationRead = struct {
 /// once authorized and pending permission before; only a call whose tool
 /// or arguments were refused may have no line.
 pub fn presentationOf(
-    description: ?protocol.Bounded(protocol.max_tool_description_bytes),
-    code: ?protocol.ToolPresentation.Code,
+    description: ?Bounded(tool_presentation.max_description_bytes),
+    code: ?tool_presentation.ToolPresentation.Code,
     authorized: ?bool,
     publication_position: ?u64,
-) error{CorruptStore}!protocol.ToolPresentation {
-    var result: protocol.ToolPresentation = .{ .description = description, .code = .unresolved, .publication_position = publication_position };
-    if (description) |line| if (!protocol.ToolPresentation.validDescription(line.slice())) return error.CorruptStore;
+) error{CorruptStore}!tool_presentation.ToolPresentation {
+    var result: tool_presentation.ToolPresentation = .{ .description = description, .code = .unresolved, .publication_position = publication_position };
+    if (description) |line| if (!tool_presentation.ToolPresentation.validDescription(line.slice())) return error.CorruptStore;
     if (code) |value| {
         result.code = value;
     } else if (!(authorized orelse false)) result.code = .pending_permission;
@@ -964,8 +931,8 @@ pub fn presentationOf(
 }
 
 /// `PresentationRead` alone, in rounds of its own.
-fn toolPresentation(a: *ReadAccess, operation: u64, ordinal: u64, publication_position: ?u64) !protocol.ToolPresentation {
-    var presentation: protocol.ToolPresentation = undefined;
+fn toolPresentation(a: *ReadAccess, operation: u64, ordinal: u64, publication_position: ?u64) !tool_presentation.ToolPresentation {
+    var presentation: tool_presentation.ToolPresentation = undefined;
     var read: PresentationRead = .init(operation, ordinal, publication_position, &presentation);
     read.queue(a);
     try runRows(a);
@@ -986,7 +953,7 @@ const hosted_call = rsql.Read(.{
         "WHERE item.session_ref=?1 AND item.session_position=?2 AND item.item_kind=5",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct {
-        description: protocol.Bounded(protocol.max_tool_description_bytes),
+        description: Bounded(tool_presentation.max_description_bytes),
         call_failed: bool,
         resolved_at: ?rsql.Positive,
         consistent: bool,
@@ -999,7 +966,7 @@ const hosted_call = rsql.Read(.{
 /// outcome go to `presentation`, and when its Operation resolved to `at`.
 const HostedRead = struct {
     position: u64,
-    presentation: *protocol.ToolPresentation,
+    presentation: *tool_presentation.ToolPresentation,
     at: u64 = 0,
     count: RowCount = .{},
 
@@ -1012,7 +979,7 @@ const HostedRead = struct {
     }
 
     fn keep(read: *HostedRead, row: *const hosted_call.Row) error{CorruptStore}!void {
-        if (!row.consistent or !protocol.ToolPresentation.validDescription(row.description.slice())) return error.CorruptStore;
+        if (!row.consistent or !tool_presentation.ToolPresentation.validDescription(row.description.slice())) return error.CorruptStore;
         read.presentation.* = .{ .description = row.description, .code = if (row.call_failed) .failed else .succeeded, .publication_position = read.position };
         read.at = (row.resolved_at orelse return error.CorruptStore).get();
     }
@@ -1031,16 +998,16 @@ const page_session = rsql.Read(.{
         "FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct {
-        model: protocol.Bounded(protocol.max_model_bytes),
+        model: Bounded(model_capability.max_model_bytes),
         permission_mode: u1,
         revision: rsql.Positive,
         next_position: rsql.Positive,
         compaction_trigger: ?u64,
         output_reservation: ?u64,
-        reasoning_effort: ?protocol.ReasoningEffort,
+        reasoning_effort: ?model_capability.ReasoningEffort,
         created_at: rsql.Positive,
-        provider: protocol.Provider,
-        workspace: *protocol.Bounded(protocol.max_workspace_bytes),
+        provider: provider_name.Provider,
+        workspace: *Bounded(workspace_path.max_bytes),
     },
     .cardinality = .optional,
 });
@@ -1057,7 +1024,7 @@ const page_session = rsql.Read(.{
 /// noinline: its row buffers (about 2.4 KB) stay out of the read's Queue.run
 /// frame, which also drains queued writes and so sits under the deepest
 /// write on every engine chain that reads a page (read_transcript).
-pub noinline fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page: *protocol.ActivityFacts) !void {
+pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.ActivityPage, page: *protocol.ActivityFacts) !void {
     page.* = .{ .end = 0, .direction = request.direction, .work = .{ .workspace = .{ .len = 0 } } };
     const session_ref = request.session.slice();
     var session: page_session.Row = undefined;
@@ -1142,12 +1109,12 @@ const SearchScratch = struct {
     window: [content_domain.ContentReader.content_window_bytes]u8 = undefined,
     matcher: word_search.Matcher = undefined,
     item: protocol.ActivityItem = undefined,
-    workspace: protocol.Bounded(protocol.max_workspace_bytes) = undefined,
+    workspace: Bounded(workspace_path.max_bytes) = undefined,
 };
 
 /// Searches the page's public sources in one read access. SQL chooses only
 /// candidate identities; the functional matcher alone decides text matches.
-pub fn searchActivity(a: *ReadAccess, request: *const protocol.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
     out.count = 0;
     out.next = null;
     const mapped = try pages.Mapped(SearchScratch).map();
@@ -1196,10 +1163,10 @@ pub fn searchActivity(a: *ReadAccess, request: *const protocol.ActivitySearch, o
                 const fields = scratch.item.value.call.fields;
                 // Same virtual text as read_transcript's full window: tool
                 // name, newline, then arguments in their stored JSON form.
-                try searchField(a, scratch, fields[@backingInt(protocol.ProposalField.name)], &budget);
+                try searchField(a, scratch, fields[@backingInt(tool_proposal.Field.name)], &budget);
                 if (budget != 0) {
                     scratch.matcher.feed("\n");
-                    try searchField(a, scratch, fields[@backingInt(protocol.ProposalField.arguments)], &budget);
+                    try searchField(a, scratch, fields[@backingInt(tool_proposal.Field.arguments)], &budget);
                 }
             }
             scratch.matcher.finish();
@@ -1239,7 +1206,7 @@ pub fn searchActivity(a: *ReadAccess, request: *const protocol.ActivitySearch, o
     }
 }
 
-fn searchField(a: *ReadAccess, scratch: *SearchScratch, field: protocol.ProposalFieldReference, budget: *usize) !void {
+fn searchField(a: *ReadAccess, scratch: *SearchScratch, field: activity_read.ProposalFieldReference, budget: *usize) !void {
     const reference: ContentReference = .{ .length = field.length, .digest = field.digest };
     const id = try content_domain.contentIdOf(a, reference, false);
     try searchContent(a, scratch, .{ .store = a.store, .content_id = id, .reference = reference }, budget);
@@ -1417,7 +1384,7 @@ pub const QueuedMessages = struct {
 const peer_label = rsql.Read(.{
     .sql = "SELECT label FROM session WHERE session_ref=?1",
     .Args = struct { session: SessionText },
-    .Row = struct { label: ?protocol.Bounded(protocol.max_label_bytes) },
+    .Row = struct { label: ?Bounded(tool_presentation.max_label_bytes) },
     .cardinality = .each,
 });
 
@@ -1435,7 +1402,7 @@ const activity_message = rsql.Read(.{
         "WHERE m.session_ref=?1 AND m.admission_id=?3",
     .Args = struct { session: []const u8, end: u64, admission: u64 },
     .Row = struct {
-        command_key: protocol.Bounded(protocol.max_key_bytes),
+        command_key: Bounded(idempotency_key.max_bytes),
         turn_id: ?rsql.Positive,
         content_id: rsql.Positive,
         applied: bool,
@@ -1462,7 +1429,7 @@ const approval_request = rsql.Read(.{
 const session_change = rsql.Read(.{
     .sql = "SELECT revision,field,changed_at FROM session_change WHERE session_ref=?1 AND position=?2 AND ordinal=?3",
     .Args = struct { session: []const u8, position: u64, ordinal: u64 },
-    .Row = struct { revision: rsql.Positive, field: protocol.SessionField, changed_at: rsql.Positive },
+    .Row = struct { revision: rsql.Positive, field: session_field.SessionField, changed_at: rsql.Positive },
     .cardinality = .one,
 });
 
@@ -1500,9 +1467,9 @@ const send_failure = rsql.Read(.{
         "LEFT JOIN core_command c ON c.command_key=s.command_key WHERE s.sender_session_ref=?1 AND s.sender_position=?2",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct {
-        command_key: protocol.Bounded(protocol.max_key_bytes),
+        command_key: Bounded(idempotency_key.max_bytes),
         target: SessionText,
-        code: protocol.Bounded(protocol.max_code_bytes),
+        code: Bounded(outcome_code.max_bytes),
         consistent: bool,
         rejected_at: rsql.Positive,
     },
@@ -1522,7 +1489,7 @@ const turn_outcome = rsql.Read(.{
         session_ref: SessionText,
         turn_id: rsql.Positive,
         operation_id: rsql.Positive,
-        outcome_code: protocol.Bounded(protocol.max_code_bytes),
+        outcome_code: Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         consistent: bool,
         resolution_content_id: ?rsql.Positive,
@@ -1541,7 +1508,7 @@ const session_stop = rsql.Read(.{
         "FROM session_stop s LEFT JOIN core_command c ON c.command_key=s.command_key LEFT JOIN turn t ON t.turn_id=s.selected_turn_id WHERE s.session_ref=?1 AND s.position=?2",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct {
-        command_key: protocol.Bounded(protocol.max_key_bytes),
+        command_key: Bounded(idempotency_key.max_bytes),
         selected_turn_id: ?rsql.Positive,
         admission_cutoff: u64,
         outcome_position: ?rsql.Positive,
@@ -1651,7 +1618,7 @@ const FailureRead = struct {
         // both refused creation and malformed addressed sends reach this read.
         read.failed.* = .{
             .key = row.command_key,
-            .target = if (protocol.validSessionId(row.target.slice())) .{ .session = row.target } else null,
+            .target = if (session_id.valid(row.target.slice())) .{ .session = row.target } else null,
             .code = row.code,
         };
         read.at = row.rejected_at.get();
@@ -2051,7 +2018,7 @@ noinline fn readItems(comptime max: usize, a: *ReadAccess, session: []const u8, 
 /// Round 1 reads the sequence guard; the item's own reads follow
 /// (`publicConversationContent`, `readItems`), which read the content's
 /// metadata, so no read repeats it.
-pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivityContent) !ContentLocation {
+pub fn openActivityContent(a: *ReadAccess, request: *const activity_read.ReadActivityContent) !ContentLocation {
     var guard: activity_sequence_guard.Result = undefined;
     a.read(activity_sequence_guard, .{ .session = request.session.slice() }, &guard);
     a.run() catch |err| return store_core.fence(a.store, if (err == error.StatementFailed) error.CorruptStore else err);
@@ -2081,13 +2048,13 @@ pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivity
 /// the same Proposal and presentation provenance checks as activity pages;
 /// the result's group position is not the original call's position.
 pub const ActivityTool = struct {
-    name: protocol.ProposalFieldReference,
-    presentation: protocol.ToolPresentation,
+    name: activity_read.ProposalFieldReference,
+    presentation: tool_presentation.ToolPresentation,
 };
 
-pub fn activityTool(a: *ReadAccess, request: *const protocol.ReadActivityContent) !ActivityTool {
-    var metadata: protocol.ProposalMetadata = undefined;
-    var presentation: protocol.ToolPresentation = undefined;
+pub fn activityTool(a: *ReadAccess, request: *const activity_read.ReadActivityContent) !ActivityTool {
+    var metadata: activity_read.ProposalMetadata = undefined;
+    var presentation: tool_presentation.ToolPresentation = undefined;
     const operation, const ordinal = if (request.ordinal == 0) call: {
         metadata = try proposal(a, request.session.slice(), request.position);
         break :call .{ metadata.operation, metadata.call_ordinal };
@@ -2103,7 +2070,7 @@ pub fn activityTool(a: *ReadAccess, request: *const protocol.ReadActivityContent
     read.queueProposal(a);
     try runRows(a);
     try read.finish();
-    return .{ .name = metadata.fields[@backingInt(protocol.ProposalField.name)], .presentation = presentation };
+    return .{ .name = metadata.fields[@backingInt(tool_proposal.Field.name)], .presentation = presentation };
 }
 
 /// The content columns of a Proposal's three fields, in ProposalField order.
@@ -2147,7 +2114,7 @@ pub const proposal_row = rsql.Read(.{
         turn_id: rsql.Positive,
         call_ordinal: u64,
         action_id: ?rsql.Positive,
-        rejection_code: ?protocol.ProposalRejection,
+        rejection_code: ?tool_proposal.Rejection,
         name_content_id: rsql.Positive,
         call_id_content_id: rsql.Positive,
         arguments_content_id: rsql.Positive,
@@ -2173,7 +2140,7 @@ pub const proposal_row = rsql.Read(.{
 /// without reopening payloads.
 pub const ProposalRead = struct {
     position: u64,
-    metadata: ?*protocol.ProposalMetadata = null,
+    metadata: ?*activity_read.ProposalMetadata = null,
     count: RowCount = .{},
 
     pub fn visit(read: *ProposalRead, row: *const proposal_row.Row) bool {
@@ -2203,9 +2170,9 @@ pub const ProposalRead = struct {
 /// A Proposal's fields, once it is consistent and each field's content is
 /// public and matches the metadata admission certified, so reference
 /// substitution is detectable without reopening payloads.
-fn certifiedFields(row: *const proposal_row.Row) error{CorruptStore}![3]protocol.ProposalFieldReference {
+fn certifiedFields(row: *const proposal_row.Row) error{CorruptStore}![3]activity_read.ProposalFieldReference {
     if (!row.consistent) return error.CorruptStore;
-    var fields: [3]protocol.ProposalFieldReference = undefined;
+    var fields: [3]activity_read.ProposalFieldReference = undefined;
     inline for (0..3) |index| {
         const suffix = std.fmt.comptimePrint("{d}", .{index});
         const length: u64 = @field(row, "length" ++ suffix);
@@ -2271,7 +2238,7 @@ pub const ToolOutcomeRow = struct {
     turn_id: ?rsql.Positive,
     call_ordinal: ?u64,
     action_id: ?rsql.Positive,
-    rejection_code: ?protocol.ProposalRejection,
+    rejection_code: ?tool_proposal.Rejection,
     name_content_id: ?rsql.Positive,
     call_id_content_id: ?rsql.Positive,
     arguments_content_id: ?rsql.Positive,
@@ -2386,8 +2353,8 @@ pub fn readProposal(a: anytype, session: []const u8, read: *ProposalRead) void {
 }
 
 /// `readProposal` in a round of its own.
-pub fn proposal(a: anytype, session: []const u8, position: u64) !protocol.ProposalMetadata {
-    var metadata: protocol.ProposalMetadata = undefined;
+pub fn proposal(a: anytype, session: []const u8, position: u64) !activity_read.ProposalMetadata {
+    var metadata: activity_read.ProposalMetadata = undefined;
     var read: ProposalRead = .{ .position = position, .metadata = &metadata };
     readProposal(a, session, &read);
     try a.run();

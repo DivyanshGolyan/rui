@@ -395,13 +395,13 @@ SLEEP_ORDERED = {
         (2, "slow-body and stall peers pace bytes against the client's real deadlines"),
     ("tests/integration/model_fixture.py", "SuccessHandler.do_POST"):
         (1, "paces SSE chunks by the scenario's chunk_delay"),
-    ("tests/integration/terminal_restoration_integration.py", "persistent_cases"):
+    ("tests/integration/terminal_restoration_cases.py", "persistent_cases"):
         (1, "sleeps 0.5 s after a command so it can reach blocked output before Ctrl-C"),
-    ("tests/integration/terminal_restoration_integration.py", "renderer_backpressure_case"):
+    ("tests/integration/terminal_restoration_cases.py", "renderer_backpressure_case"):
         (1, "sleeps 0.5 s to show a command stays pending behind blocked output"),
-    ("tests/integration/terminal_restoration_integration.py", "visible_stream_handoff_cases"):
+    ("tests/integration/terminal_restoration_cases.py", "visible_stream_handoff_cases"):
         (2, "sleeps 0.5 s to show a command stays pending behind held output"),
-    ("tests/integration/transport_h2_integration.py", "held_population"):
+    ("tests/integration/transport_h2_cases.py", "held_population"):
         (2, "0.2 s settle, then a 3 s idle-CPU measurement window"),
 }
 
@@ -586,6 +586,77 @@ def fixture_entries():
             if any(isinstance(node, ast.If) and ast.unparse(node.test) == "__name__ == '__main__'"
                    for node in ast.parse(path.read_text()).body):
                 yield path.relative_to(ROOT).as_posix()
+
+
+# Libraries that also have a command line. Any fixture may import them.
+FIXTURE_LIBRARY_ENTRIES = {
+    "tests/integration/host_process.py": "The fixture boundary: every fixture imports it, and its exec entry enters before running a command",
+    "tests/integration/mysql_server.py": "Holds the MySQL image pin: check.yml starts the server through its command line, mysql_wire_integration through its functions",
+}
+
+
+def fixture_imports(root):
+    """(importer, fixture) for each tests/integration, qualification or research
+    module, or tests/integration shell script, that imports a Python fixture: a
+    tests/integration module with a main block or a script
+    build.zig or check.sh launches. Imports are the edges select_tests.Graph
+    follows, so a change to one fixture selects only the targets that run it.
+    Harnesses outside tests/integration run only on scheduled or manual jobs,
+    so they too import libraries, never an entry script whose cases may move.
+    tests/ci tests may import a fixture to test its parts."""
+    from select_tests import PYTHON_IMPORT
+    directory = root / "tests/integration"
+    fixtures = {path.relative_to(root).as_posix() for path in directory.glob("*.py")
+                if any(isinstance(node, ast.If) and ast.unparse(node.test) == "__name__ == '__main__'"
+                       for node in ast.parse(path.read_text()).body)}
+    for launcher, launched in (("build.zig", r'"(tests/integration/\w+\.py)"'),
+                               ("tests/integration/check.sh", r'\$directory/(\w+\.py)')):
+        if (root / launcher).exists():
+            fixtures |= {name if name.startswith("tests/") else f"tests/integration/{name}"
+                         for name in re.findall(launched, (root / launcher).read_text())}
+    fixtures -= FIXTURE_LIBRARY_ENTRIES.keys()
+    found = set()
+    for path in sorted([*directory.glob("*.py"), *directory.glob("*.sh"),
+                        *(root / "tests/qualification").rglob("*.py"), *(root / "research").rglob("*.py")]):
+        importer = path.relative_to(root).as_posix()
+        for match in PYTHON_IMPORT.finditer(path.read_text()):
+            for module in (match[1] and [match[1]] or re.split(r"\s*,\s*", match[2])):
+                target = f"tests/integration/{module}.py"
+                if target in fixtures and target != importer:
+                    found.add((importer, target))
+    return sorted(found)
+
+
+class FixtureImportTest(unittest.TestCase):
+    def test_no_fixture_module_imports_another(self):
+        self.assertEqual(
+            [f"{importer} imports fixture {target}: move what it uses into a library without a main block "
+             f"(such as {Path(target).stem.removesuffix('_integration')}_fixture.py), or move the cases it runs "
+             f"into a cases library that {Path(target).name} runs" for importer, target in fixture_imports(ROOT)], [])
+
+    def test_fixtures_are_entries_and_launched_scripts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tests/integration").mkdir(parents=True)
+            main = 'if __name__ == "__main__":\n    host_process.enter()\n'
+            for name, source in {
+                "host_process.py": main,
+                "a_integration.py": "import host_process\n" + main,
+                "b_integration.py": "import host_process, a_integration as a\n" + main,
+                "launched.py": "print('runs at import')\n",
+                # A probe a fixture runs in a child interpreter imports too.
+                "c_fixture.py": 'PROBE = """\nimport launched\n"""\n',
+                "d_integration.sh": "python3 - <<'PY'\nimport a_integration\nPY\n",
+            }.items():
+                (root / "tests/integration" / name).write_text(source)
+            (root / "tests/qualification/harness").mkdir(parents=True)
+            (root / "tests/qualification/harness/run.py").write_text("from a_integration import ReplyProxy\n")
+            (root / "build.zig").write_text('run.addFileArg(b.path("tests/integration/launched.py"));\n')
+            self.assertEqual(fixture_imports(root),
+                             [("tests/integration/b_integration.py", "tests/integration/a_integration.py"),
+                              ("tests/integration/c_fixture.py", "tests/integration/launched.py"),
+                              ("tests/integration/d_integration.sh", "tests/integration/a_integration.py"),
+                              ("tests/qualification/harness/run.py", "tests/integration/a_integration.py")])
 
 
 class FixtureEntryTest(unittest.TestCase):

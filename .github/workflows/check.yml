@@ -206,18 +206,20 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           npm run check
           npm test
+      # Cache maintenance publishes this tarball on main, so a GitHub release
+      # outage does not fail policy.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/actionlint
+          key: rui-actionlint-1.7.7-linux-amd64
       - name: Install the pinned workflow linter
         env:
-          # Through the API: anonymous release downloads fail under GitHub's load shedding.
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # The official release avoids rebuilding the Go CLI on every plan.
-          gh release download v1.7.7 --repo rhysd/actionlint --pattern actionlint_1.7.7_linux_amd64.tar.gz \
-            --output "$RUNNER_TEMP/actionlint.tar.gz"
-          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
-          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          bash .github/scripts/install-actionlint.sh "$RUNNER_TEMP/actionlint"
+          echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
       - name: Validate workflows with one pinned-linter compatibility exception
         run: |
           set -euo pipefail
@@ -413,7 +415,7 @@ jobs:
     env:
       # The unit dialect check and launch-frame Host integration both
       # require CI's live MySQL server.
-      LIVE_MYSQL: ${{ contains(matrix.targets, 'test') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers') || contains(matrix.targets, 'launch-frame-integration') }}
+      LIVE_MYSQL: ${{ contains(matrix.targets, 'test') || contains(matrix.targets, 'test-store') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers') || contains(matrix.targets, 'launch-frame-integration') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -499,7 +501,7 @@ jobs:
         # Fails when the unit binary left no record or PREPAREd nothing, so
         # any path that keeps the check from running (selection, launcher
         # environment, caching) turns this shard red.
-        if: ${{ !cancelled() && (contains(matrix.targets, 'test') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers')) }}
+        if: ${{ !cancelled() && (contains(matrix.targets, 'test') || contains(matrix.targets, 'test-store') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers')) }}
         run: |
           set -euo pipefail
           python3 -B tests/ci/live_engine_step.py verify mysql | tee -a "$GITHUB_STEP_SUMMARY"

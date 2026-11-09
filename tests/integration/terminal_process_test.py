@@ -17,9 +17,13 @@ import time
 import unittest
 from unittest.mock import patch
 
-import host_process
 from host_process import stop_process, wait_for
-from terminal_process import DEVICE_ANSWER, open_pty, read_output, spawn, terminal_process, unanswered
+from terminal_process import answers_to, open_pty, spawn, terminal_process
+from terminal_screen import ScreenCapture
+
+
+# libghostty-vt's answer to DA1: a VT220 with ANSI colour.
+DEVICE_ANSWER = b"\x1b[?62;22c"
 
 
 class TerminalProcessTest(unittest.TestCase):
@@ -161,7 +165,7 @@ class TerminalProcessTest(unittest.TestCase):
             self.assertEqual(changed(termios.tcgetattr(fresh)), (False, 7))
         finally:
             os.close(fresh)
-        self.assertEqual(read_output(master, 16), b"abc")
+        self.assertEqual(os.read(master, 16), b"abc")
         # Why the PTY survives on Darwin: the job never led the session.
         self.assertTrue(seen["group_leader"], seen)
         self.assertFalse(seen["session_leader"], seen)
@@ -181,7 +185,7 @@ class TerminalProcessTest(unittest.TestCase):
         echoed = b""
         while b"pong" not in echoed:
             self.assertTrue(select.select([master], [], [], 5)[0], echoed)
-            echoed += read_output(master, 64)
+            echoed += os.read(master, 64)
         read, write = self.reporter()
         process = self.job(OWNER.replace("REPORT", str(write)), slave, pass_fds=(write,))
         os.close(write)
@@ -199,7 +203,7 @@ class TerminalProcessTest(unittest.TestCase):
         # ^C with ISIG on reaches the foreground job only.
         interrupted = self.job("import os, time; os.write(1, b'R'); time.sleep(30)", slave,
                                default_signals=(signal.SIGINT,))
-        self.assertEqual(read_output(master, 1), b"R")
+        self.assertEqual(os.read(master, 1), b"R")
         os.write(master, b"\x03")
         try:
             interrupted.wait(timeout=5)
@@ -235,7 +239,7 @@ class TerminalProcessTest(unittest.TestCase):
         master, slave = open_pty()
         process = self.job("import os, time; os.write(1, b'R'); time.sleep(30)", slave,
                            default_signals=(signal.SIGHUP,))
-        self.assertEqual(read_output(master, 1), b"R")
+        self.assertEqual(os.read(master, 1), b"R")
         os.close(master)
         self.assertEqual(process.wait(timeout=5), -signal.SIGHUP)
         self.assertEqual(process.leader.process.wait(timeout=5), 0)
@@ -249,7 +253,7 @@ class TerminalProcessTest(unittest.TestCase):
                                     str(slave), marker], pass_fds=(slave,), stdout=subprocess.PIPE)
         self.addCleanup(fixture.stdout.close)
         pids = json.loads(fixture.stdout.readline())
-        self.assertEqual(read_output(master, 1), b"R")
+        self.assertEqual(os.read(master, 1), b"R")
         fixture.kill()
         fixture.wait()
         wait_for(lambda: [pid for pid in pids if running(pid)], "the job and leader to end with their fixture",
@@ -265,17 +269,22 @@ class TerminalProcessTest(unittest.TestCase):
         self.addCleanup(stop_process, process, timeout=5)
         return process, master
 
-    def output(self, process, master, until):
-        """Read the master, as fixtures do, until it holds `until`."""
+    def output(self, process, master, until, capture=None):
+        """Read the master, as fixtures do, until it holds `until`; a
+        `capture` sees each read, as a fixture's screen observer does."""
         output = b""
         while until not in output:
             self.assertTrue(select.select([master], [], [], 5)[0], (output, process.poll()))
-            output += read_output(master, 4096)
+            chunk = os.read(master, 4096)
+            if capture is not None:
+                capture.feed(chunk)
+            output += chunk
         return output
 
     def test_answers_reach_the_terminal_the_command_reads(self):
-        # stdin and stdout on different PTYs: the request is read from stdout's
-        # master and answered on stdin's, where vaxis reads.
+        # stdin and stdout on different PTYs: the observer of stdout's master
+        # sees the request, and its terminal answers on stdin's, where vaxis
+        # reads.
         input_master, input_slave = open_pty()
         output_master, output_slave = open_pty()
         process = spawn([sys.executable, "-c",
@@ -286,13 +295,15 @@ class TerminalProcessTest(unittest.TestCase):
                          "os.write(1, b'answer=' + answer.hex().encode() + b'.')\n"],
                         stdin=input_slave, stdout=output_slave, stderr=subprocess.PIPE)
         self.addCleanup(stop_process, process, timeout=5)
-        self.assertIn(b"answer=" + DEVICE_ANSWER.hex().encode() + b".", self.output(process, output_master, b"."))
+        capture = ScreenCapture(reply=answers_to(output_master))
+        self.assertIn(b"answer=" + DEVICE_ANSWER.hex().encode() + b".",
+                      self.output(process, output_master, b".", capture))
         self.assertEqual(process.wait(timeout=5), 0, process.stderr.read())
         self.assertFalse(select.select([output_slave], [], [], 0)[0], "answer went to the output PTY")
 
-    def test_reads_answer_device_attributes_until_the_fixture_answers(self):
+    def test_observer_answers_a_split_request_once_unless_silent(self):
         # The request arrives in two reads; the answer comes once, before
-        # the next byte the fixture writes.
+        # the next byte the fixture writes. A silent observer answers nothing.
         process, master = self.converse(
             "import os, sys, tty\n"
             "tty.setraw(0)\n"
@@ -304,14 +315,15 @@ class TerminalProcessTest(unittest.TestCase):
             "os.read(0, 1)\n"
             "os.write(1, b'\\x1b[c')\n"
             "os.write(1, b'next=' + os.read(0, 1) + b'.')\n")
-        self.output(process, master, b"\x1b[")
+        capture = ScreenCapture(reply=answers_to(master))
+        self.output(process, master, b"\x1b[", capture)
         os.write(master, b"g")
-        self.assertIn(b"answer=" + DEVICE_ANSWER.hex().encode() + b".", self.output(process, master, b"."))
-        unanswered(master)
+        self.assertIn(b"answer=" + DEVICE_ANSWER.hex().encode() + b".", self.output(process, master, b".", capture))
+        capture = ScreenCapture()
         os.write(master, b"g")
-        self.output(process, master, b"\x1b[c")
+        self.output(process, master, b"\x1b[c", capture)
         os.write(master, b"z")
-        self.assertIn(b"next=z.", self.output(process, master, b"next="))
+        self.assertIn(b"next=z.", self.output(process, master, b"next=", capture))
         self.assertEqual(process.wait(timeout=5), 0, process.stderr.read())
 
 
@@ -403,8 +415,3 @@ def prove_terminal_process():
     result = unittest.TextTestRunner(verbosity=2).run(
         unittest.defaultTestLoader.loadTestsFromTestCase(TerminalProcessTest))
     assert result.wasSuccessful(), "terminal process ownership failed"
-
-
-if __name__ == "__main__":
-    host_process.enter()
-    unittest.main()

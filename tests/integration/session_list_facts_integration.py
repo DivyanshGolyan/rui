@@ -7,8 +7,8 @@ import subprocess
 import tempfile
 import threading
 
-from canonical_failure_integration import ERROR_BYTES, ReplyProxy
-from control_integration import StreamingEndpoint
+from canonical_fixture import ERROR_BYTES, ReplyProxy
+from control_fixture import StreamingEndpoint
 import model_fixture as fixture
 import host_process
 
@@ -263,8 +263,3 @@ def main():
             fixture.stop_host(host)
         prove_archive(root, home)
         prove_running_archive(root)
-
-
-if __name__ == "__main__":
-    host_process.enter()
-    main()

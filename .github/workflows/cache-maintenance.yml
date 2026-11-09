@@ -10,6 +10,7 @@ on:
       - '.github/actions/setup/**'
       - '.github/workflows/cache-maintenance.yml'
       - '.github/scripts/prune-caches.cjs'
+      - '.github/scripts/install-actionlint.sh'
   workflow_run:
     workflows: [Selected checks, On-demand macOS qualification, Renderer contracts]
     types: [completed]
@@ -75,6 +76,20 @@ jobs:
           test "$(uname -m)" = "$EXPECTED_ARCH"
           zig build -Doptimize=ReleaseSafe --summary all
           echo "Compilation cache baseline for $(git rev-parse HEAD) on $(uname -s)/$(uname -m). No test acceptance or release qualification." >> "$GITHUB_STEP_SUMMARY"
+      # Selected checks' policy job restores this tarball from main.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ runner.os == 'Linux' }}
+        with:
+          path: ${{ runner.temp }}/actionlint
+          key: rui-actionlint-1.7.7-linux-amd64
+      - name: Publish the pinned workflow linter
+        if: ${{ runner.os == 'Linux' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          bash .github/scripts/install-actionlint.sh "$RUNNER_TEMP/actionlint"
   previous_release:
     # The upgrade check restores this; requested refs cannot publish caches.
     if: ${{ github.event_name != 'workflow_run' && !github.event.repository.private && github.ref == 'refs/heads/main' }}

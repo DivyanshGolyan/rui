@@ -15,6 +15,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("h2_c");
+const openssl = @import("tls_client").c;
 const h2 = @import("h2.zig");
 const policy = @import("policy.zig");
 const Record = @import("Stream.zig");
@@ -60,7 +61,7 @@ tunnel_sent: u16,
 tunnel_request_len: u16,
 tunnel_answer: proxy.Answer,
 /// For an https origin, from the TCP connect on.
-ssl: ?*c.SSL,
+ssl: ?*openssl.SSL,
 /// Counted among its origin's lookup users until a connect succeeds.
 uses_lookup: bool,
 /// The next address to try.
@@ -159,7 +160,7 @@ pub fn settingUp(self: *const Connection) bool {
 /// partial record does not count: it waits for the socket like any read.
 pub fn tlsPending(self: *const Connection) bool {
     const ssl = self.ssl orelse return false;
-    return self.session != null and c.SSL_pending(ssl) > 0;
+    return self.session != null and openssl.SSL_pending(ssl) > 0;
 }
 
 pub fn hasRoom(self: *const Connection) bool {
@@ -309,7 +310,7 @@ fn attempt(self: *Connection, time: u64) enum { connected, in_flight, refused, l
     if (fd < 0) return .local_failure;
     self.earlier = self.socket;
     self.socket = fd;
-    if (!configureSocket(fd)) return .local_failure;
+    if (!configureSocket(fd, true)) return .local_failure;
     while (true) {
         switch (std.posix.errno(std.c.connect(fd, @ptrCast(&address.storage), address.length))) {
             .SUCCESS => return .connected,
@@ -346,13 +347,15 @@ fn closeSocket(fd: std.posix.fd_t) void {
     _ = std.c.close(fd);
 }
 
-fn configureSocket(fd: std.posix.fd_t) bool {
+/// Close-on-exec, non-blocking, over TCP no Nagle delay, and on Darwin no
+/// SIGPIPE when the peer went away.
+fn configureSocket(fd: std.posix.fd_t, tcp: bool) bool {
     if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return false;
     const flags = std.c.fcntl(fd, std.c.F.GETFL);
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
     if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) < 0) return false;
     const one: c_int = 1;
-    if (std.c.setsockopt(fd, std.c.IPPROTO.TCP, std.c.TCP.NODELAY, &one, @sizeOf(c_int)) != 0) return false;
+    if (tcp and std.c.setsockopt(fd, std.c.IPPROTO.TCP, std.c.TCP.NODELAY, &one, @sizeOf(c_int)) != 0) return false;
     if (builtin.os.tag.isDarwin()) {
         if (std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.NOSIGPIPE, &one, @sizeOf(c_int)) != 0) return false;
     }
@@ -773,13 +776,13 @@ pub fn close(self: *Connection, mode: enum { goaway, abrupt }) void {
                 };
                 // close_notify, best effort and without waiting for the peer's.
                 if (goaway_sent) if (self.ssl) |ssl| {
-                    _ = c.SSL_shutdown(ssl);
+                    _ = openssl.SSL_shutdown(ssl);
                 };
             }
         }
         c.nghttp2_session_del(session);
     }
-    if (self.ssl) |ssl| c.SSL_free(ssl);
+    if (self.ssl) |ssl| openssl.SSL_free(ssl);
     self.stopUsingLookup();
     if (self.socket >= 0) closeSocket(self.socket);
     self.dropEarlier();

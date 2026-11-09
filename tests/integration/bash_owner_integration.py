@@ -6,40 +6,12 @@ import sqlite3
 import tempfile
 import threading
 
-import bash_integration as bash_fixture
+import bash_fixture
 import model_fixture as fixture
-from control_integration import raw_request
+from control_fixture import raw_request
 import host_process
 from host_process import canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process
-
-
-def dispose_owner_case(host, endpoint, thread):
-    def shutdown():
-        if thread is not None and thread.ident is not None:
-            try:
-                endpoint.shutdown()
-            except BaseException:
-                # A pre-effect refusal still owns a live serving thread.
-                dispose_all(endpoint.shutdown)
-                raise
-
-    def join():
-        if thread is not None and thread.ident is not None:
-            thread.join(timeout=5)
-            assert not thread.is_alive(), "Bash owner endpoint thread did not retire"
-
-    dispose_all(
-        lambda: fixture.stop_host(host) if host is not None else None,
-        shutdown,
-        lambda: endpoint.server_close() if endpoint is not None else None,
-        join,
-    )
-
-
-def execution_idle(store, session, retained_bytes=0):
-    report = fixture.command("session", "inspect", "--store", store, "--session", session)
-    execution = report["execution"]
-    return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == str(retained_bytes) else None
+from bash_fixture import dispose_owner_case, execution_idle, stage_action
 
 
 def continuation_endpoint(names):
@@ -75,30 +47,6 @@ def resolution_after_stop(store, session):
         return None if row is None else row[0]
     finally:
         database.close()
-
-
-def stage_action(state, store, name, command, stdin=None):
-    responses = []
-    bash_fixture.add_exchange(responses, name, command, stdin=stdin)
-    endpoint = fixture.SuccessEndpoint(responses)
-    endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-    host = None
-    try:
-        endpoint_thread.start()
-        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        session = bash_fixture.configure(state, store, f"{name}-config")
-        fixture.message(state, store, f"{name}-message", session, "execute")
-        action = fixture.wait_for(
-            lambda: bash_fixture.action_for(store, session),
-            f"{name} Action",
-        )
-        fixture.wait_for(
-            lambda: execution_idle(store, session),
-            f"{name} Action creation cleanup",
-        )
-        return session, action
-    finally:
-        dispose_owner_case(host, endpoint, endpoint_thread)
 
 
 def prove_timeout_feedback(state):

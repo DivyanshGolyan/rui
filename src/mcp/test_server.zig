@@ -14,27 +14,25 @@ more: []const []const u8 = &.{},
 hold_reply: bool = false,
 request_received: std.atomic.Value(bool) = .init(false),
 connection_closed: std.atomic.Value(bool) = .init(false),
+stopping: std.atomic.Value(bool) = .init(false),
 seen: [4096]u8 = undefined,
 seen_len: usize = 0,
 
 pub fn start(self: *Script) !void {
-    self.listener = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
-    if (self.listener < 0) return error.SocketFailed;
-    var address: std.c.sockaddr.in = std.mem.zeroes(std.c.sockaddr.in);
-    address.family = std.c.AF.INET;
-    address.addr = @bitCast([4]u8{ 127, 0, 0, 1 });
-    if (@hasField(std.c.sockaddr.in, "len")) address.len = @sizeOf(std.c.sockaddr.in);
-    if (std.c.bind(self.listener, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)) != 0) return error.BindFailed;
-    if (std.c.listen(self.listener, 1) != 0) return error.ListenFailed;
-    var length: std.c.socklen_t = @sizeOf(std.c.sockaddr.in);
-    if (std.c.getsockname(self.listener, @ptrCast(&address), &length) != 0) return error.NameFailed;
-    self.port = std.mem.bigToNative(u16, address.port);
+    // std's backlog is ample: Darwin refuses a connect beyond a full
+    // backlog, where Linux queues it.
+    const server = try (try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0")).listen(std.testing.io, .{});
+    self.listener = server.socket.handle;
+    self.port = server.socket.address.getPort();
     self.thread = try std.Thread.spawn(.{}, serveAll, .{self});
 }
 
 fn serveAll(self: *Script) void {
     self.serve(self.reply);
-    for (self.more) |reply| self.serve(reply);
+    for (self.more) |reply| {
+        if (self.stopping.load(.acquire)) return;
+        self.serve(reply);
+    }
 }
 
 fn serve(self: *Script, reply: []const u8) void {
@@ -73,7 +71,12 @@ fn requestIn(self: *const Script) bool {
 
 pub fn stop(self: *Script) void {
     // Also release a scripted future accept when an assertion aborts a test.
-    _ = std.c.shutdown(self.listener, std.c.SHUT.RDWR);
+    // A connection wakes it on every kernel; shutdown of the listener wakes
+    // it only on Linux, and Darwin's accept would block forever.
+    self.stopping.store(true, .release);
+    var address = std.Io.net.IpAddress.parseLiteral("127.0.0.1:0") catch unreachable;
+    address.setPort(self.port);
+    if (address.connect(std.testing.io, .{ .mode = .stream })) |stream| stream.close(std.testing.io) else |_| {}
     if (self.thread) |thread| thread.join();
     _ = std.c.close(self.listener);
 }

@@ -16,7 +16,7 @@ from textwrap import dedent
 from unittest.mock import patch
 
 from select_tests import (CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES,
-                          POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, Graph, execution_batches, matches, select,
+                          POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, Graph, execution_batches, matches, select,
                           setup_requirements, tree_graph)
 from qualification import NATIVE, RESOURCES, qualification, shards
 
@@ -40,6 +40,7 @@ def named_paths(patterns):
 def covered(target, targets):
     """`target` runs when `targets` are selected, directly or inside check or check-full."""
     return (target in targets or target in CHECK_COVERS and bool(targets & {"check", "check-full"})
+            or target in {"test-native", "test-store"} and "test" in targets
             or any(target in cases and broad in targets for broad, cases in FIXTURE_COVERS.items())
             or target in {"check", "stack-frames"} and "check-full" in targets
             or target == "stack-frames" and "check" in targets)
@@ -90,6 +91,30 @@ class RuleMatchTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_native_conformance_dependencies_keep_live_mysql(self):
+        graph = tree_graph()
+        for path in ("src/find_tools.zig", "src/find_tools_tests.zig", "src/read_transcript.zig",
+                     "src/launch_frame.zig"):
+            for phase in ("development", "review"):
+                with self.subTest(path=path, phase=phase):
+                    result = select([path], phase, AVAILABLE, graph)
+                    self.assertIn("test", result["targets"])
+                    self.assertIn("test", result["server_targets"])
+        for path in graph.live_conformance & graph.reached["test-native"]:
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE, graph)
+                self.assertTrue(set(result["targets"]) & LIVE_MYSQL_TARGETS)
+
+    def test_unit_roots_follow_store_imports(self):
+        native = select(["src/session_consent.zig"], "review", AVAILABLE)["targets"]
+        self.assertIn("test-native", native)
+        self.assertNotIn("test-store", native)
+        self.assertNotIn("test", native)
+        store = select(["src/store/rsql.zig"], "review", AVAILABLE)["targets"]
+        self.assertIn("test", store)
+        self.assertNotIn("test-native", store)
+        self.assertNotIn("test-store", store)
+
     def test_upgrade_owners_select_standalone_fixture_in_both_phases(self):
         paths = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
                  "src/upgrade_process.zig", "src/HostLifecycle.zig", "src/host_identity.zig",
@@ -127,7 +152,7 @@ class SelectionTest(unittest.TestCase):
         for path in ("src/client.zig", "src/cli_args.zig", "src/server.zig",
                      "src/TestObservation.zig", "tests/integration/request_wait_integration.py",
                      "tests/integration/model_fixture.py", "tests/integration/host_process.py",
-                     "tests/integration/bash_integration.py", "tests/integration/bash_recovery_integration.py"):
+                     "tests/integration/bash_fixture.py", "tests/integration/canonical_fixture.py"):
             selected = set(select([path], "review", AVAILABLE)["targets"])
             self.assertTrue(covered("request-wait-integration", selected), (path, selected))
         core = select(["src/request_wait.zig"], "review", AVAILABLE)["targets"]
@@ -144,9 +169,9 @@ class SelectionTest(unittest.TestCase):
                     self.assertNotIn("check", targets)
 
     def test_development_does_not_claim_native_acceptance(self):
-        # The Store keeps `test` for the live MySQL check (LIVE_RULES); nothing else widens.
+        # The Store keeps its root for the live MySQL check; nothing else widens.
         result = select(["src/bash_platform.c", "src/store.zig"], "development", AVAILABLE)
-        self.assertEqual(result["targets"], ["test", "test-logic"])
+        self.assertEqual(result["targets"], ["test-logic", "test-store"])
         self.assertFalse(result["native_required"])
         self.assertEqual(select(["src/bash_platform.c"], "development", AVAILABLE)["targets"], ["test-logic"])
 
@@ -208,15 +233,15 @@ class SelectionTest(unittest.TestCase):
 
     def test_native_unit_aggregate_selects_its_root_not_check(self):
         alone = select(["src/tests.zig"], "review", AVAILABLE)
-        self.assertEqual((alone["targets"], alone["native_targets"]), (["test"], ["test"]))
+        self.assertEqual((alone["targets"], alone["native_targets"]), (["test-native"], ["test-native"]))
         # What it newly lists selects what reaches that file, not check.
         owned = select(["src/tests.zig", "src/mcp/Running.zig"], "review", AVAILABLE)["targets"]
-        self.assertTrue({"launch-frame-integration", "test"} <= set(owned))
+        self.assertTrue({"launch-frame-integration", "test-native"} <= set(owned))
         self.assertNotIn("check", owned)
 
     def test_shared_context_text_keeps_all_request_oracle_consumers(self):
         # The Host embeds both texts in requests; fixtures and Go request oracles read them.
-        request = {"test", "dispatch-integration", "transport-h2-integration"}
+        request = {"test-native", "dispatch-integration", "transport-h2-integration"}
         for path, readers in (("src/model_instructions.txt", {"codex-h2-integration", "current-facts-integration",
                                                                "server-delivery-integration", "peer-integration",
                                                                "measurement-check"}),
@@ -241,6 +266,18 @@ class SelectionTest(unittest.TestCase):
         for core in cores:
             with self.subTest(core=core):
                 self.assertIn("test-logic", select([f"src/{core}"], "review", AVAILABLE)["targets"])
+
+    def test_store_tests_reach_no_store_caller(self):
+        # The Store's tests cross only the Store's interface. A file that
+        # imports store.zig tests its own behavior over a Store in its own
+        # file; a Store test importing it would make every change to its
+        # callers rerun the Store's tests.
+        graph = tree_graph()
+        store = [name for name in graph.every if name.startswith("src/store/")]
+        callers = sorted(name for name in graph.closure(graph.every, store)
+                         if not name.startswith("src/store/") and "src/store.zig" in graph.every.get(name, ()))
+        self.assertEqual(callers, [], "Store tests reach these Store callers; move the tests that "
+                         "import them into the callers")
 
     def test_registered_cores_reach_only_unit_roots_unless_a_fixture_names_them(self):
         # A core's value tests own its decisions. A fixture that asserts one
@@ -267,9 +304,13 @@ class SelectionTest(unittest.TestCase):
                 self.assertNotIn("check", targets)
         self.assertIn("test-logic", select(["src/h2/policy.zig"], "review", AVAILABLE)["targets"])
 
-    def test_postgres_wire_client_selects_its_own_tests_and_h2_trust_reaches_them(self):
+    def test_postgres_wire_client_selects_its_own_tests_and_shared_trust_reaches_them(self):
         self.assertEqual(select(["src/store/wire/pg.zig"], "review", AVAILABLE)["targets"], ["test-pg"])
-        self.assertTrue({"test-h2", "test-pg"} <= set(select(["src/h2/tls.zig"], "review", AVAILABLE)["targets"]))
+        shared = set(select(["src/tls_client/tls_client.zig"], "review", AVAILABLE)["targets"])
+        self.assertTrue({"test-h2", "test-pg", "mysql-wire-integration"} <= shared)
+        for path in ("src/h2/tls.zig", "src/h2/Engine.zig", "src/h2/Connection.zig", "src/h2/Stream.zig"):
+            with self.subTest(path=path):
+                self.assertNotIn("test-pg", select([path], "review", AVAILABLE)["targets"])
 
     def test_store_rule_leaves_wire_clients_to_their_own_rules(self):
         self.assertNotIn("dispatch-debug-integration", select(["src/store/wire/mysql.zig"], "review", AVAILABLE)["targets"])
@@ -299,7 +340,7 @@ class SelectionTest(unittest.TestCase):
             with self.subTest(path=path):
                 targets = set(select([path], "review", AVAILABLE)["targets"])
                 self.assertIn("test-full", targets)
-                self.assertTrue(targets & {"test", "check", "check-full"})
+                self.assertTrue(targets & {"test", "test-native", "check", "check-full"})
         self.assertIn("check-full", NATIVE)
 
     def test_frontend_selects_the_pty_fixtures_that_drive_it_not_check(self):
@@ -310,7 +351,7 @@ class SelectionTest(unittest.TestCase):
                     self.assertIn("human-cli-integration", result[family])
                     self.assertNotIn("check", result[family])
         # The human CLI gate runs the PTY cases it composes; they are not selected twice.
-        result = select(["src/SessionFrontend.zig", "tests/integration/terminal_restoration_integration.py"],
+        result = select(["src/SessionFrontend.zig", "tests/integration/terminal_restoration_cases.py"],
                         "review", AVAILABLE)
         self.assertNotIn("terminal-restoration-integration", result["targets"])
 
@@ -421,10 +462,11 @@ class SelectionTest(unittest.TestCase):
 
     def test_producers_split_only_beside_other_compiles(self):
         from qualification import split_build
-        for targets in (["check"], ["check-full"], ["test", "test-logic"],
+        for targets in (["check"], ["check-full"], ["test", "test-logic"], ["test-native", "test-logic"],
+                        ["test-store", "test-logic"],
                         ["check", "admission-debug-integration"]):
             self.assertTrue(split_build(targets), targets)
-        for targets in ([], ["test"], ["test-logic", "admission-debug-integration"]):
+        for targets in ([], ["test"], ["test-native"], ["test-store"], ["test-logic", "admission-debug-integration"]):
             self.assertFalse(split_build(targets), targets)
 
     def test_macos_split_workflow_uses_the_shared_handoff(self):
@@ -539,8 +581,8 @@ class SelectionTest(unittest.TestCase):
     def test_bash_lifecycle_values_keep_portable_and_native_owner_checks(self):
         for path in ("src/BashLifecycle.zig", "src/deadline.zig"):
             result = select([path], "review", AVAILABLE)
-            native = ["bash-integration", "bash-lifecycle-integration", "bash-owner-integration",
-                      "bash-recovery-integration", "test", "test-logic"]
+            native = sorted(["bash-integration", "bash-lifecycle-integration", "bash-owner-integration",
+                             "bash-recovery-integration", "test" if path == "src/deadline.zig" else "test-native", "test-logic"])
             self.assertEqual(result["native_targets"], native, path)
             self.assertEqual(result["targets"], sorted(native + ["stack-frames"]), path)
 
@@ -571,7 +613,7 @@ class SelectionTest(unittest.TestCase):
 
     def test_transport_inputs_keep_both_native_h2_owners(self):
         for path in ("src/build_transport.sh", "build.zig.zon", "src/os/socket.zig",
-                     "tests/integration/codex_h2_integration.py", "tests/integration/transport_h2_integration.py"):
+                     "tests/integration/h2_fixture.py", "tests/integration/codex_h2_cases.py"):
             result = select([path], "review", AVAILABLE)
             for family in ("targets", "native_targets"):
                 self.assertIn("transport-h2-integration", result[family])
@@ -632,32 +674,42 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(execution_batches(["current-facts-integration", "server-delivery-integration"]),
                          [["current-facts-integration"], ["server-delivery-integration"]])
 
-    def test_a_helper_reached_through_another_fixture_module_keeps_its_consumer(self):
-        # codex_h2_integration borrows transport_h2_integration.closed_host_request,
-        # which calls control_integration.read_http_response (Codex P2 on #1102).
-        for path in ("tests/integration/control_integration.py", "tests/integration/transport_h2_integration.py"):
+    def test_a_helper_reached_through_another_library_keeps_its_consumer(self):
+        # codex_h2_integration calls h2_fixture.closed_host_request, which calls
+        # control_fixture.read_http_response (Codex P2 on #1102). The fixtures
+        # those helpers came from no longer reach codex-h2.
+        for path in ("tests/integration/control_fixture.py", "tests/integration/h2_fixture.py"):
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 for family in ("targets", "native_targets"):
                     self.assertIn("codex-h2-integration", result[family])
+        for path in ("tests/integration/control_integration.py", "tests/integration/transport_h2_integration.py"):
+            with self.subTest(path=path):
+                self.assertNotIn("codex-h2-integration", select([path], "review", AVAILABLE)["targets"])
         scenarios = select(["tests/integration/dispatch_integration.py"], "review", AVAILABLE)
         for family in ("targets", "native_targets"):
             self.assertTrue({"dispatch-debug-integration", "dispatch-integration"} <= set(scenarios[family]))
 
     def test_helper_modules_select_the_fixtures_that_import_them(self):
         # A helper selects every fixture that imports it, and check once it
-        # reaches every case check runs; a fixture module another fixture
-        # imports selects that fixture, not the importer's whole suite.
+        # reaches every case check runs; a fixture script selects only the
+        # targets that run it.
         for path, owners in (("host_process.py", {"check", "launch-frame-integration", "ts-client"}),
-                             ("control_integration.py", {"control-integration", "human-cli-integration",
-                                                         "dispatch-integration", "transport-h2-integration"}),
-                             ("canonical_failure_integration.py", {"human-cli-integration", "request-wait-integration"})):
+                             ("control_fixture.py", {"control-integration", "human-cli-integration",
+                                                     "dispatch-integration", "transport-h2-integration"}),
+                             ("canonical_fixture.py", {"human-cli-integration", "request-wait-integration"})):
             with self.subTest(path=path):
                 result = select([f"tests/integration/{path}"], "review", AVAILABLE)
                 for family in ("targets", "native_targets"):
                     self.assertTrue(owners <= set(result[family]), sorted(owners - set(result[family])))
-        control = select(["tests/integration/control_integration.py"], "review", AVAILABLE)["targets"]
-        self.assertNotIn("check", control)
+        self.assertNotIn("check", select(["tests/integration/control_fixture.py"], "review", AVAILABLE)["targets"])
+        for path, target in (("control_integration.py", "control-integration"),
+                             ("dispatch_integration.py", "dispatch-integration"),
+                             ("canonical_failure_integration.py", "canonical-failure-integration")):
+            with self.subTest(path=path):
+                result = select([f"tests/integration/{path}"], "review", AVAILABLE)
+                self.assertIn(target, result["targets"])
+                self.assertNotIn("human-cli-integration", result["targets"])
 
     def test_shared_fixture_helpers_keep_composed_and_separate_consumers(self):
         for name in ("host_process.py",):
@@ -672,7 +724,7 @@ class SelectionTest(unittest.TestCase):
                         self.assertNotIn("control-integration", result[family])
 
     def test_canonical_failure_is_covered_by_the_composed_human_cli_gate(self):
-        path = "tests/integration/canonical_failure_integration.py"
+        path = "tests/integration/canonical_failure_cases.py"
         alone = select([path], "review", AVAILABLE)
         for family in ("targets", "native_targets"):
             self.assertIn("human-cli-integration", alone[family])
@@ -717,7 +769,7 @@ class SelectionTest(unittest.TestCase):
         for block in filters:
             harnesses = {p for p in re.findall(r"'([^']+)'", block) if p.startswith("tests/integration/")}
             # The restoration fixture is also a blocking gate, so it keeps its own selection.
-            self.assertEqual(harnesses - {"tests/integration/terminal_restoration_integration.py"},
+            self.assertEqual(harnesses - {"tests/integration/terminal_restoration_*"},
                              set(RENDERER_HARNESSES))
         for path in ("tests/integration/input_equivalence.py", "tests/integration/session_sequence_model.py",
                      "tests/integration/session_sequence_model_test.py"):
@@ -801,9 +853,11 @@ class SelectionTest(unittest.TestCase):
             Graph(files, files.__getitem__)
 
     def test_h2_fixture_and_companion_keep_both_owning_targets(self):
-        # codex-h2 imports the transport fixture; its companion test is the transport target's own.
-        for path, expected in (("tests/integration/transport_h2_integration.py",
+        # The transport oracle test checks codex-h2's cases; the transport cases
+        # and their companion test are the transport target's own.
+        for path, expected in (("tests/integration/codex_h2_cases.py",
                                 ["codex-h2-integration", "transport-h2-integration"]),
+                               ("tests/integration/transport_h2_cases.py", ["transport-h2-integration"]),
                                ("tests/integration/transport_h2_integration_test.py", ["transport-h2-integration"])):
             result = select([path], "review", AVAILABLE)
             self.assertEqual(result["targets"], expected)
@@ -850,15 +904,45 @@ class SelectionTest(unittest.TestCase):
             self.assertTrue(setup_requirements([target])["node"], target)
 
     def test_setup_installs_fixture_packages_for_any_target(self):
-        self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False, "tmux": False})
-        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "node": False, "python": True, "tmux": False})
-        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "node": False, "python": True, "tmux": False})
-        self.assertEqual(setup_requirements(["ts-client"]), {"go": False, "node": True, "python": True, "tmux": False})
+        self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False, "screen": False, "tmux": False})
+        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "node": False, "python": True, "screen": False, "tmux": False})
+        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "node": False, "python": True, "screen": False, "tmux": False})
+        self.assertEqual(setup_requirements(["ts-client"]), {"go": False, "node": True, "python": True, "screen": False, "tmux": False})
         imported = set()
         for fixture in (Path(__file__).parents[1] / "integration").glob("*.py"):
-            imported |= set(re.findall(r"(?m)^\s*(?:import|from) (h2|pyte|wcwidth)\b", fixture.read_text()))
+            imported |= set(re.findall(r"(?m)^\s*(?:import|from) (h2)\b", fixture.read_text()))
         pinned = {line.split("==")[0] for line in (Path(__file__).parents[1] / "integration/requirements.txt").read_text().split()}
         self.assertLessEqual(imported, pinned)
+
+    def test_screen_package_is_fetched_only_for_steps_that_run_the_observer(self):
+        # installer-integration runs install.sh, which must never fetch ghostty.
+        for targets in ([], ["test-logic"], ["installer-integration"], ["ts-client"]):
+            with self.subTest(targets=targets):
+                self.assertFalse(setup_requirements(targets)["screen"])
+        for targets in (["check"], ["check-full"], ["terminal-restoration-integration"], ["test-logic", "direct-pty"]):
+            with self.subTest(targets=targets):
+                self.assertTrue(setup_requirements(targets)["screen"])
+        build = (Path(__file__).parents[2] / "build.zig").read_text()
+        self.assertLessEqual(SCREEN_TARGETS, set(re.findall(r'b\.step\(\s*"([^"]+)"', build)))
+        # Every fixture that reaches the observer runs with its library named,
+        # and setup fetches the package for it.
+        observing = tree_graph().targets("tests/integration/terminal_screen.py")
+        self.assertLessEqual(observing, SCREEN_TARGETS)
+        for target in observing:
+            with self.subTest(target=target):
+                fixture = FIXTURES[target][0][0]
+                run = re.search(r'(\w+)\.addFileArg\(b\.path\("' + re.escape(fixture) + r'"\)\)', build)
+                self.assertIsNotNone(run, fixture)
+                self.assertIn(f"const {run[1]} = screenCommand(", build, fixture)
+        # install.sh fetches the graph fetch_dependencies.sh walks from the root
+        # manifest; ghostty's path dependencies would also make it exit 1.
+        root = Path(__file__).parents[2]
+        script = (root / "src/fetch_dependencies.sh").read_text()
+        self.assertEqual(re.findall(r'(?m)^prepare_dependencies "(.*)"$', script), ['$repo/build.zig.zon'])
+        self.assertNotIn("screen-emulator", script)
+        manifest = (root / "build.zig.zon").read_text()
+        for name in ("ghostty", "screen-emulator"):
+            self.assertNotIn(name, manifest)
 
     def test_tmux_requirement_only_follows_upgrade_target(self):
         for targets in ([], ["check"], ["check-full"], ["installer-integration"], ["test-logic", "check-full"]):

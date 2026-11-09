@@ -22,8 +22,9 @@ INHERITED = (
     "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
     # CI's retention directory for failed fixture roots.
     "RUI_FAILURE_ARTIFACTS",
-    # The terminal notice binary that build.zig and check.sh pass.
-    "RUI_TEST_TERMINAL_NOTICE",
+    # The terminal notice binary that build.zig and check.sh pass, and the
+    # libghostty-vt that build.zig gives the PTY screen observer.
+    "RUI_TEST_TERMINAL_NOTICE", "RUI_TEST_GHOSTTY_VT",
     # Opt-in retention and measurement switches that a person or workflow sets.
     "RUI_UPGRADE_FAILURES", "RUI_RENDERER_RETAIN_COMPARISON", "RUI_ACTIVITY_MEASURE", "RUI_ACTIVITY_ITEM_BYTES",
     "RUI_MEASURE_GLIBC_TUNABLES",
