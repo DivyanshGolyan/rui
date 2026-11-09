@@ -31,6 +31,8 @@ const model_admission_domain = @import("domain/model_admission.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
+const session_list_read_domain = @import("domain/session_list_read.zig");
+const session_list_reply = @import("../session_list_reply.zig");
 const store_schema = @import("schema.zig");
 const sqlite = @import("sqlite.zig");
 const test_poll = @import("test_poll");
@@ -7258,10 +7260,10 @@ test "a failed Turn whose diagnostic is not UTF-8 gives no reset time, as on mai
     try std.testing.expect(!storage.isFenced());
 }
 
-/// The rendered text of the one statement `report_domain.report_failures`
+/// The rendered text of the one statement `session_list_read.list_failures`
 /// names `failed` whose text holds `fragment`.
-fn reportStatementForTesting(comptime failed: anyerror, comptime fragment: []const u8) [:0]const u8 {
-    return namedStatementForTesting(report_domain.report_failures, failed, fragment);
+fn listStatementForTesting(comptime failed: anyerror, comptime fragment: []const u8) [:0]const u8 {
+    return namedStatementForTesting(session_list_read_domain.list_failures, failed, fragment);
 }
 
 /// Fails the statement whose text is `sql` as a one-row list page reads
@@ -7285,21 +7287,21 @@ fn expectListStepFailure(sql: [:0]const u8, expected: anyerror) !void {
 }
 
 test "a list page whose page read fails answers main's SessionReadFailed" {
-    try expectListStepFailure(reportStatementForTesting(error.SessionReadFailed, "FROM session WHERE created_seq>?1"), error.SessionReadFailed);
+    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "FROM session WHERE created_seq>?1"), error.SessionReadFailed);
 }
 
 test "a list row whose latest Turn read fails answers main's TurnReadFailed" {
-    try expectListStepFailure(reportStatementForTesting(error.TurnReadFailed, "SELECT t.turn_id,t.operation_id"), error.TurnReadFailed);
+    try expectListStepFailure(listStatementForTesting(error.TurnReadFailed, "SELECT t.turn_id,t.operation_id"), error.TurnReadFailed);
 }
 
 test "a list row whose queue read fails answers main's MessageAdmissionReadFailed" {
-    try expectListStepFailure(reportStatementForTesting(error.MessageAdmissionReadFailed, "admission_id>?2"), error.MessageAdmissionReadFailed);
+    try expectListStepFailure(listStatementForTesting(error.MessageAdmissionReadFailed, "admission_id>?2"), error.MessageAdmissionReadFailed);
 }
 
 test "a list row whose settings read fails answers SessionReadFailed" {
     // Main named a failed settings step so, and a failed first Message
     // step CorruptStore; this one read holds both.
-    try expectListStepFailure(reportStatementForTesting(error.SessionReadFailed, "JOIN message_admission m"), error.SessionReadFailed);
+    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m"), error.SessionReadFailed);
 }
 
 test "a list row that fails to render reports its error before a later row's failed step" {
@@ -7318,7 +7320,7 @@ test "a list row that fails to render reports its error before a later row's fai
     try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&update, "UPDATE session SET label='two'||char(10)||'lines' WHERE session_ref='{s}'", .{first.slice()}, 0));
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
     var used = std.atomic.Value(u64).init(0);
-    var fault: TestingStatementFault = .{ .sql = reportStatementForTesting(error.SessionReadFailed, "JOIN message_admission m") };
+    var fault: TestingStatementFault = .{ .sql = listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m") };
     fault.arm(storage.sqliteDatabase());
     defer fault.disarm(storage.sqliteDatabase());
     // Main read and rendered the first row before the second's step.
@@ -7365,7 +7367,8 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
     var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
     const before = storage.testing_content_work.rounds;
-    try report_domain.renderSessionList(&a, &.{}, &capture);
+    var reply: session_list_reply.Reply(report_domain.SessionReportCapture) = .{ .capture = &capture };
+    try session_list_read_domain.readSessionList(&a, &.{}, &reply);
     const rounds = storage.testing_content_work.rounds - before;
     var report = try capture.seal();
     defer report.deinit();

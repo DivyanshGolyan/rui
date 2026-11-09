@@ -39,6 +39,8 @@ const model_admission_domain = @import("domain/model_admission.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
+const session_list_read_domain = @import("domain/session_list_read.zig");
+const session_list_reply = @import("../session_list_reply.zig");
 const store_schema = @import("schema.zig");
 const store_testing = @import("testing.zig");
 const turn_domain = @import("domain/turn.zig");
@@ -72,6 +74,7 @@ const OutputItemKind = historical_domain.OutputItemKind;
 const OutputMetadataWriter = store_testing.OutputMetadataWriter;
 const PermissionDecisionReply = command_domain.PermissionDecisionReply;
 const SessionReport = report_domain.SessionReport;
+const ScratchBudget = @import("../ScratchBudget.zig");
 const SessionStopReply = command_domain.SessionStopReply;
 const SettlementTracePhase = store_core.SettlementTracePhase;
 const TestingAnswerPart = store_testing.TestingAnswerPart;
@@ -651,14 +654,24 @@ pub fn checkSessionReportsForTesting(context: anytype) !void {
     }
 }
 
+const TestingListReply = session_list_reply.Reply(report_domain.SessionReportCapture);
+
+/// A list page captured as the server captures one: the Store's read
+/// written by the Host's reply into an unlinked scratch file.
+pub fn testingSessionListReport(storage: *Store, request: *const protocol.ListSessions, scratch_path: []const u8, budget: ScratchBudget, request_number: u64) !SessionReport {
+    try request.validate();
+    var capture: report_domain.SessionReportCapture = .{ .io = storage.io, .writer = null, .budget = budget };
+    try capture.create(scratch_path, request_number, false);
+    errdefer capture.deinit();
+    var reply: TestingListReply = .{ .capture = &capture };
+    try storage.readSessionList(request, &reply);
+    return capture.seal();
+}
+
 pub fn testingSessionList(storage: *Store, tmp: *std.testing.TmpDir, request: protocol.ListSessions, used: *std.atomic.Value(u64), request_number: u64) ![]u8 {
     var root: [protocol.max_store_bytes]u8 = undefined;
     const length = try tmp.dir.realPath(std.testing.io, &root);
-    var report = try storage.captureSessionList(&request, .{
-        .scratch_path = root[0..length],
-        .scratch_budget = .{ .used = used, .limit = 1024 * 1024 },
-        .request_number = request_number,
-    });
+    var report = try testingSessionListReport(storage, &request, root[0..length], .{ .used = used, .limit = 1024 * 1024 }, request_number);
     defer report.deinit();
     const bytes = try std.testing.allocator.alloc(u8, @intCast(report.length));
     errdefer std.testing.allocator.free(bytes);
@@ -725,7 +738,7 @@ test "Session list pages accepted creation order with exact workspace and fixed 
                 }
             }
             var request = protocol.ListSessions{};
-            try std.testing.expectError(error.InvalidCursor, storage.captureSessionList(&.{ .after = 2, .ceiling = 1 }, undefined));
+            try std.testing.expectError(error.InvalidCursor, storage.readSessionList(&.{ .after = 2, .ceiling = 1 }, @as(*TestingListReply, undefined)));
             request.workspace = .{};
             try request.workspace.?.set(workspace);
             const first = try testingSessionList(&storage, &tmp, request, &used, 2);
@@ -769,21 +782,13 @@ test "Session list pages accepted creation order with exact workspace and fixed 
             const scratch_length = try tmp.dir.realPath(std.testing.io, &scratch_path);
             // Hold a captured page while a new configuration commits: delivery owns
             // scratch, not a SQLite cursor, transaction or Store entry.
-            var held = try storage.captureSessionList(&.{}, .{
-                .scratch_path = scratch_path[0..scratch_length],
-                .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
-                .request_number = 5,
-            });
+            var held = try testingSessionListReport(&storage, &.{}, scratch_path[0..scratch_length], .{ .used = &used, .limit = 1024 * 1024 }, 5);
             try std.testing.expect(used.load(.acquire) > 0);
             var concurrent = try completeConfiguration("list-concurrent", "", workspace, "model");
             try std.testing.expect(storage.configure(&concurrent, .{}) == .accepted);
             held.deinit();
             try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-            try std.testing.expectError(error.ReportScratchExhausted, storage.captureSessionList(&.{}, .{
-                .scratch_path = scratch_path[0..scratch_length],
-                .scratch_budget = .{ .used = &used, .limit = 16 },
-                .request_number = 6,
-            }));
+            try std.testing.expectError(error.ReportScratchExhausted, testingSessionListReport(&storage, &.{}, scratch_path[0..scratch_length], .{ .used = &used, .limit = 16 }, 6));
             try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
             try std.testing.expect(!storage.isFenced());
         }
@@ -2485,6 +2490,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
         @embedFile("domain/report_full_shape.zig"),
+        @embedFile("domain/session_list_read.zig"),
         @embedFile("domain/skills.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
@@ -8036,7 +8042,8 @@ fn listRoundsForTesting(case: *store_testing.Case, count: usize) !u32 {
     var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
     const before = storage.testing_content_work.rounds;
-    try report_domain.renderSessionList(&a, &.{}, &capture);
+    var reply: TestingListReply = .{ .capture = &capture };
+    try session_list_read_domain.readSessionList(&a, &.{}, &reply);
     const rounds = storage.testing_content_work.rounds - before;
     var report = try capture.seal();
     defer report.deinit();
@@ -8967,7 +8974,7 @@ const EntryPoint = enum {
     activityTool,
     failedResponseBinding,
     captureSessionReport,
-    captureSessionList,
+    readSessionList,
     actionContent,
     admitModelAttempt,
     admitNextActionAttempt,
@@ -9038,7 +9045,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .activityTool = 4,
     .failedResponseBinding = 1,
     .captureSessionReport = 5,
-    .captureSessionList = 6,
+    .readSessionList = 6,
     .actionContent = 2,
     .admitModelAttempt = 3,
     .admitNextActionAttempt = 2,
@@ -9139,6 +9146,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
         @embedFile("domain/report_full_shape.zig"),
+        @embedFile("domain/session_list_read.zig"),
         @embedFile("domain/skills.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
@@ -9800,7 +9808,7 @@ test "each Store entry point takes its round budget on its common path" {
             var used = std.atomic.Value(u64).init(0);
             meter.start();
             std.testing.allocator.free(try testingSessionList(storage, tmp, .{}, &used, 2));
-            meter.stop(.captureSessionList);
+            meter.stop(.readSessionList);
             var inspect: protocol.InspectSession = .{ .failed_response = .{ .operation = continuation.operation_id, .attempt = continuation.attempt_ordinal, .part = .body } };
             try inspect.session.set(session.slice());
             meter.start();
