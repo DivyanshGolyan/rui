@@ -41,6 +41,9 @@ For bot-filed issues, the coordinating agent hands the fix to the thread that ow
 
 Before opening a fix, search open CI issues for the touched fixture and include `Fixes #N` for each issue it fixes.
 Issues record defects; they do not form a separate publication gate.
+When a `ci-red` issue closes, give it exactly one cause label: `cause:real` when the fix changed product behavior, else `cause:compile`, `cause:stale`, `cause:fixture`, `cause:flake`, `cause:policy` or `cause:infra`.
+A reopened issue keeps its label; change it if the next fix finds another cause.
+[tp_rate.py](../../tests/ci/tp_rate.py) reports the weekly share of closed `ci-red` issues that were real bugs, and lists those still unlabelled.
 
 ## Promote
 
