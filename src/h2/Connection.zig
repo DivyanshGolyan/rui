@@ -349,7 +349,7 @@ fn closeSocket(fd: std.posix.fd_t) void {
 
 /// Close-on-exec, non-blocking, over TCP no Nagle delay, and on Darwin no
 /// SIGPIPE when the peer went away.
-pub fn configureSocket(fd: std.posix.fd_t, tcp: bool) bool {
+fn configureSocket(fd: std.posix.fd_t, tcp: bool) bool {
     if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return false;
     const flags = std.c.fcntl(fd, std.c.F.GETFL);
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });

@@ -17,7 +17,7 @@
 //!
 //! Session settings (`schema.mysql_session`) are the owner's to send.
 const std = @import("std");
-const h2 = @import("h2");
+const tls_client = @import("tls_client");
 pub const mysql = @import("mysql.zig");
 pub const tls = @import("tls.zig");
 
@@ -333,7 +333,7 @@ pub const Connection = struct {
             self.fd = -1;
         }
         self.fd = fd;
-        if (!h2.socket.configure(fd, family != std.c.AF.UNIX)) return error.SystemResources;
+        if (!tls_client.socket.configure(fd, family != std.c.AF.UNIX)) return error.SystemResources;
         while (true) switch (std.posix.errno(std.c.connect(fd, address, len))) {
             .SUCCESS => return,
             .INTR => continue,
@@ -365,7 +365,7 @@ pub const Connection = struct {
     fn sendRaw(self: *Connection, bytes: []const u8) Error!void {
         var sent: usize = 0;
         while (sent < bytes.len) {
-            const count = std.c.send(self.fd, bytes[sent..].ptr, bytes.len - sent, h2.socket.send_flags);
+            const count = std.c.send(self.fd, bytes[sent..].ptr, bytes.len - sent, tls_client.socket.send_flags);
             switch (std.posix.errno(count)) {
                 .SUCCESS => sent += @intCast(count),
                 .INTR => {},
@@ -538,7 +538,7 @@ const Peer = struct {
                 .send => |bytes| {
                     var sent: usize = 0;
                     while (sent < bytes.len) {
-                        const count = std.c.send(fd, bytes[sent..].ptr, bytes.len - sent, h2.socket.send_flags);
+                        const count = std.c.send(fd, bytes[sent..].ptr, bytes.len - sent, tls_client.socket.send_flags);
                         if (count <= 0) return "send failed";
                         sent += @intCast(count);
                     }
