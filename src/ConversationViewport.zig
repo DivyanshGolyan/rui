@@ -627,6 +627,16 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return result;
         }
 
+        /// The collapsed block whose `┄` row is the logical line at `offset`,
+        /// counted from the end as Ctrl-O names one (0 is the last), or null
+        /// when that line is not a collapsed block's row. A click on the row
+        /// opens that Message.
+        pub fn summaryAt(self: *const Self, offset: usize) ?usize {
+            if (offset >= self.text().len) return null;
+            const found = self.collapsed(offset, self.lineEnd(offset)).last orelse return null;
+            return self.collapsed(found + 1, self.text().len).count;
+        }
+
         /// Drops retained bytes before `position` (an absolute offset that
         /// starts a line), as eviction would. Positions are origin-relative.
         pub fn discardFront(self: *Self, position: u64) void {
@@ -984,6 +994,18 @@ test "a peer line keeps one row with its time in the right margin, as a user blo
     try std.testing.expectEqual(@as(usize, 2), found.count);
     try std.testing.expectEqual(std.mem.indexOf(u8, text, "┄ 3").?, found.last.?);
     try std.testing.expectEqual(@as(usize, 1), blocks.collapsed(std.mem.indexOf(u8, text, "┄ 2").? + 1, text.len).count);
+    // A click names the clicked row's block, counted from the end; any
+    // other row names none.
+    const rows = struct {
+        fn start(bytes: []const u8, needle: []const u8) usize {
+            const at = std.mem.indexOf(u8, bytes, needle).?;
+            return if (std.mem.lastIndexOfScalar(u8, bytes[0..at], '\n')) |newline| newline + 1 else 0;
+        }
+    };
+    try std.testing.expectEqual(@as(?usize, 1), blocks.summaryAt(rows.start(text, "┄ 2")));
+    try std.testing.expectEqual(@as(?usize, 0), blocks.summaryAt(rows.start(text, "┄ 3")));
+    for ([_][]const u8{ "← Received", "→ Messaged", "┄ typed" }) |other| try std.testing.expectEqual(@as(?usize, null), blocks.summaryAt(rows.start(text, other)));
+    try std.testing.expectEqual(@as(?usize, null), blocks.summaryAt(text.len));
 }
 
 test "a peer's name links to its Session inside Rui, never through the terminal" {
