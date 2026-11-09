@@ -100,6 +100,7 @@ pub const testingCatalogRecords = store_test_fixtures.testingCatalogRecords;
 pub const settleCallsForTesting = store_test_fixtures.settleCallsForTesting;
 pub const TestingCall = store_test_fixtures.TestingCall;
 pub const testingSessionReportWithProfile = store_test_fixtures.testingSessionReportWithProfile;
+pub const testingSessionList = store_test_fixtures.testingSessionList;
 pub const testingSqlite = @import("store/sqlite.zig");
 pub const testingBytesContent = store_test_fixtures.testingBytesContent;
 pub const testingContentReference = store_test_fixtures.testingContentReference;
