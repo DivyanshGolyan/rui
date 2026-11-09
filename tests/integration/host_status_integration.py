@@ -402,24 +402,21 @@ def main():
                 endpoint.bind(str(stale))
                 endpoint.listen(1)
                 def incompatible_peer():
-                    for _ in range(3):
-                        connection, _ = endpoint.accept()
-                        with connection:
-                            read_request(connection)
-                            connection.sendall(
-                                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                                b"Content-Length: 2\r\nX-Rui-Wire-Version: " + str(int(host_process.WIRE_VERSION) + 1).encode() + b"\r\n\r\n{}"
-                            )
+                    connection, _ = endpoint.accept()
+                    with connection:
+                        read_request(connection)
+                        connection.sendall(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                            b"Content-Length: 2\r\nX-Rui-Wire-Version: " + str(int(host_process.WIRE_VERSION) + 1).encode() + b"\r\n\r\n{}"
+                        )
 
                 peer = threading.Thread(target=incompatible_peer)
                 peer.start()
+                # The CLI's status, exit and `host start` refusal for this peer
+                # are cli.zig's "host status and start classify a Host's reply
+                # however late it comes": the CLI runs on the real 1 s
+                # Host-info deadline, which a loaded runner can miss (#967).
                 assert status(store) == "incompatible"
-                assert cli_status(home, "--store", store)["status"] == "incompatible"
-                # A client of another wire version names the mismatch and the
-                # way out instead of failing on its first read.
-                started = subprocess.run([RUI, "host", "start", "--store", str(store)],
-                    env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
-                assert started.returncode != 0 and "does not speak this rui's protocol" in started.stderr, started
                 peer.join(timeout=3)
                 assert not peer.is_alive()
             stale.unlink()
@@ -486,8 +483,8 @@ def main():
 
                     peer = threading.Thread(target=malformed_peer, daemon=True)
                     peer.start()
-                    # The CLI prints this same classification; its incompatible
-                    # status and exit are checked against the newer wire above.
+                    # The CLI prints this same classification; cli.zig checks
+                    # its incompatible status and exit against a newer wire.
                     observed = status(store)
                     assert observed == "incompatible", (response, observed)
                     peer.join(timeout=3)
@@ -503,16 +500,16 @@ def main():
                     endpoint.listen(2)
 
                     def unavailable_peer():
-                        for _ in range(2):
-                            connection, _ = endpoint.accept()
-                            with connection:
-                                read_request(connection)
-                                connection.sendall(response)
+                        connection, _ = endpoint.accept()
+                        with connection:
+                            read_request(connection)
+                            connection.sendall(response)
 
                     peer = threading.Thread(target=unavailable_peer, daemon=True)
                     peer.start()
+                    # The untimed actor proves the reply was classified, not
+                    # timed out; cli.zig checks the CLI renders a fenced Host.
                     assert status(store) == "owned_unavailable"
-                    assert cli_status(home, "--store", store)["status"] == "owned_unavailable"
                     peer.join(timeout=3)
                     assert not peer.is_alive()
                 stale.unlink()
