@@ -22,7 +22,6 @@ const slash_commands = @import("slash_commands.zig");
 const queued_line = @import("queued_line.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const AnswerRenderer = @import("AnswerRenderer.zig");
-const Terminal = @import("SessionTerminal.zig");
 const status_page = @import("status_page.zig");
 const ReadPhase = departure.ReadPhase;
 const session_transcript = @import("session_transcript.zig");
@@ -1002,7 +1001,7 @@ pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
         job.result.copied = .saved;
         return;
     }
-    if (copy == .answer and answer.content.bytes > Terminal.clipboard_limit) {
+    if (copy == .answer and answer.content.bytes > TerminalText.clipboard_limit) {
         job.result.copied = .too_large;
         return;
     }
@@ -1017,7 +1016,7 @@ pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
         }
     else
         .{ .start = 0, .length = sink.offset };
-    job.result.copied = if (range.length > Terminal.clipboard_limit) .too_large else .{ .clipboard = range };
+    job.result.copied = if (range.length > TerminalText.clipboard_limit) .too_large else .{ .clipboard = range };
 }
 
 /// The Conversation's newest assistant answer, or null before the first.
