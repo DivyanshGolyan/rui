@@ -70,6 +70,8 @@ pub const Requests = struct {
     /// Test hook for mutation sends only: asks the Host to drop its reply at
     /// this point.
     drop_reply: ?[]const u8 = null,
+    /// Captured mutation sends' response inactivity; tests shorten it.
+    mutation_timing: ResponseTiming = .mutation,
 
     pub fn failRead(self: Requests, failure: protocol_reply.ReadFailure) error{ CanonicalStoreFailure, HostInvocationFailed } {
         if (self.read_failure) |slot| if (slot.* == null) {
@@ -100,7 +102,7 @@ pub const Requests = struct {
         const carried: ?Environment = if (captured.target == .message) environment else null;
         if (carried) |value| if (value.bytes() > protocol.max_environment_bytes) return .fail(null, error.EnvironmentTooLarge);
         const paths = platform.resolveClientPaths(self.io, captured.saved.store.slice()) catch |err| return .fail(.store, err);
-        const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), ResponseTiming.mutation, captured.length, &captured.file, null, null, carried, reply_buffer, null)) {
+        const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), self.mutation_timing, captured.length, &captured.file, null, null, carried, reply_buffer, null)) {
             .done => |reply| reply,
             .failed => |failure| return .fail(failure.step, failure.err),
         };
@@ -2658,17 +2660,20 @@ test "mutation response progress renews inactivity through header and body" {
         fn run(fd: std.posix.fd_t) void {
             defer closeTestDescriptor(fd);
             writeAll(fd, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n") catch return;
-            std.Io.sleep(std.testing.io, .fromMilliseconds(4_500), .awake) catch return;
+            std.Io.sleep(std.testing.io, .fromMilliseconds(350), .awake) catch return;
             writeAll(fd, "\r\n{") catch return;
-            // Still exceeds five seconds overall, without a second long gap.
-            std.Io.sleep(std.testing.io, .fromMilliseconds(1_000), .awake) catch return;
+            // Exceeds the inactivity window overall, though neither gap does.
+            std.Io.sleep(std.testing.io, .fromMilliseconds(350), .awake) catch return;
             writeAll(fd, "}") catch return;
         }
     };
     const writer = try std.Thread.spawn(.{}, Producer.run, .{sockets[1]});
     defer writer.join();
     var buffer: ReplyBuffer = .{};
-    const reply = try readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &buffer, ResponseTiming.mutation, null);
+    // Mutation's renewing shape with a shorter window; ResponseTiming's own
+    // tests pin the production five seconds.
+    const timing: ResponseTiming = .{ .inactivity_ms = 600, .wait_for_first_byte = ResponseTiming.mutation.wait_for_first_byte };
+    const reply = try readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &buffer, timing, null);
     try std.testing.expectEqual(@as(u16, 200), reply.status);
     try std.testing.expectEqualStrings("{}", reply.body);
 }
@@ -3237,6 +3242,7 @@ test "capture retransmits complete original bytes after a lost reply" {
                 .closed => {},
                 .silent => {
                     try addNonblocking(fd);
+                    // Outlasts the client's shortened inactivity below.
                     const until = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 6 * std.time.ns_per_s;
                     var tail: [1]u8 = undefined;
                     try std.testing.expectEqual(@as(usize, 0), try readRequest(.{ .io = std.testing.io }, fd, &tail, until));
@@ -3267,7 +3273,7 @@ test "capture retransmits complete original bytes after a lost reply" {
         Peer.failure = null;
         const peer = try std.Thread.spawn(.{}, Peer.serve, .{ sockets[1], expected, response });
         var buffer: ReplyBuffer = .{};
-        const sent = (Requests{ .io = connected_io }).sendCaptured(&captured, .empty, &buffer);
+        const sent = (Requests{ .io = connected_io, .mutation_timing = .{ .inactivity_ms = 200, .wait_for_first_byte = false } }).sendCaptured(&captured, .empty, &buffer);
         const result = sent.get();
         peer.join();
         if (Peer.failure) |err| return err;
