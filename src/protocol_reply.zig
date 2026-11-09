@@ -2151,6 +2151,28 @@ test "an activity row carries its time, and a Message's rows carry its admission
     try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(bytes, .{}));
 }
 
+test "refused peer activity retains absent and canonical targets" {
+    for ([_]bool{ false, true }) |has_target| {
+        var target: protocol.NamedPeer = .{ .session = .{} };
+        try target.session.set("absent");
+        var failure: protocol.ActivityItem.SendFailed = .{ .key = .{}, .target = if (has_target) target else null, .code = .{} };
+        try failure.key.set("refused");
+        try failure.code.set(if (has_target) "unknown_session" else "invalid_session_reference");
+        var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .send_failed = failure } };
+        try facts.work.workspace.set("/w");
+        var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try facts.writeJson(&writer);
+        const decoded = (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].value.send_failed;
+        try std.testing.expectEqualStrings(failure.key.slice(), decoded.key.slice());
+        try std.testing.expectEqualStrings(failure.code.slice(), decoded.code.slice());
+        if (has_target) {
+            try std.testing.expectEqualStrings("absent", decoded.target.?.session.slice());
+        } else try std.testing.expect(decoded.target == null);
+    }
+}
+
 test "a work state reads back exactly the facts its kind owns" {
     var cause: protocol.Bounded(protocol.max_code_bytes) = .{};
     try cause.set("provider_temporary_http_429");
@@ -3208,6 +3230,19 @@ test "Current settings preserve decimal token heuristics in projections" {
     try std.testing.expectEqual(@as(u64, 16384), reply.current.settings.output_reservation.value);
     try std.testing.expectEqual(protocol.ReasoningEffort.high, reply.current.settings.reasoning_effort.?.value);
     try std.testing.expectEqual(protocol.ReasoningEffort.high, reply.current.settings.reasoning_effort_override.?.value);
+    for ([_]struct { fields: []const u8, names: []const u8, loaded: u8 }{
+        .{ .fields = "\"tools\":[\"bash\"],\"loaded_tools\":[]", .names = "bash", .loaded = 0 },
+        .{ .fields = "\"tools\":[\"bash\",\"fetch_page\"],\"loaded_tools\":[\"bash\",\"fetch_page\"]", .names = "bash fetch_page", .loaded = 2 },
+    }) |case| {
+        const changed = try std.mem.replaceOwned(u8, std.testing.allocator, report, "\"tools\":[],\"loaded_tools\":[]", case.fields);
+        defer std.testing.allocator.free(changed);
+        try file.writePositionalAll(io, changed, 0);
+        const settings = (try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = changed.len } })).current.settings;
+        try std.testing.expectEqualStrings(case.names, settings.tools.names.names.slice());
+        try std.testing.expect(settings.tools.set.contains(.bash) and !settings.tools.set.contains(.web_search));
+        try std.testing.expectEqual(case.loaded, settings.loaded_tools.names.count);
+    }
+    try file.writePositionalAll(io, report, 0);
     var buffer: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try reply.current.writeJson(io, file, &writer);
