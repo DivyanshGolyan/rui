@@ -4,7 +4,7 @@
 //! fixtures they arrange and read rows through.
 
 const std = @import("std");
-const platform = @import("../platform.zig");
+const platform = @import("../store_path.zig");
 const tool_catalog = @import("../tools.zig");
 const named_scratch = @import("../named_scratch.zig");
 const protocol = @import("../protocol.zig");
@@ -483,10 +483,14 @@ pub fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace
         try command.configuration.permission_mode.value.set("bypass");
         command.configuration.compaction_trigger.state = .value;
         try command.configuration.compaction_trigger.value.set("115200");
-        // Listed test bindings use the client choice; unlisted ones state null.
-        if (if (@import("../model_capability.zig").supportsModel(model)) @import("../client_defaults.zig").startEffort(model, null) else null) |effort| {
+        // These fixture models use low; the other fixture bindings state null.
+        const low_models = [_][]const u8{ "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5" };
+        const effort: ?[]const u8 = for (low_models) |name| {
+            if (std.mem.eql(u8, model, name)) break "low";
+        } else null;
+        if (effort) |value| {
             command.configuration.reasoning_effort.state = .value;
-            try command.configuration.reasoning_effort.value.set(@tagName(effort));
+            try command.configuration.reasoning_effort.value.set(value);
         } else command.configuration.reasoning_effort.state = .explicit_null;
     }
     return command;

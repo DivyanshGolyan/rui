@@ -42,6 +42,7 @@ test {
     _ = @import("protocol.zig");
     _ = @import("session_skills.zig");
     _ = @import("protocol_reply.zig");
+    _ = @import("protocol_reply_store_tests.zig");
     _ = @import("caller_rejection.zig");
     _ = @import("platform.zig");
     _ = @import("socket_fixture.zig");

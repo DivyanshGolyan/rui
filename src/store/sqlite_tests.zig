@@ -6,10 +6,9 @@
 const tests = @import("tests.zig");
 const std = @import("std");
 const named_scratch = @import("../named_scratch.zig");
-const platform = @import("../platform.zig");
+const platform = @import("../store_path.zig");
 const protocol = @import("../protocol.zig");
 const wire_request = @import("../wire_request.zig");
-const protocol_reply = @import("../protocol_reply.zig");
 const model_capability = @import("../model_capability.zig");
 const product_defaults = @import("../product_defaults.zig");
 const tool_catalog = @import("../tools.zig");
@@ -1404,14 +1403,6 @@ test "loaded tools hide configured tools from frozen requests reports and call s
         const settings = report.value.object.get("session").?.object;
         try std.testing.expectEqualStrings("bash", settings.get("tools").?.array.items[0].string);
         try std.testing.expectEqual(@as(usize, 0), settings.get("loaded_tools").?.array.items.len);
-        if (profile == .current) {
-            const file = try tmp.dir.createFile(std.testing.io, "loaded-current-report", .{ .read = true });
-            defer file.close(std.testing.io);
-            try file.writeStreamingAll(std.testing.io, bytes);
-            const decoded = try protocol_reply.CurrentReply.decode(std.testing.io, file, session.slice(), .{ .report = .{ .bytes = bytes.len } });
-            try std.testing.expect(decoded.current.settings.tools.set.contains(.bash));
-            try std.testing.expectEqual(@as(u8, 0), decoded.current.settings.loaded_tools.names.count);
-        }
         if (profile == .full) {
             const revision = report.value.object.get("full").?.object.get("session_revisions").?.array.items[0].object;
             try std.testing.expectEqualStrings("bash", revision.get("tools").?.array.items[0].string);
@@ -3829,8 +3820,8 @@ test "Store WAL lifecycle at the maximum path: sidecars, lock ownership, crash c
     defer tmp.cleanup();
     var store_buffer: [protocol.max_store_bytes]u8 = undefined;
     const store_path = try createMaximumCanonicalStore(&tmp, &store_buffer);
-    const paths = try platform.resolveClientPaths(io, store_path);
-    const database = paths.database.slice();
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}{s}", .{ store_path, platform.database_suffix });
     try std.testing.expectEqual(@as(usize, platform.max_database_path_bytes), database.len);
     var wal_buffer: [platform.max_database_path_bytes + "-wal".len]u8 = undefined;
     const wal = try std.fmt.bufPrint(&wal_buffer, "{s}-wal", .{database});
@@ -3842,7 +3833,7 @@ test "Store WAL lifecycle at the maximum path: sidecars, lock ownership, crash c
     try tmp.dir.createDir(io, "database-only", .default_dir);
 
     var storage: Store = undefined;
-    try storage.open(io, database, paths.store.slice());
+    try storage.open(io, database, store_path);
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
     try store_testing.sqlite_only.exec(&storage, "INSERT INTO content(digest,byte_length,private,payload) VALUES(randomblob(32),0,0,zeroblob(0))", .{});
@@ -3863,7 +3854,7 @@ test "Store WAL lifecycle at the maximum path: sidecars, lock ownership, crash c
         try std.testing.expect(prepared == c.SQLITE_BUSY or (prepared == c.SQLITE_OK and c.sqlite3_step(statement) == c.SQLITE_BUSY));
     }
     var refused: Store = undefined;
-    if (refused.open(io, database, paths.store.slice())) |_| return error.TestUnexpectedResult else |_| {}
+    if (refused.open(io, database, store_path)) |_| return error.TestUnexpectedResult else |_| {}
     // The failed open released the process-wide heap limit; restore it.
     _ = c.sqlite3_hard_heap_limit64(sqlite_heap_bytes);
 
@@ -3887,7 +3878,7 @@ test "Store WAL lifecycle at the maximum path: sidecars, lock ownership, crash c
     // commits; the database file alone does not.
     try tmp.dir.copyFile("crash/rui.sqlite3", cwd, database, io, .{});
     try tmp.dir.copyFile("crash/rui.sqlite3-wal", cwd, wal, io, .{});
-    try storage.open(io, database, paths.store.slice());
+    try storage.open(io, database, store_path);
     storage_open = true;
     try std.testing.expectEqual(crash_rows, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM content", .{}));
     var database_only_buffer: [protocol.max_store_bytes + 32]u8 = undefined;
@@ -8511,14 +8502,9 @@ test "schema 57 refusal rows migrate to wire 10 without changing command identit
         inline for (.{ .forward, .backward }) |direction| {
             const request: protocol.ActivityPage = .{ .session = sender, .direction = direction, .kinds = .initOne(.send_failed) };
             try storage.activityPage(&request, facts);
-            var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
-            defer json.deinit();
-            try facts.writeJson(&json.writer);
-            const parsed = try arena.create(protocol_reply.ActivityPage);
-            parsed.* = try protocol_reply.ActivityPage.parse(json.written(), .{ .direction = direction, .kinds = request.kinds });
-            try std.testing.expectEqual(@as(usize, Legacy.cases.len), parsed.facts.count);
-            try std.testing.expect(!parsed.facts.more);
-            for (parsed.facts.items[0..parsed.facts.count], 0..) |item, ordinal| {
+            try std.testing.expectEqual(@as(usize, Legacy.cases.len), facts.count);
+            try std.testing.expect(!facts.more);
+            for (facts.items[0..facts.count], 0..) |item, ordinal| {
                 const index = if (direction == .forward) ordinal else Legacy.cases.len - ordinal - 1;
                 const failed = item.value.send_failed;
                 try std.testing.expectEqual(@as(u64, 6 + index), item.position);
@@ -8651,21 +8637,21 @@ test "a Store at the maximum path backs itself up before a migration" {
     defer tmp.cleanup();
     var store_buffer: [protocol.max_store_bytes]u8 = undefined;
     const store_path = try createMaximumCanonicalStore(&tmp, &store_buffer);
-    const paths = try platform.resolveClientPaths(io, store_path);
-    const database = paths.database.slice();
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}{s}", .{ store_path, platform.database_suffix });
     try std.testing.expectEqual(@as(usize, platform.max_database_path_bytes), database.len);
     {
         var storage: Store = undefined;
-        try storage.open(io, database, paths.store.slice());
+        try storage.open(io, database, store_path);
         defer storage.close() catch unreachable;
         _ = try configureTestSession(&storage, "migration-session");
     }
     const raw = try openRaw(database);
     defer _ = c.sqlite3_close(raw);
     try sqlite.exec(raw, "UPDATE store_meta SET meta_value='7' WHERE meta_key='format';PRAGMA user_version=7");
-    try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(io, raw, paths.store.slice(), 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{} }}, null));
+    try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(io, raw, store_path, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{} }}, null));
     var backup_buffer: [platform.max_database_path_bytes]u8 = undefined;
-    const backup = try std.fmt.bufPrint(&backup_buffer, "{s}/rui.backup", .{paths.store.slice()});
+    const backup = try std.fmt.bufPrint(&backup_buffer, "{s}/rui.backup", .{store_path});
     try std.testing.expect((try std.Io.Dir.cwd().statFile(io, backup, .{})).size > 0);
 }
 
@@ -9282,62 +9268,6 @@ test "a stop that selects a message_agent call's Turn cancels it before it runs"
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{caller.slice()}));
 }
 
-test "a Session with message_agent keeps it through its list row and report, as the client reads them" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, io);
-    defer storage.close() catch unreachable;
-    const session = try configureMessagingSession(&storage, "listed-messaging");
-    const file = try tmp.dir.createFile(io, "client-reply", .{ .read = true });
-    defer file.close(io);
-
-    var used = std.atomic.Value(u64).init(0);
-    const listed = try testingSessionList(&storage, &tmp, .{}, &used, 1);
-    defer std.testing.allocator.free(listed);
-    try std.testing.expect(std.mem.indexOf(u8, listed, "\"tools\":[\"message_agent\"]") != null);
-    try file.writePositionalAll(io, listed, 0);
-    const list = try protocol_reply.SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = listed.len } });
-    try std.testing.expectEqual(@as(usize, 1), list.page.count);
-    try std.testing.expect(std.mem.eql(u8, list.page.rows[0].tools.names.slice(), "message_agent"));
-
-    // A call waiting to run shows as the core tool's, which needed no
-    // permission decision under `ask`.
-    try submitTestMessage(&storage, &tmp, "listed-task", "listed-task", session.slice(), "tell yourself");
-    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var arguments_buffer: [64]u8 = undefined;
-    const arguments = try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"hi\"}}", .{session.slice()});
-    var encoded_buffer: [96]u8 = undefined;
-    const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hi\\\"}}", .{session.slice()});
-    const calls = [_]TestingCall{.{ .item_id = "listed-item", .name = "message_agent", .encoded_call_id = "listed-call", .decoded_call_id = "listed-call", .encoded_arguments = encoded, .decoded_arguments = arguments }};
-    try settleCallsForTesting(&storage, &tmp, model, "listed-metadata", &calls);
-
-    const reported = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
-    defer std.testing.allocator.free(reported);
-    try std.testing.expect(std.mem.indexOf(u8, reported, "\"tool\":\"message_agent\",\"permission_revision\":\"1\",\"authorization\":\"core\"") != null);
-    try file.setLength(io, 0);
-    try file.writePositionalAll(io, reported, 0);
-    const current = try protocol_reply.CurrentReply.decode(io, file, session.slice(), .{ .report = .{ .bytes = reported.len } });
-    try std.testing.expect(current.current.settings.tools.set.eql(.initOne(.message_agent)));
-    const Sink = struct {
-        core_calls: usize = 0,
-        pub fn visit(self: *@This(), attention: protocol_reply.Current.Attention) !void {
-            switch (attention) {
-                .unresolved => |row| {
-                    try std.testing.expectEqualStrings("message_agent", row.tool.slice());
-                    try std.testing.expect(row.authorization.value == .core);
-                    self.core_calls += 1;
-                },
-                else => {},
-            }
-        }
-    };
-    var sink: Sink = .{};
-    try current.current.traverse(io, file, &sink);
-    try std.testing.expectEqual(@as(usize, 1), sink.core_calls);
-}
-
 test "a start_agent call creates its agent where its caller works, with the task from the caller, and may only narrow" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -9574,15 +9504,6 @@ test "a Session offering an MCP server's tool is listed, reported and settled" {
         try std.testing.expect(std.mem.indexOf(u8, report, offered) != null);
         // The full profile's revision lists them too.
         if (profile == .full) try std.testing.expect(std.mem.indexOf(u8, report[std.mem.indexOf(u8, report, offered).? + 1 ..], offered) != null);
-        if (profile == .current) {
-            // A client reads the names back.
-            const file = try tmp.dir.createFile(std.testing.io, "mcp-current", .{ .read = true });
-            defer file.close(std.testing.io);
-            try file.writePositionalAll(std.testing.io, report, 0);
-            const decoded = try protocol_reply.CurrentReply.decode(std.testing.io, file, session.slice(), .{ .report = .{ .bytes = report.len } });
-            try std.testing.expectEqualStrings("bash fetch_page", decoded.current.settings.tools.names.names.slice());
-            try std.testing.expect(decoded.current.settings.tools.set.contains(.bash) and !decoded.current.settings.tools.set.contains(.web_search));
-        }
     }
     var used = std.atomic.Value(u64).init(0);
     const list = try testingSessionList(&storage, &tmp, .{}, &used, 1);

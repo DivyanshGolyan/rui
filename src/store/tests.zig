@@ -2,10 +2,8 @@
 
 const std = @import("std");
 const named_scratch = @import("../named_scratch.zig");
-const platform = @import("../platform.zig");
 const protocol = @import("../protocol.zig");
 const wire_request = @import("../wire_request.zig");
-const protocol_reply = @import("../protocol_reply.zig");
 const tool_catalog = @import("../tools.zig");
 const tool_set_domain = @import("domain/tool_set.zig");
 
@@ -5209,14 +5207,6 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try std.testing.expectEqual(@as(usize, 3), own.count);
             try std.testing.expectEqualStrings("invalid_session_reference", own.items[2].value.send_failed.code.slice());
             try std.testing.expect(own.items[2].value.send_failed.target == null);
-            const own_bytes = try std.testing.allocator.alloc(u8, protocol.ActivityFacts.max_json_bytes);
-            defer std.testing.allocator.free(own_bytes);
-            var own_writer: std.Io.Writer = .fixed(own_bytes);
-            try own.writeJson(&own_writer);
-            const decoded_own = try protocol_reply.ActivityPage.parse(own_writer.buffered(), .{ .position = sender_end });
-            try std.testing.expectEqual(@as(usize, 3), decoded_own.facts.count);
-            try std.testing.expect(decoded_own.facts.items[2].value.send_failed.target == null);
-            try std.testing.expectEqualStrings("absent", decoded_own.facts.items[1].value.send_failed.target.?.session.slice());
             const out = own.items[0].value.sent;
             try std.testing.expectEqual(accepted.accepted.admission_id, out.admission);
             // One Message's two rows share its admission time; a refused send is
@@ -5266,7 +5256,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     }.run);
 }
 
-test "refused peer creation activity survives the public page roundtrip" {
+test "refused peer creation activity keeps invalid targets absent" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -5332,15 +5322,7 @@ test "refused peer creation activity survives the public page roundtrip" {
             try std.testing.expectEqual(before.end + 1, page.end);
             try std.testing.expectEqual(@as(usize, 1), page.count);
             try std.testing.expect(page.items[0].value == .send_failed);
-            const bytes = try std.testing.allocator.alloc(u8, protocol.ActivityFacts.max_json_bytes);
-            defer std.testing.allocator.free(bytes);
-            var writer: std.Io.Writer = .fixed(bytes);
-            try page.writeJson(&writer);
-            // Store-only assertions used to miss that a refused creation's
-            // saved empty target cannot be decoded as a canonical peer.
-            const decoded = try protocol_reply.ActivityPage.parse(writer.buffered(), .{ .position = before.end });
-            try std.testing.expectEqual(@as(usize, 1), decoded.facts.count);
-            const item = decoded.facts.items[0];
+            const item = page.items[0];
             try std.testing.expectEqual(before.end + 1, item.position);
             try std.testing.expectEqual(@as(u64, 0), item.ordinal);
             try std.testing.expectEqual(page.items[0].at, item.at);
@@ -5348,20 +5330,26 @@ test "refused peer creation activity survives the public page roundtrip" {
             try std.testing.expectEqualStrings("unsupported_reasoning_effort", item.value.send_failed.code.slice());
             try std.testing.expect(item.value.send_failed.target == null);
 
-            const Roundtrip = struct {
-                fn read(store: *Store, session: protocol.Bounded(protocol.max_session_bytes), cursor: protocol_reply.ActivityCursor, buffer: []u8) !protocol_reply.ActivityPage {
-                    const facts = try store_core.activityPageForTesting(store, .{
-                        .session = session,
-                        .end = cursor.end,
-                        .position = cursor.position,
-                        .ordinal = cursor.ordinal,
-                        .direction = cursor.direction,
-                        .kinds = cursor.kinds,
-                        .limit = cursor.limit,
-                    });
-                    var out: std.Io.Writer = .fixed(buffer);
-                    try facts.writeJson(&out);
-                    return protocol_reply.ActivityPage.parse(out.buffered(), cursor);
+            const PageRead = struct {
+                const Page = struct {
+                    facts: protocol.ActivityFacts,
+                    request: protocol.ActivityPage,
+
+                    fn continuation(self: *const @This()) ?protocol.ActivityPage {
+                        if (!self.facts.more) return null;
+                        const last = self.facts.items[self.facts.count - 1];
+                        var next = self.request;
+                        next.end = self.facts.end;
+                        next.position = last.position;
+                        next.ordinal = last.ordinal;
+                        return next;
+                    }
+                };
+
+                fn read(store: *Store, session: protocol.Bounded(protocol.max_session_bytes), cursor: protocol.ActivityPage) !Page {
+                    var request = cursor;
+                    request.session = session;
+                    return .{ .facts = try store_core.activityPageForTesting(store, request), .request = request };
                 }
             };
             // These spellings are independent invalid examples, including
@@ -5387,7 +5375,7 @@ test "refused peer creation activity survives the public page roundtrip" {
                 try std.testing.expectEqual(protocol.MessageRejection.invalid_session_reference, answer.rejected.code);
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1 AND target=?2 AND input_digest=?3 AND kind=2 AND accepted=0 AND code='invalid_session_reference' AND created=0 AND revision=0", .{ invalid.key.slice(), attempted, store_testing.Blob{ .bytes = &digest } }));
                 const position = before.end + 1 + index;
-                const result = try Roundtrip.read(&storage, sender, .{ .position = position }, bytes);
+                const result = try PageRead.read(&storage, sender, .{ .position = position });
                 try std.testing.expectEqual(position + 1, result.facts.end);
                 try std.testing.expectEqual(@as(usize, 1), result.facts.count);
                 const failure = result.facts.items[0];
@@ -5411,7 +5399,7 @@ test "refused peer creation activity survives the public page roundtrip" {
             const unknown_answer = storage.submitMessageWithModel(&unknown, commits.callback(), .{});
             try std.testing.expect(unknown_answer == .rejected);
             try std.testing.expectEqual(protocol.MessageRejection.unknown_session, unknown_answer.rejected.code);
-            const unknown_page = try Roundtrip.read(&storage, sender, .{ .position = before.end + 1 + invalid_count }, bytes);
+            const unknown_page = try PageRead.read(&storage, sender, .{ .position = before.end + 1 + invalid_count });
             try std.testing.expectEqual(@as(usize, 1), unknown_page.facts.count);
             const unknown_failure = unknown_page.facts.items[0];
             try std.testing.expectEqualStrings(unknown.key.slice(), unknown_failure.value.send_failed.key.slice());
@@ -5429,7 +5417,7 @@ test "refused peer creation activity survives the public page roundtrip" {
             try std.testing.expect(!admitted.accepted.session.eql(sender.slice()));
             try std.testing.expectEqual(@as(usize, 1), commits.count);
             try std.testing.expect(commits.calls[0].from_peer);
-            const sent_page = try Roundtrip.read(&storage, sender, .{ .position = unknown_page.facts.end }, bytes);
+            const sent_page = try PageRead.read(&storage, sender, .{ .position = unknown_page.facts.end });
             try std.testing.expectEqual(@as(usize, 1), sent_page.facts.count);
             const sent = sent_page.facts.items[0];
             try std.testing.expectEqualStrings(admitted.accepted.session.slice(), sent.value.sent.target.session.slice());
@@ -5452,18 +5440,18 @@ test "refused peer creation activity survives the public page roundtrip" {
             const original_digest = message.semanticDigest();
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1 AND target='' AND input_digest=?2 AND kind=2 AND accepted=0 AND code='unsupported_reasoning_effort' AND created=0 AND revision=0", .{ message.key.slice(), store_testing.Blob{ .bytes = &original_digest } }));
             try std.testing.expectEqual(@as(u64, invalid_count + 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM sent_rejection", .{}));
-            const unchanged = try Roundtrip.read(&storage, sender, .{ .position = end }, bytes);
+            const unchanged = try PageRead.read(&storage, sender, .{ .position = end });
             try std.testing.expectEqual(end, unchanged.facts.end);
             try std.testing.expectEqual(@as(usize, 0), unchanged.facts.count);
             try std.testing.expectEqual(@as(usize, 1), commits.count);
 
-            const filtered = try Roundtrip.read(&storage, sender, .{ .end = end, .position = before.end, .kinds = .initMany(&.{.send_failed}), .limit = 1 }, bytes);
+            const filtered = try PageRead.read(&storage, sender, .{ .end = end, .position = before.end, .kinds = .initMany(&.{.send_failed}), .limit = 1 });
             try std.testing.expectEqual(end, filtered.facts.end);
             try std.testing.expectEqual(@as(usize, 1), filtered.facts.count);
             try std.testing.expectEqualStrings(message.key.slice(), filtered.facts.items[0].value.send_failed.key.slice());
             try std.testing.expect(filtered.facts.items[0].value.send_failed.target == null);
             try std.testing.expect(filtered.continuation() != null);
-            const filtered_last = try Roundtrip.read(&storage, sender, .{ .end = end, .position = end - 2, .kinds = .initMany(&.{.send_failed}), .limit = 1 }, bytes);
+            const filtered_last = try PageRead.read(&storage, sender, .{ .end = end, .position = end - 2, .kinds = .initMany(&.{.send_failed}), .limit = 1 });
             try std.testing.expectEqual(@as(usize, 1), filtered_last.facts.count);
             try std.testing.expectEqualStrings(unknown.key.slice(), filtered_last.facts.items[0].value.send_failed.key.slice());
             try std.testing.expectEqualStrings("absent", filtered_last.facts.items[0].value.send_failed.target.?.session.slice());
@@ -5472,11 +5460,11 @@ test "refused peer creation activity survives the public page roundtrip" {
             // Fixed-end pagination must retain every refusal between the
             // sender's older work and the accepted creation, in both directions.
             for ([_]@FieldType(protocol.ActivityPage, "direction"){ .forward, .backward }) |direction| {
-                var cursor: protocol_reply.ActivityCursor = .{ .end = end, .position = if (direction == .forward) before.end else 0, .direction = direction };
+                var cursor: protocol.ActivityPage = .{ .end = end, .position = if (direction == .forward) before.end else 0, .direction = direction };
                 var seen: usize = 0;
                 while (seen < times.len) {
                     cursor.limit = @intCast(@min(3, times.len - seen));
-                    const traversal = try Roundtrip.read(&storage, sender, cursor, bytes);
+                    const traversal = try PageRead.read(&storage, sender, cursor);
                     try std.testing.expectEqual(end, traversal.facts.end);
                     try std.testing.expectEqual(@as(usize, cursor.limit), traversal.facts.count);
                     for (traversal.facts.items[0..traversal.facts.count], 0..) |entry, offset| {
