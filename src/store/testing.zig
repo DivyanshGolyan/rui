@@ -27,6 +27,44 @@ const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 
 pub const OutputMetadataWriter = output_format.OutputMetadataWriter;
 
+/// Compose fixture records with the canonical required runners.
+pub fn catalogRecordsWith(comptime extra: []const tool_catalog.Record) [tool_catalog.built_in.records.len + extra.len]tool_catalog.Record {
+    var records: [tool_catalog.built_in.records.len + extra.len]tool_catalog.Record = undefined;
+    @memcpy(records[0..tool_catalog.built_in.records.len], tool_catalog.built_in.records);
+    @memcpy(records[tool_catalog.built_in.records.len..], extra);
+    sortCatalogRecords(&records);
+    return records;
+}
+
+pub fn sortCatalogRecords(records: []tool_catalog.Record) void {
+    std.mem.sort(tool_catalog.Record, records, {}, struct {
+        fn lessThan(_: void, left: tool_catalog.Record, right: tool_catalog.Record) bool {
+            return std.mem.lessThan(u8, left.name, right.name);
+        }
+    }.lessThan);
+}
+
+pub fn testingStoreCatalog(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, catalog: ?*const tool_catalog.Catalog) !void {
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    return storage.openWithOptions(io, database, root, .{ .catalog = catalog });
+}
+
+pub fn testingSqliteStore(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io) !void {
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    return storage.open(io, database, root) catch |err| {
+        std.debug.print("testing Store open failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+}
+
 /// The engines a conformance test runs on, each in this one process.
 pub const Engine = enum { sqlite, mysql };
 

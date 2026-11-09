@@ -100,6 +100,11 @@ pub const testingCatalogRecords = store_test_fixtures.testingCatalogRecords;
 pub const settleCallsForTesting = store_test_fixtures.settleCallsForTesting;
 pub const TestingCall = store_test_fixtures.TestingCall;
 pub const testingSessionReportWithProfile = store_test_fixtures.testingSessionReportWithProfile;
+pub const testingSqlite = @import("store/sqlite.zig");
+pub const testingBytesContent = store_test_fixtures.testingBytesContent;
+pub const testingContentReference = store_test_fixtures.testingContentReference;
+pub const testingCompleteSessionStop = store_test_fixtures.completeSessionStop;
+pub const ActionSettlement = action_domain.ActionSettlement;
 pub const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 
 test {
