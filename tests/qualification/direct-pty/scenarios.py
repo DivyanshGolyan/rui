@@ -226,19 +226,14 @@ def navigation(fixture, row):
     history(80, False)
     generation = tty.screen.generation
     chunks(tty, row["chunks"])
-    if row.get("status"):
-        tty.wait(lambda: inspection(tty.screen.completed, fixture.session),
-                 label="navigation entered inspection", after=generation)
-        tty.marker("This Session")
-        tty.marker("Permissions     ")
-        # Long Folder and Store rows can wrap, so Work belongs below the fold.
-        if not tty.screen.reached(" Work"):
-            generation = tty.screen.generation
-            tty.send(b"\x1b[6~")
-            tty.marker(" Work", after=generation)
-        tty.marker(" Work")
-        # This fixture completed its seeded answer before opening /status.
-        tty.marker("Finished")
+    if row.get("requests"):
+        tty.wait(lambda: inspection(tty.screen.completed),
+                 label="navigation entered local recovery inspection", after=generation)
+        # The page is about local handles, not a Current/Host status page.
+        tty.marker("Local recovery handles (not Host work status):")
+        new_captures = captures - fixture.capture_baseline
+        assert len(new_captures) == 1, (captures, fixture.capture_baseline)
+        tty.marker(next(iter(new_captures)).stem)
     else:
         tty.wait(lambda: lookback(tty.screen.completed),
                  label="navigation entered lookback", after=generation)

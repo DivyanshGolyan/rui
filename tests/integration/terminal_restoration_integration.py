@@ -2009,7 +2009,7 @@ def fatal_reporting_cases(state):
             before = {path: path.read_bytes() for path in records.glob("*.json")}
             os.write(master, b"accepted A\n")
             human.read_terminal(master, "ACCEPTED-A", composer=True)
-            human.terminal_step(master, "/status", " Status · ", composer=True)
+            human.terminal_step(master, "/requests", "Local recovery handles", composer=True)
             os.write(master, b"uncertain B\n")
             human.read_terminal(master, "Not confirmed")
             first, second = [json.loads(body) for body, _ in proxy.exchanges]
@@ -2081,6 +2081,72 @@ def decision_reporting_cases(state):
     thread = threading.Thread(target=endpoint.serve_forever)
     thread.start()
     host = caller = proxy = None
+
+    def settled_decision_has_no_original(master):
+        # Fixture-local prefix proof, not a general /requests page scanner.
+        # sessionRequests prints at most one ASCII handle/kind row per file;
+        # writeSubmission puts its mandatory reserved-key row immediately
+        # after that list, before the optional error-name tail.  Restrict the
+        # actual directory so every possible prefix row fits at width 80 and
+        # its entire byte prefix is well within showFile's 256 KiB capacity.
+        directory = home / ".config/rui/requests"
+        entries = list(directory.iterdir())
+        assert len(entries) <= 32, entries
+        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+        for path in entries:
+            assert path.is_file() and not path.is_symlink() and path.suffix == ".json", path
+            assert 1 <= len(path.stem) <= 40 and all(c in allowed for c in path.stem), path
+        before_records = {path: path.read_bytes() for path in entries}
+        # Every protocol.Kind tag in the pinned producer is <=32 ASCII bytes.
+        # Two spaces, handle, " (", tag, ")\n" <=78 bytes: one row at 80.
+        max_prefix_bytes = 52 + len(entries) * 78 + len("Original reserved request: ") + 36 + 1
+        assert max_prefix_bytes < 256 * 1024, max_prefix_bytes
+        capture = human.terminal_capture(master)
+        assert (capture.screen.columns, capture.screen.lines) == (80, 50)
+        assert capture.draft("", 2), capture.completed
+        requests_before = len(endpoint.requests)
+        mutations_before = list(proxy.mutations)
+        header = "Rui: Local recovery handles (not Host work status):"
+        first = human.command_frame(master, "/requests", lambda frame: header in frame)
+
+        def check(frame):
+            # The fixed inspection heading witnesses a selected, nonempty
+            # page. Frame.plan reserves >=1 document row with this heading.
+            # Search the entire committed physical frame: do not strip a
+            # final cell or infer source from a rail glyph.
+            lines = frame.split("\n")
+            assert len(lines) == 50 and lines[0] == "Browsing · Esc returns", frame
+            assert "Inspection unavailable" not in frame, frame
+            assert "Original reserved request:" not in frame, frame
+            assert "Publication/admission may be incomplete" not in frame, frame
+
+        check(first)
+        # An alternating non-slash one-cell draft excludes command-list input
+        # routing and establishes a fresh completed frame for every movement.
+        def marked(keys, marker):
+            return human.keyed_frame(master, keys, lambda frame, x, y:
+                x == 3 and y == 48 and frame.split("\n")[48] == "› " + marker
+                and frame.startswith("Browsing · Esc returns\n"))
+
+        frame = marked(b"x", "x")
+        check(frame)
+        # Shift-Down moves the inspection by exactly one source row, never
+        # exiting it. Even if body height changes, no forward source row can
+        # be skipped; clamps can only move the viewport backwards. There are
+        # at most N list rows, a header and the reserved-key row. Every step
+        # is observed with an alternating exact composer/caret barrier.
+        for index in range(len(entries) + 2):
+            marker = "y" if index % 2 == 0 else "x"
+            frame = marked(b"\x1b[1;2B\x7f" + marker.encode(), marker)
+            check(frame)
+        # Remove only our own marker; no Enter or recovered record selection.
+        human.keyed_frame(master, b"\x7f", lambda frame, x, y:
+            x == 2 and y == 48 and frame.split("\n")[48] == "›"
+            and frame.startswith("Browsing · Esc returns\n"))
+        assert {path: path.read_bytes() for path in directory.iterdir()} == before_records
+        assert len(endpoint.requests) == requests_before, "inspection dispatched provider work"
+        assert proxy.mutations == mutations_before, "inspection dispatched a mutation"
+
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         for decision, lost in cases:
@@ -2116,8 +2182,7 @@ def decision_reporting_cases(state):
                     caller.send_signal(signal.SIGINT)
                 else:
                     human.read_terminal(master, f"SETTLED-{name}", composer=True)
-                    status = human.terminal_step(master, "/status", " Status · ", composer=True)
-                    assert "Original reserved request:" not in status, status
+                    settled_decision_has_no_original(master)
                     os.write(master, b"\x1b[")
                 output, errors = human.terminal_exit(caller, master, timeout=6)
                 assert caller.returncode == (0 if lost else 2), (output, errors)

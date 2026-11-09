@@ -156,18 +156,13 @@ def smoke(fixture, row):
         if row["name"] == "tmux-resize":
             terminal.call("resize-window", "-t", "td4:0", "-x", "32", "-y", "12")
         terminal.call("send-keys", "-t", "td4:0.0", "-H", *(f"{byte:02x}" for byte in payload))
-    if row["name"] == "tmux-status":
-        terminal.wait(lambda text: "Browsing" in text and " Status · " in text and f" · {fixture.session}" in text
-                      and "This Session" in text and "Permissions     " in text, "status page")
-        # Work follows settings; wrapping can place it below the viewport.
-        if " Work" not in (fixture.output / "pane.txt").read_text():
-            terminal.call("send-keys", "-t", "td4:0.0", "-H", "1b", "5b", "36", "7e")
-        terminal.wait(lambda text: "Browsing" in text and " Work" in text and "Idle" in text,
-                      "status work section")
+    if row["name"] == "tmux-requests":
+        terminal.wait(lambda text: "Browsing" in text and "Local recovery handles" in text
+                      and "not Host work status" in text, "local recovery page")
         terminal.call("send-keys", "-t", "td4:0.0", "Escape")
-        terminal.wait(lambda text: "Browsing" not in text and "›" in text, "status returned to live")
+        terminal.wait(lambda text: "Browsing" not in text and "›" in text, "requests returned to live")
         assert_submitted(fixture.endpoint.requests, [])
-        assert set((fixture.home / ".config/rui/requests").glob("*.json")) == fixture.capture_baseline, "status captured intent"
+        assert set((fixture.home / ".config/rui/requests").glob("*.json")) == fixture.capture_baseline, "requests captured intent"
     else:
         terminal.wait(lambda text: "TD4 tmux answer" in text, "answer")
         assert_submitted(fixture.endpoint.requests, [row["expected"]])

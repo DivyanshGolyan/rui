@@ -3920,10 +3920,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "bypass")
             try:
                 os.write(master, b"run without approval\n")
-                live = read_terminal(master, "+1 more calls · /status", composer=True)
+                live = read_terminal(master, "+1 more calls", composer=True)
                 fixture.wait_for(lambda: all((state / f"bypass-started-{index}").exists() for index in range(4)), "held bypass effects")
                 current = current_screen(master)
-                assert "+1 more calls · /status" in current, current
+                assert "+1 more calls" in current, current
                 source, rails = permission_frame(terminal_capture(master), current)
                 clock_index = permission_clock(source, rails, bypass_description)
                 failure_rows = [i for i, row in enumerate(source) if row.startswith("  • Inspect application settings")]
@@ -3936,13 +3936,13 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 bypass_releases[1].touch()
                 reverse = read_terminal(master, "— Failed", composer=True)
                 assert "! Inspect application settings" in reverse and f"• {bypass_description}" in reverse, reverse
-                assert "+1 more calls · /status" in reverse and len(endpoint.requests) == 4, reverse
+                assert "+1 more calls" in reverse and len(endpoint.requests) == 4, reverse
                 bypass_releases[0].touch()
                 partial = read_terminal(master, f"✓ {bypass_description}", composer=True)
-                assert f"• {bypass_description}" in partial and "+1 more calls · /status" in partial, partial
+                assert f"• {bypass_description}" in partial and "+1 more calls" in partial, partial
                 assert len(endpoint.requests) == 4, "a partial tool group continued model work"
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 6, 32, 0, 0))
-                short = read_terminal(master, "+3 more calls · /status", composer=True)
+                short = read_terminal(master, "+3 more calls", composer=True)
                 assert "› live cafXé!" in short, short
                 # The running call's row is not shown, so the live line says it.
                 assert re.search(rf"^• {bypass_description} · \d+s$", short, re.M), short
@@ -3981,10 +3981,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 from terminal_screen import shown as wrapped_status
                 wrapped_frame = current_screen(master)
                 assert wrapped_status("! " + bypass_descriptions[1] + " — Failed", wrapped_frame), wrapped_frame
-                assert "! Inspect application settings" in wrapped and "+1 more calls · /status" in wrapped, wrapped
+                assert "! Inspect application settings" in wrapped and "+1 more calls" in wrapped, wrapped
                 assert "› live cafXé!" in wrapped, wrapped
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
-                read_terminal(master, "+1 more calls · /status", composer=True)
+                read_terminal(master, "+1 more calls", composer=True)
                 terminal_step(master, "\x01\x0b/exit", "Detached.")
                 # Read the screen until exit: restoring the terminal drains it.
                 _, errors = terminal_exit(caller, master)
@@ -3993,7 +3993,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
                     "--", reference], env={**os.environ, "HOME": str(home), "TERM": "xterm-256color", "NO_COLOR": ""},
                     stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-                reopened = read_terminal(master, "+1 more calls · /status", composer=True)
+                reopened = read_terminal(master, "+1 more calls", composer=True)
                 assert f"✓ {bypass_description}" in reopened and f"• {bypass_description}" in reopened, reopened
                 assert "bypass complete" not in reopened and len(endpoint.requests) == 4, reopened
                 os.write(master, "live café!\x1b[D\x1b[DX".encode())
@@ -5644,7 +5644,7 @@ def renderer_cases():
                 records = set((home / ".config/rui/requests").glob("*.json"))
                 # The typed line outlives the first Action and its command, so
                 # the second waits beside it with no prompt until Esc.
-                tty.send("not-a-command\r", "! Unknown command /not-a-command · /help")
+                tty.send("not-a-command\r", "! Unknown command /not-a-command · type / for commands")
                 assert CHOICE not in tty.capture.completed, tty.capture.completed
                 tty.send("\x07", CHOICE)
                 assert [item["action"] for item in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]] == [second]
@@ -5731,7 +5731,7 @@ def renderer_cases():
                 tty.send("\x1b[6~" * 6, predicate=lambda: "printf allowed > renderer-reading-effect" in tty.capture.completed)
                 assert tty.capture.draft("/", 3), tty.capture.completed
                 records = set((home / ".config/rui/requests").glob("*.json"))
-                tty.send("not-a-command\r", "! Unknown command /not-a-command · /help")
+                tty.send("not-a-command\r", "! Unknown command /not-a-command · type / for commands")
                 assert CHOICE not in tty.capture.completed, tty.capture.completed
                 tty.send("\x07", CHOICE)
                 assert set((home / ".config/rui/requests").glob("*.json")) == records
@@ -5902,7 +5902,7 @@ def renderer_cases():
             assert " Status · " not in scrolled, scrolled
             for action in actions:
                 assert f"Action requiring attention: {action}" in scrolled, scrolled
-            tty.send("/foo\n", "! Unknown command /foo · /help")
+            tty.send("/foo\n", "! Unknown command /foo · type / for commands")
             frames = tty.every_frame()
             run(home, "action", "deny", "--store", store, "--session", session, "--action", actions[1])
             def updated():
@@ -5911,7 +5911,7 @@ def renderer_cases():
                         f"Action requiring attention: {actions[0]}" in screen and f"Action requiring attention: {actions[2]}" in screen)
             tty.wait(predicate=updated, timeout=10)
             for frame in frames:
-                assert " Status · " not in frame and "! Unknown command /foo · /help" in frame, frame
+                assert " Status · " not in frame and "! Unknown command /foo · type / for commands" in frame, frame
             # Running a command returns to the Action. The /status line was
             # typed beside it, so the draft keeps the input row until Esc
             # returns to the choice, which the command holds: a command typed
@@ -7756,12 +7756,11 @@ def main(selected="all", *, held_owner=None):
             binding = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
             assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" in binding and permission_row(binding, "ask"), binding
-            help_text = terminal_step(master, "/help", "/result KEY", composer=True)
-            for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "Ctrl-R"):
-                assert command in help_text, help_text
-            assert "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
-            # This Session asks: help must not describe the bypass default as its mode.
-            assert "without approval" not in help_text and "\nThat line ends with asks before Bash/MCP when Bash or MCP asks first\n" in help_text, help_text
+            # Interactive /help was removed; it remains a local unknown command,
+            # not a Message or a request to the Host.
+            before_help = set(json.loads(run(preferences_home, "request", "list")))
+            terminal_step(master, "/help", "! Unknown command /help · type / for commands", composer=True)
+            assert set(json.loads(run(preferences_home, "request", "list"))) == before_help
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
             assert "result: completed\nfirst answer" in result, result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)

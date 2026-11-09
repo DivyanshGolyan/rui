@@ -41,10 +41,10 @@ def lookback(screen):
                 and lines[-1].endswith("Ctrl-G: latest"))
 
 
-def inspection(screen, session):
+def inspection(screen):
     lines = screen.splitlines()
     return bool(lines and lines[0].startswith("Browsing · ")
-                and f" Status · {session}" in screen)
+                and "Local recovery handles (not Host work status):" in screen)
 
 
 def assert_history_anchor(capture, first, browsing):

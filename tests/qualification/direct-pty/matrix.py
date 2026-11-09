@@ -99,10 +99,10 @@ def inventory():
         ("key-end-csi-4", b"\x1b[5~", b"\x1b[4~", 59),
         ("key-esc", b"\x1b[5~", b"\x1b", 59),
         ("wheel-alt-scroll", b"\x1b[A" * 3, b"\x1b[B", 77),
-        ("status", b"/status\r", b"\x1b", None),
+        ("requests", b"/requests\r", b"\x1b", None),
     ):
         vector = {"name": name, "scenario": "navigation", "chunks": [chunk(enter)],
-                  "return_chunks": [chunk(leave)], "status": name == "status", "first_history": first}
+                  "return_chunks": [chunk(leave)], "requests": name == "requests", "first_history": first}
         if name == "key-pgdn":
             vector["middle"] = [{"chunks": [chunk(b"\x1b[6~")], "first_history": 59}]
         elif name == "wheel-alt-scroll":
@@ -113,7 +113,7 @@ def inventory():
         ("paste", b"one\ntwo", "one\ntwo"),
         ("resize", "A中bc\x1b[DZ\r".encode(), "A中bZc"),
         ("alt-j", b"one\x1bjtwo\r", "one\ntwo"),
-        ("status", b"/status\r", None),
+        ("requests", b"/requests\r", None),
     ):
         rows.append({"name": "tmux-" + name, "scenario": "tmux", "chunks": [chunk(data)], "expected": expected})
     return rows

@@ -57,9 +57,9 @@ finally:
         self.assertTrue(lookback("History line 059\nLooking back · More output below · Ctrl-G: latest"))
         self.assertFalse(lookback("Looking back · Ctrl-G: latest\nordinary footer"))
         self.assertFalse(lookback("Browsing · Esc returns\n Status · k7m2qx"))
-        self.assertTrue(inspection("Browsing · Esc returns\n Status · k7m2qx", "k7m2qx"))
-        self.assertFalse(inspection("Browsing · Esc returns\n Status · other", "k7m2qx"))
-        self.assertFalse(inspection("Looking back · Ctrl-G: latest\n Status · k7m2qx", "k7m2qx"))
+        self.assertTrue(inspection("Browsing · Esc returns\nRui: Local recovery handles (not Host work status):"))
+        self.assertFalse(inspection("Browsing · Esc returns\n Status · k7m2qx"))
+        self.assertFalse(inspection("Looking back · Ctrl-G: latest\nRui: Local recovery handles (not Host work status):"))
 
         def frame(first, last, *, browsing, ending=False, wrong=None):
             screen = ScreenCapture(80, 24)

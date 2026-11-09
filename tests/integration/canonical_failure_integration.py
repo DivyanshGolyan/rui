@@ -531,7 +531,7 @@ def interactive_cases(state, binding=False, null_code=False):
                                     timeout=deadline - time.monotonic(), composer=True)
                             elif "› " not in output.split("denied tool saved", 1)[1]:
                                 output += human.read_terminal(master, "› ", timeout=deadline - time.monotonic())
-                        os.write(master, b"/status\n")
+                        os.write(master, b"/requests\n")
                         diagnostic = human.read_terminal(master, f"Last submission error: {reason}", composer=True)
                         assert key in diagnostic and "Ctrl-R retries this exact original" in diagnostic, diagnostic
                         # No ordinary no-op may retry an unresolved submission.
