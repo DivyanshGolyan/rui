@@ -3,6 +3,7 @@
 //! identities and traces. The facade re-exports only the Store type and its value types.
 
 const std = @import("std");
+const command_reply = @import("../command_reply.zig");
 const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
 const protocol = @import("../protocol.zig");
@@ -71,15 +72,7 @@ const SupersedingControl = action_domain.SupersedingControl;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 const Queue = @import("queue.zig").Queue;
 
-/// A repeat read owns only its token; a full read is filled in the caller's
-/// storage rather than copied through Store/worker frames.
-pub const Observed = union(enum) {
-    not_modified: change_ring.SessionToken,
-    full: struct {
-        token: ?change_ring.SessionToken,
-        observation: CommandObservation = undefined,
-    },
-};
+pub const Observed = command_reply.Observed;
 
 pub const Store = struct {
     io: std.Io,

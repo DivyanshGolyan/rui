@@ -2,6 +2,7 @@
 //! configuration update, and reading a Session's saved settings.
 
 const std = @import("std");
+const command_reply = @import("../../command_reply.zig");
 const protocol = @import("../../protocol.zig");
 const wire_request = @import("../../wire_request.zig");
 const model_catalog = @import("../../model_catalog.zig");
@@ -20,18 +21,9 @@ const store_access = @import("../access.zig");
 const Faults = store_core.Faults;
 const StoredAnswer = command_domain.StoredAnswer;
 
-pub const AcceptedConfiguration = struct {
-    replayed: bool,
-    revision: u64 = 0,
-    created: bool = false,
-    skills: ?protocol.SkillsReloadStatus = null,
-    session: protocol.Bounded(protocol.max_session_bytes) = .{},
-};
+pub const AcceptedConfiguration = command_reply.AcceptedConfiguration;
 
-pub const RejectedConfiguration = struct {
-    replayed: bool,
-    code: protocol.ConfigurationRejection,
-};
+pub const RejectedConfiguration = command_reply.RejectedConfiguration;
 
 /// Host-only preset resolution, carried through the ordinary configure
 /// transaction. The request digest is of the original, unresolved command.
@@ -42,12 +34,7 @@ pub const PresetDecision = struct {
     pub const Rejection = enum { unknown_preset, preset_on_update };
 };
 
-pub const ConfigureReply = union(enum) {
-    accepted: AcceptedConfiguration,
-    rejected: RejectedConfiguration,
-    conflict,
-    infrastructure_failure,
-};
+pub const ConfigureReply = command_reply.ConfigureReply;
 
 const Tool = tool_catalog.Tool;
 

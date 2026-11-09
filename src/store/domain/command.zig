@@ -2,6 +2,7 @@
 //! interruptions, permission decisions), their replay, and their observed results.
 
 const std = @import("std");
+const command_reply = @import("../../command_reply.zig");
 const skills_domain = @import("skills.zig");
 const protocol = @import("../../protocol.zig");
 const wire_request = @import("../../wire_request.zig");
@@ -34,25 +35,11 @@ pub const session_stop_cutoff_sql =
 pub const pending_message_count_sql =
     "SELECT count(*) AS pending FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2";
 
-pub const AcceptedMessage = struct {
-    replayed: bool,
-    admission_id: u64,
-    content: ContentReference,
-    session: protocol.Bounded(protocol.max_session_bytes),
-};
+pub const AcceptedMessage = command_reply.AcceptedMessage;
 
-pub const RejectedMessage = struct {
-    replayed: bool,
-    code: protocol.MessageRejection,
-    content: ContentReference,
-};
+pub const RejectedMessage = command_reply.RejectedMessage;
 
-pub const MessageReply = union(enum) {
-    accepted: AcceptedMessage,
-    rejected: RejectedMessage,
-    conflict,
-    infrastructure_failure,
-};
+pub const MessageReply = command_reply.MessageReply;
 
 pub const StoredAnswer = struct {
     accepted: bool,
@@ -61,91 +48,21 @@ pub const StoredAnswer = struct {
     created: bool = false,
 };
 
-pub const CommandObservation = struct {
-    status: protocol.CommandObservationStatus,
-    target: protocol.Bounded(protocol.max_session_bytes) = .{},
-    code: protocol.Bounded(protocol.max_code_bytes) = .{},
-    kind: union(protocol.CommandKind) {
-        configure: struct { revision: u64 = 0, created: bool = false },
-        message: ?MessageObservation,
-        session_stop: ?SessionStopObservation,
-        session_archive: ?protocol.SessionArchiveObservation,
-        model_interruption: ModelInterruptionTarget,
-        permission_decision: struct { action_id: u64, decision: protocol.PermissionDecision },
-    } = .{ .configure = .{} },
+pub const CommandObservation = command_reply.CommandObservation;
 
-    /// The Host's one ordered Message-state rule. Clients consume this value.
-    pub fn requestState(self: *const CommandObservation) ?protocol.MessageRequestState {
-        if (self.kind != .message or self.status == .absent) return null;
-        if (self.status == .rejected) return .rejected;
-        const message = if (self.kind.message) |*value| value else return null;
-        const queue = if (message.queue) |*value| value else return null;
-        switch (queue.state) {
-            .completed => return .completed,
-            .failed => return .failed,
-            .cancelled, .excluded => return .cancelled,
-            else => {},
-        }
-        if (message.work) |*work| {
-            if (work.state.progress() == .waiting_for_permission) return .waiting_for_permission;
-        }
-        return if (queue.state == .processing) .processing else .queued;
-    }
-};
+pub const SessionStopSelection = command_reply.SessionStopSelection;
 
-pub const SessionStopSelection = struct {
-    selected_turn_id: ?u64 = null,
-    admission_cutoff: u64,
-};
+pub const SessionStopObservation = command_reply.SessionStopObservation;
 
-pub const SessionStopObservation = struct {
-    selection: SessionStopSelection,
-    completion: protocol.SessionStopCompletion,
-};
+pub const ModelInterruptionTarget = command_reply.ModelInterruptionTarget;
 
-pub const ModelInterruptionTarget = struct {
-    session: protocol.Bounded(protocol.max_session_bytes),
-    turn_id: u64,
-    operation_id: u64,
-};
+pub const SessionStopReply = command_reply.SessionStopReply;
 
-pub const SessionStopReply = union(enum) {
-    accepted: struct {
-        replayed: bool,
-        selection: SessionStopSelection,
-        completion: protocol.SessionStopCompletion,
-        interrupted_operation_id: ?u64 = null,
-    },
-    rejected: struct { replayed: bool, code: protocol.SessionStopRejection },
-    conflict,
-    infrastructure_failure,
-};
+pub const ModelInterruptionReply = command_reply.ModelInterruptionReply;
 
-pub const ModelInterruptionReply = union(enum) {
-    accepted: struct { replayed: bool },
-    rejected: struct { replayed: bool, code: protocol.ModelInterruptionRejection },
-    conflict,
-    infrastructure_failure,
-};
+pub const SessionArchiveReply = command_reply.SessionArchiveReply;
 
-pub const SessionArchiveReply = union(enum) {
-    accepted: struct {
-        replayed: bool,
-        archived: bool,
-        completion: protocol.SessionStopCompletion,
-        interrupted_operation_id: ?u64 = null,
-    },
-    rejected: struct { replayed: bool, code: protocol.SessionArchiveRejection },
-    conflict,
-    infrastructure_failure,
-};
-
-pub const PermissionDecisionReply = union(enum) {
-    accepted: struct { replayed: bool },
-    rejected: struct { replayed: bool, code: protocol.PermissionDecisionRejection },
-    conflict,
-    infrastructure_failure,
-};
+pub const PermissionDecisionReply = command_reply.PermissionDecisionReply;
 pub const max_permission_decision_bytes = sqlite.maxEnumTagBytes(protocol.PermissionDecision);
 
 const MessageProjection = struct {
