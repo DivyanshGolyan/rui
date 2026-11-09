@@ -24,9 +24,13 @@ tracks file contents and directory additions. Discovery imports must be eager
 in the aggregate: a module imported only inside an excluded named test body is
 not discovered merely because its compiler filter exists.
 
-Explicit `-Dtest-filter` invocations retain the original single stock-runner
-`test` binary, full debug info, filter behavior and globals. This also preserves
-renderer-mutation reproduction and cache-execution probes. `test-full` retains
+Explicit `-Dtest-filter` invocations retain the original single `test` binary,
+full debug info, filter behavior and globals. This also preserves
+renderer-mutation reproduction and cache-execution probes. Their `test`,
+`test-logic` and `test-full` runners are the stock runner adapted to fail when
+the filter leaves no named test: anonymous discovery tests always compile, and
+a module imported only by excluded tests contributes none of its own, so an
+empty run would otherwise pass. `test-full` retains
 its separate aggregate/default witness and `RUI_TEST_EXACT_INACTIVITY=1`; normal
 unit/check runs force `0`. The complete aggregate also remains the macOS
 semantic/type-check root.
