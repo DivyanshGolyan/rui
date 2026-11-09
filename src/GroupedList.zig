@@ -6,7 +6,7 @@ const vxfw = vaxis.vxfw;
 const Self = @This();
 
 pub const Row = struct {
-    label: vxfw.Text,
+    text: []const u8,
     heading: bool = false,
 };
 
@@ -27,16 +27,6 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     if (input == .mouse) try self.list.handleEvent(ctx, input);
 }
 
-fn build(raw: *const anyopaque, index: usize, _: usize) ?vxfw.Widget {
-    const self: *const Self = @ptrCast(@alignCast(raw));
-    if (index >= self.rows.len) return null;
-    const row = &self.rows[index];
-    row.label.style = if (row.heading) self.heading else if (self.selected != null and self.selected.? == index) self.selection else self.body;
-    row.label.width_basis = .parent;
-    row.label.softwrap = false;
-    return row.label.widget();
-}
-
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.selected) |selected| {
@@ -45,7 +35,19 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const cursor = self.selected orelse 0;
     const count: u32 = @intCast(self.rows.len);
     const changed = self.list.item_count != count or self.list.cursor != cursor;
-    self.list.children = .{ .builder = .{ .userdata = self, .buildFn = build } };
+    const labels = try ctx.arena.alloc(vxfw.Text, self.rows.len);
+    const children = try ctx.arena.alloc(vxfw.Widget, self.rows.len);
+    for (self.rows, labels, children, 0..) |row, *label, *child, index| {
+        label.* = .{
+            .text = try ctx.arena.dupe(u8, row.text),
+            .style = if (row.heading) self.heading else if (self.selected != null and self.selected.? == index) self.selection else self.body,
+            .width_basis = .parent,
+            .softwrap = false,
+        };
+        child.* = label.widget();
+    }
+    self.list.children = .{ .slice = children };
+    defer self.list.children = .{ .slice = &.{} };
     self.list.item_count = count;
     self.list.cursor = cursor;
     if (changed) self.list.ensureScroll();
@@ -56,11 +58,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 
 test "GroupedList keeps a selected item visible while its keys stay with the composer" {
     var rows = [_]Row{
-        .{ .label = .{ .text = "Needs you" }, .heading = true },
-        .{ .label = .{ .text = "Approve a tool" } },
-        .{ .label = .{ .text = "Active" }, .heading = true },
-        .{ .label = .{ .text = "First task" } },
-        .{ .label = .{ .text = "Last task" } },
+        .{ .text = "Needs you", .heading = true },
+        .{ .text = "Approve a tool" },
+        .{ .text = "Active", .heading = true },
+        .{ .text = "First task" },
+        .{ .text = "Last task" },
     };
     var list: Self = .{ .rows = &rows, .selected = 4 };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -70,7 +72,7 @@ test "GroupedList keeps a selected item visible while its keys stay with the com
     var visible = false;
     for (surface.children) |child| {
         if (child.origin.row >= surface.size.height or child.origin.row < 0) continue;
-        if (child.surface.widget.eql(rows[4].label.widget())) {
+        if (std.mem.eql(u8, child.surface.readCell(0, 0).char.grapheme, "L")) {
             visible = true;
             try std.testing.expectEqualStrings("L", child.surface.readCell(0, 0).char.grapheme);
             try std.testing.expect(child.surface.readCell(0, 0).style.reverse);
@@ -89,11 +91,11 @@ test "GroupedList keeps a selected item visible while its keys stay with the com
     list.selected = 1;
     const first = try list.widget().draw(ctx);
     try std.testing.expect(first.children.len > 0);
-    try std.testing.expect(!rows[0].label.style.reverse);
     var returned = false;
     for (first.children) |child| {
         if (child.origin.row >= first.size.height or child.origin.row < 0) continue;
-        if (child.surface.widget.eql(rows[1].label.widget())) {
+        if (std.mem.eql(u8, child.surface.readCell(0, 0).char.grapheme, "N")) try std.testing.expect(!child.surface.readCell(0, 0).style.reverse);
+        if (std.mem.eql(u8, child.surface.readCell(0, 0).char.grapheme, "A") and std.mem.eql(u8, child.surface.readCell(1, 0).char.grapheme, "p")) {
             returned = true;
             try std.testing.expectEqualStrings("A", child.surface.readCell(0, 0).char.grapheme);
             try std.testing.expect(child.surface.readCell(0, 0).style.reverse);
@@ -109,11 +111,32 @@ test "GroupedList keeps a selected item visible while its keys stay with the com
     returned = false;
     for (restored.children) |child| {
         if (child.origin.row >= restored.size.height or child.origin.row < 0) continue;
-        if (child.surface.widget.eql(rows[1].label.widget())) returned = true;
+        if (std.mem.eql(u8, child.surface.readCell(0, 0).char.grapheme, "A") and std.mem.eql(u8, child.surface.readCell(1, 0).char.grapheme, "p")) returned = true;
     }
     try std.testing.expect(returned);
     list.rows = &.{};
     list.selected = null;
     const empty = try list.widget().draw(ctx);
     try std.testing.expectEqual(@as(usize, 0), empty.children.len);
+}
+
+test "GroupedList retains frame children when row data refreshes before a mouse event" {
+    var text = "Before".*;
+    var rows = [_]Row{.{ .text = &text }};
+    var replacement = [_]Row{.{ .text = "After" }};
+    var list: Self = .{ .rows = &rows };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} };
+    const before = try list.widget().draw(ctx);
+    list.rows = &replacement;
+    @memset(&text, 'X');
+    rows[0] = .{ .text = "Recycled" };
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try before.children[0].surface.widget.handleEvent(&events, .{ .mouse = .{ .col = 0, .row = 0, .button = .left, .type = .press, .mods = .{} } });
+    const retained = try before.children[0].surface.widget.draw(ctx);
+    try std.testing.expectEqualStrings("B", retained.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("B", before.children[0].surface.readCell(0, 0).char.grapheme);
+    const after = try list.widget().draw(ctx);
+    try std.testing.expectEqualStrings("A", after.children[0].surface.readCell(0, 0).char.grapheme);
 }
