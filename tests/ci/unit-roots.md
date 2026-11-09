@@ -6,6 +6,14 @@
 * **native**: all non-`store.` tests;
 * **store**: every `store.` test, including migration/dialect acceptance.
 
+`test-native` and `test-store` run their respective roots independently;
+`test-native` also runs the renderer-allocation actor and signal-stack probe
+that `test` runs. With `-Dtest-filter`, either runs the single filtered
+aggregate. Selection follows each root's import closure, conservatively using
+the entire aggregate for native. When both are reached, selection emits `test`
+instead of the pair.
+The Store root alone starts and verifies the live MySQL dialect check in Linux CI.
+
 Module ownership preserves each module's process globals. Executions are
 **serial, Store last**: the MySQL dialect fixture uses fixed schema names and
 rewrites `RUI_TEST_MYSQL_RECORD`. The final record remains the Store owner's

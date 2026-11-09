@@ -141,6 +141,16 @@ class BuildWiringTest(unittest.TestCase):
         self.assertEqual(build.count(".test_runner = filtered_runner"), 2)
         self.assertIn('generate.addArg("--filtered")', build)
 
+    def test_standalone_roots_do_not_inherit_the_serial_chain(self):
+        build = (ROOT / "build.zig").read_text()
+        self.assertIn('b.step("test-native",', build)
+        self.assertIn('b.step("test-store",', build)
+        self.assertIn('(if (root == .native) native_step else store_step).dependOn(&standalone.step)', build)
+        self.assertIn('native_step.dependOn(&run.step)', build)
+        self.assertIn('store_step.dependOn(&run.step)', build)
+        for dependency in ('run_renderer_allocation', 'signal_stack_probe'):
+            self.assertIn(f'native_step.dependOn(&{dependency}.step)', build)
+
     def test_ci_classifies_all_unit_compiles_and_filters_track_sources(self):
         build = (ROOT / "build.zig").read_text()
         self.assertIn("unit: []const *std.Build.Step.Compile", build)

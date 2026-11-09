@@ -59,6 +59,8 @@ pub fn build(b: *std.Build) void {
         generate.addFileArg(std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig"));
         break :runner .{ .path = generate.addOutputFileArg("filtered_test_runner.zig"), .mode = .server };
     } else null;
+    const native_step = b.step("test-native", "Run non-Store unit tests");
+    const store_step = b.step("test-store", "Run Store unit tests");
     var run_tests: *std.Build.Step.Run = undefined;
     for (tests, 0..) |*entry, index| {
         const root = unit_partition.roots[index];
@@ -100,6 +102,15 @@ pub fn build(b: *std.Build) void {
         const run = ci.run(compile);
         run.has_side_effects = true;
         run.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
+        if (test_filters.len != 0) {
+            native_step.dependOn(&run.step);
+            store_step.dependOn(&run.step);
+        } else {
+            const standalone = ci.run(compile);
+            standalone.has_side_effects = true;
+            standalone.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
+            (if (root == .native) native_step else store_step).dependOn(&standalone.step);
+        }
         // Compile in parallel, execute serially: the MySQL dialect fixture owns
         // fixed database names. Store runs last and owns the acceptance record
         // (including migrations/conformance); never mask an earlier failure.
@@ -221,6 +232,7 @@ pub fn build(b: *std.Build) void {
     const run_renderer_allocation = ci.run(renderer_allocation);
     logic_test_step.dependOn(&run_renderer_allocation.step);
     test_step.dependOn(&run_renderer_allocation.step);
+    native_step.dependOn(&run_renderer_allocation.step);
 
     const terminal_notice = b.addExecutable(.{
         .name = "rui-terminal-notice-test",
@@ -243,6 +255,7 @@ pub fn build(b: *std.Build) void {
     }));
     signal_stack_probe.has_side_effects = true;
     test_step.dependOn(&signal_stack_probe.step);
+    native_step.dependOn(&signal_stack_probe.step);
 
     const production_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
     const release_safe = if (pr_ci) addRui(b, target, .ReleaseSafe, "rui-pr-check", pinned_transport) else production_safe;
