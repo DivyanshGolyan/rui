@@ -2321,3 +2321,69 @@ test "production live and seam listing activate only assistant tables and submit
     try host.read(&job);
     try std.testing.expectEqual(@as(u6, 0), job.result.output_blocks.count);
 }
+
+test "large submitted body rendering is invariant across source chunk boundaries" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "large-user", .{ .read = true });
+    defer file.close(io);
+    var task: Task = .{ .io = io };
+    const source = try std.testing.allocator.alloc(u8, 70 * 1024);
+    defer std.testing.allocator.free(source);
+    @memset(source, 0x1b);
+    const opening = "> outside 🌍\n```\n> inside fence\n```\n";
+    const closing = "\n>> after fence 🌍\n";
+    @memcpy(source[0..opening.len], opening);
+    @memcpy(source[source.len - closing.len ..], closing);
+
+    var expected_digest: [32]u8 = undefined;
+    var expected_length: u64 = 0;
+    var expected_marks: OutputBlocks.Capture = .{};
+    for ([_]usize{ source.len, 1, 4093 }) |chunk| {
+        try file.setLength(io, 0);
+        var marks: OutputBlocks.Capture = .{};
+        var capture: DisplayCapture = .{ .task = &task, .file = file, .typed = &marks };
+        var body: View.UserBody(*DisplayCapture) = undefined;
+        try body.initBlocks(&capture, source.len, capture.capability());
+        var offset: usize = 0;
+        while (offset < source.len) {
+            const end = @min(source.len, offset + chunk);
+            try body.feed(source[offset..end]);
+            offset = end;
+        }
+        try body.finish();
+        var hash = protocol.contentHasher();
+        var window: [4096]u8 = undefined;
+        var written: u64 = 0;
+        while (written < capture.offset) {
+            const wanted: usize = @intCast(@min(window.len, capture.offset - written));
+            try std.testing.expectEqual(wanted, try file.readPositionalAll(io, window[0..wanted], written));
+            hash.update(window[0..wanted]);
+            written += wanted;
+        }
+        const digest = hash.finalResult();
+        if (chunk == source.len) {
+            expected_digest = digest;
+            expected_length = capture.offset;
+            expected_marks = marks;
+            try std.testing.expect(capture.offset > 256 * 1024);
+            try std.testing.expectEqual(@as(u6, 2), marks.count);
+            try std.testing.expectEqual(@as(u4, 1), marks.items[0].data.quote.depth);
+            try std.testing.expectEqual(@as(u4, 2), marks.items[1].data.quote.depth);
+            var first: ["> outside 🌍".len]u8 = undefined;
+            var second: [">> after fence 🌍".len]u8 = undefined;
+            try std.testing.expectEqual(first.len, try file.readPositionalAll(io, &first, marks.items[0].start));
+            try std.testing.expectEqual(second.len, try file.readPositionalAll(io, &second, marks.items[1].start));
+            try std.testing.expectEqualStrings("> outside 🌍", &first);
+            try std.testing.expectEqualStrings(">> after fence 🌍", &second);
+        } else {
+            try std.testing.expectEqual(expected_length, capture.offset);
+            try std.testing.expectEqualSlices(u8, &expected_digest, &digest);
+            try std.testing.expectEqual(expected_marks.count, marks.count);
+            for (marks.slice(), expected_marks.slice()) |actual, expected| {
+                try std.testing.expect(std.meta.eql(actual, expected));
+            }
+        }
+    }
+}
