@@ -323,9 +323,14 @@ def main():
             continue
         log = job_log(repository, job["id"])
         verdict = BISECT.search(untimed(log)) if log is not None else None
-        for cause in job_causes(log, cases, args.workflow, job):
+        causes = job_causes(log, cases, args.workflow, job)
+        for cause in causes:
             if verdict:
-                cause.detail = "\n".join(filter(None, (cause.detail, verdict[0])))
+                # The bisect replays the whole job, so it locates the job's first
+                # failing commit, not each cause's.
+                scope = (f"\nThe job '{job['name']}' failed with {len(causes)} causes; this commit is where the job "
+                         "first fails, and another cause may come from a later commit." if len(causes) > 1 else "")
+                cause.detail = "\n".join(filter(None, (cause.detail, verdict[0] + scope)))
             print(file_cause(repository, issues, cause, args.workflow, args.sha, url, args.label))
 
 

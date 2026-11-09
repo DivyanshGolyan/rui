@@ -73,7 +73,7 @@ class PromotionBisectTest(unittest.TestCase):
                 verdict, stdout, logs = repository.run()
                 self.assertEqual(verdict["verdict"], "culprit")
                 self.assertEqual(verdict["culprit"], repository.commits[broken])
-                self.assertIn(f"Promotion bisect: first failing commit {repository.commits[broken]} (change {broken})",
+                self.assertIn(f"Promotion bisect: this job's replay first fails at {repository.commits[broken]} (change {broken})",
                               stdout)
                 # HEAD, then a binary search over eight commits, then stable only for the first.
                 self.assertLessEqual(len(verdict["replays"]), 1 + 3 + (broken == 0))

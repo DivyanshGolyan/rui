@@ -371,7 +371,7 @@ class ReportTest(unittest.TestCase):
             self.assertEqual([call[2] for call in fake.made('reopen')], ['6'])
 
     def test_a_promotion_bisect_verdict_rides_on_the_failure_it_located(self):
-        verdict = 'Promotion bisect: first failing commit ' + 'd' * 40 + ' (Change the bash owner)'
+        verdict = "Promotion bisect: this job's replay first fails at " + 'd' * 40 + ' (Change the bash owner)'
         fake = FakeGitHub([dict(id=1, name='linux suites (check)', conclusion='failure')],
                           {1: BASH + logged('replay at ' + 'd' * 40 + ': failed (exit 1)') + logged(verdict)})
         self.run_main(fake, '--label', 'promotion-red')
@@ -380,6 +380,24 @@ class ReportTest(unittest.TestCase):
         self.assertIn(verdict, create[create.index('--body') + 1])
         self.assertEqual(report_issue.signature_state(create[create.index('--body') + 1])['signature'],
                          'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError')
+
+        # One cause: the job's first failing commit is that cause's.
+        self.assertNotIn('causes', create[create.index('--body') + 1])
+
+    def test_a_job_with_several_causes_never_attributes_its_verdict_to_each(self):
+        # The bisect replays the whole job, so with two regressions from different
+        # commits it can locate only the earlier one; neither issue may claim it alone.
+        verdict = "Promotion bisect: this job's replay first fails at " + 'd' * 40 + ' (Change the bash owner)'
+        fake = FakeGitHub([dict(id=1, name='linux suites (check)', conclusion='failure')],
+                          {1: BASH + HOST_STOP + logged(verdict)})
+        self.run_main(fake, '--label', 'promotion-red')
+        creates = fake.made('create')
+        self.assertEqual(len(creates), 2)
+        for create in creates:
+            body = create[create.index('--body') + 1]
+            self.assertIn(verdict, body)
+            self.assertIn("The job 'linux suites (check)' failed with 2 causes", body)
+            self.assertIn('another cause may come from a later commit', body)
 
     def test_only_failed_jobs_are_read(self):
         passing = (logged('::warning::check failed (exit 1); one automatic retry. A pass after this retry '

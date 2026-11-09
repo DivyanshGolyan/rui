@@ -115,7 +115,8 @@ Correctness failures are fixed on the PR before it reaches `main`.
 [Promote](.github/workflows/promote.yml) is the only path to a release, and it starts only by manual dispatch on `main`: `gh workflow run promote.yml --ref main`.
 It qualifies main HEAD against the batch since `stable`, the last promoted commit, and runs everything the PR tier skips: Linux and macOS `check-full`, `test-logic` and full Debug admission recovery with the batch's selected targets, `stack-frames`, the upgrade check on both systems and the renderer contracts.
 A failing suite, upgrade or contract job replays its own command on the same runner: once at HEAD, then by binary search over the batch's first-parent commits.
-The verdict names the first failing commit, or says the red did not reproduce at HEAD or already fails at `stable`; replay logs and the verdict are retained with the run.
+The verdict names the first commit where that job fails, or says the red did not reproduce at HEAD or already fails at `stable`; replay logs and the verdict are retained with the run.
+A job's replay covers all its targets or failed steps, so a job with several causes names only the earliest; each of its issues says so.
 The run then files one `promotion-red` issue per failure signature through [report_issue.py](tests/ci/report_issue.py), with the verdict on it.
 A red promotion publishes nothing and leaves `stable` where it is; fix forward on `main` through ordinary PRs and promote again.
 A bisect never turns a promotion green, and a promotion never merges or reverts.

@@ -47,5 +47,6 @@ Issues record defects; they do not form a separate publication gate.
 
 Promotion publishes a release and advances `stable`; merging never does.
 Ask the user before dispatching it: `gh workflow run promote.yml --ref main`.
-A red promotion names the first failing commit of its batch on each `promotion-red` issue it files; fix it forward through an ordinary PR, then promote again.
+A red promotion names, on each `promotion-red` issue it files, the first batch commit where that job fails; when a job has several causes, another may come from a later commit.
+Fix forward through an ordinary PR, then promote again.
 Recover an interrupted publication by rerunning that promotion's failed jobs, which reuses the same release identity.

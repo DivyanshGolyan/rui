@@ -71,7 +71,7 @@ def describe(result, base, head):
     verdict = result["verdict"]
     if verdict == "culprit":
         subject = git("log", "-1", "--format=%s", result["culprit"])
-        return f"first failing commit {result['culprit']} ({subject})"
+        return f"this job's replay first fails at {result['culprit']} ({subject})"
     return {
         "empty-batch": f"no commits between {base} and {head}",
         "not-reproduced": f"did not fail again at {head}; treat it as a flake until it recurs",
