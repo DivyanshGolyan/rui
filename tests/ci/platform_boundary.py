@@ -32,11 +32,13 @@ MAC_PATHS = (
     ".github/workflows/qualify-macos.yml",
     "install.sh", "release/*",
     # build.zig's Darwin-only linking and test settings, which Linux never runs.
-    "build/darwin.zig",
+    # build.zig stays until they move to build/darwin.zig: typecheck-macos
+    # skips addH2's Darwin SDK and framework linking.
+    "build/darwin.zig", "build.zig",
 )
-# Build plumbing (build.zig, build.zig.zon, the setup action, the CI
-# qualification helpers) is not here: Linux runs it, typecheck-macos compiles
-# Rui for Darwin on every PR, and promotion links and runs it on a Mac.
+# Other build plumbing (build.zig.zon, the setup action, the CI qualification
+# helpers) is not here: Linux runs it, typecheck-macos compiles Rui for
+# Darwin on every PR, and promotion links and runs it on a Mac.
 
 # fnmatch patterns, as prepush.py and the selector read them: `*` spans
 # directories, so src/*.zig covers src/http1/Exchange.zig too.
