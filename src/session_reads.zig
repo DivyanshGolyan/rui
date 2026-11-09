@@ -20,6 +20,7 @@ const Viewport = @import("ConversationViewport.zig");
 const session_line = @import("session_line.zig");
 const slash_commands = @import("slash_commands.zig");
 const queued_line = @import("queued_line.zig");
+const session_chrome = @import("session_chrome.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const AnswerRenderer = @import("AnswerRenderer.zig");
 const status_page = @import("status_page.zig");
@@ -1049,7 +1050,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash/MCP when Bash or MCP asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAt an Action, Left/Right choose Allow once or Deny · Enter decides\nCtrl-O shows the lowest collapsed message in full, or opens a Session name below it · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands, then their choices · Up/Down highlight one · Tab or Enter takes it\nOn /status, Up/Down choose a setting · Enter starts its change\n\n" ++ slash_commands.conversation.help ++ "\nLogin: ");
+        try output.interface.writeAll(session_chrome.help ++ slash_commands.conversation.help ++ "\nLogin: ");
         try output.interface.print("{s} in your shell.\n", .{(job.provider orelse comptime protocol.Provider.onlyWith(.sign_in)).login()});
     } else {
         std.debug.assert(job.inspection_kind == .requests);
