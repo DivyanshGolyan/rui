@@ -14,12 +14,13 @@ import tempfile
 import threading
 import time
 
-import bash_integration as bash_fixture
+import bash_fixture
 import model_fixture as fixture
 import host_process
 from host_process import HostDiagnostics, ReleaseGate, canonical_fixture_root, dispose_all, is_peer_disconnect, stop_process
-from host_status_integration import socket_path, status
+from host_status_fixture import socket_path, status
 import os_semantics
+from host_status_fixture import finish
 
 
 RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
@@ -91,21 +92,6 @@ def request(sock, store, identity=None, *, extra=b""):
     stream.connect(str(sock))
     stream.sendall(header + extra + b"\r\n")
     return stream, body
-
-
-def finish(stream, body):
-    response = bytearray()
-    with stream:
-        try:
-            stream.sendall(body)
-            while chunk := stream.recv(4096):
-                response.extend(chunk)
-                assert len(response) < 8192
-        except OSError as error:
-            if not is_peer_disconnect(error):
-                raise
-            # A late reset must not erase a captured acceptance prefix.
-    return bytes(response)
 
 
 def mixed_effect_drain(provider_first):

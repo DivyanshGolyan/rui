@@ -17,7 +17,7 @@ import threading
 
 import host_process
 import model_fixture as fixture
-from control_integration import raw_request
+from control_fixture import raw_request
 from host_process import canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
 
 
@@ -497,14 +497,15 @@ def main():
         # Exercise the real slash adapter, not a caller-side expansion or a
         # constructed native Message. Its announced handle must use the same
         # HOME-owned capture directory as ordinary inspect/list/recover.
-        import human_cli_integration as human
+        from human_cli_fixture import read_terminal
+        from terminal_process import terminal_process
         before_handles = set(invoke("request", "list"))
         count = len(endpoint.decoded())
-        with human.terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store), parent],
+        with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store), parent],
                 cwd=workspace, env={**environment, "TERM": "xterm-256color", "LANG": "C.UTF-8"}) as (_, master):
-            human.read_terminal(master, "› ")
+            read_terminal(master, "› ")
             os.write(master, b"/skill demo\r")
-            page = human.read_terminal(master, "request: ")
+            page = read_terminal(master, "request: ")
             (state / "slash-skill-screen.txt").write_text(page)
             announced = re.search(r"request: (\S+)", page)
             assert announced, page

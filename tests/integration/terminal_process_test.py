@@ -17,7 +17,6 @@ import time
 import unittest
 from unittest.mock import patch
 
-import host_process
 from host_process import stop_process, wait_for
 from terminal_process import DEVICE_ANSWER, open_pty, read_output, spawn, terminal_process, unanswered
 
@@ -403,8 +402,3 @@ def prove_terminal_process():
     result = unittest.TextTestRunner(verbosity=2).run(
         unittest.defaultTestLoader.loadTestsFromTestCase(TerminalProcessTest))
     assert result.wasSuccessful(), "terminal process ownership failed"
-
-
-if __name__ == "__main__":
-    host_process.enter()
-    unittest.main()

@@ -127,7 +127,7 @@ class SelectionTest(unittest.TestCase):
         for path in ("src/client.zig", "src/cli_args.zig", "src/server.zig",
                      "src/TestObservation.zig", "tests/integration/request_wait_integration.py",
                      "tests/integration/model_fixture.py", "tests/integration/host_process.py",
-                     "tests/integration/bash_integration.py", "tests/integration/bash_recovery_integration.py"):
+                     "tests/integration/bash_fixture.py", "tests/integration/canonical_fixture.py"):
             selected = set(select([path], "review", AVAILABLE)["targets"])
             self.assertTrue(covered("request-wait-integration", selected), (path, selected))
         core = select(["src/request_wait.zig"], "review", AVAILABLE)["targets"]
@@ -322,7 +322,7 @@ class SelectionTest(unittest.TestCase):
                     self.assertIn("human-cli-integration", result[family])
                     self.assertNotIn("check", result[family])
         # The human CLI gate runs the PTY cases it composes; they are not selected twice.
-        result = select(["src/SessionFrontend.zig", "tests/integration/terminal_restoration_integration.py"],
+        result = select(["src/SessionFrontend.zig", "tests/integration/terminal_restoration_cases.py"],
                         "review", AVAILABLE)
         self.assertNotIn("terminal-restoration-integration", result["targets"])
 
@@ -583,7 +583,7 @@ class SelectionTest(unittest.TestCase):
 
     def test_transport_inputs_keep_both_native_h2_owners(self):
         for path in ("src/build_transport.sh", "build.zig.zon", "src/os/socket.zig",
-                     "tests/integration/codex_h2_integration.py", "tests/integration/transport_h2_integration.py"):
+                     "tests/integration/h2_fixture.py", "tests/integration/codex_h2_cases.py"):
             result = select([path], "review", AVAILABLE)
             for family in ("targets", "native_targets"):
                 self.assertIn("transport-h2-integration", result[family])
@@ -644,32 +644,42 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(execution_batches(["current-facts-integration", "server-delivery-integration"]),
                          [["current-facts-integration"], ["server-delivery-integration"]])
 
-    def test_a_helper_reached_through_another_fixture_module_keeps_its_consumer(self):
-        # codex_h2_integration borrows transport_h2_integration.closed_host_request,
-        # which calls control_integration.read_http_response (Codex P2 on #1102).
-        for path in ("tests/integration/control_integration.py", "tests/integration/transport_h2_integration.py"):
+    def test_a_helper_reached_through_another_library_keeps_its_consumer(self):
+        # codex_h2_integration calls h2_fixture.closed_host_request, which calls
+        # control_fixture.read_http_response (Codex P2 on #1102). The fixtures
+        # those helpers came from no longer reach codex-h2.
+        for path in ("tests/integration/control_fixture.py", "tests/integration/h2_fixture.py"):
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 for family in ("targets", "native_targets"):
                     self.assertIn("codex-h2-integration", result[family])
+        for path in ("tests/integration/control_integration.py", "tests/integration/transport_h2_integration.py"):
+            with self.subTest(path=path):
+                self.assertNotIn("codex-h2-integration", select([path], "review", AVAILABLE)["targets"])
         scenarios = select(["tests/integration/dispatch_integration.py"], "review", AVAILABLE)
         for family in ("targets", "native_targets"):
             self.assertTrue({"dispatch-debug-integration", "dispatch-integration"} <= set(scenarios[family]))
 
     def test_helper_modules_select_the_fixtures_that_import_them(self):
         # A helper selects every fixture that imports it, and check once it
-        # reaches every case check runs; a fixture module another fixture
-        # imports selects that fixture, not the importer's whole suite.
+        # reaches every case check runs; a fixture script selects only the
+        # targets that run it.
         for path, owners in (("host_process.py", {"check", "launch-frame-integration", "ts-client"}),
-                             ("control_integration.py", {"control-integration", "human-cli-integration",
-                                                         "dispatch-integration", "transport-h2-integration"}),
-                             ("canonical_failure_integration.py", {"human-cli-integration", "request-wait-integration"})):
+                             ("control_fixture.py", {"control-integration", "human-cli-integration",
+                                                     "dispatch-integration", "transport-h2-integration"}),
+                             ("canonical_fixture.py", {"human-cli-integration", "request-wait-integration"})):
             with self.subTest(path=path):
                 result = select([f"tests/integration/{path}"], "review", AVAILABLE)
                 for family in ("targets", "native_targets"):
                     self.assertTrue(owners <= set(result[family]), sorted(owners - set(result[family])))
-        control = select(["tests/integration/control_integration.py"], "review", AVAILABLE)["targets"]
-        self.assertNotIn("check", control)
+        self.assertNotIn("check", select(["tests/integration/control_fixture.py"], "review", AVAILABLE)["targets"])
+        for path, target in (("control_integration.py", "control-integration"),
+                             ("dispatch_integration.py", "dispatch-integration"),
+                             ("canonical_failure_integration.py", "canonical-failure-integration")):
+            with self.subTest(path=path):
+                result = select([f"tests/integration/{path}"], "review", AVAILABLE)
+                self.assertIn(target, result["targets"])
+                self.assertNotIn("human-cli-integration", result["targets"])
 
     def test_shared_fixture_helpers_keep_composed_and_separate_consumers(self):
         for name in ("host_process.py",):
@@ -684,7 +694,7 @@ class SelectionTest(unittest.TestCase):
                         self.assertNotIn("control-integration", result[family])
 
     def test_canonical_failure_is_covered_by_the_composed_human_cli_gate(self):
-        path = "tests/integration/canonical_failure_integration.py"
+        path = "tests/integration/canonical_failure_cases.py"
         alone = select([path], "review", AVAILABLE)
         for family in ("targets", "native_targets"):
             self.assertIn("human-cli-integration", alone[family])
@@ -729,7 +739,7 @@ class SelectionTest(unittest.TestCase):
         for block in filters:
             harnesses = {p for p in re.findall(r"'([^']+)'", block) if p.startswith("tests/integration/")}
             # The restoration fixture is also a blocking gate, so it keeps its own selection.
-            self.assertEqual(harnesses - {"tests/integration/terminal_restoration_integration.py"},
+            self.assertEqual(harnesses - {"tests/integration/terminal_restoration_*"},
                              set(RENDERER_HARNESSES))
         for path in ("tests/integration/input_equivalence.py", "tests/integration/session_sequence_model.py",
                      "tests/integration/session_sequence_model_test.py"):
@@ -813,9 +823,11 @@ class SelectionTest(unittest.TestCase):
             Graph(files, files.__getitem__)
 
     def test_h2_fixture_and_companion_keep_both_owning_targets(self):
-        # codex-h2 imports the transport fixture; its companion test is the transport target's own.
-        for path, expected in (("tests/integration/transport_h2_integration.py",
+        # The transport oracle test checks codex-h2's cases; the transport cases
+        # and their companion test are the transport target's own.
+        for path, expected in (("tests/integration/codex_h2_cases.py",
                                 ["codex-h2-integration", "transport-h2-integration"]),
+                               ("tests/integration/transport_h2_cases.py", ["transport-h2-integration"]),
                                ("tests/integration/transport_h2_integration_test.py", ["transport-h2-integration"])):
             result = select([path], "review", AVAILABLE)
             self.assertEqual(result["targets"], expected)
