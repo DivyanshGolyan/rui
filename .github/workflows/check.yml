@@ -359,7 +359,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
   cache_execution:
-    # Admission requires both platforms when cache policy changes.
+    # Admission requires Linux when cache policy changes; promotion adds macOS.
     # Run alongside compilation rather than delaying its producers.
     name: cache execution (${{ matrix.runner }})
     needs: plan
@@ -367,7 +367,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, macos-15]
+        runner: ${{ fromJSON(inputs.promotion && '["ubuntu-24.04", "macos-15"]' || '["ubuntu-24.04"]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
@@ -688,11 +688,13 @@ jobs:
         run: python3 -B tests/ci/failure_cause.py explain
   previous_release_upgrade:
     needs: plan
-    # Upgrade, installer and Store-format paths only; promotion runs it for every batch.
+    # Upgrade, installer and Store-format paths only; promotion runs it on both systems for every batch.
     if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && needs.plan.outputs.upgrade == 'true' }}
     uses: ./.github/workflows/previous-release-upgrade.yml
     with:
       candidate-ref: ${{ needs.plan.outputs.candidate_ref }}
+      # Linux on PRs; promotion runs the upgrade on both systems.
+      systems: '["ubuntu-24.04"]'
   admission:
     # This is the sole PR admission status. Reduced draft feedback cannot pass it.
     needs: [plan, policy, linux, macos, previous_release_upgrade, cache_execution]

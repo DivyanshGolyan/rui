@@ -344,8 +344,12 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn('CANDIDATE_REF: ${{ github.sha }}', job(text, 'plan'))
         self.assertNotIn('refs/pull/', text)
 
-    def test_reusable_upgrade_receives_candidate_and_runs_both_native_platforms(self):
+    def test_reusable_upgrade_runs_linux_on_prs_and_both_platforms_in_promotion(self):
         caller = job(CHECK.read_text(), 'previous_release_upgrade')
+        self.assertIn("""systems: '["ubuntu-24.04"]'""", caller)
+        promotion = job(PROMOTE.read_text(), 'upgrade')
+        self.assertIn('uses: ./.github/workflows/previous-release-upgrade.yml', promotion)
+        self.assertNotIn('systems:', promotion)
         self.assertIn('uses: ./.github/workflows/previous-release-upgrade.yml', caller)
         self.assertIn('candidate-ref: ${{ needs.plan.outputs.candidate_ref }}', caller)
         self.assertIn("github.event_name == 'pull_request'", caller)
@@ -354,7 +358,8 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn('  workflow_call:', text)
         self.assertIn('      candidate-ref:', text)
         upgrade = job(text, 'upgrade')
-        self.assertIn('os: [ubuntu-24.04, macos-15]', upgrade)
+        self.assertIn("""os: ${{ fromJSON(inputs.systems || '["ubuntu-24.04", "macos-15"]') }}""", upgrade)
+        self.assertIn("""default: '["ubuntu-24.04", "macos-15"]'""", text)
         self.assertIn('ref: ${{ inputs.candidate-ref || github.sha }}', upgrade)
         self.assertIn('python3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .', upgrade)
         script = step_script(upgrade, 'Validate immutable candidate')
@@ -676,12 +681,12 @@ class ReleaseFlowTest(unittest.TestCase):
             self.assertLess(body.index(setup), checks, setup)
 
 
-    def test_candidate_jobs_are_read_only_and_cache_proof_covers_both_platforms(self):
+    def test_candidate_jobs_are_read_only_and_cache_proof_adds_macos_in_promotion(self):
         for path in (CHECK, UPGRADE):
             with self.subTest(workflow=path.name):
                 self.assertNotRegex(path.read_text(), r'(?:contents|actions|issues): write')
         cache = job(CHECK.read_text(), 'cache_execution')
-        self.assertIn('runner: [ubuntu-24.04, macos-15]', cache)
+        self.assertIn("""runner: ${{ fromJSON(inputs.promotion && '["ubuntu-24.04", "macos-15"]' || '["ubuntu-24.04"]') }}""", cache)
 
 
 if __name__ == '__main__':
