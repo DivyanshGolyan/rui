@@ -23,6 +23,20 @@ const AnswerRenderer = @import("AnswerRenderer.zig");
 const Terminal = @import("SessionTerminal.zig");
 const status_page = @import("status_page.zig");
 const ReadPhase = departure.ReadPhase;
+const session_transcript = @import("session_transcript.zig");
+const Transcript = session_transcript.Of(protocol.ActivityItem.Message, protocol_reply.ConversationCursor, @typeInfo(@FieldType(protocol.ActivityFacts, "items")).array.len);
+pub const Messages = session_transcript.Messages;
+pub const DrawnSpan = session_transcript.DrawnSpan;
+pub const Boundary = Transcript.Boundary;
+pub const Echo = Transcript.Echo;
+pub const Echoes = Transcript.Echoes;
+pub const Listing = Transcript.Listing;
+pub const Record = Transcript.Record;
+pub const Plan = Transcript.Plan;
+pub const plan = Transcript.plan;
+pub const Boundaries = Transcript.Boundaries;
+pub const Marks = Transcript.Marks;
+const readEnd = Transcript.readEnd;
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
 /// Writes /requests' recovery handles, and offers each saved Message among
@@ -582,7 +596,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
             job.result.listing = null;
         },
         .range => |range| {
-            var cursor = range.cursor;
+            var cursor: protocol_reply.ActivityCursor = .{ .end = range.end, .position = range.position, .ordinal = range.ordinal, .direction = .backward };
             var compact = false;
             while (true) {
                 const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
@@ -594,7 +608,8 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
                     const value = listed(item, range.shown) orelse continue;
                     try View.message(requests, job.store, job.session, item, value, .lasting(page.facts.work.work.state.holdsQueue()), &output, job.colour, &compact);
                     var next = range;
-                    next.cursor = .{ .end = range.end, .position = item.position, .ordinal = item.ordinal, .direction = .backward };
+                    next.position = item.position;
+                    next.ordinal = item.ordinal;
                     job.result.listing = .{ .range = next };
                     return;
                 } else if (page.continuation()) |next| {
@@ -607,170 +622,40 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
                 // later seam reads: a later search may stop there. Applied
                 // Messages stay applied, and one waiting that a stop later
                 // excludes shows at the stop, which lowers it again.
-                if (range.shown == null) job.result.searched = if (range.cursor.position == 0) range.end + 1 else range.cursor.position;
+                if (range.shown == null) job.result.searched = if (range.position == 0) range.end + 1 else range.position;
                 return;
             }
         },
     }
 }
 
-/// Whether a range lists this item, and its Message.
-///
-/// A span of dropped echoes (`shown`, read at its newest echo's position)
-/// lists each Message live output showed in it once. Live output shows another
-/// Session's Message as its Admission. It shows a person's or script's at
-/// its Admission when the Message showed while it waited (`DrawnSpan`),
-/// otherwise as its row or labelled at the stop that excluded it, so it
-/// judges each by the newest such Message before the span and after it:
-/// - A row shows unless its Message showed while it waited, which it did
-///   before the span only if no newer one had, and in the span only with
-///   its Admission there too. Either way the row is listed exactly when its
-///   Message is newer than the one before the span.
-/// - An Admission whose row is in the span is listed there instead. One
-///   still waiting at the span's end showed in it exactly when no newer
-///   Message showed while it waited by then: any that did was taken next,
-///   so this one had been taken before it. One a stop excluded is listed at
-///   the stop's seam.
-///
-/// A seam lists each Message not applied at the range's end, except a
-/// person's or script's still waiting: one that showed at its Admission has
-/// its row before any later boundary (see `Messages`), and any other waits
-/// above the input and shows live once taken.
+/// Whether a range lists this item (see `session_transcript.lists`), and
+/// its Message.
 fn listed(item: protocol.ActivityItem, shown: ?DrawnSpan) ?protocol.ActivityItem.Message {
-    return switch (item.value) {
-        .received => |value| if (shown != null or value.state != .applied) value else null,
-        .admission => |value| if (shown) |drawn|
-            (if (value.state == .queued and value.admission <= drawn.after) value else null)
-        else if (value.state == .excluded) value else null,
-        .user => |value| if (shown) |drawn| (if (value.sender == null and value.admission > drawn.before) value else null) else null,
+    const seen = sighted(item.value) orelse return null;
+    const message = seen.message;
+    const state: session_transcript.State = switch (message.state) {
+        inline else => |tag| @field(session_transcript.State, @tagName(tag)),
+    };
+    return if (session_transcript.lists(seen.kind, state, message.admission, message.sender == null, shown)) message else null;
+}
+
+/// The Message an Activity item carries, and how; null for any other item.
+fn sighted(value: protocol.ActivityItem.Value) ?struct { kind: session_transcript.Kind, message: protocol.ActivityItem.Message } {
+    return switch (value) {
+        inline .admission, .received, .user => |message, tag| .{ .kind = @field(session_transcript.Kind, @tagName(tag)), .message = message },
         else => null,
     };
 }
 
-test "a range lists the Messages live output showed, never queued Messages still waiting above the input" {
-    const content: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
-    const peer: protocol.NamedPeer = .{ .session = .{ .len = 0 } };
-    const Case = struct { kind: enum { admission, received, user }, sender: bool, state: @FieldType(protocol.ActivityItem.Message, "state"), admission: u64, shown: ?DrawnSpan, listed: bool };
-    // Live output showed Message 10 while it waited before the dropped
-    // span, and Message 14 by its end.
+test "only an item that carries a Message is listed" {
     const span: DrawnSpan = .{ .before = 10, .after = 14 };
-    for ([_]Case{
-        // A dropped live span: what live output showed. Another Session's
-        // Admission, a person's or script's row, and the Admission of one
-        // that showed while it waited and still waits at the span's end.
-        .{ .kind = .received, .sender = true, .state = .applied, .admission = 12, .shown = span, .listed = true },
-        .{ .kind = .user, .sender = false, .state = .applied, .admission = 12, .shown = span, .listed = true },
-        .{ .kind = .admission, .sender = false, .state = .queued, .admission = 14, .shown = span, .listed = true },
-        // Not the row of one that showed while it waited before the span,
-        // another Session's row, an Admission whose row the span lists,
-        // one still waiting above the input, or one a stop excluded, which
-        // shows at the stop.
-        .{ .kind = .user, .sender = false, .state = .applied, .admission = 10, .shown = span, .listed = false },
-        .{ .kind = .user, .sender = true, .state = .applied, .admission = 12, .shown = span, .listed = false },
-        .{ .kind = .admission, .sender = false, .state = .applied, .admission = 12, .shown = span, .listed = false },
-        .{ .kind = .admission, .sender = false, .state = .queued, .admission = 15, .shown = span, .listed = false },
-        .{ .kind = .admission, .sender = false, .state = .excluded, .admission = 12, .shown = span, .listed = false },
-        // A seam: each Message not applied at its end, except a person's
-        // or script's still queued, which shows live once taken, at the
-        // opening too.
-        .{ .kind = .admission, .sender = false, .state = .queued, .admission = 10, .shown = null, .listed = false },
-        .{ .kind = .admission, .sender = false, .state = .queued, .admission = 11, .shown = null, .listed = false },
-        .{ .kind = .admission, .sender = false, .state = .excluded, .admission = 11, .shown = null, .listed = true },
-        .{ .kind = .received, .sender = true, .state = .queued, .admission = 11, .shown = null, .listed = true },
-        .{ .kind = .admission, .sender = false, .state = .applied, .admission = 9, .shown = null, .listed = false },
-        .{ .kind = .user, .sender = false, .state = .applied, .admission = 11, .shown = null, .listed = false },
-    }) |case| {
-        const message: protocol.ActivityItem.Message = .{ .admission = case.admission, .key = .{}, .turn = null, .state = case.state, .content = content, .admitted_at = 1, .sender = if (case.sender) peer else null };
-        const item: protocol.ActivityItem = .{ .position = 30, .at = 1, .value = switch (case.kind) {
-            .admission => .{ .admission = message },
-            .received => .{ .received = message },
-            .user => .{ .user = message },
-        } };
-        try std.testing.expectEqual(case.listed, listed(item, case.shown) != null);
-    }
+    const message: protocol.ActivityItem.Message = .{ .admission = 12, .key = .{}, .turn = 1, .state = .applied, .content = .{ .length = 1, .digest = @splat(0) }, .admitted_at = 1 };
+    try std.testing.expectEqual(@as(u64, 12), listed(.{ .position = 30, .at = 1, .value = .{ .user = message } }, span).?.admission);
+    // Another Session's row, and a person's Admission whose row the span lists.
+    try std.testing.expect(listed(.{ .position = 30, .at = 1, .value = .{ .user = .{ .admission = 12, .key = .{}, .turn = 1, .state = .applied, .content = message.content, .admitted_at = 1, .sender = .{ .session = .{ .len = 0 } } } } }, span) == null);
+    try std.testing.expect(listed(.{ .position = 30, .at = 1, .value = .{ .admission = message } }, span) == null);
     try std.testing.expect(listed(.{ .position = 30, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 12, .completion = .completed } } }, span) == null);
-}
-
-/// A live history for transcript tests: each item as of the newest dropped
-/// echo's position, and the echoes live output recorded, in order.
-const Shown = struct {
-    items: [160]protocol.ActivityItem = undefined,
-    count: usize = 0,
-    record: Record = .{},
-    drawn: u64 = 0,
-    output: u64 = 0,
-
-    fn message(admission: u64, state: @FieldType(protocol.ActivityItem.Message, "state"), sender: bool) protocol.ActivityItem.Message {
-        return .{ .admission = admission, .key = .{}, .turn = if (state == .applied) 1 else null, .state = state, .content = .{ .length = 1, .digest = @splat(0) }, .admitted_at = 1, .sender = if (sender) .{ .session = .{ .len = 0 } } else null };
-    }
-
-    /// Appends an item at the next position; live output shows it as an
-    /// echo when `shown`, moving the watermark to `drew` if it showed while
-    /// it waited.
-    fn add(self: *Shown, value: protocol.ActivityItem.Value, shown: bool, drew: ?u64, opening: bool) void {
-        const item: protocol.ActivityItem = .{ .position = self.count + 1, .at = 1, .value = value };
-        self.items[self.count] = item;
-        self.count += 1;
-        if (!shown) return;
-        const before = self.drawn;
-        if (drew) |admission| self.drawn = admission;
-        const echoed = switch (value) {
-            .admission, .received, .user => |echoed| echoed,
-            else => unreachable,
-        };
-        self.record.add(.{ .output = self.output, .end = self.output + 1, .position = item.position, .ordinal = 0, .message = echoed, .drawn = .{ .before = before, .after = self.drawn } }, opening);
-        self.output += 1;
-    }
-
-    /// How many times a transcript reaches each Message by admission ID:
-    /// its kept echoes, and the dropped span listed as `list` reads it.
-    fn reached(self: *const Shown, counts: []u8) !void {
-        @memset(counts, 0);
-        for (self.record.opening[0..self.record.opening_count]) |echo| counts[echo.message.admission] += 1;
-        for (self.record.live[0..self.record.live_count]) |echo| counts[echo.message.admission] += 1;
-        const range = (plan(&Marks{}, &self.record, self.output, null).dropped orelse return error.NothingDropped).range;
-        for (self.items[0..self.count]) |item| if (item.position >= range.lowest and item.position <= range.end) {
-            if (listed(item, range.shown)) |value| counts[value.admission] += 1;
-        };
-    }
-};
-
-test "a dropped span lists a Message taken from the queued row once, after a newer one showed while it waited" {
-    // X waits behind work and leaves the queued row as its row R; another
-    // Session's Messages keep live output from marking, so R falls into the
-    // dropped span with X's Admission below it. Later Y shows at its
-    // Admission while it waits. R is still X's only showing.
-    var shown: Shown = .{};
-    const x = 1;
-    const y = 68;
-    shown.add(.{ .admission = Shown.message(x, .applied, false) }, false, null, false);
-    for (2..4) |admission| shown.add(.{ .received = Shown.message(admission, .queued, true) }, true, null, false);
-    const row = shown.count + 1;
-    shown.add(.{ .user = Shown.message(x, .applied, false) }, true, null, false);
-    for (4..y) |admission| shown.add(.{ .received = Shown.message(admission, .queued, true) }, true, null, false);
-    shown.add(.{ .admission = Shown.message(y, .queued, false) }, true, y, false);
-    const span = shown.record.dropped.?;
-    try std.testing.expect(span.low > 1 and span.low < row and row <= span.high);
-    var counts: [100]u8 = undefined;
-    try shown.reached(&counts);
-    for (1..y + 1) |admission| try std.testing.expectEqual(@as(u8, 1), counts[admission]);
-}
-
-test "Messages waiting at the opening reach a transcript once after their rows fall into the dropped span" {
-    // The opening shows A at its Admission, since nothing holds the queue
-    // and it is the oldest; B to the last wait in the queued row. Their
-    // rows show live once taken, A's excepted, and more than a Record
-    // holds fall into the dropped span; a later Message shows while it
-    // waits.
-    var shown: Shown = .{};
-    const waiting = 70;
-    for (1..waiting + 1) |admission| shown.add(.{ .admission = Shown.message(admission, .applied, false) }, admission == 1, if (admission == 1) 1 else null, true);
-    for (1..waiting + 1) |admission| shown.add(.{ .user = Shown.message(admission, .applied, false) }, admission != 1, null, false);
-    shown.add(.{ .admission = Shown.message(waiting + 1, .queued, false) }, true, waiting + 1, false);
-    try std.testing.expect(shown.record.dropped != null);
-    var counts: [100]u8 = undefined;
-    try shown.reached(&counts);
-    for (1..waiting + 2) |admission| try std.testing.expectEqual(@as(u8, 1), counts[admission]);
 }
 
 test "a stop answers every Message up to its cutoff, and no boundary precedes queued Messages it shows" {
@@ -908,7 +793,7 @@ const DisplayCapture = struct {
     /// Accounts for the last item; returns the Messages after it.
     fn finish(self: *@This()) Messages {
         if (self.current) |current| {
-            self.messages.observe(current, self.current_shown);
+            if (sighted(current.value)) |seen| self.messages.observe(seen.kind, seen.message.admission, self.current_shown);
             if (self.current_shown) switch (current.value) {
                 .admission, .received, .user => |message| self.echoes.add(.{ .output = self.current_start, .end = self.offset, .position = current.position, .ordinal = current.ordinal, .message = message, .drawn = .{ .before = self.current_drawn, .after = self.drawn } }),
                 else => {},
@@ -919,422 +804,6 @@ const DisplayCapture = struct {
         return self.messages;
     }
 };
-
-/// Messages shown in live output, by admission id. Another Session's Message
-/// shows first as its Admission, as does a person's or script's taken next;
-/// each gains its conversation row later: at model-attempt
-/// admission, after a running tool's result when steered, or after the
-/// answer it queued behind. Admission ids follow Session positions, so the
-/// newest of each stands for every earlier one.
-pub const Messages = struct {
-    /// The newest Message shown as its Admission.
-    shown: u64 = 0,
-    /// The newest Message whose conversation row a read returned, or up to
-    /// which a stop excluded every Message without one.
-    answered: u64 = 0,
-
-    /// Every shown Message has its conversation row before the next item, so
-    /// no conversation item after it showed earlier in live output.
-    pub fn settled(self: Messages) bool {
-        return self.shown <= self.answered;
-    }
-
-    fn observe(self: *Messages, item: protocol.ActivityItem, shown: bool) void {
-        switch (item.value) {
-            .admission, .received => |message| if (shown) {
-                self.shown = @max(self.shown, message.admission);
-            },
-            .user => |message| self.answered = @max(self.answered, message.admission),
-            else => {},
-        }
-    }
-};
-
-/// Where a read's output may begin a transcript. `output` counts the read's
-/// staged bytes, styling included; live output keeps only text, so the UI
-/// records the live offset where writing reaches it, never this number.
-pub const Boundary = struct {
-    output: u64,
-    cursor: ?protocol_reply.ConversationCursor,
-    /// Every Message admitted before this position that showed did so before
-    /// the boundary; one admitted at or after it shows after it, if at all.
-    admitted: u64,
-};
-
-/// One Message as a read's output shows it: live, another Session's
-/// Admission, or a person's or script's at its Admission or as its row; in
-/// the opening, its row or unapplied input. `output` and `end` are output
-/// offsets until the UI records live ones. The state is as of the read's end.
-pub const Echo = struct {
-    output: u64,
-    end: u64,
-    position: u64,
-    ordinal: u64,
-    message: protocol.ActivityItem.Message,
-    drawn: DrawnSpan = .{},
-};
-
-/// The newest Message a person or script sent that live output showed while
-/// it waited (see View.Taking), by admission ID: just before the first of
-/// some shown items and just after the last.
-pub const DrawnSpan = struct { before: u64 = 0, after: u64 = 0 };
-
-/// The Messages one read shows, in order: a page holds at most one each.
-pub const Echoes = struct {
-    items: [@typeInfo(@FieldType(protocol.ActivityFacts, "items")).array.len]Echo = undefined,
-    count: usize = 0,
-
-    fn add(self: *Echoes, echo: Echo) void {
-        self.items[self.count] = echo;
-        self.count += 1;
-    }
-
-    pub fn slice(self: *const Echoes) []const Echo {
-        return self.items[0..self.count];
-    }
-};
-
-/// One step of a transcript's listing: a Message in full where older pages
-/// and the retained copy cannot show it. Each step reads one Message.
-pub const Listing = union(enum) {
-    /// A shown Message whose output left the view, from its own item.
-    echo: Echo,
-    /// Messages at positions in `[lowest, before)` at `end`, newest first:
-    /// every one live output showed in a span it dropped (`shown`), or those
-    /// not applied at `end` (see `listed`). `cursor` is where the next one is
-    /// searched for, backward.
-    range: struct { end: u64, lowest: u64, shown: ?DrawnSpan, cursor: protocol_reply.ActivityCursor },
-
-    pub fn within(end: u64, lowest: u64, before: u64, shown: ?DrawnSpan) ?Listing {
-        if (lowest >= before) return null;
-        // Position 0 searches back from the end itself.
-        return .{ .range = .{ .end = end, .lowest = lowest, .shown = shown, .cursor = .{ .end = end, .position = if (before > end) 0 else before, .direction = .backward } } };
-    }
-};
-
-/// The Messages live output shows after its newest mark, as live offsets.
-/// A mark prunes every echo before it: a transcript joined there reaches
-/// those through older pages or its listing. Opening echoes (one page) are
-/// never dropped; live ones beyond capacity are, keeping only their span.
-pub const Record = struct {
-    pub const capacity = 64;
-    opening: [@typeInfo(@FieldType(Echoes, "items")).array.len]Echo = undefined,
-    opening_count: usize = 0,
-    live: [capacity]Echo = undefined,
-    live_count: usize = 0,
-    /// Live echoes dropped beyond capacity: live echoes follow position
-    /// order, so they are every item live output showed as a Message in
-    /// `[low, high]` (see `listed`), and `drawn` is around them.
-    dropped: ?struct { low: u64, high: u64, end: u64, drawn: DrawnSpan } = null,
-
-    pub fn add(self: *Record, echo: Echo, opening: bool) void {
-        if (opening) {
-            self.opening[self.opening_count] = echo;
-            self.opening_count += 1;
-            return;
-        }
-        if (self.live_count == self.live.len) {
-            const old = self.live[0];
-            self.dropped = if (self.dropped) |span| .{ .low = span.low, .high = old.position, .end = old.end, .drawn = .{ .before = span.drawn.before, .after = old.drawn.after } } else .{ .low = old.position, .high = old.position, .end = old.end, .drawn = old.drawn };
-            std.mem.copyForwards(Echo, self.live[0 .. self.live_count - 1], self.live[1..self.live_count]);
-            self.live_count -= 1;
-        }
-        self.live[self.live_count] = echo;
-        self.live_count += 1;
-    }
-
-    pub fn prune(self: *Record, offset: u64) void {
-        self.opening_count = keep(self.opening[0..self.opening_count], offset);
-        self.live_count = keep(self.live[0..self.live_count], offset);
-        if (self.dropped) |span| if (span.end <= offset) {
-            self.dropped = null;
-        };
-    }
-
-    fn keep(echoes: []Echo, offset: u64) usize {
-        var kept: usize = 0;
-        for (echoes) |echo| if (echo.output >= offset) {
-            echoes[kept] = echo;
-            kept += 1;
-        };
-        return kept;
-    }
-};
-
-/// How a transcript of live output retained from `front` begins: where its
-/// copy starts, then upward the listed Messages, the gap's label if any, the
-/// Messages listed at its seam, and older pages before `older`.
-pub const Plan = struct {
-    start: u64,
-    /// Shown Messages that left the view, oldest first; listed nearest the copy.
-    echoes: [@typeInfo(@FieldType(Record, "opening")).array.len + Record.capacity]Echo = undefined,
-    echo_count: usize = 0,
-    /// How many of `echoes`, the oldest, are the opening's: older than every
-    /// live one, the dropped span's included.
-    opening: usize = 0,
-    dropped: ?Listing = null,
-    gap: bool = false,
-    unapplied: ?Listing = null,
-    older: ?protocol_reply.ConversationCursor = null,
-
-    /// The listed Message a transcript reads next, if any comes before older
-    /// pages. Each is prepended, so newest first: live echoes, the dropped
-    /// span, the opening's echoes, then after the gap's label the seam's.
-    pub fn next(self: *const Plan) ?Listing {
-        if (self.echo_count > self.opening) return .{ .echo = self.echoes[self.echo_count - 1] };
-        if (self.dropped) |range| return range;
-        if (self.echo_count != 0) return .{ .echo = self.echoes[self.echo_count - 1] };
-        if (!self.gap) if (self.unapplied) |range| return range;
-        return null;
-    }
-
-    /// Passes the step `next` returned once it shows; a range continues at
-    /// `rest`, or is done when null.
-    pub fn listed(self: *Plan, step: Listing, rest: ?Listing) void {
-        switch (step) {
-            .echo => self.echo_count -= 1,
-            .range => if (self.dropped != null) {
-                self.dropped = rest;
-            } else {
-                self.unapplied = rest;
-            },
-        }
-    }
-};
-
-pub fn plan(marks: *const Marks, record: *const Record, front: u64, lowest: ?u64) Plan {
-    const mark: ?Marks.Mark = switch (marks.start(front)) {
-        .joined => |mark| return .{ .start = mark.offset, .unapplied = seam(mark, lowest), .older = mark.cursor },
-        .gap => |before| before,
-    };
-    var result: Plan = .{ .start = front, .gap = true, .older = if (mark) |value| value.cursor else null };
-    if (mark) |value| result.unapplied = seam(value, lowest);
-    // Live echoes dropped beyond capacity may reach past the front: start
-    // after the newest so none shows twice, and list them all.
-    if (record.dropped) |span| {
-        result.start = @max(result.start, span.end);
-        // Read at the newest dropped echo's position: a Message applied
-        // there has its row in the span (see `listed`).
-        result.dropped = Listing.within(span.high, span.low, span.high + 1, span.drawn);
-    }
-    // An echo that the front cuts is listed whole, and the copy starts after it.
-    const echoes = [_][]const Echo{ record.opening[0..record.opening_count], record.live[0..record.live_count] };
-    for (echoes) |kept| for (kept) |echo| if (echo.output < result.start and echo.end > result.start) {
-        result.start = echo.end;
-    };
-    for (echoes, 0..) |kept, index| for (kept) |echo| if (echo.end <= result.start) {
-        result.echoes[result.echo_count] = echo;
-        result.echo_count += 1;
-        if (index == 0) result.opening += 1;
-    };
-    return result;
-}
-
-test "a transcript lists each recorded Message once, whole, before the copy that follows it" {
-    const Make = struct {
-        fn echo(position: u64, output: u64) Echo {
-            // Each one moves the newest Message shown while it waited.
-            return .{ .output = output, .end = output + 8, .position = position, .ordinal = 0, .message = .{ .admission = position, .key = .{}, .turn = null, .state = .queued, .content = .{ .length = 0, .digest = @splat(0) }, .admitted_at = 1 }, .drawn = .{ .before = position, .after = position + 1 } };
-        }
-    };
-    const opening: Marks.Mark = .{ .offset = 0, .cursor = .{ .end = 20 }, .admitted = 5 };
-    var marks: Marks = .{};
-    marks.record(opening);
-    const Span = @typeInfo(@FieldType(Record, "dropped")).optional.child;
-    var record: Record = .{};
-    for (0..16) |index| record.add(Make.echo(5 + index, index * 4), true);
-    // 64 live echoes fit; the 65th drops the oldest, keeping its span.
-    for (0..64) |index| record.add(Make.echo(30 + index, 100 + 10 * index), false);
-    try std.testing.expectEqual(@as(?Span, null), record.dropped);
-    record.add(Make.echo(94, 740), false);
-    try std.testing.expectEqual(@as(usize, 16), record.opening_count);
-    try std.testing.expectEqual(@as(usize, 64), record.live_count);
-    try std.testing.expectEqualDeep(Span{ .low = 30, .high = 30, .end = 108, .drawn = .{ .before = 30, .after = 31 } }, record.dropped);
-    // A second wrap widens the span to the next dropped echo, its end and
-    // what showed by then.
-    var wrapped = record;
-    wrapped.add(Make.echo(95, 750), false);
-    try std.testing.expectEqualDeep(Span{ .low = 30, .high = 31, .end = 118, .drawn = .{ .before = 30, .after = 32 } }, wrapped.dropped);
-    try std.testing.expectEqualDeep(Listing.within(31, 30, 32, .{ .before = 30, .after = 32 }), plan(&marks, &wrapped, 105, 3).dropped);
-    try std.testing.expectEqual(@as(u64, 118), plan(&marks, &wrapped, 105, 3).start);
-
-    // The newest dropped echo ends after the front: the copy starts at its
-    // end, so it shows only in the listing, and every opening echo is listed.
-    // Live echoes wrapped while no later mark recorded: the opening mark
-    // still names older pages and the seam.
-    var result = plan(&marks, &record, 105, 3);
-    try std.testing.expectEqual(@as(u64, 108), result.start);
-    try std.testing.expect(result.gap);
-    try std.testing.expectEqualDeep(Listing.within(30, 30, 31, .{ .before = 30, .after = 31 }), result.dropped);
-    try std.testing.expectEqualDeep(Listing.within(20, 3, 5, null), result.unapplied);
-    try std.testing.expectEqual(@as(u64, 20), result.older.?.end);
-    try std.testing.expectEqual(@as(usize, 16), result.echo_count);
-    // Before the front, it is listed as well; the copy starts at the front.
-    result = plan(&marks, &record, 109, 3);
-    try std.testing.expectEqual(@as(u64, 109), result.start);
-    try std.testing.expect(result.dropped != null);
-    // A front inside an echo lists that echo whole and starts after it.
-    result = plan(&marks, &record, 112, 3);
-    try std.testing.expectEqual(@as(u64, 118), result.start);
-    try std.testing.expectEqual(@as(usize, 17), result.echo_count);
-    try std.testing.expectEqual(@as(u64, 31), result.echoes[16].position);
-    // Listed newest first: the live echo, the dropped span, then the opening's
-    // older echoes; the gap's label precedes the seam.
-    try std.testing.expectEqual(@as(u64, 31), result.next().?.echo.position);
-    result.listed(result.next().?, null);
-    try std.testing.expectEqualDeep(Listing.within(30, 30, 31, .{ .before = 30, .after = 31 }), result.next());
-    result.listed(result.next().?, null);
-    for (0..16) |index| {
-        try std.testing.expectEqual(@as(u64, 20 - index), result.next().?.echo.position);
-        result.listed(result.next().?, null);
-    }
-    try std.testing.expectEqual(@as(?Listing, null), result.next());
-    result.gap = false;
-    try std.testing.expectEqualDeep(Listing.within(20, 3, 5, null), result.next());
-    result.listed(result.next().?, null);
-    try std.testing.expectEqual(@as(?Listing, null), result.next());
-
-    // A mark prunes echoes strictly before it; one starting at it stays.
-    record.prune(107);
-    try std.testing.expect(record.dropped != null);
-    record.prune(120);
-    try std.testing.expectEqual(@as(?Span, null), record.dropped);
-    try std.testing.expectEqual(@as(usize, 0), record.opening_count);
-    try std.testing.expectEqual(@as(usize, 63), record.live_count);
-    try std.testing.expectEqual(@as(u64, 120), record.live[0].output);
-}
-
-test "the opening mark is retained through 64 marks and dropped by the 65th" {
-    var marks: Marks = .{};
-    marks.record(.{ .offset = 0, .cursor = null, .admitted = 1 });
-    for (1..64) |index| marks.record(.{ .offset = index, .cursor = .{ .end = index }, .admitted = index + 1 });
-    try std.testing.expectEqual(@as(u64, 0), marks.start(0).joined.offset);
-    marks.record(.{ .offset = 64, .cursor = .{ .end = 64 }, .admitted = 65 });
-    try std.testing.expectEqual(@as(u64, 1), marks.start(0).joined.offset);
-}
-
-/// Messages a transcript joined at `mark` lists there: admitted before its
-/// position and not applied at its end, so neither older pages nor the copy
-/// show them.
-fn seam(mark: Marks.Mark, lowest: ?u64) ?Listing {
-    const cursor = mark.cursor orelse return null;
-    return Listing.within(cursor.end, lowest orelse return null, mark.admitted, null);
-}
-
-/// A read's newest boundaries, oldest first. Any boundary at or after the
-/// view's front joins its transcript, so dropping the oldest loses nothing
-/// a newer one cannot replace.
-pub const Boundaries = struct {
-    items: [Marks.capacity]Boundary = undefined,
-    count: usize = 0,
-
-    pub fn add(self: *Boundaries, boundary: Boundary) void {
-        if (self.count == self.items.len) {
-            std.mem.copyForwards(Boundary, self.items[0 .. self.count - 1], self.items[1..self.count]);
-            self.count -= 1;
-        }
-        self.items[self.count] = boundary;
-        self.count += 1;
-    }
-
-    pub fn slice(self: *const Boundaries) []const Boundary {
-        return self.items[0..self.count];
-    }
-};
-
-/// A later read also marks the end of its output, even when it shows nothing,
-/// if it reached its snapshot's end with every shown Message rowed.
-/// Reads continue from the previous one, so every item through `end` was read
-/// and has shown before `output` or never shows live; every later item,
-/// a result included, takes a fresh position after `end`. A Message whose row
-/// a read returned silently is then reachable through older pages. A page
-/// with more to read ends before its snapshot's end, and an unrowed shown
-/// Message would be in neither, so neither marks.
-fn readEnd(messages: Messages, more: bool, end: u64, output: u64) ?Boundary {
-    if (more or !messages.settled()) return null;
-    // End 0 asks the Host for its current end; nothing precedes position 1.
-    return .{ .output = output, .cursor = if (end == 0) null else .{ .end = end }, .admitted = end + 1 };
-}
-
-test "a silent read marks its end only when complete and every shown Message is rowed" {
-    const rowed: Messages = .{ .shown = 4, .answered = 4 };
-    try std.testing.expectEqualDeep(Boundary{ .output = 9, .cursor = .{ .end = 30 }, .admitted = 31 }, readEnd(rowed, false, 30, 9).?);
-    try std.testing.expectEqual(@as(?Boundary, null), readEnd(rowed, true, 30, 9));
-    try std.testing.expectEqual(@as(?Boundary, null), readEnd(.{ .shown = 5, .answered = 4 }, false, 30, 9));
-    try std.testing.expectEqualDeep(Boundary{ .output = 0, .cursor = null, .admitted = 1 }, readEnd(.{}, false, 0, 0).?);
-}
-
-/// Read boundaries in live output, oldest first. A boundary pairs an absolute
-/// live offset with the canonical cursor for everything before it (null: the
-/// conversation's start). It is valid only if no conversation item at or after
-/// its cursor showed before its offset. Reads record only valid ones: the
-/// opening's start, and in a later read each shown item that follows every
-/// shown Message's conversation row, and its output's end (see `readEnd`).
-/// An incomplete read that shows nothing records none.
-pub const Marks = struct {
-    pub const Mark = struct { offset: u64, cursor: ?protocol_reply.ConversationCursor, admitted: u64 };
-    pub const capacity = 64;
-    items: [capacity]Mark = undefined,
-    count: usize = 0,
-
-    /// Where a transcript of live output retained from some front begins.
-    pub const Start = union(enum) {
-        /// Output from the boundary's offset continues the older pages
-        /// before its cursor exactly.
-        joined: Mark,
-        /// No boundary is retained. Output before the front left the view;
-        /// older pages continue before the newest boundary that did, if any.
-        gap: ?Mark,
-    };
-
-    pub fn record(self: *Marks, mark: Mark) void {
-        // Equal offsets: nothing showed between the two reads, so the later
-        // cursor is valid too and names at least as much before the offset.
-        if (self.count != 0 and self.items[self.count - 1].offset == mark.offset) {
-            self.items[self.count - 1] = mark;
-            return;
-        }
-        std.debug.assert(self.count == 0 or self.items[self.count - 1].offset < mark.offset);
-        if (self.count == self.items.len) {
-            // Dropping the oldest boundary keeps the newest before any front
-            // until every retained one is after it.
-            std.mem.copyForwards(Mark, self.items[0 .. self.count - 1], self.items[1..self.count]);
-            self.count -= 1;
-        }
-        self.items[self.count] = mark;
-        self.count += 1;
-    }
-
-    /// The first boundary retained from `front`; otherwise the newest before it.
-    pub fn start(self: *const Marks, front: u64) Start {
-        var before: ?Mark = null;
-        for (self.items[0..self.count]) |mark| {
-            if (mark.offset >= front) return .{ .joined = mark };
-            before = mark;
-        }
-        return .{ .gap = before };
-    }
-};
-
-test "a transcript joins at the first retained boundary or shows the gap after the newest evicted one" {
-    var marks: Marks = .{};
-    try std.testing.expectEqualDeep(Marks.Start{ .gap = null }, marks.start(0));
-    marks.record(.{ .offset = 0, .cursor = null, .admitted = 1 });
-    marks.record(.{ .offset = 40, .cursor = .{ .end = 9, .before_position = 7 }, .admitted = 7 });
-    try std.testing.expectEqualDeep(Marks.Start{ .joined = .{ .offset = 0, .cursor = null, .admitted = 1 } }, marks.start(0));
-    try std.testing.expectEqual(@as(u64, 7), marks.start(10).joined.cursor.?.before_position);
-    // Past every boundary, older pages continue before the newest one, not
-    // the oldest and not none: rows between it and the front are the gap.
-    try std.testing.expectEqual(@as(u64, 7), marks.start(41).gap.?.cursor.?.before_position);
-    // An equal offset replaces the cursor rather than adding a boundary.
-    marks.record(.{ .offset = 40, .cursor = .{ .end = 9, .before_position = 8 }, .admitted = 8 });
-    try std.testing.expectEqual(@as(usize, 2), marks.count);
-    try std.testing.expectEqual(@as(u64, 8), marks.start(10).joined.cursor.?.before_position);
-    for (0..100) |index| marks.record(.{ .offset = 100 + index, .cursor = .{ .end = 200, .before_position = 100 + index }, .admitted = 100 + index });
-    try std.testing.expectEqual(@as(usize, 64), marks.count);
-    try std.testing.expectEqual(@as(u64, 136), marks.start(0).joined.offset);
-    try std.testing.expectEqual(@as(u64, 199), marks.start(500).gap.?.cursor.?.before_position);
-}
 
 /// The Ctrl-O page. The Message's length, digest and end are validated
 /// before anything shows; its full text then follows at column 0.
