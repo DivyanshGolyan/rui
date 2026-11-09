@@ -10,7 +10,8 @@ import textwrap
 import unittest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from platform_boundary import mac_path, python_sites, sites, violations, zig_sites  # noqa: E402
+from platform_boundary import (bind_sites, mac_path, python_sites, sites, typescript_sites,  # noqa: E402
+                               unlistened_binds, violations, zig_sites)
 from select_tests import CHECK_COVERS, select  # noqa: E402
 from qualification import split_build  # noqa: E402
 
@@ -64,6 +65,41 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertEqual(python_sites('if sys.platform == "darwin":\n    pass\n'), 1)
         self.assertEqual(python_sites('name = platform.system()\nos.uname()\n'), 2)
         self.assertEqual(python_sites('# sys.platform\ntext = "sys.platform"\nx.sys.platform\n'), 0)
+
+    def test_fixture_trust_through_ssl_cert_variables_is_a_platform_site(self):
+        # The feed-host test before #997 trusted its CA this way and failed only on Darwin.
+        self.assertEqual(typescript_sites(
+            'writeFileSync(wrapper, `#!/bin/sh\\nexport SSL_CERT_FILE=${quote(cert)}\\nexec rui "$@"\\n`);'), 1)
+        self.assertEqual(typescript_sites('// SSL_CERT_FILE is ignored on Darwin\n/* SSL_CERT_DIR */ const a = 1;'), 0)
+        self.assertEqual(python_sites('env = {"SSL_CERT_FILE": cert}\n'), 1)
+        self.assertEqual(python_sites('script = f"SSL_CERT_DIR={path} rui host serve"\n'), 1)
+        self.assertEqual(python_sites('# SSL_CERT_FILE\nenv = os_semantics.system_trust(cert)\n'), 0)
+
+    def test_system_trust_is_linux_only(self):
+        sys.path.insert(0, str(Path(__file__).parents[1] / "integration"))
+        import os_semantics
+        with os_semantics.simulate("linux"):
+            self.assertEqual(os_semantics.system_trust(Path("/ca.pem")), {"SSL_CERT_FILE": "/ca.pem"})
+        with os_semantics.simulate("darwin"), self.assertRaises(AssertionError):
+            os_semantics.system_trust(Path("/ca.pem"))
+
+    def test_a_bound_socket_that_never_listens_is_refused(self):
+        # server_mcp_tests.zig before #1002: Darwin dropped its SYNs instead of refusing.
+        unlistened = textwrap.dedent('''
+            test "down" {
+                const fd = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
+                // std.c.listen(fd, 1) would make it a listener.
+                if (std.c.bind(fd, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)) != 0) return error.BindFailed;
+            }''')
+        self.assertEqual(unlistened_binds(unlistened), ['"down"'])
+        listener = textwrap.dedent('''
+            fn tcp(port: *u16) !Peer {
+                if (std.c.bind(fd, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)) != 0) return error.Bind;
+                if (std.c.listen(fd, 1) != 0) return error.Listen;
+            }
+            test "refused" { const port = try socket_fixture.refusedPort(); _ = port; }''')
+        self.assertEqual(unlistened_binds(listener), [])
+        self.assertEqual(bind_sites(), {})
 
     def test_sites_outside_mac_paths_are_violations(self):
         self.assertEqual(violations({}), [])

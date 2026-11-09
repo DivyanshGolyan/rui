@@ -99,24 +99,7 @@ fn run(case: Case) !void {
     script.* = .{ .reply = reply, .more = if (case == .serial) &.{reply} else &.{}, .hold_reply = case == .timeout or case == .stop or case == .shutdown or case == .concurrent };
     if (case != .down) try script.start();
     defer if (case != .down) script.stop();
-    // Keep the unavailable port ours without relying on a globally chosen
-    // unused port. A bound, non-listening TCP socket need not refuse promptly:
-    // Darwin tcp_input drops SYNs for a TCPS_CLOSED PCB without a reset.
-    const down_fd = if (case == .down) std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0) else -1;
-    defer if (down_fd >= 0) {
-        _ = std.c.close(down_fd);
-    };
-    if (case == .down) {
-        if (down_fd < 0) return error.SocketFailed;
-        var address: std.c.sockaddr.in = std.mem.zeroes(std.c.sockaddr.in);
-        address.family = std.c.AF.INET;
-        address.addr = @bitCast([4]u8{ 127, 0, 0, 1 });
-        if (@hasField(std.c.sockaddr.in, "len")) address.len = @sizeOf(std.c.sockaddr.in);
-        if (std.c.bind(down_fd, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)) != 0) return error.BindFailed;
-        var length: std.c.socklen_t = @sizeOf(std.c.sockaddr.in);
-        if (std.c.getsockname(down_fd, @ptrCast(&address), &length) != 0) return error.NameFailed;
-        script.port = std.mem.bigToNative(u16, address.port);
-    }
+    if (case == .down) script.port = try @import("socket_fixture.zig").refusedPort();
     var url_buffer: [128]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/mcp", .{script.port});
     const other_script = try allocator.create(Script);
