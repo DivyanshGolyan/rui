@@ -20,6 +20,7 @@ const View = @import("session_view.zig");
 const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const reader_policy = @import("session_reading.zig");
+const session_notice = @import("session_notice.zig");
 const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
 const UpgradePanel = @import("UpgradePanel.zig");
@@ -1070,12 +1071,7 @@ fn drawFrame(self: *Self) !void {
     // A waiting Action says how to decide it under the input, not here. A
     // sent Message reads Sent until live output shows it: as its row, at
     // its stop, or in the queued row, which the frame may drop.
-    const submission_status: ?[]const u8 = if (self.reading.opening) "Opening…" else if (waiting) "" else if (self.submission.view()) |submission| switch (submission.state) {
-        .not_started => "Not sent · Ctrl-R retries original",
-        .submitting => "Sending…",
-        .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
-        .rejected => "Rejected · /discard",
-    } else null;
+    const submission_status = session_notice.status(self.reading.opening, waiting, self.heldOriginal());
     const base_status = submission_status orelse if (self.admission.echo != null) "Sent" else "";
     // A waiting Action speaks for itself; elsewhere the work says what it is
     // doing now, on every view.
@@ -1143,8 +1139,8 @@ fn recoverable(self: *const Self) ?*const [36]u8 {
 /// Ctrl-R, or /recover with the original's key: retries the original,
 /// except while an Action waits, which only its choice decides.
 fn recover(self: *Self, key: ?[]const u8) !void {
-    if (self.terminal.screen.consent != null) {
-        self.notice = self.decisionNotice();
+    if (self.waitingAction()) |action| {
+        self.notice = session_notice.decision(action);
         return;
     }
     try self.submission.requestRecovery(key);
@@ -1394,18 +1390,13 @@ fn perform(self: *Self, action: ConversationAction) !void {
             self.dropMessageRequest();
             screen.moveRow(.selector);
             if (action == .close and self.settledView()) {
-                if (self.submission.view()) |submission| {
-                    self.notice = switch (submission.state) {
-                        .rejected => "Esc returns to the overview once /discard clears the rejected original.",
-                        .submitting => "Esc returns to the overview once the original is confirmed.",
-                        .not_started, .unconfirmed => "Esc returns to the overview once Ctrl-R retries the original.",
-                    };
-                } else if (self.input.composition().bytes.len == 0) {
-                    self.leaving = .returned;
-                    return;
-                } else {
-                    // No draft outlives the frontend, so leaving would lose it.
-                    self.notice = "Esc returns to the overview once the draft is empty.";
+                const original: ?Submission.State = if (self.submission.view()) |submission| submission.state else null;
+                switch (session_notice.close(original, self.input.composition().bytes.len == 0)) {
+                    .leave => {
+                        self.leaving = .returned;
+                        return;
+                    },
+                    .stay => |why| self.notice = why,
                 }
             }
             if (action != .latest and screen.view == .message) try screen.leaveMessage() else try screen.latest();
@@ -1701,21 +1692,17 @@ fn choose(self: *Self, key: Screen.ChoiceKey, offer: ?Screen.Offer) !void {
     }
 }
 
-/// Why a draft waits for the Action: a previewed Action is decided only in the shell.
-fn decisionNotice(self: *const Self) []const u8 {
+/// The waiting Action, as the screen shows it now.
+fn waitingAction(self: *const Self) ?session_notice.Action {
     const screen = self.terminal.screen;
-    if (screen.consent.?.presentation == .preview) return "! Approval disabled · /help for exact shell commands. Draft retained.";
-    return if (screen.actionVisible()) "! Action needs a decision; Esc returns to the choice. Draft retained." else "! Action needs a decision; Esc returns to it. Draft retained.";
+    const pending = screen.consent orelse return null;
+    return .{ .preview = pending.presentation == .preview, .visible = screen.actionVisible(), .reason = screen.liveApproval(self.commandActive()) == .reason };
 }
 
-/// Says what Enter in the draft does, so the frame showing it may offer the
-/// denial.
-const reason_not_ready = "! Not ready; nothing denied · " ++ Screen.deny_words;
-
-/// Why Enter in the draft beside an Action sent nothing.
-fn reasonNotice(self: *const Self, letter: bool) []const u8 {
-    if (self.terminal.screen.liveApproval(self.commandActive()) != .reason) return self.decisionNotice();
-    return if (letter) "! Use ←→ and Enter to choose; a message denies the call." else reason_not_ready;
+/// The original the submission holds, as the conversation shows it.
+fn heldOriginal(self: *const Self) ?session_notice.Held {
+    const submission = self.submission.view() orelse return null;
+    return .{ .kind = submission.kind, .state = submission.state };
 }
 
 /// One input in the draft, with the offer this input spent. Beside an Action
@@ -1746,7 +1733,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer)
             try self.beginMessage(.{ .message_then_deny = .{ .ticket = ticket, .action = denial.action } });
         } else try self.beginMessage(.{ .message = ticket }),
         .command => try self.commandLine(),
-        .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (screen.consent != null) self.reasonNotice(letter) else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
+        .busy => self.notice = session_notice.busy(.{ .command = self.commandActive(), .held = self.heldOriginal(), .preparing = self.reading.phase == .permission, .action = self.waitingAction(), .letter = letter }),
         .editor => |outcome| switch (outcome) {
             .action => |action| try self.perform(action),
             .refused => |why| self.notice = refusedNotice(why),
@@ -2811,7 +2798,7 @@ test "a Message being written when an Action arrives keeps the input row, so its
     try std.testing.expect(held.self.submission.view() == null);
     try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
     try std.testing.expectEqualStrings("run the tests", held.self.input.composition().bytes);
-    try std.testing.expectEqualStrings(reason_not_ready, held.self.notice.?);
+    try std.testing.expectEqualStrings(session_notice.reason_not_ready, held.self.notice.?);
     try held.settle();
     try std.testing.expectEqual(ConsentPolicy.Projection{ .approval = .reason }, held.screen.selected);
     // Esc shows the choice at Allow once, and the draft stays.
@@ -2857,13 +2844,13 @@ test "an Enter in the draft beside an Action before its frame is offered denies 
     try std.testing.expect(held.self.submission.view() == null);
     try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
     try std.testing.expectEqualStrings("skip it", held.self.input.composition().bytes);
-    try std.testing.expectEqualStrings(reason_not_ready, held.self.notice.?);
+    try std.testing.expectEqualStrings(session_notice.reason_not_ready, held.self.notice.?);
     // A frame held while its write pumps the Enter: still not delivered.
     try held.hold("\r");
     _ = try held.self.draw();
     try std.testing.expect(held.pumps != 0);
     try std.testing.expect(held.self.submission.view() == null);
-    try std.testing.expectEqualStrings(reason_not_ready, held.self.notice.?);
+    try std.testing.expectEqualStrings(session_notice.reason_not_ready, held.self.notice.?);
     // The refusal is drawn and offered; the Enter after it sends the line.
     try held.settle();
     try sendKeys(&held.self, "\r");
@@ -2880,7 +2867,7 @@ test "a draft beside an Action denies only after a frame whose line under it say
     // The Enter meant to send the line, read before any frame showed the
     // Action, is refused.
     try sendKeys(&held.self, "\r");
-    try std.testing.expectEqualStrings(reason_not_ready, held.self.notice.?);
+    try std.testing.expectEqualStrings(session_notice.reason_not_ready, held.self.notice.?);
     // Another notice takes the line under the draft, as a confirmation of
     // an earlier Message would: the frame shows the reason but never says
     // what Enter does, so the Enter after it denies nothing.
@@ -2894,10 +2881,10 @@ test "a draft beside an Action denies only after a frame whose line under it say
     try std.testing.expectEqual(@as(?Submission.View, null), held.self.submission.view());
     try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
     // That refusal says it; once its frame is offered, Enter denies.
-    try std.testing.expectEqualStrings(reason_not_ready, held.self.notice.?);
+    try std.testing.expectEqualStrings(session_notice.reason_not_ready, held.self.notice.?);
     held.self.dirty = true;
     try held.settle();
-    try std.testing.expectEqualStrings(reason_not_ready, lastRow(held.screen, &storage));
+    try std.testing.expectEqualStrings(session_notice.reason_not_ready, lastRow(held.screen, &storage));
     try sendKeys(&held.self, "\r");
     try std.testing.expectEqual(@as(?ConsentPolicy.Pending, null), held.screen.consent);
     const reason = held.self.submission.intent.?.message_then_deny;

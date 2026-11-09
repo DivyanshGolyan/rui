@@ -22,9 +22,6 @@ const Self = @This();
 /// reads.
 pub const ViewKind = enum { live, transcript, inspection, action, message };
 
-/// What a reason's line under the input says, as its hint or a notice.
-pub const deny_words = "enter denies the call and sends this";
-
 /// A delivered frame's choice, offered to the next input.
 pub const Offer = struct { frame: u64, scope: u64, decision: ConsentPolicy.Decision };
 
@@ -815,7 +812,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     var says_deny = false;
     if (layout.notice.length != 0) {
         _ = layout.notice.draw(window.child(.{ .y_off = line_row, .height = layout.line_height }), .{}, true, self.colour, self.style(if (std.mem.startsWith(u8, footer.notice, "!")) .failure else .normal));
-        says_deny = std.mem.indexOf(u8, footer.notice, deny_words) != null;
+        says_deny = std.mem.indexOf(u8, footer.notice, ConsentPolicy.deny_words) != null;
     } else if (layout.line_height != 0) {
         // While an Action waits, the line under the input says how to decide it.
         const text = if (self.selected.approval != .absent)
@@ -920,7 +917,7 @@ fn approvalHint(approval: ConsentPolicy.Approval, action_visible: bool, width: u
         .choice => &.{ "←→ choose · enter confirms", "←→ · enter" },
         .reading => &.{ "PgDn reads the rest · then choose", "PgDn · then choose" },
         .held => &.{ "the choice returns when it ends", "then the choice" },
-        .reason => &.{ deny_words ++ " · esc back to the choice", "enter denies and sends this · esc choice", "enter denies · esc choice" },
+        .reason => &.{ ConsentPolicy.deny_words ++ " · esc back to the choice", "enter denies and sends this · esc choice", "enter denies · esc choice" },
         .paused => if (action_visible) &.{ "Approval paused · Esc returns to the choice", "Esc · choice" } else &.{ "Approval paused · Esc returns to Action", "Esc · Action" },
         .preview => &.{ "Approval disabled · /help for exact shell commands", "Approval disabled" },
     };

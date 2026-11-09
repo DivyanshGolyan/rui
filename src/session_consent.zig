@@ -9,6 +9,10 @@ pub const Choice = enum { allow_once, deny };
 pub const Decision = struct { action: u64, choice: Choice };
 pub const Presentation = enum { complete, preview };
 
+/// What a reason's line under the input says, as its hint or a notice. A
+/// frame offers the denial only when that line says it.
+pub const deny_words = "enter denies the call and sends this";
+
 /// What the input row shows: the draft editor, or the Allow once / Deny
 /// selector.
 pub const Row = enum { draft, selector };
