@@ -1,9 +1,10 @@
-//! The Session screen's chrome, wired: it owns the rows and chips that
-//! `session_chrome` decides and puts them in the Session screen's slots each
-//! frame. The screen tells it what it read (browsing or at the latest, what
-//! needs the person, the work, the facts) and forwards keys; the chrome keeps
-//! the notice, the `?` shortcuts and the title it last set. Every click runs
-//! one of the screen's own actions, the same one its key runs.
+//! The Session screen's chrome, placed: it owns the rows and chips that
+//! present what `session_chrome` decided, and puts them in the Session
+//! screen's slots each frame from the values the screen passes. It holds no
+//! decision and no state but its widgets: the screen keeps the notice
+//! (`session_chrome.Notice`), whether the `?` shortcuts are open
+//! (`session_chrome.shortcut`) and the title (`session_chrome.Title`). Every
+//! click runs one of the screen's own actions, the same one its key runs.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -44,14 +45,16 @@ pub const View = struct {
     stoppable: bool = false,
     /// The facts after `‹ `.
     facts: []const u8 = "",
+    /// The notice that shows now (`Notice.current`), borrowed until the
+    /// next frame.
+    notice: ?[]const u8 = null,
+    /// The `?` shortcuts are open.
+    shortcuts: bool = false,
     /// The overlay the screen would show (the palette), or null. The `?`
     /// shortcuts take its place while open.
     overlay: ?vxfw.Widget = null,
     width: u16,
-    now_ms: u64,
 };
-
-const notice_capacity = 256;
 
 status: StatusRow,
 facts: FactsRow,
@@ -59,11 +62,6 @@ activity: ActivityBlock,
 marker: Chip,
 marker_text: [chrome.marker_bytes]u8 = undefined,
 shortcuts: Shortcuts = .{},
-shortcuts_open: bool = false,
-notice_text: [notice_capacity]u8 = undefined,
-notice: ?struct { len: usize, shown: chrome.Notice } = null,
-title_text: [chrome.title_bytes]u8 = undefined,
-title_len: ?usize = null,
 
 pub fn init(actions: Actions) Self {
     const chip = struct {
@@ -79,57 +77,15 @@ pub fn init(actions: Actions) Self {
     };
 }
 
-/// Shows `text` as a notice about the person's own last action, replacing
-/// any notice before it. A longer text is cut on a character.
-pub fn notify(self: *Self, text: []const u8, now_ms: u64) void {
-    var len = @min(text.len, notice_capacity);
-    while (len < text.len and len > 0 and text[len] & 0xc0 == 0x80) len -= 1;
-    @memcpy(self.notice_text[0..len], text[0..len]);
-    self.notice = .{ .len = len, .shown = .{ .shown_ms = now_ms } };
-}
-
-/// A key arrived. It clears the notice before it acts, so a notice the key
-/// itself raises survives, and opens or closes the `?` shortcuts. The
-/// screen acts on the key unless this returns `.open` or `.close_and_type`
-/// (which types one `?`).
-pub fn key(self: *Self, question: bool, draft_empty: bool) chrome.Shortcut {
-    self.notice = null;
-    const what = chrome.shortcut(self.shortcuts_open, draft_empty, question);
-    self.shortcuts_open = what == .open;
-    return what;
-}
-
-/// Milliseconds until the notice goes by itself, so the screen can wake to
-/// redraw; null when no notice waits.
-pub fn wake(self: *const Self, now_ms: u64) ?u64 {
-    const notice = self.notice orelse return null;
-    return if (notice.shown.fresh(now_ms)) notice.shown.remaining(now_ms) else null;
-}
-
-/// Sets the terminal title when it changed: the Session's name and how many
-/// Sessions need the person.
-pub fn title(self: *Self, ctx: *vxfw.EventContext, session: []const u8, needs_you: u64) !void {
-    var buffer: [chrome.title_bytes]u8 = undefined;
-    const text = chrome.title(&buffer, session, needs_you);
-    if (self.title_len) |len| if (std.mem.eql(u8, self.title_text[0..len], text)) return;
-    @memcpy(self.title_text[0..text.len], text);
-    self.title_len = text.len;
-    try ctx.setTitle(text);
-}
-
 /// Puts this frame's chrome in the Session screen's slots.
 pub fn place(self: *Self, screen: *AppScreen.Session, view: View) void {
-    const notice = if (self.notice) |held| self.notice_text[0..held.len] else "";
     self.status.bar = chrome.bar(.{
         .needs = view.needs,
-        .notice = if (self.notice) |held| .{ .text = notice, .shown = held.shown } else null,
+        .notice = view.notice,
         .stoppable = view.stoppable,
         .width = view.width,
         .method = self.status.method,
-    }, view.now_ms);
-    if (self.notice) |held| if (!held.shown.fresh(view.now_ms)) {
-        self.notice = null;
-    };
+    });
     self.status.key.label = if (view.needs != null) view.needs_key else "";
     self.facts.text = view.facts;
     screen.input.facts = self.facts.widget();
@@ -137,7 +93,7 @@ pub fn place(self: *Self, screen: *AppScreen.Session, view: View) void {
     screen.tail = if (view.browsing) null else self.activity.widget();
     self.marker.label = chrome.marker(&self.marker_text, view.new_entries);
     screen.marker = if (view.browsing) self.marker.widget() else null;
-    screen.overlay = if (self.shortcuts_open) self.shortcuts.widget() else view.overlay;
+    screen.overlay = if (view.shortcuts) self.shortcuts.widget() else view.overlay;
 }
 
 const Recorder = struct {
@@ -186,7 +142,7 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
-    const view: View = .{ .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries", .stoppable = true, .facts = "Fix flaky store test · gpt-6.1-sol · high · 62% left", .width = 80, .now_ms = 0 };
+    const view: View = .{ .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries", .stoppable = true, .facts = "Fix flaky store test · gpt-6.1-sol · high · 62% left", .width = 80 };
 
     self.place(&screen, view);
     try std.testing.expect(screen.tail != null and screen.marker == null);
@@ -213,7 +169,7 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.latest));
 }
 
-test "a notice shows until the next key or five seconds; ? opens the shortcuts over the palette" {
+test "the status row shows the notice under what needs the person, and the ? shortcuts take the palette's place" {
     var recorder: Recorder = .{};
     var self: Self = .init(recorder.actions());
     var bytes: [16]u8 = undefined;
@@ -226,45 +182,15 @@ test "a notice shows until the next key or five seconds; ? opens the shortcuts o
     var screen: AppScreen.Session = .{ .content = &transcript, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
     const palette: vxfw.Text = .{ .text = "/model" };
 
-    self.notify("Copied 12 lines", 1_000);
-    try std.testing.expectEqual(@as(?u64, 5_000), self.wake(1_000));
-    self.place(&screen, .{ .width = 80, .now_ms = 2_000, .overlay = palette.widget() });
+    self.place(&screen, .{ .width = 80, .notice = "Copied 12 lines", .overlay = palette.widget() });
     try std.testing.expectEqualStrings("Copied 12 lines", self.status.bar.left);
     try std.testing.expect(screen.overlay.?.eql(palette.widget()));
-    // The newest replaces it.
-    self.notify("! Unknown command /x · /help", 3_000);
-    self.place(&screen, .{ .width = 80, .now_ms = 3_000 });
-    try std.testing.expectEqualStrings("! Unknown command /x · /help", self.status.bar.left);
-    // It goes by itself.
-    self.place(&screen, .{ .width = 80, .now_ms = 8_000 });
-    try std.testing.expectEqualStrings("", self.status.bar.left);
-    try std.testing.expectEqual(@as(?u64, null), self.wake(8_000));
-    // Or with the next key.
-    self.notify("Copied 12 lines", 9_000);
-    try std.testing.expectEqual(chrome.Shortcut.open, self.key(true, true));
-    self.place(&screen, .{ .width = 80, .now_ms = 9_001, .overlay = palette.widget() });
+    self.place(&screen, .{ .width = 80, .shortcuts = true, .overlay = palette.widget() });
     try std.testing.expectEqualStrings("", self.status.bar.left);
     try std.testing.expect(screen.overlay.?.eql(self.shortcuts.widget()));
-    // The next key closes them; ?? types one.
-    try std.testing.expectEqual(chrome.Shortcut.close_and_type, self.key(true, true));
-    self.place(&screen, .{ .width = 80, .now_ms = 9_002 });
+    self.place(&screen, .{ .width = 80 });
     try std.testing.expect(screen.overlay == null);
-    // What needs the person outlasts any notice.
-    self.notify("Copied 12 lines", 10_000);
-    self.place(&screen, .{ .width = 80, .now_ms = 20_000, .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries" });
+    self.place(&screen, .{ .width = 80, .notice = "Copied 12 lines", .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries" });
     try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries", self.status.bar.left);
-}
-
-test "the title is set once per change" {
-    var recorder: Recorder = .{};
-    var self: Self = .init(recorder.actions());
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    try self.title(&ctx, "Fix flaky store test", 0);
-    try self.title(&ctx, "Fix flaky store test", 0);
-    try self.title(&ctx, "Fix flaky store test", 1);
-    try std.testing.expectEqual(@as(usize, 2), ctx.cmds.items.len);
-    try std.testing.expectEqualStrings("Fix flaky store test · rui", ctx.cmds.items[0].set_title);
-    try std.testing.expectEqualStrings("Fix flaky store test · rui · 1 needs you", ctx.cmds.items[1].set_title);
+    try std.testing.expectEqualStrings("ctrl+r retries", self.status.key.label);
 }

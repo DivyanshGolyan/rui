@@ -15,23 +15,43 @@ pub const Method = session_line.Method;
 /// How long a notice about the person's own last action stays without a key.
 pub const notice_ms = 5_000;
 
-/// A notice about the person's own last action: `Copied 12 lines`,
-/// `! Unknown command /x · /help`. The screen keeps one; a newer notice
-/// replaces it, and the next key clears it before the key acts, so a key's
-/// own notice survives it. Anything the person must act on is never a
-/// notice: it is the status bar's `needs` text, which lasts until resolved.
+/// The notice about the person's own last action: `Copied 12 lines`,
+/// `! Unknown command /x · /help`. One at a time: a newer one replaces it,
+/// and the next key dismisses it before the key acts, so a key's own
+/// notice survives it. Anything the person must act on is never a notice:
+/// it is the status bar's `needs` text, which lasts until resolved.
 pub const Notice = struct {
-    /// When it was shown, on the shell's clock.
-    shown_ms: u64,
+    pub const capacity = 256;
+    bytes: [capacity]u8 = undefined,
+    len: usize = 0,
+    /// When it was shown, on the shell's clock; null when none is held.
+    shown_ms: ?u64 = null,
 
-    /// Whether it still shows at `now_ms`.
-    pub fn fresh(self: Notice, now_ms: u64) bool {
-        return now_ms -| self.shown_ms < notice_ms;
+    /// Holds `text`, shown at `now_ms`, in place of any notice. A longer
+    /// text is cut on a character.
+    pub fn show(self: *Notice, text: []const u8, now_ms: u64) void {
+        const len = cutUtf8(text, capacity);
+        @memcpy(self.bytes[0..len], text[0..len]);
+        self.len = len;
+        self.shown_ms = now_ms;
     }
 
-    /// How long until it goes by itself, so the shell can wake to clear it.
-    pub fn remaining(self: Notice, now_ms: u64) u64 {
-        return notice_ms -| (now_ms -| self.shown_ms);
+    /// The next key: the notice goes.
+    pub fn dismiss(self: *Notice) void {
+        self.shown_ms = null;
+    }
+
+    /// The text that shows at `now_ms`, or null once it went.
+    pub fn current(self: *const Notice, now_ms: u64) ?[]const u8 {
+        const shown = self.shown_ms orelse return null;
+        return if (now_ms -| shown < notice_ms) self.bytes[0..self.len] else null;
+    }
+
+    /// Milliseconds until it goes by itself, so the shell can wake to
+    /// redraw; null when nothing shows.
+    pub fn wake(self: *const Notice, now_ms: u64) ?u64 {
+        _ = self.current(now_ms) orelse return null;
+        return notice_ms - (now_ms -| self.shown_ms.?);
     }
 };
 
@@ -69,8 +89,8 @@ pub const Facts = struct {
     /// What needs the person, with its key (`! Not confirmed · ctrl+r
     /// retries`). Persists until resolved; outranks any notice.
     needs: ?[]const u8 = null,
-    /// The latest notice and its text, if one is held.
-    notice: ?struct { text: []const u8, shown: Notice } = null,
+    /// The notice that shows now (`Notice.current`), if any.
+    notice: ?[]const u8 = null,
     /// `stoppable` for the Session's work.
     stoppable: bool = false,
     width: u16,
@@ -80,19 +100,19 @@ pub const Facts = struct {
 /// Cells kept between the left text and the stop key.
 const gap = 2;
 
-/// The status bar at `now_ms`. Left: what needs the person, else a fresh
-/// notice, else nothing. Right: the stop key while work can be stopped.
+/// The status bar. Left: what needs the person, else the notice, else
+/// nothing. Right: the stop key while work can be stopped.
 /// When both don't fit, the left side wins and the stop key drops (Ctrl-X
 /// still works); the shell clips left text that is wider than the row.
-pub fn bar(facts: Facts, now_ms: u64) Bar {
+pub fn bar(facts: Facts) Bar {
     var result: Bar = .{};
     if (facts.needs) |needs| {
         result.left = needs;
         result.tone = .attention;
-    } else if (facts.notice) |notice| if (notice.shown.fresh(now_ms)) {
-        result.left = notice.text;
-        result.tone = if (std.mem.startsWith(u8, notice.text, "!")) .attention else .quiet;
-    };
+    } else if (facts.notice) |notice| {
+        result.left = notice;
+        result.tone = if (std.mem.startsWith(u8, notice, "!")) .attention else .quiet;
+    }
     if (!facts.stoppable) return result;
     const stop_cells = session_line.cells(stop_key, facts.method);
     const left_cells = session_line.cells(result.left, facts.method);
@@ -147,6 +167,22 @@ pub fn title(buffer: *[title_bytes]u8, session: ?[]const u8, needs_you: u64) []c
     if (needs_you != 0) out.print(" · {d} needs you", .{needs_you}) catch unreachable;
     return out.buffered();
 }
+
+/// The title the terminal shows, so the shell sets it only when it changes.
+pub const Title = struct {
+    bytes: [title_bytes]u8 = undefined,
+    len: ?usize = null,
+
+    /// The title to set now, or null when the terminal already shows it.
+    pub fn next(self: *Title, session: ?[]const u8, needs_you: u64) ?[]const u8 {
+        var buffer: [title_bytes]u8 = undefined;
+        const text = title(&buffer, session, needs_you);
+        if (self.len) |len| if (std.mem.eql(u8, self.bytes[0..len], text)) return null;
+        @memcpy(self.bytes[0..text.len], text);
+        self.len = text.len;
+        return self.bytes[0..text.len];
+    }
+};
 
 /// The longest prefix of `bytes` within `limit` that ends on a UTF-8 scalar
 /// boundary.
@@ -267,31 +303,31 @@ test "? on an empty draft shows the shortcuts; the next key closes them; ?? type
     try std.testing.expectEqual(Shortcut.close_and_act, shortcut(true, true, false));
 }
 
-test "a notice goes after about five seconds; what needs the person stays and outranks it" {
-    const notice: Notice = .{ .shown_ms = 10_000 };
-    try std.testing.expect(notice.fresh(10_000));
-    try std.testing.expect(notice.fresh(14_999));
-    try std.testing.expect(!notice.fresh(15_000));
-    try std.testing.expectEqual(@as(u64, 1), notice.remaining(14_999));
-    try std.testing.expectEqual(@as(u64, 0), notice.remaining(20_000));
+test "a notice goes after about five seconds or at the next key; the newest replaces it; what needs the person stays" {
+    var notice: Notice = .{};
+    try std.testing.expectEqual(@as(?[]const u8, null), notice.current(0));
+    notice.show("Copied 12 lines", 10_000);
+    try std.testing.expectEqualStrings("Copied 12 lines", notice.current(10_000).?);
+    try std.testing.expectEqualStrings("Copied 12 lines", notice.current(14_999).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), notice.current(15_000));
+    try std.testing.expectEqual(@as(?u64, 1), notice.wake(14_999));
+    try std.testing.expectEqual(@as(?u64, null), notice.wake(15_000));
     // A clock that reads earlier than the notice still shows it.
-    try std.testing.expect(notice.fresh(9_000));
+    try std.testing.expect(notice.current(9_000) != null);
+    notice.show("! Unknown command /x · /help", 12_000);
+    try std.testing.expectEqualStrings("! Unknown command /x · /help", notice.current(16_000).?);
+    notice.dismiss();
+    try std.testing.expectEqual(@as(?[]const u8, null), notice.current(12_001));
+    // A long notice is cut on a character.
+    notice.show(comptime repeat("é", 200), 0);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(notice.current(0).?));
+    try std.testing.expectEqual(@as(usize, 256), notice.current(0).?.len);
 
-    const copied: Facts = .{ .notice = .{ .text = "Copied 12 lines", .shown = notice }, .width = 80 };
-    try std.testing.expectEqualStrings("Copied 12 lines", bar(copied, 12_000).left);
-    try std.testing.expectEqual(Tone.quiet, bar(copied, 12_000).tone);
-    try std.testing.expectEqualStrings("", bar(copied, 15_000).left);
-
-    var failing = copied;
-    failing.notice.?.text = "! Unknown command /x · /help";
-    try std.testing.expectEqual(Tone.attention, bar(failing, 12_000).tone);
-
-    var unconfirmed = copied;
-    unconfirmed.needs = "! Not confirmed · ctrl+r retries";
-    for ([_]u64{ 12_000, 15_000, 1_000_000 }) |now| {
-        try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries", bar(unconfirmed, now).left);
-        try std.testing.expectEqual(Tone.attention, bar(unconfirmed, now).tone);
-    }
+    try std.testing.expectEqual(Tone.quiet, bar(.{ .notice = "Copied 12 lines", .width = 80 }).tone);
+    try std.testing.expectEqual(Tone.attention, bar(.{ .notice = "! Unknown command /x · /help", .width = 80 }).tone);
+    const unconfirmed = bar(.{ .needs = "! Not confirmed · ctrl+r retries", .notice = "Copied 12 lines", .width = 80 });
+    try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries", unconfirmed.left);
+    try std.testing.expectEqual(Tone.attention, unconfirmed.tone);
 }
 
 test "the stop key shows on the right while work can be stopped, and drops first when the row is short" {
@@ -304,23 +340,23 @@ test "the stop key shows on the right while work can be stopped, and drops first
         // Once the person asked, Ctrl-X does nothing until the Host reports.
         try std.testing.expect(!stoppable(kind, true));
     }
-    const alone = bar(.{ .stoppable = true, .width = 80 }, 0);
+    const alone = bar(.{ .stoppable = true, .width = 80 });
     try std.testing.expect(alone.stop);
     try std.testing.expectEqual(@as(u16, 80 - 11 - 1), alone.stop_column);
     try std.testing.expectEqualStrings("", alone.left);
 
     const needs = "! Not confirmed · ctrl+r retries"; // 32 cells
-    const both = bar(.{ .needs = needs, .stoppable = true, .width = 80 }, 0);
+    const both = bar(.{ .needs = needs, .stoppable = true, .width = 80 });
     try std.testing.expect(both.stop);
     try std.testing.expectEqualStrings(needs, both.left);
     // 32 + 2 + 11 + 1 cells fit exactly in 46; one fewer drops the stop key.
-    try std.testing.expect(bar(.{ .needs = needs, .stoppable = true, .width = 46 }, 0).stop);
-    const narrow = bar(.{ .needs = needs, .stoppable = true, .width = 45 }, 0);
+    try std.testing.expect(bar(.{ .needs = needs, .stoppable = true, .width = 46 }).stop);
+    const narrow = bar(.{ .needs = needs, .stoppable = true, .width = 45 });
     try std.testing.expect(!narrow.stop);
     try std.testing.expectEqualStrings(needs, narrow.left);
-    try std.testing.expect(!bar(.{ .stoppable = true, .width = 11 }, 0).stop);
-    try std.testing.expect(bar(.{ .stoppable = true, .width = 12 }, 0).stop);
-    try std.testing.expect(!bar(.{ .stoppable = false, .width = 80 }, 0).stop);
+    try std.testing.expect(!bar(.{ .stoppable = true, .width = 11 }).stop);
+    try std.testing.expect(bar(.{ .stoppable = true, .width = 12 }).stop);
+    try std.testing.expect(!bar(.{ .stoppable = false, .width = 80 }).stop);
 }
 
 test "Shift-Up/Down move half the transcript, at least a row" {
@@ -354,6 +390,12 @@ test "the title leads with the Session, says how many need the person, and never
     try std.testing.expectEqualStrings(comptime repeat("é", 40) ++ "… · rui", cut);
     const worst = title(&buffer, &(@as([200]u8, @splat(0x1b))), std.math.maxInt(u64));
     try std.testing.expect(std.mem.endsWith(u8, worst, "… · rui · 18446744073709551615 needs you"));
+    // Set once per change.
+    var shown: Title = .{};
+    try std.testing.expectEqualStrings("Fix flaky store test · rui", shown.next("Fix flaky store test", 0).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), shown.next("Fix flaky store test", 0));
+    try std.testing.expectEqualStrings("Fix flaky store test · rui · 1 needs you", shown.next("Fix flaky store test", 1).?);
+    try std.testing.expectEqualStrings("rui · 1 needs you", shown.next(null, 1).?);
 }
 
 fn repeat(comptime text: []const u8, comptime count: usize) []const u8 {
