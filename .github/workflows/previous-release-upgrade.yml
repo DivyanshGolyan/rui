@@ -76,7 +76,7 @@ jobs:
           path: |
             ${{ runner.temp }}/previous-release/.zig-cache
             ${{ runner.temp }}/previous-release/zig-pkg
-          key: rui-previous-release-${{ runner.os }}-${{ runner.arch }}-0.17.0-0e4b2225d106dd63fa9c38801188facb5e9c6335
+          key: rui-previous-release-${{ runner.os }}-${{ runner.arch }}-0.17.1-0e4b2225d106dd63fa9c38801188facb5e9c6335
       - name: Start detached, then install, save real work, reinstall and restart the same Store
         # Each check's only copy; steps.py records the failed ones for a promotion to replay.
         timeout-minutes: 45

@@ -2,7 +2,7 @@
     .name = .rui,
     .version = "0.1.0",
     .fingerprint = 0xce12316328c0bfb1,
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .yaml = .{
             .url = "https://github.com/yaml/libyaml/archive/refs/tags/0.2.5.tar.gz",

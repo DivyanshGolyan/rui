@@ -1,9 +1,11 @@
-// Zig 0.17.0's Cache.Manifest.checkInputPath hashes a file whose stat changed
+// Zig 0.17.x's Cache.Manifest.checkInputPath hashes a file whose stat changed
 // into the manifest's own digest and then compares it with the unpopulated
 // input digest, so identical bytes at a new inode or mtime always miss. A
 // restored cache on a fresh checkout therefore never hits. For every manifest
 // input whose current bytes hash to the recorded digest, record the current
 // size, inode and mtime; anything else is left to miss as before.
+// Upstream fixed this on master (ziglang/zig#37238), after 0.17.1; delete this
+// tool with the move to a release whose Cache.zig carries that fix.
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <fcntl.h>
