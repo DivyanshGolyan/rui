@@ -526,8 +526,38 @@ const WipingAllocator = struct {
     }
 };
 
+/// What a launched Host's caller reads when its start fails, if anything.
 /// Only static messages cross the refusal boundary: never server text or URL.
-pub fn mysqlRefusal(err: anyerror) ?Refusal {
+pub fn startRefusal(store: std.meta.Tag(Frame.Store), err: anyerror) ?Refusal {
+    if (store == .mysql_url) if (mysqlRefusal(err)) |refusal| return refusal;
+    return switch (err) {
+        error.StoreAlreadyOwned => .{ .code = .store_locked, .message = "another Host owns this Store" },
+        error.RuntimeDirectoryInUse => .{ .code = .runtime_dir_unusable, .message = "another Host owns this runtimeDir" },
+        error.RuntimeDirectoryUnusable => .{ .code = .runtime_dir_unusable, .message = "runtimeDir must be a private (mode 0700) directory this Host can lock" },
+        else => null,
+    };
+}
+
+test "a launched Host's start failure is refused with its Store's codes only" {
+    const cases = [_]struct { store: std.meta.Tag(Frame.Store), err: anyerror, code: ?StartError }{
+        .{ .store = .sqlite_dir, .err = error.StoreAlreadyOwned, .code = .store_locked },
+        .{ .store = .mysql_url, .err = error.StoreAlreadyOwned, .code = .store_locked },
+        .{ .store = .mysql_url, .err = error.StoreLocked, .code = .store_locked },
+        .{ .store = .sqlite_dir, .err = error.StoreLocked, .code = null },
+        .{ .store = .mysql_url, .err = error.StoreSchemaMissing, .code = .store_schema_missing },
+        .{ .store = .sqlite_dir, .err = error.StoreSchemaMissing, .code = null },
+        .{ .store = .sqlite_dir, .err = error.RuntimeDirectoryInUse, .code = .runtime_dir_unusable },
+        .{ .store = .mysql_url, .err = error.RuntimeDirectoryUnusable, .code = .runtime_dir_unusable },
+        .{ .store = .sqlite_dir, .err = error.OutOfMemory, .code = null },
+    };
+    for (cases) |case| {
+        const refusal = startRefusal(case.store, case.err);
+        try std.testing.expectEqual(case.code, if (refusal) |value| value.code else null);
+    }
+    try std.testing.expect(!std.mem.eql(u8, startRefusal(.sqlite_dir, error.RuntimeDirectoryInUse).?.message, startRefusal(.sqlite_dir, error.RuntimeDirectoryUnusable).?.message));
+}
+
+fn mysqlRefusal(err: anyerror) ?Refusal {
     return switch (err) {
         error.StoreLocked => .{ .code = .store_locked, .message = "another Host owns this Store" },
         error.StoreSchemaMissing => .{ .code = .store_schema_missing, .message = "apply this build's MySQL schema before starting the Host" },

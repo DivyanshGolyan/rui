@@ -1873,15 +1873,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     ) catch |err| {
         // A launched Host stops when its stdin closes; that is its clean end.
         if (launched != null and err == error.EffectAwareShutdown) return;
-        if (launched) |frame| if (frame.store == .mysql_url) {
-            if (launch_frame.mysqlRefusal(err)) |refusal| launch_frame.writeRefusal(io, refusal);
-        };
-        if (launched != null and err == error.StoreAlreadyOwned)
-            launch_frame.writeRefusal(io, .{ .code = .store_locked, .message = "another Host owns this Store" });
-        if (launched != null and err == error.RuntimeDirectoryInUse)
-            launch_frame.writeRefusal(io, .{ .code = .runtime_dir_unusable, .message = "another Host owns this runtimeDir" });
-        if (launched != null and err == error.RuntimeDirectoryUnusable)
-            launch_frame.writeRefusal(io, .{ .code = .runtime_dir_unusable, .message = "runtimeDir must be a private (mode 0700) directory this Host can lock" });
+        if (launched) |frame| if (launch_frame.startRefusal(frame.store, err)) |refusal| launch_frame.writeRefusal(io, refusal);
         return err;
     };
 }
