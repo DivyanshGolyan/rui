@@ -44,7 +44,7 @@ MAC_PATHS = (
 
 # fnmatch patterns, as prepush.py and the selector read them: `*` spans
 # directories, so src/*.zig covers src/http1/Exchange.zig too.
-SCANNED = ("src/*.zig", "tests/integration/*.zig", "tests/integration/*.py", "clients/ts/test/*.ts")
+SCANNED = ("src/*.zig", "tests/integration/*.zig", "tests/integration/*.py", "tests/integration/*.sh", "clients/ts/test/*.ts")
 
 # Darwin differs on these: shutdown of a closed or listening socket returns
 # ENOTCONN, a full backlog refuses connect, kill(-pgid) of a zombie group is
@@ -94,9 +94,35 @@ def python_sites(source):
     trust = sum(len(TRUST_VARIABLE.findall(t.string)) for t in generated
                 if t.type in STRING_TOKENS)
     tokens = [t.string for t in generated if t.type in (tokenize.NAME, tokenize.OP)]
-    return trust + sum(1 for i in range(len(tokens) - 2)
-                       if (tokens[i], tokens[i + 2]) in PYTHON_PLATFORM and tokens[i + 1] == "."
-                       and (i == 0 or tokens[i - 1] != "."))
+    platform = sum(1 for i in range(len(tokens) - 2)
+                   if (tokens[i], tokens[i + 2]) in PYTHON_PLATFORM and tokens[i + 1] == "."
+                   and (i == 0 or tokens[i - 1] != "."))
+    sockets = unix_socket_sites(tokens)
+    return trust + platform + sockets
+
+
+def unix_socket_sites(tokens):
+    return sum(tokens[i:i + 7] == ["socket", ".", "socket", "(", "socket", ".", "AF_UNIX"]
+               for i in range(len(tokens)))
+
+
+def shell_sites(source):
+    # Shell fixtures embed Python in PY* heredocs; tokenize only their bodies.
+    lines = iter(source.splitlines(keepends=True))
+    count = 0
+    for line in lines:
+        match = re.search(r"<<['\"]?(PY[A-Z]*)['\"]?", line)
+        if not match:
+            continue
+        body = []
+        for line in lines:
+            if line.strip() == match[1]:
+                break
+            body.append(line)
+        generated = tokenize.generate_tokens(io.StringIO("".join(body)).readline)
+        tokens = [t.string for t in generated if t.type in (tokenize.NAME, tokenize.OP)]
+        count += unix_socket_sites(tokens)
+    return count
 
 
 def typescript_sites(source):
@@ -154,7 +180,7 @@ def sites(root=ROOT):
     for file, path in scanned(root):
         if mac_path(path):
             continue
-        count = {".py": python_sites, ".ts": typescript_sites}.get(file.suffix, zig_sites)(file.read_text())
+        count = {".py": python_sites, ".sh": shell_sites, ".ts": typescript_sites}.get(file.suffix, zig_sites)(file.read_text())
         if count:
             found[path] = count
     return found
@@ -162,7 +188,8 @@ def sites(root=ROOT):
 
 def violations(found):
     return [f"{path}: {count} platform sites outside src/os/ and tests/integration/os_semantics.py. "
-            "Move them there; see tests/ci/platform_boundary.py" for path, count in sorted(found.items())]
+            "Move them there; use os_semantics.unix_stream() for fixture Unix sockets; "
+            "see tests/ci/platform_boundary.py" for path, count in sorted(found.items())]
 
 
 def bind_sites(root=ROOT):

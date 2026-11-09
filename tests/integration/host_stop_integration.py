@@ -87,7 +87,7 @@ def request(sock, store, identity=None, *, extra=b""):
     )
     if identity is not None:
         header += f"X-Rui-Host-Instance: {identity}\r\n".encode()
-    stream = socket.socket(socket.AF_UNIX)
+    stream = os_semantics.unix_stream()
     stream.settimeout(5)
     stream.connect(str(sock))
     stream.sendall(header + extra + b"\r\n")
@@ -277,7 +277,7 @@ def main():
                         + b"Content-Type: application/json\r\nX-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\n"
                         + (b"X-Rui-Environment-Bytes: 0\r\n" if kind == "message" else b"")
                         + f"Content-Length: {len(body)}\r\n\r\n".encode())
-                    upload = socket.socket(socket.AF_UNIX)
+                    upload = os_semantics.unix_stream()
                     uploads.append((upload, b"\r\n" + body if phase == "header" else body[-3:]))
                     upload.settimeout(5)
                     upload.connect(str(sock))
@@ -297,7 +297,7 @@ def main():
                                            subject_kind="request_number")
             assert not diagnostics.matching("connection_resources_released", subject=pending_phase["subject"])
             began_ns = time.monotonic_ns()
-            transferred = socket.socket(socket.AF_UNIX)
+            transferred = os_semantics.unix_stream()
             transferred.settimeout(5)
             transferred.connect(str(sock))
             transferred.sendall(b"POST /v1/observe-command HTTP/1.1\r\n")
@@ -321,7 +321,7 @@ def main():
                 response = finish(upload, remainder)
                 assert b'"status":"accepted"' not in response, ("admitted after Host stop", response)
             fixture.wait_for(lambda: not sock.exists(), "listener closure before cleanup")
-            with socket.socket(socket.AF_UNIX) as newcomer:
+            with os_semantics.unix_stream() as newcomer:
                 try:
                     newcomer.connect(str(sock))
                 except (FileNotFoundError, ConnectionRefusedError):

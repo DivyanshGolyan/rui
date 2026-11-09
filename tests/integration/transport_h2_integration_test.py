@@ -108,7 +108,7 @@ class ShapedWorkTests(unittest.TestCase):
         for kind in ("configure", "message", "observe_command", "read_result", "inspect_session"):
             with self.subTest(kind=kind):
                 reply = HostReply(content_type=b"text/plain" if kind == "read_result" else b"application/json")
-                with patch.object(socket, "socket", return_value=reply):
+                with patch.object(os_semantics, "unix_stream", return_value=reply):
                     transport.closed_host_request("/fixture/socket", pathlib.Path("/fixture"), kind)
                 self.assertTrue(reply.released, "caller returned before peer EOF")
 
@@ -533,7 +533,7 @@ class HeldPopulationCleanupTests(unittest.TestCase):
                               content_type=b"text/plain" if kind == "read_result" else b"application/json")
             reply.report_released = kind != held_report
             replies.append((kind, reply))
-            with patch.object(socket, "socket", return_value=reply):
+            with patch.object(os_semantics, "unix_stream", return_value=reply):
                 if kind == omitted_eof:
                     # Model the old Content-Length-only completion boundary.
                     _, body = control_fixture.read_http_response(reply)
@@ -957,7 +957,7 @@ class ObservationDeadlineTests(unittest.TestCase):
                 clock = [0.0]
                 reply = TimedReply(clock, arrivals)
                 with patch.object(transport.time, "monotonic", side_effect=lambda: clock[0]), \
-                        patch.object(socket, "socket", return_value=reply):
+                        patch.object(os_semantics, "unix_stream", return_value=reply):
                     if timely:
                         self.assertEqual(transport.closed_host_request("/fixture/socket", pathlib.Path("/fixture"),
                                                                        "read_result", deadline=deadline), b"answer")
