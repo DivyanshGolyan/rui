@@ -6,6 +6,7 @@
 //! only the sets saved after it.
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
 const tool_catalog = @import("../../tools.zig");
 const rsql = @import("../rsql.zig");
 const content_domain = @import("content.zig");
@@ -256,9 +257,9 @@ pub const catalog_records = rsql.Read(.{
     .Args = struct { set: u64, ordinal: u64 },
     .Row = struct {
         ordinal: u64,
-        name: protocol.Bounded(tool_catalog.max_name_bytes),
+        name: Bounded(tool_catalog.max_name_bytes),
         owner: tool_catalog.Owner,
-        server: protocol.Bounded(tool_catalog.max_server_bytes),
+        server: Bounded(tool_catalog.max_server_bytes),
         description_id: rsql.Positive,
         description_length: u64,
         description_digest: [32]u8,
@@ -323,9 +324,9 @@ const selection_records = rsql.Read(.{
         "JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id WHERE member.tool_set_id=?1 ORDER BY tool.name",
     .Args = struct { set: u64 },
     .Row = struct {
-        name: protocol.Bounded(tool_catalog.max_name_bytes),
+        name: Bounded(tool_catalog.max_name_bytes),
         owner: tool_catalog.Owner,
-        server: protocol.Bounded(tool_catalog.max_server_bytes),
+        server: Bounded(tool_catalog.max_server_bytes),
         description: [32]u8,
         input_schema: [32]u8,
     },

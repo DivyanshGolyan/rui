@@ -4,6 +4,8 @@
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const protocol = @import("../../protocol.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
+const provider_name = @import("../../provider_name.zig");
 const model_capability = @import("../../model_capability.zig");
 const product_defaults = @import("../../product_defaults.zig");
 const output_format = @import("../../output_format.zig");
@@ -169,7 +171,7 @@ const latest_turn = rsql.Read(.{
     .Args = struct { session: []const u8 },
     .Row = struct {
         purpose: u1,
-        resolution_code: ?protocol.Bounded(protocol.max_code_bytes),
+        resolution_code: ?Bounded(protocol.max_code_bytes),
         operation_id: rsql.Positive,
         active: bool,
         first_admission_id: rsql.Positive,
@@ -205,7 +207,7 @@ pub const CompactionRead = struct {
     session: []const u8,
     /// The Session's next position, provider and model.
     boundary: u64,
-    provider: protocol.Provider,
+    provider: provider_name.Provider,
     model: []const u8,
     facts: turn_policy.CompactionFacts,
     stage: enum { latest, first, context, done } = .latest,
@@ -213,7 +215,7 @@ pub const CompactionRead = struct {
     first: first_runnable.Result = undefined,
     context: admission_context.Result = undefined,
 
-    pub fn init(session: []const u8, boundary: u64, provider: protocol.Provider, model: []const u8, policy: model_capability.CompactionPolicy) CompactionRead {
+    pub fn init(session: []const u8, boundary: u64, provider: provider_name.Provider, model: []const u8, policy: model_capability.CompactionPolicy) CompactionRead {
         return .{ .session = session, .boundary = boundary, .provider = provider, .model = model, .facts = .{
             .trigger = policy.compaction_trigger,
             .context_changed = false,
@@ -410,18 +412,18 @@ const admission_facts = rsql.Read(.{
     .Row = struct {
         session: rsql.SessionHead,
         revision: rsql.Positive,
-        provider: protocol.Provider,
-        model: protocol.Bounded(protocol.max_model_bytes),
+        provider: provider_name.Provider,
+        model: Bounded(model_capability.max_model_bytes),
         compaction_trigger: ?rsql.Positive,
         output_reservation: ?u64,
-        reasoning_effort: ?protocol.ReasoningEffort,
-        previous_reasoning_effort: ?protocol.ReasoningEffort,
+        reasoning_effort: ?model_capability.ReasoningEffort,
+        previous_reasoning_effort: ?model_capability.ReasoningEffort,
         latest_turn: ?rsql.Positive,
         latest_active: bool,
         latest_first: ?rsql.Positive,
         latest_operation: ?rsql.Positive,
         latest_compaction: ?bool,
-        latest_resolution: ?protocol.Bounded(protocol.max_code_bytes),
+        latest_resolution: ?Bounded(protocol.max_code_bytes),
         instructions: u64,
     },
     .cardinality = .one,
@@ -453,7 +455,7 @@ const admission_context = rsql.Read(.{
         "SELECT measured.changed,measured.uncached,measured.cache_read,measured.cache_write,measured.output,measured.usage_position,measured.result_admission," ++
         "CASE WHEN measured.changed THEN " ++ uncoveredBytesSql("measured.covered", "measured.frontier", "measured.results") ++ " ELSE 0 END AS uncovered_bytes " ++
         "FROM measured",
-    .Args = struct { session: []const u8, boundary: u64, provider: protocol.Provider, model: []const u8 },
+    .Args = struct { session: []const u8, boundary: u64, provider: provider_name.Provider, model: []const u8 },
     .Row = struct {
         changed: bool,
         uncached: ?u64,
@@ -528,7 +530,7 @@ const insert_operation = rsql.Write(.{
         compaction: bool,
         compaction_trigger: ?u64,
         output_reservation: u64,
-        reasoning_effort: ?protocol.ReasoningEffort,
+        reasoning_effort: ?model_capability.ReasoningEffort,
         history_floor: ?u64,
         history_level: ?u8,
         history_dropped: ?u64,

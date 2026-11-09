@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
 const tool_catalog = @import("../../tools.zig");
 const tool_set = @import("tool_set.zig");
 const output_format = @import("../../output_format.zig");
@@ -64,7 +65,7 @@ pub const ModelFailure = union(enum) {
     pub const Correlated = struct {
         code: []const u8,
         /// The provider's own correlation; empty when it sent none.
-        request_id: protocol.Bounded(256),
+        request_id: Bounded(256),
         /// The provider's own words, `code: message`; empty when it sent
         /// none. A terminal failure keeps it as its outcome's report.
         report: []const u8,
@@ -74,7 +75,7 @@ pub const ModelFailure = union(enum) {
         code: []const u8,
         // Borrowed for settlement only; never Turn output or model continuation.
         diagnostic: []const u8,
-        request_id: protocol.Bounded(256),
+        request_id: Bounded(256),
         report: []const u8,
     };
 
@@ -122,10 +123,10 @@ pub const ValidatedOutput = struct {
     answer_item_ordinal: ?u64 = null,
     answer_length: u64,
     answer_digest: [32]u8,
-    response_id: protocol.Bounded(256),
+    response_id: Bounded(256),
     /// Adapter-certified opaque observations; Store never decodes provider grammar.
-    model_evidence: protocol.Bounded(775),
-    request_id: protocol.Bounded(256),
+    model_evidence: Bounded(775),
+    request_id: Bounded(256),
 };
 
 /// The purpose of the Attempt `binding` names, in an Entry of its own,
@@ -256,7 +257,7 @@ pub fn currentAttemptSession(a: anytype, binding: AttemptBinding) !rsql.SessionH
 const superseding_control = rsql.Read(.{
     .sql = "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",
     .Args = struct { operation_id: u64 },
-    .Row = struct { turn_id: i64, attempt_ordinal: i64, interrupted_by_command_key: ?protocol.Bounded(protocol.max_key_bytes) },
+    .Row = struct { turn_id: i64, attempt_ordinal: i64, interrupted_by_command_key: ?Bounded(protocol.max_key_bytes) },
     .cardinality = .optional,
 });
 
@@ -882,7 +883,7 @@ const historical_mcp = rsql.Read(.{
         "JOIN tool_set_member member ON member.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE o.operation_id=?1 AND tool.owner='mcp' AND tool.name IN (" ++ parameters(2, batch_items) ++ ") GROUP BY tool.name",
     .Args = NameArgs(),
-    .Row = struct { name: protocol.Bounded(tool_catalog.max_name_bytes), offered: bool },
+    .Row = struct { name: Bounded(tool_catalog.max_name_bytes), offered: bool },
     .cardinality = .each,
 });
 
@@ -893,7 +894,7 @@ fn NameArgs() type {
     types[0] = u64;
     for (0..batch_items) |index| {
         names[index + 1] = std.fmt.comptimePrint("n{d}", .{index});
-        types[index + 1] = protocol.Bounded(tool_catalog.max_name_bytes);
+        types[index + 1] = Bounded(tool_catalog.max_name_bytes);
     }
     return @Struct(.auto, null, &names, &types, &@splat(.{}));
 }
@@ -943,9 +944,9 @@ pub const Batch = struct {
     duplicates: DuplicateVisitor,
 
     /// The fixed SQL fields also own the stable names selected call facts borrow.
-    fn names(batch: *Batch) *[batch_items]protocol.Bounded(tool_catalog.max_name_bytes) {
+    fn names(batch: *Batch) *[batch_items]Bounded(tool_catalog.max_name_bytes) {
         @setEvalBranchQuota(20_000);
-        const Name = protocol.Bounded(tool_catalog.max_name_bytes);
+        const Name = Bounded(tool_catalog.max_name_bytes);
         comptime {
             std.debug.assert(@sizeOf(historical_mcp.Args) == @sizeOf(u64) + batch_items * @sizeOf(Name));
             for (0..batch_items) |index| {

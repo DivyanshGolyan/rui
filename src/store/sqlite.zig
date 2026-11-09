@@ -3,6 +3,9 @@
 
 const std = @import("std");
 const protocol = @import("../protocol.zig");
+const Bounded = @import("../bounded.zig").Bounded;
+const model_capability = @import("../model_capability.zig");
+const provider_name = @import("../provider_name.zig");
 const rsql = @import("rsql.zig");
 const store_schema = @import("schema.zig");
 const change_ring = @import("../change_ring.zig");
@@ -26,11 +29,11 @@ pub fn diagnosticUnsignedPragma(database: *c.sqlite3, sql: [:0]const u8) ?u64 {
 pub fn diagnosticTextPragma(
     database: *c.sqlite3,
     sql: [:0]const u8,
-) ?protocol.Bounded(16) {
+) ?Bounded(16) {
     const statement = prepare(database, sql) catch return null;
     defer _ = c.sqlite3_finalize(statement);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return null;
-    var value: protocol.Bounded(16) = .{};
+    var value: Bounded(16) = .{};
     readText(statement, 0, &value) catch return null;
     return value;
 }
@@ -271,7 +274,7 @@ pub fn servedFunction(context: ?*c.sqlite3_context, argc: c_int, argv: [*c]?*c.s
     const routes: *const protocol.Routes = @ptrCast(@alignCast(c.sqlite3_user_data(context)));
     const text = c.sqlite3_value_text(argv[0]);
     const length = c.sqlite3_value_bytes(argv[0]);
-    const served = if (text == null or length < 0) false else if (std.meta.stringToEnum(protocol.Provider, text[0..@intCast(length)])) |provider|
+    const served = if (text == null or length < 0) false else if (std.meta.stringToEnum(provider_name.Provider, text[0..@intCast(length)])) |provider|
         protocol.routeOf(routes.*, provider) != .unserved
     else
         false;
@@ -386,15 +389,15 @@ pub fn columnBytes(statement: *c.sqlite3_stmt, index: c_int) []const u8 {
 
 /// The persisted closed grammar is the corruption boundary; a saved effort is
 /// trusted after it parses and is never checked against the catalog again.
-pub fn readNullableEffort(statement: *c.sqlite3_stmt, index: c_int) !?protocol.ReasoningEffort {
+pub fn readNullableEffort(statement: *c.sqlite3_stmt, index: c_int) !?model_capability.ReasoningEffort {
     if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return null;
     if (c.sqlite3_column_type(statement, index) != c.SQLITE_TEXT) return error.CorruptStore;
-    var value: protocol.Bounded(16) = .{};
+    var value: Bounded(16) = .{};
     readText(statement, index, &value) catch return error.CorruptStore;
-    return std.meta.stringToEnum(protocol.ReasoningEffort, value.slice()) orelse error.CorruptStore;
+    return std.meta.stringToEnum(model_capability.ReasoningEffort, value.slice()) orelse error.CorruptStore;
 }
 
-pub fn bindNullableEffort(statement: *c.sqlite3_stmt, index: c_int, value: ?protocol.ReasoningEffort) !void {
+pub fn bindNullableEffort(statement: *c.sqlite3_stmt, index: c_int, value: ?model_capability.ReasoningEffort) !void {
     if (value) |effort| return bindText(statement, index, @tagName(effort));
     if (c.sqlite3_bind_null(statement, index) != c.SQLITE_OK) return error.BindFailed;
 }
@@ -409,7 +412,7 @@ pub fn readNullableTokens(statement: *c.sqlite3_stmt, index: c_int, allow_zero: 
 
 /// The longest fixed value a statement binds by value: an `[n]u8` Args
 /// field, such as a 32-byte digest or a call's 120-byte field
-/// certificate, and a `protocol.Bounded` text.
+/// certificate, and a `Bounded` text.
 pub const max_copied_bytes = 256;
 
 /// SQLITE_TRANSIENT, the destructor -1: SQLite copies a value bound with
@@ -419,7 +422,7 @@ pub const max_copied_bytes = 256;
 var transient: extern union { bits: usize, destructor: c.sqlite3_destructor_type } = .{ .bits = std.math.maxInt(usize) };
 
 /// Binds a typed statement's `Args` as ?1..?N, then `now` as ?(N+1) when
-/// the text uses @now. Integers, `[n]u8` arrays, `protocol.Bounded` texts
+/// the text uses @now. Integers, `[n]u8` arrays, `Bounded` texts
 /// and a SessionHead's reference are copied into the
 /// statement when it is bound: SQLite holds the copy, in its own heap,
 /// until the statement is rebound or reset, so a caller may reuse their
@@ -508,11 +511,11 @@ fn isBlob(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "blob_capacity") and T == rsql.Blob(T.blob_capacity);
 }
 
-/// Whether `T` is a `protocol.Bounded`: text up to its capacity.
+/// Whether `T` is a `Bounded`: text up to its capacity.
 fn isBounded(comptime T: type) bool {
     if (@typeInfo(T) != .@"struct" or !@hasField(T, "bytes")) return false;
     const bytes = @typeInfo(@FieldType(T, "bytes"));
-    return bytes == .array and T == protocol.Bounded(bytes.array.len);
+    return bytes == .array and T == Bounded(bytes.array.len);
 }
 
 fn decodeValue(comptime T: type, statement: *c.sqlite3_stmt, column: c_int, out: *T) !void {

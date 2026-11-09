@@ -327,7 +327,7 @@ pub fn render(comptime dialect: Dialect, comptime text: []const u8) []const u8 {
 pub const Bytes = struct { bytes: []const u8 };
 
 /// A stored blob of at most `capacity` bytes, read by value. Unlike text
-/// (`protocol.Bounded`), its bytes are not checked to be UTF-8; a value
+/// (`Bounded`), its bytes are not checked to be UTF-8; a value
 /// that is not a blob, or is longer, is `CorruptStore`.
 pub fn Blob(comptime capacity: usize) type {
     return struct {
@@ -2635,7 +2635,7 @@ pub const Walk = struct {
 /// - `pageError` on the parsed tree: each arm's first source is its walked
 ///   table under its walked index, and every later source is a LEFT JOIN.
 ///   A missing joined row reads as NULLs, which a text field
-///   (`protocol.Bounded`) reads as empty and every other field that is
+///   (`Bounded`) reads as empty and every other field that is
 ///   not optional refuses (`CorruptStore`; an enum, as no tag), so a list
 ///   whose joined fields are all text checks them itself
 ///   (`report.Interruptions.check`).

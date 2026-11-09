@@ -4,6 +4,8 @@
 
 const std = @import("std");
 const protocol = @import("../protocol.zig");
+const Bounded = @import("../bounded.zig").Bounded;
+const wire_version = @import("../wire_version.zig").wire_version;
 const tool_catalog = @import("../tools.zig");
 const prefix_seal = @import("../prefix_seal.zig");
 const retry_policy = @import("../retry_policy.zig");
@@ -19,7 +21,7 @@ pub const application_id: u32 = 0x4c544631; // LTF1
 pub const schema_version: u32 = 59;
 
 pub const IdentityMismatch = struct {
-    saved_selector: protocol.Bounded(protocol.max_store_bytes) = .{},
+    saved_selector: Bounded(protocol.max_store_bytes) = .{},
 };
 
 /// `digest()` of each schema_version, oldest first. Each format PR appends
@@ -1953,7 +1955,7 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     try sqlite.exec(database, version_sql);
     const statement = try sqlite.prepare(database, store_meta_sql);
     defer _ = c.sqlite3_finalize(statement);
-    try sqlite.bindText(statement, 1, protocol.wire_version);
+    try sqlite.bindText(statement, 1, wire_version);
     try sqlite.bindText(statement, 2, selector);
     try sqlite.expectDone(statement);
     try sqlite.exec(database, "COMMIT");
@@ -2104,9 +2106,9 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'");
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreVersion;
-        var version: protocol.Bounded(16) = .{};
+        var version: Bounded(16) = .{};
         try sqlite.readText(statement, 0, &version);
-        if (!version.eql(protocol.wire_version)) return error.WrongStoreVersion;
+        if (!version.eql(wire_version)) return error.WrongStoreVersion;
     }
     {
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_id'");
@@ -2118,7 +2120,7 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_selector'");
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreIdentity;
-        var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
+        var stored_selector: Bounded(protocol.max_store_bytes) = .{};
         try sqlite.readText(statement, 0, &stored_selector);
         if (!stored_selector.eql(selector)) {
             if (identity_mismatch) |out| out.saved_selector = stored_selector;
@@ -2411,7 +2413,7 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try openExisting(std.testing.io, database, root, null);
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
-    try std.testing.expect(try metaEquals(database, "wire_version", protocol.wire_version));
+    try std.testing.expect(try metaEquals(database, "wire_version", wire_version));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT * FROM core_command)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM original_commands)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at FROM session_stop)"));

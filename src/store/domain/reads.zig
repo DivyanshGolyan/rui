@@ -9,6 +9,10 @@ const command_reply = @import("../../command_reply.zig");
 const word_search = @import("../../word_search.zig");
 const pages = @import("../../os/pages.zig");
 const protocol = @import("../../protocol.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
+const provider_name = @import("../../provider_name.zig");
+const session_archive = @import("../../session_archive.zig");
+const session_id = @import("../../session_id.zig");
 const session_work = @import("../../session_work.zig");
 const codec_abi = @import("../../codec_abi.zig");
 const output_format = @import("../../output_format.zig");
@@ -34,7 +38,7 @@ const content_metadata = content_domain.content_metadata;
 /// The Access every entry point here reads through.
 pub const ReadAccess = store_access.Access(.read, error{});
 
-const SessionText = protocol.Bounded(protocol.max_session_bytes);
+const SessionText = Bounded(protocol.max_session_bytes);
 
 /// The rows of an `.each` read, up to `max`, kept in the caller's frame.
 /// The visit that fills the last slot stops the read, so it steps at most
@@ -347,20 +351,20 @@ pub const AcceptedMessageQueue = command_reply.AcceptedMessageQueue;
 
 pub const SessionObservation = struct {
     found: bool = false,
-    archive_state: protocol.SessionArchiveState = .active,
-    session: protocol.Bounded(protocol.max_session_bytes) = .{},
-    workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
-    provider: ?protocol.Provider = null,
-    model: protocol.Bounded(protocol.max_model_bytes) = .{},
+    archive_state: session_archive.State = .active,
+    session: Bounded(protocol.max_session_bytes) = .{},
+    workspace: Bounded(protocol.max_workspace_bytes) = .{},
+    provider: ?provider_name.Provider = null,
+    model: Bounded(model_capability.max_model_bytes) = .{},
     revision: u64 = 0,
     tools_mask: u8 = 0,
     compaction_trigger: ?u64 = null,
     output_reservation: u64 = 0,
     compaction_trigger_override: ?u64 = null,
     output_reservation_override: ?u64 = null,
-    reasoning_effort: ?protocol.ReasoningEffort = null,
-    reasoning_effort_override: ?protocol.ReasoningEffort = null,
-    permission_mode: protocol.Bounded(16) = .{},
+    reasoning_effort: ?model_capability.ReasoningEffort = null,
+    reasoning_effort_override: ?model_capability.ReasoningEffort = null,
+    permission_mode: Bounded(16) = .{},
     instructions: ContentReference = .{ .length = 0, .digest = @splat(0) },
     output_schema: ?ContentReference = null,
     pending_messages: u64 = 0,
@@ -834,7 +838,7 @@ const tool_presentation = rsql.Read(.{
         "WHERE tool_call.operation_id=?1 AND tool_call.call_ordinal=?2",
     .Args = struct { operation: u64, ordinal: u64 },
     .Row = struct {
-        description: ?protocol.Bounded(protocol.max_tool_description_bytes),
+        description: ?Bounded(protocol.max_tool_description_bytes),
         code: ?protocol.ToolPresentation.Code,
         authorized: ?bool,
         session_ref: SessionText,
@@ -900,7 +904,7 @@ const PresentationRead = struct {
 /// once authorized and pending permission before; only a call whose tool
 /// or arguments were refused may have no line.
 pub fn presentationOf(
-    description: ?protocol.Bounded(protocol.max_tool_description_bytes),
+    description: ?Bounded(protocol.max_tool_description_bytes),
     code: ?protocol.ToolPresentation.Code,
     authorized: ?bool,
     publication_position: ?u64,
@@ -940,7 +944,7 @@ const hosted_call = rsql.Read(.{
         "WHERE item.session_ref=?1 AND item.session_position=?2 AND item.item_kind=5",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct {
-        description: protocol.Bounded(protocol.max_tool_description_bytes),
+        description: Bounded(protocol.max_tool_description_bytes),
         call_failed: bool,
         resolved_at: ?rsql.Positive,
         consistent: bool,
@@ -985,16 +989,16 @@ const page_session = rsql.Read(.{
         "FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct {
-        model: protocol.Bounded(protocol.max_model_bytes),
+        model: Bounded(model_capability.max_model_bytes),
         permission_mode: u1,
         revision: rsql.Positive,
         next_position: rsql.Positive,
         compaction_trigger: ?u64,
         output_reservation: ?u64,
-        reasoning_effort: ?protocol.ReasoningEffort,
+        reasoning_effort: ?model_capability.ReasoningEffort,
         created_at: rsql.Positive,
-        provider: protocol.Provider,
-        workspace: *protocol.Bounded(protocol.max_workspace_bytes),
+        provider: provider_name.Provider,
+        workspace: *Bounded(protocol.max_workspace_bytes),
     },
     .cardinality = .optional,
 });
@@ -1096,7 +1100,7 @@ const SearchScratch = struct {
     window: [content_domain.ContentReader.content_window_bytes]u8 = undefined,
     matcher: word_search.Matcher = undefined,
     item: protocol.ActivityItem = undefined,
-    workspace: protocol.Bounded(protocol.max_workspace_bytes) = undefined,
+    workspace: Bounded(protocol.max_workspace_bytes) = undefined,
 };
 
 /// Searches the page's public sources in one read access. SQL chooses only
@@ -1371,7 +1375,7 @@ pub const QueuedMessages = struct {
 const peer_label = rsql.Read(.{
     .sql = "SELECT label FROM session WHERE session_ref=?1",
     .Args = struct { session: SessionText },
-    .Row = struct { label: ?protocol.Bounded(protocol.max_label_bytes) },
+    .Row = struct { label: ?Bounded(protocol.max_label_bytes) },
     .cardinality = .each,
 });
 
@@ -1389,7 +1393,7 @@ const activity_message = rsql.Read(.{
         "WHERE m.session_ref=?1 AND m.admission_id=?3",
     .Args = struct { session: []const u8, end: u64, admission: u64 },
     .Row = struct {
-        command_key: protocol.Bounded(protocol.max_key_bytes),
+        command_key: Bounded(protocol.max_key_bytes),
         turn_id: ?rsql.Positive,
         content_id: rsql.Positive,
         applied: bool,
@@ -1454,9 +1458,9 @@ const send_failure = rsql.Read(.{
         "LEFT JOIN core_command c ON c.command_key=s.command_key WHERE s.sender_session_ref=?1 AND s.sender_position=?2",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct {
-        command_key: protocol.Bounded(protocol.max_key_bytes),
+        command_key: Bounded(protocol.max_key_bytes),
         target: SessionText,
-        code: protocol.Bounded(protocol.max_code_bytes),
+        code: Bounded(protocol.max_code_bytes),
         consistent: bool,
         rejected_at: rsql.Positive,
     },
@@ -1476,7 +1480,7 @@ const turn_outcome = rsql.Read(.{
         session_ref: SessionText,
         turn_id: rsql.Positive,
         operation_id: rsql.Positive,
-        outcome_code: protocol.Bounded(protocol.max_code_bytes),
+        outcome_code: Bounded(protocol.max_code_bytes),
         outcome_content_id: ?rsql.Positive,
         consistent: bool,
         resolution_content_id: ?rsql.Positive,
@@ -1495,7 +1499,7 @@ const session_stop = rsql.Read(.{
         "FROM session_stop s LEFT JOIN core_command c ON c.command_key=s.command_key LEFT JOIN turn t ON t.turn_id=s.selected_turn_id WHERE s.session_ref=?1 AND s.position=?2",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct {
-        command_key: protocol.Bounded(protocol.max_key_bytes),
+        command_key: Bounded(protocol.max_key_bytes),
         selected_turn_id: ?rsql.Positive,
         admission_cutoff: u64,
         outcome_position: ?rsql.Positive,
@@ -1605,7 +1609,7 @@ const FailureRead = struct {
         // both refused creation and malformed addressed sends reach this read.
         read.failed.* = .{
             .key = row.command_key,
-            .target = if (protocol.validSessionId(row.target.slice())) .{ .session = row.target } else null,
+            .target = if (session_id.valid(row.target.slice())) .{ .session = row.target } else null,
             .code = row.code,
         };
         read.at = row.rejected_at.get();

@@ -12,6 +12,7 @@
 const std = @import("std");
 const Bounded = @import("../bounded.zig").Bounded;
 const protocol = @import("../protocol.zig");
+const provider_name = @import("../provider_name.zig");
 const rsql = @import("rsql.zig");
 
 const text_head = "_utf8mb4 X'";
@@ -90,7 +91,7 @@ fn argument(comptime Args: type, comptime index: usize, args: *const Args) ArgTy
     return @field(args, @typeInfo(Args).@"struct".field_names[index]);
 }
 
-fn served(provider: protocol.Provider, bound: Bound) []const u8 {
+fn served(provider: provider_name.Provider, bound: Bound) []const u8 {
     return rsql.servedBinding(provider, protocol.routeOf(bound.served.*, provider) != .unserved);
 }
 

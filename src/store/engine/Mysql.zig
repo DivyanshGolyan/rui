@@ -3,6 +3,7 @@ const std = @import("std");
 const engine = @import("../engine.zig");
 const Store = @import("../Store.zig");
 const protocol = @import("../../protocol.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
 const rsql = @import("../rsql.zig");
 const wire = @import("../wire/mysql_connection.zig");
 const row_decoder = @import("../mysql_row.zig");
@@ -42,7 +43,7 @@ pub const State = struct {
     prefix_results: u8 = 0,
     committing: bool = false,
     sink: content.SinkState = .{},
-    doublewrite: protocol.Bounded(32) = .{},
+    doublewrite: Bounded(32) = .{},
     store_id: [32]u8 = undefined,
     testing_database: if (is_test) [40]u8 else void = if (is_test) @splat(0) else {},
     fence_result: u8 = 0,
@@ -432,7 +433,7 @@ pub fn writePayload(self: *Mysql, id: u64, bytes: []const u8) Failure!void {
     }
 }
 
-pub const Diagnostic = struct { doublewrite: protocol.Bounded(32), queries: u64, state_bytes: usize };
+pub const Diagnostic = struct { doublewrite: Bounded(32), queries: u64, state_bytes: usize };
 pub fn diagnostic(self: *const Mysql) Diagnostic {
     return .{ .doublewrite = self.state.doublewrite, .queries = self.state.connection.queries, .state_bytes = @sizeOf(State) };
 }

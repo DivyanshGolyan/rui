@@ -7,6 +7,9 @@ const command_reply = @import("../command_reply.zig");
 const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
 const protocol = @import("../protocol.zig");
+const Bounded = @import("../bounded.zig").Bounded;
+const model_capability = @import("../model_capability.zig");
+const session_id = @import("../session_id.zig");
 const wire_request = @import("../wire_request.zig");
 const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
@@ -79,7 +82,7 @@ pub const Store = struct {
     /// The connection, its prepared statements and an Entry's content
     /// read handle.
     engine: Engine,
-    selector: protocol.Bounded(protocol.max_store_bytes),
+    selector: Bounded(protocol.max_store_bytes),
     fenced: std.atomic.Value(bool) = .init(false),
     /// Advances before `release` of any entry point that changed rows, so
     /// after every successful COMMIT. An unchanged value proves no canonical
@@ -168,7 +171,7 @@ pub const Store = struct {
 
     pub fn setHistoricalModelForTesting(self: *Store, binding: AttemptBinding, model: []const u8) !void {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-        var bounded: protocol.Bounded(protocol.max_model_bytes) = .{};
+        var bounded: Bounded(model_capability.max_model_bytes) = .{};
         try bounded.set(model);
         if (bounded.len == 0) return error.InvalidModel;
         try self.engine.sqlite.setHistoricalModelForTesting(binding.operation_id, model);
@@ -196,7 +199,7 @@ pub const Store = struct {
         const opened = try Sqlite.open(io, database_path, selector, options);
         errdefer opened.abandon();
 
-        var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
+        var stored_selector: Bounded(protocol.max_store_bytes) = .{};
         try stored_selector.set(selector);
         const changes = try createRing();
         errdefer destroyRing(changes);
@@ -305,7 +308,7 @@ pub const Store = struct {
         errdefer self.* = undefined;
         var opened = try Mysql.open(io, connection, selector, options);
         errdefer opened.close() catch {};
-        var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
+        var stored_selector: Bounded(protocol.max_store_bytes) = .{};
         try stored_selector.set(selector);
         const changes = try createRing();
         errdefer destroyRing(changes);
@@ -587,7 +590,7 @@ pub const Store = struct {
     }
 
     pub const SkillsState = struct {
-        workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{ .len = 0 },
+        workspace: Bounded(protocol.max_workspace_bytes) = .{ .len = 0 },
         catalog: @import("../skills.zig").Catalog = .{ .entries = &.{} },
     };
 
@@ -853,8 +856,8 @@ pub const Store = struct {
         defer access.deinit();
         try entry.finish(Ordinary.none, command_domain.observeCommand(&access, key, &out.full.observation));
         const observation = &out.full.observation;
-        if (observation.status != .absent and protocol.validSessionId(observation.target.slice())) {
-            out.full.token = .{ .instance = self.instance, .generation = generation, .session = observation.target.slice()[0..protocol.session_id_bytes].* };
+        if (observation.status != .absent and session_id.valid(observation.target.slice())) {
+            out.full.token = .{ .instance = self.instance, .generation = generation, .session = observation.target.slice()[0..session_id.bytes].* };
         }
     }
 
@@ -943,7 +946,7 @@ pub const Store = struct {
             out.work.work.state != .retrying and out.work.work.state != .pending) out.token = .{
             .instance = self.instance,
             .generation = generation,
-            .session = request.session.slice()[0..protocol.session_id_bytes].*,
+            .session = request.session.slice()[0..session_id.bytes].*,
         };
     }
 
@@ -1636,7 +1639,7 @@ pub const SqliteDiagnostic = struct {
     synchronous: ?i64 = null,
     temp_store: ?i64 = null,
     busy_timeout_ms: ?u64 = null,
-    journal_mode: ?protocol.Bounded(16) = null,
+    journal_mode: ?Bounded(16) = null,
 };
 
 /// Test builds' counters on a Store. `read` and `blob` count content bytes

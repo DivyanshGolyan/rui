@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const session_id = @import("../../session_id.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const store_access = @import("../access.zig");
@@ -175,7 +176,7 @@ const owe_child_stops = rsql.Write(.{
 /// Queues the stop each of `parent`'s `unowed` attached children owes
 /// (D38), because `parent` stopped or ran out of context at `position`.
 /// The Host runs each as the child's own stop (`Store.nextCoreWork`).
-pub fn queueOwedStops(a: anytype, parent: *const [protocol.session_id_bytes]u8, position: u64, unowed: u64) void {
+pub fn queueOwedStops(a: anytype, parent: *const [session_id.bytes]u8, position: u64, unowed: u64) void {
     if (unowed != 0) a.writeCount(owe_child_stops, .{ .parent = parent, .position = position }, unowed);
 }
 

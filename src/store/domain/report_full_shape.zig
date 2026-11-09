@@ -1,6 +1,10 @@
 //! Shapes for the Full report's hand-written, streaming rows in report.zig.
 //! Shared content references and enum domains retain their protocol owners.
 const protocol = @import("../../protocol.zig");
+const cli_value = @import("../../cli_value.zig");
+const model_capability = @import("../../model_capability.zig");
+const mutation_answer = @import("../../mutation_answer.zig");
+const provider_name = @import("../../provider_name.zig");
 const H = protocol.Hole;
 const Reference = protocol.ActivityItem.Content;
 
@@ -44,11 +48,11 @@ pub const Full = struct {
     pub const Revision = struct {
         pub const json_shape = .{
             "{\"revision\":\"",         H.decimal,                                        "\",\"command_key\":",      H{ .string = protocol.max_key_bytes },
-            ",\"workspace\":",          H{ .string = protocol.max_workspace_bytes },      ",\"provider\":\"",         H{ .tag = protocol.Provider },
-            "\",\"model\":",            H{ .string = protocol.max_model_bytes },          ",\"compaction_trigger\":", H.optional_id,
-            ",\"output_reservation\":", H.optional_id,                                    ",\"reasoning_effort\":",   H{ .optional_tag = protocol.ReasoningEffort },
+            ",\"workspace\":",          H{ .string = protocol.max_workspace_bytes },      ",\"provider\":\"",         H{ .tag = provider_name.Provider },
+            "\",\"model\":",            H{ .string = model_capability.max_model_bytes },  ",\"compaction_trigger\":", H.optional_id,
+            ",\"output_reservation\":", H.optional_id,                                    ",\"reasoning_effort\":",   H{ .optional_tag = model_capability.ReasoningEffort },
             ",\"label\":",              H{ .optional_string = protocol.max_label_bytes }, ",\"tools\":",              Tools,
-            ",\"loaded_tools\":",       Tools,                                            ",\"permission_mode\":\"",  H{ .tag = protocol.PermissionMode },
+            ",\"loaded_tools\":",       Tools,                                            ",\"permission_mode\":\"",  H{ .tag = cli_value.PermissionMode },
             "\",\"instructions\":",     H{ .json = RevisionContent },                     ",\"output_schema\":",      H{ .optional_json = RevisionContent },
             "}",
         };
@@ -72,7 +76,7 @@ pub const Full = struct {
         pub const json_shape = .{ "{\"turn\":\"", H.decimal, "\",\"first_admission\":\"", H.decimal, "\",\"input_cutoff\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"outcome\":", H{ .optional_json = Outcome }, "}" };
     };
     pub const Operation = struct {
-        pub const json_shape = .{ "{\"operation\":\"", H.decimal, "\",\"turn\":\"", H.decimal, "\",\"resolution\":", H{ .optional_json = Resolution }, ",\"interrupted_by\":", H{ .optional_string = protocol.max_key_bytes }, ",\"settings_revision\":\"", H.decimal, "\",\"request_id\":", H{ .optional_string = 256 }, ",\"reasoning_effort\":", H{ .optional_tag = protocol.ReasoningEffort }, "}" };
+        pub const json_shape = .{ "{\"operation\":\"", H.decimal, "\",\"turn\":\"", H.decimal, "\",\"resolution\":", H{ .optional_json = Resolution }, ",\"interrupted_by\":", H{ .optional_string = protocol.max_key_bytes }, ",\"settings_revision\":\"", H.decimal, "\",\"request_id\":", H{ .optional_string = 256 }, ",\"reasoning_effort\":", H{ .optional_tag = model_capability.ReasoningEffort }, "}" };
     };
     pub const Call = struct {
         pub const json_shape = .{ "{\"operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"item_ordinal\":\"", H.decimal, "\",\"rejection\":", H{ .optional_string = 32 }, ",\"acceptance_position\":", H.optional_id, ",\"name\":", H{ .json = Inline }, ",\"call_id\":", H{ .json = Inline }, ",\"arguments\":", H{ .json = Inline }, ",\"rejection_result\":", H{ .optional_json = Inline }, "}" };
@@ -81,7 +85,7 @@ pub const Full = struct {
         pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"permission_revision\":\"", H.decimal, "\",\"permission\":\"", H{ .tag = enum { denied, authorized, requested } }, "\",\"resolution\":", H{ .optional_string = @import("action.zig").max_action_resolution_code_bytes }, ",\"result\":", H{ .optional_json = Inline }, ",\"acceptance_position\":", H.optional_id, "}" };
     };
     pub const Decision = struct {
-        pub const json_shape = .{ "{\"command_key\":", H{ .string = protocol.max_key_bytes }, ",\"action\":", H{ .string = 20 }, ",\"decision\":\"", H{ .tag = protocol.PermissionDecision }, "\",\"status\":\"", H{ .tag = enum { accepted, rejected } }, "\",\"code\":", H{ .string = 96 }, "}" };
+        pub const json_shape = .{ "{\"command_key\":", H{ .string = protocol.max_key_bytes }, ",\"action\":", H{ .string = 20 }, ",\"decision\":\"", H{ .tag = mutation_answer.PermissionDecision }, "\",\"status\":\"", H{ .tag = enum { accepted, rejected } }, "\",\"code\":", H{ .string = 96 }, "}" };
     };
     pub const Stop = struct {
         pub const json_shape = .{ "{\"command_key\":", H{ .string = protocol.max_key_bytes }, ",\"status\":\"", H{ .tag = enum { accepted, rejected } }, "\",\"code\":", H{ .string = 96 }, ",\"selected_turn\":", H.optional_id, ",\"admission_cutoff\":", H.optional_id, "}" };

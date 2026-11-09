@@ -3,6 +3,8 @@
 const std = @import("std");
 const catalog = @import("../../skills.zig");
 const protocol = @import("../../protocol.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
+const mutation_answer = @import("../../mutation_answer.zig");
 const content = @import("content.zig");
 const rsql = @import("../rsql.zig");
 const store_core = @import("../Store.zig");
@@ -47,7 +49,7 @@ pub const latest = rsql.Read(.{
     .Args = struct { session: []const u8 },
     .Row = struct {
         session: rsql.SessionHead,
-        workspace: *protocol.Bounded(protocol.max_workspace_bytes),
+        workspace: *Bounded(protocol.max_workspace_bytes),
         catalog_content_id: ?rsql.Positive,
         catalog_position: ?u64 = null,
         byte_length: ?u64,
@@ -123,7 +125,7 @@ pub fn reload(a: anytype, allocator: std.mem.Allocator, session: rsql.SessionHea
 }
 
 pub fn read(a: anytype, allocator: std.mem.Allocator, session: []const u8) !catalog.Catalog {
-    const workspace = try allocator.create(protocol.Bounded(protocol.max_workspace_bytes));
+    const workspace = try allocator.create(Bounded(protocol.max_workspace_bytes));
     var row: latest.Row = .{ .workspace = workspace, .session = undefined, .catalog_content_id = null, .byte_length = null, .digest = null };
     const access = @import("../access.zig");
     var found: access.Found = .missing;
@@ -178,7 +180,7 @@ pub const Capture = union(enum) {
     failed: Failure,
 };
 
-pub const Result = struct { bytes: []const u8, succeeded: bool, reload_status: ?protocol.SkillsReloadStatus = null };
+pub const Result = struct { bytes: []const u8, succeeded: bool, reload_status: ?mutation_answer.SkillsReloadStatus = null };
 
 pub fn apply(a: anytype, allocator: std.mem.Allocator, session: rsql.SessionHead, captured: *const Capture, faults: store_core.Faults) !Result {
     return switch (captured.*) {
