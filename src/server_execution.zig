@@ -3360,7 +3360,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             command.configuration.compaction_trigger.state = .value;
             try command.configuration.compaction_trigger.value.set("115200");
             command.configuration.reasoning_effort.state = .explicit_null;
-            const configured = storage.configure(&command, .{});
+            const configured = try storage.configure(&command, .{});
             try std.testing.expect(configured == .accepted);
             const file = try tmp.dir.createFile(std.testing.io, "failed-admission-message", .{ .read = true });
             try file.writeStreamingAll(std.testing.io, "hello");
@@ -3587,7 +3587,7 @@ test "preparing slots belong to their live preparations" {
     command.configuration.compaction_trigger.state = .value;
     try command.configuration.compaction_trigger.value.set("115200");
     command.configuration.reasoning_effort.state = .explicit_null;
-    const configured = storage.configure(&command, .{});
+    const configured = try storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "prep-belong-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
@@ -3914,7 +3914,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     command.configuration.compaction_trigger.state = .value;
     try command.configuration.compaction_trigger.value.set("115200");
     command.configuration.reasoning_effort.state = .explicit_null;
-    const configured = storage.configure(&command, .{});
+    const configured = try storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
@@ -4211,7 +4211,7 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
     command.configuration.tools = try .of(&.{ "bash", "fetch_page" });
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("bypass");
-    const configured = storage.configure(&command, .{});
+    const configured = try storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
     try store_module.testingSubmitMessage(&storage, &tmp, "host-mcp-message", "host-mcp-message", session.slice(), "fetch");
@@ -4282,7 +4282,7 @@ test "a skill tool reload under heap exhaustion runs again later without fencing
     const initial = try skills.initialCatalog(memory.allocator(), .{ .entries = &entries });
     var command = try store_module.testingCompleteConfiguration("skill-reload-config", "", workspace, "model-a");
     command.configuration.tools = try .of(&.{"skill"});
-    const configured = storage.configureWithInitialSkills(&command, null, &.{ .ready = .{ .encoded = initial.encoded, .instruction = initial.instruction } }, .{});
+    const configured = try storage.configureWithInitialSkills(&command, null, &.{ .ready = .{ .encoded = initial.encoded, .instruction = initial.instruction } }, .{});
     const session = configured.accepted.session;
     try store_module.testingSubmitMessage(&storage, &tmp, "skill-reload-message", "skill-reload-message", session.slice(), "reload");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;

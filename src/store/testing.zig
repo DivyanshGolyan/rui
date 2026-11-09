@@ -529,7 +529,7 @@ pub fn configureTestSession(
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var command = try completeConfiguration(key, "", workspace, "model-a");
-    const reply = storage.configure(&command, .{});
+    const reply = try storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     return reply.accepted.session;
 }

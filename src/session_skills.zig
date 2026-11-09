@@ -554,7 +554,7 @@ test "skills invocation capture retains only final max-body bytes in the request
     try store.testingStoreWith(&.{ .engine = .sqlite }, &database, &tmp, io, .{});
     defer database.close() catch unreachable;
     var create = try store.testingCompleteConfiguration("capture-memory-create", "", root, "model-a");
-    const session = database.configureWithInitialSkills(&create, null, initial_skills, .{}).accepted.session;
+    const session = (try database.configureWithInitialSkills(&create, null, initial_skills, .{})).accepted.session;
     const raw = try allocator.alloc(u8, catalog.max_skill_bytes);
     defer allocator.free(raw);
     @memset(raw, 'x');

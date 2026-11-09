@@ -41,7 +41,7 @@ test "MCP ask approval uses the frozen server after its Session offer changes" {
     command.configuration.tools = try .of(&.{"fetch_page"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
-    const configured = storage.configure(&command, .{});
+    const configured = try storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
     try submitTestMessage(&storage, &tmp, "approval-input", "approval-input", session.slice(), "fetch");
@@ -53,7 +53,7 @@ test "MCP ask approval uses the frozen server after its Session offer changes" {
     try update.key.set("approval-remove");
     update.session = session;
     update.configuration.tools = try .of(&.{"bash"});
-    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
     const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
     defer std.testing.allocator.free(report);
     const scratch = try tmp.dir.createFile(std.testing.io, "approval-scratch", .{ .read = true });

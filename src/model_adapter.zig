@@ -1583,7 +1583,7 @@ test "real preparation consumes the configured allowance across multiple advance
     configuration.configuration.compaction_trigger.state = .value;
     try configuration.configuration.compaction_trigger.value.set("115200");
     configuration.configuration.reasoning_effort.state = .explicit_null;
-    const configured = storage.configure(&configuration, .{});
+    const configured = try storage.configure(&configuration, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
 
@@ -1731,7 +1731,7 @@ const PreparationTestSetup = struct {
         command.configuration.compaction_trigger.state = .value;
         try command.configuration.compaction_trigger.value.set("115200");
         command.configuration.reasoning_effort.state = .explicit_null;
-        const configured = self.storage.configure(&command, .{});
+        const configured = try self.storage.configure(&command, .{});
         try std.testing.expect(configured == .accepted);
         try std.testing.expect(protocol.validSessionId(configured.accepted.session.slice()));
         return configured.accepted.session;
@@ -1777,7 +1777,7 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     configuration.configuration.tools = try .of(&.{"bash"});
     configuration.configuration.permission_mode.state = .value;
     try configuration.configuration.permission_mode.value.set("bypass");
-    try std.testing.expect(setup.storage.configure(&configuration, .{}) == .accepted);
+    try std.testing.expect(try setup.storage.configure(&configuration, .{}) == .accepted);
     try setup.submit("peer-seed", "peer-seed", peer.slice(), "send a report");
     const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleComposedForTesting(&setup, model, "peer-calls", .reasoning, "{\"type\":\"reasoning\",\"id\":\"peer-reasoning\",\"encrypted_content\":\"opaque\"}", &.{.{ .item_id = "peer-item", .call_id = "peer-call" }});
@@ -2124,7 +2124,7 @@ fn establishComposedHistory(setup: *PreparationTestSetup) !struct { binding: sto
             .digest = protocol.contentDigest(schema_json),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        const reply = setup.storage.configure(&command, .{});
+        const reply = try setup.storage.configure(&command, .{});
         try std.testing.expect(reply == .accepted);
         break :configured reply.accepted.session;
     };
@@ -2299,7 +2299,7 @@ test "request preparation minimal golden is exact across schedules" {
             update.session = golden_session;
             update.configuration.tools.state = .value;
             update.configuration.tools.count = 0;
-            try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try setup.storage.configure(&update, .{}) == .accepted);
         }
         var file_name: [32]u8 = undefined;
         const file = try std.fmt.bufPrint(&file_name, "prep-golden-file-{d}", .{index});
@@ -2429,7 +2429,7 @@ test "request preparation escapes instructions and user content" {
             .digest = protocol.contentDigest(instructions_text),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        const reply = setup.storage.configure(&command, .{});
+        const reply = try setup.storage.configure(&command, .{});
         try std.testing.expect(reply == .accepted);
         break :configured reply.accepted.session;
     };
@@ -2499,7 +2499,7 @@ test "request preparation escapes instructions and user content" {
             .digest = protocol.contentDigest(instructions_text),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        const reply = setup_two.storage.configure(&command, .{});
+        const reply = try setup_two.storage.configure(&command, .{});
         try std.testing.expect(reply == .accepted);
         break :configured reply.accepted.session;
     };
@@ -2582,7 +2582,7 @@ test "request preparation keeps the starting effort at the top and changes it at
             command.configuration.reasoning_effort.state = .value;
             try command.configuration.reasoning_effort.value.set(effort);
         } else command.configuration.reasoning_effort.state = .explicit_null;
-        const configured = setup.storage.configure(&command, .{});
+        const configured = try setup.storage.configure(&command, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session;
         try setup.submit("effort-message", "effort-message", session.slice(), "keep this exact input");
@@ -2598,7 +2598,7 @@ test "request preparation keeps the starting effort at the top and changes it at
                 update.session = session;
                 update.configuration.reasoning_effort.state = .value;
                 try update.configuration.reasoning_effort.value.set("low");
-                try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+                try std.testing.expect(try setup.storage.configure(&update, .{}) == .accepted);
             }
             var used: std.atomic.Value(u64) = .init(0);
             var retained: ?named_scratch.Owner = null;
@@ -2655,7 +2655,7 @@ test "request preparation freezes settings at admission" {
         update.session = session;
         update.configuration.tools.state = .value;
         update.configuration.tools = try .of(&.{"bash"});
-        try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+        try std.testing.expect(try setup.storage.configure(&update, .{}) == .accepted);
     }
     try setup.submit("prep-settings-file", "prep-settings-message", session.slice(), "hi");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -2669,7 +2669,7 @@ test "request preparation freezes settings at admission" {
         update.session = session;
         update.configuration.tools.state = .value;
         update.configuration.tools.count = 0;
-        try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+        try std.testing.expect(try setup.storage.configure(&update, .{}) == .accepted);
     }
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
@@ -3163,7 +3163,7 @@ test "request preparation authenticates the historical requested model binding" 
     var revision: wire_request.ConfigureCommand = .{};
     try revision.key.set("binding-revision");
     revision.session = session;
-    try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
+    try std.testing.expect(try setup.storage.configure(&revision, .{}) == .accepted);
     const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
@@ -3545,7 +3545,7 @@ test "a compaction's floor drops whole exchanges and every request on its base r
         command.session = session;
         command.configuration.instructions = .{ .state = .value, .file = file, .length = rules.len, .digest = protocol.contentDigest(rules) };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expect(setup.storage.configure(&command, .{}) == .accepted);
+        try std.testing.expect(try setup.storage.configure(&command, .{}) == .accepted);
     }
     var third = (try setup.storage.admitNextModelAttempt(.{})).?;
     const third_binding = try third.permit.consume();
@@ -3680,13 +3680,13 @@ test "compaction public preparation rejects incompatible selected base and suffi
         var revision: wire_request.ConfigureCommand = .{};
         try revision.key.set("binding-revision-two");
         revision.session = session;
-        try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
+        try std.testing.expect(try setup.storage.configure(&revision, .{}) == .accepted);
         const suffix = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         // The suffix is produced against a distinct saved revision.
         try setup.submit("binding-two", "binding-two", session.slice(), "later");
         try settleComposedForTesting(&setup, suffix, "binding-suffix", .reasoning, "{\"type\":\"reasoning\",\"id\":\"suffix\",\"encrypted_content\":\"opaque\"}", &.{});
         try revision.key.set("binding-revision-three");
-        try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
+        try std.testing.expect(try setup.storage.configure(&revision, .{}) == .accepted);
         const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
@@ -3863,7 +3863,7 @@ fn configureMemoSessionModelForTesting(setup: *PreparationTestSetup, model: []co
     } else command.configuration.reasoning_effort.state = .explicit_null;
     command.configuration.compaction_trigger.state = .value;
     try command.configuration.compaction_trigger.value.set("115200");
-    const reply = setup.storage.configure(&command, .{});
+    const reply = try setup.storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     return reply.accepted.session;
 }
@@ -3992,7 +3992,7 @@ test "a legacy null Session continues with its earlier Operation effort" {
     update.session = session;
     update.configuration.reasoning_effort.state = .value;
     try update.configuration.reasoning_effort.value.set("medium");
-    try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+    try std.testing.expect(try setup.storage.configure(&update, .{}) == .accepted);
     try setup.submit("legacy-first", "legacy-first", session.slice(), "first");
     const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
 
@@ -4024,7 +4024,7 @@ test "a legacy null Session continues with its earlier Operation effort" {
     // An explicit new spec still wins over the earlier frozen value.
     try update.key.set("legacy-low");
     try update.configuration.reasoning_effort.value.set("low");
-    try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+    try std.testing.expect(try setup.storage.configure(&update, .{}) == .accepted);
     const third = try advanceMemoHistoryForTesting(&setup, session, second, 1);
     const changed = try prepareMemoForTesting(&setup, third, null, .{});
     defer std.testing.allocator.free(changed.bytes);
@@ -4044,7 +4044,7 @@ test "an effort change keeps each request's input a prefix of the next" {
     initial.session = session;
     initial.configuration.reasoning_effort.state = .value;
     try initial.configuration.reasoning_effort.value.set("medium");
-    try std.testing.expect(setup.storage.configure(&initial, .{}) == .accepted);
+    try std.testing.expect(try setup.storage.configure(&initial, .{}) == .accepted);
     try setup.submit("memo-first", "memo-first", session.slice(), "start \"work\"\n");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     var binding = try admitted.permit.consume();
@@ -4065,7 +4065,7 @@ test "an effort change keeps each request's input a prefix of the next" {
                 update.session = session;
                 update.configuration.reasoning_effort.state = .value;
                 try update.configuration.reasoning_effort.value.set(value);
-                try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+                try std.testing.expect(try setup.storage.configure(&update, .{}) == .accepted);
             }
             binding = try advanceMemoHistoryForTesting(&setup, session, binding, round);
         }
@@ -4124,7 +4124,7 @@ test "a tool change keeps each request's input a prefix of the next" {
                 update.session = session;
                 update.configuration.tools = try .of(names);
                 update.configuration.tools.state = .value;
-                try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+                try std.testing.expect(try setup.storage.configure(&update, .{}) == .accepted);
             }
             binding = try advanceHistoryForTesting(&setup, session, binding, round, action);
             if (tools_round) |names| offered = names.len != 0;
@@ -4163,7 +4163,7 @@ test "a loaded tools revision adds exactly the newly loaded tool without a cache
     configure.configuration.tools = try .of(&.{ "bash", "message_agent" });
     configure.configuration.permission_mode.state = .value;
     try configure.configuration.permission_mode.value.set("ask");
-    try std.testing.expect(setup.storage.configure(&configure, .{}) == .accepted);
+    try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
     // This intentionally unreachable subset exercises the legacy NULL/set
     // representation independently of the loader. Configured tools stay fixed.
     try store.setLoadedToolsForTesting(&setup.storage, session.slice(), donor.slice());
@@ -4185,7 +4185,7 @@ test "a loaded tools revision adds exactly the newly loaded tool without a cache
     try grow.key.set("loaded-memo-grow");
     grow.session = session;
     grow.configuration.loaded_tools = try .of(&.{ "bash", "message_agent" });
-    try std.testing.expect(setup.storage.configure(&grow, .{}) == .accepted);
+    try std.testing.expect(try setup.storage.configure(&grow, .{}) == .accepted);
     binding = try advanceHistoryForTesting(&setup, session, binding, 1, 1);
     // The old request's history is still a valid prefix and the memo is hit.
     try std.testing.expectEqual(covered, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
@@ -4217,7 +4217,7 @@ test "find_tools declares a found tool on the next request without losing the me
     configure.session = session;
     configure.configuration.tools = try .of(&.{ "find_tools", "read_transcript" });
     configure.configuration.loaded_tools = try .of(&.{"find_tools"});
-    try std.testing.expect(setup.storage.configure(&configure, .{}) == .accepted);
+    try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
     try setup.submit("find-codec-input", "find-codec-input", session.slice(), "read the transcript");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     var binding = try admitted.permit.consume();
@@ -4686,7 +4686,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     var configure: wire_request.ConfigureCommand = .{};
     try skillsConfigurationForTesting(&setup, "skills-create", &configure);
     const initial = (try skill_owner.initial(arena, std.testing.allocator, std.testing.io, &setup.storage, configure.key.slice(), &configure.configuration, null)).?;
-    const creation = setup.storage.configureWithInitialSkills(&configure, null, initial, .{});
+    const creation = try setup.storage.configureWithInitialSkills(&configure, null, initial, .{});
     try std.testing.expect(creation == .accepted);
     const session = creation.accepted.session;
     const state = try setup.storage.readSkills(arena, session.slice());
@@ -4694,7 +4694,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     try std.testing.expectEqualStrings("initial-demo-desc", state.catalog.entries[0].description);
     try std.testing.expect(std.fs.path.isAbsolute(state.catalog.entries[0].path));
     try std.testing.expect((try skill_owner.initial(arena, std.testing.allocator, std.testing.io, &setup.storage, configure.key.slice(), &configure.configuration, null)) == null);
-    try std.testing.expect(setup.storage.configureWithInitialSkills(&configure, null, null, .{}).accepted.replayed);
+    try std.testing.expect((try setup.storage.configureWithInitialSkills(&configure, null, null, .{})).accepted.replayed);
 
     var reload: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
     try reload.key.set("skills-initial-noop");
@@ -4901,7 +4901,7 @@ test "historical accepted assistant output completeness and provenance fence rea
         var reconfigure: wire_request.ConfigureCommand = .{};
         try reconfigure.key.set("output-reconfigure");
         reconfigure.session = session;
-        try std.testing.expect(database.configure(&reconfigure, .{}) == .accepted);
+        try std.testing.expect(try database.configure(&reconfigure, .{}) == .accepted);
         try submitTestMessage(&database, &tmp, "output-next", "output-next", session.slice(), "next");
         const binding = (try database.admitNextModelAttempt(.{})).?.permit.binding;
         switch (case.incompatible) {

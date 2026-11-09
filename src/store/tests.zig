@@ -138,13 +138,13 @@ test "Store allocates six character IDs atomically retries collisions and replay
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(io, &workspace_buffer);
             var first = try completeConfiguration("first-creation", "", workspace, "model-a");
-            const first_reply = storage.configure(&first, .{});
+            const first_reply = try storage.configure(&first, .{});
             try std.testing.expect(first_reply == .accepted);
             const a = first_reply.accepted;
             try std.testing.expect(a.created and !a.replayed);
             try std.testing.expectEqualStrings("000000", a.session.slice());
             var second = try completeConfiguration("second-creation", "", workspace, "model-b");
-            const second_reply = storage.configure(&second, .{});
+            const second_reply = try storage.configure(&second, .{});
             try std.testing.expect(second_reply == .accepted);
             const b = second_reply.accepted;
             try std.testing.expect(b.created and !b.replayed);
@@ -152,7 +152,7 @@ test "Store allocates six character IDs atomically retries collisions and replay
             try std.testing.expectEqual(@as(usize, 3), Entropy.draws);
             try std.testing.expectEqualStrings("model-a", (try store_core.readSessionForTesting(&storage, a.session.slice())).?.model.slice());
             try std.testing.expectEqualStrings("model-b", (try store_core.readSessionForTesting(&storage, b.session.slice())).?.model.slice());
-            const replay = storage.configure(&second, .{}).accepted;
+            const replay = (try storage.configure(&second, .{})).accepted;
             try std.testing.expect(replay.replayed and replay.created);
             try std.testing.expectEqualStrings(b.session.slice(), replay.session.slice());
             try std.testing.expectEqual(@as(usize, 3), Entropy.draws);
@@ -164,12 +164,12 @@ test "Store allocates six character IDs atomically retries collisions and replay
                 try std.testing.expectError(error.StatementFailed, insertSessionForTesting(&storage, &current, invalid));
             }
             var unknown = try completeConfiguration("unknown-update", "k7m2qx", workspace, "model-c");
-            try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_session, storage.configure(&unknown, .{}).rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_session, (try storage.configure(&unknown, .{})).rejected.code);
             try std.testing.expect(try store_core.readSessionForTesting(&storage, "k7m2qx") == null);
             for ([_][]const u8{ "old/name", "K7m2qx", "k7m2qi", "k7\x00qx" }, 0..) |invalid, index| {
                 var key: [32]u8 = undefined;
                 var bad = try completeConfiguration(try std.fmt.bufPrint(&key, "invalid-id-{d}", .{index}), invalid, workspace, "model-c");
-                try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_session_reference, storage.configure(&bad, .{}).rejected.code);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_session_reference, (try storage.configure(&bad, .{})).rejected.code);
             }
             try std.testing.expectEqual(@as(usize, 3), Entropy.draws);
             try std.testing.expect(!storage.isFenced());
@@ -364,7 +364,7 @@ pub fn configureTestSessionWithMode(
     command.configuration.tools = try .of(&.{"bash"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set(mode);
-    const reply = storage.configure(&command, .{});
+    const reply = try storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     return reply.accepted.session;
 }
@@ -693,7 +693,7 @@ test "Session list pages accepted creation order with exact workspace and fixed 
             // Not configuration: request captures must never create list entries.
             var unrelated = try completeConfiguration("rejected-list", "", workspace, "model");
             unrelated.configuration.workspace.state = .omitted;
-            try std.testing.expect(storage.configure(&unrelated, .{}) == .rejected);
+            try std.testing.expect(try storage.configure(&unrelated, .{}) == .rejected);
             const empty = try testingSessionList(&storage, &tmp, .{}, &used, 1);
             defer std.testing.allocator.free(empty);
             // A full listing's token is this opening's current generation.
@@ -709,7 +709,7 @@ test "Session list pages accepted creation order with exact workspace and fixed 
                 const key = try std.fmt.bufPrint(&key_buffer, "list-config-{d}", .{index});
                 var config = try completeConfiguration(key, "", workspace, "model\nwith-control");
                 if (index == 3) try config.configuration.workspace.value.set(other);
-                const configured = storage.configure(&config, .{});
+                const configured = try storage.configure(&config, .{});
                 try std.testing.expect(configured == .accepted);
                 id.* = configured.accepted.session;
                 if (index == 8) {
@@ -745,7 +745,7 @@ test "Session list pages accepted creation order with exact workspace and fixed 
             request.ceiling = try std.fmt.parseInt(u64, next.get("ceiling").?.string, 10);
             try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
             var later = try completeConfiguration("list-later", "", workspace, "different");
-            try std.testing.expect(storage.configure(&later, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&later, .{}) == .accepted);
             const second = try testingSessionList(&storage, &tmp, request, &used, 3);
             defer std.testing.allocator.free(second);
             var final = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, second, .{});
@@ -776,7 +776,7 @@ test "Session list pages accepted creation order with exact workspace and fixed 
             });
             try std.testing.expect(used.load(.acquire) > 0);
             var concurrent = try completeConfiguration("list-concurrent", "", workspace, "model");
-            try std.testing.expect(storage.configure(&concurrent, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&concurrent, .{}) == .accepted);
             held.deinit();
             try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
             try std.testing.expectError(error.ReportScratchExhausted, storage.captureSessionList(&.{}, .{
@@ -857,7 +857,7 @@ test "a since listing answers only the Sessions changed since its token, or ever
                     var command = try completeConfiguration(try std.fmt.bufPrint(&key, "since-{d}", .{count.*}), session, place, "model");
                     command.configuration.label.state = .value;
                     try command.configuration.label.value.set(try std.fmt.bufPrint(&key, "Label {d}", .{count.*}));
-                    const configured = store.configure(&command, .{});
+                    const configured = try store.configure(&command, .{});
                     try std.testing.expect(configured == .accepted);
                     return configured.accepted.session.slice()[0..protocol.session_id_bytes].*;
                 }
@@ -1376,7 +1376,7 @@ test "the touch oracle names a Session whose rows changed without a touch" {
             defer storage.close() catch unreachable;
             var root: [protocol.max_store_bytes]u8 = undefined;
             var command = try completeConfiguration("oracle", "", root[0..try tmp.dir.realPath(std.testing.io, &root)], "model");
-            const configured = storage.configure(&command, .{});
+            const configured = try storage.configure(&command, .{});
             const session = configured.accepted.session.slice();
             const generation = storage.commit_generation.load(.acquire);
             {
@@ -1413,7 +1413,7 @@ test "Session list capture and cursor storage stay page bounded as dormant Sessi
                 var key_buffer: [32]u8 = undefined;
                 const key = try std.fmt.bufPrint(&key_buffer, "dormant-key-{d}", .{i});
                 var config = try completeConfiguration(key, "", workspace, "model");
-                try std.testing.expect(storage.configure(&config, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&config, .{}) == .accepted);
                 if (i == 99 or i == 999) {
                     const bytes = try testingSessionList(&storage, &tmp, .{}, &used, i + 1);
                     defer std.testing.allocator.free(bytes);
@@ -1474,7 +1474,7 @@ test "a list row carries its Session's Label, times, first Message, work and pee
             var create = try completeConfiguration("row-create", "", workspace, "model-a");
             create.configuration.label.state = .value;
             try create.configuration.label.value.set("Review PR 412");
-            const session = storage.configure(&create, .{}).accepted.session;
+            const session = (try storage.configure(&create, .{})).accepted.session;
             const created_at = try store_testing.queryU64(&storage, "SELECT created_at FROM session", .{});
             {
                 // Configured, never messaged: idle since its creation.
@@ -1726,7 +1726,7 @@ test "a configure whose instructions and output schema are the same new bytes im
             create.configuration.output_schema = try testingBytesContent(&tmp, "same-create-schema", create_bytes);
             defer create.removeTemporaryContent(std.testing.io) catch unreachable;
             const before_create = try store_testing.queryU64(&storage, rows, .{});
-            const created = storage.configure(&create, .{});
+            const created = try storage.configure(&create, .{});
             try std.testing.expect(created == .accepted);
             try std.testing.expectEqual(before_create + 1, try store_testing.queryU64(&storage, rows, .{}));
             const session = created.accepted.session;
@@ -1738,7 +1738,7 @@ test "a configure whose instructions and output schema are the same new bytes im
             update.configuration.instructions = try testingBytesContent(&tmp, "same-update-instructions", update_bytes);
             update.configuration.output_schema = try testingBytesContent(&tmp, "same-update-schema", update_bytes);
             defer update.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             try std.testing.expectEqual(before_create + 2, try store_testing.queryU64(&storage, rows, .{}));
             const after_update = (try store_core.readSessionForTesting(&storage, session.slice())).?;
             try std.testing.expectEqual(after_update.instructions_id.?, after_update.output_schema_id.?);
@@ -1752,7 +1752,7 @@ test "a configure whose instructions and output schema are the same new bytes im
             forged.configuration.output_schema = try testingBytesContent(&tmp, "same-forged-schema", "{\"title\":\"same-other\"}");
             forged.configuration.output_schema.digest = forged.configuration.instructions.digest;
             defer forged.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.configure(&forged, .{}) != .accepted);
+            try std.testing.expect(try storage.configure(&forged, .{}) != .accepted);
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key='same-forged'", .{}));
             try std.testing.expectEqual(before_create + 2, try store_testing.queryU64(&storage, rows, .{}));
         }
@@ -1779,7 +1779,7 @@ test "Full revisions own repeated content once and render semantic settings" {
             const schema_a = "{}";
             initial.configuration.output_schema = try testingBytesContent(&tmp, "revision-owner-schema-a", schema_a);
             defer initial.removeTemporaryContent(std.testing.io) catch unreachable;
-            const created_session_0_reply = storage.configure(&initial, .{});
+            const created_session_0_reply = try storage.configure(&initial, .{});
             try std.testing.expect(created_session_0_reply == .accepted);
             const created_session_0 = created_session_0_reply.accepted.session;
 
@@ -1793,7 +1793,7 @@ test "Full revisions own repeated content once and render semantic settings" {
             const schema_b = "{\"type\":\"object\"}";
             second.configuration.output_schema = try testingBytesContent(&tmp, "revision-owner-schema-b", schema_b);
             defer second.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.configure(&second, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&second, .{}) == .accepted);
 
             var third: wire_request.ConfigureCommand = .{};
             try third.key.set("revision-owner-3");
@@ -1802,21 +1802,21 @@ test "Full revisions own repeated content once and render semantic settings" {
             third.configuration.tools = try .of(&.{"bash"});
             third.configuration.output_schema = try testingBytesContent(&tmp, "revision-owner-schema-a-again", schema_a);
             defer third.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.configure(&third, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&third, .{}) == .accepted);
 
             var fourth: wire_request.ConfigureCommand = .{};
             try fourth.key.set("revision-owner-4");
             try fourth.session.set(created_session_0.slice());
             fourth.configuration.tools.state = .value;
             fourth.configuration.tools.count = 0;
-            try std.testing.expect(storage.configure(&fourth, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&fourth, .{}) == .accepted);
 
             var fifth: wire_request.ConfigureCommand = .{};
             try fifth.key.set("revision-owner-5");
             try fifth.session.set(created_session_0.slice());
             fifth.configuration.instructions = try testingBytesContent(&tmp, "revision-owner-instructions-schema-a", schema_a);
             defer fifth.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.configure(&fifth, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&fifth, .{}) == .accepted);
 
             const full = try testingSessionReportWithProfile(&storage, &tmp, created_session_0.slice(), 512 * 1024, .full);
             defer std.testing.allocator.free(full);
@@ -1939,7 +1939,7 @@ test "allow once survives mode changes and reopen without granting another Attem
             try update.session.set(session.slice());
             update.configuration.permission_mode.state = .value;
             try update.configuration.permission_mode.value.set("bypass");
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             for (0..2) |pass| {
                 if (pass == 1) {
                     try storage.close();
@@ -2594,7 +2594,7 @@ test "a Bash call the Operation did not offer is rejected and keeps its descript
             var command = try completeConfiguration("unoffered-config", "", workspace, "model-a");
             command.configuration.tools.state = .value;
             command.configuration.tools = try .of(&.{});
-            const reply = storage.configure(&command, .{});
+            const reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .accepted);
             const session = reply.accepted.session;
             try submitTestMessage(&storage, &tmp, "unoffered-message", "unoffered-message", session.slice(), "classify");
@@ -3093,7 +3093,7 @@ test "compaction pressure uses provider usage appended input and complete call r
                 try patch.configuration.compaction_trigger.value.set("1000");
                 patch.configuration.output_reservation.state = .value;
                 try patch.configuration.output_reservation.value.set("1");
-                try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
                 try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "original");
                 const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 const calls = [_]TestingCall{
@@ -3298,7 +3298,7 @@ test "call classification uses the proposing Operation frozen catalog" {
             try remove_bash.session.set(session.slice());
             remove_bash.configuration.tools.state = .value;
             remove_bash.configuration.tools.count = 0;
-            try std.testing.expect(storage.configure(&remove_bash, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&remove_bash, .{}) == .accepted);
             try submitTestMessage(&storage, &tmp, "frozen-call-message", "frozen-call-message", session.slice(), "classify");
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
 
@@ -3307,7 +3307,7 @@ test "call classification uses the proposing Operation frozen catalog" {
             try add_bash.session.set(session.slice());
             add_bash.configuration.tools.state = .value;
             add_bash.configuration.tools = try .of(&.{"bash"});
-            try std.testing.expect(storage.configure(&add_bash, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&add_bash, .{}) == .accepted);
             const calls = [_]TestingCall{.{
                 .item_id = "frozen-item",
                 .name = "bash",
@@ -4124,7 +4124,7 @@ test "Store configuration requires model, Bash workspace and, on a Host serving 
                 if (mask & 1 == 0) command.configuration.workspace.state = .omitted;
                 if (mask & 2 == 0) command.configuration.provider.state = .omitted;
                 if (mask & 4 == 0) command.configuration.model.state = .omitted;
-                const reply = storage.configure(&command, .{});
+                const reply = try storage.configure(&command, .{});
                 // The test Store serves every provider, so none is the default (D221).
                 if (mask == 7) {
                     try std.testing.expect(reply == .accepted);
@@ -4136,7 +4136,7 @@ test "Store configuration requires model, Bash workspace and, on a Host serving 
             }
 
             var initial = try completeConfiguration("binding-initial", "", workspace, "model-a");
-            const initial_reply = storage.configure(&initial, .{});
+            const initial_reply = try storage.configure(&initial, .{});
             try std.testing.expect(initial_reply == .accepted);
             const session = initial_reply.accepted.session;
             const observation = try storage.inspectSessionForTesting(session.slice());
@@ -4150,13 +4150,13 @@ test "Store configuration requires model, Bash workspace and, on a Host serving 
             try equal.configuration.provider.value.set("codex");
             equal.configuration.model.state = .value;
             try equal.configuration.model.value.set("model-a");
-            try std.testing.expect(storage.configure(&equal, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&equal, .{}) == .accepted);
 
             var different = equal;
             try different.key.set("binding-different");
             different.configuration.model.value.len = 0;
             try different.configuration.model.value.set("model-a ");
-            const rejected = storage.configure(&different, .{});
+            const rejected = try storage.configure(&different, .{});
             try std.testing.expect(rejected == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.model_is_immutable, rejected.rejected.code);
         }
@@ -4174,7 +4174,7 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var initial = try completeConfiguration("atomic-initial", "", workspace, "model-a");
-            const created_session_0_reply = storage.configure(&initial, .{});
+            const created_session_0_reply = try storage.configure(&initial, .{});
             try std.testing.expect(created_session_0_reply == .accepted);
             const created_session_0 = created_session_0_reply.accepted.session;
 
@@ -4192,7 +4192,7 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
             defer update.removeTemporaryContent(std.testing.io) catch unreachable;
             const content_count = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
             const revision_count = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{});
-            const rejected = storage.configure(&update, .{});
+            const rejected = try storage.configure(&update, .{});
             try std.testing.expect(rejected == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_provider, rejected.rejected.code);
             try std.testing.expectEqual(content_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
@@ -4201,7 +4201,7 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
             try std.testing.expectEqual(@as(u64, 1), current.revision);
             try std.testing.expectEqual(tool_catalog.toolBit(.bash) | tool_catalog.toolBit(.web_search), current.tools_mask);
             try std.testing.expectEqualStrings("bypass", current.permission_mode.slice());
-            const replay = storage.configure(&update, .{});
+            const replay = try storage.configure(&update, .{});
             try std.testing.expect(replay == .rejected and replay.rejected.replayed);
 
             var omitted: wire_request.ConfigureCommand = .{};
@@ -4209,12 +4209,12 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
             try omitted.session.set(created_session_0.slice());
             omitted.configuration.tools.state = .value;
             omitted.configuration.tools.count = 0;
-            try std.testing.expect(storage.configure(&omitted, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&omitted, .{}) == .accepted);
             var explicit = omitted;
             explicit.configuration.provider.state = .value;
             try explicit.configuration.provider.value.set("codex");
-            try std.testing.expect(storage.configure(&explicit, .{}) == .conflict);
-            try std.testing.expect(storage.configure(&omitted, .{}).accepted.replayed);
+            try std.testing.expect(try storage.configure(&explicit, .{}) == .conflict);
+            try std.testing.expect((try storage.configure(&omitted, .{})).accepted.replayed);
         }
     }.run);
 }
@@ -4232,14 +4232,14 @@ test "creation requires every agent setting and accepts an unused Workspace" {
             inline for (.{ "model", "reasoning_effort", "compaction_trigger", "tools", "permission_mode" }) |field| {
                 var command = try completeConfiguration("missing-" ++ field, "", workspace, "model-a");
                 @field(command.configuration, field).state = .omitted;
-                const reply = storage.configure(&command, .{});
+                const reply = try storage.configure(&command, .{});
                 try std.testing.expect(reply == .rejected);
                 try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, reply.rejected.code);
             }
             // A supplied Workspace is checked even when no tool uses it.
             var missing = try completeConfiguration("unused-missing", "", "/does-not-exist/rui-unused-workspace", "model-a");
             missing.configuration.tools = try .of(&.{});
-            const refused = storage.configure(&missing, .{});
+            const refused = try storage.configure(&missing, .{});
             try std.testing.expect(refused == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_workspace, refused.rejected.code);
             {
@@ -4248,7 +4248,7 @@ test "creation requires every agent setting and accepts an unused Workspace" {
                 var command = try completeConfiguration("unused-omitted", "", workspace, "model-a");
                 command.configuration.tools = try .of(&.{});
                 command.configuration.workspace.state = .omitted;
-                const reply = storage.configure(&command, .{});
+                const reply = try storage.configure(&command, .{});
                 try std.testing.expect(reply == .accepted);
                 const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
                 try std.testing.expectEqual(@as(u8, 0), observed.tools_mask);
@@ -4257,7 +4257,7 @@ test "creation requires every agent setting and accepts an unused Workspace" {
                 try enable.key.set(try std.fmt.bufPrint(&key, "enable-{d}", .{index}));
                 enable.session = reply.accepted.session;
                 enable.configuration.tools = try .of(&.{"bash"});
-                try std.testing.expect(storage.configure(&enable, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&enable, .{}) == .accepted);
                 const enabled = try storage.inspectSessionForTesting(reply.accepted.session.slice());
                 try std.testing.expectEqualStrings(observed.workspace.slice(), enabled.workspace.slice());
                 try std.testing.expectEqualStrings("/", enabled.workspace.slice());
@@ -4282,7 +4282,7 @@ test "an omitted provider selects the Host's sole served provider" {
             command.configuration.workspace.state = .omitted;
             command.configuration.tools = try .of(&.{});
             command.require_model = true;
-            const reply = storage.configure(&command, .{});
+            const reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .accepted);
             const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
             try std.testing.expectEqual(protocol.Provider.openai, observed.provider.?);
@@ -4307,13 +4307,13 @@ test "an omitted provider is refused on a Host serving several" {
             command.configuration.provider.state = .omitted;
             command.configuration.workspace.state = .omitted;
             command.configuration.tools = try .of(&.{});
-            const reply = storage.configure(&command, .{});
+            const reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, reply.rejected.code);
             try command.key.set("several-providers-named");
             command.configuration.provider.state = .value;
             try command.configuration.provider.value.set("openai");
-            try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&command, .{}) == .accepted);
         }
     }.run);
 }
@@ -4332,28 +4332,28 @@ test "compactAt enforces only known context windows on create and update" {
             var buffer: [20]u8 = undefined;
             var command = try completeConfiguration("too-large-create", "", workspace, "gpt-6.1-sol");
             try command.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&buffer, "{d}", .{window + 1}));
-            var reply = storage.configure(&command, .{});
+            var reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.compact_at_too_large, reply.rejected.code);
-            try std.testing.expect(storage.configure(&command, .{}).rejected.replayed);
+            try std.testing.expect((try storage.configure(&command, .{})).rejected.replayed);
             try command.key.set("u64-too-large-create");
             try command.configuration.compaction_trigger.value.set("18446744073709551615");
-            const huge = storage.configure(&command, .{});
+            const huge = try storage.configure(&command, .{});
             try std.testing.expect(huge == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.compact_at_too_large, huge.rejected.code);
             try command.key.set("window-boundary");
             try command.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&buffer, "{d}", .{window}));
-            reply = storage.configure(&command, .{});
+            reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .accepted);
             var patch: wire_request.ConfigureCommand = .{};
             try patch.key.set("too-large-update");
             patch.session = reply.accepted.session;
             patch.configuration.compaction_trigger.state = .value;
             try patch.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&buffer, "{d}", .{window + 1}));
-            const refused = storage.configure(&patch, .{});
+            const refused = try storage.configure(&patch, .{});
             try std.testing.expect(refused == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.compact_at_too_large, refused.rejected.code);
-            try std.testing.expect(storage.configure(&patch, .{}).rejected.replayed);
+            try std.testing.expect((try storage.configure(&patch, .{})).rejected.replayed);
             const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
             try std.testing.expectEqual(@as(u64, 1), observed.revision);
             try std.testing.expectEqual(@as(?u64, window), observed.compaction_trigger);
@@ -4361,7 +4361,7 @@ test "compactAt enforces only known context windows on create and update" {
             try command.configuration.model.value.set("model-not-in-catalog");
             command.configuration.reasoning_effort.state = .explicit_null;
             try command.configuration.compaction_trigger.value.set("999999999");
-            try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&command, .{}) == .accepted);
         }
     }.run);
 }
@@ -4387,9 +4387,9 @@ test "loaded tools select saved records even after the Host catalog changes or r
             var create = try completeConfiguration("loaded-records-create", "", workspace, "model-a");
             create.configuration.tools = try .of(&.{ "fetch_page", "find_tools", "other_page" });
             create.configuration.loaded_tools = try .of(&.{"find_tools"});
-            const first = storage.configure(&create, .{}).accepted.session;
+            const first = (try storage.configure(&create, .{})).accepted.session;
             try create.key.set("loaded-records-second");
-            const second = storage.configure(&create, .{}).accepted.session;
+            const second = (try storage.configure(&create, .{})).accepted.session;
             const saved_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.tool_set_id " ++
                 "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
 
@@ -4403,7 +4403,7 @@ test "loaded tools select saved records even after the Host catalog changes or r
             try update.key.set("loaded-records-reworded");
             update.session = first;
             update.configuration.loaded_tools = try .of(&.{ "fetch_page", "find_tools" });
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             const loaded_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.loaded_tool_set_id " ++
                 "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
             try std.testing.expectEqual(saved_record, loaded_record);
@@ -4417,7 +4417,7 @@ test "loaded tools select saved records even after the Host catalog changes or r
             try storage.saveCatalog(&removed);
             try update.key.set("loaded-records-removed");
             update.session = second;
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             // Both configurations select the original records and intern
             // the very same loaded set despite today's catalog contents.
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(DISTINCT loaded_tool_set_id) FROM session WHERE session_ref=?1 OR session_ref=?2", .{ first.slice(), second.slice() }));
@@ -4584,7 +4584,7 @@ test "configuration answers replay without reverting newer settings" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var first = try completeConfiguration("first", "", workspace, "model-a");
-            const first_reply = storage.configure(&first, .{});
+            const first_reply = try storage.configure(&first, .{});
             try std.testing.expect(first_reply == .accepted);
             try std.testing.expect(first_reply.accepted.created);
 
@@ -4595,11 +4595,11 @@ test "configuration answers replay without reverting newer settings" {
             update.configuration.tools.count = 0;
             update.configuration.permission_mode.state = .value;
             try update.configuration.permission_mode.value.set("bypass");
-            const update_reply = storage.configure(&update, .{});
+            const update_reply = try storage.configure(&update, .{});
             try std.testing.expect(update_reply == .accepted);
             try std.testing.expectEqual(@as(u64, 2), update_reply.accepted.revision);
 
-            const replay = storage.configure(&first, .{});
+            const replay = try storage.configure(&first, .{});
             try std.testing.expect(replay == .accepted);
             try std.testing.expect(replay.accepted.replayed);
             try std.testing.expectEqual(@as(u64, 1), replay.accepted.revision);
@@ -4624,7 +4624,7 @@ test "configuration answers replay without reverting newer settings" {
 
             first.configuration.tools.state = .value;
             first.configuration.tools.count = 0;
-            try std.testing.expect(storage.configure(&first, .{}) == .conflict);
+            try std.testing.expect(try storage.configure(&first, .{}) == .conflict);
         }
     }.run);
 }
@@ -4690,7 +4690,7 @@ test "core preserves empty and NUL keys while Session references stay canonical"
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var command = try completeConfiguration("", "", workspace, "model-a");
-            const reply = storage.configure(&command, .{});
+            const reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .accepted);
             const session = reply.accepted.session;
             try std.testing.expect(protocol.validSessionId(session.slice()));
@@ -4702,14 +4702,14 @@ test "core preserves empty and NUL keys while Session references stay canonical"
             var update: wire_request.ConfigureCommand = .{};
             try update.key.set("exact\x00key");
             update.session = session;
-            const updated = storage.configure(&update, .{});
+            const updated = try storage.configure(&update, .{});
             try std.testing.expect(updated == .accepted and !updated.accepted.created);
             try std.testing.expectEqual(@as(u64, 2), updated.accepted.revision);
             try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "exact\x00key")).status == .accepted);
-            try std.testing.expect(storage.configure(&update, .{}).accepted.replayed);
+            try std.testing.expect((try storage.configure(&update, .{})).accepted.replayed);
 
             var invalid = try completeConfiguration("invalid-nul-session", "exact\x00reference", workspace, "model-a");
-            const rejected = storage.configure(&invalid, .{});
+            const rejected = try storage.configure(&invalid, .{});
             try std.testing.expect(rejected == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_session_reference, rejected.rejected.code);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
@@ -4730,7 +4730,7 @@ test "saved incomplete initialization stays rejected after Session creation" {
 
             var incomplete: wire_request.ConfigureCommand = .{};
             try incomplete.key.set("incomplete");
-            const rejected = storage.configure(&incomplete, .{});
+            const rejected = try storage.configure(&incomplete, .{});
             try std.testing.expect(rejected == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, rejected.rejected.code);
 
@@ -4742,8 +4742,8 @@ test "saved incomplete initialization stays rejected after Session creation" {
                 workspace,
                 "model-a",
             );
-            try std.testing.expect(storage.configure(&complete, .{}) == .accepted);
-            const replay = storage.configure(&incomplete, .{});
+            try std.testing.expect(try storage.configure(&complete, .{}) == .accepted);
+            const replay = try storage.configure(&incomplete, .{});
             try std.testing.expect(replay == .rejected);
             try std.testing.expect(replay.rejected.replayed);
         }
@@ -4764,25 +4764,25 @@ test "capability-required configuration rejects on replacement and replays its s
             command.require_model = true;
 
             storage.served = protocol.routesAll(.unserved);
-            const rejected = storage.configure(&command, .{});
+            const rejected = try storage.configure(&command, .{});
             try std.testing.expect(rejected == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.model_capability_unavailable, rejected.rejected.code);
             try std.testing.expect(!(try storage.inspectSessionForTesting(command.session.slice())).found);
-            const replay = storage.configure(&command, .{});
+            const replay = try storage.configure(&command, .{});
             try std.testing.expect(replay == .rejected and replay.rejected.replayed);
             try std.testing.expectEqual(rejected.rejected.code, replay.rejected.code);
 
             var new_key = command;
             try new_key.key.set("capability-guard-next");
             storage.served = protocol.routesAll(.endpoint);
-            try std.testing.expect(storage.configure(&new_key, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&new_key, .{}) == .accepted);
             storage.served = protocol.routesAll(.unserved);
-            try std.testing.expect(storage.configure(&new_key, .{}).accepted.replayed);
+            try std.testing.expect((try storage.configure(&new_key, .{})).accepted.replayed);
             var changed_intent = command;
             changed_intent.require_model = false;
-            try std.testing.expect(storage.configure(&changed_intent, .{}) == .conflict);
+            try std.testing.expect(try storage.configure(&changed_intent, .{}) == .conflict);
             try changed_intent.key.set("explicit-offline-config");
-            try std.testing.expect(storage.configure(&changed_intent, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&changed_intent, .{}) == .accepted);
         }
     }.run);
 }
@@ -4803,7 +4803,7 @@ test "failed commit saves neither answer nor partial Session" {
             {
                 var storage: Store = undefined;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-                const reply = storage.configure(&command, .{ .before_commit = true });
+                const reply = try storage.configure(&command, .{ .before_commit = true });
                 try std.testing.expect(reply == .infrastructure_failure);
                 try storage.close();
             }
@@ -4813,7 +4813,7 @@ test "failed commit saves neither answer nor partial Session" {
                 defer storage.close() catch unreachable;
                 try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "commit-fault")).status == .absent);
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
-                try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&command, .{}) == .accepted);
             }
         }
     }.run);
@@ -4860,7 +4860,7 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
             var create = try completeConfiguration("label-create", "", workspace, "model-a");
             create.configuration.label.state = .value;
             try create.configuration.label.value.set("Review PR 412");
-            const created = storage.configure(&create, .{});
+            const created = try storage.configure(&create, .{});
             try std.testing.expect(created == .accepted);
             const session = created.accepted.session;
             {
@@ -4870,10 +4870,10 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
             }
             // An exact replay answers the saved admission; a changed Label under the
             // same key conflicts.
-            try std.testing.expect(storage.configure(&create, .{}).accepted.replayed);
+            try std.testing.expect((try storage.configure(&create, .{})).accepted.replayed);
             var changed = create;
             try changed.configuration.label.value.set("Review PR 413");
-            try std.testing.expect(storage.configure(&changed, .{}) == .conflict);
+            try std.testing.expect(try storage.configure(&changed, .{}) == .conflict);
 
             // A Label-only revision relabels without touching the Conversation, and
             // omission preserves the Label.
@@ -4882,13 +4882,13 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
             try relabel.session.set(session.slice());
             relabel.configuration.label.state = .value;
             try relabel.configuration.label.value.set("Fix the flaky resize test");
-            try std.testing.expectEqual(@as(u64, 2), storage.configure(&relabel, .{}).accepted.revision);
+            try std.testing.expectEqual(@as(u64, 2), (try storage.configure(&relabel, .{})).accepted.revision);
             var effort: wire_request.ConfigureCommand = .{};
             try effort.key.set("label-preserved");
             try effort.session.set(session.slice());
             effort.configuration.permission_mode.state = .value;
             try effort.configuration.permission_mode.value.set("ask");
-            try std.testing.expect(storage.configure(&effort, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&effort, .{}) == .accepted);
             {
                 const label = (try testingLabel(&storage, &tmp, session.slice())).?;
                 defer std.testing.allocator.free(label);
@@ -4902,7 +4902,7 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
             try clear.key.set("label-clear");
             try clear.session.set(session.slice());
             clear.configuration.label.state = .explicit_null;
-            try std.testing.expect(storage.configure(&clear, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&clear, .{}) == .accepted);
             try std.testing.expect((try testingLabel(&storage, &tmp, session.slice())) == null);
 
             // A Label obeys the saved description rule: blank and multi-line text
@@ -4914,7 +4914,7 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
                 try refused.session.set(session.slice());
                 refused.configuration.label.state = .value;
                 try refused.configuration.label.value.set(text);
-                const reply = storage.configure(&refused, .{});
+                const reply = try storage.configure(&refused, .{});
                 try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_label, reply.rejected.code);
             }
             try std.testing.expect(!storage.isFenced());
@@ -5057,7 +5057,7 @@ test "message rejections replay before current Session checks without retained i
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var configuration = try completeConfiguration("configure-later", "", workspace, "model-a");
-            const configured = storage.configure(&configuration, .{});
+            const configured = try storage.configure(&configuration, .{});
             try std.testing.expect(configured == .accepted);
             try std.testing.expectEqualStrings(message.session.slice(), configured.accepted.session.slice());
             const replay = storage.submitMessageWithModel(&message, null, .{});
@@ -5093,7 +5093,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             tools.configuration.tools = try .of(&.{"bash"});
             tools.configuration.permission_mode.state = .value;
             try tools.configuration.permission_mode.value.set("bypass");
-            try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&tools, .{}) == .accepted);
             try submitTestMessage(&storage, &tmp, "sender-seed", "sender-seed", sender, "send a report");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, model, "sender-calls");
@@ -5273,7 +5273,7 @@ test "refused peer creation activity survives the public page roundtrip" {
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var configuration = try completeConfiguration("creation-refusal-sender", "", workspace, "model-a");
             configuration.configuration.tools = try .of(&.{"bash"});
-            const configured = storage.configure(&configuration, .{});
+            const configured = try storage.configure(&configuration, .{});
             try std.testing.expect(configured == .accepted);
             const sender = configured.accepted.session;
             try submitTestMessage(&storage, &tmp, "creation-refusal-seed", "creation-refusal-seed", sender.slice(), "start another Session");
@@ -5520,7 +5520,7 @@ test "message observation validates accepted admission references independently"
                     workspace,
                     "model-a",
                 );
-                const created_session_0_reply = storage.configure(&primary_configuration, .{});
+                const created_session_0_reply = try storage.configure(&primary_configuration, .{});
                 try std.testing.expect(created_session_0_reply == .accepted);
                 const created_session_0 = created_session_0_reply.accepted.session;
                 var other_configuration = try completeConfiguration(
@@ -5529,7 +5529,7 @@ test "message observation validates accepted admission references independently"
                     workspace,
                     "model-a",
                 );
-                const other_reply = storage.configure(&other_configuration, .{});
+                const other_reply = try storage.configure(&other_configuration, .{});
                 try std.testing.expect(other_reply == .accepted);
                 const other_session = other_reply.accepted.session;
 
@@ -5594,7 +5594,7 @@ test "message observation rejects an answer attached to processing durable facts
                 workspace,
                 "model-a",
             );
-            const created_session_0_reply = storage.configure(&configuration, .{});
+            const created_session_0_reply = try storage.configure(&configuration, .{});
             try std.testing.expect(created_session_0_reply == .accepted);
             const created_session_0 = created_session_0_reply.accepted.session;
             const file = try tmp.dir.createFile(std.testing.io, "corrupt-observation-message", .{ .read = true });
@@ -5632,7 +5632,7 @@ test "message conflicts and failed commits cannot create another admission" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var configuration = try completeConfiguration("configure", "", workspace, "model-a");
-            const created_session_0_reply = storage.configure(&configuration, .{});
+            const created_session_0_reply = try storage.configure(&configuration, .{});
             try std.testing.expect(created_session_0_reply == .accepted);
             const created_session_0 = created_session_0_reply.accepted.session;
 
@@ -5663,7 +5663,7 @@ test "message conflicts and failed commits cannot create another admission" {
             changed.text.length += 1;
             try std.testing.expect(storage.submitMessageWithModel(&changed, null, .{}) == .conflict);
             var changed_kind = try completeConfiguration("message", created_session_0.slice(), workspace, "model-a");
-            try std.testing.expect(storage.configure(&changed_kind, .{}) == .conflict);
+            try std.testing.expect(try storage.configure(&changed_kind, .{}) == .conflict);
             try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(created_session_0.slice())).pending_messages);
             try storage.close();
         }
@@ -5681,7 +5681,7 @@ test "failed message import rolls back content command and admission" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var configuration = try completeConfiguration("configure", "", workspace, "model-a");
-            const created_session_0_reply = storage.configure(&configuration, .{});
+            const created_session_0_reply = try storage.configure(&configuration, .{});
             try std.testing.expect(created_session_0_reply == .accepted);
             const created_session_0 = created_session_0_reply.accepted.session;
             const text = "larger than an empty import";
@@ -5731,7 +5731,7 @@ test "external content import follows sealed descriptor custody" {
                 .digest = protocol.contentDigest(captured),
             };
             defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-            const created_session_0_reply = storage.configure(&command, .{});
+            const created_session_0_reply = try storage.configure(&command, .{});
             try std.testing.expect(created_session_0_reply == .accepted);
             const created_session_0 = created_session_0_reply.accepted.session;
 
@@ -5770,7 +5770,7 @@ test "external content identity is verified before canonical commit" {
             };
             defer command.removeTemporaryContent(std.testing.io) catch unreachable;
 
-            try std.testing.expect(storage.configure(&command, .{}) == .infrastructure_failure);
+            try std.testing.expect(try storage.configure(&command, .{}) == .infrastructure_failure);
             try std.testing.expectError(error.StoreFenced, store_testing.observeCommandForTesting(&storage, "changed"));
         }
     }.run);
@@ -5796,7 +5796,7 @@ test "content verification failure rolls back new imports and deduplicated input
                     defer initial.removeTemporaryContent(std.testing.io) catch unreachable;
                     var session: protocol.Bounded(protocol.max_session_bytes) = .{};
                     if (deduplicated) {
-                        const configured = storage.configure(&initial, .{});
+                        const configured = try storage.configure(&initial, .{});
                         try std.testing.expect(configured == .accepted);
                         session = configured.accepted.session;
                     }
@@ -5820,7 +5820,7 @@ test "content verification failure rolls back new imports and deduplicated input
                             if (deduplicated) content.digest = initial.configuration.instructions.digest;
                         },
                     }
-                    try std.testing.expect(storage.configure(&command, .{ .content_read = case == .read_failure }) == .infrastructure_failure);
+                    try std.testing.expect(try storage.configure(&command, .{ .content_read = case == .read_failure }) == .infrastructure_failure);
                     try std.testing.expectError(error.StoreFenced, store_testing.observeCommandForTesting(&storage, "invalid"));
                     try std.testing.expectEqual(content_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
                     try std.testing.expectEqual(command_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command", .{}));
@@ -5870,17 +5870,17 @@ test "content import reads once and rolls back sources that change during readin
                 command.configuration.instructions = try testingContent(&tmp, "source", 'q', length);
                 defer command.removeTemporaryContent(std.testing.io) catch unreachable;
                 if (change == .none) {
-                    const created_session_0_reply = storage.configure(&command, .{});
+                    const created_session_0_reply = try storage.configure(&command, .{});
                     try std.testing.expect(created_session_0_reply == .accepted);
                     const created_session_0 = created_session_0_reply.accepted.session;
                     try std.testing.expectEqual(length, Probe.bytes_read);
                     Probe.bytes_read = 0;
                     try command.key.set("deduplicated");
                     command.session = created_session_0;
-                    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+                    try std.testing.expect(try storage.configure(&command, .{}) == .accepted);
                     try std.testing.expectEqual(length, Probe.bytes_read);
                 } else {
-                    try std.testing.expect(storage.configure(&command, .{}) == .infrastructure_failure);
+                    try std.testing.expect(try storage.configure(&command, .{}) == .infrastructure_failure);
                     try std.testing.expectError(error.StoreFenced, store_testing.observeCommandForTesting(&storage, "read-probe"));
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE content_id NOT IN (SELECT description_content_id FROM tool_record) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)", .{}));
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command", .{}));
@@ -5905,12 +5905,12 @@ test "multiwindow content import and deduplication preserve all bytes" {
             const length = protocol.content_window_bytes * 2 + 17;
             command.configuration.instructions = try testingContent(&tmp, "source", 'q', length);
             defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-            const created_session_0_reply = storage.configure(&command, .{});
+            const created_session_0_reply = try storage.configure(&command, .{});
             try std.testing.expect(created_session_0_reply == .accepted);
             const created_session_0 = created_session_0_reply.accepted.session;
             try command.key.set("second");
             command.session = created_session_0;
-            try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&command, .{}) == .accepted);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
             const observation = try storage.inspectSessionForTesting(created_session_0.slice());
             try std.testing.expectEqual(@as(u64, 2), observation.revision);
@@ -5948,7 +5948,7 @@ test "large raw content opens without materializing its payload" {
                 .length = command.configuration.instructions.length,
                 .digest = command.configuration.instructions.digest,
             };
-            const created_session_0_reply = storage.configure(&command, .{});
+            const created_session_0_reply = try storage.configure(&command, .{});
             try std.testing.expect(created_session_0_reply == .accepted);
             var reader: ContentReader = undefined;
             reader.open(try storage.openContent(reference));
@@ -5977,7 +5977,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             // The 1 MiB Message must not start a compaction: this test reads pages.
             configuration.configuration.compaction_trigger.state = .value;
             try configuration.configuration.compaction_trigger.value.set("1000000000");
-            const created_session_0_reply = storage.configure(&configuration, .{});
+            const created_session_0_reply = try storage.configure(&configuration, .{});
             try std.testing.expect(created_session_0_reply == .accepted);
             const created_session_0 = created_session_0_reply.accepted.session;
             var request = protocol.ConversationPage{};
@@ -6005,7 +6005,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             try instruction.session.set(created_session_0.slice());
             instruction.configuration.instructions = try testingContent(&tmp, "public-instruction-before", 's', 7);
             defer instruction.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.configure(&instruction, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&instruction, .{}) == .accepted);
             const active = (try storage.admitNextModelAttempt(.{})).?;
             const first = try store_core.publicConversationPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 16), first.count);
@@ -6036,7 +6036,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             try later.session.set(created_session_0.slice());
             later.configuration.instructions = try testingContent(&tmp, "public-private-settings", 'p', 16);
             defer later.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.configure(&later, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&later, .{}) == .accepted);
             try submitTestMessage(&storage, &tmp, "after-page", "after-page-key", created_session_0.slice(), "later public input");
             try storage.settleModelAttemptFailure(active.permit.binding, .{ .uncorrelated = "fixture_failure" }, .ordinary, .{});
             _ = (try storage.admitNextModelAttempt(.{})).?;
@@ -6194,7 +6194,7 @@ test "definite rejections retain decisions without retaining payloads" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var initial = try completeConfiguration("initial", "", workspace, "model-a");
-            const created_session_0_reply = storage.configure(&initial, .{});
+            const created_session_0_reply = try storage.configure(&initial, .{});
             try std.testing.expect(created_session_0_reply == .accepted);
             const created_session_0 = created_session_0_reply.accepted.session;
             try store_testing.exec(&storage, "UPDATE session SET revision=9223372036854775807 WHERE session_ref=?1", .{created_session_0.slice()});
@@ -6212,7 +6212,7 @@ test "definite rejections retain decisions without retaining payloads" {
             try incomplete.key.set("incomplete");
             incomplete.configuration.instructions = try testingContent(&tmp, "incomplete", 'i', 64 * 1024);
             defer incomplete.removeTemporaryContent(std.testing.io) catch unreachable;
-            const incomplete_reply = storage.configure(&incomplete, .{});
+            const incomplete_reply = try storage.configure(&incomplete, .{});
             try std.testing.expect(incomplete_reply == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, incomplete_reply.rejected.code);
 
@@ -6221,7 +6221,7 @@ test "definite rejections retain decisions without retaining payloads" {
             try exhausted.session.set(created_session_0.slice());
             exhausted.configuration.instructions = try testingContent(&tmp, "exhausted", 'e', 64 * 1024);
             defer exhausted.removeTemporaryContent(std.testing.io) catch unreachable;
-            const exhausted_reply = storage.configure(&exhausted, .{});
+            const exhausted_reply = try storage.configure(&exhausted, .{});
             try std.testing.expect(exhausted_reply == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.revision_exhausted, exhausted_reply.rejected.code);
 
@@ -6231,15 +6231,15 @@ test "definite rejections retain decisions without retaining payloads" {
             try storage.close();
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             try std.testing.expect(storage.submitMessageWithModel(&unknown_message, null, .{}).rejected.replayed);
-            try std.testing.expect(storage.configure(&incomplete, .{}).rejected.replayed);
-            try std.testing.expect(storage.configure(&exhausted, .{}).rejected.replayed);
+            try std.testing.expect((try storage.configure(&incomplete, .{})).rejected.replayed);
+            try std.testing.expect((try storage.configure(&exhausted, .{})).rejected.replayed);
 
             var changed = unknown_message;
             changed.text.digest[0] ^= 1;
             try std.testing.expect(storage.submitMessageWithModel(&changed, null, .{}) == .conflict);
             var retargeted = incomplete;
             try retargeted.session.set("0ther0");
-            try std.testing.expect(storage.configure(&retargeted, .{}) == .conflict);
+            try std.testing.expect(try storage.configure(&retargeted, .{}) == .conflict);
             var changed_kind: wire_request.MessageCommand = .{};
             try changed_kind.key.set("incomplete");
             try changed_kind.session.set("absent");
@@ -7311,7 +7311,7 @@ test "explicit compaction thresholds and frozen retry survive reopen" {
                 const expected: ?u64 = model_capability.contextWindow(model) * product_defaults.compaction_trigger_percent / 100;
                 var threshold: [20]u8 = undefined;
                 try configure.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&threshold, "{d}", .{expected.?}));
-                const created_session_0_reply = storage.configure(&configure, .{});
+                const created_session_0_reply = try storage.configure(&configure, .{});
                 try std.testing.expect(created_session_0_reply == .accepted);
                 const created_session_0 = created_session_0_reply.accepted.session;
                 const initial = try storage.inspectSessionForTesting(created_session_0.slice());
@@ -7327,7 +7327,7 @@ test "explicit compaction thresholds and frozen retry survive reopen" {
                 try patch.configuration.compaction_trigger.value.set("10");
                 patch.configuration.output_reservation.state = .value;
                 try patch.configuration.output_reservation.value.set("8");
-                try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
                 const selected = try storage.inspectSessionForTesting(created_session_0.slice());
                 try std.testing.expectEqual(@as(?u64, 10), selected.compaction_trigger_override);
                 try std.testing.expectEqual(@as(?u64, 8), selected.output_reservation_override);
@@ -7347,12 +7347,12 @@ test "explicit compaction thresholds and frozen retry survive reopen" {
                 try patch.key.set("inherit");
                 patch.configuration.compaction_trigger.state = .explicit_null;
                 patch.configuration.output_reservation.state = .explicit_null;
-                const refused_clear = storage.configure(&patch, .{});
+                const refused_clear = try storage.configure(&patch, .{});
                 try std.testing.expect(refused_clear == .rejected);
                 try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_compaction_trigger, refused_clear.rejected.code);
                 try patch.key.set("explicit-threshold");
                 patch.configuration.compaction_trigger = configure.configuration.compaction_trigger;
-                try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
                 const reset = try storage.inspectSessionForTesting(created_session_0.slice());
                 try std.testing.expectEqual(expected, reset.compaction_trigger);
                 try std.testing.expectEqual(@as(u64, 0), reset.output_reservation);
@@ -7423,7 +7423,7 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
                 if (index == 7) patch.configuration.compaction_trigger.state = .omitted;
                 patch.configuration.output_reservation.state = .value;
                 try patch.configuration.output_reservation.value.set("0");
-                try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
                 try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "original");
                 // A Session's first call never compacts, so nothing is compared.
                 try std.testing.expectEqual(@as(?u64, null), try testingContextEstimate(&storage, &tmp, session.slice()));
@@ -7507,7 +7507,7 @@ test "compaction pressure uses the latest accepted output even without usage" {
                     try patch.session.set(session.slice());
                     patch.configuration.compaction_trigger.state = .value;
                     try patch.configuration.compaction_trigger.value.set("1000");
-                    try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                    try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
                     const original: [4000]u8 = @splat('x');
                     try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), if (context == .host_input) &original else "small input");
                     const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -7547,7 +7547,7 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
             try patch.configuration.compaction_trigger.value.set("1");
             patch.configuration.output_reservation.state = .value;
             try patch.configuration.output_reservation.value.set("1");
-            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
             try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "original");
             const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "provider_failure" }, .ordinary, .{});
@@ -7571,7 +7571,7 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
             try patch.configuration.output_reservation.value.set("8");
             patch.configuration.instructions = try testingBytesContent(&tmp, "instruction", "later instruction");
             defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
             try std.testing.expectEqual(@as(u64, 1), (try testSettings(&view)).compaction_trigger);
             try submitTestMessage(&storage, &tmp, "three", "three", session.slice(), "arrival");
             try settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
@@ -7593,12 +7593,12 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
             }
             try std.testing.expect((try cursor.next(&later)) == null);
             try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSessionForTesting(session.slice())).pending_messages);
-            const replay = storage.configure(&patch, .{});
+            const replay = try storage.configure(&patch, .{});
             try std.testing.expect(replay == .accepted and replay.accepted.replayed);
             var omitted: wire_request.ConfigureCommand = .{};
             try omitted.key.set("omitted-heuristics");
             try omitted.session.set(session.slice());
-            try std.testing.expect(storage.configure(&omitted, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&omitted, .{}) == .accepted);
             const observed = try storage.inspectSessionForTesting(session.slice());
             try std.testing.expectEqual(@as(u64, 999), observed.compaction_trigger);
             try std.testing.expectEqual(@as(u64, 8), observed.output_reservation);
@@ -7613,7 +7613,7 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
                 try invalid_patch.session.set(session.slice());
                 invalid_patch.configuration.compaction_trigger.state = .value;
                 try invalid_patch.configuration.compaction_trigger.value.set(invalid);
-                const rejected = storage.configure(&invalid_patch, .{});
+                const rejected = try storage.configure(&invalid_patch, .{});
                 try std.testing.expect(rejected == .rejected);
                 try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_compaction_trigger, rejected.rejected.code);
                 try std.testing.expectEqual(observed.revision, (try storage.inspectSessionForTesting(session.slice())).revision);
@@ -7622,7 +7622,7 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
                     invalid_patch.configuration.compaction_trigger.state = .omitted;
                     invalid_patch.configuration.output_reservation.state = .value;
                     try invalid_patch.configuration.output_reservation.value.set(invalid);
-                    const reserve_rejected = storage.configure(&invalid_patch, .{});
+                    const reserve_rejected = try storage.configure(&invalid_patch, .{});
                     try std.testing.expect(reserve_rejected == .rejected);
                     try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_output_reservation, reserve_rejected.rejected.code);
                     try std.testing.expectEqual(observed.revision, (try storage.inspectSessionForTesting(session.slice())).revision);
@@ -7762,7 +7762,7 @@ test "compaction repeated overflow consumes fixed pending prefix without a proac
                 try patch.session.set(session.slice());
                 patch.configuration.compaction_trigger.state = .value;
                 try patch.configuration.compaction_trigger.value.set("1");
-                try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
                 try submitTestMessage(&storage, &tmp, "pending", "pending", session.slice(), "fixed pending prefix");
                 const proactive = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(proactive));
@@ -7807,7 +7807,7 @@ test "compaction does not repeat a soft trigger after a failed assistant with un
             try patch.session.set(session.slice());
             patch.configuration.compaction_trigger.state = .value;
             try patch.configuration.compaction_trigger.value.set("1");
-            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
             try submitTestMessage(&storage, &tmp, "two", "two", session.slice(), "new pending input");
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
@@ -7838,7 +7838,7 @@ test "compaction missing usage estimates covered retained host input" {
                 try patch.session.set(session.slice());
                 patch.configuration.compaction_trigger.state = .value;
                 try patch.configuration.compaction_trigger.value.set("1000");
-                try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
                 const original: [4000]u8 = @splat('x');
                 try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), &original);
                 const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -7887,7 +7887,7 @@ test "compaction new Turn evaluates pressure independently of stopped overflow r
                     try patch.session.set(session.slice());
                     patch.configuration.compaction_trigger.state = .value;
                     try patch.configuration.compaction_trigger.value.set(if (pressure) "1" else "1000000");
-                    try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                    try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
                     try submitTestMessage(&storage, &tmp, "new", "new", session.slice(), "new work");
                     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                     try std.testing.expect(next.turn_id != original.turn_id);
@@ -8424,7 +8424,7 @@ test "Full revision queries bound the rows MySQL must drain after a streaming st
                 try change.key.set(try std.fmt.bufPrint(&key, "revision-drain-{d}", .{revision}));
                 try change.session.set(session.slice());
                 change.configuration.instructions = try testingBytesContent(&tmp, key[0..change.key.len], key[0..change.key.len]);
-                try std.testing.expect(storage.configure(&change, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&change, .{}) == .accepted);
             }
             const Rows = struct {
                 count: usize = 0,
@@ -8492,7 +8492,7 @@ test "Full revisions show each content whole where it first occurs" {
                     try reconfigure.key.set(try std.fmt.bufPrint(&key, "owners-other-{d}", .{index}));
                     try reconfigure.session.set(other.slice());
                     reconfigure.configuration.instructions = try testingBytesContent(&tmp, try std.fmt.bufPrint(&key, "owners-other-i-{d}", .{index}), texts[index][0..lengths[index]]);
-                    try std.testing.expect(storage.configure(&reconfigure, .{}) == .accepted);
+                    try std.testing.expect(try storage.configure(&reconfigure, .{}) == .accepted);
                 }
                 // Each revision's text, as an index into `texts` (`null`: none).
                 const instructions = try std.testing.allocator.alloc(?usize, revisions + 1);
@@ -8538,7 +8538,7 @@ test "Full revisions show each content whole where it first occurs" {
                     if (output_schema[revision]) |o| {
                         reconfigure.configuration.output_schema = try testingBytesContent(&tmp, try std.fmt.bufPrint(&key, "owners-s-{d}", .{revision}), texts[o][0..lengths[o]]);
                     } else reconfigure.configuration.output_schema.state = .explicit_null;
-                    try std.testing.expect(storage.configure(&reconfigure, .{}) == .accepted);
+                    try std.testing.expect(try storage.configure(&reconfigure, .{}) == .accepted);
                 }
                 try std.testing.expectEqual(shape == .grown, 2 * distinct > capacity);
                 const full = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .full);
@@ -8739,7 +8739,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
             try permission_update.session.set(session.slice());
             permission_update.configuration.permission_mode.state = .value;
             try permission_update.configuration.permission_mode.value.set("bypass");
-            try std.testing.expect(storage.configure(&permission_update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&permission_update, .{}) == .accepted);
             const second_action_id = second: {
                 const report_bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
                 defer std.testing.allocator.free(report_bytes);
@@ -9499,7 +9499,7 @@ test "each Store entry point takes its round budget on its common path" {
             command.configuration.tools = try .of(&.{"fetch_page"});
             command.configuration.permission_mode.state = .value;
             try command.configuration.permission_mode.value.set("bypass");
-            const configured = storage.configure(&command, .{});
+            const configured = try storage.configure(&command, .{});
             try std.testing.expect(configured == .accepted);
             const session = configured.accepted.session;
             try submitTestMessage(&storage, &tmp, "budget-mcp-input", "budget-mcp-key", session.slice(), "fetch a page");
@@ -9549,7 +9549,7 @@ test "each Store entry point takes its round budget on its common path" {
             var path: [protocol.max_workspace_bytes]u8 = undefined;
             var create = try completeConfiguration("budget-skill", "", try canonicalCwd(std.testing.io, &path), "model-a");
             create.configuration.tools = try .of(&.{"skill"});
-            const session = storage.configureWithInitialSkills(&create, null, &initial, .{}).accepted.session;
+            const session = (try storage.configureWithInitialSkills(&create, null, &initial, .{})).accepted.session;
             meter.start();
             try std.testing.expect(try storage.commandExists("budget-skill"));
             meter.stop(.commandExists);
@@ -9580,7 +9580,7 @@ test "each Store entry point takes its round budget on its common path" {
             var configuration = try completeConfiguration("budget-find", "", try canonicalCwd(std.testing.io, &path), "model-a");
             configuration.configuration.tools = try .of(&.{ "bash", "find_tools" });
             configuration.configuration.loaded_tools = try .of(&.{"find_tools"});
-            const session = storage.configure(&configuration, .{}).accepted.session;
+            const session = (try storage.configure(&configuration, .{})).accepted.session;
             try submitTestMessage(storage, tmp, "budget-find-input", "budget-find-key", session.slice(), "find tools");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const calls = [_]TestingCall{.{ .item_id = "find-item", .name = "find_tools", .encoded_call_id = "find-call", .decoded_call_id = "find-call", .encoded_arguments = "{\\\"words\\\":\\\"absent0 absent1 absent2 absent3 absent4 absent5 absent6 absent7\\\"}", .decoded_arguments = "{\"words\":\"absent0 absent1 absent2 absent3 absent4 absent5 absent6 absent7\"}" }};
@@ -9603,7 +9603,7 @@ test "each Store entry point takes its round budget on its common path" {
             var command = try completeConfiguration("budget-core", "", workspace, "model-a");
             command.configuration.tools.state = .value;
             command.configuration.tools = try .of(&.{ "message_agent", "start_agent" });
-            const session = storage.configure(&command, .{}).accepted.session;
+            const session = (try storage.configure(&command, .{})).accepted.session;
             try submitTestMessage(storage, tmp, "budget-core-input", "budget-core-key", session.slice(), "message yourself");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             var arguments_buffer: [64]u8 = undefined;
@@ -9721,7 +9721,7 @@ test "each Store entry point takes its round budget on its common path" {
             try add_search.session.set(session.slice());
             add_search.configuration.tools = try .of(&.{ "bash", "web_search" });
             add_search.configuration.tools.state = .value;
-            try std.testing.expect(storage.configure(&add_search, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&add_search, .{}) == .accepted);
             const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             {
                 var view: HistoricalView = undefined;
@@ -9820,7 +9820,7 @@ test "each Store entry point takes its round budget on its common path" {
             try patch.configuration.compaction_trigger.value.set("1000");
             patch.configuration.output_reservation.state = .value;
             try patch.configuration.output_reservation.value.set("1");
-            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
             try submitTestMessage(storage, tmp, "budget-one", "budget-one", session.slice(), "original");
             const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const calls = [_]TestingCall{
@@ -9929,7 +9929,7 @@ test "a Workspace's changed page reads only its own Sessions, however many other
 
         fn configure(store: *Store, key: []const u8, session: []const u8, place: []const u8) !change_ring.Id {
             var command = try completeConfiguration(key, session, place, "model");
-            const configured = store.configure(&command, .{});
+            const configured = try store.configure(&command, .{});
             try std.testing.expect(configured == .accepted);
             return configured.accepted.session.slice()[0..protocol.session_id_bytes].*;
         }
@@ -10550,7 +10550,7 @@ test "model admission work excludes accepted compaction base history, in rounds"
                 try patch.session.set(session.slice());
                 patch.configuration.compaction_trigger.state = .value;
                 try patch.configuration.compaction_trigger.value.set("1000");
-                try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
                 try submitTestMessage(&storage, &tmp, "pending", "pending", session.slice(), "");
                 const counter = TwinRounds.start(&storage);
                 const admitted = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -10595,7 +10595,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                     try tools.configuration.tools.append("bash");
                     tools.configuration.permission_mode.state = .value;
                     try tools.configuration.permission_mode.value.set("bypass");
-                    try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
+                    try std.testing.expect(try storage.configure(&tools, .{}) == .accepted);
                 }
                 const call = TestingCall{ .item_id = "item", .name = if (kind == .action) "bash" else "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = if (kind == .action) "{\\\"description\\\":\\\"Run no-op\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}" else "{}", .decoded_arguments = if (kind == .action) "{\"description\":\"Run no-op\",\"cmd\":\"true\",\"timeout_ms\":null}" else "{}" };
                 const instructions: [400]u8 = @splat('x');
@@ -10607,7 +10607,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                         try patch.session.set(session.slice());
                         patch.configuration.instructions = try testingBytesContent(&tmp, "instruction", &instructions);
                         defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
-                        try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                        try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
                     }
                     const message_key = try std.fmt.bufPrint(&key, "message-{d}", .{index});
                     try submitTestMessage(&storage, &tmp, "input", message_key, session.slice(), "old input");
@@ -10639,14 +10639,14 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                     patch.configuration.instructions = try testingBytesContent(&tmp, "pending-instruction", &instructions);
                 }
                 defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
-                try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
                 if (kind == .instruction) {
                     var clear: wire_request.ConfigureCommand = .{};
                     try clear.key.set("clear");
                     try clear.session.set(session.slice());
                     clear.configuration.instructions = try testingBytesContent(&tmp, "clear-instruction", "");
                     defer clear.removeTemporaryContent(std.testing.io) catch unreachable;
-                    try std.testing.expect(storage.configure(&clear, .{}) == .accepted);
+                    try std.testing.expect(try storage.configure(&clear, .{}) == .accepted);
                 }
                 try submitTestMessage(&storage, &tmp, "pending", "pending", session.slice(), "");
                 const counter = TwinRounds.start(&storage);
@@ -10695,7 +10695,7 @@ test "each setting a revision changes is one session_changed row at the position
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("change-create", "", workspace, "model-a");
-            const session = storage.configure(&create, .{}).accepted.session;
+            const session = (try storage.configure(&create, .{})).accepted.session;
             var request: protocol.ActivityPage = .{ .kinds = .initOne(.session_changed) };
             try request.session.set(session.slice());
             // A creation is no change.
@@ -10707,10 +10707,10 @@ test "each setting a revision changes is one session_changed row at the position
             try change.configuration.permission_mode.value.set("ask");
             change.configuration.label.state = .value;
             try change.configuration.label.value.set("renamed");
-            try std.testing.expect(storage.configure(&change, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&change, .{}) == .accepted);
             // A revision that changes nothing writes no row.
             var same = try completeConfiguration("change-same", session.slice(), workspace, "model-a");
-            try std.testing.expect(storage.configure(&same, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&same, .{}) == .accepted);
             try submitTestMessage(&storage, &tmp, "change-after", "change-after", session.slice(), "after");
             const page = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 2), page.count);
@@ -10754,7 +10754,7 @@ test "each compaction that succeeds is one compacted row, with the entries its f
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("compacted-create", "", workspace, "model-a");
-            const session = storage.configure(&create, .{}).accepted.session;
+            const session = (try storage.configure(&create, .{})).accepted.session;
             var request: protocol.ActivityPage = .{ .kinds = .initOne(.compacted) };
             try request.session.set(session.slice());
             // model-a's levels aim at 512,000, 128,000 and 32,000 bytes:
@@ -10815,7 +10815,7 @@ test "core_tools start_agent persists optional borrowed spec content" {
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("optional-agent-parent", "", workspace, "model-a");
             create.configuration.tools = try .of(&.{"start_agent"});
-            const parent = storage.configure(&create, .{}).accepted.session;
+            const parent = (try storage.configure(&create, .{})).accepted.session;
             try submitTestMessage(&storage, &tmp, "optional-agent-message", "optional-agent-key", parent.slice(), "start a child");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleCallsForTesting(&storage, &tmp, model, "optional-agent-call", &.{.{
@@ -10864,7 +10864,7 @@ test "core_tools start_agent spec refusals fail calls and name the refused setti
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("refused-agent-parent", "", workspace, "model-a");
             create.configuration.tools = try .of(&.{"start_agent"});
-            const parent = storage.configure(&create, .{}).accepted.session;
+            const parent = (try storage.configure(&create, .{})).accepted.session;
             try submitTestMessage(&storage, &tmp, "refused-agent-message", "refused-agent-key", parent.slice(), "start children");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const cases = .{
@@ -10923,7 +10923,7 @@ test "a start_agent child works in its caller's Workspace with its provider" {
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("binding-agent-parent", "", workspace, "model-a");
             create.configuration.tools = try .of(&.{ "bash", "start_agent" });
-            const parent = storage.configure(&create, .{}).accepted.session;
+            const parent = (try storage.configure(&create, .{})).accepted.session;
             try submitTestMessage(&storage, &tmp, "binding-agent-message", "binding-agent-key", parent.slice(), "start a child");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleCallsForTesting(&storage, &tmp, model, "binding-agent-call", &.{.{
@@ -10954,13 +10954,13 @@ test "a null effort on a listed model refuses a mixed update before any changes"
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("effort-null-spec", "", workspace, "gpt-6.1-sol");
-            const session = storage.configure(&create, .{}).accepted.session;
+            const session = (try storage.configure(&create, .{})).accepted.session;
             var patch: wire_request.ConfigureCommand = .{};
             patch.session = session;
             try patch.key.set("effort-set-low");
             patch.configuration.reasoning_effort.state = .value;
             try patch.configuration.reasoning_effort.value.set("low");
-            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
             const before = try storage.inspectSessionForTesting(session.slice());
             try patch.key.set("effort-clear-mixed");
             patch.configuration.reasoning_effort.state = .explicit_null;
@@ -10969,7 +10969,7 @@ test "a null effort on a listed model refuses a mixed update before any changes"
             try patch.configuration.label.value.set("must not apply");
             const bytes = "must not import these instructions";
             patch.configuration.instructions = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
-            const refused = storage.configure(&patch, .{});
+            const refused = try storage.configure(&patch, .{});
             try std.testing.expect(refused == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, refused.rejected.code);
             const after = try storage.inspectSessionForTesting(session.slice());
@@ -11035,7 +11035,7 @@ test "loaded tools configure defaults equality membership and reachability" {
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
 
             var initial = try completeConfiguration("loaded-default", "", workspace, "model-a");
-            const created = storage.configure(&initial, .{});
+            const created = try storage.configure(&initial, .{});
             try std.testing.expect(created == .accepted);
             const session = created.accepted.session;
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
@@ -11046,22 +11046,22 @@ test "loaded tools configure defaults equality membership and reachability" {
             try update.key.set("loaded-equal");
             update.configuration.tools = try .of(&.{"bash"});
             update.configuration.loaded_tools = try .of(&.{"bash"});
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
-            try std.testing.expect(storage.configure(&update, .{}).accepted.replayed);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect((try storage.configure(&update, .{})).accepted.replayed);
             var conflict = update;
             conflict.configuration.loaded_tools.state = .omitted;
-            try std.testing.expect(storage.configure(&conflict, .{}) == .conflict);
+            try std.testing.expect(try storage.configure(&conflict, .{}) == .conflict);
 
             try update.key.set("loaded-not-in-tools");
             update.configuration.loaded_tools = try .of(&.{"web_search"});
-            const outside = storage.configure(&update, .{});
+            const outside = try storage.configure(&update, .{});
             try std.testing.expect(outside == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_not_in_tools, outside.rejected.code);
-            try std.testing.expect(storage.configure(&update, .{}).rejected.replayed);
+            try std.testing.expect((try storage.configure(&update, .{})).rejected.replayed);
 
             try update.key.set("loaded-unreachable");
             update.configuration.loaded_tools = try .of(&.{});
-            const unreachable_set = storage.configure(&update, .{});
+            const unreachable_set = try storage.configure(&update, .{});
             try std.testing.expect(unreachable_set == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, unreachable_set.rejected.code);
 
@@ -11069,7 +11069,7 @@ test "loaded tools configure defaults equality membership and reachability" {
             try update.key.set("loaded-saved-tools");
             update.configuration.tools.state = .omitted;
             update.configuration.loaded_tools = try .of(&.{"web_search"});
-            const saved_outside = storage.configure(&update, .{});
+            const saved_outside = try storage.configure(&update, .{});
             try std.testing.expect(saved_outside == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_not_in_tools, saved_outside.rejected.code);
 
@@ -11077,7 +11077,7 @@ test "loaded tools configure defaults equality membership and reachability" {
             try update.key.set("loaded-follow-tools");
             update.configuration.tools = try .of(&.{ "bash", "web_search" });
             update.configuration.loaded_tools.state = .omitted;
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL AND revision=3", .{session.slice()}));
 
@@ -11085,14 +11085,14 @@ test "loaded tools configure defaults equality membership and reachability" {
             var equal = try completeConfiguration("loaded-create-equal", "", workspace, "model-a");
             equal.configuration.tools = try .of(&.{"bash"});
             equal.configuration.loaded_tools = try .of(&.{"bash"});
-            try std.testing.expect(storage.configure(&equal, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&equal, .{}) == .accepted);
             try equal.key.set("loaded-create-empty");
             equal.configuration.tools = try .of(&.{});
             equal.configuration.loaded_tools = try .of(&.{});
-            try std.testing.expect(storage.configure(&equal, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&equal, .{}) == .accepted);
             try equal.key.set("loaded-create-unreachable");
             equal.configuration.tools = try .of(&.{"bash"});
-            const rejected_create = storage.configure(&equal, .{});
+            const rejected_create = try storage.configure(&equal, .{});
             try std.testing.expect(rejected_create == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, rejected_create.rejected.code);
         }
@@ -11113,7 +11113,7 @@ test "loaded tools preserve and intersect a saved subset through the catalog" {
             var initial = try completeConfiguration("loaded-subset-create", "", workspace, "model-a");
             initial.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
             initial.configuration.loaded_tools = try .of(&.{ "bash", "find_tools" });
-            const created = storage.configure(&initial, .{});
+            const created = try storage.configure(&initial, .{});
             try std.testing.expect(created == .accepted);
             const session = created.accepted.session;
             const loaded_id = try store_testing.queryU64(&storage, "SELECT loaded_tool_set_id FROM session WHERE session_ref=?1", .{session.slice()});
@@ -11125,12 +11125,12 @@ test "loaded tools preserve and intersect a saved subset through the catalog" {
             try update.key.set("loaded-subset-label");
             update.configuration.label.state = .value;
             try update.configuration.label.value.set("same loaded subset");
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             try std.testing.expectEqual(loaded_id, try store_testing.queryU64(&storage, "SELECT loaded_tool_set_id FROM session WHERE session_ref=?1", .{session.slice()}));
 
             try update.key.set("loaded-subset-intersect");
             update.configuration.tools = try .of(&.{ "find_tools", "web_search" });
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=s.loaded_tool_set_id " ++
                 "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='find_tools'", .{session.slice()}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT member_count FROM session s JOIN tool_set t ON t.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1", .{session.slice()}));
@@ -11138,12 +11138,12 @@ test "loaded tools preserve and intersect a saved subset through the catalog" {
             // Re-adding a configured tool does not implicitly load it.
             try update.key.set("loaded-subset-grow-tools");
             update.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT member_count FROM session s JOIN tool_set t ON t.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1", .{session.slice()}));
 
             try update.key.set("loaded-subset-unreachable");
             update.configuration.tools = try .of(&.{"bash"});
-            const unreachable_set = storage.configure(&update, .{});
+            const unreachable_set = try storage.configure(&update, .{});
             try std.testing.expect(unreachable_set == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, unreachable_set.rejected.code);
 
@@ -11151,19 +11151,19 @@ test "loaded tools preserve and intersect a saved subset through the catalog" {
             // unreachable subset, and normalizes to NULL.
             try update.key.set("loaded-subset-clear");
             update.configuration.tools = try .of(&.{});
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
 
             // Explicit equality uses NULL, including when clearing both sets.
             try update.key.set("loaded-subset-equal");
             update.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
             update.configuration.loaded_tools = try .of(&.{ "bash", "find_tools", "web_search" });
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
             try update.key.set("loaded-subset-empty");
             update.configuration.tools = try .of(&.{});
             update.configuration.loaded_tools.state = .omitted;
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
         }
     }.run);
@@ -11189,7 +11189,7 @@ test "core_tools presets retain caller narrowing after overrides resolve" {
             var create = try completeConfiguration("preset-agent-parent", "", workspace, "model-a");
             create.configuration.tools = try .of(&.{"start_agent"});
             try create.configuration.permission_mode.value.set("ask");
-            const parent = storage.configure(&create, .{}).accepted.session;
+            const parent = (try storage.configure(&create, .{})).accepted.session;
             try submitTestMessage(&storage, &tmp, "preset-agent-message", "preset-agent-key", parent.slice(), "start children");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -11247,7 +11247,7 @@ test "preset unknown rejection survives reopen and later resolution" {
                 var storage: Store = undefined;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
-                const refused = storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .unknown_preset }, .{});
+                const refused = try storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .unknown_preset }, .{});
                 try std.testing.expect(refused == .rejected and !refused.rejected.replayed);
                 try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, refused.rejected.code);
                 const saved = try store_testing.observeCommandForTesting(&storage, request.key.slice());
@@ -11265,7 +11265,7 @@ test "preset unknown rejection survives reopen and later resolution" {
                 const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
                 var resolved = try completeConfiguration(request.key.slice(), "", workspace, "model-a");
                 resolved.configuration.label = request.configuration.label;
-                const replay = reopened.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{});
+                const replay = try reopened.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{});
                 try std.testing.expect(replay == .rejected and replay.rejected.replayed);
                 try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, replay.rejected.code);
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&reopened, "SELECT count(*) FROM session", .{}));
@@ -11273,11 +11273,11 @@ test "preset unknown rejection survives reopen and later resolution" {
                 // Neither a different name nor different overrides share that
                 // rejection's identity, even if they resolve to the same spec.
                 try request.preset.?.set("other");
-                try std.testing.expect(reopened.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{}) == .conflict);
+                try std.testing.expect(try reopened.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{}) == .conflict);
                 try request.preset.?.set("review");
                 try request.configuration.label.value.set("Changed");
-                try std.testing.expect(reopened.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{}) == .conflict);
-                try std.testing.expect(reopened.configure(&resolved, .{}) == .conflict);
+                try std.testing.expect(try reopened.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{}) == .conflict);
+                try std.testing.expect(try reopened.configure(&resolved, .{}) == .conflict);
             }
         }
     }.run);
@@ -11294,17 +11294,17 @@ test "preset refusal cannot replace an accepted configure key" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("preset-bound-key", "", workspace, "model-a");
-            const first = storage.configure(&create, .{});
+            const first = try storage.configure(&create, .{});
             try std.testing.expect(first == .accepted);
             var request = create;
             request.preset = .{};
             try request.preset.?.set("missing");
-            const result = storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .unknown_preset }, .{});
+            const result = try storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .unknown_preset }, .{});
             try std.testing.expect(result == .conflict);
             const saved = try store_testing.observeCommandForTesting(&storage, create.key.slice());
             try std.testing.expectEqual(protocol.CommandObservationStatus.accepted, saved.status);
             try std.testing.expectEqualStrings(first.accepted.session.slice(), saved.target.slice());
-            const replay = storage.configure(&create, .{});
+            const replay = try storage.configure(&create, .{});
             try std.testing.expect(replay == .accepted and replay.accepted.replayed);
             try std.testing.expectEqualStrings(first.accepted.session.slice(), replay.accepted.session.slice());
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
@@ -11329,10 +11329,10 @@ test "preset on update rejection is durable and replayed before applying fields"
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                 const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
                 var create = try completeConfiguration("preset-update-parent", "", workspace, "model-a");
-                const first = storage.configure(&create, .{});
+                const first = try storage.configure(&create, .{});
                 try std.testing.expect(first == .accepted);
                 request.session = first.accepted.session;
-                const refused = storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .preset_on_update }, .{});
+                const refused = try storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .preset_on_update }, .{});
                 try std.testing.expect(refused == .rejected and !refused.rejected.replayed);
                 try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, refused.rejected.code);
                 const saved = try store_testing.observeCommandForTesting(&storage, request.key.slice());
@@ -11345,13 +11345,13 @@ test "preset on update rejection is durable and replayed before applying fields"
                 var reopened: Store = undefined;
                 try store_testing.testingStore(case, &reopened, &tmp, std.testing.io);
                 defer reopened.close() catch unreachable;
-                const replay = reopened.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .preset_on_update }, .{});
+                const replay = try reopened.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .preset_on_update }, .{});
                 try std.testing.expect(replay == .rejected and replay.rejected.replayed);
                 try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, replay.rejected.code);
                 try request.preset.?.set("other");
-                try std.testing.expect(reopened.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .preset_on_update }, .{}) == .conflict);
+                try std.testing.expect(try reopened.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .preset_on_update }, .{}) == .conflict);
                 request.preset = null;
-                try std.testing.expect(reopened.configure(&request, .{}) == .conflict);
+                try std.testing.expect(try reopened.configure(&request, .{}) == .conflict);
                 try std.testing.expectEqual(@as(u64, 1), (try reopened.inspectSessionForTesting(request.session.slice())).revision);
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&reopened, "SELECT count(*) FROM session WHERE label IS NULL", .{}));
             }
@@ -11474,7 +11474,7 @@ test "observation since sibling Session commit advances an unchanged token" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("observe-parent", "", workspace, "model-a");
-            const parent = storage.configure(&create, .{});
+            const parent = try storage.configure(&create, .{});
             try std.testing.expect(parent == .accepted);
             var observed: store_core.Observed = undefined;
             try storage.observeCommand("observe-parent", null, &observed);
@@ -11487,7 +11487,7 @@ test "observation since sibling Session commit advances an unchanged token" {
             try std.testing.expectEqualDeep(token, observed.not_modified);
 
             var sibling = try completeConfiguration("observe-sibling", "", workspace, "model-a");
-            try std.testing.expect(storage.configure(&sibling, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&sibling, .{}) == .accepted);
             const generation = storage.commit_generation.load(.acquire);
             try std.testing.expect(generation > token.generation);
             try storage.observeCommand("observe-parent", token, &observed);
@@ -11508,7 +11508,7 @@ test "observation since own Session commit reads full at its generation" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("observe-own", "", workspace, "model-a");
-            const parent = storage.configure(&create, .{});
+            const parent = try storage.configure(&create, .{});
             try std.testing.expect(parent == .accepted);
             var observed: store_core.Observed = undefined;
             try storage.observeCommand("observe-own", null, &observed);
@@ -11517,7 +11517,7 @@ test "observation since own Session commit reads full at its generation" {
             var update = try completeConfiguration("observe-update", parent.accepted.session.slice(), workspace, "model-a");
             update.configuration.label.state = .value;
             try update.configuration.label.value.set("Changed");
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             const generation = storage.commit_generation.load(.acquire);
             try std.testing.expect(generation > token.generation);
             try storage.observeCommand("observe-own", token, &observed);
@@ -11542,7 +11542,7 @@ test "observation since falls back for foreign future uncovered and restarted to
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                 const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
                 var create = try completeConfiguration("observe-fallback", "", workspace, "model-a");
-                try std.testing.expect(storage.configure(&create, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&create, .{}) == .accepted);
                 var observed: store_core.Observed = undefined;
                 try storage.observeCommand("observe-fallback", null, &observed);
                 try std.testing.expect(observed == .full);
@@ -11555,7 +11555,7 @@ test "observation since falls back for foreign future uncovered and restarted to
                 // An older token is uncovered after the ring has forgotten a
                 // generation, even when that generation only names a sibling.
                 var sibling = try completeConfiguration("observe-fallback-sibling", "", workspace, "model-a");
-                try std.testing.expect(storage.configure(&sibling, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&sibling, .{}) == .accepted);
                 const generation = storage.commit_generation.load(.acquire);
                 storage.changes.forget(generation);
                 try std.testing.expect(!storage.changes.covers(saved.generation));
@@ -11601,7 +11601,7 @@ test "observation since leaves absent and non Session targets untokened and repo
             var request: wire_request.ConfigureCommand = .{ .preset = .{} };
             try request.key.set("observe-no-session");
             try request.preset.?.set("missing");
-            const rejected = storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .unknown_preset }, .{});
+            const rejected = try storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .unknown_preset }, .{});
             try std.testing.expect(rejected == .rejected);
             try storage.observeCommand("observe-no-session", null, &observed);
             try std.testing.expect(observed == .full);
@@ -11612,12 +11612,12 @@ test "observation since leaves absent and non Session targets untokened and repo
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("observe-before-fence", "", workspace, "model-a");
-            try std.testing.expect(storage.configure(&create, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&create, .{}) == .accepted);
             try storage.observeCommand("observe-before-fence", null, &observed);
             try std.testing.expect(observed == .full);
             const token = observed.full.token.?;
             var failed = try completeConfiguration("observe-fence", "", workspace, "model-a");
-            try std.testing.expect(storage.configure(&failed, .{ .before_commit = true }) == .infrastructure_failure);
+            try std.testing.expect(try storage.configure(&failed, .{ .before_commit = true }) == .infrastructure_failure);
             try std.testing.expectError(error.StoreFenced, storage.observeCommand("observe-before-fence", token, &observed));
             try std.testing.expectError(error.StoreFenced, storage.observeCommand("observe-before-fence", null, &observed));
         }
@@ -11768,7 +11768,7 @@ test "activity since sibling commit preserves end and own commit returns new ite
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("activity-token-parent", "", workspace, "model-a");
-            const parent = storage.configure(&create, .{}).accepted.session;
+            const parent = (try storage.configure(&create, .{})).accepted.session;
             var request: protocol.ActivityPage = .{};
             try request.session.set(parent.slice());
             var page: protocol.ActivityFacts = undefined;
@@ -11795,7 +11795,7 @@ test "activity since sibling commit preserves end and own commit returns new ite
             try std.testing.expect(page.token == null);
             request.direction = .forward;
             var sibling = try completeConfiguration("activity-token-sibling", "", workspace, "model-a");
-            const sibling_session = storage.configure(&sibling, .{}).accepted.session;
+            const sibling_session = (try storage.configure(&sibling, .{})).accepted.session;
             try storage.activityPage(&request, &page);
             try std.testing.expect(page.not_modified);
             try std.testing.expectEqualDeep(token.at(storage.commit_generation.load(.acquire)), page.token.?);
@@ -11803,7 +11803,7 @@ test "activity since sibling commit preserves end and own commit returns new ite
             var update = try completeConfiguration("activity-token-update", parent.slice(), workspace, "model-a");
             update.configuration.label.state = .value;
             try update.configuration.label.value.set("Own change");
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             try storage.activityPage(&request, &page);
             try std.testing.expect(!page.not_modified);
             try std.testing.expect(page.count > 0);
@@ -11812,7 +11812,7 @@ test "activity since sibling commit preserves end and own commit returns new ite
             var second_update = try completeConfiguration("activity-token-second-update", parent.slice(), workspace, "model-a");
             second_update.configuration.label.state = .value;
             try second_update.configuration.label.value.set("Second own change");
-            try std.testing.expect(storage.configure(&second_update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&second_update, .{}) == .accepted);
             // A page with unread lookahead cannot issue a follow token.
             request.position = 0;
             request.limit = 1;
@@ -11855,7 +11855,7 @@ test "Current remains full when execution changes without a Session commit" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("current-uncacheable", "", workspace, "model-a");
-            const session = storage.configure(&create, .{}).accepted.session;
+            const session = (try storage.configure(&create, .{})).accepted.session;
             const generation = storage.commit_generation.load(.acquire);
             for ([_]usize{ 0, 1 }) |occupied| {
                 const bytes = try testingSessionReportWithExecution(&storage, &tmp, session.slice(), 1024 * 1024, .current, .{
@@ -11903,7 +11903,7 @@ test "skills start_agent imports six distinct contents atomically and retries af
                 // can be deduplicated against an inherited catalog or reload.
                 var create = try completeConfiguration("skills-six-parent", "", workspace, "model-a");
                 create.configuration.tools = try .of(&.{"start_agent"});
-                const parent = storage.configure(&create, .{}).accepted.session;
+                const parent = (try storage.configure(&create, .{})).accepted.session;
                 try submitTestMessage(&storage, &tmp, "skills-six-input", "skills-six-input", parent.slice(), "Please start a fresh worker");
                 const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try settleCallsForTesting(&storage, &tmp, model, "skills-six-call", &.{.{
@@ -11994,7 +11994,7 @@ test "skills catalog provenance fences readSkills history and full reports" {
                     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
                     var create = try completeConfiguration("skills-certificate", "", workspace, "model-a");
-                    const session = storage.configureWithInitialSkills(&create, null, &skills_fixture_initial, .{}).accepted.session;
+                    const session = (try storage.configureWithInitialSkills(&create, null, &skills_fixture_initial, .{})).accepted.session;
                     try submitTestMessage(&storage, &tmp, "skills-certificate-input", "skills-certificate-input", session.slice(), "Read the catalog");
                     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                     switch (corruption) {
@@ -12029,7 +12029,7 @@ test "skills empty initial snapshot is valid and schema rejects mismatched catal
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("skills-empty", "", workspace, "model-a");
             const empty: skills_fixture_domain.Initial = .{ .ready = .{ .encoded = "{\"entries\":[]}", .instruction = null } };
-            const session = storage.configureWithInitialSkills(&create, null, &empty, .{}).accepted.session;
+            const session = (try storage.configureWithInitialSkills(&create, null, &empty, .{})).accepted.session;
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             const state = try storage.readSkills(arena.allocator(), session.slice());
@@ -12078,7 +12078,7 @@ test "skills reload out of memory in configure or the skill tool rolls back with
             var path: [protocol.max_workspace_bytes]u8 = undefined;
             var create = try completeConfiguration("reload-oom", "", try canonicalCwd(std.testing.io, &path), "model-a");
             create.configuration.tools = try .of(&.{"skill"});
-            const session = storage.configureWithInitialSkills(&create, null, &initial, .{}).accepted.session;
+            const session = (try storage.configureWithInitialSkills(&create, null, &initial, .{})).accepted.session;
 
             var reload: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
             try reload.key.set("reload-oom-configure");
@@ -12140,7 +12140,7 @@ test "skills peer refusal persists authenticated activity diagnostic and keyed r
             update.configuration.tools = try .of(&.{"bash"});
             update.configuration.permission_mode.state = .value;
             try update.configuration.permission_mode.value.set("bypass");
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             try submitTestMessage(&storage, &tmp, "skills-peer-input", "skills-peer-input", sender.slice(), "Invoke a skill for my peer");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, model, "skills-peer-call");
@@ -12210,7 +12210,7 @@ test "inline skills a peer Session's Message may list the recipient's skills" {
             update.configuration.tools = try .of(&.{"bash"});
             update.configuration.permission_mode.state = .value;
             try update.configuration.permission_mode.value.set("bypass");
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             try submitTestMessage(&storage, &tmp, "skills-peer-accept-input", "skills-peer-accept-input", sender.slice(), "Ask my peer to use its skill");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, model, "skills-peer-accept-call");
@@ -12283,7 +12283,7 @@ test "skills reload settles catalog and result atomically across faults retry re
                 var create = try completeConfiguration("skills-reload-atomic-create", "", workspace, "model-a");
                 const authored = "Authored baseline instructions must survive every catalog reload";
                 create.configuration.instructions = .{ .state = .value, .borrowed = authored.ptr, .length = authored.len, .digest = protocol.contentDigest(authored) };
-                const session = storage.configureWithInitialSkills(&create, null, &skills_fixture_initial, .{}).accepted.session;
+                const session = (try storage.configureWithInitialSkills(&create, null, &skills_fixture_initial, .{})).accepted.session;
                 const baseline = (try store_core.readSessionForTesting(&storage, session.slice())).?;
                 try std.testing.expectEqual(@as(u64, 1), baseline.revision);
                 const original_content = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
@@ -12439,7 +12439,7 @@ test "skills native reload validates targets after replay without changing ordin
                 try std.testing.expect(replay == .rejected and replay.rejected.replayed);
                 try std.testing.expectEqual(expected, replay.rejected.code);
                 command.reload_skills = false;
-                try std.testing.expect(storage.configure(&command, .{}) == .conflict);
+                try std.testing.expect(try storage.configure(&command, .{}) == .conflict);
             }
             var existing: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
             try existing.key.set("reload-target-existing");
@@ -12467,7 +12467,7 @@ test "skills saved catalog read retains only decoded result metadata" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("catalog-read-retention", "", workspace, "model-a");
-            const session = storage.configureWithInitialSkills(&create, null, &skills_fixture_initial, .{}).accepted.session;
+            const session = (try storage.configureWithInitialSkills(&create, null, &skills_fixture_initial, .{})).accepted.session;
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             var requested = std.testing.FailingAllocator.init(arena.allocator(), .{});

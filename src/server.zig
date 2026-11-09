@@ -1547,13 +1547,13 @@ noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureC
     var decision: store_module.PresetDecision = .{ .request_digest = command.presetRequestDigest() };
     if (command.session.len != 0) {
         decision.rejection = .preset_on_update;
-        return host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
+        return try host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
     }
     const preset = for (host.presets) |*entry| {
         if (std.mem.eql(u8, entry.name, name.slice())) break entry;
     } else {
         decision.rejection = .unknown_preset;
-        return host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
+        return try host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
     };
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
@@ -2964,7 +2964,7 @@ test "activity page both unchanged tiers render byte exactly with independent re
     defer storage.close() catch unreachable;
     storage.instance = @splat(0xab);
     var configure = try store_module.testingCompleteConfiguration("page-tier-create", "", root, "model-a");
-    const session = storage.configure(&configure, .{}).accepted.session;
+    const session = (try storage.configure(&configure, .{})).accepted.session;
     var request: protocol.ActivityPage = .{};
     try request.session.set(session.slice());
     const page = try std.testing.allocator.create(protocol.ActivityFacts);
@@ -2977,7 +2977,7 @@ test "activity page both unchanged tiers render byte exactly with independent re
     for (0..2) |tier| {
         if (tier == 1) {
             try configure.key.set("page-tier-sibling");
-            try std.testing.expect(storage.configure(&configure, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&configure, .{}) == .accepted);
         }
         try storage.activityPage(&request, page);
         try std.testing.expect(page.not_modified);
@@ -3002,7 +3002,7 @@ test "command observation full and both unchanged tiers render byte exactly with
     defer storage.close() catch unreachable;
     storage.instance = @splat(0xab);
     var configure = try store_module.testingCompleteConfiguration("tier-create", "", root, "model-a");
-    const configured = storage.configure(&configure, .{});
+    const configured = try storage.configure(&configure, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
     var observed: store_module.Observed = undefined;
@@ -3031,7 +3031,7 @@ test "command observation full and both unchanged tiers render byte exactly with
     try Expect.unchanged(&observed, session.slice(), first.generation);
     // Tier 2 advances over a sibling's commit, without a read access.
     try configure.key.set("tier-sibling");
-    try std.testing.expect(storage.configure(&configure, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&configure, .{}) == .accepted);
     try storage.observeCommand("tier-create", first, &observed);
     try std.testing.expect(observed.not_modified.generation > first.generation);
     try Expect.unchanged(&observed, session.slice(), storage.commitGeneration());
@@ -3041,7 +3041,7 @@ test "command observation full and both unchanged tiers render byte exactly with
     try update.session.set(session.slice());
     update.configuration.label.state = .value;
     try update.configuration.label.value.set("changed");
-    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
     try storage.observeCommand("tier-create", sibling, &observed);
     try Expect.full(&observed, session.slice(), storage.commitGeneration());
     try storage.observeCommand("absent", null, &observed);
@@ -3846,7 +3846,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         configure.configuration.compaction_trigger.state = .value;
         try configure.configuration.compaction_trigger.value.set("115200");
         configure.configuration.reasoning_effort.state = .explicit_null;
-        const configured = storage.configure(&configure, .{});
+        const configured = try storage.configure(&configure, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session.slice();
         const message = try std.mem.replaceOwned(u8, std.testing.allocator, message_template, "peer", session);
@@ -4157,7 +4157,7 @@ test "only a fresh Message changes its Session's environment; a replay or a reje
     configure.configuration.compaction_trigger.state = .value;
     try configure.configuration.compaction_trigger.value.set("115200");
     configure.configuration.reasoning_effort.state = .explicit_null;
-    const configured = storage.configure(&configure, .{});
+    const configured = try storage.configure(&configure, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session.slice();
     var environments: SessionEnvironments = undefined;
@@ -4514,7 +4514,7 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     try storage.open(std.testing.io, database, root);
     defer storage.close() catch unreachable;
     const configure = try store_module.testingCompleteConfiguration("pressure-config", "", root, "model-a");
-    const configured = storage.configureWithInitialSkills(&configure, null, &.{ .ready = .{ .encoded = initial.encoded, .instruction = initial.instruction } }, .{});
+    const configured = try storage.configureWithInitialSkills(&configure, null, &.{ .ready = .{ .encoded = initial.encoded, .instruction = initial.instruction } }, .{});
     try std.testing.expect(configured == .accepted);
     var lease: platform.StoreLease = undefined;
     lease.paths = .{};

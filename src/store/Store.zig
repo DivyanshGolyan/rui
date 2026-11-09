@@ -638,7 +638,7 @@ pub const Store = struct {
         self: *Store,
         command: *const content_custody.ConfigureCommand,
         faults: Faults,
-    ) ConfigureReply {
+    ) error{OutOfMemory}!ConfigureReply {
         return self.configureWithInitialSkills(command, null, null, faults);
     }
 
@@ -650,15 +650,12 @@ pub const Store = struct {
         command: *const content_custody.ConfigureCommand,
         preset: *const configuration_domain.PresetDecision,
         faults: Faults,
-    ) ConfigureReply {
+    ) error{OutOfMemory}!ConfigureReply {
         return self.configureWithInitialSkills(command, preset, null, faults);
     }
 
-    pub fn configureWithInitialSkills(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, faults: Faults) ConfigureReply {
-        // Only a reload capture allocates, from the caller's memory.
-        return self.configureWithCapturedSkills(command, preset, initial_skills, null, .failing, faults) catch |err| switch (err) {
-            error.OutOfMemory => unreachable,
-        };
+    pub fn configureWithInitialSkills(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, faults: Faults) error{OutOfMemory}!ConfigureReply {
+        return self.configureWithCapturedSkills(command, preset, initial_skills, null, std.heap.c_allocator, faults);
     }
 
     pub fn configureWithCapturedSkills(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, allocator: std.mem.Allocator, faults: Faults) error{OutOfMemory}!ConfigureReply {
@@ -678,8 +675,8 @@ pub const Store = struct {
         defer entry.release();
         var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
         defer access.deinit();
-        // A reload allocates from the caller's memory inside the write;
-        // running out of it rolls back cleanly and is the caller's to answer.
+        // Running out of memory, the caller's for a reload or the engine's,
+        // rolls the write back cleanly and is the caller's to answer.
         return entry.finishTransaction(error{OutOfMemory}, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, initial_skills, reload_capture, allocator, faults))) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => .infrastructure_failure,
