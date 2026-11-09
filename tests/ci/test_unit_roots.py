@@ -28,6 +28,15 @@ class GeneratedRunnerTest(unittest.TestCase):
         self.assertIn("partition.owner(test_fn.name)", generated)
         self.assertIn("unit_tests = selected[0..count]", generated)
 
+    def test_filtered_runner_refuses_a_run_without_named_tests(self):
+        generated = runner.generate_filtered("const a = builtin.test_functions;\n")
+        self.assertTrue(generated.startswith("const a = filteredTests();\n"))
+        self.assertIn('".test."', generated)
+        self.assertIn('".decltest."', generated)
+        self.assertIn("std.process.exit(1)", generated)
+        with self.assertRaisesRegex(ValueError, "runner changed"):
+            runner.generate_filtered("pub fn main() void {}")
+
     def test_command_line_generator(self):
         with tempfile.TemporaryDirectory() as tmp:
             source, output = Path(tmp, "stock runner.zig"), Path(tmp, "generated runner.zig")
@@ -127,7 +136,10 @@ class BuildWiringTest(unittest.TestCase):
         self.assertIn('if (test_filters.len != 0) "test"', build)
         self.assertIn('.root_source_file = b.path("src/tests.zig")', build)
         self.assertIn(".filters = if (test_filters.len != 0) test_filters else unit_filters[index]", build)
-        self.assertIn(".mode = .server } else null", build)
+        self.assertIn(".mode = .server } else filtered_runner", build)
+        # test, test-full and test-logic refuse a filter that leaves no named test.
+        self.assertEqual(build.count(".test_runner = filtered_runner"), 2)
+        self.assertIn('generate.addArg("--filtered")', build)
 
     def test_ci_classifies_all_unit_compiles_and_filters_track_sources(self):
         build = (ROOT / "build.zig").read_text()
