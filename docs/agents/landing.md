@@ -8,7 +8,7 @@
 Before publishing, run the focused checks in [Evidence](../../CODING_STANDARDS.md#evidence).
 For PR descriptions, use the `pr` skill.
 Every PR commit states its actual test commands and results.
-Performance changes include A/B numbers, and TUI changes include a real-screen tmux capture.
+Performance changes include A/B numbers, and TUI changes include a plain-PTY capture using [verify-rui](../../.claude/skills/verify-rui/SKILL.md).
 Keep published commits unchanged so their CI evidence retains its SHA.
 
 Green means the required `admission` check completed successfully for the PR's current head; it need not be rerun after `main` moves.

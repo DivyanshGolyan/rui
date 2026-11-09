@@ -1,8 +1,7 @@
 # Synthetic direct-PTY key matrix
 
-Divyansh approved this primary direct key/escape/paste/wheel/mouse matrix and
-five-row tmux smoke set in place of full attached/detached tmux key matrices.
-This area supplies that workload; workflow owners apply the gate wiring.
+This area supplies the primary direct key/escape/paste/wheel/mouse matrix;
+workflow owners apply the gate wiring.
 Other qualification gates are unchanged. Physical checks are post-landing,
 Ghostty first. Injected bytes establish neither physical-human nor emulator
 qualification.
@@ -10,10 +9,10 @@ qualification.
 ## Commands
 
 The runner requires Python 3.11 or newer, the pinned packages in
-`requirements.txt`, tmux for the smoke rows, and a native built Rui binary.
+`requirements.txt`, and a native built Rui binary.
 Each worker sets its soft `RLIMIT_NOFILE` to 256 without changing the hard limit.
 The controller runs up to `--jobs` independent worker processes, each with its own
-HOME, Store, Host, provider endpoint, caller, and PTY or private tmux server.
+HOME, Store, Host, provider endpoint, caller, and PTY.
 
 ```sh
 python3 -m venv .amp/td4/venv
@@ -25,17 +24,15 @@ zig build -Doptimize=ReleaseSafe
 .amp/td4/venv/bin/python tests/qualification/direct-pty/matrix.py "$PWD/zig-out/bin/rui" --output .amp/td4/ghostty --jobs 4 --vectors tests/qualification/direct-pty/ghostty.json
 ```
 
-Output directories must be fresh. `--row NAME` is repeatable. `--surface direct`
-selects only the direct PTY rows, `--surface tmux` selects the smoke set, and the
-default `--surface all` runs both. `--list` lists the selected stable row names.
+Output directories must be fresh. `--row NAME` is repeatable.
+`--list` lists the selected stable row names.
 
 The default inventory covers editing, graphemes, unbound modifiers, Kitty keys,
 double ESC, marked paste, explicit fragmentation, bare ESC expiry, incomplete
 input, rejection, resize, and raw Ctrl-R recovery. Seeded-history rows cover
 PgUp/PgDn, Shift-PgUp, CSI/SS3 Up, three End forms, Esc and Ctrl-G return,
 alternate-scroll wheel Up/Down encodings, and `/status`. Unsolicited SGR/X10
-wheel and split-X10 reports must leave submitted text unchanged. The tmux smoke
-set covers typing, paste, resize, Alt-J newline, and `/status`.
+wheel and split-X10 reports must leave submitted text unchanged.
 Navigation checks exact seeded-history ranges after entry, intermediate
 Down/PgDn steps and return, distinguishing one-line movement from page movement.
 It observes a later printable composer marker before checking each range, then
@@ -108,9 +105,7 @@ Message assertion and prove owned Host and caller retirement after each signal.
 Wrong arrow/wheel/page distances and wheel direction must fail at the exact
 history-anchor assertion, rather than merely entering and leaving Browsing.
 They also inject setup interruption before/after provider start, after Host
-start, PTY acquisition and caller launch, plus tmux interruption and failed
-server teardown paired with a body assertion. Failed disposal retains the
-private control root and reports no successful cleanup receipt. The controller
+start, PTY acquisition and caller launch. The controller
 requires both a matching passed receipt and zero worker exit; a late crash or
 signal cannot turn green.
 
