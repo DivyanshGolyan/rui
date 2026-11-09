@@ -226,8 +226,8 @@ class SelectionTest(unittest.TestCase):
                 self.assertEqual({target for target in request | readers if not covered(target, targets)}, set())
 
     def test_cli_configuration_surface_runs_the_measurement_configure_contract(self):
-        for path in ("src/cli_args.zig", "src/client.zig", "src/product_defaults.zig", "src/protocol.zig",
-                     "src/store/domain/configuration.zig", "openapi.json"):
+        for path in ("src/cli_args.zig", "src/client.zig", "src/configure_input.zig", "src/product_defaults.zig",
+                     "src/protocol.zig", "src/store/domain/configuration.zig", "openapi.json"):
             result = select([path], "review", AVAILABLE)
             for family in ("targets", "native_targets"):
                 with self.subTest(path=path, family=family):
@@ -1554,6 +1554,14 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                         self.assertFalse(root.exists())
                 finally:
                     if group is not None:
+                        # Deliver the lost signal now that nothing needs the
+                        # held descendant. Closing its release FIFO is not
+                        # enough: one that opens the FIFO after the last
+                        # writer closed waits for a writer forever (#662).
+                        try:
+                            killpg(group, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
                         self.wait_for_group_retirement(group, time.monotonic() + 5)
                     if root is not None and root.exists():
                         rmtree(root)

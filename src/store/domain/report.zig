@@ -4,6 +4,7 @@ const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const named_scratch = @import("../../named_scratch.zig");
 const protocol = @import("../../protocol.zig");
+const ScratchBudget = @import("../../ScratchBudget.zig");
 const model_capability = @import("../../model_capability.zig");
 const tool_catalog = @import("../../tools.zig");
 const tool_set = @import("tool_set.zig");
@@ -43,7 +44,7 @@ pub const SessionReportExecution = struct {
 
 pub const SessionReportOptions = struct {
     scratch_path: []const u8,
-    scratch_budget: protocol.ScratchBudget,
+    scratch_budget: ScratchBudget,
     request_number: u64,
     profile: protocol.ReportProfile = .current,
     execution: SessionReportExecution,
@@ -52,7 +53,7 @@ pub const SessionReportOptions = struct {
 
 pub const SessionListOptions = struct {
     scratch_path: []const u8,
-    scratch_budget: protocol.ScratchBudget,
+    scratch_budget: ScratchBudget,
     request_number: u64,
     fail_unlink: bool = false,
 };
@@ -64,7 +65,7 @@ pub const SessionReport = struct {
     file: std.Io.File,
     length: u64,
     charged: u64,
-    budget: protocol.ScratchBudget,
+    budget: ScratchBudget,
 
     pub fn read(self: *SessionReport, start: u64, destination: []u8) !usize {
         if (destination.len > read_window_bytes) return error.WindowTooLarge;
@@ -85,7 +86,7 @@ pub const SessionReportCapture = struct {
 
     io: std.Io,
     writer: ?std.Io.File,
-    budget: protocol.ScratchBudget,
+    budget: ScratchBudget,
     buffer: [buffer_bytes]u8 = undefined,
     buffered: usize = 0,
     length: u64 = 0,

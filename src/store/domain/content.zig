@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const wire_request = @import("../../wire_request.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const store_access = @import("../access.zig");
@@ -357,13 +358,13 @@ fn readWindow(a: anytype, reader: *ContentReader, start: u64, destination: []u8)
 }
 
 /// The identity of sealed caller content, as `lookup` finds it.
-pub fn sealedIdentity(field: *const protocol.ContentField) Import {
+pub fn sealedIdentity(field: *const wire_request.ContentField) Import {
     return .{ .digest = field.digest, .length = field.length, .private = false };
 }
 
 /// noinline: the digest stays off importSealed's frame, which sits on the
 /// engine thread's deepest chain.
-noinline fn importBorrowed(a: anytype, field: *const protocol.ContentField, bytes: []const u8, value: *Import) !u64 {
+noinline fn importBorrowed(a: anytype, field: *const wire_request.ContentField, bytes: []const u8, value: *Import) !u64 {
     if (!std.mem.eql(u8, &protocol.contentDigest(bytes), &field.digest)) return error.ContentChanged;
     return importBytes(a, value, bytes);
 }
@@ -374,7 +375,7 @@ noinline fn importBorrowed(a: anytype, field: *const protocol.ContentField, byte
 /// (`contentSink`, which steps the insert in process), so a file that
 /// changed fails before COMMIT; a row that exists still has its file
 /// verified. It ends no round.
-pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField, value: *Import, faults: Faults) !u64 {
+pub fn importSealed(a: anytype, io: std.Io, field: *const wire_request.ContentField, value: *Import, faults: Faults) !u64 {
     std.debug.assert(field.state == .value);
     // D113: start_agent owns these bounded bytes until this transaction ends.
     // Verify their identity just as sealed files are verified before import.

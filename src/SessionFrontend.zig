@@ -2456,7 +2456,7 @@ test "a transcript begun before grown live output is drawn shows the gap, not a 
     try screen.append("GROWS-FIRST\n");
     self.live.marks.record(.{ .offset = 12, .cursor = .{ .end = 3 }, .admitted = 4 });
     // Unescaped, the rows after the mark fit; escaped, they evict it.
-    for (0..45000) |_| try screen.append("\u{200b}");
+    try Screen.appendEscapeGrowth(screen);
     try screen.append("\nGROWS-END\n");
     try self.beginTranscript();
     try std.testing.expect(std.mem.indexOf(u8, screen.browsing.text(), "Earlier rows left this view.") != null);

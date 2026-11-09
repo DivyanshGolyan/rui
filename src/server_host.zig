@@ -17,6 +17,7 @@ const provider = @import("provider.zig");
 const providers_module = @import("providers.zig");
 const turn_states_module = @import("turn_states.zig");
 const protocol = @import("protocol.zig");
+const wire_request = @import("wire_request.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
@@ -173,7 +174,7 @@ pub const Hooks = struct {
         self.failures.insert(fromOptionName(Failure, name) orelse return error.UnknownFault);
     }
 
-    pub fn contentFaults(self: *const Hooks) protocol.ContentFaults {
+    pub fn contentFaults(self: *const Hooks) wire_request.ContentFaults {
         return .{
             .acquire = self.fails(.content_acquire),
             .write = self.fails(.content_write),

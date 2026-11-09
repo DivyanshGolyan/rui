@@ -8,6 +8,7 @@ const std = @import("std");
 const named_scratch = @import("../named_scratch.zig");
 const platform = @import("../platform.zig");
 const protocol = @import("../protocol.zig");
+const wire_request = @import("../wire_request.zig");
 const protocol_reply = @import("../protocol_reply.zig");
 const model_capability = @import("../model_capability.zig");
 const product_defaults = @import("../product_defaults.zig");
@@ -630,7 +631,7 @@ test "a rolled-back transaction's identities are handed out again, a committed o
     try submitTestMessage(&storage, &tmp, "identity-later-message", "identity-later-message", second_session.slice(), "propose again");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "identity-second");
     // A new tool set commits.
-    var tools: protocol.ConfigureCommand = .{};
+    var tools: wire_request.ConfigureCommand = .{};
     try tools.key.set("identity-later-tools");
     tools.session = second_session;
     tools.configuration.tools = try .of(&.{ "bash", "test_tool" });
@@ -1324,7 +1325,7 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
     defer storage.close() catch unreachable;
     const Tools = struct {
         fn set(store: *Store, key: []const u8, session: protocol.Bounded(protocol.max_session_bytes), offered: []const []const u8) !void {
-            var command: protocol.ConfigureCommand = .{};
+            var command: wire_request.ConfigureCommand = .{};
             try command.key.set(key);
             command.session = session;
             command.configuration.tools = try .of(offered);
@@ -1461,7 +1462,7 @@ test "loaded tools hide configured tools from frozen requests reports and call s
         try std.testing.expect(!try view.nextTool(&tool));
     }
     // Loading Bash after admission does not widen that frozen Operation.
-    var update: protocol.ConfigureCommand = .{};
+    var update: wire_request.ConfigureCommand = .{};
     try update.key.set("loaded-hidden-grow");
     update.session = session;
     update.configuration.loaded_tools = try .of(&.{"bash"});
@@ -2436,7 +2437,7 @@ test "historical accepted assistant output completeness and provenance fence rea
                 .request_id = .{},
             }, .{});
         }
-        var reconfigure: protocol.ConfigureCommand = .{};
+        var reconfigure: wire_request.ConfigureCommand = .{};
         try reconfigure.key.set("output-reconfigure");
         reconfigure.session = session;
         try std.testing.expect(storage.configure(&reconfigure, .{}) == .accepted);
@@ -3265,7 +3266,7 @@ fn expectBindingPreserved(storage: *Store, session: []const u8, phase: []const u
     for (0..6) |variant| {
         const before = try storage.inspectSessionForTesting(session);
         var key_buffer: [128]u8 = undefined;
-        var update: protocol.ConfigureCommand = .{};
+        var update: wire_request.ConfigureCommand = .{};
         try update.key.set(try std.fmt.bufPrint(&key_buffer, "binding-{s}-{d}", .{ phase, variant }));
         try update.session.set(session);
         if (variant & 1 != 0 or variant == 4) {
@@ -3390,7 +3391,7 @@ test "configuration rejections bypass content effects and replay committed answe
     const schema_file = try tmp.dir.createFile(std.testing.io, "rejected-schema", .{ .read = true });
     try schema_file.writeStreamingAll(std.testing.io, schema);
     try schema_file.sync(std.testing.io);
-    var command: protocol.ConfigureCommand = .{};
+    var command: wire_request.ConfigureCommand = .{};
     try command.key.set("rejected-content");
     try command.session.set("invalid/session");
     command.configuration.instructions = .{
@@ -3838,7 +3839,7 @@ test "message admissions remain queued in order and retain bounded canonical con
 /// Gives `session` Bash, has its model propose two calls, and attempts
 /// the first; the second stays unattempted.
 fn attemptBashForTesting(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !ActionAttemptBinding {
-    var tools: protocol.ConfigureCommand = .{};
+    var tools: wire_request.ConfigureCommand = .{};
     try tools.key.set("bash-tools");
     try tools.session.set(session);
     tools.configuration.tools = try .of(&.{"bash"});
@@ -5191,7 +5192,7 @@ test "one committed selection freezes its settings and input prefix" {
     defer second.removeTemporaryContent(std.testing.io) catch unreachable;
     try std.testing.expect(storage.submitMessageWithModel(&second, null, .{}) == .accepted);
 
-    var instructions_update: protocol.ConfigureCommand = .{};
+    var instructions_update: wire_request.ConfigureCommand = .{};
     try instructions_update.key.set("instructions-before-selection");
     try instructions_update.session.set(created_session_0.slice());
     instructions_update.configuration.instructions = try testingContent(&tmp, "instructions-before", 'b', 1);
@@ -5240,7 +5241,7 @@ test "one committed selection freezes its settings and input prefix" {
     var third = try completeMessage("dispatch-3", created_session_0.slice(), third_file, "later");
     defer third.removeTemporaryContent(std.testing.io) catch unreachable;
     try std.testing.expect(storage.submitMessageWithModel(&third, null, .{}) == .accepted);
-    var update: protocol.ConfigureCommand = .{};
+    var update: wire_request.ConfigureCommand = .{};
     try update.key.set("configure-later");
     try update.session.set(created_session_0.slice());
     update.configuration.model.state = .value;
@@ -5314,7 +5315,7 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqual(protocol.ConfigurationRejection.model_is_immutable, failed_update.rejected.code);
     try expectBindingPreserved(&storage, created_session_0.slice(), "after-failure");
 
-    var tools_update: protocol.ConfigureCommand = .{};
+    var tools_update: wire_request.ConfigureCommand = .{};
     try tools_update.key.set("tools-after-failure");
     try tools_update.session.set(created_session_0.slice());
     tools_update.configuration.tools.state = .value;
@@ -5465,7 +5466,7 @@ test "continued accepted output keeps model immutable and public text readable" 
         try std.testing.expectEqualStrings("answer", code.slice());
     }
 
-    var update: protocol.ConfigureCommand = .{};
+    var update: wire_request.ConfigureCommand = .{};
     try update.key.set("continued-model-change");
     try update.session.set(created_session_0.slice());
     update.configuration.model.state = .value;
@@ -6630,7 +6631,7 @@ test "Session work dates a tool group by its last acceptance, even when the cloc
     // run, the other waits for a slot from that run's resolution, not from
     // its own authorization, whatever the clock read.
     const bypass = try configureTestSessionAsk(&storage, "stepped-bypass");
-    var update: protocol.ConfigureCommand = .{};
+    var update: wire_request.ConfigureCommand = .{};
     try update.key.set("stepped-bypass-mode");
     try update.session.set(bypass.slice());
     update.configuration.permission_mode.state = .value;
@@ -6983,7 +6984,7 @@ test "the Current report fences an unauthorized Action proposed under bypass" {
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSessionAsk(&storage, "unauthorized-config");
-    var update: protocol.ConfigureCommand = .{};
+    var update: wire_request.ConfigureCommand = .{};
     try update.key.set("unauthorized-mode");
     try update.session.set(session.slice());
     update.configuration.permission_mode.state = .value;
@@ -6999,7 +7000,7 @@ test "the Current report fences an unauthorized Action proposed under bypass" {
 }
 
 fn configureTestEffort(storage: *Store, key: []const u8, session: []const u8, state: protocol.FieldState, value: []const u8) !ConfigureReply {
-    var command: protocol.ConfigureCommand = .{};
+    var command: wire_request.ConfigureCommand = .{};
     try command.key.set(key);
     try command.session.set(session);
     command.configuration.reasoning_effort.state = state;
@@ -7349,7 +7350,7 @@ test "model admission work excludes accepted compaction base history" {
                     .unchanged => unreachable,
                 });
             }
-            var patch: protocol.ConfigureCommand = .{};
+            var patch: wire_request.ConfigureCommand = .{};
             try patch.key.set("policy");
             try patch.session.set(session.slice());
             patch.configuration.compaction_trigger.state = .value;
@@ -7395,7 +7396,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "config");
             if (kind == .action) {
-                var tools: protocol.ConfigureCommand = .{};
+                var tools: wire_request.ConfigureCommand = .{};
                 try tools.key.set("tools");
                 try tools.session.set(session.slice());
                 tools.configuration.tools.state = .value;
@@ -7409,7 +7410,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
             for (0..population + 1) |index| {
                 var key: [64]u8 = undefined;
                 if (kind == .instruction) {
-                    var patch: protocol.ConfigureCommand = .{};
+                    var patch: wire_request.ConfigureCommand = .{};
                     try patch.key.set(try std.fmt.bufPrint(&key, "instructions-{d}", .{index}));
                     try patch.session.set(session.slice());
                     patch.configuration.instructions = try testingBytesContent(&tmp, "instruction", &instructions);
@@ -7436,7 +7437,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                     }
                 }
             }
-            var patch: protocol.ConfigureCommand = .{};
+            var patch: wire_request.ConfigureCommand = .{};
             try patch.key.set("policy");
             try patch.session.set(session.slice());
             patch.configuration.compaction_trigger.state = .value;
@@ -7448,7 +7449,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
             defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
             try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
             if (kind == .instruction) {
-                var clear: protocol.ConfigureCommand = .{};
+                var clear: wire_request.ConfigureCommand = .{};
                 try clear.key.set("clear");
                 try clear.session.set(session.slice());
                 clear.configuration.instructions = try testingBytesContent(&tmp, "clear-instruction", "");
@@ -7492,7 +7493,7 @@ test "admission fails before COMMIT when a counted write changes other than its 
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "counted-admission-config");
-        var patch: protocol.ConfigureCommand = .{};
+        var patch: wire_request.ConfigureCommand = .{};
         try patch.key.set("counted-admission-instructions");
         try patch.session.set(session.slice());
         patch.configuration.instructions = try testingBytesContent(&tmp, "counted-admission-instruction", "an instruction");
@@ -7766,7 +7767,7 @@ test "admission's context read answers CorruptStore, as admission names it" {
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "context-fold");
-        var patch: protocol.ConfigureCommand = .{};
+        var patch: wire_request.ConfigureCommand = .{};
         try patch.key.set("context-fold-trigger");
         try patch.session.set(session.slice());
         patch.configuration.compaction_trigger.state = .value;
@@ -7871,7 +7872,7 @@ fn costFixtureForTesting(storage: *Store, tmp: *std.testing.TmpDir, cycles: usiz
     const session = try configureTestSessionAsk(storage, "probe-config");
     const answer = [_]TestingAnswerPart{.{ .encoded = "hello there", .decoded = "hello there" }};
     try answerTestTurn(storage, tmp, session.slice(), "probe-greeting", &answer);
-    var reconfigure: protocol.ConfigureCommand = .{};
+    var reconfigure: wire_request.ConfigureCommand = .{};
     try reconfigure.key.set("probe-reconfigure");
     try reconfigure.session.set(session.slice());
     reconfigure.configuration.instructions = try testingBytesContent(tmp, "probe-instructions", "Be brief and careful.");
@@ -8164,9 +8165,10 @@ test "Full lists grow linearly on a mixed history" {
     // most 4.5 times those at N. A statement whose chunks reopened a walk
     // of the call-free Operations after the current one grew 10 and 12
     // times (a9a0f7eb's calls, 15413 to 160133 steps, and results, 23494
-    // to 290902).
-    const small = try mixedHistorySteps(128);
-    const large = try mixedHistorySteps(512);
+    // to 290902). Fitted as aN^2+bN, those would grow 8.4 and 10.4 times
+    // from 64 to 256.
+    const small = try mixedHistorySteps(64);
+    const large = try mixedHistorySteps(256);
     var linear = true;
     inline for (report_domain.full_pages, small, large) |S, at_n, at_4n| {
         if (at_4n * 2 > at_n * 9) {
@@ -8281,7 +8283,7 @@ test "Full revisions read no statement past a last revision that shows content" 
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSessionAsk(&storage, "last-revision-config");
-    var reconfigure: protocol.ConfigureCommand = .{};
+    var reconfigure: wire_request.ConfigureCommand = .{};
     try reconfigure.key.set("last-revision");
     try reconfigure.session.set(session.slice());
     reconfigure.configuration.instructions = try testingBytesContent(&tmp, "last-revision-instructions", "Be brief.");
@@ -8713,7 +8715,7 @@ test "schema 57 refusal rows migrate to wire 10 without changing command identit
             .{ .key = "legacy-unknown-addressed", .target = "absent", .code = .unknown_session },
         };
 
-        fn expectSaved(database: *c.sqlite3, commands: []const protocol.MessageCommand) !void {
+        fn expectSaved(database: *c.sqlite3, commands: []const wire_request.MessageCommand) !void {
             for (commands, cases, 0..) |*command, case, index| {
                 const digest = command.semanticDigest();
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(database, "SELECT count(*) FROM core_command c JOIN sent_rejection s ON s.command_key=c.command_key " ++
@@ -8727,9 +8729,9 @@ test "schema 57 refusal rows migrate to wire 10 without changing command identit
             try std.testing.expectEqual(@as(u64, 9), try store_testing.sqliteQueryU64(database, "SELECT next_position FROM session WHERE session_ref='brhkcj'", .{}));
         }
     };
-    var payload: protocol.MessageCommand = .{ .text = try testingBytesContent(&tmp, "legacy-refused-body", "a saved rejected Message") };
+    var payload: wire_request.MessageCommand = .{ .text = try testingBytesContent(&tmp, "legacy-refused-body", "a saved rejected Message") };
     defer payload.removeTemporaryContent(std.testing.io) catch unreachable;
-    const commands = try arena.alloc(protocol.MessageCommand, Legacy.cases.len);
+    const commands = try arena.alloc(wire_request.MessageCommand, Legacy.cases.len);
     for (commands, Legacy.cases) |*command, case| {
         command.* = .{ .text = payload.text, .sender = .{}, .sender_handle = .{} };
         try command.key.set(case.key);
@@ -8852,13 +8854,13 @@ test "schema 53 moves forward with loaded tools defaulting to NULL" {
         try std.testing.expect((try store_testing.queryU64(&storage, "SELECT count(*) FROM " ++ table, .{})) > 0);
         try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM " ++ table ++ " WHERE loaded_tool_set_id IS NOT NULL", .{}));
     }
-    var configure: protocol.ConfigureCommand = .{};
+    var configure: wire_request.ConfigureCommand = .{};
     try configure.key.set("legacy-configure");
     const configure_replay = storage.configure(&configure, .{});
     try std.testing.expect(configure_replay == .rejected);
     try std.testing.expect(configure_replay.rejected.replayed);
     try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, configure_replay.rejected.code);
-    var message: protocol.MessageCommand = .{ .configuration = .{} };
+    var message: wire_request.MessageCommand = .{ .configuration = .{} };
     try message.key.set("legacy-create-message");
     message.text = try testingBytesContent(&tmp, "legacy-message", "go");
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
@@ -9863,7 +9865,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     const sender_action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
     var sender_input: BashExecutionInput = undefined;
     try storage.readBashExecutionInput(sender_action, &sender_input);
-    var rename: protocol.ConfigureCommand = .{};
+    var rename: wire_request.ConfigureCommand = .{};
     try rename.key.set("transcript-source-label");
     rename.session = source;
     rename.configuration.label.state = .value;
@@ -9879,7 +9881,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     for (refusals, 0..) |refusal, index| {
-        var refused: protocol.MessageCommand = .{
+        var refused: wire_request.MessageCommand = .{
             .text = try testingBytesContent(&tmp, refusal.key, "Rejected text is never transcript content."),
             .sender = .{},
             .sender_handle = sender_input.sender_handle,
@@ -10117,7 +10119,7 @@ test "a Session offering an MCP server's tool is listed, reported and settled" {
     const session = reply.accepted.session;
     // Reading and reconfiguring it neither refuses nor fences.
     _ = try storage.inspectSessionForTesting(session.slice());
-    var reworded: protocol.ConfigureCommand = .{};
+    var reworded: wire_request.ConfigureCommand = .{};
     try reworded.key.set("mcp-reconfigure");
     reworded.session = session;
     reworded.configuration.tools = try .of(&.{ "bash", "fetch_page", "test_tool" });
@@ -10194,7 +10196,7 @@ test "MCP Actions follow ask and bypass permission and continue after resolution
         try submitTestMessage(&storage, &tmp, "mcp-permission-message", "mcp-permission-message", session.slice(), "fetch");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         // The Operation's offer, not a later Session revision, owns this call.
-        var update: protocol.ConfigureCommand = .{};
+        var update: wire_request.ConfigureCommand = .{};
         try update.key.set("mcp-permission-remove");
         update.session = session;
         update.configuration.tools = try .of(&.{"bash"});
@@ -10278,7 +10280,7 @@ test "a removed MCP tool gets the removed-tool result instead of an Action" {
     const reply = storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     const session = reply.accepted.session;
-    var update: protocol.ConfigureCommand = .{};
+    var update: wire_request.ConfigureCommand = .{};
     try update.key.set("mcp-remove");
     update.session = session;
     update.configuration.tools = try .of(&.{"bash"});
@@ -10358,7 +10360,7 @@ test "MCP invalid and removed calls share their batch rejection lookup rounds" {
             try std.testing.expect(configured == .accepted);
             const session = configured.accepted.session;
             if (removed) {
-                var update: protocol.ConfigureCommand = .{};
+                var update: wire_request.ConfigureCommand = .{};
                 try update.key.set("mcp-rounds-remove");
                 update.session = session;
                 update.configuration.tools = try .of(&.{"bash"});
@@ -10645,7 +10647,7 @@ test "MCP ask approval uses the frozen server after its Session offer changes" {
     try settleCallsForTesting(&storage, &tmp, model, "approval-calls", &.{
         .{ .item_id = "item", .name = "fetch_page", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
     });
-    var update: protocol.ConfigureCommand = .{};
+    var update: wire_request.ConfigureCommand = .{};
     try update.key.set("approval-remove");
     update.session = session;
     update.configuration.tools = try .of(&.{"bash"});
@@ -11486,7 +11488,7 @@ test "skills schema 56 wire 9 upgrades populated rows to the current Store" {
 
 test "skills schema 58 wire 10 upgrades populated archive and refusal rows to the current Store" {
     const Extra = struct {
-        fn seed(raw: *c.sqlite3, archive: *const protocol.SessionArchiveCommand, refused: *const protocol.MessageCommand) !void {
+        fn seed(raw: *c.sqlite3, archive: *const protocol.SessionArchiveCommand, refused: *const wire_request.MessageCommand) !void {
             const archive_digest = archive.semanticDigest();
             const refusal_digest = refused.semanticDigest();
             try store_testing.sqliteExec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,6,'rhvzwc',?2,1,'',0,0,1000)", .{ archive.key.slice(), store_testing.Blob{ .bytes = &archive_digest } });
@@ -11499,7 +11501,7 @@ test "skills schema 58 wire 10 upgrades populated archive and refusal rows to th
             try sqlite.exec(raw, "UPDATE session SET next_position=7 WHERE session_ref='brhkcj'");
         }
 
-        fn expectSaved(raw: *c.sqlite3, archive: *const protocol.SessionArchiveCommand, refused: *const protocol.MessageCommand) !void {
+        fn expectSaved(raw: *c.sqlite3, archive: *const protocol.SessionArchiveCommand, refused: *const wire_request.MessageCommand) !void {
             const archive_digest = archive.semanticDigest();
             const refusal_digest = refused.semanticDigest();
             try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM session_archive a JOIN session_stop s ON s.command_key=a.command_key JOIN session_archive_command requested ON requested.command_key=a.command_key JOIN core_command c ON c.command_key=a.command_key WHERE a.session_ref='rhvzwc' AND c.command_key=?1 AND c.kind=6 AND c.target='rhvzwc' AND c.input_digest=?2 AND c.accepted=1 AND c.command_seq=1000 AND requested.archived=1 AND s.session_ref='rhvzwc' AND s.position=2 AND s.admission_cutoff=0 AND s.stopped_at=1793781800 AND s.parent_caused=0", .{ archive.key.slice(), store_testing.Blob{ .bytes = &archive_digest } }));
@@ -11519,7 +11521,7 @@ test "skills schema 58 wire 10 upgrades populated archive and refusal rows to th
     var archive: protocol.SessionArchiveCommand = .{};
     try archive.key.set("skills-58-archive");
     try archive.session.set("rhvzwc");
-    var refused: protocol.MessageCommand = .{ .text = try testingBytesContent(&tmp, "skills-58-refused-body", "old wire 10 refused peer message"), .sender = .{}, .sender_handle = .{} };
+    var refused: wire_request.MessageCommand = .{ .text = try testingBytesContent(&tmp, "skills-58-refused-body", "old wire 10 refused peer message"), .sender = .{}, .sender_handle = .{} };
     defer refused.removeTemporaryContent(std.testing.io) catch unreachable;
     try refused.key.set("skills-58-refusal");
     try refused.session.set("absent");

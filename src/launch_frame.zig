@@ -7,6 +7,7 @@
 const std = @import("std");
 const api_key = @import("api_key.zig");
 const protocol = @import("protocol.zig");
+const wire_request = @import("wire_request.zig");
 const core_tools = @import("core_tools.zig");
 const platform = @import("platform.zig");
 pub const MysqlUrl = @import("mysql_url.zig");
@@ -235,7 +236,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, frame: *Frame, refusal: 
     };
     if (presets.count() > core_tools.max_presets) return refusePreset(refusal, "presets", "must name at most 64 presets");
     if (presets.count() == 0) return;
-    const checked_configuration = try arena.allocator().create(protocol.Configuration);
+    const checked_configuration = try arena.allocator().create(wire_request.Configuration);
     var entries = presets.iterator();
     while (entries.next()) |entry| {
         const name = entry.key_ptr.*;
