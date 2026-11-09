@@ -13,6 +13,7 @@ test {
     _ = @import("FactsRow.zig");
     _ = @import("ActivityBlock.zig");
     _ = @import("Shortcuts.zig");
+    _ = @import("SessionChrome.zig");
     _ = @import("TerminalApp.zig");
     _ = @import("Installation.zig");
     _ = @import("release_candidate.zig");
