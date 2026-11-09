@@ -36,6 +36,8 @@ MAC_PATHS = (
     "install.sh", "release/*",
 )
 
+# fnmatch patterns, as prepush.py and the selector read them: `*` spans
+# directories, so src/*.zig covers src/http1/Exchange.zig too.
 SCANNED = ("src/*.zig", "tests/integration/*.zig", "tests/integration/*.py", "clients/ts/test/*.ts")
 
 # Darwin differs on these: shutdown of a closed or listening socket returns
@@ -128,17 +130,23 @@ def mac_path(path):
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in MAC_PATHS)
 
 
+def scanned(root=ROOT):
+    """Every file under SCANNED, at any depth."""
+    tops = sorted({pattern.split("/*", 1)[0] for pattern in SCANNED})
+    for file in sorted(f for top in tops for f in (root / top).rglob("*") if f.is_file()):
+        path = file.relative_to(root).as_posix()
+        if any(fnmatch.fnmatchcase(path, pattern) for pattern in SCANNED):
+            yield file, path
+
+
 def sites(root=ROOT):
     found = {}
-    for pattern in SCANNED:
-        for file in sorted(root.glob(pattern)):
-            path = file.relative_to(root).as_posix()
-            if mac_path(path):
-                continue
-            source = file.read_text()
-            count = {".py": python_sites, ".ts": typescript_sites}.get(file.suffix, zig_sites)(source)
-            if count:
-                found[path] = count
+    for file, path in scanned(root):
+        if mac_path(path):
+            continue
+        count = {".py": python_sites, ".ts": typescript_sites}.get(file.suffix, zig_sites)(file.read_text())
+        if count:
+            found[path] = count
     return found
 
 
