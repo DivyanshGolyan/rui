@@ -241,11 +241,14 @@ pub const fixture_text_cases = [_]struct { text: []const u8, refused: bool }{
     .{ .text = "SELECT unixepoch() FROM turn", .refused = true },
 };
 
-/// `text` when it passes `fixtureTextError`, else a failed build. Each
-/// call also hands its MySQL spelling to the live MySQL check
-/// (`mysql_dialect_check.shadowPrepareFixture`).
+/// `text` when it passes `fixtureTextError` and the grammar and rules of
+/// the Store's own statements (`rsql.fixtureError`), and MySQL rendering
+/// takes it, else a failed build. Each call also hands its MySQL spelling
+/// to the live MySQL check (`mysql_dialect_check.shadowPrepareFixture`),
+/// which should then find nothing the build missed.
 fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
     if (comptime fixtureTextError(text)) |message| @compileError(message ++ ": " ++ text);
+    if (comptime rsql.fixtureError(text)) |message| @compileError("fixture: " ++ message ++ ": " ++ text);
     switch (comptime rsql.mysqlRendering(text)) {
         .refused => |message| @compileError("fixture: MySQL rendering refuses it: " ++ message ++ ": " ++ text),
         .rendered => {},
