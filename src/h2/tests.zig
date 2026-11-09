@@ -1472,13 +1472,18 @@ test "exchange: loopback and NO_PROXY hosts connect directly" {
     try std.testing.expectEqual(@as(?[]const u8, null), proxy.firstRequest());
 }
 
-test "exchange: a proxy URL Rui cannot use fails Client init" {
+test "exchange: a proxy URL Rui cannot use fails Client init, and checkProxy agrees" {
     var response: [64]u8 = undefined;
     var request = exchangeRequest("https://proxied.test/v1", &response);
     request.proxy = .{ .url = "https://proxy.example:443" };
     try std.testing.expectError(error.HttpsProxySchemeUnsupported, h2.exchange(std.testing.io, request));
+    try std.testing.expectError(error.HttpsProxySchemeUnsupported, h2.checkProxy(std.testing.allocator, request.proxy.?));
+    request.proxy = .{ .url = "socks5://127.0.0.1:1080" };
+    try std.testing.expectError(error.HttpsProxySchemeUnsupported, h2.checkProxy(std.testing.allocator, request.proxy.?));
     request.proxy = .{ .url = "http://proxy.example:0" };
     try std.testing.expectError(error.HttpsProxyInvalid, h2.exchange(std.testing.io, request));
+    try std.testing.expectError(error.HttpsProxyInvalid, h2.checkProxy(std.testing.allocator, request.proxy.?));
+    try h2.checkProxy(std.testing.allocator, .{ .url = "http://user:p%40ss@proxy.example:3128/", .no_proxy = "localhost" });
 }
 
 test "exchange: an answer longer than the buffer is refused, as sent" {

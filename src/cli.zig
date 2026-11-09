@@ -1847,6 +1847,13 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     }
     if (fixture_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false), .fixture = true } } });
     if (provider_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .none });
+    // The execution thread's fence would report this while startup still
+    // holds stderr, so its cause could be dropped (#1093).
+    if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
+        stderr.diagnostic("rui: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy. The Host did not start.\n", .{reason});
+        recordExit(.environment);
+        return error.Reported;
+    }
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     return server.serve(
         io,
