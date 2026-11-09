@@ -8,7 +8,7 @@ const store_path = @import("../store_path.zig");
 const tool_name = @import("../tool_name.zig");
 const Bounded = @import("../bounded.zig").Bounded;
 const wire_version = @import("../wire_version.zig").wire_version;
-const tool_catalog = @import("../tools.zig");
+const tool_catalog = @import("../tool_record.zig");
 const prefix_seal = @import("../prefix_seal.zig");
 const retry_policy = @import("../retry_policy.zig");
 const turn_policy = @import("../turn_policy.zig");
@@ -580,7 +580,7 @@ pub const tables = [_]Table{
         },
     },
     // An ordered set of tool records, saved once: `digest` names its
-    // members' content (tools.zig `SetDigest`). A Session's set holds at
+    // members' content (tool_record.zig `SetDigest`). A Session's set holds at
     // most max_tools, the wire's bound; the Host's catalog set up to
     // max_catalog_records.
     .{
@@ -607,7 +607,7 @@ pub const tables = [_]Table{
         },
         .without_rowid = true,
     },
-    // The Host's catalog: the set its last open saved (tools.zig
+    // The Host's catalog: the set its last open saved (tool_record.zig
     // `Catalog`), which the next start reads back. One row.
     .{
         .name = "host_catalog",
