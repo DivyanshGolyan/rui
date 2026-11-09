@@ -3453,10 +3453,7 @@
                       "provider_is_immutable",
                       "model_is_immutable",
                       "revision_exhausted",
-                      "skills_unavailable",
-                      "skill_file_unavailable",
-                      "skill_file_too_large",
-                      "skill_text_invalid"
+                      "skills_unavailable"
                     ]
                   }
                 },

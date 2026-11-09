@@ -404,7 +404,7 @@ noinline fn reloadSkills(a: anytype, command: *const wire_request.ConfigureComma
     }
     if (invalid) return saveConfigurationRejection(a, command, digest, .incomplete_initial_configuration, faults);
     const captured = reload_capture orelse return saveConfigurationRejection(a, command, digest, .skills_unavailable, faults);
-    if (captured.* == .failed) return saveConfigurationRejectionWithFailure(a, command, digest, captured.failed.rejection(protocol.ConfigurationRejection), captured.failed, faults);
+    if (captured.* == .failed) return saveConfigurationRejectionWithFailure(a, command, digest, captured.failed.configurationRejection(), captured.failed, faults);
     if (captured.* != .reload) return saveConfigurationRejection(a, command, digest, .skills_unavailable, faults);
     var memory: std.heap.ArenaAllocator = .init(std.heap.c_allocator);
     defer memory.deinit();

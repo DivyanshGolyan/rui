@@ -158,12 +158,14 @@ pub const Failure = struct {
     code: enum { unknown_session, unknown_skill, skill_file_unavailable, skill_file_too_large, skill_text_invalid, skills_unavailable },
     bytes: []const u8,
 
-    /// The command refusal a configure's skills reload saves. Only the
-    /// model's `skill` tool names a skill, so only it has `unknown_skill`.
-    pub fn rejection(self: Failure, comptime Rejection: type) Rejection {
+    /// The command refusal a configure's skills reload saves. A reload
+    /// fails only for an unknown Session or an unreadable catalog; the
+    /// other codes are the model `skill` tool's, which reads skill files.
+    pub fn configurationRejection(self: Failure) protocol.ConfigurationRejection {
         return switch (self.code) {
-            .unknown_skill => unreachable,
-            inline else => |code| @field(Rejection, @tagName(code)),
+            .unknown_session => .unknown_session,
+            .skills_unavailable => .skills_unavailable,
+            .unknown_skill, .skill_file_unavailable, .skill_file_too_large, .skill_text_invalid => unreachable,
         };
     }
 };

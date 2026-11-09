@@ -517,9 +517,6 @@ pub const ConfigurationRejection = enum {
     model_is_immutable,
     revision_exhausted,
     skills_unavailable,
-    skill_file_unavailable,
-    skill_file_too_large,
-    skill_text_invalid,
 };
 pub const MessageRejection = enum {
     session_archiving,
