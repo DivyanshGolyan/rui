@@ -599,9 +599,10 @@ const Press = union(enum) {
     key: Key,
     enter,
     edit: Edit,
-    /// An unbound Alt, Super, Hyper or Meta chord: dropped whole and reported.
+    /// An unbound Ctrl, Alt, Super, Hyper or Meta chord or C0 control:
+    /// dropped whole and reported.
     chord,
-    /// An unbound Ctrl key, C0 control or invalid scalar: never text.
+    /// An invalid scalar: never text.
     control,
     text: []const u8,
     none,
@@ -621,8 +622,8 @@ fn classify(value: vaxis.Key) Press {
     // Alt-Enter adds a line in every form: Ghostty and other terminals send
     // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.
     if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .alt = true })) return .{ .edit = .newline };
-    if (value.matchExact(vaxis.Key.left, .{})) return .{ .edit = .left };
-    if (value.matchExact(vaxis.Key.right, .{})) return .{ .edit = .right };
+    if (value.matchExact(vaxis.Key.left, .{}) or value.matchExact('b', .{ .ctrl = true })) return .{ .edit = .left };
+    if (value.matchExact(vaxis.Key.right, .{}) or value.matchExact('f', .{ .ctrl = true })) return .{ .edit = .right };
     if (value.matchExact('a', .{ .ctrl = true })) return .{ .edit = .line_start };
     if (value.matchExact('e', .{ .ctrl = true })) return .{ .edit = .line_end };
     if (value.matchExact(vaxis.Key.delete, .{})) return .{ .edit = .delete_next };
@@ -639,10 +640,12 @@ fn classify(value: vaxis.Key) Press {
     // never typed, and the draft around it was: an Esc pressed just before
     // a key arrives as one chord.
     if (value.mods.alt or value.mods.super or value.mods.hyper or value.mods.meta) return .chord;
-    // Vaxis represents C0 controls as Ctrl keys or textless Kitty codepoints;
-    // those are not text, so an unbound one rejects the input.
+    // An unbound Ctrl key is dropped and reported the same way, the draft
+    // kept: vaxis represents C0 controls as Ctrl keys or textless Kitty
+    // codepoints, and a typed one is a key, never text.
     const control = value.codepoint < 0x20 and value.codepoint != vaxis.Key.enter and value.codepoint != vaxis.Key.tab and value.codepoint != vaxis.Key.escape;
-    if (value.mods.ctrl or control or !validScalar(value.codepoint, false)) return .control;
+    if (value.mods.ctrl or control) return .chord;
+    if (!validScalar(value.codepoint, false)) return .control;
     if (value.text) |text| return .{ .text = text };
     return .none;
 }
@@ -771,15 +774,15 @@ test "Tab over a partial character or a rejected draft does what it did before c
         }
         const status: Completion = .{ .context = &{}, .add = add };
     };
-    // A lead byte waiting for the rest of its character, or a NUL.
-    for ([_][]const u8{ "\xc3", "\x00" }) |state| {
+    // A lead byte waiting for the rest of its character, or an invalid byte.
+    for ([_][]const u8{ "\xc3", "\xff" }) |state| {
         errdefer std.debug.print("state={any}\n", .{state});
         var storage: [2][64]u8 = undefined;
         var editors = [_]Editor{ .{ .buffer = &storage[0] }, .{ .buffer = &storage[1], .completion = Complete.status } };
         for (&editors) |*editor| {
             var stream: Input = .{};
             for ("/st") |byte| _ = editor.feed(&stream, byte);
-            if (state[0] == 0) _ = editor.feed(&stream, 0) else _ = editor.insert(state[0], false);
+            if (state[0] == 0xff) _ = editor.feed(&stream, 0xff) else _ = editor.insert(state[0], false);
             try std.testing.expect(editor.partial_length != 0 or editor.rejected != null);
             _ = editor.feed(&stream, '\t');
         }
@@ -1230,10 +1233,8 @@ test "unknown CSI retains following text; malformed input and marked choice reje
         const event = editor.feed(&stream, byte);
         if (byte == '\n') try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, event);
     }
-    for ([_][]const u8{
-        "invalid\x00x", "invalid\x14x", "invalid\x1cx",
-        "a\x1b[0u",     "a\x1b[28u",
-    }) |input| for ([_]bool{ true, false }) |allow_paste| {
+    // A Kitty report of a surrogate or a codepoint past Unicode is no key.
+    for ([_][]const u8{ "a\x1b[55296u", "a\x1b[1114112u" }) |input| for ([_]bool{ true, false }) |allow_paste| {
         editor = .{ .buffer = &storage, .allow_paste = allow_paste };
         for (input) |byte| _ = editor.feed(&stream, byte);
         try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, editor.feed(&stream, '\n'));
@@ -1318,6 +1319,37 @@ test "Ctrl-D exits only on an empty draft and otherwise deletes forward" {
     try std.testing.expectEqual(KeyOutcome{ .action = .ctrl_d }, editor.feed(&stream, 4));
 }
 
+test "an unbound Ctrl key is dropped and reported, and the draft still sends" {
+    var storage: [16]u8 = undefined;
+    // Ctrl-T, Ctrl-L, Ctrl-Y, Ctrl-Space (NUL), Ctrl-\ and Kitty's Ctrl-T,
+    // NUL and Ctrl-\ forms.
+    for ([_][]const u8{ "\x14", "\x0c", "\x19", "\x00", "\x1c", "\x1b[116;5u", "\x1b[0u", "\x1b[28u" }) |key_bytes| {
+        errdefer std.debug.print("key={any}\n", .{key_bytes});
+        var editor: Editor = .{ .buffer = &storage };
+        var stream: Input = .{};
+        for ("ok") |byte| _ = editor.feed(&stream, byte);
+        var last: KeyOutcome = .none;
+        for (key_bytes) |byte| {
+            const outcome = editor.feed(&stream, byte);
+            if (outcome != .none) last = outcome;
+        }
+        try std.testing.expectEqual(KeyOutcome{ .refused = .unbound }, last);
+        for ("!") |byte| _ = editor.feed(&stream, byte);
+        try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
+        try std.testing.expectEqualStrings("ok!", storage[0..editor.length]);
+    }
+}
+
+test "Ctrl-B and Ctrl-F move the caret a character, as readline does" {
+    var storage: [16]u8 = undefined;
+    var editor: Editor = .{ .buffer = &storage };
+    var stream: Input = .{};
+    for ("ab\x02x\x06y") |byte| _ = editor.feed(&stream, byte);
+    try std.testing.expectEqualStrings("axby", storage[0..editor.length]);
+    for ("\x1b[98;5u\x1b[98;5uz\x1b[102;5uw") |byte| _ = editor.feed(&stream, byte);
+    try std.testing.expectEqualStrings("axzbwy", storage[0..editor.length]);
+}
+
 test "a key no table binds neither edits nor rejects the line" {
     const nothing = comptime keymap.Keymap(void){ .meanings = .initFill(null) };
     var storage: [16]u8 = undefined;
@@ -1335,7 +1367,7 @@ test "a key no table binds neither edits nor rejects the line" {
     // A rejected line changes no key's meaning: Ctrl-X still passes.
     var editor: Editor = .{ .buffer = &storage };
     var stream: Input = .{};
-    for ("ok\x00") |byte| _ = editor.feed(&stream, byte);
+    for ("ok\xc3(") |byte| _ = editor.feed(&stream, byte);
     try std.testing.expectEqual(KeyOutcome{ .action = .ctrl_x }, editor.feed(&stream, 0x18));
     try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, editor.feed(&stream, '\r'));
 }

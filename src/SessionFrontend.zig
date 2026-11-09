@@ -3435,7 +3435,7 @@ test "End on an empty draft goes to the latest view and never leaves the convers
         try std.testing.expect(self.leaving == null);
     }
     // A rejected draft changes no key's meaning: Esc still returns.
-    try sendKeys(self, "\x00\x1b[27u");
+    try sendKeys(self, "\xff\x1b[27u");
     try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
 }
 
