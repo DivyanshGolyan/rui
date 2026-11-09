@@ -1,0 +1,113 @@
+diff --git a/src/SessionFrontend.zig b/src/SessionFrontend.zig
+index a2226a90..1b8a88f1 100644
+--- a/src/SessionFrontend.zig
++++ b/src/SessionFrontend.zig
+@@ -1978,23 +1978,35 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
+             if (self.queue.page.len == 0) {
+                 if (!self.queue.busy and self.queue.wanted == null) self.queue.wanted = .{ .snapshot = self.queue.snapshot.? };
+             } else self.queue.focused = !self.queue.focused;
++            self.queue.visible = false;
++            screen.invalidateScope();
+             self.dirty = true;
+             return;
+         }
+         if (self.queue.focused) {
+             if (key.matchExact(vaxis.Key.up, .{}) or key.matchExact(vaxis.Key.down, .{})) {
+                 self.queue.move(self.init.gpa, if (key.codepoint == vaxis.Key.up) .backward else .forward);
++                self.queue.visible = false;
++                screen.invalidateScope();
+                 self.dirty = true;
+                 return;
+             }
+             if (key.matchExact(vaxis.Key.escape, .{})) {
+                 self.queue.focused = false;
++                self.queue.visible = false;
++                screen.invalidateScope();
+                 self.dirty = true;
+                 return;
+             }
+             self.queue.focused = false;
++            self.queue.visible = false;
++            screen.invalidateScope();
+         }
+-    } else if (self.queue.focused and !(decoded == .event and decoded.event.event == .key_release)) self.queue.focused = false;
++    } else if (self.queue.focused and !(decoded == .event and decoded.event.event == .key_release)) {
++        self.queue.focused = false;
++        self.queue.visible = false;
++        screen.invalidateScope();
++    }
+     if (asked == .archive and selected == .enter) {
+         try self.converse(if (Editor.plainEnter(decoded)) .confirm_archive else .other);
+         self.dirty = true;
+@@ -6312,10 +6324,11 @@ test "inline pending list routes delivered focus without consuming the draft or
+     try std.testing.expect(rowWith(held.screen, "7 same 中文", &storage) != null);
+     // While replacement output is blocked, the old frame cannot confer
+     // authority on the newly painted list. The real output pump sees Alt-Q.
+-    try held.hold("\x1bq");
++    try held.hold("\x1bq\x1b[B\x1b[B");
+     try self.drawFrame();
+     try std.testing.expect(held.pumps != 0);
+     try std.testing.expect(!self.queue.focused and !self.queue.visible);
++    try std.testing.expectEqual(@as(usize, 0), self.queue.list.cursor);
+     try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
+     try held.settle();
+     try sendKeys(self, "\x1bq");
+@@ -6350,3 +6363,58 @@ test "inline pending list routes delivered focus without consuming the draft or
+     try std.testing.expect(self.submission.view() == null);
+     try std.testing.expectEqualStrings("draft!", self.input.composition().bytes);
+ }
++
++test "pending list burst waits for each delivered focus and cursor frame" {
++    const held = try HeldFrontend.create();
++    defer held.destroy();
++    const self = &held.self;
++    self.init.gpa = std.testing.allocator;
++    self.queue.observe(.{ .boundary = 12, .queued = .{ .count = 3, .oldest_position = 2, .newest_position = 4, .newest_admission = 12 } });
++    const request = self.queue.wanted.?;
++    self.queue.wanted = null;
++    var page: reads.QueuePage = .{ .len = 3 };
++    for (0..3) |index| {
++        page.entries[index] = .{ .admission = 10 + @as(u64, @intCast(index)), .position = 2 + @as(u64, @intCast(index)), .line = .{} };
++        try page.entries[index].line.set("duplicate");
++    }
++    try std.testing.expect(self.queue.publish(request, page));
++    try held.settle();
++    try std.testing.expect(self.queue.visible and !self.queue.focused);
++    const burst = "\x1bq\x1b[B\x1b[B";
++    try std.testing.expectEqual(@as(isize, burst.len), std.c.write(held.pipes[0][1], burst.ptr, burst.len));
++    const PumpToStale = struct {
++        fn run(front: *Self) !void {
++            for (0..32) |_| {
++                const service = try front.step(0);
++                if (front.terminal.screen.stale()) return;
++                if (service != .byte) return error.TestUnexpectedResult;
++            }
++            return error.TestUnexpectedResult;
++        }
++    };
++    var text: [512]u8 = undefined;
++    // The first input can focus, but the first arrow remains unread until
++    // the selected row and its focus hint have actually been delivered.
++    try PumpToStale.run(self);
++    try std.testing.expect(self.queue.focused and !self.queue.visible);
++    try std.testing.expectEqual(@as(usize, 0), self.queue.list.cursor);
++    const first = held.screen.ticket.?.frame;
++    try held.settle();
++    try std.testing.expect(held.screen.ticket.?.delivered and held.screen.ticket.?.frame > first);
++    try std.testing.expect(rowWith(held.screen, "› 10 duplicate", &text) != null);
++    // Each arrow likewise invalidates that exact frame before another arrow.
++    try PumpToStale.run(self);
++    try std.testing.expectEqual(@as(usize, 1), self.queue.list.cursor);
++    try std.testing.expect(!self.queue.visible);
++    const second = held.screen.ticket.?.frame;
++    try held.settle();
++    try std.testing.expect(held.screen.ticket.?.delivered and held.screen.ticket.?.frame > second);
++    try std.testing.expect(rowWith(held.screen, "› 11 duplicate", &text) != null);
++    try PumpToStale.run(self);
++    try std.testing.expectEqual(@as(usize, 2), self.queue.list.cursor);
++    try std.testing.expect(!self.queue.visible);
++    try held.settle();
++    try std.testing.expect(rowWith(held.screen, "› 12 duplicate", &text) != null);
++    try std.testing.expectEqualStrings("", self.input.composition().bytes);
++    try std.testing.expect(self.submission.view() == null and held.screen.consent == null);
++}

@@ -1,0 +1,356 @@
+diff --git a/tests/integration/canonical_failure_integration.py b/tests/integration/canonical_failure_integration.py
+index 98177cd8..6ba86124 100644
+--- a/tests/integration/canonical_failure_integration.py
++++ b/tests/integration/canonical_failure_integration.py
+@@ -531,7 +531,7 @@ def interactive_cases(state, binding=False, null_code=False):
+                                     timeout=deadline - time.monotonic(), composer=True)
+                             elif "› " not in output.split("denied tool saved", 1)[1]:
+                                 output += human.read_terminal(master, "› ", timeout=deadline - time.monotonic())
+-                        os.write(master, b"/status\n")
++                        os.write(master, b"/requests\n")
+                         diagnostic = human.read_terminal(master, f"Last submission error: {reason}", composer=True)
+                         assert key in diagnostic and "Ctrl-R retries this exact original" in diagnostic, diagnostic
+                         # No ordinary no-op may retry an unresolved submission.
+diff --git a/tests/integration/human_cli_integration.py b/tests/integration/human_cli_integration.py
+index 35ec1929..82065876 100644
+--- a/tests/integration/human_cli_integration.py
++++ b/tests/integration/human_cli_integration.py
+@@ -3920,10 +3920,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
+                 "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "bypass")
+             try:
+                 os.write(master, b"run without approval\n")
+-                live = read_terminal(master, "+1 more calls · /status", composer=True)
++                live = read_terminal(master, "+1 more calls", composer=True)
+                 fixture.wait_for(lambda: all((state / f"bypass-started-{index}").exists() for index in range(4)), "held bypass effects")
+                 current = current_screen(master)
+-                assert "+1 more calls · /status" in current, current
++                assert "+1 more calls" in current, current
+                 source, rails = permission_frame(terminal_capture(master), current)
+                 clock_index = permission_clock(source, rails, bypass_description)
+                 failure_rows = [i for i, row in enumerate(source) if row.startswith("  • Inspect application settings")]
+@@ -3936,13 +3936,13 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
+                 bypass_releases[1].touch()
+                 reverse = read_terminal(master, "— Failed", composer=True)
+                 assert "! Inspect application settings" in reverse and f"• {bypass_description}" in reverse, reverse
+-                assert "+1 more calls · /status" in reverse and len(endpoint.requests) == 4, reverse
++                assert "+1 more calls" in reverse and len(endpoint.requests) == 4, reverse
+                 bypass_releases[0].touch()
+                 partial = read_terminal(master, f"✓ {bypass_description}", composer=True)
+-                assert f"• {bypass_description}" in partial and "+1 more calls · /status" in partial, partial
++                assert f"• {bypass_description}" in partial and "+1 more calls" in partial, partial
+                 assert len(endpoint.requests) == 4, "a partial tool group continued model work"
+                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 6, 32, 0, 0))
+-                short = read_terminal(master, "+3 more calls · /status", composer=True)
++                short = read_terminal(master, "+3 more calls", composer=True)
+                 assert "› live cafXé!" in short, short
+                 # The running call's row is not shown, so the live line says it.
+                 assert re.search(rf"^• {bypass_description} · \d+s$", short, re.M), short
+@@ -3981,10 +3981,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
+                 from terminal_screen import shown as wrapped_status
+                 wrapped_frame = current_screen(master)
+                 assert wrapped_status("! " + bypass_descriptions[1] + " — Failed", wrapped_frame), wrapped_frame
+-                assert "! Inspect application settings" in wrapped and "+1 more calls · /status" in wrapped, wrapped
++                assert "! Inspect application settings" in wrapped and "+1 more calls" in wrapped, wrapped
+                 assert "› live cafXé!" in wrapped, wrapped
+                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
+-                read_terminal(master, "+1 more calls · /status", composer=True)
++                read_terminal(master, "+1 more calls", composer=True)
+                 terminal_step(master, "\x01\x0b/exit", "Detached.")
+                 # Read the screen until exit: restoring the terminal drains it.
+                 _, errors = terminal_exit(caller, master)
+@@ -3993,7 +3993,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
+                 caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+                     "--", reference], env={**os.environ, "HOME": str(home), "TERM": "xterm-256color", "NO_COLOR": ""},
+                     stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+-                reopened = read_terminal(master, "+1 more calls · /status", composer=True)
++                reopened = read_terminal(master, "+1 more calls", composer=True)
+                 assert f"✓ {bypass_description}" in reopened and f"• {bypass_description}" in reopened, reopened
+                 assert "bypass complete" not in reopened and len(endpoint.requests) == 4, reopened
+                 os.write(master, "live café!\x1b[D\x1b[DX".encode())
+@@ -5644,7 +5644,7 @@ def renderer_cases():
+                 records = set((home / ".config/rui/requests").glob("*.json"))
+                 # The typed line outlives the first Action and its command, so
+                 # the second waits beside it with no prompt until Esc.
+-                tty.send("not-a-command\r", "! Unknown command /not-a-command · /help")
++                tty.send("not-a-command\r", "! Unknown command /not-a-command · type / for commands")
+                 assert CHOICE not in tty.capture.completed, tty.capture.completed
+                 tty.send("\x07", CHOICE)
+                 assert [item["action"] for item in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]] == [second]
+@@ -5731,7 +5731,7 @@ def renderer_cases():
+                 tty.send("\x1b[6~" * 6, predicate=lambda: "printf allowed > renderer-reading-effect" in tty.capture.completed)
+                 assert tty.capture.draft("/", 3), tty.capture.completed
+                 records = set((home / ".config/rui/requests").glob("*.json"))
+-                tty.send("not-a-command\r", "! Unknown command /not-a-command · /help")
++                tty.send("not-a-command\r", "! Unknown command /not-a-command · type / for commands")
+                 assert CHOICE not in tty.capture.completed, tty.capture.completed
+                 tty.send("\x07", CHOICE)
+                 assert set((home / ".config/rui/requests").glob("*.json")) == records
+@@ -5902,7 +5902,7 @@ def renderer_cases():
+             assert " Status · " not in scrolled, scrolled
+             for action in actions:
+                 assert f"Action requiring attention: {action}" in scrolled, scrolled
+-            tty.send("/foo\n", "! Unknown command /foo · /help")
++            tty.send("/foo\n", "! Unknown command /foo · type / for commands")
+             frames = tty.every_frame()
+             run(home, "action", "deny", "--store", store, "--session", session, "--action", actions[1])
+             def updated():
+@@ -5911,7 +5911,7 @@ def renderer_cases():
+                         f"Action requiring attention: {actions[0]}" in screen and f"Action requiring attention: {actions[2]}" in screen)
+             tty.wait(predicate=updated, timeout=10)
+             for frame in frames:
+-                assert " Status · " not in frame and "! Unknown command /foo · /help" in frame, frame
++                assert " Status · " not in frame and "! Unknown command /foo · type / for commands" in frame, frame
+             # Running a command returns to the Action. The /status line was
+             # typed beside it, so the draft keeps the input row until Esc
+             # returns to the choice, which the command holds: a command typed
+@@ -7756,12 +7756,11 @@ def main(selected="all", *, held_owner=None):
+             binding = terminal_step(master, "/status", " Status · ", composer=True)
+             assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
+             assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" in binding and permission_row(binding, "ask"), binding
+-            help_text = terminal_step(master, "/help", "/result KEY", composer=True)
+-            for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "Ctrl-R"):
+-                assert command in help_text, help_text
+-            assert "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
+-            # This Session asks: help must not describe the bypass default as its mode.
+-            assert "without approval" not in help_text and "\nThat line ends with asks before Bash/MCP when Bash or MCP asks first\n" in help_text, help_text
++            # Interactive /help was removed; it remains a local unknown command,
++            # not a Message or a request to the Host.
++            before_help = set(json.loads(run(preferences_home, "request", "list")))
++            terminal_step(master, "/help", "! Unknown command /help · type / for commands", composer=True)
++            assert set(json.loads(run(preferences_home, "request", "list"))) == before_help
+             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
+             assert "result: completed\nfirst answer" in result, result
+             terminal_step(master, "/requests", "Local recovery handles", composer=True)
+diff --git a/tests/integration/saved_request_resources.py b/tests/integration/saved_request_resources.py
+index c7de29ae..4463f45f 100644
+--- a/tests/integration/saved_request_resources.py
++++ b/tests/integration/saved_request_resources.py
+@@ -115,8 +115,10 @@ def retained(state, binary, label):
+                 listing = cli.terminal_step(master, "/requests",
+                     prompt if label == "baseline" else "Local recovery handles", composer=label != "baseline")
+                 assert "01234567-89ab-4cde-8012-" not in listing
+-                cli.terminal_step(master, "/status",
+-                    prompt if label == "baseline" else " Status · ", composer=label != "baseline")
++                # The historical baseline retains /status; the current UI
++                # repeats its surviving recovery inspection for FD-custody cycles.
++                cli.terminal_step(master, "/status" if label == "baseline" else "/requests",
++                    prompt if label == "baseline" else "Local recovery handles", composer=label != "baseline")
+             samples.append(sample(process.pid))
+         cli.terminal_step(master, "/exit", "Detached.")
+         assert process.wait(timeout=5) == 0
+diff --git a/tests/integration/terminal_restoration_integration.py b/tests/integration/terminal_restoration_integration.py
+index d4a3749d..c5978310 100644
+--- a/tests/integration/terminal_restoration_integration.py
++++ b/tests/integration/terminal_restoration_integration.py
+@@ -2009,7 +2009,7 @@ def fatal_reporting_cases(state):
+             before = {path: path.read_bytes() for path in records.glob("*.json")}
+             os.write(master, b"accepted A\n")
+             human.read_terminal(master, "ACCEPTED-A", composer=True)
+-            human.terminal_step(master, "/status", " Status · ", composer=True)
++            human.terminal_step(master, "/requests", "Local recovery handles", composer=True)
+             os.write(master, b"uncertain B\n")
+             human.read_terminal(master, "Not confirmed")
+             first, second = [json.loads(body) for body, _ in proxy.exchanges]
+@@ -2081,6 +2081,72 @@ def decision_reporting_cases(state):
+     thread = threading.Thread(target=endpoint.serve_forever)
+     thread.start()
+     host = caller = proxy = None
++
++    def settled_decision_has_no_original(master):
++        # Fixture-local prefix proof, not a general /requests page scanner.
++        # sessionRequests prints at most one ASCII handle/kind row per file;
++        # writeSubmission puts its mandatory reserved-key row immediately
++        # after that list, before the optional error-name tail.  Restrict the
++        # actual directory so every possible prefix row fits at width 80 and
++        # its entire byte prefix is well within showFile's 256 KiB capacity.
++        directory = home / ".config/rui/requests"
++        entries = list(directory.iterdir())
++        assert len(entries) <= 32, entries
++        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
++        for path in entries:
++            assert path.is_file() and not path.is_symlink() and path.suffix == ".json", path
++            assert 1 <= len(path.stem) <= 40 and all(c in allowed for c in path.stem), path
++        before_records = {path: path.read_bytes() for path in entries}
++        # Every protocol.Kind tag in the pinned producer is <=32 ASCII bytes.
++        # Two spaces, handle, " (", tag, ")\n" <=78 bytes: one row at 80.
++        max_prefix_bytes = 52 + len(entries) * 78 + len("Original reserved request: ") + 36 + 1
++        assert max_prefix_bytes < 256 * 1024, max_prefix_bytes
++        capture = human.terminal_capture(master)
++        assert (capture.screen.columns, capture.screen.lines) == (80, 50)
++        assert capture.draft("", 2), capture.completed
++        requests_before = len(endpoint.requests)
++        mutations_before = list(proxy.mutations)
++        header = "Rui: Local recovery handles (not Host work status):"
++        first = human.command_frame(master, "/requests", lambda frame: header in frame)
++
++        def check(frame):
++            # The fixed inspection heading witnesses a selected, nonempty
++            # page. Frame.plan reserves >=1 document row with this heading.
++            # Search the entire committed physical frame: do not strip a
++            # final cell or infer source from a rail glyph.
++            lines = frame.split("\n")
++            assert len(lines) == 50 and lines[0] == "Browsing · Esc returns", frame
++            assert "Inspection unavailable" not in frame, frame
++            assert "Original reserved request:" not in frame, frame
++            assert "Publication/admission may be incomplete" not in frame, frame
++
++        check(first)
++        # An alternating non-slash one-cell draft excludes command-list input
++        # routing and establishes a fresh completed frame for every movement.
++        def marked(keys, marker):
++            return human.keyed_frame(master, keys, lambda frame, x, y:
++                x == 3 and y == 48 and frame.split("\n")[48] == "› " + marker
++                and frame.startswith("Browsing · Esc returns\n"))
++
++        frame = marked(b"x", "x")
++        check(frame)
++        # Shift-Down moves the inspection by exactly one source row, never
++        # exiting it. Even if body height changes, no forward source row can
++        # be skipped; clamps can only move the viewport backwards. There are
++        # at most N list rows, a header and the reserved-key row. Every step
++        # is observed with an alternating exact composer/caret barrier.
++        for index in range(len(entries) + 2):
++            marker = "y" if index % 2 == 0 else "x"
++            frame = marked(b"\x1b[1;2B\x7f" + marker.encode(), marker)
++            check(frame)
++        # Remove only our own marker; no Enter or recovered record selection.
++        human.keyed_frame(master, b"\x7f", lambda frame, x, y:
++            x == 2 and y == 48 and frame.split("\n")[48] == "›"
++            and frame.startswith("Browsing · Esc returns\n"))
++        assert {path: path.read_bytes() for path in directory.iterdir()} == before_records
++        assert len(endpoint.requests) == requests_before, "inspection dispatched provider work"
++        assert proxy.mutations == mutations_before, "inspection dispatched a mutation"
++
+     try:
+         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+         for decision, lost in cases:
+@@ -2116,8 +2182,7 @@ def decision_reporting_cases(state):
+                     caller.send_signal(signal.SIGINT)
+                 else:
+                     human.read_terminal(master, f"SETTLED-{name}", composer=True)
+-                    status = human.terminal_step(master, "/status", " Status · ", composer=True)
+-                    assert "Original reserved request:" not in status, status
++                    settled_decision_has_no_original(master)
+                     os.write(master, b"\x1b[")
+                 output, errors = human.terminal_exit(caller, master, timeout=6)
+                 assert caller.returncode == (0 if lost else 2), (output, errors)
+diff --git a/tests/qualification/direct-pty/driver.py b/tests/qualification/direct-pty/driver.py
+index 5f3dca6e..ba561cfd 100644
+--- a/tests/qualification/direct-pty/driver.py
++++ b/tests/qualification/direct-pty/driver.py
+@@ -41,10 +41,10 @@ def lookback(screen):
+                 and lines[-1].endswith("Ctrl-G: latest"))
+ 
+ 
+-def inspection(screen, session):
++def inspection(screen):
+     lines = screen.splitlines()
+     return bool(lines and lines[0].startswith("Browsing · ")
+-                and f" Status · {session}" in screen)
++                and "Local recovery handles (not Host work status):" in screen)
+ 
+ 
+ def assert_history_anchor(capture, first, browsing):
+diff --git a/tests/qualification/direct-pty/matrix.py b/tests/qualification/direct-pty/matrix.py
+index fa6cd0b8..49ba4741 100644
+--- a/tests/qualification/direct-pty/matrix.py
++++ b/tests/qualification/direct-pty/matrix.py
+@@ -99,10 +99,10 @@ def inventory():
+         ("key-end-csi-4", b"\x1b[5~", b"\x1b[4~", 59),
+         ("key-esc", b"\x1b[5~", b"\x1b", 59),
+         ("wheel-alt-scroll", b"\x1b[A" * 3, b"\x1b[B", 77),
+-        ("status", b"/status\r", b"\x1b", None),
++        ("requests", b"/requests\r", b"\x1b", None),
+     ):
+         vector = {"name": name, "scenario": "navigation", "chunks": [chunk(enter)],
+-                  "return_chunks": [chunk(leave)], "status": name == "status", "first_history": first}
++                  "return_chunks": [chunk(leave)], "requests": name == "requests", "first_history": first}
+         if name == "key-pgdn":
+             vector["middle"] = [{"chunks": [chunk(b"\x1b[6~")], "first_history": 59}]
+         elif name == "wheel-alt-scroll":
+@@ -113,7 +113,7 @@ def inventory():
+         ("paste", b"one\ntwo", "one\ntwo"),
+         ("resize", "A中bc\x1b[DZ\r".encode(), "A中bZc"),
+         ("alt-j", b"one\x1bjtwo\r", "one\ntwo"),
+-        ("status", b"/status\r", None),
++        ("requests", b"/requests\r", None),
+     ):
+         rows.append({"name": "tmux-" + name, "scenario": "tmux", "chunks": [chunk(data)], "expected": expected})
+     return rows
+diff --git a/tests/qualification/direct-pty/scenarios.py b/tests/qualification/direct-pty/scenarios.py
+index 747b370a..349c2675 100644
+--- a/tests/qualification/direct-pty/scenarios.py
++++ b/tests/qualification/direct-pty/scenarios.py
+@@ -226,19 +226,14 @@ def navigation(fixture, row):
+     history(80, False)
+     generation = tty.screen.generation
+     chunks(tty, row["chunks"])
+-    if row.get("status"):
+-        tty.wait(lambda: inspection(tty.screen.completed, fixture.session),
+-                 label="navigation entered inspection", after=generation)
+-        tty.marker("This Session")
+-        tty.marker("Permissions     ")
+-        # Long Folder and Store rows can wrap, so Work belongs below the fold.
+-        if not tty.screen.reached(" Work"):
+-            generation = tty.screen.generation
+-            tty.send(b"\x1b[6~")
+-            tty.marker(" Work", after=generation)
+-        tty.marker(" Work")
+-        # This fixture completed its seeded answer before opening /status.
+-        tty.marker("Finished")
++    if row.get("requests"):
++        tty.wait(lambda: inspection(tty.screen.completed),
++                 label="navigation entered local recovery inspection", after=generation)
++        # The page is about local handles, not a Current/Host status page.
++        tty.marker("Local recovery handles (not Host work status):")
++        new_captures = captures - fixture.capture_baseline
++        assert len(new_captures) == 1, (captures, fixture.capture_baseline)
++        tty.marker(next(iter(new_captures)).stem)
+     else:
+         tty.wait(lambda: lookback(tty.screen.completed),
+                  label="navigation entered lookback", after=generation)
+diff --git a/tests/qualification/direct-pty/test_driver.py b/tests/qualification/direct-pty/test_driver.py
+index f98064da..e3a2262b 100644
+--- a/tests/qualification/direct-pty/test_driver.py
++++ b/tests/qualification/direct-pty/test_driver.py
+@@ -57,9 +57,9 @@ finally:
+         self.assertTrue(lookback("History line 059\nLooking back · More output below · Ctrl-G: latest"))
+         self.assertFalse(lookback("Looking back · Ctrl-G: latest\nordinary footer"))
+         self.assertFalse(lookback("Browsing · Esc returns\n Status · k7m2qx"))
+-        self.assertTrue(inspection("Browsing · Esc returns\n Status · k7m2qx", "k7m2qx"))
+-        self.assertFalse(inspection("Browsing · Esc returns\n Status · other", "k7m2qx"))
+-        self.assertFalse(inspection("Looking back · Ctrl-G: latest\n Status · k7m2qx", "k7m2qx"))
++        self.assertTrue(inspection("Browsing · Esc returns\nRui: Local recovery handles (not Host work status):"))
++        self.assertFalse(inspection("Browsing · Esc returns\n Status · k7m2qx"))
++        self.assertFalse(inspection("Looking back · Ctrl-G: latest\nRui: Local recovery handles (not Host work status):"))
+ 
+         def frame(first, last, *, browsing, ending=False, wrong=None):
+             screen = ScreenCapture(80, 24)
+diff --git a/tests/qualification/direct-pty/tmux_smoke.py b/tests/qualification/direct-pty/tmux_smoke.py
+index 2a75ffcb..c6796204 100644
+--- a/tests/qualification/direct-pty/tmux_smoke.py
++++ b/tests/qualification/direct-pty/tmux_smoke.py
+@@ -156,18 +156,13 @@ def smoke(fixture, row):
+         if row["name"] == "tmux-resize":
+             terminal.call("resize-window", "-t", "td4:0", "-x", "32", "-y", "12")
+         terminal.call("send-keys", "-t", "td4:0.0", "-H", *(f"{byte:02x}" for byte in payload))
+-    if row["name"] == "tmux-status":
+-        terminal.wait(lambda text: "Browsing" in text and " Status · " in text and f" · {fixture.session}" in text
+-                      and "This Session" in text and "Permissions     " in text, "status page")
+-        # Work follows settings; wrapping can place it below the viewport.
+-        if " Work" not in (fixture.output / "pane.txt").read_text():
+-            terminal.call("send-keys", "-t", "td4:0.0", "-H", "1b", "5b", "36", "7e")
+-        terminal.wait(lambda text: "Browsing" in text and " Work" in text and "Idle" in text,
+-                      "status work section")
++    if row["name"] == "tmux-requests":
++        terminal.wait(lambda text: "Browsing" in text and "Local recovery handles" in text
++                      and "not Host work status" in text, "local recovery page")
+         terminal.call("send-keys", "-t", "td4:0.0", "Escape")
+-        terminal.wait(lambda text: "Browsing" not in text and "›" in text, "status returned to live")
++        terminal.wait(lambda text: "Browsing" not in text and "›" in text, "requests returned to live")
+         assert_submitted(fixture.endpoint.requests, [])
+-        assert set((fixture.home / ".config/rui/requests").glob("*.json")) == fixture.capture_baseline, "status captured intent"
++        assert set((fixture.home / ".config/rui/requests").glob("*.json")) == fixture.capture_baseline, "requests captured intent"
+     else:
+         terminal.wait(lambda text: "TD4 tmux answer" in text, "answer")
+         assert_submitted(fixture.endpoint.requests, [row["expected"]])
