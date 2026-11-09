@@ -81,9 +81,11 @@ fn compare(bytes: []const u8, storage: *store.Store, workspace: []const u8, ids:
         var placeholder: [16]u8 = undefined;
         try replace(&normalized, id.slice(), try std.fmt.bufPrint(&placeholder, "<id{d}>", .{i}));
     }
+    // Engine setup may commit before the first Session. Compare the complete
+    // token the Store owns instead of assuming its generation starts at zero.
     var token_buffer: [protocol.SinceToken.max_bytes]u8 = undefined;
     const token = (protocol.SinceToken{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) }).format(&token_buffer);
-    try replace(&normalized, token[0..32], "<instance>");
+    try replace(&normalized, token, "<since>");
     for (parsed.value.object.get("sessions").?.array.items) |row| {
         try replace(&normalized, row.object.get("created_at").?.string, "<time>");
         try replace(&normalized, row.object.get("work").?.object.get("state").?.object.get("since").?.string, "<time>");
@@ -93,8 +95,12 @@ fn compare(bytes: []const u8, storage: *store.Store, workspace: []const u8, ids:
     const prefix = "{\"version\":\"";
     try std.testing.expect(std.mem.startsWith(u8, expected, prefix));
     const end = std.mem.indexOfScalarPos(u8, expected, prefix.len, '"') orelse return error.InvalidGolden;
-    const current = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ prefix, protocol.wire_version, expected[end..] });
+    var current = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ prefix, protocol.wire_version, expected[end..] });
     defer allocator.free(current);
+    const token_prefix = "\"since\":\"";
+    const token_start = (std.mem.lastIndexOf(u8, current, token_prefix) orelse return error.InvalidGolden) + token_prefix.len;
+    const token_end = std.mem.indexOfScalarPos(u8, current, token_start, '"') orelse return error.InvalidGolden;
+    try replace(&current, current[token_start..token_end], "<since>");
     try std.testing.expectEqualStrings(current, normalized);
 }
 
