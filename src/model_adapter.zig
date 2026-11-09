@@ -6,6 +6,7 @@ const prefix_seal = @import("prefix_seal.zig");
 const output_format = @import("output_format.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const wire_request = @import("wire_request.zig");
 const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
 const provider = @import("provider.zig");
@@ -2177,7 +2178,7 @@ test "scratch namespaces prepare a provider request while matching ingress scrat
 
 fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     const Overlap = struct {
-        var ingress: *protocol.Ingress = undefined;
+        var ingress: *wire_request.Ingress = undefined;
         var storage: *store.Store = undefined;
         var body: []const u8 = undefined;
         var failure: ?anyerror = null;
@@ -2220,7 +2221,7 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     );
     var used: std.atomic.Value(u64) = .init(0);
     var retained_ingress: ?named_scratch.Owner = null;
-    var ingress: protocol.Ingress = undefined;
+    var ingress: wire_request.Ingress = undefined;
     ingress.init(std.testing.allocator, .{
         .io = std.testing.io,
         .content_length = body.len,

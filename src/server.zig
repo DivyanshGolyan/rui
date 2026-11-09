@@ -21,6 +21,7 @@ const platform = @import("platform.zig");
 const provider = @import("provider.zig");
 const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
+const wire_request = @import("wire_request.zig");
 const store_module = @import("store.zig");
 const launch_frame = @import("launch_frame.zig");
 const core_tools = @import("core_tools.zig");
@@ -120,7 +121,7 @@ const Intake = struct {
         route: ?Route = null,
         header: Header = undefined,
         number: ?u64 = null,
-        ingress: ?*protocol.Ingress = null,
+        ingress: ?*wire_request.Ingress = null,
         /// The finished Request; it lives in `ingress`.
         request: ?*protocol.Request = null,
         reply: ?*Reply = null,
@@ -352,7 +353,7 @@ const Intake = struct {
                     };
                     if (self.header.content_length > limit) return error.RequestTooLarge;
                     const request_length = try self.reserveEnvironment();
-                    const ingress = try createUnfilled(self.host.allocator, protocol.Ingress);
+                    const ingress = try createUnfilled(self.host.allocator, wire_request.Ingress);
                     ingress.init(self.host.allocator, .{
                         .io = self.host.io,
                         .content_length = request_length,
@@ -2653,7 +2654,7 @@ const Reply = struct {
         if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblocking) < 0) return error.WriteFailed;
         self.renew();
         while (true) {
-            protocol.pollExchange(self.io, fd, std.posix.POLL.OUT, self.deadline()) catch |err|
+            wire_request.pollExchange(self.io, fd, std.posix.POLL.OUT, self.deadline()) catch |err|
                 return if (err == error.ExchangeDeadlineExceeded and self.absolute_deadline == null) error.TransferInactive else err;
             if (try self.advance(fd)) {
                 if (self.timing) |*timing| timing.replyComplete();
@@ -2678,7 +2679,7 @@ fn httpReason(status: u16) []const u8 {
 
 /// A finished Request in its Ingress, as `receive` leaves it.
 fn adoptRequestForTest(exchange: *Intake.Exchange, request: protocol.Request) !void {
-    const ingress = try exchange.host.allocator.create(protocol.Ingress);
+    const ingress = try exchange.host.allocator.create(wire_request.Ingress);
     ingress.init(exchange.host.allocator, .{
         .io = exchange.host.io,
         .content_length = 0,
@@ -3861,7 +3862,7 @@ test "retired ordinary capture still consumes its intake classification and reso
         const budget: protocol.ScratchBudget = .{ .used = &host.scratch_used, .limit = 9000 };
         switch (custody) {
             .ingress => {
-                const ingress = try host.allocator.create(protocol.Ingress);
+                const ingress = try host.allocator.create(wire_request.Ingress);
                 ingress.init(host.allocator, .{
                     .io = host.io,
                     .content_length = 4096,
@@ -4644,7 +4645,7 @@ test "exchange retirement retains failed ingress cleanup through retry" {
         defer _ = std.c.close(sockets[1]);
         const exchange = try std.testing.allocator.create(Intake.Exchange);
         exchange.* = .{ .owner = undefined, .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 0, .state = .retired };
-        const ingress = try std.testing.allocator.create(protocol.Ingress);
+        const ingress = try std.testing.allocator.create(wire_request.Ingress);
         ingress.init(std.testing.allocator, .{
             .io = io,
             .content_length = prefix.len + payload.len + suffix.len,
