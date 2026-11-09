@@ -15,6 +15,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("h2_c");
+const openssl = @import("tls_client").c;
 const h2 = @import("h2.zig");
 const policy = @import("policy.zig");
 const Record = @import("Stream.zig");
@@ -60,7 +61,7 @@ tunnel_sent: u16,
 tunnel_request_len: u16,
 tunnel_answer: proxy.Answer,
 /// For an https origin, from the TCP connect on.
-ssl: ?*c.SSL,
+ssl: ?*openssl.SSL,
 /// Counted among its origin's lookup users until a connect succeeds.
 uses_lookup: bool,
 /// The next address to try.
@@ -159,7 +160,7 @@ pub fn settingUp(self: *const Connection) bool {
 /// partial record does not count: it waits for the socket like any read.
 pub fn tlsPending(self: *const Connection) bool {
     const ssl = self.ssl orelse return false;
-    return self.session != null and c.SSL_pending(ssl) > 0;
+    return self.session != null and openssl.SSL_pending(ssl) > 0;
 }
 
 pub fn hasRoom(self: *const Connection) bool {
@@ -773,13 +774,13 @@ pub fn close(self: *Connection, mode: enum { goaway, abrupt }) void {
                 };
                 // close_notify, best effort and without waiting for the peer's.
                 if (goaway_sent) if (self.ssl) |ssl| {
-                    _ = c.SSL_shutdown(ssl);
+                    _ = openssl.SSL_shutdown(ssl);
                 };
             }
         }
         c.nghttp2_session_del(session);
     }
-    if (self.ssl) |ssl| c.SSL_free(ssl);
+    if (self.ssl) |ssl| openssl.SSL_free(ssl);
     self.stopUsingLookup();
     if (self.socket >= 0) closeSocket(self.socket);
     self.dropEarlier();

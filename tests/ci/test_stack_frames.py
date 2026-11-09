@@ -256,11 +256,11 @@ class StackFramesTest(unittest.TestCase):
             self.assertEqual(spec["chain_ceiling"] % PAGE, 0, label)
         modules = rules["host_modules"]
         self.assertEqual(len(modules), len(set(modules)))
-        # Each names a source file by its Zig namespace; the h2 package's
-        # files are named from its own root.
+        # Each names a source file by its Zig namespace; the h2 and tls_client
+        # packages' files are named from their own roots.
         for module in modules:
             path = module.replace(".", "/") + ".zig"
-            self.assertTrue((ROOT / "src" / path).exists() or (ROOT / "src/h2" / path).exists(), module)
+            self.assertTrue(any((ROOT / root / path).exists() for root in ("src", "src/h2", "src/tls_client")), module)
 
     def test_repository_allowance_does_not_grow_from_trusted_base(self):
         self.assertEqual(allowance_growth(), [])

@@ -187,7 +187,8 @@ pub fn build(b: *std.Build) void {
 
     const h2_test_step = b.step("test-h2", "Run the HTTP/2 client's own tests");
     const pg_test_step = b.step("test-pg", "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
-    if (addH2(b, target, .ReleaseSafe, pinned_transport, addTestPoll(b))) |h2| {
+    if (addTlsClient(b, target, .ReleaseSafe, pinned_transport)) |tls_client| {
+        const h2 = addH2(b, target, .ReleaseSafe, pinned_transport, addTestPoll(b), tls_client);
         const h2_tests = b.addTest(.{ .root_module = h2, .filters = test_filters });
         const run_h2_tests = ci.run(h2_tests);
         run_h2_tests.has_side_effects = true;
@@ -520,7 +521,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     // TLS: the connection's tls.zig is on h2's OpenSSL.
-    if (addH2(b, target, .ReleaseSafe, pinned_transport, addTestPoll(b))) |h2| mysql_connection.addImport("h2", h2);
+    if (addTlsClient(b, target, .ReleaseSafe, pinned_transport)) |tls_client| mysql_connection.addImport("h2", addH2(b, target, .ReleaseSafe, pinned_transport, addTestPoll(b), tls_client));
     mysql_wire_tests.root_module.addImport("mysql_connection", mysql_connection);
     const mysql_wire_integration = b.addSystemCommand(&.{"python3"});
     mysql_wire_integration.addFileArg(b.path("tests/integration/mysql_wire_integration.py"));
@@ -1268,8 +1269,9 @@ fn configureTransportWithIdentity(
     compile.root_module.addOptions("transport_options", options);
     const test_poll = addTestPoll(b);
     compile.root_module.addImport("test_poll", test_poll);
-    const h2 = addH2(b, target, compile.root_module.optimize.?, maybe_pinned, test_poll) orelse return;
-    compile.root_module.addImport("h2", h2);
+    const optimize = compile.root_module.optimize.?;
+    const tls_client = addTlsClient(b, target, optimize, maybe_pinned) orelse return;
+    compile.root_module.addImport("h2", addH2(b, target, optimize, maybe_pinned, test_poll, tls_client));
 }
 
 /// The one helper Rui's and h2's tests poll through. A module, so both
@@ -1278,26 +1280,24 @@ fn addTestPoll(b: *std.Build) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("src/testing/poll.zig") });
 }
 
-/// The HTTP/2 client module, linked against the pinned nghttp2 and OpenSSL,
-/// or null where the pinned transport is not built. With only headers it
-/// type-checks and links nothing.
-fn addH2(
+/// TLS client settings, host naming and trust loading, linked against the
+/// pinned OpenSSL, or null where the pinned transport is not built. The one
+/// module that links OpenSSL: h2 and the Store's wire import it. With only
+/// headers it type-checks and links nothing.
+fn addTlsClient(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     maybe_pinned: ?PinnedTransport,
-    test_poll: *std.Build.Module,
 ) ?*std.Build.Module {
     if (!transportEnabled(target)) return null;
     const module = b.createModule(.{
-        .root_source_file = b.path("src/h2/h2.zig"),
+        .root_source_file = b.path("src/tls_client/tls_client.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    module.addImport("test_poll", test_poll);
-    const bindings = addBindings(b, module, "h2_c",
-        \\#include <nghttp2/nghttp2.h>
+    const bindings = addBindings(b, module, "openssl_c",
         \\#include <openssl/ssl.h>
         \\#include <openssl/err.h>
         \\#include <openssl/x509v3.h>
@@ -1307,23 +1307,63 @@ fn addH2(
         bindings.addIncludePath(addTransportHeaders(b, target));
         return module;
     };
-    bindings.addIncludePath(pinned.output.path(b, "include"));
-    module.addObjectFile(pinned.output.path(b, "lib/libnghttp2.a"));
+    addPinnedPaths(b, target, pinned, module, bindings);
     module.addObjectFile(pinned.output.path(b, "lib/libssl.a"));
     module.addObjectFile(pinned.output.path(b, "lib/libcrypto.a"));
+    return module;
+}
+
+/// The HTTP/2 client module, linked against the pinned nghttp2, on
+/// `tls_client`'s OpenSSL. With only headers it type-checks and links
+/// nothing.
+fn addH2(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    maybe_pinned: ?PinnedTransport,
+    test_poll: *std.Build.Module,
+    tls_client: *std.Build.Module,
+) *std.Build.Module {
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/h2/h2.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    module.addImport("test_poll", test_poll);
+    module.addImport("tls_client", tls_client);
+    const bindings = addBindings(b, module, "h2_c",
+        \\#include <nghttp2/nghttp2.h>
+        \\
+    );
+    const pinned = maybe_pinned orelse {
+        bindings.addIncludePath(addTransportHeaders(b, target));
+        return module;
+    };
+    addPinnedPaths(b, target, pinned, module, bindings);
+    module.addObjectFile(pinned.output.path(b, "lib/libnghttp2.a"));
+    // SecTrust verifies h2's sessions under system trust on macOS.
+    if (target.result.os.tag == .macos) {
+        module.linkFramework("Security", .{});
+        module.linkFramework("CoreFoundation", .{});
+    }
+    return module;
+}
+
+/// The pinned headers and the system libraries a module on the pinned
+/// transport compiles and links against: the bundled SDK on macOS.
+fn addPinnedPaths(b: *std.Build, target: std.Build.ResolvedTarget, pinned: PinnedTransport, module: *std.Build.Module, bindings: Translator) void {
+    bindings.addIncludePath(pinned.output.path(b, "include"));
     if (target.result.os.tag == .macos) {
         module.addSystemFrameworkPath(pinned.output.path(b, "sdk/System/Library/Frameworks"));
         module.addSystemIncludePath(pinned.output.path(b, "sdk/usr/include"));
         module.addLibraryPath(pinned.output.path(b, "sdk/usr/lib"));
         bindings.addSystemFrameworkPath(pinned.output.path(b, "sdk/System/Library/Frameworks"));
         bindings.addSystemIncludePath(pinned.output.path(b, "sdk/usr/include"));
-        module.linkFramework("Security", .{});
-        module.linkFramework("CoreFoundation", .{});
     } else {
         module.linkSystemLibrary("pthread", .{});
         module.linkSystemLibrary("dl", .{});
     }
-    return module;
 }
 
 /// The Store's Postgres wire client, on h2's OpenSSL.

@@ -31,12 +31,12 @@ STACK_FRAMES_GATE = "tests/ci/stack_frames.json"
 # build.zig's named modules that are repository files. Every other named
 # import must be a package or generated module, or the graph refuses it.
 MODULES = {
-    "test_poll": "src/testing/poll.zig", "h2": "src/h2/h2.zig", "rui_client": CALLER, "client": CALLER,
+    "test_poll": "src/testing/poll.zig", "h2": "src/h2/h2.zig", "tls_client": "src/tls_client/tls_client.zig", "rui_client": CALLER, "client": CALLER,
     "mysql_connection": "src/store/wire/mysql_connection.zig", "preferences": "src/preferences.zig",
     "codex_credentials": "src/codex_credentials.zig", "AnswerRenderer": "src/AnswerRenderer.zig",
     "openapi.json": "openapi.json",
 }
-PACKAGES = {"std", "builtin", "vaxis", "terminal_width", "terminal_unicode", "h2_c", "posix",
+PACKAGES = {"std", "builtin", "vaxis", "terminal_width", "terminal_unicode", "h2_c", "openssl_c", "posix",
             "transport_options", "yaml", "sqlite", "unit_test_options", "unit_test_partition"}
 
 # Unit test executables: a change runs each one whose build compiles it.
@@ -380,6 +380,7 @@ LIVE_RULES = (
      "The launch-frame Host opens a live MySQL Store on Linux; macOS skips the live server",
      frozenset({"launch-frame-integration", "check", "check-full"})),
     (("src/store/wire/pg*.zig", "src/store/wire/scram.zig", "src/store/wire/tls.zig", "src/h2/h2.zig", "src/h2/tls.zig",
+      "src/tls_client/*",
       "tests/integration/live_engines.py", "tests/ci/live_engine_step.py"),
      ("test-pg",), ("test-pg",), "The Postgres wire client's own tests, live against postgres:15 on Linux",
      LIVE_POSTGRES_TARGETS),
