@@ -11,7 +11,7 @@ Every PR commit states its actual test commands and results.
 Performance changes include A/B numbers, and TUI changes include a real-screen tmux capture.
 Keep published commits unchanged so their CI evidence retains its SHA.
 
-Green means the required `admission` check completed successfully for the current, up-to-date PR merge candidate.
+Green means the required `admission` check completed successfully for the PR's current head; it need not be rerun after `main` moves.
 [The main ruleset](../../.github/main-ruleset.json) records the required GitHub enforcement.
 Its active remote configuration must match before the publication cutover.
 Pending, skipped, cancelled or earlier-head success is not green.

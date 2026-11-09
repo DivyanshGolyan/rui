@@ -3,8 +3,7 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && format('Selected check
 on:
   pull_request:
     # Edits and draft conversion never cancel a running candidate. A
-    # retargeted PR runs again on its next push, which the up-to-date rule
-    # requires; reopen it when its head already contains the new base.
+    # retargeted PR runs again on its next push, or when reopened.
     types: [opened, synchronize, reopened, ready_for_review]
   # Diagnose a ref against a chosen base without publishing it.
   workflow_dispatch:

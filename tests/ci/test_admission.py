@@ -120,7 +120,7 @@ class AdmissionTest(unittest.TestCase):
         for name in ('linux_build', 'linux_build_unit', 'macos_build_unit'):
             self.assertEqual(budget(job(text, name)), 15)
 
-    def test_main_ruleset_requires_strict_admission_and_prs_without_bypass(self):
+    def test_main_ruleset_requires_admission_and_prs_without_bypass(self):
         ruleset = json.loads((ROOT / '.github/main-ruleset.json').read_text())
         self.assertEqual(ruleset['target'], 'branch')
         self.assertEqual(ruleset['enforcement'], 'active')
@@ -131,7 +131,8 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn('non_fast_forward', rules)
         self.assertIn('deletion', rules)
         checks = rules['required_status_checks']['parameters']
-        self.assertTrue(checks['strict_required_status_checks_policy'])
+        # Promotion qualifies the merged batch, so a green PR need not rerun after main moves.
+        self.assertFalse(checks['strict_required_status_checks_policy'])
         self.assertEqual(checks['required_status_checks'], [{'context': 'admission', 'integration_id': 15368}])
 
     def admission(self, **changes):

@@ -93,9 +93,10 @@ Syntax checks, probe compilation and unrelated product tests do not qualify a re
 
 `main` is the integration branch; `stable` and the latest release are what users run.
 Pull requests run the fast tier before merge; a manual promotion runs the expensive tier on a batch of merged commits before it reaches users.
-GitHub must require pull requests, an up-to-date base and the GitHub Actions `admission` check on `main`, with no bypass.
+GitHub must require pull requests and the GitHub Actions `admission` check on `main`, with no bypass; it does not require an up-to-date base.
 Use squash merges under linear history.
-The checked PR merge commit and final squash commit have different identities; qualification applies to their identical source tree, not an identical commit SHA.
+A PR's checks qualify its merge with the base they ran on, so a green PR merges without rerunning after `main` moves.
+Two PRs that pass alone but break together are caught by promotion, which qualifies main HEAD and bisects to the commit that broke it.
 A changed head or base requires current candidate checks before merge.
 
 [Selected checks](.github/workflows/check.yml) qualify each ready PR's immutable merge candidate.
