@@ -79,6 +79,9 @@ def zig_sites(source):
             sites += 1
         elif token == "@import" and tokens[i + 1:i + 6] == ["(", '"builtin"', ")", ".", "os"]:
             sites += 1
+        # Linux uses MSG_NOSIGNAL; Darwin configures SO_NOSIGPIPE on the socket.
+        elif (token, *following) in (("MSG", ".", "NOSIGNAL"), ("SO", ".", "NOSIGPIPE")):
+            sites += 1
         elif (token in SYSCALL_NAMESPACES and following[:1] == ["."] and following[1:] and following[1] in DIVERGENT_SYSCALLS
               and (following[1] != "kill" or tokens[i + 3:i + 5] == ["(", "-"])
               and (i == 0 or tokens[i - 1] != "." or tokens[i - 2:i] == ["std", "."])):

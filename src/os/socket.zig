@@ -51,6 +51,15 @@ test "connect result classifies socket observations" {
     inline for (cases) |case| try std.testing.expectEqual(case[3], connectResult(case[0], case[1], case[2]));
 }
 
+/// Suppress SIGPIPE on Darwin without changing the socket's blocking mode.
+pub fn suppressSigpipe(fd: std.c.fd_t) bool {
+    if (builtin.os.tag.isDarwin()) {
+        const one: c_int = 1;
+        return std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.NOSIGPIPE, &one, @sizeOf(c_int)) == 0;
+    }
+    return true;
+}
+
 /// Close-on-exec, non-blocking, over TCP no Nagle delay, and on Darwin no
 /// SIGPIPE when the peer went away.
 pub fn configure(fd: std.c.fd_t, tcp: bool) bool {
@@ -60,10 +69,7 @@ pub fn configure(fd: std.c.fd_t, tcp: bool) bool {
     if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) < 0) return false;
     const one: c_int = 1;
     if (tcp and std.c.setsockopt(fd, std.c.IPPROTO.TCP, std.c.TCP.NODELAY, &one, @sizeOf(c_int)) != 0) return false;
-    if (builtin.os.tag.isDarwin()) {
-        if (std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.NOSIGPIPE, &one, @sizeOf(c_int)) != 0) return false;
-    }
-    return true;
+    return suppressSigpipe(fd);
 }
 
 pub const Shutdown = enum { done, peer_gone, failed };

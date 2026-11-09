@@ -78,6 +78,12 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertEqual(python_sites('name = platform.system()\nos.uname()\n'), 2)
         self.assertEqual(python_sites('# sys.platform\ntext = "sys.platform"\nx.sys.platform\n'), 0)
 
+    def test_sigpipe_constants_belong_to_socket_owner(self):
+        for source in ('std.c.MSG.NOSIGNAL', 'c.SO.NOSIGPIPE', 'MSG . NOSIGNAL'):
+            self.assertEqual(zig_sites(source), 1, source)
+        for source in ('// MSG.NOSIGNAL', '"SO.NOSIGPIPE"', 'socket_os.send_flags', 'MSG.OTHER'):
+            self.assertEqual(zig_sites(source), 0, source)
+
     def test_fixture_trust_through_ssl_cert_variables_is_a_platform_site(self):
         # The feed-host test before #997 trusted its CA this way and failed only on Darwin.
         self.assertEqual(typescript_sites(
