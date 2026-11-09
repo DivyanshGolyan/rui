@@ -80,7 +80,7 @@ test "the status row shows what needs the person with its key clickable, and the
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const needs = "! Not confirmed · ctrl+r retries";
-    row.bar = chrome.bar(.{ .needs = needs, .stoppable = true, .width = 80 }, 0);
+    row.bar = chrome.bar(.{ .needs = needs, .stoppable = true, .width = 80 });
     const drawn = try row.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqual(vxfw.Size{ .width = 80, .height = 1 }, drawn.size);
     try std.testing.expectEqualStrings("!", drawn.readCell(0, 0).char.grapheme);
@@ -109,21 +109,21 @@ test "the status row shows what needs the person with its key clickable, and the
     try std.testing.expectEqual(@as(usize, 1), actions.stopped);
 
     // A notice with no key: plain text, no key target.
-    row.bar = chrome.bar(.{ .notice = .{ .text = "Copied 12 lines", .shown = .{ .shown_ms = 0 } }, .width = 40 }, 1);
+    row.bar = chrome.bar(.{ .notice = "Copied 12 lines", .width = 40 });
     const notice = try row.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(usize, 0), notice.children.len);
     try std.testing.expectEqualStrings("C", notice.readCell(0, 0).char.grapheme);
     try std.testing.expectEqual(vaxis.Color{ .index = 8 }, notice.readCell(0, 0).style.fg);
 
     // Narrow: the left side wins, the stop key drops.
-    row.bar = chrome.bar(.{ .needs = needs, .stoppable = true, .width = 30 }, 0);
+    row.bar = chrome.bar(.{ .needs = needs, .stoppable = true, .width = 30 });
     const narrow = try row.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(usize, 1), narrow.children.len);
     try std.testing.expect(narrow.children[0].surface.widget.eql(row.key.widget()));
     try std.testing.expect(narrow.children[0].surface.size.width <= 30 - 18);
 
     for ([_]vxfw.Size{ .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 0 }, .{ .width = 1, .height = 1 } }) |size| {
-        row.bar = chrome.bar(.{ .needs = needs, .stoppable = true, .width = size.width }, 0);
+        row.bar = chrome.bar(.{ .needs = needs, .stoppable = true, .width = size.width });
         const tiny = try row.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
         try std.testing.expect(tiny.size.width <= size.width and tiny.size.height <= size.height);
     }
