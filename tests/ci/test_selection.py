@@ -279,9 +279,13 @@ class SelectionTest(unittest.TestCase):
                 self.assertNotIn("check", targets)
         self.assertIn("test-logic", select(["src/h2/policy.zig"], "review", AVAILABLE)["targets"])
 
-    def test_postgres_wire_client_selects_its_own_tests_and_h2_trust_reaches_them(self):
+    def test_postgres_wire_client_selects_its_own_tests_and_shared_trust_reaches_them(self):
         self.assertEqual(select(["src/store/wire/pg.zig"], "review", AVAILABLE)["targets"], ["test-pg"])
-        self.assertTrue({"test-h2", "test-pg"} <= set(select(["src/h2/tls.zig"], "review", AVAILABLE)["targets"]))
+        shared = set(select(["src/tls_client/tls_client.zig"], "review", AVAILABLE)["targets"])
+        self.assertTrue({"test-h2", "test-pg", "mysql-wire-integration"} <= shared)
+        for path in ("src/h2/tls.zig", "src/h2/Engine.zig", "src/h2/Connection.zig", "src/h2/Stream.zig"):
+            with self.subTest(path=path):
+                self.assertNotIn("test-pg", select([path], "review", AVAILABLE)["targets"])
 
     def test_store_rule_leaves_wire_clients_to_their_own_rules(self):
         self.assertNotIn("dispatch-debug-integration", select(["src/store/wire/mysql.zig"], "review", AVAILABLE)["targets"])
