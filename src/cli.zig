@@ -4456,6 +4456,10 @@ test "host status and start classify a Host's reply however late it comes" {
         failure: ?anyerror = null,
 
         fn run(self: *@This()) void {
+            // Closing the listener drops any connection still queued on it and
+            // refuses later ones, so after a failure the CLI fails fast instead
+            // of waiting for a reply on a clock that never reaches its deadline.
+            defer self.listener.deinit(std.testing.io);
             for (self.replies) |reply| self.answer(reply) catch |err| {
                 self.failure = err;
                 return;
@@ -4519,12 +4523,13 @@ test "host status and start classify a Host's reply however late it comes" {
     defer lease.release();
     try lease.prepareForServing(false);
     var listener = try (try std.Io.net.UnixAddress.init(lease.paths.socket.slice())).listen(io, .{});
-    defer {
-        listener.deinit(io);
-        std.Io.Dir.cwd().deleteFile(io, lease.paths.socket.slice()) catch @panic("unable to remove fixture socket");
-    }
+    defer std.Io.Dir.cwd().deleteFile(io, lease.paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    // The peer closes the listener when it stops.
     var peer: Peer = .{ .listener = &listener, .replies = &.{ incompatible, incompatible, fenced } };
-    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    const thread = std.Thread.spawn(.{}, Peer.run, .{&peer}) catch |err| {
+        listener.deinit(io);
+        return err;
+    };
     var joined = false;
     defer if (!joined) thread.join();
 
