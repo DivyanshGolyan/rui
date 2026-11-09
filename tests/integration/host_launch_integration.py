@@ -9,7 +9,7 @@ import hashlib
 import os
 import pathlib
 import pty
-from terminal_process import COLUMNS, ROWS, open_pty, terminal_process
+from terminal_process import COLUMNS, ROWS, open_pty, read_output, spawn, terminal_process
 from terminal_screen import ScreenCapture
 import re
 import resource
@@ -646,7 +646,7 @@ def wait_for_terminal_exit(caller, master, output, deadline):
                 return caller.wait(timeout=max(0, deadline - time.monotonic()))
             continue
         try:
-            chunk = os.read(master, 65536)
+            chunk = read_output(master, 65536)
         except OSError as error:
             # Linux PTYs report EOF as EIO; Darwin returns an empty read.
             if error.errno != errno.EIO:
@@ -949,7 +949,7 @@ def main():
         caller = None
         try:
             original_terminal = termios.tcgetattr(master)
-            caller = subprocess.Popen([RUI], cwd=root, env=bare_env,
+            caller = spawn([RUI], cwd=root, env=bare_env,
                 stdin=slave, stdout=slave, stderr=slave)
             output = bytearray()
             screen = ScreenCapture(COLUMNS, ROWS)
@@ -960,7 +960,7 @@ def main():
                     and screen.screen.display[screen.screen.cursor.y].startswith(" ›")):
                 remaining = until - time.monotonic()
                 assert remaining > 0 and select.select([master], [], [], remaining)[0], (screen.completed, output)
-                chunk = os.read(master, 65536)
+                chunk = read_output(master, 65536)
                 assert chunk, ("terminal closed before prompt", output)
                 assert len(output) + len(chunk) < PTY_OUTPUT_LIMIT, "unexpected unbounded terminal output"
                 output.extend(chunk)
