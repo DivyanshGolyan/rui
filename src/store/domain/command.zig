@@ -4,6 +4,7 @@
 const std = @import("std");
 const skills_domain = @import("skills.zig");
 const protocol = @import("../../protocol.zig");
+const wire_request = @import("../../wire_request.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const action_domain = @import("action.zig");
@@ -223,7 +224,7 @@ pub const MessageReads = struct {
 
 /// The handle a peer Message's sender claims, when its address names this
 /// Store: only then can an Action of this Store hold it.
-fn claimedHandle(command: *const protocol.MessageCommand, selector: []const u8) ?[]const u8 {
+fn claimedHandle(command: *const wire_request.MessageCommand, selector: []const u8) ?[]const u8 {
     const handle = if (command.sender_handle) |*value| value else return null;
     const claimed = if (command.sender) |*value| value else return null;
     if (!claimed.store.eql(selector)) return null;
@@ -232,14 +233,14 @@ fn claimedHandle(command: *const protocol.MessageCommand, selector: []const u8) 
 
 /// Whether the Message's sender is what its handle proves: no sender and
 /// no handle, or the Session of the Action `found` holds the handle.
-fn senderValid(command: *const protocol.MessageCommand, selector: []const u8, found: message_sender.Result) bool {
+fn senderValid(command: *const wire_request.MessageCommand, selector: []const u8, found: message_sender.Result) bool {
     if (command.sender_handle == null) return command.sender == null;
     if (claimedHandle(command, selector) == null) return false;
     const row = found orelse return false;
     return command.sender.?.session.eql(&row.session.ref);
 }
 
-fn readMessage(a: anytype, selector: []const u8, command: *const protocol.MessageCommand, reads: *MessageReads) void {
+fn readMessage(a: anytype, selector: []const u8, command: *const wire_request.MessageCommand, reads: *MessageReads) void {
     lookupCommand(a, command.key.slice(), &reads.saved);
     if (claimedHandle(command, selector)) |handle| a.read(message_sender, .{ .handle = handle }, &reads.sender);
 }
@@ -247,7 +248,7 @@ fn readMessage(a: anytype, selector: []const u8, command: *const protocol.Messag
 /// A Message's answer when round 1 found it saved, or null for a fresh
 /// one. An accepted replay reads its admission and text in a round of its
 /// own.
-fn replayMessage(a: anytype, command: *const protocol.MessageCommand, reads: *const MessageReads) !?MessageReply {
+fn replayMessage(a: anytype, command: *const wire_request.MessageCommand, reads: *const MessageReads) !?MessageReply {
     switch (try classify(protocol.MessageRejection, &reads.saved, .message, command.session.slice(), &reads.digest)) {
         .fresh => return null,
         .conflict => {
@@ -279,7 +280,7 @@ fn replayMessage(a: anytype, command: *const protocol.MessageCommand, reads: *co
 /// position. Then commits.
 fn rejectMessage(
     a: anytype,
-    command: *const protocol.MessageCommand,
+    command: *const wire_request.MessageCommand,
     reads: *const MessageReads,
     sender_known: bool,
     code: protocol.MessageRejection,
@@ -290,7 +291,7 @@ fn rejectMessage(
 
 fn rejectMessageWithFailure(
     a: anytype,
-    command: *const protocol.MessageCommand,
+    command: *const wire_request.MessageCommand,
     reads: *const MessageReads,
     sender_known: bool,
     code: protocol.MessageRejection,
@@ -316,7 +317,7 @@ fn rejectMessageWithFailure(
 fn admitMessage(
     a: anytype,
     io: std.Io,
-    command: *const protocol.MessageCommand,
+    command: *const wire_request.MessageCommand,
     reads: *MessageReads,
     head: rsql.SessionHead,
     session: protocol.Bounded(protocol.max_session_bytes),
@@ -374,7 +375,7 @@ pub fn submitMessage(
     io: std.Io,
     served: anytype,
     selector: []const u8,
-    command: *const protocol.MessageCommand,
+    command: *const wire_request.MessageCommand,
     committed: ?MessageCommitted,
     initial_skills: ?*const skills_domain.Initial,
     captured_skill: ?*const skills_domain.MessageCapture,
@@ -394,7 +395,7 @@ noinline fn submitTo(
     io: std.Io,
     served: anytype,
     selector: []const u8,
-    command: *const protocol.MessageCommand,
+    command: *const wire_request.MessageCommand,
     committed: ?MessageCommitted,
     captured_skill: ?*const skills_domain.MessageCapture,
     faults: Faults,
@@ -445,7 +446,7 @@ noinline fn submitCreating(
     io: std.Io,
     served: anytype,
     selector: []const u8,
-    command: *const protocol.MessageCommand,
+    command: *const wire_request.MessageCommand,
     committed: ?MessageCommitted,
     initial_skills: ?*const skills_domain.Initial,
     captured_skill: ?*const skills_domain.MessageCapture,
@@ -739,7 +740,7 @@ pub fn startAgent(
     caller: []const u8,
     task: []const u8,
     attached: bool,
-    configuration: *protocol.Configuration,
+    configuration: *wire_request.Configuration,
     committed: ?MessageCommitted,
     initial_skills: ?*const skills_domain.Initial,
     captured: ?*const skills_domain.MessageCapture,

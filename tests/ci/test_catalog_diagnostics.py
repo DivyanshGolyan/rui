@@ -19,12 +19,12 @@ DIAGNOSTICS = {
     "proxy": b"rui: models.dev catalog unavailable (HttpsProxySchemeUnsupported); the saved catalog stands\n",
     "trust": b"rui: models.dev catalog unavailable (InvalidSslCertFile); the saved catalog stands\n",
 }
-REQUIRED_FAILURE = "transport reactor initialization failure: HttpsProxySchemeUnsupported"
+REQUIRED_FAILURE = catalog.REQUIRED_PROXY_FAILURE
 
 
 class CatalogDiagnosticsTest(unittest.TestCase):
     def run_fixture(self, case, *, early=b"", late=b"", providers=None, capacity=None,
-                    exited=False, required_code=1, required_stderr=REQUIRED_FAILURE,
+                    exited=False, required_code=1, required_stdout="", required_stderr=REQUIRED_FAILURE,
                     configured="accepted", completed="completed", answer=b"HTTP still works",
                     requests=1):
         hosts = []
@@ -53,7 +53,7 @@ class CatalogDiagnosticsTest(unittest.TestCase):
         endpoint = Mock(server_port=1234, requests=[{}] * requests)
         thread = Mock()
         thread.is_alive.return_value = False
-        required = subprocess.CompletedProcess([], required_code, "", required_stderr)
+        required = subprocess.CompletedProcess([], required_code, required_stdout, required_stderr)
         with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(catalog.tempfile, "mkdtemp", return_value=directory))
             stack.enter_context(patch.object(catalog, "start_ready_process", side_effect=start))
@@ -126,7 +126,10 @@ class CatalogDiagnosticsTest(unittest.TestCase):
                     self.run_fixture(case, **mutation)
 
     def test_required_provider_setup_failure_keeps_its_classification(self):
+        # A provider Host refuses the proxy before readiness (#1093): a ready
+        # line means the cause was left to race the startup stderr custody.
         mutations = ({"required_code": 0}, {"required_stderr": "wrong failure"},
+                     {"required_stdout": "ready socket=fixture.sock\n"},
                      {"required_stderr": REQUIRED_FAILURE + "\nmodels.dev catalog unavailable"})
         for mutation in mutations:
             with self.subTest(mutation=mutation):

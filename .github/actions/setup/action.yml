@@ -154,6 +154,20 @@ runs:
         restore-keys: |
           ${{ steps.build-keys.outputs.prefix-sources }}
           ${{ steps.build-keys.outputs.prefix-deps }}
+    # Package pair: pinned package sources depend only on build.zig.zon, so a
+    # tool, image or build-input change that misses every build snapshot reads
+    # them here instead of from codeberg.org and GitHub, whose 504s failed
+    # producers. The fetch below downloads only packages still missing.
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.publish-caches == 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
+      with:
+        path: zig-pkg
+        key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.publish-caches != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
+      with:
+        path: zig-pkg
+        key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
     # Runner pair: consumers compile only the build runner and configuration; executables
     # come from the verified artifact and test runs are never cached.
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

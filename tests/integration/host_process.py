@@ -470,7 +470,7 @@ def _owned(path, pattern, name):
 
 
 # The wire version fixtures speak, read from its one owner.
-WIRE_VERSION = _owned("src/protocol.zig", r'^pub const wire_version = "(\d+)";$', "wire_version")
+WIRE_VERSION = _owned("src/wire_version.zig", r'^pub const wire_version = "(\d+)";$', "wire_version")
 
 
 # The Store format fixtures expect, read from its one owner, so a format

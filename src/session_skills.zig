@@ -4,9 +4,10 @@
 const std = @import("std");
 const catalog = @import("skills.zig");
 const protocol = @import("protocol.zig");
+const wire_request = @import("wire_request.zig");
 const storage = @import("store.zig");
 
-pub fn initial(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, key: []const u8, configuration: *const protocol.Configuration, home: ?[]const u8) !?*const storage.InitialSkills {
+pub fn initial(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, key: []const u8, configuration: *const wire_request.Configuration, home: ?[]const u8) !?*const storage.InitialSkills {
     if (try store.commandExists(key)) return null;
     return captureInitial(allocator, scratch_allocator, io, if (configuration.workspace.state == .value) configuration.workspace.value.slice() else "/", home);
 }
@@ -77,14 +78,14 @@ pub const PreparedMessage = struct {
 /// Message text as a door holds it: a wire field, bytes the Host made, or
 /// content the Store saved.
 pub const Text = union(enum) {
-    field: *const protocol.ContentField,
+    field: *const wire_request.ContentField,
     bytes: []const u8,
     stored: struct { store: *storage.Store, reference: storage.ContentReference },
 };
 
 /// The wire Message door: a creation binds against the catalog it creates,
 /// any other Message against its Session's. Replays prepare nothing.
-pub fn prepareMessage(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, command: *const protocol.MessageCommand, home: ?[]const u8) !*PreparedMessage {
+pub fn prepareMessage(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, command: *const wire_request.MessageCommand, home: ?[]const u8) !*PreparedMessage {
     const prepared = try allocator.create(PreparedMessage);
     prepared.* = .{};
     // This includes accepted, rejected and conflicting keys: no metadata or
@@ -282,7 +283,7 @@ test "inline skills suggestions bound pages and retain prefix-independent revisi
     try std.testing.expectEqualStrings("beta", filtered.entries[0].name);
 }
 
-fn expectBound(text: *const protocol.ContentField, found: catalog.Catalog, expected: []const []const u8) !void {
+fn expectBound(text: *const wire_request.ContentField, found: catalog.Catalog, expected: []const []const u8) !void {
     var binder: Binder = .{ .allocator = std.testing.allocator, .found = found };
     defer binder.selected.deinit(std.testing.allocator);
     try eachReference(std.testing.io, .{ .field = text }, &binder);
@@ -297,7 +298,7 @@ test "inline skills bind each catalog name a /name word names, once, in text ord
         .{ .name = "tmp", .description = "Metadata", .path = "/never-read" },
     };
     const text = "use /beta, not /tmp/etc or /gamma; then /alpha and /beta again /tmp";
-    const borrowed: protocol.ContentField = .{ .state = .value, .borrowed = text.ptr, .length = text.len };
+    const borrowed: wire_request.ContentField = .{ .state = .value, .borrowed = text.ptr, .length = text.len };
     try expectBound(&borrowed, .{ .entries = &entries }, &.{ "beta", "alpha", "tmp" });
     // Sealed text streams in windows; a word may straddle one.
     var tmp = std.testing.tmpDir(.{});
@@ -309,9 +310,9 @@ test "inline skills bind each catalog name a /name word names, once, in text ord
     @memset(bytes[0..padding], 'x');
     @memcpy(bytes[padding..], " /alpha");
     try file.writeStreamingAll(std.testing.io, &bytes);
-    const sealed: protocol.ContentField = .{ .state = .value, .file = file, .length = bytes.len };
+    const sealed: wire_request.ContentField = .{ .state = .value, .file = file, .length = bytes.len };
     try expectBound(&sealed, .{ .entries = &entries }, &.{"alpha"});
-    const empty: protocol.ContentField = .{ .state = .value };
+    const empty: wire_request.ContentField = .{ .state = .value };
     try expectBound(&empty, .{ .entries = &entries }, &.{});
 }
 
@@ -338,7 +339,7 @@ test "inline skills refuse a Message whose bound files together exceed the body 
     defer memory.deinit();
     // Each file alone fits; the second one's bytes cross the cap.
     for ([_]struct { text: []const u8, bound: usize }{ .{ .text = "/first", .bound = 1 }, .{ .text = "/second and /first", .bound = 0 } }) |case| {
-        const text: protocol.ContentField = .{ .state = .value, .borrowed = case.text.ptr, .length = case.text.len };
+        const text: wire_request.ContentField = .{ .state = .value, .borrowed = case.text.ptr, .length = case.text.len };
         const captured = (try bind(memory.allocator(), std.testing.io, .{ .field = &text }, .{ .entries = &entries })).?;
         if (case.bound == 0) {
             try std.testing.expectEqual(.skill_file_too_large, captured.failed.code);
@@ -350,7 +351,7 @@ test "inline skills refuse a Message whose bound files together exceed the body 
         }
     }
     // A word that names no skill binds nothing and reads no file.
-    const prose: protocol.ContentField = .{ .state = .value, .borrowed = "/tmp/etc /month".ptr, .length = "/tmp/etc /month".len };
+    const prose: wire_request.ContentField = .{ .state = .value, .borrowed = "/tmp/etc /month".ptr, .length = "/tmp/etc /month".len };
     try std.testing.expect(try bind(memory.allocator(), std.testing.io, .{ .field = &prose }, .{ .entries = &entries }) == null);
 }
 
@@ -371,7 +372,7 @@ test "inline skills initial render limits remain keyed refusals with ordinary co
     try store.open(std.testing.io, database, root);
     defer store.close() catch unreachable;
     var configuration = try storage.testingCompleteConfiguration("unused", "", root, "");
-    var command: protocol.MessageCommand = .{ .configuration = configuration.configuration, .text = .{ .state = .value, .length = 0, .digest = protocol.contentDigest("") } };
+    var command: wire_request.MessageCommand = .{ .configuration = configuration.configuration, .text = .{ .state = .value, .length = 0, .digest = protocol.contentDigest("") } };
     try command.key.set("invalid-config-render-limit");
     const invalid = store.submitMessageWithInitialSkills(&command, null, &unavailable, .{});
     try std.testing.expect(invalid == .rejected);

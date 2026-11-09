@@ -12,6 +12,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const client = @import("client.zig");
+const configure_input = @import("configure_input.zig");
 const product_defaults = @import("product_defaults.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -341,8 +342,6 @@ frame: std.ArrayList(u8) = .empty,
 pumped: ?Next = null,
 /// The Session a conversation borrows, in stable storage.
 opened: view.Reference = undefined,
-/// The stop prompt the conversation shows.
-prompt: [view.max_prompt_bytes]u8 = undefined,
 /// The overview's own step or job failed while a conversation held the
 /// terminal: the failure is the overview's, not the Session's.
 lent_failed: bool = false,
@@ -849,36 +848,36 @@ fn startInput(self: *const Self, start: *const view.OwnedStart, compaction_buffe
             inline for (view.start_options, 0..) |option, index| if (comptime std.mem.eql(u8, option, name)) return from.get(index);
             @compileError("not a start setting: " ++ name);
         }
-        fn given(value: ?[]const u8) client.OptionalText {
+        fn given(value: ?[]const u8) configure_input.OptionalText {
             return if (value) |present| .{ .present = true, .value = present } else .{};
         }
-        fn policy(value: ?[]const u8) client.OptionalPolicy {
-            const given_value = value orelse return .{};
-            return .{ .present = true, .value = if (std.mem.eql(u8, given_value, "default")) null else given_value };
+        fn policy(value: ?[]const u8) configure_input.OptionalPolicy {
+            return configure_input.policy(value orelse return .{});
         }
     };
-    const label: client.OptionalPolicy = if (held.at(start, "label")) |value| .{ .present = true, .value = if (value.len == 0) null else value } else .{};
+    const label: configure_input.OptionalPolicy = if (held.at(start, "label")) |value| .{ .present = true, .value = if (value.len == 0) null else value } else .{};
     const held_effort = held.at(start, "reasoning-effort");
-    const effort = held.policy(held_effort);
     const start_effort: view.StartEffort = .{ .held = held_effort, .model = start.binding().model };
     // Read at each start, so an /effort chosen in a conversation since this
     // overview opened applies.
     const saved_effort = start_effort.applied(if (start_effort.readsSaved()) try self.savedEffort() else null);
-    return .{ .store = self.options.store, .session = "", .text_path = "", .text = start.text(), .configuration = .{
+    var configuration: configure_input.ConfigureInput = .{
         .store = self.options.store,
         .session = .create,
         .require_model = true,
         .workspace = .{ .present = true, .value = held.at(start, "workspace") orelse self.options.workspace },
         .provider = held.given(start.binding().provider),
         .model = held.given(start.binding().model),
-        .tools = held.at(start, "tools") orelse product_defaults.tools,
+        .tools = held.at(start, "tools"),
         .loaded_tools = held.at(start, "loaded-tools"),
-        .permission_mode = .{ .present = true, .value = held.at(start, "permission-mode") orelse product_defaults.permission_mode },
-        .compaction_trigger = if (held.at(start, "compaction-trigger") != null and !std.mem.eql(u8, held.at(start, "compaction-trigger").?, "default")) held.policy(held.at(start, "compaction-trigger")) else .{ .present = true, .value = try std.fmt.bufPrint(compaction_buffer, "{d}", .{client.defaultCompactionTrigger(std.meta.stringToEnum(protocol.Provider, start.binding().provider orelse product_defaults.provider).?, start.binding().model orelse product_defaults.recommended_model)}) },
+        .permission_mode = held.given(held.at(start, "permission-mode")),
+        .compaction_trigger = held.policy(held.at(start, "compaction-trigger")),
         .output_reservation = held.policy(held.at(start, "output-reservation")),
-        .reasoning_effort = if (effort.present and effort.value != null) effort else client.defaultStartEffort(start.binding().model orelse product_defaults.recommended_model, if (effort.present) null else saved_effort),
+        .reasoning_effort = held.policy(held_effort),
         .label = label,
-    } };
+    };
+    configuration.completeCreation(std.meta.stringToEnum(protocol.Provider, start.binding().provider orelse product_defaults.provider).?, start.binding().model orelse product_defaults.recommended_model, saved_effort, compaction_buffer);
+    return .{ .store = self.options.store, .session = "", .text_path = "", .text = start.text(), .configuration = configuration };
 }
 
 fn listModels(self: *Self, requests: client.Requests, gpa: std.mem.Allocator) ![]u8 {
@@ -1007,7 +1006,7 @@ fn askBackground(self: *Self) !?Next {
 fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
     // The composer edits, and while frozen only the keys the table binds
     // act, so nothing edits the text a failed start leaves to retry.
-    const input: view.Input = switch (self.state.route(TerminalEditor.select(view.keys, decoded), TerminalEditor.plainEnter(decoded))) {
+    const input: view.Input = switch (self.state.route(TerminalEditor.select(view.keys, decoded))) {
         .edit => .{ .composer = self.composer.apply(view.keys, decoded) },
         .frozen => .{ .composer = if (TerminalEditor.frozenAction(view.keys, decoded)) |action| .{ .action = action } else .none },
         .input => |input| input,
@@ -1128,10 +1127,21 @@ fn converse(self: *Self, session: view.Reference) ?Left {
     // The conversation may have read the terminal's width report.
     self.caps.width = screen.vx.caps.unicode;
     const returned = if (ended) |outcome| outcome == .returned else |_| false;
-    if (returned) ended = frontend.back() orelse {
-        self.init.gpa.destroy(frontend);
-        for (opened) |file| file.close(io);
-        return null;
+    if (returned) ended = switch (frontend.back(view.canHoldSend(&self.state))) {
+        .ended => |end| end,
+        .overview => |recovery| {
+            self.init.gpa.destroy(frontend);
+            for (opened) |file| file.close(io);
+            if (recovery == .none) return null;
+            // The ledger holds it before anything can fail, so a failure
+            // still ends with its line.
+            const next = self.event(.{ .unconfirmed = .{ .reference = session, .recovery = recovery } }) catch |err| {
+                left.ended = err;
+                return left;
+            };
+            std.debug.assert(next == null);
+            return null;
+        },
     };
     return .{ .session = session, .frontend = frontend, .files = files, .ended = ended };
 }
@@ -1216,8 +1226,8 @@ fn upgradeHandoff(raw: *anyopaque, handoff: SessionFrontend.UpgradeHandoff) !boo
 /// What the overview says under the opened Session's conversation.
 fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Said {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const said = view.conversation(&self.state, self.opened, kind, &self.prompt);
-    return .{ .text = said.text, .asking = said.asking, .stoppable = said.stoppable };
+    const said = view.conversation(&self.state, self.opened, kind);
+    return .{ .text = said.text, .stoppable = said.stoppable };
 }
 
 /// Every way out: restores the terminal, answers the worker's job through
@@ -1715,7 +1725,7 @@ test "/model reads the lists on the worker, the sign-in choice takes the arrows,
     try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.start.model.?.slice());
 }
 
-test "any key at the sign-in choice cancels a stop prompt, arrows and ignored keys alike" {
+test "Ctrl-X at the sign-in choice stops the selected Session at once" {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
     defer rig.close();
@@ -1723,24 +1733,15 @@ test "any key at the sign-in choice cancels a stop prompt, arrows and ignored ke
     Seen.now.listed = listed_references.len;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
-    // A working Session, which Ctrl-X asks to stop.
+    // A working Session.
     overview.state.selected = shownRow(rig, 2);
     try std.testing.expect(try rig.press("/model\n") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("\x1b[B\n") == null);
     try std.testing.expect(overview.state.inputMode() == .choice);
     try std.testing.expect(try rig.press("\x18") == null);
-    try std.testing.expect(overview.state.prompt != null);
-    // Arrows, and keys the choice ignores: Backspace, Delete, Tab.
-    for ([_][]const u8{ "\x1b[D", "\x1b[C", "\x7f", "\x1b[3~", "\t" }) |arrow| {
-        try std.testing.expect(try rig.press(arrow) == null);
-        try std.testing.expect(overview.state.prompt == null);
-        // Ctrl-X asks again rather than stopping.
-        try std.testing.expect(try rig.press("\x18") == null);
-        try std.testing.expect(overview.state.prompt != null);
-    }
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
 }
 
 test "a save still queued as the overview ends runs, and the way out names it" {
@@ -2345,8 +2346,9 @@ test "while a conversation holds the terminal its stop goes first, the listing g
     // A listing is due as the conversation opens.
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     overview.opened = "k7m2qx".*;
-    try conversed(overview, .working, .stop);
-    try std.testing.expectEqual(view.Prompt.Action.stop, conversationLine(overview, .working).asking.?);
+    // The due Host read starts before the stop is asked for.
+    try overview.dispatch(.lent);
+    try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.job));
     try conversed(overview, .working, .stop);
     // The Host read already running answers first; the stop goes before
     // the page queued ahead of it.
@@ -3073,28 +3075,6 @@ test "leaving with a stop still queued says it was not sent" {
     try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
 }
 
-test "any input but Ctrl-X ends the stop prompt, whether or not it changed the draft" {
-    var cancellation: client.Cancellation = .{};
-    // On an empty composer Backspace, Left and PageUp change nothing; while
-    // a start holds the draft the editor takes nothing at all.
-    for ([_]struct { draft: []const u8 = "", key: []const u8 }{ .{ .key = "\x7f" }, .{ .key = "\x1b[D" }, .{ .key = "\x1b[5~" }, .{ .draft = "held\r", .key = "a" } }) |case| {
-        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
-        defer rig.close();
-        try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
-        try std.testing.expect(try rig.settle() == null);
-        if (case.draft.len != 0) try std.testing.expect(try rig.press(case.draft) == null);
-        try std.testing.expect(try rig.press("\x1b[H\x18") == null);
-        try std.testing.expectEqualStrings("k7m2qx", &rig.overview.state.prompt.?.stop);
-        try std.testing.expect(try rig.press(case.key) == null);
-        try std.testing.expect(rig.overview.state.prompt == null);
-        // The next Ctrl-X asks afresh and stops nothing.
-        try std.testing.expect(try rig.press("\x18") == null);
-        try std.testing.expectEqualStrings("k7m2qx", &rig.overview.state.prompt.?.stop);
-        try std.testing.expect(try rig.settle() == null);
-        try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
-    }
-}
-
 /// Types `bytes` into a fresh overview and returns the first Message of the
 /// Session Enter started, or null when none started.
 fn startFrom(rig: *Rig, bytes: []const u8) !?[]const u8 {
@@ -3160,7 +3140,7 @@ test "the composer edits at its caret, as a conversation's draft does" {
     try expectStarted(rig, "a\x1b\rb\x1b[AX\x1b[D\x04\r", "a\nb");
     try expectStarted(rig, "one two\x17three\r", "one three");
     // Esc clears the draft, a rejected one included.
-    try expectStarted(rig, "junk\x02\x1b[27uok\r", "ok");
+    try expectStarted(rig, "junk\xff\x1b[27uok\r", "ok");
 }
 
 test "a start freezes the composer until its answer, and the overview's keys still act" {
@@ -3227,7 +3207,7 @@ test "Tab completes from the draft's own list, however many keys arrive before a
 test "Shift-Up and Shift-Down select the row above and below, whatever the draft holds" {
     const rig = try openListed();
     defer rig.close();
-    for ([_][]const u8{ "", "two\x1b\rlines", "junk\x00" }) |draft| {
+    for ([_][]const u8{ "", "two\x1b\rlines", "junk\xff" }) |draft| {
         for ([_]struct { bytes: []const u8, row: usize }{
             .{ .bytes = "\x1b[1;2A", .row = 1 },
             .{ .bytes = "\x1b[1;2:1A", .row = 1 },
@@ -3302,7 +3282,7 @@ fn pressKey(rig: *Rig, bytes: []const u8) !?Ending {
 }
 
 test "every key does what the overview's table says, through the editor, in every encoding, on an empty and on a rejected draft" {
-    for (std.enums.values(keymap.Key)) |key| for (key_encodings.get(key)) |bytes| for ([_][]const u8{ "", "\x00" }) |draft| {
+    for (std.enums.values(keymap.Key)) |key| for (key_encodings.get(key)) |bytes| for ([_][]const u8{ "", "\xff" }) |draft| {
         errdefer std.debug.print("key={s} bytes={s} draft={s}\n", .{ @tagName(key), bytes[1..], draft });
         try std.testing.expectEqual(@as(?keymap.Key, key), try keyOf(bytes));
         const rig = try openListed();
@@ -3316,7 +3296,7 @@ test "every key does what the overview's table says, through the editor, in ever
             // Nothing happens, and the line is not rejected by it.
             try std.testing.expect(ending == null);
             try std.testing.expectEqualStrings(&shownRow(rig, 2), &selected);
-            try std.testing.expect(state.prompt == null and !state.settings.empty());
+            try std.testing.expect(state.request_count == 0 and !state.settings.empty());
             if (draft.len == 0) try expectStarted(rig, "ok\r", "ok");
             continue;
         };
@@ -3337,7 +3317,11 @@ test "every key does what the overview's table says, through the editor, in ever
                 try std.testing.expectEqualStrings(&shownRow(rig, row), &selected);
             },
             .clear => try std.testing.expect(state.settings.empty()),
-            .archive, .stop => try std.testing.expectEqualStrings(&shownRow(rig, 2), &(state.prompt orelse return error.TestExpectedPrompt).stop),
+            // Both act at once on the selected row, asking nothing.
+            .archive, .stop => {
+                try std.testing.expectEqual(@as(usize, 1), state.request_count);
+                try std.testing.expectEqualStrings(&shownRow(rig, 2), &state.requests[0].session.?);
+            },
             .exit => unreachable,
         }
     };
@@ -3606,23 +3590,16 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
 }
 
-test "Alt-A overview preserves draft bytes caret and revision through ask cancel confirm and server answer" {
-    for ([_][]const u8{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" }) |chord| for ([_]bool{ false, true }) |rejected| for ([_][]const u8{ "\r", "\n", "\x1b[13u", "\x1b[27;1;13~" }) |confirmation| {
+test "Alt-A overview archives at once and preserves draft bytes caret and revision through the server answer" {
+    for ([_][]const u8{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" }) |chord| for ([_]bool{ false, true }) |rejected| {
         const rig = try openListed();
         defer rig.close();
         const overview = rig.overview;
         try std.testing.expect(try rig.press("/rename unfinished\x1b[D\x1b[D") == null);
-        if (rejected) try std.testing.expect(try rig.press("\x00") == null);
+        if (rejected) try std.testing.expect(try rig.press("\xff") == null);
         const before = overview.composerDraft();
         const target = overview.state.selected.?;
         try std.testing.expect(try rig.press(chord) == null);
-        try std.testing.expectEqual(view.Prompt.Action.archive, overview.state.prompt.?.action);
-        try std.testing.expect(try pressKey(rig, "\x1b") == null);
-        try std.testing.expect(overview.state.prompt == null);
-        try std.testing.expectEqual(@as(usize, 0), Seen.now.archives);
-        try std.testing.expect(try rig.press(chord) == null);
-        overview.state.selected = shownRow(rig, 3);
-        try std.testing.expect(try rig.press(confirmation) == null);
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
         try std.testing.expectEqualStrings(&target, &Seen.now.archive_session);
@@ -3635,7 +3612,7 @@ test "Alt-A overview preserves draft bytes caret and revision through ask cancel
     };
 }
 
-test "Alt-A overview confirmation precedes the visible model sign-in choice" {
+test "Alt-A at the visible model sign-in choice archives at once and keeps the choice" {
     const rig = try openListed();
     defer rig.close();
     try std.testing.expect(try rig.press("/model\r") == null);
@@ -3644,25 +3621,12 @@ test "Alt-A overview confirmation precedes the visible model sign-in choice" {
     const overview = rig.overview;
     try std.testing.expectEqual(view.InputMode.choice, overview.state.inputMode());
     const target = overview.state.selected.?;
-    try std.testing.expect(try rig.press("\x1ba\r") == null);
+    try std.testing.expect(try rig.press("\x1ba") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
     try std.testing.expectEqualStrings(&target, &Seen.now.archive_session);
     try std.testing.expectEqual(@as(usize, 0), Seen.now.saves);
     try std.testing.expectEqual(view.InputMode.choice, overview.state.inputMode());
-}
-
-test "Alt-A overview ignores paste and modified confirmation without submitting the draft" {
-    for ([_][]const u8{ "\x1b[13;2u", "\x1b[13;3u", "\x1b[13;5u", "\x1b[200~\r\x1b[201~", "\x1b[200~\n\x1b[201~", "\x18" }) |other| {
-        const rig = try openListed();
-        defer rig.close();
-        try std.testing.expect(try rig.press("keep me\x1b[D\x1ba") == null);
-        try std.testing.expect(try rig.press(other) == null);
-        try std.testing.expect(try rig.settle() == null);
-        try std.testing.expectEqual(@as(usize, 0), Seen.now.archives);
-        try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
-        if (rig.overview.state.prompt) |prompt| try std.testing.expectEqual(view.Prompt.Action.stop, prompt.action);
-    }
 }
 
 test "conversation archive and restore use the exact unlisted opened reference through the existing worker" {

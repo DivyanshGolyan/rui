@@ -324,6 +324,9 @@ def openai_base_url_run(*, catalog_available=False):
                 retain_failure_state("OpenAI base URL failure state", root)
 
 
+REQUIRED_PROXY_FAILURE = "rui: https_proxy/HTTPS_PROXY names a scheme other than http://; Rui tunnels only through an http:// proxy. The Host did not start.\n"
+
+
 def catalog_unusable_proxy_run():
     """Catalog-only Client initialization is optional; provider setup is not."""
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-catalog-proxy.")).resolve()
@@ -355,16 +358,18 @@ def catalog_unusable_proxy_run():
             # Optional output can be absent; validate all bytes after writer retirement.
             stderr = log.read_bytes()
             assert stderr in (b"", diagnostic), stderr
-        # Even an HTTP provider shares Engine.init's proxy validation. Do not
-        # swallow its failure or retry without the inherited network policy.
+        # Even an HTTP provider shares Engine.init's proxy validation. Startup
+        # refuses it before readiness: no swallowing, no retry without the
+        # inherited network policy, and no cause raced against stderr custody.
         required = subprocess.run([
             *fixture.host_arguments(root / "required-provider", "http://127.0.0.1:1/responses"),
             "--test-models-dev-url", "https://127.0.0.1:1/api.json",
         ], env=env, capture_output=True, text=True, timeout=10)
         assert required.returncode != 0, required
-        assert "transport reactor initialization failure: HttpsProxySchemeUnsupported" in required.stderr, required
+        assert required.stdout == "", required
+        assert REQUIRED_PROXY_FAILURE in required.stderr, required
         assert "models.dev catalog unavailable" not in required.stderr, required
-        print("catalog proxy failure passed: provider-free Hosts stay responsive at capacity 0 and 1; provider setup still fences")
+        print("catalog proxy failure passed: provider-free Hosts stay responsive at capacity 0 and 1; a provider Host refuses the proxy before readiness")
         complete = True
     finally:
         if complete:

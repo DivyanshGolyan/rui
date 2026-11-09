@@ -21,6 +21,9 @@ ROOT = Path(__file__).resolve().parents[2]
 # Changing any of these can change Mac behaviour by itself.
 MAC_PATHS = (
     "src/os/*", "tests/integration/os_semantics.py",
+    # The PTY launcher: Darwin revokes a terminal when its session leader
+    # exits and keeps different hangup and EOF rules, so Linux can't vouch.
+    "tests/integration/terminal_process.py", "tests/integration/terminal_leader.py",
     # The self-contained HTTP/2 client cannot import src/os, so its sockets,
     # waker and trust paths name the platform themselves.
     "src/h2/*",

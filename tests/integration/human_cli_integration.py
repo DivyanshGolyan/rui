@@ -82,7 +82,7 @@ def time_limit(milliseconds):
     return f"{milliseconds} ms"
 
 
-from terminal_process import open_pty, terminal_process
+from terminal_process import open_pty, read_output, spawn, terminal_process, unanswered
 import terminal_process as terminal_process_module
 import model_fixture as fixture
 import codex_integration as codex_fixture
@@ -329,7 +329,7 @@ def help_case():
         # terminal that could otherwise reach the provider chooser.
         master, slave = pty.openpty()
         try:
-            caller = subprocess.Popen([str(fixture.RUI), "setup"],
+            caller = spawn([str(fixture.RUI), "setup"],
                 env={**os.environ, "HOME": str(home), "TERM": "xterm-256color"},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             output, errors = terminal_exit(caller, master)
@@ -681,7 +681,7 @@ def draining(master, observe, feed=None):
 
     def drained():
         while select.select([master], [], [], 0)[0]:
-            chunk = os.read(master, 65536)
+            chunk = read_output(master, 65536)
             if not chunk:
                 break
             feed(chunk)
@@ -696,7 +696,7 @@ def discard_terminal(master):
     frame's start."""
     discarded = 0
     while select.select([master], [], [], 0)[0]:
-        chunk = os.read(master, 65536)
+        chunk = read_output(master, 65536)
         if not chunk:
             break
         discarded += len(chunk)
@@ -733,7 +733,7 @@ def command_frame(master, command, accept, timeout=15, *, end="\n"):
             remaining = deadline - time.monotonic()
             assert remaining > 0 and select.select([master], [], [], remaining)[0], (
                 "command result frame", command, capture.completed)
-            chunk = os.read(master, 65536)
+            chunk = read_output(master, 65536)
             assert chunk, ("terminal closed before command result", command)
             capture.feed(chunk)
     finally:
@@ -799,7 +799,7 @@ def keyed_frame(master, keys, accept, timeout=15):
             remaining = deadline - time.monotonic()
             assert remaining > 0 and select.select([master], [], [], remaining)[0], (
                 "keyed frame", keys, capture.completed)
-            chunk = os.read(master, 65536)
+            chunk = read_output(master, 65536)
             assert chunk, ("terminal closed before keyed frame", keys)
             capture.feed(chunk)
     finally:
@@ -832,7 +832,7 @@ def leave_overview(master, timeout=15):
             return plain
         remaining = deadline - time.monotonic()
         assert remaining > 0 and select.select([master], [], [], remaining)[0], ("overview notice", plain)
-        chunk = os.read(master, 65536)
+        chunk = read_output(master, 65536)
         assert chunk, ("terminal closed before the overview notice", plain)
         capture.feed(chunk)
 
@@ -897,7 +897,7 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
             assert remaining > 0, (marker, capture.completed, plain())
             assert select.select([master], [], [], remaining)[0], (marker, capture.completed, plain())
             try:
-                chunk = os.read(master, 65536)
+                chunk = read_output(master, 65536)
             except OSError as error:
                 if error.errno != errno.EIO:
                     raise
@@ -1208,7 +1208,7 @@ def terminal_exit(caller, master, timeout=5):
             return bytes(streams[master]), bytes(streams[errors_fd])
         for fd in ready:
             try:
-                chunk = os.read(fd, 65536)
+                chunk = read_output(fd, 65536) if fd == master else os.read(fd, 65536)
             except OSError as error:
                 if fd != master or error.errno != errno.EIO:
                     raise
@@ -1231,7 +1231,7 @@ def terminal_gate(caller, master, reached, context, timeout=10):
         remaining = max(0, deadline - time.monotonic())
         for fd in select.select(list(pending), [], [], min(0.1, remaining))[0]:
             try:
-                data = os.read(fd, 65536)
+                data = read_output(fd, 65536) if fd == master else os.read(fd, 65536)
             except OSError as error:
                 if fd != master or error.errno != errno.EIO:
                     raise
@@ -1269,7 +1269,7 @@ def next_frame(master, timeout=3):
         if remaining <= 0 or not select.select([master], [], [], remaining)[0]:
             return None
         try:
-            chunk = os.read(master, 65536)
+            chunk = read_output(master, 65536)
         except OSError as error:
             if error.errno != errno.EIO:
                 raise
@@ -1418,7 +1418,7 @@ def overview_cases():
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         defaults(home, "--store", store, "--provider", "codex", "--model", "gpt-6-luna")
         original = termios.tcgetattr(slave)
-        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env,
+        caller = spawn([str(fixture.RUI)], cwd=workspace, env=env,
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         # An empty Store shows the composer and a hint.
         empty = overview_frame(master, lambda frame: "No unarchived Sessions. /sessions archived shows the archive." in frame)
@@ -1456,7 +1456,7 @@ def overview_cases():
         assert caller.returncode == 0 and not errors, errors
         assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
         # Resume opens the Session inside the overview: Esc returns to it.
-        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", started], cwd=workspace, env=env,
+        caller = spawn([str(fixture.RUI), "session", "resume", started], cwd=workspace, env=env,
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "Flaky test fixed.", composer=True)
         overview_frame(master, lambda frame: "lane four" in frame, keys=b"\x1b")
@@ -1470,7 +1470,7 @@ def overview_cases():
             ("bash", "overview-action-call", json.dumps({"cmd": "printf x > overview-effect", "description": "Write the overview effect", "timeout_ms": None}))])
         admit(home, "session", "send", "--to", started, input="Propose an overview Action", cwd=workspace)
         fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", started)["actionable_permissions"], "overview Action proposal")
-        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env,
+        caller = spawn([str(fixture.RUI)], cwd=workspace, env=env,
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, lambda frame: "Needs approval" in frame and "lane four" in frame)
         os.write(master, b"\n")
@@ -1483,7 +1483,7 @@ def overview_cases():
         # A start captured and never sent is recovered from its saved request.
         before = set(records.glob("*.json"))
         gate = state / "overview-capture"
-        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env={**env, "RUI_TEST_CAPTURE_GATE": str(gate)},
+        caller = spawn([str(fixture.RUI)], cwd=workspace, env={**env, "RUI_TEST_CAPTURE_GATE": str(gate)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, lambda frame: "lane four" in frame)
         os.write(master, b"captured then killed\n")
@@ -1499,10 +1499,10 @@ def overview_cases():
         allocated = recovered["answer"]["session"]
         assert recovered["context"]["session"] == allocated and allocated != started, recovered
         fixture.wait_for(lambda: len(endpoint.requests) == 3, "recovered start's Turn")
-        # Ctrl-X asks, a second Ctrl-X stops the selected working Session, and
-        # its row turns stopped without leaving the overview.
+        # One Ctrl-X stops the selected working Session, and its row turns
+        # stopped without leaving the overview.
         before = set(records.glob("*.json"))
-        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env,
+        caller = spawn([str(fixture.RUI)], cwd=workspace, env=env,
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, lambda frame: "lane four" in frame)
         os.write(master, b"Hold for a stop\n")
@@ -1511,12 +1511,11 @@ def overview_cases():
         held = fixture.observe(store, record.stem)["target"]
         # The Session is yours and working, so its mark is the spinner.
         overview_frame(master, lambda frame: re.search(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏*] Hold for a stop", frame), keys=b"\x1b")
-        overview_frame(master, lambda frame: f"Stop {held}? ctrl+x yes" in frame, keys=b"\x18")
         overview_frame(master, lambda frame: re.search(r"[■#] Hold for a stop", frame), keys=b"\x18")
         work = fixture.command("session", "inspect", "--store", store, "--session", held)["work"]["state"]
         assert work["kind"] == "stopped", work
         # In a conversation the line under the input offers ctrl+x stop
-        # while there is work, and Ctrl-X twice stops its Session there.
+        # while there is work, and one Ctrl-X stops its Session there.
         before = set(records.glob("*.json"))
         sent = len(endpoint.requests)
         os.write(master, b"Hold in the conversation\n")
@@ -1525,10 +1524,6 @@ def overview_cases():
         talking = fixture.observe(store, record.stem)["target"]
         session_line = lambda screen: screen.rstrip("\n").rsplit("\n", 1)[-1]
         keyed_frame(master, b"", lambda screen, x, y: composer_ready(screen, x, y) and session_line(screen).endswith(" · ctrl+x stop"))
-        keyed_frame(master, b"\x18", lambda screen, x, y: session_line(screen) == f"Stop {talking}? ctrl+x yes · esc no")
-        # Esc only cancels the ask; the conversation stays open.
-        keyed_frame(master, b"\x1b", lambda screen, x, y: composer_ready(screen, x, y) and session_line(screen).endswith(" · ctrl+x stop"))
-        keyed_frame(master, b"\x18", lambda screen, x, y: session_line(screen).startswith("Stop "))
         os.write(master, b"\x18")
         fixture.wait_for(draining(master, lambda: fixture.command("session", "inspect", "--store", store, "--session", talking)["work"]["state"]["kind"] == "stopped"), "conversation stop")
         stopped = keyed_frame(master, b"", lambda screen, x, y: composer_ready(screen, x, y) and "Session stopped." in screen)
@@ -1563,7 +1558,7 @@ def raw_output(master, until, timeout=15):
     while not (until in raw if isinstance(until, bytes) else until(capture.completed)):
         remaining = deadline - time.monotonic()
         assert remaining > 0 and select.select([master], [], [], remaining)[0], ("terminal output deadline", raw[-512:])
-        chunk = os.read(master, 65536)
+        chunk = read_output(master, 65536)
         assert chunk, ("terminal closed", raw[-512:])
         capture.feed(chunk)
         raw += chunk
@@ -1577,7 +1572,7 @@ def quiet_output(master, seconds):
     while (remaining := deadline - time.monotonic()) > 0:
         if not select.select([master], [], [], remaining)[0]:
             break
-        chunk = os.read(master, 65536)
+        chunk = read_output(master, 65536)
         if not chunk:
             break
         raw += chunk
@@ -1624,7 +1619,7 @@ def notification_cases():
         defaults(home, "--store", store, "--provider", "codex", "--model", "gpt-6-luna")
         lanes = {label: create_session(home, "--store", store, "--workspace", workspace, "--provider", "codex",
             "--model", "gpt-6-luna", "--label", label, "--permission-mode", "ask") for label in ("notify lane", "focused lane", "muted lane")}
-        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        caller = spawn([str(fixture.RUI)], cwd=workspace, env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         opened = raw_output(master, b"\x1b[?1004h")
         assert opened.index(b"\x1b[?1004h") > opened.index(b"\x1b[?1049h"), opened[:256]
         overview_frame(master, lambda frame: "muted lane" in frame)
@@ -1652,7 +1647,7 @@ def notification_cases():
         # The conversation, away, notifies of its own Session's Action; the
         # report reaches no editor, so the choice stays offered.
         session = lanes["notify lane"]
-        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", session], cwd=workspace, env=env,
+        caller = spawn([str(fixture.RUI), "session", "resume", session], cwd=workspace, env=env,
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "First done.", composer=True)
         os.write(master, b"\x1b[O")
@@ -1673,7 +1668,8 @@ def notification_cases():
         # A terminal that answers the program status probe before the device
         # attributes request behind it gets one record per Session in place
         # of notifications, and leaving clears Rui's records.
-        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        unanswered(master)
+        caller = spawn([str(fixture.RUI)], cwd=workspace, env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         raw_output(master, b"\x1b[?1004h\x1b[?2027$p\x1b[?1007$p\x1b]7501;?\x1b\\\x1b[c")
         os.write(master, b"\x1b]7501;?\x1b\\\x1b[?62;22c")
         def record(state, label, kind=b""):
@@ -1740,7 +1736,7 @@ def command_entry_cases():
         assert re.fullmatch(r"[0123456789abcdefghjkmnpqrstvwxyz]{6}", initial_session), initial_session
         master, slave = open_pty()
         original = termios.tcgetattr(slave)
-        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", initial_session], cwd=workspace,
+        caller = spawn([str(fixture.RUI), "session", "resume", initial_session], cwd=workspace,
             env={**os.environ, "HOME": str(home), "TERM": "xterm-256color", "NO_COLOR": ""},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         output = read_terminal(master, "Initial prompt answered.", composer=True)
@@ -1771,7 +1767,7 @@ def command_entry_cases():
         alias = state / "workspace-alias"
         alias.symlink_to(workspace, target_is_directory=True)
         for terminal, no_colour in (("xterm-256color", ""), ("xterm-256color", "1"), ("dumb", "")):
-            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", initial_session], cwd=alias,
+            caller = spawn([str(fixture.RUI), "session", "resume", initial_session], cwd=alias,
                 env={**os.environ, "HOME": str(home), "TERM": terminal, "NO_COLOR": no_colour},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             if terminal == "dumb":
@@ -1885,7 +1881,7 @@ def command_entry_cases():
         # to fix it; one before a resumed Session opens names that Session.
         records = home / ".config/rui/requests"
         before_entry = set(records.glob("*.json"))
-        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+        caller = spawn([str(fixture.RUI)], cwd=workspace,
             env={**env, "TMPDIR": "not-absolute"}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         output, errors = terminal_exit(caller, master)
         assert caller.returncode == 1 and b"[internal_unexpected]" in errors, (output, errors)
@@ -1893,7 +1889,7 @@ def command_entry_cases():
         assert set(records.glob("*.json")) == before_entry, "the overview captured a request"
         allocated_entry = admit(home, "session", "configure", cwd=workspace)["admission"]["answer"]["session"]
         added = set(records.glob("*.json")) - before_entry
-        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", allocated_entry], cwd=workspace,
+        caller = spawn([str(fixture.RUI), "session", "resume", allocated_entry], cwd=workspace,
             env={**env, "TMPDIR": "not-absolute"}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         output, errors = terminal_exit(caller, master)
         assert caller.returncode == 1 and b"[internal_unexpected]" in errors, (output, errors)
@@ -1903,7 +1899,7 @@ def command_entry_cases():
         public_bin = state / "bin"
         public_bin.mkdir()
         (public_bin / "rui").symlink_to(fixture.RUI)
-        caller = subprocess.Popen(["bash", "-c", resume], cwd=workspace,
+        caller = spawn(["bash", "-c", resume], cwd=workspace,
             env={**env, "PATH": str(public_bin) + os.pathsep + os.environ["PATH"]},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "› ")
@@ -1946,7 +1942,7 @@ def command_entry_cases():
         defaults(home, "--store", store)
         before_failure = set(records.glob("*.json"))
         proxy = canonical.ReplyProxy(host, "/v1/inspect-session")
-        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--", newer], cwd=workspace,
+        caller = spawn([str(fixture.RUI), "session", "resume", "--", newer], cwd=workspace,
             env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         output, errors = terminal_exit(caller, master)
         assert caller.returncode == 1 and b"[internal_unexpected]" in errors, (output, errors)
@@ -1963,7 +1959,7 @@ def command_entry_cases():
             "--workspace", other, "--provider", "codex", "--model", "gpt-5.6-luna")
         defaults(home, "--store", lookalike_store)
         before_resume = set(records.glob("*.json"))
-        caller = subprocess.Popen(["bash", "-c", exact_resume], cwd=workspace,
+        caller = spawn(["bash", "-c", exact_resume], cwd=workspace,
             env={**env, "PATH": str(public_bin) + os.pathsep + os.environ["PATH"]},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "› ")
@@ -2033,7 +2029,7 @@ def scroll_return_case():
         def enter(session, rows, latest):
             nonlocal caller, master, slave
             master, slave = open_pty(80, rows)
-            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), "--", session],
+            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), "--", session],
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             read_terminal(master, latest, composer=True)
             os.write(master, b"keep")
@@ -2139,7 +2135,7 @@ def persistent_opening_case():
         # Tall enough that the whole wrapped opening is one committed frame.
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 120, 100, 0, 0))
         original = termios.tcgetattr(slave)
-        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+        caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "› ", composer=True)
@@ -2177,7 +2173,7 @@ def persistent_opening_case():
             lambda response: response[:-1] if b"OPENING-COMPLETE" in response else response)
         master, slave = open_pty()
         original = termios.tcgetattr(slave)
-        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+        caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         # Opening content is verified before the screen draws it: a truncated
@@ -2192,9 +2188,13 @@ def persistent_opening_case():
         assert not drawn.count(b"\x1b[?1049h") or drawn.endswith(b"\x1b[?1049l") or b"\x1b[?1049l" in drawn, drawn
         actual = termios.tcgetattr(slave)
         assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "late opening error left terminal configuration changed"
-        # Three content reads: the Session line's first Message (this Session
-        # has no Label), the User row and the truncated answer.
-        assert len(endpoint.requests) == 1 and len(proxy.exchanges) == 3, "opening error retried or caused work"
+        # The truncated answer is read once, so the failure is not retried.
+        # Resume opens inside the overview, which names this unlabelled
+        # Session from its first Message on its own reader; that read races
+        # the failure, so first-Message reads are not counted.
+        answer_reads = [record for record, response in proxy.exchanges if b"OPENING-COMPLETE" in response]
+        assert len(endpoint.requests) == 1 and len(answer_reads) == 1, (
+            "opening error retried or caused work", len(endpoint.requests), len(answer_reads))
         proxy.close()
         proxy = None
         os.close(master)
@@ -2247,7 +2247,7 @@ def persistent_opening_case():
 
             proxy = canonical.ReplyProxy(host, "/v1/activity-page", hold_first_opening)
             master, slave = open_pty()
-            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
                 session], env={**os.environ, "HOME": str(home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             startup = terminal_gate(caller, master, opening_held, ("queued opening", handoff, proxy.exchanges))
@@ -2272,7 +2272,7 @@ def persistent_opening_case():
         # Short enough that opening shows only the latest rows; wide enough
         # that the raw export command is one row.
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 512, 0, 0))
-        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+        caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         # Each frame's last row is the Session line, named by this unlabelled
@@ -2453,7 +2453,7 @@ def persistent_pending_case():
         proxy = canonical.ReplyProxy(host, "/v1/activity-page", hold_opening)
         # Tall enough that the queued row and every row are one frame.
         master, slave = open_pty(rows=160)
-        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+        caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         startup = terminal_gate(caller, master, captured, ("pending opening", proxy.exchanges, endpoint.requests))
@@ -2524,9 +2524,9 @@ def persistent_input_cases():
             if len(proxy.exchanges) == 3:
                 next_received.set()
                 assert next_admission_release.wait(15), "next Admission gate was not released"
-            return b"" if len(proxy.exchanges) in (1, 4) else response
+            return b"" if len(proxy.exchanges) in (1, 4, 8) else response
 
-        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+        caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "› ")
@@ -2602,6 +2602,9 @@ def persistent_input_cases():
         os.write(master, b"original before capture failure\n")
         failed = read_terminal(master, "Not confirmed")
         assert "Original reserved request" not in failed, failed
+        # Nothing was saved, so Esc keeps the only copy of the original.
+        os.write(master, b"\x1b")
+        failed += read_terminal(master, "Esc returns to the overview once Ctrl-R retries the original.")
         # Diagnostics run with canonical input restored. Their final line is
         # not readiness: the next raw-entry flush follows it. Await the resumed
         # composer under the same response budget before typing the next draft.
@@ -2641,15 +2644,23 @@ def persistent_input_cases():
         assert fixture.command("session", "inspect", "--store", store,
             "--session", session)["session"]["permission_mode"] == "ask"
         assert len(endpoint.requests) == 5 and len(proxy.exchanges) == 7, "command suffix reached Host"
-        os.write(master, b"\x03")
-        read_terminal(master, "Detached.")
+        # Esc leaves a conversation whose original is unconfirmed: the
+        # overview names its key, and quitting prints how to recover it.
+        before_left = set(records.glob("*.json"))
+        os.write(master, b"\x15left unconfirmed\n")
+        read_terminal(master, "Not confirmed")
+        left_record, = set(records.glob("*.json")) - before_left
+        left_key = left_record.stem
+        overview_frame(master, lambda frame: f"! Not confirmed · rui request recover {left_key}" in frame, keys=b"\x1b")
+        leave_overview(master)
         _, errors = caller.communicate(timeout=5)
         assert caller.returncode == 0, errors
+        assert f"rui: Message not confirmed. Use rui request recover {left_key} to retry the exact original".encode() in errors, errors
         actual = termios.tcgetattr(slave)
         # NOW restores user configuration, not kernel-owned history flags.
         assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "persistent terminal configuration was not restored"
         completed = True
-        print("persistent public Session: exact original replay, joined acceptance, next Unicode cursor, malformed→valid, prepublication repair, restoration passed", flush=True)
+        print("persistent public Session: exact original replay, joined acceptance, next Unicode cursor, malformed→valid, prepublication repair, Esc with an unconfirmed original, restoration passed", flush=True)
     finally:
         records = home / ".config/rui/requests"
 
@@ -2855,7 +2866,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         master, slave = open_pty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
         original = termios.tcgetattr(slave)
-        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+        caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", reference], env={**os.environ, "HOME": str(home),
                 "TERM": "xterm-256color", "NO_COLOR": "",
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
@@ -3228,7 +3239,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 _, errors = terminal_exit(caller, master)
                 assert caller.returncode == 0, errors
                 forget_terminal(master)  # The next caller's screen starts at its first byte.
-                caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+                caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
                     "--", reference], env={**os.environ, "HOME": str(home), "TERM": "xterm-256color", "NO_COLOR": ""},
                     stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 reopened = read_terminal(master, "+1 more calls · /status", composer=True)
@@ -3300,7 +3311,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                     proxy.route = "/v1/activity-page"
                     notice_release.touch()
                     fixture.wait_for(notice_held.is_set, "silent Activity result before notice")
-                    os.write(master, b"\x00\n")
+                    os.write(master, b"\xc3(\n")
                     read_terminal(master, "! Input rejected; nothing sent.", composer=True)
                     notice_reply_release.set()
                     read_terminal(master, "compact complete", composer=True)
@@ -3376,7 +3387,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                         pending_release.set()
                         prefix += terminal_gate(caller, master, refreshed_held, "permission refresh without an Action")
                         if with_notice:
-                            os.write(master, b"\x00\n")
+                            os.write(master, b"\xc3(\n")
                             read_terminal(master, "! Input rejected; nothing sent.", composer=True)
                             before_notice = current_screen(master)
                             # The released page applies whole: its approval
@@ -3421,7 +3432,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "signal after inspection handoff did not restore terminal"
         # Tall enough that the whole reopened conversation is one frame.
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 160, 100, 0, 0))
-        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+        caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", reference], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         reopened = read_terminal(master, "› ", composer=True)
@@ -3453,7 +3464,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 fixture.wait_for(lambda: fixture.completed_observation(store, key), "age saved Tool Result")
             calls_before_history = len(endpoint.requests)
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 512, 0, 0))
-            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", reference], env={**os.environ, "HOME": str(home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             read_terminal(master, "› ")
@@ -3539,7 +3550,7 @@ def store_selection_cases(state, workspace, valid_store):
         args = ["--store", str(explicit)] if case.startswith("explicit") else []
         master, slave = open_pty()
         ready_read, ready_write = os.pipe()
-        caller = subprocess.Popen([str(fixture.RUI), *args], cwd=workspace,
+        caller = spawn([str(fixture.RUI), *args], cwd=workspace,
             env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
             pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         os.close(ready_write)
@@ -3630,14 +3641,14 @@ def action_ready(descriptor, master, timeout=15, *, return_to_action=True, shows
             ready = select.select([descriptor, master], [], [], remaining)[0]
             assert ready, ("Action input flush did not finish", capture.completed)
             if master in ready:
-                capture.feed(os.read(master, 65536))
+                capture.feed(read_output(master, 65536))
             if descriptor in ready:
                 assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
                 # The notification follows the final write/flush. Collect its
                 # remaining queued bytes too, without waiting for another prompt.
                 while select.select([master], [], [], 0)[0]:
                     assert time.monotonic() < deadline, "Action transcript exceeded readiness deadline"
-                    chunk = os.read(master, 65536)
+                    chunk = read_output(master, 65536)
                     assert chunk, "Action terminal closed at readiness"
                     capture.feed(chunk)
                 # A notification from before a later invalidation (another
@@ -3667,11 +3678,11 @@ def provider_prompt(master, ready, command=None):
         assert remaining > 0, ("provider prompt readiness did not arrive", capture.plain)
         selected = select.select([ready, master], [], [], remaining)[0]
         if master in selected:
-            capture.feed(os.read(master, 65536))
+            capture.feed(read_output(master, 65536))
         if ready in selected:
             assert os.read(ready, 1) == b"x", "prompt caller exited before readiness"
             while select.select([master], [], [], 0)[0]:
-                chunk = os.read(master, 65536)
+                chunk = read_output(master, 65536)
                 assert chunk, "prompt terminal closed at readiness"
                 capture.feed(chunk)
             break
@@ -3881,7 +3892,7 @@ def silent_read_edit_cases():
             original = termios.tcgetattr(slave)
             held, release = threading.Event(), threading.Event()
             try:
-                caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), reference],
+                caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), reference],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 read_terminal(master, "› ")
                 def hold(response):
@@ -3958,7 +3969,7 @@ def opaque_session_commands_case():
             "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
         # Wide enough that each printed recovery command is one inspection row.
         master, slave = open_pty(columns=256)
-        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), reference],
+        entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), reference],
             cwd=state, env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
         read_terminal(master, "› ")
         assert f" Status · {reference}" in terminal_step(master, "/status", " Status · ", composer=True)
@@ -3969,7 +3980,7 @@ def opaque_session_commands_case():
         bin_dir = state / "bin"
         bin_dir.mkdir()
         (bin_dir / "rui").symlink_to(fixture.RUI)
-        entered = subprocess.Popen(["bash", "-c", "exec " + command], cwd=state,
+        entered = spawn(["bash", "-c", "exec " + command], cwd=state,
             env={**os.environ, "HOME": str(home), "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
                  "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         read_terminal(master, "› ")
@@ -4004,7 +4015,7 @@ def opaque_session_commands_case():
         while "Opaque decisions complete." not in capture.completed or "Allow once" in capture.completed:
             remaining = deadline - time.monotonic()
             assert remaining > 0 and select.select([master], [], [], remaining)[0], capture.completed
-            chunk = os.read(master, 65536)
+            chunk = read_output(master, 65536)
             assert chunk, capture.completed
             capture.feed(chunk)
         terminal_step(master, "/exit", "Resume: ")
@@ -4088,7 +4099,7 @@ def long_input_case(home, store, workspace, endpoint, host):
     try:
         master, slave = open_pty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 40, 0, 0))
-        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+        entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", long_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
         greeting = read_terminal(master, "› ")
@@ -4172,9 +4183,11 @@ def long_input_case(home, store, workspace, endpoint, host):
         assert next(item["content"][0]["text"] for item in reversed(body["input"])
             if item.get("role") == "user") == "shorter replacement", body
         accepted_count += 1
-        rejected = terminal_step(master, "invalid\x00x", "Input rejected; nothing sent.")
+        # Raw bytes: a str would encode U+00C3 as valid UTF-8.
+        os.write(master, b"invalid\xc3(x\n")
+        rejected = read_terminal(master, "Input rejected; nothing sent.")
         assert "Input rejected; nothing sent." in rejected and "--text FILE" not in rejected, rejected
-        assert len(endpoint.requests) == accepted_count, "unsupported control reached Host"
+        assert len(endpoint.requests) == accepted_count, "invalid input reached Host"
         assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
         assert termios.tcgetattr(master)[3] & termios.ICANON
@@ -4208,7 +4221,7 @@ def incomplete_input_case(home, store, session, endpoint, host):
             master, slave = open_pty()
             try:
                 original = termios.tcgetattr(slave)
-                entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+                entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
                     "--", session], env={**os.environ, "HOME": str(home)},
                     stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             except BaseException:
@@ -4349,7 +4362,7 @@ def renderer_cases():
                     assert remaining > 0 and select.select([self.master], [], [], remaining)[0], (
                         "renderer screen deadline", marker, self.capture.completed,
                         self.caller.poll(), self.capture.screen.cursor)
-                    chunk = os.read(self.master, 65536)
+                    chunk = read_output(self.master, 65536)
                     assert chunk, ("renderer terminal closed", marker)
                     # Collection budget excludes observer work on long combining
                     # cells; this is not a native wall-response performance claim.
@@ -4401,12 +4414,12 @@ def renderer_cases():
                 ready = select.select([descriptor, self.master], [], [], remaining)[0]
                 assert ready, "renderer Action readiness missing"
                 if self.master in ready:
-                    self.feed(os.read(self.master, 65536))
+                    self.feed(read_output(self.master, 65536))
                 if descriptor in ready:
                     assert os.read(descriptor, 1) == b"x"
                     while select.select([self.master], [], [], 0)[0]:
                         assert time.monotonic() < deadline
-                        self.feed(os.read(self.master, 65536))
+                        self.feed(read_output(self.master, 65536))
                     if until():
                         # Spend the tokens of later offers too, with their
                         # frames (each token follows its frame), so the next
@@ -4415,7 +4428,7 @@ def renderer_cases():
                             assert os.read(descriptor, 1) == b"x"
                             while select.select([self.master], [], [], 0)[0]:
                                 assert time.monotonic() < deadline
-                                self.feed(os.read(self.master, 65536))
+                                self.feed(read_output(self.master, 65536))
                         return
 
         def finish(self, expected=0):
@@ -4433,7 +4446,7 @@ def renderer_cases():
                     break
                 for fd in ready:
                     try:
-                        chunk = os.read(fd, 65536)
+                        chunk = read_output(fd, 65536) if fd == self.master else os.read(fd, 65536)
                     except OSError as error:
                         if fd != self.master or error.errno != errno.EIO:
                             raise
@@ -4475,7 +4488,7 @@ def renderer_cases():
                     "--provider", "codex", "--model", "gpt-6-sol", input=initial_text))["context"]["session"]
                 assert re.fullmatch(r"[0123456789abcdefghjkmnpqrstvwxyz]{6}", session), session
             arguments = ["session", "resume", "--store", str(store), "--", session]
-            caller = subprocess.Popen([str(fixture.RUI), *arguments],
+            caller = spawn([str(fixture.RUI), *arguments],
                 cwd=workspace, env=env, pass_fds=(() if ready_write is None else (ready_write,)),
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             terminal = Terminal(master, slave, caller)
@@ -6623,7 +6636,7 @@ def main(selected="all"):
         master, slave = open_pty()
         ready_read, ready_write = os.pipe()
         try:
-            deferred = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+            deferred = spawn([str(fixture.RUI)], cwd=workspace,
                 env={**os.environ, "HOME": str(preferences_home),
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
@@ -6654,7 +6667,7 @@ def main(selected="all"):
             original = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
             try:
-                chooser = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+                chooser = spawn([str(fixture.RUI)], cwd=workspace,
                     env={**os.environ, "HOME": str(preferences_home),
                         "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                     pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
@@ -6683,7 +6696,7 @@ def main(selected="all"):
         master, slave = open_pty()
         ready_read, ready_write = os.pipe()
         try:
-            explicit = subprocess.Popen([str(fixture.RUI), "--store", str(store),
+            explicit = spawn([str(fixture.RUI), "--store", str(store),
                 "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
                 env={**os.environ, "HOME": str(explicit_home),
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
@@ -6714,7 +6727,7 @@ def main(selected="all"):
         master, slave = open_pty()
         ready_read, ready_write = os.pipe()
         try:
-            expiring = subprocess.Popen([str(fixture.RUI), "--store", str(store),
+            expiring = spawn([str(fixture.RUI), "--store", str(store),
                 "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
                 env={**os.environ, "HOME": str(explicit_home),
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
@@ -6750,7 +6763,7 @@ def main(selected="all"):
                 master, slave = open_pty()
                 ready_read, ready_write = os.pipe()
                 try:
-                    changing = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+                    changing = spawn([str(fixture.RUI)], cwd=workspace,
                         env={**os.environ, "HOME": str(changing_home),
                             "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                         pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
@@ -6815,7 +6828,7 @@ def main(selected="all"):
         before_records = set(records.glob("*.json"))
         sessions_before = run(preferences_home, "session", "list", "--store", store, "--all")
         master, slave = open_pty()
-        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+        caller = spawn([str(fixture.RUI)], cwd=workspace,
             env={**os.environ, "HOME": str(preferences_home)},
             stdin=slave, stdout=slave, stderr=slave)
         try:
@@ -6842,7 +6855,7 @@ def main(selected="all"):
         original_mode = termios.tcgetattr(slave)
         blocked = None
         try:
-            blocked = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+            blocked = spawn([str(fixture.RUI)], cwd=workspace,
                 env={**os.environ, "HOME": str(blocked_home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             # The composer's capture fails before any send: the draft stays.
             overview_frame(master, overview_title)
@@ -6960,7 +6973,7 @@ def main(selected="all"):
         master, slave = open_pty()
         ready_read, ready_write = os.pipe()
         try:
-            entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--", session],
+            entered = spawn([str(fixture.RUI), "session", "resume", "--", session],
                 env={**os.environ, "HOME": str(preferences_home),
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
@@ -7107,7 +7120,7 @@ def main(selected="all"):
         assert attention["work"]["state"]["kind"] == "approval" and attention["work"]["first_action"] == pending, attention
         master, slave = open_pty()
         ready_read, ready_write = os.pipe()
-        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+        entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", sibling_session], env={**os.environ, "HOME": str(fresh_home),
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=slave)
@@ -7138,7 +7151,7 @@ def main(selected="all"):
         assert attention["status"] == "accepted" and "result" not in attention, attention
         master, slave = open_pty()
         ready_read, ready_write = os.pipe()
-        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+        entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", sibling_session], env={**os.environ, "HOME": str(home),
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=slave)
@@ -7355,7 +7368,7 @@ def main(selected="all"):
         master, slave = open_pty(80, 100)
         ready_read, ready_write = os.pipe()
         try:
-            entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+            entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", interactive], env={**os.environ, "HOME": str(home),
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
@@ -7561,7 +7574,7 @@ def main(selected="all"):
             f"editor-message-{i}", f"edited {i}")[0] for i in range(len(cases)))
         master, slave = open_pty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
-        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+        entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", editor_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
         try:
@@ -7659,7 +7672,7 @@ def main(selected="all"):
             dispose_all(lambda: stop_process(entered, timeout=5),
                         lambda: os.close(master), lambda: os.close(slave))
         master, slave = open_pty()
-        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+        entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", empty_session], env={**os.environ, "HOME": str(fresh_home)},
             stdin=slave, stdout=slave, stderr=slave)
         try:
@@ -7678,7 +7691,7 @@ def main(selected="all"):
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
             original_terminal = termios.tcgetattr(slave)
             before = set((fresh_home / ".config/rui/requests").glob("*.json"))
-            entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+            entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", empty_session], env={**os.environ, "HOME": str(fresh_home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             try:
@@ -7704,7 +7717,7 @@ def main(selected="all"):
         observation_held, observation_continue = threading.Event(), threading.Event()
         master, slave = open_pty()
         original_terminal = termios.tcgetattr(slave)
-        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+        entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", empty_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         proxy = None

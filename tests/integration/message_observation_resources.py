@@ -10,7 +10,7 @@ import json
 import os
 import pathlib
 import pty
-from terminal_process import open_pty
+from terminal_process import open_pty, spawn
 import subprocess
 import sys
 import tempfile
@@ -30,7 +30,7 @@ def retained(state, binary, label, repetition, failed_key):
     # Keep the historical baseline's original entry; migrate only the candidate.
     entry = (["session", "--store", str(state / "store"), "--session", "resources/message"]
         if label == "baseline" else ["session", "resume", "--store", str(state / "store"), "--", "resources/message"])
-    process = subprocess.Popen([str(binary), *entry], env={**os.environ, "HOME": str(home)},
+    process = spawn([str(binary), *entry], env={**os.environ, "HOME": str(home)},
         stdin=slave, stdout=slave, stderr=slave)
     os.close(slave)
     try:

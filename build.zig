@@ -273,7 +273,7 @@ pub fn build(b: *std.Build) void {
     }
     b.step(
         "direct-pty",
-        "Run the synthetic direct-PTY key matrix and tmux smoke (nonblocking)",
+        "Run the synthetic direct-PTY key matrix (nonblocking)",
     ).dependOn(&addPtyHarness(b, "tests/qualification/direct-pty/matrix.py", ci.path(release_safe)).step);
     b.step(
         "direct-pty-controls",
@@ -627,6 +627,29 @@ pub fn build(b: *std.Build) void {
     host_stop_integration.addFileArg(ci.path(host_status_actor));
     const host_stop_step = b.step("host-stop-integration", "Run native exact-instance Host shutdown and custody drain");
     host_stop_step.dependOn(&host_stop_integration.step);
+
+    // check runs these cases among its process integrations; each step runs
+    // the same case alone, so selection can name only the ones a change reaches.
+    b.step("peer-integration", "Run the peer round trip through Rui-launched Bash")
+        .dependOn(&addFixture(b, "tests/integration/peer_integration.py", ci.path(release_safe)).step);
+    b.step("sender-identity-integration", "Run Action sender authority through the installed CLI, exit, stop and restart")
+        .dependOn(&addFixture(b, "tests/integration/sender_identity_integration.py", ci.path(release_safe)).step);
+    b.step("conversation-page-integration", "Run public Conversation wire reads against a real Host and canonical Store")
+        .dependOn(&addFixture(b, "tests/integration/conversation_page_integration.py", ci.path(release_safe)).step);
+    b.step("host-allocator-integration", "Observe the Host allocator environment before main")
+        .dependOn(&addFixture(b, "tests/integration/host_allocator_test.py", ci.path(release_safe)).step);
+    const human_cli = b.addSystemCommand(&.{"env"});
+    human_cli.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
+    human_cli.addArg("python3");
+    human_cli.addFileArg(b.path("tests/integration/human_cli_integration.py"));
+    human_cli.addFileArg(ci.path(release_safe));
+    b.step(
+        "human-cli-integration",
+        "Run public caller recovery, the interactive frontend and exact Bash authorization (includes terminal restoration and canonical failure)",
+    ).dependOn(&human_cli.step);
+    const host_process_test = b.addSystemCommand(&.{"python3"});
+    host_process_test.addFileArg(b.path("tests/integration/host_process_test.py"));
+    b.step("host-process-test", "Run the bounded Host process fixture's own failure checks").dependOn(&host_process_test.step);
 
     const debug = addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
     const debug_integration = b.addSystemCommand(&.{"sh"});
@@ -1116,6 +1139,14 @@ fn sameTransportTarget(a: std.Build.ResolvedTarget, b: std.Build.ResolvedTarget)
     return a.result.cpu.arch == b.result.cpu.arch and
         a.result.os.tag == b.result.os.tag and
         a.result.abi == b.result.abi;
+}
+
+/// A Python process fixture run against one Rui executable.
+fn addFixture(b: *std.Build, script: []const u8, rui: std.Build.LazyPath) *std.Build.Step.Run {
+    const run = b.addSystemCommand(&.{"python3"});
+    run.addFileArg(b.path(script));
+    run.addFileArg(rui);
+    return run;
 }
 
 fn addRui(

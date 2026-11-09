@@ -236,6 +236,13 @@ pub fn proxyFromEnvironment() ?Proxy {
     return proxyFrom(std.c.getenv);
 }
 
+/// Fails exactly as `Client.init` would on `proxy`, so a caller can refuse
+/// an unusable proxy before it reports readiness.
+pub fn checkProxy(allocator: std.mem.Allocator, proxy: Proxy) InitError!void {
+    var route = try Engine.ProxyRoute.init(allocator, proxy);
+    route.deinit(allocator);
+}
+
 fn proxyFrom(comptime lookup: fn ([*:0]const u8) callconv(.c) ?[*:0]u8) ?Proxy {
     return .{
         .url = environmentSetting(lookup, "https_proxy", "HTTPS_PROXY") orelse return null,

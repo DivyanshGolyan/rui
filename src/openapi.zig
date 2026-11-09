@@ -13,6 +13,7 @@
 //! Host and client write in code rather than as one shape.
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const wire_request = @import("wire_request.zig");
 const model_list = @import("model_list.zig");
 const store = @import("store.zig");
 const launch_frame = @import("launch_frame.zig");
@@ -1096,7 +1097,7 @@ test "the Host parses a generated example of every request variant" {
             const bytes = body.written();
             var used = std.atomic.Value(u64).init(0);
             var retained: ?@import("named_scratch.zig").Owner = null;
-            var ingress: protocol.Ingress = undefined;
+            var ingress: wire_request.Ingress = undefined;
             ingress.init(std.testing.allocator, .{
                 .io = io,
                 .content_length = bytes.len,

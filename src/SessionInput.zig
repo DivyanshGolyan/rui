@@ -340,7 +340,7 @@ test "a recalled Message is the draft until an edit, never a caret move" {
     try std.testing.expectEqual(found.at, input.recall.shown.?);
     // Each edit, even one that keeps the length (a paste rolled back as a
     // whole), makes it an ordinary draft.
-    for ([_][]const u8{ "x", "\x7f", "\x01\x1b[3~", "\x15", "\x1b[200~p\x1b[201~", "\x02", "\xc3\xa9", "\x1b[200~\n\xcc\x81\x1b[201~" }) |edit| {
+    for ([_][]const u8{ "x", "\x7f", "\x01\x1b[3~", "\x15", "\x1b[200~p\x1b[201~", "\xff", "\xc3\xa9", "\x1b[200~\n\xcc\x81\x1b[201~" }) |edit| {
         try input.fill(io, file, found);
         const revision = input.revision;
         for (edit) |byte| _ = input.feed(byte);

@@ -2,7 +2,11 @@ const std = @import("std");
 const socket_os = @import("os/socket.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
-const client_defaults = @import("client_defaults.zig");
+const configure_input = @import("configure_input.zig");
+const ConfigureInput = configure_input.ConfigureInput;
+const OptionalPolicy = configure_input.OptionalPolicy;
+const OptionalText = configure_input.OptionalText;
+const OptionalFile = configure_input.OptionalFile;
 const environment_rule = @import("environment.zig");
 const TerminalText = @import("TerminalText.zig");
 const ResponseTiming = @import("ResponseTiming.zig");
@@ -70,6 +74,8 @@ pub const Requests = struct {
     /// Test hook for mutation sends only: asks the Host to drop its reply at
     /// this point.
     drop_reply: ?[]const u8 = null,
+    /// Captured mutation sends' response inactivity; tests shorten it.
+    mutation_timing: ResponseTiming = .mutation,
 
     pub fn failRead(self: Requests, failure: protocol_reply.ReadFailure) error{ CanonicalStoreFailure, HostInvocationFailed } {
         if (self.read_failure) |slot| if (slot.* == null) {
@@ -100,7 +106,7 @@ pub const Requests = struct {
         const carried: ?Environment = if (captured.target == .message) environment else null;
         if (carried) |value| if (value.bytes() > protocol.max_environment_bytes) return .fail(null, error.EnvironmentTooLarge);
         const paths = platform.resolveClientPaths(self.io, captured.saved.store.slice()) catch |err| return .fail(.store, err);
-        const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), ResponseTiming.mutation, captured.length, &captured.file, null, null, carried, reply_buffer, null)) {
+        const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), self.mutation_timing, captured.length, &captured.file, null, null, carried, reply_buffer, null)) {
             .done => |reply| reply,
             .failed => |failure| return .fail(failure.step, failure.err),
         };
@@ -440,64 +446,6 @@ fn completeContentEOF(requests: Requests, fd: std.posix.fd_t, actual: [32]u8, ex
     var tail: [1]u8 = undefined;
     if (try readRequest(requests, fd, &tail, ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, null, true)) != 0) return error.InvalidResponse;
 }
-
-pub const OptionalText = struct {
-    present: bool = false,
-    value: []const u8 = "",
-};
-
-pub const OptionalPolicy = struct {
-    present: bool = false,
-    value: ?[]const u8 = null,
-};
-
-pub const OptionalFile = struct {
-    state: enum { omitted, value, explicit_null } = .omitted,
-    path: []const u8 = "",
-};
-
-/// Concrete client-side defaults for a fresh Session, never sparse updates.
-pub const defaultCompactionTrigger = client_defaults.compactionTrigger;
-
-pub fn defaultStartEffort(model: []const u8, saved: ?@import("model_capability.zig").ReasoningEffort) OptionalPolicy {
-    const effort = client_defaults.startEffort(model, saved);
-    return .{ .present = true, .value = if (effort) |value| @tagName(value) else null };
-}
-
-test "client default effort policy is explicit including null" {
-    for ([_]struct { model: []const u8, effort: ?[]const u8 }{
-        .{ .model = "gpt-6.1-sol", .effort = "low" },
-        .{ .model = "openai/whisper-1", .effort = null },
-        .{ .model = "unlisted-model", .effort = "low" },
-    }) |case| {
-        const actual = defaultStartEffort(case.model, null);
-        try std.testing.expect(actual.present);
-        if (case.effort) |effort| try std.testing.expectEqualStrings(effort, actual.value.?) else try std.testing.expect(actual.value == null);
-    }
-}
-
-pub const ConfigureInput = struct {
-    store: []const u8,
-    session: union(enum) {
-        named: []const u8,
-        create,
-    },
-    require_model: bool = false,
-    reload_skills: bool = false,
-    workspace: OptionalText = .{},
-    provider: OptionalText = .{},
-    model: OptionalText = .{},
-    instructions: OptionalFile = .{},
-    tools: ?[]const u8 = null,
-    loaded_tools: ?[]const u8 = null,
-    permission_mode: OptionalText = .{},
-    output_schema: OptionalFile = .{},
-    compaction_trigger: OptionalPolicy = .{},
-    output_reservation: OptionalPolicy = .{},
-    reasoning_effort: OptionalPolicy = .{},
-    /// A null value clears the Label.
-    label: OptionalPolicy = .{},
-};
 
 pub const MessageInput = struct {
     store: []const u8,
@@ -1481,11 +1429,11 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         .session_stop => .session_stop,
         .session_archive => .{ .session_archive = .{ .archived = fields.archived } },
         .model_interruption => .{ .model_interruption = .{
-            .turn = protocol_reply.mutationId(fields.target.?.turn, true) catch return error.InvalidRequestRecord,
-            .operation = protocol_reply.mutationId(fields.target.?.operation, true) catch return error.InvalidRequestRecord,
+            .turn = protocol_reply.decimalId(fields.target.?.turn, true) catch return error.InvalidRequestRecord,
+            .operation = protocol_reply.decimalId(fields.target.?.operation, true) catch return error.InvalidRequestRecord,
         } },
         .permission_decision => .{ .permission_decision = .{
-            .action = protocol_reply.mutationId(fields.action orelse return error.InvalidRequestRecord, true) catch return error.InvalidRequestRecord,
+            .action = protocol_reply.decimalId(fields.action orelse return error.InvalidRequestRecord, true) catch return error.InvalidRequestRecord,
             .decision = std.meta.stringToEnum(protocol.PermissionDecision, (fields.decision orelse return error.InvalidRequestRecord).slice()) orelse return error.InvalidRequestRecord,
         } },
     };
@@ -2691,17 +2639,20 @@ test "mutation response progress renews inactivity through header and body" {
         fn run(fd: std.posix.fd_t) void {
             defer closeTestDescriptor(fd);
             writeAll(fd, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n") catch return;
-            std.Io.sleep(std.testing.io, .fromMilliseconds(4_500), .awake) catch return;
+            std.Io.sleep(std.testing.io, .fromMilliseconds(350), .awake) catch return;
             writeAll(fd, "\r\n{") catch return;
-            // Still exceeds five seconds overall, without a second long gap.
-            std.Io.sleep(std.testing.io, .fromMilliseconds(1_000), .awake) catch return;
+            // Exceeds the inactivity window overall, though neither gap does.
+            std.Io.sleep(std.testing.io, .fromMilliseconds(350), .awake) catch return;
             writeAll(fd, "}") catch return;
         }
     };
     const writer = try std.Thread.spawn(.{}, Producer.run, .{sockets[1]});
     defer writer.join();
     var buffer: ReplyBuffer = .{};
-    const reply = try readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &buffer, ResponseTiming.mutation, null);
+    // Mutation's renewing shape with a shorter window; ResponseTiming's own
+    // tests pin the production five seconds.
+    const timing: ResponseTiming = .{ .inactivity_ms = 600, .wait_for_first_byte = ResponseTiming.mutation.wait_for_first_byte };
+    const reply = try readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &buffer, timing, null);
     try std.testing.expectEqual(@as(u16, 200), reply.status);
     try std.testing.expectEqualStrings("{}", reply.body);
 }
@@ -3270,6 +3221,7 @@ test "capture retransmits complete original bytes after a lost reply" {
                 .closed => {},
                 .silent => {
                     try addNonblocking(fd);
+                    // Outlasts the client's shortened inactivity below.
                     const until = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 6 * std.time.ns_per_s;
                     var tail: [1]u8 = undefined;
                     try std.testing.expectEqual(@as(usize, 0), try readRequest(.{ .io = std.testing.io }, fd, &tail, until));
@@ -3300,7 +3252,7 @@ test "capture retransmits complete original bytes after a lost reply" {
         Peer.failure = null;
         const peer = try std.Thread.spawn(.{}, Peer.serve, .{ sockets[1], expected, response });
         var buffer: ReplyBuffer = .{};
-        const sent = (Requests{ .io = connected_io }).sendCaptured(&captured, .empty, &buffer);
+        const sent = (Requests{ .io = connected_io, .mutation_timing = .{ .inactivity_ms = 200, .wait_for_first_byte = false } }).sendCaptured(&captured, .empty, &buffer);
         const result = sent.get();
         peer.join();
         if (Peer.failure) |err| return err;

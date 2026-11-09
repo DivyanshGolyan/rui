@@ -311,6 +311,21 @@ pub const Providers = struct {
         return false;
     }
 
+    /// Why the environment's HTTPS proxy, which every served provider's
+    /// transport uses, cannot be used; null when it can or none is served.
+    /// The Host starts the transport only after readiness, so startup asks
+    /// first. A provider-free Host needs it only for optional discovery.
+    pub fn proxyRefusal(self: *const Providers, allocator: std.mem.Allocator) error{ OutOfMemory, SystemResources }!?[]const u8 {
+        if (!self.any()) return null;
+        const proxy = h2.proxyFromEnvironment() orelse return null;
+        h2.checkProxy(allocator, proxy) catch |err| return switch (err) {
+            error.HttpsProxySchemeUnsupported => "names a scheme other than http://",
+            error.HttpsProxyInvalid => "is not a usable proxy URL",
+            error.OutOfMemory, error.SystemResources => |other| other,
+        };
+        return null;
+    }
+
     /// The one leased sign-in whose leases and refreshes this Host's
     /// sign-in worker serves, if any.
     pub fn leasedSignIn(self: *const Providers) ?Authentication {

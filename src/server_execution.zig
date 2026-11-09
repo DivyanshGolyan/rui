@@ -19,6 +19,8 @@ const provider = @import("provider.zig");
 const providers = @import("providers.zig");
 const turn_states_module = @import("turn_states.zig");
 const protocol = @import("protocol.zig");
+const ScratchBudget = @import("ScratchBudget.zig");
+const wire_request = @import("wire_request.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
@@ -2802,7 +2804,7 @@ test "HTTP error capture retires before execution custody" {
     defer workspace.unmap();
     for (0..3) |kind| {
         var used: std.atomic.Value(u64) = .init(17);
-        const budget = protocol.ScratchBudget{ .used = &used, .limit = 4096 };
+        const budget = ScratchBudget{ .used = &used, .limit = 4096 };
         var records: [1]execution.CustodyRecord = @splat(.{});
         var host = Host{
             .io = io,
@@ -2974,7 +2976,7 @@ test "cleanup publication follows complete execution retirement" {
     var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
     try workspace.set(root);
     var used: std.atomic.Value(u64) = .init(0);
-    const budget = protocol.ScratchBudget{ .used = &used, .limit = 4096 };
+    const budget = ScratchBudget{ .used = &used, .limit = 4096 };
     var entries: [2]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
@@ -3342,7 +3344,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
             defer directory.close(std.testing.io);
             const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
-            var command: protocol.ConfigureCommand = .{};
+            var command: wire_request.ConfigureCommand = .{};
             try command.key.set("failed-admission-config");
             command.configuration.workspace.state = .value;
             try command.configuration.workspace.value.set(workspace);
@@ -3361,7 +3363,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             const file = try tmp.dir.createFile(std.testing.io, "failed-admission-message", .{ .read = true });
             try file.writeStreamingAll(std.testing.io, "hello");
             try file.sync(std.testing.io);
-            var message: protocol.MessageCommand = .{};
+            var message: wire_request.MessageCommand = .{};
             try message.key.set("failed-admission-key");
             message.session = configured.accepted.session;
             message.text = .{
@@ -3569,7 +3571,7 @@ test "preparing slots belong to their live preparations" {
     var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
     defer directory.close(std.testing.io);
     const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
-    var command: protocol.ConfigureCommand = .{};
+    var command: wire_request.ConfigureCommand = .{};
     try command.key.set("prep-belong-config");
     command.configuration.workspace.state = .value;
     try command.configuration.workspace.value.set(workspace);
@@ -3588,7 +3590,7 @@ test "preparing slots belong to their live preparations" {
     const file = try tmp.dir.createFile(std.testing.io, "prep-belong-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
     try file.sync(std.testing.io);
-    var message: protocol.MessageCommand = .{};
+    var message: wire_request.MessageCommand = .{};
     try message.key.set("prep-belong-key");
     message.session = configured.accepted.session;
     message.text = .{
@@ -3777,7 +3779,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used: std.atomic.Value(u64) = .init(0);
-    const root_budget = protocol.ScratchBudget{ .used = &used, .limit = 104 };
+    const root_budget = ScratchBudget{ .used = &used, .limit = 104 };
     var entries: [2]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, root_budget, &entries);
     defer retention.cleanupAll();
@@ -3896,7 +3898,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
     defer directory.close(std.testing.io);
     const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
-    var command: protocol.ConfigureCommand = .{};
+    var command: wire_request.ConfigureCommand = .{};
     try command.key.set("encode-failure-config");
     command.configuration.workspace.state = .value;
     try command.configuration.workspace.value.set(workspace);
@@ -3915,7 +3917,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
     try file.sync(std.testing.io);
-    var message: protocol.MessageCommand = .{};
+    var message: wire_request.MessageCommand = .{};
     try message.key.set("encode-failure-key");
     message.session = configured.accepted.session;
     message.text = .{

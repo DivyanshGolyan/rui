@@ -6,6 +6,7 @@ const prefix_seal = @import("prefix_seal.zig");
 const output_format = @import("output_format.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const wire_request = @import("wire_request.zig");
 const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
 const provider = @import("provider.zig");
@@ -1568,7 +1569,7 @@ test "real preparation consumes the configured allowance across multiple advance
     var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
     defer directory.close(std.testing.io);
     const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
-    var configuration: protocol.ConfigureCommand = .{};
+    var configuration: wire_request.ConfigureCommand = .{};
     try configuration.key.set("prep-config");
     configuration.configuration.workspace.state = .value;
     try configuration.configuration.workspace.value.set(workspace);
@@ -1590,7 +1591,7 @@ test "real preparation consumes the configured allowance across multiple advance
     const file = try tmp.dir.createFile(std.testing.io, "prep-file", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, text);
     try file.sync(std.testing.io);
-    var message: protocol.MessageCommand = .{};
+    var message: wire_request.MessageCommand = .{};
     try message.key.set("prep-message");
     message.session = session;
     message.text = .{
@@ -1716,7 +1717,7 @@ const PreparationTestSetup = struct {
     }
 
     fn configure(self: *PreparationTestSetup, key: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
-        var command: protocol.ConfigureCommand = .{};
+        var command: wire_request.ConfigureCommand = .{};
         try command.key.set(key);
         command.configuration.workspace.state = .value;
         try command.configuration.workspace.value.set(self.workspace);
@@ -1744,7 +1745,7 @@ const PreparationTestSetup = struct {
         const file = try self.tmp.dir.createFile(std.testing.io, file_name, .{ .read = true });
         try file.writeStreamingAll(std.testing.io, text);
         try file.sync(std.testing.io);
-        var command: protocol.MessageCommand = .{};
+        var command: wire_request.MessageCommand = .{};
         try command.key.set(key);
         try command.session.set(session);
         if (sender) |ref| {
@@ -1770,7 +1771,7 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     defer setup.close();
     const receiver = try setup.configure("config-receiver");
     const peer = try setup.configure("config-peer");
-    var configuration: protocol.ConfigureCommand = .{};
+    var configuration: wire_request.ConfigureCommand = .{};
     try configuration.key.set("peer-tools");
     configuration.session = peer;
     configuration.configuration.tools = try .of(&.{"bash"});
@@ -2101,7 +2102,7 @@ fn establishComposedHistory(setup: *PreparationTestSetup) !struct { binding: sto
         const file = try setup.tmp.dir.createFile(std.testing.io, "composed-schema", .{ .read = true });
         try file.writeStreamingAll(std.testing.io, schema_json);
         try file.sync(std.testing.io);
-        var command: protocol.ConfigureCommand = .{};
+        var command: wire_request.ConfigureCommand = .{};
         try command.key.set("composed-config");
         command.configuration.workspace.state = .value;
         try command.configuration.workspace.value.set(setup.workspace);
@@ -2179,7 +2180,7 @@ test "scratch namespaces prepare a provider request while matching ingress scrat
 
 fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     const Overlap = struct {
-        var ingress: *protocol.Ingress = undefined;
+        var ingress: *wire_request.Ingress = undefined;
         var storage: *store.Store = undefined;
         var body: []const u8 = undefined;
         var failure: ?anyerror = null;
@@ -2222,7 +2223,7 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     );
     var used: std.atomic.Value(u64) = .init(0);
     var retained_ingress: ?named_scratch.Owner = null;
-    var ingress: protocol.Ingress = undefined;
+    var ingress: wire_request.Ingress = undefined;
     ingress.init(std.testing.allocator, .{
         .io = std.testing.io,
         .content_length = body.len,
@@ -2293,7 +2294,7 @@ test "request preparation minimal golden is exact across schedules" {
         defer std.testing.allocator.free(full_expected);
         // Explicit empty tool list selects no tools for an exact small envelope.
         {
-            var update: protocol.ConfigureCommand = .{};
+            var update: wire_request.ConfigureCommand = .{};
             try update.key.set("prep-golden-tools");
             update.session = golden_session;
             update.configuration.tools.state = .value;
@@ -2407,7 +2408,7 @@ test "request preparation escapes instructions and user content" {
         const file = try setup.tmp.dir.createFile(std.testing.io, "prep-escape-instructions", .{ .read = true });
         try file.writeStreamingAll(std.testing.io, instructions_text);
         try file.sync(std.testing.io);
-        var command: protocol.ConfigureCommand = .{};
+        var command: wire_request.ConfigureCommand = .{};
         try command.key.set("prep-escape-config");
         command.configuration.workspace.state = .value;
         try command.configuration.workspace.value.set(setup.workspace);
@@ -2477,7 +2478,7 @@ test "request preparation escapes instructions and user content" {
         const file = try setup_two.tmp.dir.createFile(std.testing.io, "prep-escape2-instructions", .{ .read = true });
         try file.writeStreamingAll(std.testing.io, instructions_text);
         try file.sync(std.testing.io);
-        var command: protocol.ConfigureCommand = .{};
+        var command: wire_request.ConfigureCommand = .{};
         try command.key.set("prep-escape2-config");
         command.configuration.workspace.state = .value;
         try command.configuration.workspace.value.set(setup_two.workspace);
@@ -2563,7 +2564,7 @@ test "request preparation keeps the starting effort at the top and changes it at
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
-        var command: protocol.ConfigureCommand = .{};
+        var command: wire_request.ConfigureCommand = .{};
         try command.key.set("effort-config");
         command.configuration.workspace.state = .value;
         try command.configuration.workspace.value.set(setup.workspace);
@@ -2592,7 +2593,7 @@ test "request preparation keeps the starting effort at the top and changes it at
             if (case.override != null and purpose == 0) {
                 // A later setting must not rewrite the already admitted
                 // envelope; the following compaction is a new Operation.
-                var update: protocol.ConfigureCommand = .{};
+                var update: wire_request.ConfigureCommand = .{};
                 try update.key.set("effort-later");
                 update.session = session;
                 update.configuration.reasoning_effort.state = .value;
@@ -2649,7 +2650,7 @@ test "request preparation freezes settings at admission" {
     defer setup.close();
     const session = try setup.configure("prep-settings-config");
     {
-        var update: protocol.ConfigureCommand = .{};
+        var update: wire_request.ConfigureCommand = .{};
         try update.key.set("prep-settings-catalog");
         update.session = session;
         update.configuration.tools.state = .value;
@@ -2663,7 +2664,7 @@ test "request preparation freezes settings at admission" {
     // first reads settings: the admitted view must keep the original
     // Bash/Edit catalog, not the current empty tool list.
     {
-        var update: protocol.ConfigureCommand = .{};
+        var update: wire_request.ConfigureCommand = .{};
         try update.key.set("prep-settings-tools");
         update.session = session;
         update.configuration.tools.state = .value;
@@ -3085,7 +3086,7 @@ test "request preparation replays a large private reasoning item within each adv
             try writer.writeAll("\",");
             for (0..1000) |_| try writer.writeAll("\"future\":{\"open\":[0,null]},");
         }
-        try item.writeAll("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}]," ++ summary ++ ",");
+        try item.writeAll("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"REASONING-TEXT\",\"annotations\":[],\"annotations\":false}]," ++ summary ++ ",");
         try item.writeAll("\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}");
         try replayed.writeAll("\"id\":\"r\",\"status\":\"completed\"}");
         try settleComposedForTesting(&setup, first, "large-metadata", .reasoning, item.buffered(), &.{});
@@ -3116,7 +3117,8 @@ test "request preparation replays a large private reasoning item within each adv
                     var request_buffer: [64 * 1024]u8 = undefined;
                     const length = try request.file.readPositionalAll(std.testing.io, &request_buffer, 0);
                     try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], replayed.buffered()) != null);
-                    try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], "private") == null);
+                    // The request carries the workspace path, so the marker is one no path contains.
+                    try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], "REASONING-TEXT") == null);
                     break;
                 },
             }
@@ -3158,7 +3160,7 @@ test "request preparation authenticates the historical requested model binding" 
     const source = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
     try setup.submit("binding-two", "binding-two", session.slice(), "next");
     try settleComposedForTesting(&setup, source, "binding-output", .reasoning, "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}", &.{});
-    var revision: protocol.ConfigureCommand = .{};
+    var revision: wire_request.ConfigureCommand = .{};
     try revision.key.set("binding-revision");
     revision.session = session;
     try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
@@ -3310,16 +3312,16 @@ test "request preparation replays reasoning continuation without its private rea
     // no reasoning text and stays.
     const cases = [_]struct { saved: []const u8, replayed: []const u8 }{
         .{
-            .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\"},{\"type\":\"reasoning_text\",\"text\":\"more private\"}],\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
+            .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"REASONING-TEXT\"},{\"type\":\"reasoning_text\",\"text\":\"more REASONING-TEXT\"}],\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
             // Rebuilt from Rui's form: parts first, then the provider bag.
             .replayed = "{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"id\":\"r\",\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
         },
         .{
-            .saved = "{\"content\" : [ {\"text\":\"private\",\"type\":\"reasoning_text\",\"annotations\":[]} ] , \"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
+            .saved = "{\"content\" : [ {\"text\":\"REASONING-TEXT\",\"type\":\"reasoning_text\",\"annotations\":[]} ] , \"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
             .replayed = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
         },
         .{
-            .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"c\\u006fntent\":[{\"type\":\"reasoning_text\",\"text\":\"private\"}]}",
+            .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"c\\u006fntent\":[{\"type\":\"reasoning_text\",\"text\":\"REASONING-TEXT\"}]}",
             .replayed = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
         },
         .{
@@ -3355,7 +3357,8 @@ test "request preparation replays reasoning continuation without its private rea
         const expected = try requestGolden(setup.workspace, session.slice(), body);
         defer std.testing.allocator.free(expected);
         try std.testing.expectEqualStrings(expected, result.bytes);
-        try std.testing.expect(std.mem.indexOf(u8, result.bytes, "private") == null);
+        // The request carries the workspace path, so the marker is one no path contains.
+        try std.testing.expect(std.mem.indexOf(u8, result.bytes, "REASONING-TEXT") == null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     };
 }
@@ -3537,7 +3540,7 @@ test "a compaction's floor drops whole exchanges and every request on its base r
         const file = try setup.tmp.dir.createFile(std.testing.io, "floor-rules", .{ .read = true });
         try file.writeStreamingAll(std.testing.io, rules);
         try file.sync(std.testing.io);
-        var command: protocol.ConfigureCommand = .{};
+        var command: wire_request.ConfigureCommand = .{};
         try command.key.set("floor-rules-config");
         command.session = session;
         command.configuration.instructions = .{ .state = .value, .file = file, .length = rules.len, .digest = protocol.contentDigest(rules) };
@@ -3674,7 +3677,7 @@ test "compaction public preparation rejects incompatible selected base and suffi
         try setup.storage.settleModelAttemptFailure(first, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
         const base = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         try store.settleCompactionForTesting(&setup.storage, &setup.tmp, base, &.{.compaction});
-        var revision: protocol.ConfigureCommand = .{};
+        var revision: wire_request.ConfigureCommand = .{};
         try revision.key.set("binding-revision-two");
         revision.session = session;
         try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
@@ -3841,7 +3844,7 @@ fn configureMemoSessionForTesting(setup: *PreparationTestSetup) !protocol.Bounde
 }
 
 fn configureMemoSessionModelForTesting(setup: *PreparationTestSetup, model: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
-    var command: protocol.ConfigureCommand = .{};
+    var command: wire_request.ConfigureCommand = .{};
     try command.key.set("memo-config");
     command.configuration.workspace.state = .value;
     try command.configuration.workspace.value.set(setup.workspace);
@@ -3984,7 +3987,7 @@ test "a legacy null Session continues with its earlier Operation effort" {
         setup.tmp.cleanup();
     }
     const session = try configureMemoSessionModelForTesting(&setup, "gpt-5.5");
-    var update: protocol.ConfigureCommand = .{};
+    var update: wire_request.ConfigureCommand = .{};
     try update.key.set("legacy-medium");
     update.session = session;
     update.configuration.reasoning_effort.state = .value;
@@ -4036,7 +4039,7 @@ test "an effort change keeps each request's input a prefix of the next" {
     const session = try configureMemoSessionModelForTesting(&setup, "gpt-5.5");
     // The prefix fixture starts at medium explicitly, independently of the
     // client's product default (low under C1b).
-    var initial: protocol.ConfigureCommand = .{};
+    var initial: wire_request.ConfigureCommand = .{};
     try initial.key.set("effort-initial-medium");
     initial.session = session;
     initial.configuration.reasoning_effort.state = .value;
@@ -4056,7 +4059,7 @@ test "an effort change keeps each request's input a prefix of the next" {
     for (efforts, 0..) |effort, round| {
         if (round != 0) {
             if (effort) |value| {
-                var update: protocol.ConfigureCommand = .{};
+                var update: wire_request.ConfigureCommand = .{};
                 var key: [32]u8 = undefined;
                 try update.key.set(try std.fmt.bufPrint(&key, "effort-round-{d}", .{round}));
                 update.session = session;
@@ -4115,7 +4118,7 @@ test "a tool change keeps each request's input a prefix of the next" {
                 break :id actions;
             } else null;
             if (tools_round) |names| {
-                var update: protocol.ConfigureCommand = .{};
+                var update: wire_request.ConfigureCommand = .{};
                 var key: [32]u8 = undefined;
                 try update.key.set(try std.fmt.bufPrint(&key, "tools-round-{d}", .{round}));
                 update.session = session;
@@ -4154,7 +4157,7 @@ test "a loaded tools revision adds exactly the newly loaded tool without a cache
     defer setup.close();
     const donor = try configureMemoSessionForTesting(&setup);
     const session = try setup.configure("loaded-memo-main");
-    var configure: protocol.ConfigureCommand = .{};
+    var configure: wire_request.ConfigureCommand = .{};
     try configure.key.set("loaded-memo-tools");
     configure.session = session;
     configure.configuration.tools = try .of(&.{ "bash", "message_agent" });
@@ -4178,7 +4181,7 @@ test "a loaded tools revision adds exactly the newly loaded tool without a cache
     const covered = heldMemoLength(&memos, session.slice());
     try std.testing.expect(covered > 0);
 
-    var grow: protocol.ConfigureCommand = .{};
+    var grow: wire_request.ConfigureCommand = .{};
     try grow.key.set("loaded-memo-grow");
     grow.session = session;
     grow.configuration.loaded_tools = try .of(&.{ "bash", "message_agent" });
@@ -4209,7 +4212,7 @@ test "find_tools declares a found tool on the next request without losing the me
     try setup.init();
     defer setup.close();
     const session = try setup.configure("find-codec");
-    var configure: protocol.ConfigureCommand = .{};
+    var configure: wire_request.ConfigureCommand = .{};
     try configure.key.set("find-codec-tools");
     configure.session = session;
     configure.configuration.tools = try .of(&.{ "find_tools", "read_transcript" });
@@ -4613,7 +4616,7 @@ test "a preparation cancelled while keeping its memo keeps nothing of it" {
     try expectMemoStoreCancelForTesting(&setup, session.slice(), binding, &memos);
 }
 
-fn skillsConfigurationForTesting(setup: *PreparationTestSetup, key: []const u8, command: *protocol.ConfigureCommand) !void {
+fn skillsConfigurationForTesting(setup: *PreparationTestSetup, key: []const u8, command: *wire_request.ConfigureCommand) !void {
     command.* = .{};
     try command.key.set(key);
     command.configuration.workspace.state = .value;
@@ -4680,7 +4683,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     @memset(body, 'x');
     const raw = try std.fmt.allocPrint(arena, "---\r\nname: demo\r\ndescription: initial-demo-desc\r\ndisable-model-invocation: true\r\nallowed-tools: [made_up]\r\n---\r\n{s}\r\n雪 trailing\r\n", .{body});
     try writeSkillForTesting(&setup, ".agents/skills/demo/SKILL.md", raw);
-    var configure: protocol.ConfigureCommand = .{};
+    var configure: wire_request.ConfigureCommand = .{};
     try skillsConfigurationForTesting(&setup, "skills-create", &configure);
     const initial = (try skill_owner.initial(arena, std.testing.allocator, std.testing.io, &setup.storage, configure.key.slice(), &configure.configuration, null)).?;
     const creation = setup.storage.configureWithInitialSkills(&configure, null, initial, .{});
@@ -4693,7 +4696,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     try std.testing.expect((try skill_owner.initial(arena, std.testing.allocator, std.testing.io, &setup.storage, configure.key.slice(), &configure.configuration, null)) == null);
     try std.testing.expect(setup.storage.configureWithInitialSkills(&configure, null, null, .{}).accepted.replayed);
 
-    var reload: protocol.ConfigureCommand = .{ .session = session, .reload_skills = true };
+    var reload: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
     try reload.key.set("skills-initial-noop");
     var candidate = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .reload }, null);
     const no_work = setup.storage.configureWithCapturedSkills(&reload, null, null, &candidate, .{});
@@ -4707,7 +4710,7 @@ test "skills native conversation is append-only across invoke reload replay and 
 
     // A user Message that is only the skill's `/name` word.
     const typed = "/demo";
-    var invoke: protocol.MessageCommand = .{ .session = session, .text = .{ .state = .value, .borrowed = typed.ptr, .length = typed.len, .digest = protocol.contentDigest(typed) } };
+    var invoke: wire_request.MessageCommand = .{ .session = session, .text = .{ .state = .value, .borrowed = typed.ptr, .length = typed.len, .digest = protocol.contentDigest(typed) } };
     try invoke.key.set("skills-user-invoke");
     var demo: protocol.Bounded(64) = .{};
     try demo.set("demo");

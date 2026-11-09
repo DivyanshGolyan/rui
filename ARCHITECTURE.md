@@ -2235,16 +2235,13 @@ A ready existing Host retains its actual capacity/capabilities; no model capabil
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
 `/sessions unarchived`, `/sessions archived`, and `/sessions all` choose the server-side archive filter.
 The header names the view; changing it clears the previous traversal.
-`/archive` or Alt-A puts away the selected Session, with a Stop and archive confirmation while it has work.
+`/archive` or Alt-A puts away the selected Session at once, stopping its work first when it has any; nothing asks, because `/sessions archived` and `/unarchive` bring it back.
 `/unarchive` restores the selected Session.
-`/undo` restores the last Session explicitly archived from this overview.
 A row remains visible with archive progress until the server reports it archived.
 Archived rows and exact conversations show their archive state.
 Conversations also expose `/archive` and `/unarchive`; these validated commands and Alt-A forward semantic intents for the exact open Session even when it is absent from the listing.
-The overview core owns their shared confirmation, archive/restore request ledger and worker effects; conversation slash commands never run a separate CLI archive mutation.
+The overview core owns their archive/restore request ledger and worker effects; conversation slash commands never run a separate CLI archive mutation.
 Alt-A leaves the draft, caret and retained original unchanged.
-The shared Stop and archive prompt captures its Session reference; unpasted, unmodified Enter confirms it before any draft, picker or permission choice, and Esc cancels it without clearing or sending the draft.
-Archive confirmation spends any permission offer without deciding the Action.
 While a conversation is open the refreshes go on without the screen or input, for [desktop notifications](#desktop-notifications).
 Marks hold still: `●` active, `◌` queued, `○` idle or waiting on approval, `✓` finished, `×` failed, `■` stopped; moving to its group says a row changed.
 Only your own Session at work (an active mark under Yours) turns a spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one frame per 200 ms of the monotonic clock, every spinner in step.
@@ -2266,8 +2263,8 @@ A stop's answer asks for a listing at once, so `■ stopped` follows within one 
 While a stop of a row is in flight or unconfirmed, the row reads `Stopping…` and takes no other stop; Ctrl-X then names the stop's recovery.
 A retry that has fallen due reads as the pending work it became in its words, mark and colour alike.
 Divyansh approved this on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
-Ctrl-X, then Ctrl-X again, stops the open Session from the conversation, exactly as on the overview (Divyansh approved this on 2026-10-31, front-end plan PR 5).
-The conversation hands each input, as Ctrl-X or another, to the overview that lent it the terminal, with the work the conversation shows in place of a row's, and the overview's core decides it with the same prompt, ledger and worker, so a Session not yet listed stops too.
+One Ctrl-X stops the open Session from the conversation at once, exactly as on the overview; nothing asks, because stopping loses nothing (Divyansh, 2026-11-09).
+The conversation hands each input, as Ctrl-X or another, to the overview that lent it the terminal, with the work the conversation shows in place of a row's, and the overview's core decides it with the same ledger and worker, so a Session not yet listed stops too.
 Esc or Ctrl-G with the prompt open only cancels it, any other input cancels it and acts, and Ctrl-X before the conversation's first read says the Session stops once it opens.
 While a conversation is open the overview's worker starts stops and listing jobs, a stop first, and a start waits for the overview's return.
 Every job's answer is taken there, so a stop's notice shows in the conversation and a stop never waits behind a listing.
@@ -2427,8 +2424,8 @@ Steps are read one at a time: presses made while one is read add up and opposite
 Each edit, clear or send of the draft makes it an ordinary one and drops the presses not yet read, and a step shows only on the draft it began from.
 On a typed draft Ctrl-P says to empty the draft first, even while a step is read.
 Ctrl-P past the oldest says `No earlier message.` While an Action's choice holds the input, Ctrl-P and Ctrl-N do nothing and presses not yet read are dropped; a step already read still lands on the draft.
-Any other Ctrl key is a control character and rejects the draft.
-Any Alt, Super, Hyper or Meta chord with no binding, on a character, a control or a named key such as an arrow, is dropped as it arrives, with a notice, and the draft stays: ESC followed by a key (Option as Meta, an Esc pressed just before a key, or a chord tmux re-encodes that way) and Kitty Alt chords, even with associated text, never insert the bare key, reject the draft or send it.
+Ctrl-B and Ctrl-F move the caret a character left and right, as in readline.
+Any Ctrl, Alt, Super, Hyper or Meta chord with no binding, a typed C0 control among them, on a character, a control or a named key such as an arrow, is dropped as it arrives, with a notice, and the draft stays: ESC followed by a key (Option as Meta, an Esc pressed just before a key, or a chord tmux re-encodes that way) and Kitty Alt chords, even with associated text, never insert the bare key, reject the draft or send it.
 ESC before a key that starts no sequence is Alt on that key as decoded alone: ESC ^H is Alt-Backspace, ESC CR (which arrives as ESC LF under ICRNL) is Alt-Enter, and ESC before a multibyte scalar drops that scalar; a combining mark or joined scalar that arrives after it is ordinary text.
 Alt-Enter adds a line like Shift-Enter and Alt-J in every form (ESC CR, ESC LF, Kitty `CSI 13;3u` and `CSI 27;3;13~`) and never sends: Ghostty sends Shift-Enter as ESC CR.
 A bare Esc that expires (80 ms) before Enter is Esc, then Enter, which sends.
@@ -2439,7 +2436,7 @@ A pending ESC before Ctrl-C or Ctrl-D is discarded, so those still interrupt or 
 A terminal path can change a key before Rui reads it: tmux delivers Shift-Enter as Enter and Hyper or Meta chords as their bare keys, so while a draft is composed inside tmux the status says `In tmux, Shift-Enter sends · Alt-J adds a line`, and `/help` says so too.
 At an Action's choice any chord is refused, spends freshness and authorizes nothing.
 Shift alone stays text.
-An xterm modifyOtherKeys key (`CSI 27 ; modifier ; code ~`, which Ghostty's legacy table sends for modified Enter without being asked) decodes as the Kitty key with the same modifiers and no associated text, so its bindings mean the same: Shift-Enter adds a line, Ctrl-A moves to the line start, Ctrl-J sends, an unbound Alt or Super chord is dropped and an unbound Ctrl key rejects the draft as its Kitty form does.
+An xterm modifyOtherKeys key (`CSI 27 ; modifier ; code ~`, which Ghostty's legacy table sends for modified Enter without being asked) decodes as the Kitty key with the same modifiers and no associated text, so its bindings mean the same: Shift-Enter adds a line, Ctrl-A moves to the line start, Ctrl-J sends, and an unbound Ctrl, Alt or Super chord is dropped as its Kitty form is.
 Shift with a printable code inserts nothing in this form.
 Ctrl-R recovers in its raw, Kitty and modifyOtherKeys forms alike, never from pasted text; at an Action's choice it is refused, spends freshness and authorizes nothing, and while approval is paused it waits for the Action, keeping the draft.
 A malformed key in a supported form is a key whose meaning was lost, so it fails closed: a Kitty modifier outside 1–256 or event type outside 1–3, a key, alternate key or associated-text value that is not a Unicode scalar, associated text over the decoder's 128 bytes, or a modifyOtherKeys field outside its form rejects the draft at its line end, or is refused at once at an Action's choice, as malformed UTF-8 is, rather than being ignored so that the text typed around it stands.
@@ -2611,8 +2608,9 @@ Explicitly ask-configured Sessions use the same allow-once/deny path, without sp
 The frontend's caller owns the terminal and lends it.
 The caller creates the screen and `SessionTerminal`, installs the SIGINT and SIGTERM handlers and passes the cancellation they stop.
 `SessionFrontend.run` draws until the person leaves or a signal arrives, and returns how it stopped: `detached`, `interrupted` or `returned`.
-It returns `returned` only when nothing would be lost or dismissed: no draft, pending Action, sub-view, running command or unresolved submission.
+It returns `returned` only when nothing would be lost or dismissed: no draft, pending Action, sub-view or running command, and no original that is not yet saved (`not_started` or `submitting`).
 The overview then closes the frontend, which joins its reader, and draws again without restoring the terminal or printing a notice.
+A rejected original is released as `/discard` would. An unconfirmed one goes into the overview's request ledger: the overview says `! Not confirmed · rui request recover KEY`, and its departure prints the line the conversation's exit would have printed. When that ledger is full, the frontend leaves as Ctrl-C would and prints the line itself.
 It never restores the terminal or prints the Detached notice.
 Its caller restores the terminal, lets the frontend join its borrowers and write the guidance that follows restoration, then prints the notice from that outcome.
 A frontend that stops running never cancels Host work.
@@ -2728,7 +2726,7 @@ The interface preserves the shell's previous screen; conversation output does no
 This trade-off is accepted for one library-owned renderer.
 It retains a bounded latest view (256 KiB each for live text and a selected inspection).
 PgUp/PgDn, Shift-PgUp/PgDn, Up/Down beyond the draft's lines and the mouse wheel scroll it; Esc, Ctrl-G, End on an empty draft or scrolling past the end returns to the latest view, or to a pending Action.
-At the latest view, Esc, Ctrl-G or End on an empty draft returns to the overview when nothing would be lost or dismissed: no pending Action, sub-view, running command or unresolved submission; a draft keeps the conversation open, and the status line says to clear it first.
+At the latest view, Esc, Ctrl-G or End on an empty draft returns to the overview when nothing would be lost or dismissed: no pending Action, sub-view or running command, and no original still unsaved; a draft keeps the conversation open, and the status line says to clear it first.
 Sending a Message returns to the latest view, where it and its reply appear, and a page asked for before it no longer opens over it.
 With nothing said yet, scrolling up reaches `Start of conversation`.
 Scrolling up from live text freezes a transcript copy that starts at the first retained read boundary.
@@ -3596,7 +3594,7 @@ Keep platform memory metrics and unavailable counters distinct.
 
 | Owner | Selected mechanism |
 | --- | --- |
-| Transport | Rui's own HTTP/2 client on pinned nghttp2 and OpenSSL, with name lookup on short-lived threads and addresses raced by family (Happy Eyeballs, RFC 8305: families alternate, the next attempt starts after 250 ms or as soon as one fails, and with two in flight the oldest gives way). `https://` origins tunnel through the `http://` proxy that `https_proxy`/`HTTPS_PROXY` names (a set lowercase name decides, even empty), read once when the transport starts, with `Proxy-Authorization: Basic` from the proxy URL's credentials; loopback and `no_proxy`/`NO_PROXY` hosts (`*`, names with their subdomains, IP addresses, CIDR ranges; no ports) connect directly; a proxy's 407 and 403 are distinct causes; an `https://` or other proxy scheme fails startup; HTTP/1.1 and HTTP/3/QUIC are absent. Use Apple SecTrust on macOS; on Linux, OpenSSL's `SSL_CERT_FILE` / `SSL_CERT_DIR` when set (an unloadable path fails, never falls back), else the host's CA bundle; and explicit CA-file configuration (`--provider-ca-file`), which takes precedence, where needed. Missing trust/capabilities fail; never disable verification. Transport owns initialization, resolver lifetime and cleanup. |
+| Transport | Rui's own HTTP/2 client on pinned nghttp2 and OpenSSL, with name lookup on short-lived threads and addresses raced by family (Happy Eyeballs, RFC 8305: families alternate, the next attempt starts after 250 ms or as soon as one fails, and with two in flight the oldest gives way). `https://` origins tunnel through the `http://` proxy that `https_proxy`/`HTTPS_PROXY` names (a set lowercase name decides, even empty), read once when the transport starts, with `Proxy-Authorization: Basic` from the proxy URL's credentials; loopback and `no_proxy`/`NO_PROXY` hosts (`*`, names with their subdomains, IP addresses, CIDR ranges; no ports) connect directly; a proxy's 407 and 403 are distinct causes; an `https://` or other proxy scheme fails a provider-serving Host's startup before readiness, and only disables models.dev discovery on a provider-free Host; HTTP/1.1 and HTTP/3/QUIC are absent. Use Apple SecTrust on macOS; on Linux, OpenSSL's `SSL_CERT_FILE` / `SSL_CERT_DIR` when set (an unloadable path fails, never falls back), else the host's CA bundle; and explicit CA-file configuration (`--provider-ca-file`), which takes precedence, where needed. Missing trust/capabilities fail; never disable verification. Transport owns initialization, resolver lifetime and cleanup. |
 | Storage | Bundle pinned thread-safe SQLite with single-owner access and native VFS. Use local filesystems; network/shared-mounted Stores are unsupported. Enable macOS fullfsync. |
 | Credentials | One Rui-owned file on Linux and macOS. Check ownership/access, preserve account binding and atomically persist refresh; do not fall back to Codex CLI state or another backend. The file is readable by same-user programs, including authorized Bash; credentials never enter semantic data, logs or child environments. |
 | Files/processes | Configurable disk-backed scratch and installed Bash with optional executable path. Report known memory-backed scratch as incompatible with disk-first guarantees; unknown backing is a deployment assumption. A target-header C shim supplies non-consuming child observation and queued-pipe-byte counts; lifecycle policy remains in Zig. Process-group cleanup promises neither detached-descendant containment nor rollback. |
