@@ -413,7 +413,7 @@ noinline fn reloadSkills(a: anytype, command: *const content_custody.ConfigureCo
     }
     if (invalid) return saveConfigurationRejection(a, command, digest, .incomplete_initial_configuration, faults);
     const captured = reload_capture orelse return saveConfigurationRejection(a, command, digest, .skills_unavailable, faults);
-    if (captured.* == .failed) return saveConfigurationRejectionWithFailure(a, command, digest, captured.failed.rejection(configuration_admission.Rejection), captured.failed, faults);
+    if (captured.* == .failed) return saveConfigurationRejectionWithFailure(a, command, digest, captured.failed.configurationRejection(), captured.failed, faults);
     if (captured.* != .reload) return saveConfigurationRejection(a, command, digest, .skills_unavailable, faults);
     var memory: std.heap.ArenaAllocator = .init(std.heap.c_allocator);
     defer memory.deinit();
@@ -500,7 +500,7 @@ const Settings = struct {
     }
 
     /// Each field whose value differs, by its name in `SessionField`.
-    fn changed(before: *const Settings, after: *const Settings) std.EnumSet(protocol.SessionField) {
+    fn changed(before: *const Settings, after: *const CurrentConfiguration) std.EnumSet(protocol.SessionField) {
         var fields: std.EnumSet(protocol.SessionField) = .empty;
         fields.setPresent(.provider, before.provider != after.provider);
         fields.setPresent(.model, !before.model.eql(after.model.slice()));
@@ -540,6 +540,9 @@ pub const ConfigurationReads = struct {
     /// The Session's saved configuration, which the plan then updates in
     /// place: one 4.6 KB value, not a copy of it.
     next: CurrentConfiguration,
+    /// The validation-only phase and application borrow this same plan until
+    /// settlement; keep its saved Settings off the Host's import call chain.
+    validated: ValidatedConfiguration = undefined,
     /// Whether the Session exists: `.missing` for a creation, which reads none.
     found: store_access.Found = .missing,
     reference: [session_id.bytes]u8 = undefined,
@@ -845,15 +848,22 @@ fn targetRejection(session: []const u8) ?configuration_admission.Rejection {
 /// first Message can share this owner without an intermediate commit. The
 /// answer names the Session either way; the caller records an accepted
 /// one with `queueConfiguredCommand`.
-pub fn applyConfiguration(
+pub const ValidatedConfiguration = struct {
+    content_actions: @FieldType(ConfigurationUpdatePlan, "update"),
+    before: ?Settings,
+};
+pub const ConfigurationValidation = union(enum) { ready: *const ValidatedConfiguration, rejected: protocol.ConfigurationRejection };
+
+/// Validates without queuing content, tool-set or Session writes. The resulting
+/// plan borrows the same transaction's reads and is applied exactly once.
+pub fn validateConfiguration(
     a: anytype,
     io: std.Io,
     session: []const u8,
     configuration: *const content_custody.Configuration,
     initial_skills: ?*const skills_domain.Initial,
-    faults: Faults,
     reads: *ConfigurationReads,
-) !Application {
+) !ConfigurationValidation {
     const creating = session.len == 0;
     if (targetRejection(session)) |code| return .{ .rejected = code };
     if (configuration.permission_mode.state == .value and
@@ -908,7 +918,7 @@ pub fn applyConfiguration(
     if (try prepareLoadedTools(a, creating, configuration, reads)) |rejection| return .{ .rejected = rejection };
 
     const created = !reads.found.get();
-    const before: ?Settings = if (created) null else .of(next);
+    reads.validated.before = if (created) null else .of(next);
     const content_actions = switch (planConfigurationUpdate(
         current_configuration,
         configuration,
@@ -923,6 +933,24 @@ pub fn applyConfiguration(
     // discovery capture, but reject it before any content or Session writes.
     if (creating) if (initial_skills) |captured| if (captured.* == .unavailable) return .{ .rejected = .skills_unavailable };
 
+    reads.validated.content_actions = content_actions;
+    return .{ .ready = &reads.validated };
+}
+
+pub fn applyConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads) !Application {
+    const checked = try validateConfiguration(a, io, session, configuration, initial_skills, reads);
+    return switch (checked) {
+        .rejected => |code| .{ .rejected = code },
+        .ready => |plan| try applyValidatedConfiguration(a, io, session, configuration, initial_skills, faults, reads, plan),
+    };
+}
+
+pub fn applyValidatedConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads, plan: *const ValidatedConfiguration) !Application {
+    const creating = session.len == 0;
+    const created = !reads.found.get();
+    const next = &reads.next;
+    const before = if (plan.before) |*saved| saved else null;
+    const content_actions = plan.content_actions;
     var command_instructions_id: ?u64 = null;
     switch (content_actions.instructions) {
         .preserve => {},
@@ -999,7 +1027,7 @@ pub fn applyConfiguration(
         .instructions_id = command_instructions_id,
         .output_schema_id = command_output_schema_id,
         .instructions_updated = created or configuration.instructions.state == .value,
-        .changes = if (before) |*saved| saved.changed(&Settings.of(next)) else .empty,
+        .changes = if (before) |saved| saved.changed(next) else .empty,
     } };
 }
 
@@ -1021,7 +1049,7 @@ fn saveConfigurationRejectionWithFailure(
     failure: ?skills_domain.Failure,
     faults: Faults,
 ) !ConfigureReply {
-    const outcome_id = if (failure) |diagnostic| try skills_domain.importFailure(a, diagnostic, faults) else null;
+    const outcome_id = if (failure) |diagnostic| try skills_domain.importFailure(a, diagnostic.bytes, faults) else null;
     var answer = StoredAnswer{ .accepted = false };
     try answer.code.set(@tagName(code));
     try command_domain.queueCommand(a, command.key.slice(), .configure, command.session.slice(), digest, outcome_id, null, &answer);

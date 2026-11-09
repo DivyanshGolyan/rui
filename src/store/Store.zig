@@ -616,9 +616,11 @@ pub const Store = struct {
     fn readSkillsHeld(self: *Store, allocator: std.mem.Allocator, session: []const u8, out: *SkillsState) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        var access: Access(.read, error{SessionNotFound}) = .open(&entry);
+        // Decoding the catalog allocates from the caller's memory; running
+        // out of it is the caller's to answer, not canonical corruption.
+        var access: Access(.read, error{ SessionNotFound, OutOfMemory }) = .open(&entry);
         defer access.deinit();
-        return entry.finish(error{SessionNotFound}, readSkillsOn(&access, allocator, session, out));
+        return entry.finish(error{ SessionNotFound, OutOfMemory }, readSkillsOn(&access, allocator, session, out));
     }
 
     fn readSkillsOn(a: anytype, allocator: std.mem.Allocator, session: []const u8, out: *SkillsState) !void {
@@ -709,7 +711,7 @@ pub const Store = struct {
         return self.submitMessageCapturedSkills(command, committed, initial_skills, null, faults);
     }
 
-    pub fn submitMessageCapturedSkills(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.Capture, faults: Faults) MessageReply {
+    pub fn submitMessageCapturedSkills(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.MessageCapture, faults: Faults) MessageReply {
         return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, faults });
     }
 
@@ -718,7 +720,7 @@ pub const Store = struct {
         command: *const content_custody.MessageCommand,
         committed: ?MessageCommitted,
         initial_skills: ?*const skills_domain.Initial,
-        captured_skill: ?*const skills_domain.Capture,
+        captured_skill: ?*const skills_domain.MessageCapture,
         faults: Faults,
     ) MessageReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
@@ -1241,15 +1243,20 @@ pub const Store = struct {
     /// Delivers the owed child ending (D39) `nextCoreWork` names, or only
     /// settles one its parent's stop caused (D139).
     pub fn deliverChildEnding(self: *Store, turn_id: u64, faults: Faults) !bool {
-        return self.queue().write(deliverChildEndingHeld, .{ self, turn_id, faults });
+        return self.deliverChildEndingBound(turn_id, null, faults);
     }
 
-    fn deliverChildEndingHeld(self: *Store, turn_id: u64, faults: Faults) !bool {
+    /// `captured` is what the Host's binding of the ending's text found.
+    pub fn deliverChildEndingBound(self: *Store, turn_id: u64, captured: ?*const skills_domain.MessageCapture, faults: Faults) !bool {
+        return self.queue().write(deliverChildEndingHeld, .{ self, turn_id, captured, faults });
+    }
+
+    fn deliverChildEndingHeld(self: *Store, turn_id: u64, captured: ?*const skills_domain.MessageCapture, faults: Faults) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.deliverChildEnding(&access, turn_id, faults)));
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.deliverChildEnding(&access, turn_id, captured, faults)));
     }
 
     /// Positions one ancestor feed row and durably queues its next hop.
@@ -1285,34 +1292,41 @@ pub const Store = struct {
     /// Runs the `message_agent` call `binding` names with its checked
     /// arguments, in one transaction.
     pub fn deliverAgentMessage(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, faults: Faults) !AgentDelivery {
-        return self.queue().write(deliverAgentMessageHeld, .{ self, binding, target, text, faults });
+        return self.deliverAgentMessageBound(binding, target, text, null, faults);
     }
 
-    fn deliverAgentMessageHeld(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, faults: Faults) !AgentDelivery {
+    /// `captured` is what the Host's binding of `text` found.
+    pub fn deliverAgentMessageBound(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentDelivery {
+        return self.queue().write(deliverAgentMessageHeld, .{ self, binding, target, text, captured, faults });
+    }
+
+    fn deliverAgentMessageHeld(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentDelivery {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.deliverAgentMessage(&access, binding, target, text, faults)));
+        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.deliverAgentMessage(&access, binding, target, text, captured, faults)));
     }
 
     /// Runs the `start_agent` call `binding` names with its checked
     /// arguments, in one transaction; `configuration` is the agent's spec,
     /// which this completes. `committed` runs once the task is admitted.
     pub fn startAgent(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, faults: Faults) !AgentStart {
-        return self.startAgentWithInitialSkills(binding, caller, task, attached, configuration, committed, null, faults);
+        return self.startAgentWithInitialSkills(binding, caller, task, attached, configuration, committed, null, null, faults);
     }
 
-    pub fn startAgentWithInitialSkills(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) !AgentStart {
-        return self.queue().write(startAgentHeld, .{ self, binding, caller, task, attached, configuration, committed, initial_skills, faults });
+    /// `captured` is what the Host's binding of `task` against
+    /// `initial_skills`' catalog found.
+    pub fn startAgentWithInitialSkills(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentStart {
+        return self.queue().write(startAgentHeld, .{ self, binding, caller, task, attached, configuration, committed, initial_skills, captured, faults });
     }
 
-    fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) !AgentStart {
+    fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentStart {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.agent_start) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.agent_start, faults, access.end(faults, command_domain.startAgent(&access, self.io, binding, caller, task, attached, configuration, committed, initial_skills, faults)));
+        return entry.finishTransaction(Ordinary.agent_start, faults, access.end(faults, command_domain.startAgent(&access, self.io, binding, caller, task, attached, configuration, committed, initial_skills, captured, faults)));
     }
 
     /// Loads matching saved tools and resolves the call in one transaction.
@@ -1703,10 +1717,12 @@ const accepted_settlement_growth = 14352;
 comptime {
     // The settlement batch is the larger use: 19240 bytes, the original
     // 14480 plus 4760 for per-batch call names, membership flags and their
-    // lookup visitor. The creation reads use 14472, including command/Message
+    // lookup visitor. The creation reads use 14968, including command/Message
     // facts, saved parent reference and the saved tool and loaded names a
-    // subset update reads. Exact, so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 14472 or scratch_bytes != 19240)
+    // subset update reads, the skills a Message bound and the one retained
+    // validation plan. This uses existing scratch, with no resident growth.
+    // Exact, so a change to either size is a decision.
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 14968 or scratch_bytes != 19240)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }

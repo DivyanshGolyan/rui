@@ -19,6 +19,9 @@ pub const ModelFact = @import("store/domain/model_facts.zig").Fact;
 pub const ModelCatalogSource = @import("store/domain/model_facts.zig").Source;
 pub const Store = store_core.Store;
 pub const CapturedSkill = @import("store/domain/skills.zig").Capture;
+pub const CapturedMessageSkills = @import("store/domain/skills.zig").MessageCapture;
+pub const MessageSkillFailure = @import("store/domain/skills.zig").MessageFailure;
+pub const BoundSkill = @import("store/domain/skills.zig").BoundSkill;
 pub const InitialSkills = @import("store/domain/skills.zig").Initial;
 pub const MysqlStartError = @import("store/engine/mysql_refusal.zig").StartError;
 
@@ -93,6 +96,7 @@ pub const testingPublicProjection = store_testing.testingPublicProjection;
 pub const testingStoreWith = store_testing.testingStoreWith;
 pub const testingCanonicalCwd = store_testing.canonicalCwd;
 pub const testingCompleteConfiguration = store_testing.completeConfiguration;
+pub const testingFailReadsOf = store_testing.failReadsOf;
 pub const testingSubmitMessage = store_testing.submitTestMessage;
 pub const testing = store_testing;
 pub const testing_content_chunk_bytes = store_schema.content_chunk_bytes;

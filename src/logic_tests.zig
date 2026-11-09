@@ -86,6 +86,8 @@ const cores = .{
     .{ "session_upgrade.zig", @import("session_upgrade.zig") },
     .{ "session_work.zig", @import("session_work.zig") },
     .{ "session_archive.zig", @import("session_archive.zig") },
+    .{ "skill_reference.zig", @import("skill_reference.zig") },
+    .{ "skill_suggestions.zig", @import("skill_suggestions.zig") },
     .{ "slash_commands.zig", @import("slash_commands.zig") },
     .{ "status_page.zig", @import("status_page.zig") },
     .{ "store_path.zig", @import("store_path.zig") },

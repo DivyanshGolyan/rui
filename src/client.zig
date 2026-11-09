@@ -303,6 +303,49 @@ pub const Requests = struct {
         };
     }
 
+    /// Bounded owned metadata only; scope strings are borrowed until return.
+    pub fn skillSuggestions(self: Requests, gpa: std.mem.Allocator, store_path: []const u8, scope: @import("skill_suggestions.zig").Scope, prefix: []const u8) !@import("skill_suggestions.zig").Page {
+        try self.check();
+        if (prefix.len > 64 or !std.unicode.utf8ValidateSlice(prefix)) return error.InvalidPrefix;
+        switch (scope) {
+            .session => |session| try protocol_reply.validateIdentityInputs("", session),
+            .workspace => |workspace| if (workspace.len == 0 or workspace.len > protocol.max_workspace_bytes or !std.unicode.utf8ValidateSlice(workspace)) return error.InvalidWorkspace,
+        }
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        const body = try gpa.create(protocol.RequestBuffer);
+        defer gpa.destroy(body);
+        body.len = 0;
+        switch (scope) {
+            .session => |session| {
+                try body.appendShape(protocol.skill_suggestions_session_request, .{ paths.store.slice(), session, prefix });
+            },
+            .workspace => |workspace| {
+                try body.appendShape(protocol.skill_suggestions_workspace_request, .{ paths.store.slice(), workspace, prefix });
+            },
+        }
+        const fd = try openRead(self, &paths, "/v1/skill-suggestions", body.slice());
+        defer closeSocket(self.io, fd);
+        const Sink = struct {
+            bytes: std.ArrayList(u8) = .empty,
+            gpa: std.mem.Allocator,
+            pub fn feed(s: *@This(), bytes: []const u8) !void {
+                if (bytes.len > protocol.skill_suggestions_reply.max_bytes - s.bytes.items.len) return error.ResponseTooLarge;
+                try s.bytes.appendSlice(s.gpa, bytes);
+            }
+        };
+        var sink: Sink = .{ .gpa = gpa };
+        defer sink.bytes.deinit(gpa);
+        var buffer: ReplyBuffer = .{};
+        switch (try readReportResponse(self, fd, &sink, &buffer)) {
+            .report => {},
+            .command => |reply| return self.failRead(try self.captureReadFailure(reply)),
+        }
+        var page = try protocol_reply.decodeSkillSuggestions(gpa, sink.bytes.items);
+        errdefer page.deinit(gpa);
+        for (page.entries) |entry| if (!std.mem.startsWith(u8, entry.name, prefix)) return error.InvalidResponse;
+        return page;
+    }
+
     /// Complete scoped bytes once.
     pub fn readActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
         try self.check();
@@ -409,7 +452,6 @@ pub const MessageInput = struct {
     session: []const u8,
     text_path: []const u8,
     text: ?[]const u8 = null,
-    skill: ?[]const u8 = null,
     configuration: ?ConfigureInput = null,
     // The full sending address from the tool process, retained for recovery.
     sender: ?Address = null,
@@ -1348,7 +1390,6 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         require_model: ?bool = null,
         archived: bool = true,
         reload_skills: ?bool = null,
-        skill: ?protocol_reply.JsonString(64) = null,
         sender: ?protocol_reply.JsonAddress = null,
         sender_handle: ?protocol_reply.JsonString(32) = null,
         text: ?struct { state: protocol_reply.JsonString(8), value: CapturedText } = null,
@@ -1380,10 +1421,6 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         },
         .message => blk: {
             if (fields.sender) |sender| _ = sender.address() catch return error.InvalidRequestRecord;
-            if (fields.skill) |name| {
-                if (name.slice().len == 0 or fields.text != null or fields.configuration != null) return error.InvalidRequestRecord;
-                break :blk .{ .message = .{ .bytes = 0, .digest = protocol.contentDigest(""), .invokes_skill = true } };
-            }
             const text = fields.text orelse return error.InvalidRequestRecord;
             if (!text.state.eql("value")) return error.InvalidRequestRecord;
             if (fields.configuration != null and saved.session.len != 0) return error.InvalidRequestRecord;
@@ -1405,7 +1442,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     if ((kind != .configure and kind != .message and fields.configuration != null) or
         (fields.require_model != null and !(kind == .configure or kind == .message and fields.configuration != null)) or
         (kind != .configure and fields.reload_skills != null) or
-        (kind != .message and (fields.skill != null or fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
+        (kind != .message and (fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
         (kind != .permission_decision and (fields.action != null or fields.decision != null))) return error.InvalidRequestRecord;
     return .{ .saved = saved, .target = target };
 }
@@ -1537,10 +1574,6 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
         // either variable payload. Inspection never scans Message content.
         try capture.writeRequest(protocol.message_request.configuration, .{});
         try capture.writeConfiguration(configuration);
-    }
-    if (input.skill) |name| {
-        try capture.writeRequest(protocol.message_request.skill, .{name});
-        return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .message);
     }
     try capture.writeRequest(protocol.message_request.text, .{});
     if (input.text) |value| {
@@ -2489,7 +2522,7 @@ test "upgrade Host observation headers preserve strict framing and profile ident
             defer std.testing.allocator.free(bad);
             try std.testing.expectError(error.InvalidResponse, parseResponseHeadForProfile(bad, profile));
         }
-        for ([_][]const u8{ "8", "11", "09", "unknown", "" }) |wire| {
+        for ([_][]const u8{ "8", protocol.next_wire_version, "09", "unknown", "" }) |wire| {
             const field = try std.fmt.allocPrint(std.testing.allocator, "X-Rui-Wire-Version: {s}", .{wire});
             defer std.testing.allocator.free(field);
             const bad = try std.mem.replaceOwned(u8, std.testing.allocator, good, if (profile == .released_9) legacy_field else "X-Rui-Wire-Version: " ++ protocol.wire_version, field);
@@ -3751,6 +3784,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
     const token = @as([protocol.SinceToken.max_bytes]u8, @splat('9'));
     const observation_token = @as([protocol_reply.SessionToken.max_bytes]u8, @splat(1));
     const reference = @as([protocol.session_id_bytes]u8, @splat(1));
+    const skill_prefix = @as([64]u8, @splat(1));
     const id: u64 = std.math.maxInt(u64);
     const optional_id: ?u64 = std.math.maxInt(u64);
     const Direction = @FieldType(protocol.ActivityPage, "direction");
@@ -3773,6 +3807,8 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.activity_page_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id }, comptime protocol.shapeBytes(protocol.activity_page_request) },
         .{ protocol.activity_page_since_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id, @as(?[]const u8, &observation_token) }, protocol.max_activity_page_request_bytes },
         .{ protocol.activity_content_request, .{ &store, &session, id, id }, protocol.max_activity_content_request_bytes },
+        .{ protocol.skill_suggestions_session_request, .{ &store, &session, &skill_prefix }, comptime protocol.shapeBytes(protocol.skill_suggestions_session_request) },
+        .{ protocol.skill_suggestions_workspace_request, .{ &store, &workspace, &skill_prefix }, comptime protocol.shapeBytes(protocol.skill_suggestions_workspace_request) },
         .{ protocol.model_list_request, .{&store}, protocol.max_model_list_request_bytes },
     };
     var largest: usize = 0;
@@ -4704,29 +4740,47 @@ test "archive recovery preserves the protocol default and refuses ambiguous or m
     }
 }
 
-test "skills typed captures preserve invocation and invalid mixed reload intent" {
+test "skills typed captures preserve reload intent" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.setPermissions(io, .fromMode(0o700));
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
-    var captured = try captureMessage(io, .{ .store = root, .session = "k7m2qx", .text_path = "not-read", .skill = "demo" }, .{ .generated = root }).get();
-    defer captured.close(io);
-    const binding = try readCapturedBinding(io, &captured.file);
-    try std.testing.expect(binding.target.message.invokes_skill);
     var bytes: [4096]u8 = undefined;
-    var length = try captured.file.readPositionalAll(io, &bytes, 0);
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
-    defer parsed.deinit();
-    try std.testing.expectEqualStrings("demo", parsed.value.object.get("skill").?.string);
-    try std.testing.expect(parsed.value.object.get("text") == null);
     var reload = try captureConfigure(io, .{ .store = root, .session = .{ .named = "k7m2qx" }, .reload_skills = true, .require_model = true }, .{ .generated = root }).get();
     defer reload.close(io);
     _ = try readCapturedBinding(io, &reload.file);
-    length = try reload.file.readPositionalAll(io, &bytes, 0);
-    parsed.deinit();
-    parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
+    const length = try reload.file.readPositionalAll(io, &bytes, 0);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
+    defer parsed.deinit();
     try std.testing.expect(parsed.value.object.get("reload_skills").?.bool);
     try std.testing.expect(parsed.value.object.get("require_model").?.bool);
+}
+
+test "inline skills native suggestion read rejects invalid scope before Store discovery" {
+    const requests: Requests = .{ .io = std.testing.io };
+    try std.testing.expectError(error.InvalidSession, requests.skillSuggestions(std.testing.allocator, "/never-open", .{ .session = "invalid" }, ""));
+    try std.testing.expectError(error.InvalidWorkspace, requests.skillSuggestions(std.testing.allocator, "/never-open", .{ .workspace = "" }, ""));
+    try std.testing.expectError(error.InvalidPrefix, requests.skillSuggestions(std.testing.allocator, "/never-open", .{ .session = "k7m2qx" }, &@as([65]u8, @splat('x'))));
+}
+
+test "inline skills Message records keep /name words as exact text and refuse a skills field" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(std.testing.io, .fromMode(0o700));
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    const text = "/demo look at /tmp/etc 雪";
+    var captured = try captureMessage(std.testing.io, .{ .store = root, .session = "k7m2qx", .text_path = "unused", .text = text }, .{ .generated = root }).get();
+    defer captured.close(std.testing.io);
+    const binding = try readCapturedBinding(std.testing.io, &captured.file);
+    try std.testing.expectEqual(@as(u64, text.len), binding.target.message.bytes);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &binding.target.message.digest);
+    // A hand-written record listing skills beside the text is not a Message.
+    const listed = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"/s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"skills\":[\"demo\"],\"text\":{\"state\":\"value\",\"value\":\"x\"}}";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "listed.json", .data = listed });
+    var file = try tmp.dir.openFile(std.testing.io, "listed.json", .{});
+    defer file.close(std.testing.io);
+    try std.testing.expectError(error.InvalidRequestRecord, readCapturedBinding(std.testing.io, &file));
 }

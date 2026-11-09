@@ -888,7 +888,9 @@ pub const Preparation = struct {
                 const anchor = (try self.view.coverage()).anchor;
                 const covered = if (anchor) |position| entry.position < position else false;
                 switch (entry.kind) {
-                    .user, .instruction => {
+                    // A skill a Message bound reads as its own user message
+                    // right after it, as Codex sends one.
+                    .user, .instruction, .skill => {
                         var handles: u8 = 0;
                         if (entry.content) |content| {
                             self.handles[0] = .{ .content = content };
@@ -901,7 +903,7 @@ pub const Preparation = struct {
                             self.handles[1] = .sender;
                             handles |= 0b10;
                         }
-                        return self.loadItemHeader(.{ .message = if (entry.kind == .user) .user else .instruction }, handles);
+                        return self.loadItemHeader(.{ .message = if (entry.kind == .instruction) .instruction else .user }, handles);
                     },
                     .tool_results => self.state.stage = if (covered) .covered_tool_results else .tool_results,
                     // A compaction base covers the boundaries before its
@@ -4706,15 +4708,20 @@ test "skills native conversation is append-only across invoke reload replay and 
     defer std.testing.allocator.free(initial_report);
     try std.testing.expect(std.mem.indexOf(u8, initial_report, "\"turn\":null") != null);
 
-    var invoke: wire_request.MessageCommand = .{ .session = session, .skill = .{} };
+    // A user Message that is only the skill's `/name` word.
+    const typed = "/demo";
+    var invoke: wire_request.MessageCommand = .{ .session = session, .text = .{ .state = .value, .borrowed = typed.ptr, .length = typed.len, .digest = protocol.contentDigest(typed) } };
     try invoke.key.set("skills-user-invoke");
-    try invoke.skill.?.set("demo");
-    const captured = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .invoke, .name = invoke.skill }, null);
+    var demo: protocol.Bounded(64) = .{};
+    try demo.set("demo");
+    const captured = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .invoke, .name = demo }, null);
     try std.testing.expect(captured == .invocation);
     try std.testing.expect(std.mem.endsWith(u8, captured.invocation, raw));
-    const admitted_message = setup.storage.submitMessageCapturedSkills(&invoke, null, null, &captured, .{});
+    const prepared = try skill_owner.prepareMessage(arena, std.testing.allocator, std.testing.io, &setup.storage, &invoke, null);
+    const admitted_message = setup.storage.submitMessageCapturedSkills(&invoke, null, null, &prepared.captured.?, .{});
     try std.testing.expect(admitted_message == .accepted);
-    try std.testing.expectEqual(captured.invocation.len, admitted_message.accepted.content.length);
+    // The receipt names the text as typed; the model reads the skill after it.
+    try std.testing.expectEqual(@as(u64, typed.len), admitted_message.accepted.content.length);
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     var binding = try admitted.permit.consume();
     var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
@@ -4725,12 +4732,15 @@ test "skills native conversation is append-only across invoke reload replay and 
     defer std.testing.allocator.free(first.bytes);
     const first_parsed = try std.json.parseFromSlice(std.json.Value, arena, first.bytes, .{});
     try std.testing.expect(std.mem.indexOf(u8, first_parsed.value.object.get("instructions").?.string, "initial-demo-desc") == null);
-    var exact_user = false;
+    // The typed text, then the skill as its own user message, nothing between.
+    var users: std.ArrayList([]const u8) = .empty;
     for (first_parsed.value.object.get("input").?.array.items) |item| {
         const role = item.object.get("role") orelse continue;
-        if (std.mem.eql(u8, role.string, "user")) exact_user = std.mem.eql(u8, item.object.get("content").?.array.items[0].object.get("text").?.string, captured.invocation);
+        if (std.mem.eql(u8, role.string, "user")) try users.append(arena, item.object.get("content").?.array.items[0].object.get("text").?.string);
     }
-    try std.testing.expect(exact_user);
+    try std.testing.expectEqual(@as(usize, 2), users.items.len);
+    try std.testing.expectEqualStrings(typed, users.items[0]);
+    try std.testing.expectEqualStrings(captured.invocation, users.items[1]);
 
     const current_raw = "---\r\nname: demo\r\ndescription: initial-demo-desc\r\n---\r\nnew current body 雪\r\n";
     try writeSkillForTesting(&setup, ".agents/skills/demo/SKILL.md", current_raw);
@@ -4742,7 +4752,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     });
     const action = (try setup.storage.nextCoreWork()).?.action;
     try std.testing.expectEqual(@TypeOf(action.tool).skill, action.tool);
-    const current = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .invoke, .name = invoke.skill }, null);
+    const current = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .invoke, .name = demo }, null);
     try std.testing.expect(std.mem.endsWith(u8, current.invocation, current_raw));
     try std.testing.expect(try setup.storage.settleSkillTool(action.binding, arena, &current, .{}));
     admitted = (try setup.storage.admitNextModelAttempt(.{})).?;

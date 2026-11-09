@@ -252,8 +252,6 @@ fn MessageCommandOf(comptime Custody: type) type {
         sender: ?Address = null,
         sender_handle: ?Bounded(max_sender_handle_bytes) = null,
         text: ContentField = .{},
-        /// Explicit skill invocation, alternative to caller text.
-        skill: ?Bounded(64) = null,
         // Non-null means create a fresh Session and admit this first Message in
         // one transaction. The requested Session must then be empty. Initial
         // configuration cannot supply instruction or schema content values.
@@ -276,10 +274,7 @@ fn MessageCommandOf(comptime Custody: type) type {
             }
             hash.update(&.{@intFromBool(self.sender_handle != null)});
             if (self.sender_handle) |handle| hashField(&hash, handle.slice());
-            if (self.skill) |name| {
-                hashField(&hash, "skill-invocation/v1");
-                hashField(&hash, name.slice());
-            } else hashContent(&hash, &self.text);
+            hashContent(&hash, &self.text);
             if (self.configuration) |*configuration| {
                 // The creation's own digest covers its capability condition.
                 hashField(&hash, "initial-configuration");
