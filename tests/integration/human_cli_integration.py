@@ -2597,6 +2597,9 @@ def persistent_input_cases():
         os.write(master, b"original before capture failure\n")
         failed = read_terminal(master, "Not confirmed")
         assert "Original reserved request" not in failed, failed
+        # Nothing was saved, so Esc keeps the only copy of the original.
+        os.write(master, b"\x1b")
+        failed += read_terminal(master, "Esc returns to the overview once Ctrl-R retries the original.")
         # Diagnostics run with canonical input restored. Their final line is
         # not readiness: the next raw-entry flush follows it. Await the resumed
         # composer under the same response budget before typing the next draft.

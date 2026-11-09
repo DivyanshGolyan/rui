@@ -1348,7 +1348,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
             screen.moveRow(.selector);
             if (action == .close and self.settledView()) {
                 const original: ?Submission.State = if (self.submission.view()) |submission| submission.state else null;
-                switch (session_notice.close(original, self.input.composition().bytes.len == 0)) {
+                switch (session_notice.close(original, self.submission.published(), self.input.composition().bytes.len == 0)) {
                     .leave => {
                         self.leaving = .returned;
                         return;
@@ -3085,16 +3085,19 @@ test "Esc at the latest view returns to the overview unless unsent text or a cho
     // resolves it; a saved one, rejected or not, lets it go.
     self.submission.intent = .{ .decision = .{ .action = 1, .decision = .deny } };
     defer self.submission.intent = null;
-    for ([_]struct { Submission.State, ?[]const u8 }{
-        .{ .not_started, "Esc returns to the overview once Ctrl-R retries the original." },
-        .{ .rejected, null },
-        .{ .unconfirmed, null },
+    for ([_]struct { Submission.State, Submission.Publication, ?[]const u8 }{
+        .{ .not_started, .not_sent, "Esc returns to the overview once Ctrl-R retries the original." },
+        .{ .rejected, .published, null },
+        // A capture that failed before publishing may have saved nothing.
+        .{ .unconfirmed, .unknown, "Esc returns to the overview once Ctrl-R retries the original." },
+        .{ .unconfirmed, .published, null },
     }) |case| {
         self.submission.state = case[0];
+        self.submission.publication = case[1];
         self.notice = null;
         self.leaving = null;
         try sendKeys(self, "\x07");
-        if (case[1]) |why| {
+        if (case[2]) |why| {
             try std.testing.expect(self.leaving == null);
             try std.testing.expectEqualStrings(why, self.notice.?);
         } else try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
@@ -3102,6 +3105,7 @@ test "Esc at the latest view returns to the overview unless unsent text or a cho
     self.leaving = null;
     self.submission.intent = null;
     self.submission.state = .not_started;
+    self.submission.publication = .not_sent;
     // A running command keeps the conversation open.
     self.inspection.command_running = true;
     try sendKeys(self, "\x07");
