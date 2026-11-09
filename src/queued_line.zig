@@ -55,6 +55,46 @@ const mark = "› ";
 pub const text_capacity = mark.len + session_line.max_line_bytes + session_line.ellipsis.len;
 pub const label_capacity = std.fmt.count("{d} queued", .{std.math.maxInt(u64)});
 
+/// The waiting mark the Session's activity tail and the overview share.
+pub const waiting_mark = "◌";
+pub const waiting_capacity = waiting_mark.len + std.fmt.count(" {d} ·", .{std.math.maxInt(u64)}) + 1 + session_line.max_line_bytes + session_line.ellipsis.len;
+
+/// The activity tail's waiting row: `◌ also update docs …`, and with more
+/// than one waiting, `◌ 3 · also update docs …`, the newest Message cut to
+/// `width` cells. The mark says it waits its turn; there is no word.
+pub fn waitingRow(buffer: *[waiting_capacity]u8, line: []const u8, count: u64, width: usize, method: Method) []const u8 {
+    std.debug.assert(count != 0 and line.len <= session_line.max_line_bytes);
+    var out = std.Io.Writer.fixed(buffer);
+    out.writeAll(waiting_mark) catch unreachable;
+    if (count > 1) out.print(" {d} ·", .{count}) catch unreachable;
+    const head = session_line.cells(out.buffered(), method) + 1;
+    if (head >= width) return out.buffered();
+    out.writeByte(' ') catch unreachable;
+    const room = width - head;
+    if (session_line.cells(line, method) <= room) {
+        out.writeAll(line) catch unreachable;
+    } else {
+        const kept = session_line.fit(line, room -| session_line.cells(session_line.ellipsis, method), method);
+        out.writeAll(line[0..kept.len]) catch unreachable;
+        out.writeAll(session_line.ellipsis) catch unreachable;
+    }
+    return out.buffered();
+}
+
+test "the waiting row marks the newest Message and counts the rest, cut to the row" {
+    var buffer: [waiting_capacity]u8 = undefined;
+    try std.testing.expectEqualStrings("◌ also update docs/using-rui.md", waitingRow(&buffer, "also update docs/using-rui.md", 1, 80, .unicode));
+    try std.testing.expectEqualStrings("◌ 3 · also update docs/using-rui.md", waitingRow(&buffer, "also update docs/using-rui.md", 3, 80, .unicode));
+    // Cut to 12 cells: "◌ " takes 2, the words 9, the ellipsis 1.
+    try std.testing.expectEqualStrings("◌ also upda…", waitingRow(&buffer, "also update docs", 1, 12, .unicode));
+    try std.testing.expectEqualStrings("◌ 12 · a…", waitingRow(&buffer, "also", 12, 9, .unicode));
+    // Wide clusters are never split.
+    try std.testing.expectEqualStrings("◌ 日本…", waitingRow(&buffer, "日本語です", 1, 8, .unicode));
+    // Too narrow for any words: the mark and count alone.
+    try std.testing.expectEqualStrings("◌ 3 ·", waitingRow(&buffer, "also", 3, 5, .unicode));
+    try std.testing.expectEqualStrings("◌", waitingRow(&buffer, "also", 1, 1, .unicode));
+}
+
 /// Fits the row to `width` cells. The label always shows, shortened to
 /// `queued` when the count does not fit; the Message keeps one cell before
 /// it and shows only when its mark and one more cell fit.
