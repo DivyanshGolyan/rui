@@ -2656,7 +2656,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
         } };
         defer if (slot == .model_authenticating) request.deinit(io, host.scratch_budget.?);
         var reactor: provider.Reactor = undefined;
-        worker.state = .requested;
+        worker.state = .{ .requested = .acquire };
         try std.testing.expect(!advanceAuthentication(&host, &reactor, &slot, &request));
         try std.testing.expect(slot == .model_authenticating);
         try std.testing.expectEqual(@as(u64, 4), host.scratch_used.load(.acquire));
@@ -2664,10 +2664,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
         if (ready) {
             try credentials.leaseInto(path, &worker.credential, &worker.work.credentials);
             worker.state = .ready;
-        } else {
-            worker.failure = error.AuthenticationFailed;
-            worker.state = .failed;
-        }
+        } else worker.state = .{ .failed = error.AuthenticationFailed };
         try std.testing.expect(advanceAuthentication(&host, &reactor, &slot, &request));
         try std.testing.expect(slot == .free);
         try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
@@ -2678,6 +2675,65 @@ test "authentication handoff borrows the sole credential lease and releases it o
         try std.testing.expect(!host.custody.claimTerminalDelivery(token));
         try host.custody.releaseUnused(reused);
     }
+}
+
+test "authentication worker answers each job with that job's result" {
+    const credentials = @import("codex_credentials.zig");
+    const codex_auth = @import("codex_auth.zig");
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(io, "private", .{ .permissions = .fromMode(0o700) });
+    private.close(io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/private/codex.json", .{root[0..root_len]});
+    var record: credentials.Record = .{
+        .generation = 0,
+        .account_id = .{},
+        .id_token = .{},
+        .access_token = .{},
+        .refresh_token = .{},
+        .expires_at = 4_102_444_800,
+        .refreshed_at = 100,
+    };
+    try record.account_id.set(codex_auth.fixture_account_id);
+    try record.id_token.set(codex_auth.fixture_id_token);
+    try record.access_token.set(codex_auth.fixture_access_token);
+    try record.refresh_token.set("synthetic-refresh");
+    var worker = AuthWorker{ .io = io, .authentication = .{ .path = path, .fixture = true } };
+    try credentials.install(path, &record, null, &worker.work.credentials);
+    const thread = try std.Thread.spawn(.{}, AuthWorker.run, .{&worker});
+    defer worker.stop(thread);
+    const answered = struct {
+        fn check(target: *AuthWorker) bool {
+            target.mutex.lockUncancelable(target.io);
+            defer target.mutex.unlock(target.io);
+            return target.state != .requested;
+        }
+    }.check;
+
+    worker.request();
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
+    try std.testing.expect(worker.take().?.ready == &worker.credential);
+    try std.testing.expectEqualStrings("synthetic-refresh", worker.credential.record.refresh_token.slice());
+    worker.finish();
+    // The installed generation 1 refreshes; the same stale generation then
+    // finds it replaced; a missing file fails. Each answer is taken once.
+    worker.requestRefresh(1);
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
+    try std.testing.expect(worker.take().?.refreshed);
+    try std.testing.expect(worker.take() == null);
+    worker.requestRefresh(1);
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
+    try std.testing.expect(!worker.take().?.refreshed);
+    try tmp.dir.deleteFile(io, "private/codex.json");
+    worker.requestRefresh(2);
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
+    try std.testing.expectEqual(error.FileNotFound, worker.take().?.failed);
+    try std.testing.expect(worker.take() == null);
+    try std.testing.expect(worker.idle());
 }
 
 test "HTTP error capture retires before execution custody" {
