@@ -269,13 +269,36 @@ def probe_status():
     victim.kill()
     killed = victim.wait(5)
     isig = bool(termios.tcgetattr(slave)[3] & termios.ISIG)
-    sleeper = spawn(["sleep", "30"], **streams)
-    os.write(master, b"\x03")
+
+    def ctrl_c(**options):
+        sleeper = spawn(["sleep", "30"], **streams, **options)
+        os.write(master, b"\x03")
+        try:
+            return sleeper, sleeper.wait(2)
+        except subprocess.TimeoutExpired:
+            sleeper.kill()
+            sleeper.wait(5)
+            return sleeper, "still running"
+
+    # The command inherits an ignored SIGINT as a Popen child does, unless the
+    # fixture resets it. Pin the fixture's disposition so the run doesn't
+    # depend on what started the probe.
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
-        interrupted = sleeper.wait(5)
-    except subprocess.TimeoutExpired:
-        sleeper.kill()
-        interrupted = "timeout"
+        _, inherited = ctrl_c()
+        sleeper, interrupted = ctrl_c(default_signals=(signal.SIGINT,))
+        control = subprocess.Popen(["sleep", "30"], stdin=slave, stdout=slave, stderr=slave)
+        control.send_signal(signal.SIGINT)
+        try:
+            popen_ignored = control.wait(2)
+        except subprocess.TimeoutExpired:
+            control.kill()
+            control.wait()
+            popen_ignored = "still running"
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        _, default_interrupted = ctrl_c()
+    finally:
+        signal.signal(signal.SIGINT, previous)
     leader = sleeper.leader
     leader_alive = leader.process.poll() is None
     after = spawn(PY + ["pass"], **streams).wait(5)
@@ -287,10 +310,13 @@ def probe_status():
         ("exit 3 -> 3", exit3 == 3),
         ("SIGKILL -> -9", killed == -signal.SIGKILL),
         ("ISIG on", isig),
-        ("^C -> -2", interrupted == -signal.SIGINT),
+        ("^C -> -2 (SIGINT reset by default_signals)", interrupted == -signal.SIGINT),
+        ("^C -> -2 (fixture SIGINT at default)", default_interrupted == -signal.SIGINT),
+        ("ignored SIGINT inherited, as Popen does", inherited == popen_ignored == "still running"),
         ("leader untouched", leader_alive),
         ("leader still runs commands", after == 0),
-    ], {"exit3": exit3, "killed": killed, "isig": isig, "ctrl_c": interrupted,
+    ], {"exit3": exit3, "killed": killed, "isig": isig, "ctrl_c": interrupted, "ctrl_c_fixture_default": default_interrupted,
+        "ctrl_c_fixture_ignores": inherited, "popen_control_fixture_ignores": popen_ignored,
         "leader_alive_after_ctrl_c": leader_alive, "next_command": after, "fixture_pid": os.getpid()})
 
 
