@@ -6,7 +6,9 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const viewport = @import("ConversationViewport.zig");
+const selecting = @import("transcript_selection.zig");
 const TerminalText = @import("TerminalText.zig");
+const Spot = selecting.Spot;
 const Self = @This();
 
 document: *const viewport.Document,
@@ -42,23 +44,6 @@ pub const Handler = struct {
     on_click: ?*const fn (*anyopaque, *vxfw.EventContext, viewport.Position) anyerror!void = null,
 };
 
-/// A cell's place in the retained text, in absolute offsets (the document's
-/// origin plus the byte), so scrolling and eviction mid-drag never move it.
-/// A cell showing text spans its cluster; any other cell is the point
-/// between the text before and after it.
-const Spot = struct {
-    start: u64,
-    end: u64,
-
-    fn point(at: u64) Spot {
-        return .{ .start = at, .end = at };
-    }
-
-    fn within(self: Spot, from: u64, to: u64) bool {
-        return if (self.start == self.end) from <= self.start and self.start < to else self.start < to and self.end > from;
-    }
-};
-
 pub const Selection = struct {
     press: Point,
     anchor: Spot,
@@ -67,14 +52,6 @@ pub const Selection = struct {
     dragging: bool = false,
     edge: enum { none, up, down } = .none,
     ticking: bool = false,
-
-    fn from(self: Selection) u64 {
-        return @min(self.anchor.start, self.head.start);
-    }
-
-    fn to(self: Selection) u64 {
-        return @max(self.anchor.end, self.head.end);
-    }
 };
 
 /// A cell in this widget's coordinates; a forwarded drag may be outside it.
@@ -158,11 +135,9 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) anyerror!void
             const selection = self.selection orelse return;
             self.selection = null;
             ctx.consumeAndRedraw();
-            if (selection.dragging) return self.copy(ctx, handler, selection);
+            if (selection.dragging) return copy(ctx, handler, try selecting.copy(ctx.alloc, self.document, .of(selection.anchor, selection.head)));
             if (!std.meta.eql(at, selection.press)) return;
-            if (self.relative(selection.anchor.start)) |offset| {
-                if (selection.anchor.start != selection.anchor.end) if (self.document.sessionAt(offset)) |id| return handler.on_open(handler.userdata, ctx, id);
-            }
+            if (selecting.opens(self.document, selection.anchor)) |id| return handler.on_open(handler.userdata, ctx, id);
             const clicked = handler.on_click orelse return;
             if (at.row >= 0) if (self.rowPosition(self.laidFirst(), @intCast(at.row))) |position| try clicked(handler.userdata, ctx, position);
         },
@@ -170,79 +145,13 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) anyerror!void
     }
 }
 
-/// Copies the selection once and says what happened. An empty selection
-/// copies nothing and says nothing.
-fn copy(self: *Self, ctx: *vxfw.EventContext, handler: Handler, selection: Selection) !void {
-    const text_length = self.document.text().len;
-    const from = self.relative(selection.from()) orelse 0;
-    const to = self.relative(selection.to()) orelse text_length;
-    if (from >= to) return;
-    const text = try self.document.shownText(ctx.alloc, from, to, TerminalText.clipboard_limit) orelse
-        return handler.on_notice(handler.userdata, ctx, "Too large for the clipboard · /copy file");
-    if (text.len == 0) return ctx.alloc.free(text);
-    var lines: usize = 1 + std.mem.count(u8, text, "\n");
-    if (text[text.len - 1] == '\n') lines -= 1;
+/// Sends what a release copies, once, and says what happened.
+fn copy(ctx: *vxfw.EventContext, handler: Handler, result: selecting.Copy) !void {
     // App frees the command's bytes once written.
-    try ctx.addCmd(.{ .copy_to_clipboard = text });
+    if (result == .text) try ctx.addCmd(.{ .copy_to_clipboard = result.text.bytes });
     var buffer: [64]u8 = undefined;
-    try handler.on_notice(handler.userdata, ctx, std.fmt.bufPrint(&buffer, "Copied {d} line{s}", .{ lines, if (lines == 1) "" else "s" }) catch unreachable);
+    if (selecting.notice(result, &buffer)) |text| try handler.on_notice(handler.userdata, ctx, text);
 }
-
-/// An absolute offset in the current text, or null once it has left it.
-fn relative(self: *const Self, at: u64) ?usize {
-    const origin = self.document.origin;
-    if (at < origin) return null;
-    const offset = at - origin;
-    return if (offset <= self.document.text().len) @intCast(offset) else null;
-}
-
-/// Where a cell's cluster starts in the current text, as an absolute
-/// offset, or null for a cell that shows no body text: blank, indent,
-/// margin time, `…` or `┆`. Cells come from laying out the current text.
-fn source(self: *const Self, cell: vaxis.Cell) ?u64 {
-    const address = @intFromPtr(cell.char.grapheme.ptr);
-    const base = @intFromPtr(&self.document.bytes);
-    if (cell.char.grapheme.len == 0 or address < base or address >= base + self.document.text().len) return null;
-    const offset = address - base;
-    if (!self.document.selectable(offset)) return null;
-    return self.document.origin + offset;
-}
-
-/// Each cell's spot along one laid-out row, left to right.
-const RowSpots = struct {
-    transcript: *const Self,
-    cells: []const vaxis.Cell,
-    /// The spot of cells before any text, and after the last.
-    boundary: ?u64,
-    covered: usize = 0,
-    cover: Spot = undefined,
-    column: usize = 0,
-
-    fn init(transcript: *const Self, cells: []const vaxis.Cell) RowSpots {
-        var spots: RowSpots = .{ .transcript = transcript, .cells = cells, .boundary = null };
-        for (cells) |cell| {
-            if (transcript.source(cell)) |at| {
-                spots.boundary = at;
-                break;
-            }
-        }
-        return spots;
-    }
-
-    fn next(self: *RowSpots) ?Spot {
-        if (self.column == self.cells.len) return null;
-        defer self.column += 1;
-        const cell = self.cells[self.column];
-        if (self.transcript.source(cell)) |at| {
-            self.cover = .{ .start = at, .end = at + cell.char.grapheme.len };
-            self.covered = self.column + @max(cell.char.width, 1);
-            self.boundary = self.cover.end;
-            return self.cover;
-        }
-        if (self.column < self.covered) return self.cover;
-        return Spot.point(self.boundary orelse return null);
-    }
-};
 
 fn layout(self: *const Self) viewport.Layout {
     return .{ .width = self.drawn.width, .method = self.method };
@@ -251,7 +160,7 @@ fn layout(self: *const Self) viewport.Layout {
 /// The first row the last draw showed, in the current text. Once its line
 /// has been evicted the text's first row stands in.
 fn laidFirst(self: *const Self) viewport.Position {
-    const offset = self.relative(self.drawn.line) orelse return .{};
+    const offset = selecting.relative(self.document, self.drawn.line) orelse return .{};
     return self.document.clamp(self.layout(), .{ .offset = offset, .row = self.drawn.row });
 }
 
@@ -263,19 +172,9 @@ fn rowPosition(self: *const Self, first: viewport.Position, row: u16) ?viewport.
     return self.document.down(self.layout(), first, row);
 }
 
-/// The spot under column `col` of a laid-out row at `line`.
-fn spotIn(self: *const Self, cells: []const vaxis.Cell, line: ?viewport.Position, col: i32) Spot {
-    const position = line orelse return Spot.point(self.document.origin + self.document.text().len);
-    var spots: RowSpots = .init(self, cells);
-    const boundary = spots.boundary orelse return Spot.point(self.document.origin + position.offset);
-    var column: i32 = 0;
-    var spot: Spot = Spot.point(boundary);
-    while (spots.next()) |value| : (column += 1) {
-        spot = value;
-        if (column >= col) return spot;
-    }
-    // Past the row's last cell: after its text.
-    return Spot.point(spot.end);
+/// Row `row` of cells laid out from `first`, for the selection core.
+fn rowAt(self: *const Self, cells: []const vaxis.Cell, first: viewport.Position, index: u16) selecting.Row {
+    return .{ .document = self.document, .cells = cells, .line = if (self.rowPosition(first, index)) |position| position.offset else null };
 }
 
 /// The spot under a pointer, laying out its row from the retained text at
@@ -283,18 +182,18 @@ fn spotIn(self: *const Self, cells: []const vaxis.Cell, line: ?viewport.Position
 /// first row's start or the last row's end.
 fn spotAt(self: *const Self, gpa: std.mem.Allocator, at: Point) !Spot {
     const last_row: i32 = self.drawn.height - 1;
-    const row: u16 = @intCast(std.math.clamp(at.row, 0, last_row));
+    const index: u16 = @intCast(std.math.clamp(at.row, 0, last_row));
     const col: i32 = if (at.row < 0) 0 else if (at.row > last_row) self.drawn.width else at.col;
-    const line = self.rowPosition(self.laidFirst(), row);
+    const first = self.laidFirst();
     const cells = try gpa.alloc(vaxis.Cell, self.drawn.width);
     defer gpa.free(cells);
     @memset(cells, .{});
-    if (line) |position| {
+    if (self.rowPosition(first, index)) |position| {
         var screen: vaxis.Screen = .{ .width = self.drawn.width, .height = 1, .width_method = self.method, .buf = cells };
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.width, .height = 1, .screen = &screen };
         _ = self.document.draw(window, position, true, false, .{});
     }
-    return self.spotIn(cells, line, col);
+    return self.rowAt(cells, first, index).spot(col);
 }
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -347,18 +246,16 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         // Held at an edge, the selection follows the rows scrolled in.
         switch (selection.edge) {
             .none => {},
-            .up => selection.head = self.spotIn(surface.buffer[0..width], self.rowPosition(self.first, 0), 0),
-            .down => selection.head = self.spotIn(surface.buffer[(height - 1) * width ..][0..width], self.rowPosition(self.first, height - 1), width),
+            .up => selection.head = self.rowAt(surface.buffer[0..width], self.first, 0).spot(0),
+            .down => selection.head = self.rowAt(surface.buffer[(height - 1) * width ..][0..width], self.first, height - 1).spot(width),
         }
-        const from = selection.from();
-        const to = selection.to();
-        for (0..height) |row| {
-            const cells = surface.buffer[row * width ..][0..width];
-            const line = self.rowPosition(self.first, @intCast(row));
-            var spots: RowSpots = .init(self, cells);
-            if (spots.boundary == null) spots.boundary = if (line) |position| self.document.origin + position.offset else self.document.origin + self.document.text().len;
-            for (cells) |*cell| {
-                if (spots.next().?.within(from, to)) cell.style.reverse = true;
+        const range: selecting.Range = .of(selection.anchor, selection.head);
+        const columns = try ctx.arena.alloc(bool, width);
+        for (0..height) |index| {
+            const cells = surface.buffer[index * width ..][0..width];
+            self.rowAt(cells, self.first, @intCast(index)).covered(range, columns);
+            for (cells, columns) |*cell, selected| {
+                if (selected) cell.style.reverse = true;
             }
         }
     };
@@ -598,26 +495,6 @@ test "a drag held at an edge scrolls one row a tick and selects the rows it brin
     try h.send(.release, 3, 5);
     try std.testing.expectEqual(@as(i32, -1), h.scrolls);
     try std.testing.expectEqualStrings("line 3\nline 4\nline 5", h.copies(&copied));
-}
-
-test "a drag past the clipboard limit copies nothing and says why" {
-    const gpa = std.testing.allocator;
-    const line = @as([99]u8, @splat('x')) ++ "\n";
-    const text = try gpa.alloc(u8, line.len * (TerminalText.clipboard_limit / line.len + 1));
-    defer gpa.free(text);
-    for (0..text.len / line.len) |index| @memcpy(text[index * line.len ..][0..line.len], line);
-    const h = try Harness.init(text, .{ .width = 100, .height = 2 });
-    defer h.deinit();
-    h.transcript.first = .{};
-    _ = try h.frame();
-    try h.drag(.{ 0, 0 }, .{ 0, 1 });
-    // Held at the bottom edge until every row has been selected.
-    h.transcript.selection.?.head = .{ .start = text.len, .end = text.len };
-    h.transcript.selection.?.edge = .none;
-    try h.send(.release, 0, 1);
-    var copied: [8]u8 = undefined;
-    try std.testing.expectEqualStrings("", h.copies(&copied));
-    try std.testing.expectEqualStrings("Too large for the clipboard · /copy file", h.notices.items[0]);
 }
 
 test "a press or drag ends without copying when the pointer leaves or the content is replaced" {
