@@ -1920,29 +1920,29 @@ noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetad
 pub fn validateJsonBytes(bytes: []const u8) !bool {
     var scanner = std.json.Scanner.initCompleteInput(std.heap.c_allocator, bytes);
     defer scanner.deinit();
-    try scanner.ensureTotalStackCapacity(protocol.max_json_depth);
+    try scanner.ensureTotalStackCapacity(@import("../../json_limits.zig").max_depth);
     while (true) {
         const token = scanner.next() catch |err| switch (err) {
             error.SyntaxError, error.UnexpectedEndOfInput => return false,
             else => return err,
         };
-        if (scanner.stackHeight() > protocol.max_json_depth) return false;
+        if (scanner.stackHeight() > @import("../../json_limits.zig").max_depth) return false;
         if (token == .end_of_document) return true;
     }
 }
 
 pub noinline fn validateJsonFile(io: std.Io, file: std.Io.File) !bool {
-    var read_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var read_buffer: [@import("../../conversation_read.zig").content_window_bytes]u8 = undefined;
     var file_reader = file.reader(io, &read_buffer);
     var json_reader = std.json.Reader.init(std.heap.c_allocator, &file_reader.interface);
     defer json_reader.deinit();
-    try json_reader.ensureTotalStackCapacity(protocol.max_json_depth);
+    try json_reader.ensureTotalStackCapacity(@import("../../json_limits.zig").max_depth);
     while (true) {
         const token = json_reader.next() catch |err| switch (err) {
             error.SyntaxError, error.UnexpectedEndOfInput => return false,
             else => return err,
         };
-        if (json_reader.stackHeight() > protocol.max_json_depth) return false;
+        if (json_reader.stackHeight() > @import("../../json_limits.zig").max_depth) return false;
         if (token == .end_of_document) return true;
     }
 }

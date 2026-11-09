@@ -7,6 +7,9 @@ const command_reply = @import("../command_reply.zig");
 const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
 const protocol = @import("../protocol.zig");
+const conversation_read = @import("../conversation_read.zig");
+const session_list = @import("../session_list.zig");
+const activity_read = @import("../activity_read.zig");
 const tool_proposal = @import("../tool_proposal.zig");
 const workspace_path = @import("../workspace_path.zig");
 const store_path = @import("../store_path.zig");
@@ -834,7 +837,7 @@ pub const Store = struct {
 
     /// Tokens cover follow polling after the unpinned forward page is drained,
     /// not another slice of a bounded, backward or intra-position traversal.
-    fn activitySince(request: *const protocol.ActivityPage) ?change_ring.SessionToken {
+    fn activitySince(request: *const activity_read.ActivityPage) ?change_ring.SessionToken {
         if (request.direction != .forward or request.end != null or request.ordinal != null) return null;
         return sessionSince(request.session.slice(), request.since);
     }
@@ -895,11 +898,11 @@ pub const Store = struct {
     // group's final acceptance position. No transaction survives this call.
     // The fixed end is the last committed position at the first read, not a
     // count of visible rows; a private-only append cannot become public later.
-    pub fn publicConversationPage(self: *Store, request: *const protocol.ConversationPage, out: *PublicConversationPage) !void {
+    pub fn publicConversationPage(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage) !void {
         return self.queue().run(publicConversationPageHeld, .{ self, request, out });
     }
 
-    fn publicConversationPageHeld(self: *Store, request: *const protocol.ConversationPage, out: *PublicConversationPage) !void {
+    fn publicConversationPageHeld(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -909,11 +912,11 @@ pub const Store = struct {
 
     // Resolve the public identity again, rather than accepting a global digest:
     // another Session's content or private provider material is not authority.
-    pub fn openPublicConversationContent(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
+    pub fn openPublicConversationContent(self: *Store, request: *const conversation_read.ConversationContent) !ContentLocation {
         return self.queue().run(openPublicConversationContentHeld, .{ self, request });
     }
 
-    fn openPublicConversationContentHeld(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
+    fn openPublicConversationContentHeld(self: *Store, request: *const conversation_read.ConversationContent) !ContentLocation {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -921,7 +924,7 @@ pub const Store = struct {
         return entry.finish(Ordinary.public_content, reads_domain.openPublicConversationContent(&access, request));
     }
 
-    pub fn activityPage(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
+    pub fn activityPage(self: *Store, request: *const activity_read.ActivityPage, out: *protocol.ActivityFacts) !void {
         try request.validate();
         if (self.unchangedSession(activitySince(request))) |token| {
             out.not_modified = true;
@@ -931,7 +934,7 @@ pub const Store = struct {
         return self.queue().run(activityPageHeld, .{ self, request, out });
     }
 
-    fn activityPageHeld(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
+    fn activityPageHeld(self: *Store, request: *const activity_read.ActivityPage, out: *protocol.ActivityFacts) !void {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
@@ -956,11 +959,11 @@ pub const Store = struct {
         };
     }
 
-    pub fn searchActivity(self: *Store, request: *const protocol.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+    pub fn searchActivity(self: *Store, request: *const activity_read.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
         return self.queue().run(searchActivityHeld, .{ self, request, out });
     }
 
-    fn searchActivityHeld(self: *Store, request: *const protocol.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+    fn searchActivityHeld(self: *Store, request: *const activity_read.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
@@ -969,11 +972,11 @@ pub const Store = struct {
         return entry.finish(Ordinary.page, reads_domain.searchActivity(&access, request, out));
     }
 
-    pub fn openActivityContent(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
+    pub fn openActivityContent(self: *Store, request: *const activity_read.ReadActivityContent) !ContentLocation {
         return self.queue().run(openActivityContentHeld, .{ self, request });
     }
 
-    fn openActivityContentHeld(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
+    fn openActivityContentHeld(self: *Store, request: *const activity_read.ReadActivityContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const entry = try enter(self, .none);
         defer entry.release();
@@ -982,11 +985,11 @@ pub const Store = struct {
         return entry.finish(Ordinary.content, reads_domain.openActivityContent(&access, request));
     }
 
-    pub fn activityTool(self: *Store, request: *const protocol.ReadActivityContent) !reads_domain.ActivityTool {
+    pub fn activityTool(self: *Store, request: *const activity_read.ReadActivityContent) !reads_domain.ActivityTool {
         return self.queue().run(activityToolHeld, .{ self, request });
     }
 
-    fn activityToolHeld(self: *Store, request: *const protocol.ReadActivityContent) !reads_domain.ActivityTool {
+    fn activityToolHeld(self: *Store, request: *const activity_read.ReadActivityContent) !reads_domain.ActivityTool {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const entry = try enter(self, .none);
         defer entry.release();
@@ -1037,7 +1040,7 @@ pub const Store = struct {
 
     /// Returns an owned, unlinked page; no SQLite cursor survives capture.
     /// The caller releases its scratch charge by deinitializing the report.
-    pub fn captureSessionList(self: *Store, request: *const protocol.ListSessions, options: SessionListOptions) !SessionReport {
+    pub fn captureSessionList(self: *Store, request: *const session_list.ListSessions, options: SessionListOptions) !SessionReport {
         try request.validate();
         var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
         try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
@@ -1046,7 +1049,7 @@ pub const Store = struct {
         return capture.seal();
     }
 
-    fn captureSessionListHeld(self: *Store, request: *const protocol.ListSessions, capture: *SessionReportCapture) !void {
+    fn captureSessionListHeld(self: *Store, request: *const session_list.ListSessions, capture: *SessionReportCapture) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -2050,13 +2053,13 @@ pub fn readSessionForTesting(self: *Store, session_ref: []const u8) !?CurrentCon
     return current;
 }
 
-pub fn activityPageForTesting(self: *Store, request: protocol.ActivityPage) !protocol.ActivityFacts {
+pub fn activityPageForTesting(self: *Store, request: activity_read.ActivityPage) !protocol.ActivityFacts {
     var page: protocol.ActivityFacts = undefined;
     try self.activityPage(&request, &page);
     return page;
 }
 
-pub fn publicConversationPageForTesting(self: *Store, request: protocol.ConversationPage) !PublicConversationPage {
+pub fn publicConversationPageForTesting(self: *Store, request: conversation_read.ConversationPage) !PublicConversationPage {
     var page: PublicConversationPage = undefined;
     try self.publicConversationPage(&request, &page);
     return page;
