@@ -68,6 +68,7 @@ const cores = .{
     .{ "store/engine/mysql_refusal.zig", @import("store/engine/mysql_refusal.zig") },
     .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
     .{ "TerminalText.zig", @import("TerminalText.zig") },
+    .{ "theme.zig", @import("theme.zig") },
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
     .{ "work_line.zig", @import("work_line.zig") },

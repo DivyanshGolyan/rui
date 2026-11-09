@@ -92,6 +92,7 @@ RULES = (
      "Terminal layout and input values retain their separate logic root and native wiring"),
     (("src/overview_view.zig", "src/attention.zig", "src/model_picker.zig"), ("test-logic",), ("test-logic",),
      "Overview decisions and screen over values; its shell's owner selects native checks"),
+    (("src/theme.zig",), ("test-logic",), ("test-logic",), "Theme palette and terminal identity"),
     (("src/failure_class.zig",), ("test-logic", "test"), ("test-logic", "test"),
      "What a saved failure code lets the person do; the conversation view renders it"),
     (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the nonblocking renderer contracts run them"),
