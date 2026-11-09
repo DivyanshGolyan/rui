@@ -193,7 +193,6 @@ pub const pending = .{
     "InvalidSqliteCacheSize",
     "InvalidTarget",
     "InvalidTemporaryDirectory",
-    "InvalidTerminalInput",
     "InvalidTestObservationPlan",
     "InvalidToolName",
     "InvalidUtf8",

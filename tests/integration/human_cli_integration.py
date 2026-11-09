@@ -6244,7 +6244,17 @@ def provider_line_cases():
     host = None
     completed = False
     try:
-        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        host_key = state / "host-openai.key"
+        host_key.write_text("fixture-provider-choice-key\n")
+        host_key.chmod(0o600)
+        host_codex = state / "host-codex.json"
+        codex_fixture.credentials(host_codex)
+        url = f"http://127.0.0.1:{endpoint.server_port}/responses"
+        host, _ = host_process.start_ready_process(
+            [fixture.RUI, "host", "serve", "--store", store,
+             "--test-codex-fixture-endpoint", url, "--test-openai-fixture-endpoint", url],
+            env={**os.environ, "RUI_OPENAI_KEY_FILE": str(host_key), "RUI_CODEX_CREDENTIAL_FILE": str(host_codex)},
+            required_fields={"execution": "enabled", "nghttp2": "1.70.0"})
         for choice in ("c", "o", "d", "z", "\x1b", "\x03"):
             home = state / f"home-{ord(choice)}"
             config = home / ".config/rui"
