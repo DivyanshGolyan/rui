@@ -1444,11 +1444,11 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         .session_stop => .session_stop,
         .session_archive => .{ .session_archive = .{ .archived = fields.archived } },
         .model_interruption => .{ .model_interruption = .{
-            .turn = protocol_reply.mutationId(fields.target.?.turn, true) catch return error.InvalidRequestRecord,
-            .operation = protocol_reply.mutationId(fields.target.?.operation, true) catch return error.InvalidRequestRecord,
+            .turn = protocol_reply.decimalId(fields.target.?.turn, true) catch return error.InvalidRequestRecord,
+            .operation = protocol_reply.decimalId(fields.target.?.operation, true) catch return error.InvalidRequestRecord,
         } },
         .permission_decision => .{ .permission_decision = .{
-            .action = protocol_reply.mutationId(fields.action orelse return error.InvalidRequestRecord, true) catch return error.InvalidRequestRecord,
+            .action = protocol_reply.decimalId(fields.action orelse return error.InvalidRequestRecord, true) catch return error.InvalidRequestRecord,
             .decision = std.meta.stringToEnum(protocol.PermissionDecision, (fields.decision orelse return error.InvalidRequestRecord).slice()) orelse return error.InvalidRequestRecord,
         } },
     };
