@@ -6,6 +6,7 @@ const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
 const store_id = @import("store_id.zig");
 const mutation_answer = @import("mutation_answer.zig");
+const tool_presentation = @import("tool_presentation.zig");
 const tool_name = @import("tool_name.zig");
 const idempotency_key = @import("idempotency_key.zig");
 
@@ -40,21 +41,14 @@ pub const max_code_bytes = 96;
 /// A failed Turn outcome's report: the provider's code and message, each
 /// at most 256 bytes plus a shortened mark, and their separator.
 pub const max_report_bytes = 2 * 256 + ": ".len + 2 * "…".len;
-pub const max_tool_description_bytes = 100;
+pub const max_tool_description_bytes = tool_presentation.max_description_bytes;
 pub const max_tool_name_bytes = tool_name.max_bytes;
 pub const max_tools = tool_name.max_tools;
 pub const max_tool_list_name_bytes = tool_name.max_list_name_bytes;
 /// A preset name passed at connect or named at Session creation.
 pub const max_preset_name_bytes = 64;
-/// A Session Label obeys the saved Bash description rule.
-pub const max_label_bytes = max_tool_description_bytes;
-
-/// Whether `bytes` is a Session Label: one non-blank line of UTF-8 within
-/// `max_label_bytes`.
-pub fn validLabel(bytes: []const u8) bool {
-    comptime std.debug.assert(max_label_bytes == max_tool_description_bytes);
-    return ToolPresentation.validDescription(bytes);
-}
+pub const max_label_bytes = tool_presentation.max_label_bytes;
+pub const validLabel = tool_presentation.validLabel;
 pub const Provider = provider_name.Provider;
 /// How a Host serves a provider: not at all, at a development endpoint
 /// that takes no credential, or at its own endpoint with its credential.
@@ -848,36 +842,20 @@ pub const ActivitySearchFacts = struct {
     }
 };
 
-pub const ToolPresentation = struct {
-    description: ?Bounded(max_tool_description_bytes),
-    code: Code,
-    publication_position: ?u64,
-    pub const Code = enum { unresolved, pending_permission, succeeded, failed, timed_out, indeterminate, storage_failed, spawn_failed, cancelled, infrastructure_shutdown, denied, unknown_tool, invalid_arguments };
+pub const ToolPresentation = tool_presentation.ToolPresentation;
 
+/// A ToolPresentation as JSON.
+pub const ToolPresentationJson = struct {
+    value: ToolPresentation,
+
+    pub const openapi_name = "ToolPresentation";
     /// Holes: description, code, publication position.
-    pub const json_shape = .{ "{\"description\":", Hole{ .optional_string = max_tool_description_bytes }, ",\"code\":\"", Hole{ .tag = Code }, "\",\"publication_position\":", Hole.optional_id, "}" };
+    pub const json_shape = .{ "{\"description\":", Hole{ .optional_string = max_tool_description_bytes }, ",\"code\":\"", Hole{ .tag = ToolPresentation.Code }, "\",\"publication_position\":", Hole.optional_id, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
-    pub fn writeJson(self: ToolPresentation, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ if (self.description) |description| description.slice() else null, self.code, self.publication_position });
-    }
-
-    /// One non-blank line of UTF-8 within the description bound.
-    pub fn validDescription(bytes: []const u8) bool {
-        if (bytes.len == 0 or bytes.len > max_tool_description_bytes or !std.unicode.utf8ValidateSlice(bytes)) return false;
-        var nonblank = false;
-        var index: usize = 0;
-        while (index < bytes.len) {
-            const length = std.unicode.utf8ByteSequenceLength(bytes[index]) catch unreachable;
-            const scalar = std.unicode.utf8Decode(bytes[index..][0..length]) catch unreachable;
-            index += length;
-            switch (scalar) {
-                '\n', '\r', 0x85, 0x2028, 0x2029 => return false,
-                ' ', '\t', 0xb, 0xc, 0xa0, 0x1680, 0x2000...0x200a, 0x202f, 0x205f, 0x3000 => {},
-                else => nonblank = true,
-            }
-        }
-        return nonblank;
+    pub fn writeJson(self: ToolPresentationJson, out: *std.Io.Writer) !void {
+        const presentation = self.value;
+        try writeShape(out, json_shape, .{ if (presentation.description) |description| description.slice() else null, presentation.code, presentation.publication_position });
     }
 };
 
@@ -984,9 +962,9 @@ pub const ActivityItem = struct {
         /// Holes: operation, turn, call ordinal, Action, rejection, the three field contents.
         pub const call = .{ "{\"operation\":\"", Hole.decimal, "\",\"turn\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\",\"action\":", Hole.optional_id, ",\"rejection\":", Hole{ .optional_tag = ProposalRejection }, ",\"fields\":[", Hole{ .json = Content }, ",", Hole{ .json = Content }, ",", Hole{ .json = Content }, "]}" };
         /// Holes: content, presentation.
-        pub const tool_result = .{ "{\"content\":", Hole{ .json = Content }, ",\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
+        pub const tool_result = .{ "{\"content\":", Hole{ .json = Content }, ",\"presentation\":", Hole{ .json = ToolPresentationJson }, "}" };
         /// A call the provider ran, shown by its line alone. Hole: presentation.
-        pub const hosted_call = .{ "{\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
+        pub const hosted_call = .{ "{\"presentation\":", Hole{ .json = ToolPresentationJson }, "}" };
         /// Holes: turn, operation, ending, code, content.
         pub const turn_ended = .{ "{\"session\":", Hole{ .string = session_id_bytes }, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"ending\":\"", Hole{ .tag = TurnEnding }, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .optional_json = Content }, "}" };
         /// Holes: key, turn, cutoff, completion.
@@ -1030,8 +1008,8 @@ pub const ActivityItem = struct {
             .session_changed => |change| try writeShape(out, value_shapes.session_changed, .{ change.revision, change.field }),
             .compacted => |compacted| try writeShape(out, value_shapes.compacted, .{ compacted.operation, compacted.dropped }),
             .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ assistant.content, assistant.final }),
-            .tool_result => |result| try writeShape(out, value_shapes.tool_result, .{ result.content, result.presentation }),
-            .hosted_call => |presentation| try writeShape(out, value_shapes.hosted_call, .{presentation}),
+            .tool_result => |result| try writeShape(out, value_shapes.tool_result, .{ result.content, ToolPresentationJson{ .value = result.presentation } }),
+            .hosted_call => |presentation| try writeShape(out, value_shapes.hosted_call, .{ToolPresentationJson{ .value = presentation }}),
             .call => |call| {
                 comptime std.debug.assert(call.fields.len == 3);
                 var fields: [3]Content = undefined;
@@ -1055,7 +1033,7 @@ pub const CallActivity = struct {
     /// Hole: total.
     pub const head = .{ "{\"total\":\"", Hole.decimal, "\",\"entries\":[" };
     /// Holes: operation, ordinal, presentation.
-    pub const entry_shape = .{ "{\"operation\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
+    pub const entry_shape = .{ "{\"operation\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"presentation\":", Hole{ .json = ToolPresentationJson }, "}" };
     pub const tail = .{"]}"};
     pub const max_json_bytes = shapeBytes(head) + jsonListBytes(@typeInfo(@FieldType(CallActivity, "entries")).array.len, shapeBytes(entry_shape)) + shapeBytes(tail);
 
@@ -1063,7 +1041,7 @@ pub const CallActivity = struct {
         try writeShape(out, head, .{self.total});
         for (self.entries[0..self.count], 0..) |entry, index| {
             if (index != 0) try out.writeByte(',');
-            try writeShape(out, entry_shape, .{ entry.operation, entry.ordinal, entry.presentation });
+            try writeShape(out, entry_shape, .{ entry.operation, entry.ordinal, ToolPresentationJson{ .value = entry.presentation } });
         }
         try writeShape(out, tail, .{});
     }
@@ -3033,7 +3011,7 @@ pub const conversation_page_reply = struct {
     /// A User item's admission. Holes: second, sending peer.
     pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeer } };
     /// A Tool Result or Hosted Call item's presentation. Hole: it.
-    pub const presentation = .{ ",\"presentation\":", Hole{ .json = ToolPresentation } };
+    pub const presentation = .{ ",\"presentation\":", Hole{ .json = ToolPresentationJson } };
     pub const item_end = .{"}"};
 
     /// The largest item of this kind, with what only that kind carries.
@@ -3268,14 +3246,6 @@ test "an activity page names its kinds once each, in order, and a limit from 1 t
             try std.testing.expect(request == .activity_page);
         }
     }
-}
-
-test "a Label is one non-blank line of at most 100 bytes" {
-    const longest: [max_label_bytes]u8 = @splat('x');
-    const overlong: [max_label_bytes + 1]u8 = @splat('x');
-    try std.testing.expect(validLabel("Review PR 412") and validLabel(&longest) and validLabel("Café"));
-    for ([_][]const u8{ "", " \t", "one\ntwo", "one\u{2028}two", "\xff", &overlong }) |invalid|
-        try std.testing.expect(!validLabel(invalid));
 }
 
 test "configuration token heuristics and effort parse sparsely and bind idempotency" {

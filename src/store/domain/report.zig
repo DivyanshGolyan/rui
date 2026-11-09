@@ -4,6 +4,7 @@ const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const named_scratch = @import("../../named_scratch.zig");
 const protocol = @import("../../protocol.zig");
+const tool_presentation = @import("../../tool_presentation.zig");
 const tool_name = @import("../../tool_name.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -635,7 +636,7 @@ const ListRow = struct {
     model: Bounded(model_capability.max_model_bytes),
     tools: ?Bounded(tool_set.max_names_bytes),
     permission_mode: u8,
-    label: ?Bounded(protocol.max_label_bytes),
+    label: ?Bounded(tool_presentation.max_label_bytes),
     created_at: rsql.Positive,
     revision: rsql.Positive,
     next_position: rsql.Positive,
@@ -1015,7 +1016,7 @@ const unresolved_actions = rsql.Read(.{
     .cardinality = .each,
 });
 
-const Description = Bounded(protocol.max_tool_description_bytes);
+const Description = Bounded(tool_presentation.max_description_bytes);
 
 /// The CTE `publications`: each active Operation's tool group
 /// publication, as main's outcome facts gave it, its largest acceptance
@@ -1326,7 +1327,7 @@ pub const CurrentJson = struct {
             ",\"permission_mode\":\"",             H{ .tag = cli_value.PermissionMode },
             "\",\"instructions\":",                H{ .json = Reference },
             ",\"output_schema\":",                 H{ .optional_json = Reference },
-            ",\"label\":",                         H{ .optional_string = protocol.max_label_bytes },
+            ",\"label\":",                         H{ .optional_string = tool_presentation.max_label_bytes },
             ",\"created_at\":\"",                  H.decimal,
             "\"}",
         };
@@ -1341,13 +1342,13 @@ pub const CurrentJson = struct {
         pub const json_shape = .{ "{\"turn\":\"", H.decimal, "\",\"message\":", H{ .string = idempotency_key.max_bytes }, ",\"outcome\":", H{ .string = protocol.max_code_bytes }, "}" };
     };
     pub const Unresolved = struct {
-        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"tool\":\"", H{ .tag = built_in_tool.BuiltInTool }, "\",\"permission_revision\":\"", H.decimal, "\",\"authorization\":\"", H{ .tag = enum { core, pending, bypass, allow_once } }, "\",\"call_id\":", H{ .json = TextReference }, ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentation }, "}" };
+        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"tool\":\"", H{ .tag = built_in_tool.BuiltInTool }, "\",\"permission_revision\":\"", H.decimal, "\",\"authorization\":\"", H{ .tag = enum { core, pending, bypass, allow_once } }, "\",\"call_id\":", H{ .json = TextReference }, ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
     };
     pub const Resolved = struct {
-        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = max_action_resolution_code_bytes }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentation }, "}" };
+        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = max_action_resolution_code_bytes }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
     };
     pub const Rejected = struct {
-        pub const json_shape = .{ "{\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = 32 }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = TextReference }, ",\"name\":", H{ .json = TextReference }, ",\"call_id\":", H{ .json = TextReference }, ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentation }, "}" };
+        pub const json_shape = .{ "{\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = 32 }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = TextReference }, ",\"name\":", H{ .json = TextReference }, ",\"call_id\":", H{ .json = TextReference }, ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
     };
     pub const Actions = struct {
         pub const json_shape = .{ "{\"count\":\"", H.decimal, "\",\"unresolved\":", ListOf(Unresolved), ",\"resolved\":", ListOf(Resolved), "}" };
@@ -1485,14 +1486,14 @@ fn renderActionable(capture: *SessionReportCapture, row: *const actionable_permi
 
 /// A stored outcome code as a presentation's: one it does not name is
 /// `CorruptStore`, as main's decode answered.
-fn presentedCode(code: []const u8) error{CorruptStore}!protocol.ToolPresentation.Code {
-    return std.meta.stringToEnum(protocol.ToolPresentation.Code, code) orelse error.CorruptStore;
+fn presentedCode(code: []const u8) error{CorruptStore}!tool_presentation.ToolPresentation.Code {
+    return std.meta.stringToEnum(tool_presentation.ToolPresentation.Code, code) orelse error.CorruptStore;
 }
 
-fn appendPresentation(capture: *SessionReportCapture, presentation: protocol.ToolPresentation) !void {
-    var buffer: [protocol.ToolPresentation.max_json_bytes]u8 = undefined;
+fn appendPresentation(capture: *SessionReportCapture, presentation: tool_presentation.ToolPresentation) !void {
+    var buffer: [protocol.ToolPresentationJson.max_json_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try presentation.writeJson(&writer);
+    try (protocol.ToolPresentationJson{ .value = presentation }).writeJson(&writer);
     try capture.append(",\"presentation\":");
     try capture.append(writer.buffered());
 }
@@ -1572,7 +1573,7 @@ const work_oldest = rsql.Read(.{
         "JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
         "WHERE a.parent_operation_id=?1 AND a.resolution_code IS NULL AND a.attempt_ordinal=1 ORDER BY a.attempt_at,a.action_id LIMIT 1",
     .Args = struct { operation: u64 },
-    .Row = struct { attempt_at: rsql.Positive, description: ?Bounded(protocol.max_tool_description_bytes), call_ordinal: u64 },
+    .Row = struct { attempt_at: rsql.Positive, description: ?Bounded(tool_presentation.max_description_bytes), call_ordinal: u64 },
     .cardinality = .each,
 });
 
@@ -1657,7 +1658,7 @@ pub const WorkRead = struct {
     outcome_content_id: ?u64 = null,
     /// A waiting Operation's failure code.
     cause: Code = .{},
-    description: ?Bounded(protocol.max_tool_description_bytes) = null,
+    description: ?Bounded(tool_presentation.max_description_bytes) = null,
     cutoff: u64 = 0,
 
     const Stage = enum { latest, actions, oldest, cutoff, queued, excluded, stop, done };
@@ -2245,7 +2246,7 @@ const RevisionRow = struct {
     compaction_trigger: ?rsql.Positive,
     output_reservation: ?u64,
     reasoning_effort: ?model_capability.ReasoningEffort,
-    label: ?Bounded(protocol.max_label_bytes),
+    label: ?Bounded(tool_presentation.max_label_bytes),
     tools: ?Bounded(tool_set.max_names_bytes),
     loaded_tools: ?Bounded(tool_set.max_names_bytes),
     permission_mode: u8,

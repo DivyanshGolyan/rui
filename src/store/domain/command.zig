@@ -5,6 +5,7 @@ const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const skills_domain = @import("skills.zig");
 const protocol = @import("../../protocol.zig");
+const tool_presentation = @import("../../tool_presentation.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const cli_value = @import("../../cli_value.zig");
@@ -1809,7 +1810,7 @@ const recovery_actions = rsql.Read(.{
         "WHERE m.command_key=?1 AND " ++ recovery_range_sql ++ " " ++
         "ORDER BY a.parent_operation_id DESC,a.call_ordinal DESC LIMIT 5",
     .Args = struct { key: []const u8 },
-    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, call_ordinal: u64, resolved_at: rsql.Positive, description: ?Bounded(protocol.max_tool_description_bytes) },
+    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, call_ordinal: u64, resolved_at: rsql.Positive, description: ?Bounded(tool_presentation.max_description_bytes) },
     .cardinality = .{ .at_most = 5 },
 });
 

@@ -82,6 +82,7 @@ const cores = .{
     .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "tool_name.zig", @import("tool_name.zig") },
+    .{ "tool_presentation.zig", @import("tool_presentation.zig") },
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
     .{ "wire_field.zig", @import("wire_field.zig") },

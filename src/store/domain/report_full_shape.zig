@@ -1,6 +1,7 @@
 //! Shapes for the Full report's hand-written, streaming rows in report.zig.
 //! Shared content references and enum domains retain their protocol owners.
 const protocol = @import("../../protocol.zig");
+const tool_presentation = @import("../../tool_presentation.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const cli_value = @import("../../cli_value.zig");
 const model_capability = @import("../../model_capability.zig");
@@ -48,13 +49,13 @@ pub const Full = struct {
     };
     pub const Revision = struct {
         pub const json_shape = .{
-            "{\"revision\":\"",         H.decimal,                                        "\",\"command_key\":",      H{ .string = idempotency_key.max_bytes },
-            ",\"workspace\":",          H{ .string = protocol.max_workspace_bytes },      ",\"provider\":\"",         H{ .tag = provider_name.Provider },
-            "\",\"model\":",            H{ .string = model_capability.max_model_bytes },  ",\"compaction_trigger\":", H.optional_id,
-            ",\"output_reservation\":", H.optional_id,                                    ",\"reasoning_effort\":",   H{ .optional_tag = model_capability.ReasoningEffort },
-            ",\"label\":",              H{ .optional_string = protocol.max_label_bytes }, ",\"tools\":",              Tools,
-            ",\"loaded_tools\":",       Tools,                                            ",\"permission_mode\":\"",  H{ .tag = cli_value.PermissionMode },
-            "\",\"instructions\":",     H{ .json = RevisionContent },                     ",\"output_schema\":",      H{ .optional_json = RevisionContent },
+            "{\"revision\":\"",         H.decimal,                                                 "\",\"command_key\":",      H{ .string = idempotency_key.max_bytes },
+            ",\"workspace\":",          H{ .string = protocol.max_workspace_bytes },               ",\"provider\":\"",         H{ .tag = provider_name.Provider },
+            "\",\"model\":",            H{ .string = model_capability.max_model_bytes },           ",\"compaction_trigger\":", H.optional_id,
+            ",\"output_reservation\":", H.optional_id,                                             ",\"reasoning_effort\":",   H{ .optional_tag = model_capability.ReasoningEffort },
+            ",\"label\":",              H{ .optional_string = tool_presentation.max_label_bytes }, ",\"tools\":",              Tools,
+            ",\"loaded_tools\":",       Tools,                                                     ",\"permission_mode\":\"",  H{ .tag = cli_value.PermissionMode },
+            "\",\"instructions\":",     H{ .json = RevisionContent },                              ",\"output_schema\":",      H{ .optional_json = RevisionContent },
             "}",
         };
     };

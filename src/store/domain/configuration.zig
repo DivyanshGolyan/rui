@@ -4,6 +4,7 @@
 const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const protocol = @import("../../protocol.zig");
+const tool_presentation = @import("../../tool_presentation.zig");
 const tool_name = @import("../../tool_name.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const cli_value = @import("../../cli_value.zig");
@@ -116,9 +117,9 @@ pub fn permissionMode(code: u8) error{CorruptStore}!cli_value.PermissionMode {
     };
 }
 
-/// Refuses a persisted label that `protocol.validLabel` does not accept.
+/// Refuses a persisted label that `tool_presentation.validLabel` does not accept.
 pub fn checkLabel(label: []const u8) error{CorruptStore}!void {
-    if (!protocol.validLabel(label)) return error.CorruptStore;
+    if (!tool_presentation.validLabel(label)) return error.CorruptStore;
 }
 
 /// A Session's saved configuration. Its fields name, in order, the columns
@@ -142,7 +143,7 @@ pub const CurrentConfiguration = struct {
     compaction_trigger: ?u64 = null,
     output_reservation: ?u64 = null,
     reasoning_effort: ?model_capability.ReasoningEffort = null,
-    label: ?Bounded(protocol.max_label_bytes) = null,
+    label: ?Bounded(tool_presentation.max_label_bytes) = null,
     /// Read only: the Store dates a Session when it inserts it.
     created_at: u64 = 0,
     /// Read only: the change ring's key for the Session's Workspace.
@@ -247,7 +248,7 @@ pub fn configurationBeforeWorkspace(
             return .model_is_immutable;
         }
     }
-    if (requested.label.state == .value and !protocol.validLabel(requested.label.value.slice())) return .invalid_label;
+    if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
     if (requested.tools.state == .value) if (toolsRejection(catalog, provider orelse (if (current) |existing| existing.provider else default_provider.?), &requested.tools)) |rejection| return rejection;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     // D166: an unlisted model has no known window to enforce.
@@ -477,7 +478,7 @@ const Settings = struct {
     compaction_trigger: ?u64,
     output_reservation: ?u64,
     reasoning_effort: ?model_capability.ReasoningEffort,
-    label: ?Bounded(protocol.max_label_bytes),
+    label: ?Bounded(tool_presentation.max_label_bytes),
 
     fn of(current: *const CurrentConfiguration) Settings {
         return .{

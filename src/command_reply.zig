@@ -3,6 +3,7 @@
 //! and their tests need no Store.
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const tool_presentation = @import("tool_presentation.zig");
 const session_id = @import("session_id.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const cli_value = @import("cli_value.zig");
@@ -147,7 +148,7 @@ pub const PublicConversationItem = struct {
     ordinal: u64, // Zero for User/Assistant; one-based call ordinal in a completed Tool Result group.
     kind: protocol.ConversationItemKind,
     content: ContentReference,
-    presentation: ?protocol.ToolPresentation = null,
+    presentation: ?tool_presentation.ToolPresentation = null,
     admitted_at: ?u64 = null, // The Host wall-clock second a User item was admitted.
     sender: ?protocol.NamedPeer = null, // A User item's sending peer Session.
 };
