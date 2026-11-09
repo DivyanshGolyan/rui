@@ -227,7 +227,7 @@ All Zig unit Run steps bypass Zig acceptance caching, and Go tests use `-count=1
 Cache-policy changes run [the fixed-seed execution regression](tests/ci/cache_execution.py) on Linux and macOS before main.
 The required `admission` aggregate includes this job when selected.
 Build-cache keys separate native tools, Apple SDK, architecture, dependency pins, scripts, source inputs and shard.
-PR caches never feed a privileged workflow.
+Only `main` saves caches; PR jobs restore main's snapshots and save none, so PR caches never feed a privileged workflow or evict main's.
 
 Each platform builds its target closure once with `ci-build -Dci-targets=...`.
 On Linux and macOS, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.
