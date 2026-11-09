@@ -296,6 +296,21 @@ CACHE_POLICY = {
 }
 
 
+# tests/ci units that read no repository file outside their inputs (traced).
+# The policy job skips a unit whose inputs the diff leaves unchanged; every
+# other tests/ci test always runs.
+POLICY_SELF_CHECKS = (
+    # The check.sh driver tests run the real driver and host_process.py, which
+    # imports live_engines.py and h2 and reads the wire version.
+    ("test_selection.FullCheckPartitionTest",
+     ("tests/ci/*", "build.zig", "tests/integration/check.sh", "tests/integration/host_process.py",
+      "tests/integration/live_engines.py", "tests/integration/requirements.txt", "src/protocol.zig")),
+    ("test_admission", ("tests/ci/*", ".github/*", "build.zig")),
+    ("test_release_publication", ("tests/ci/*",)),
+    ("test_build_artifact", ("tests/ci/*",)),
+)
+
+
 def setup_requirements(targets):
     # Every runner installs the same fixture packages (tests/integration/requirements.txt)
     # for any target, so no fixture's import depends on a hand-kept target list.
@@ -428,6 +443,8 @@ def select(paths, phase, available):
             "retry": not strict(paths),
             "cache_execution_checks": cache_execution_checks,
             "linux_memory_checks": linux_memory_checks, "manual_checks": sorted(manual_checks),
+            "policy_skips": [unit for unit, inputs in POLICY_SELF_CHECKS
+                             if not any(matches(path, inputs) for path in paths)],
             "reasons": sorted(reasons)}
 
 

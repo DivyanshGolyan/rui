@@ -236,6 +236,33 @@ class AdmissionTest(unittest.TestCase):
                 self.assertNotIn(forbidden, body)
         self.assertNotIn('paths-ignore', text)
 
+    def test_policy_skips_only_the_named_unchanged_self_checks(self):
+        script = step_script(job(CHECK.read_text(), 'policy'), 'Run tests/ci, less self-checks whose inputs are unchanged')
+        modules = {
+            'test_alpha': 'class Alpha(unittest.TestCase):\n    def test_one(self): pass\n    def test_two(self): pass\n',
+            'test_beta': ('class Kept(unittest.TestCase):\n    def test_kept(self): pass\n'
+                          'class Skipped(unittest.TestCase):\n    def test_skipped(self): self.fail()\n'),
+            'test_gamma': 'class Gamma(unittest.TestCase):\n    def test_gamma(self): self.fail()\n',
+            # A skipped unit's name is not a prefix of another module.
+            'test_gamma_more': 'class More(unittest.TestCase):\n    def test_more(self): pass\n',
+        }
+        with tempfile.TemporaryDirectory() as root:
+            for name, body in modules.items():
+                path = Path(root, 'tests/ci', name + '.py')
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('import unittest\n' + body)
+
+            def run(skips):
+                return subprocess.run(['bash', '-euc', script], cwd=root, capture_output=True, text=True,
+                                      env=dict(os.environ, SKIPS=json.dumps(skips)))
+            passed = run(['test_beta.Skipped', 'test_gamma'])
+            self.assertEqual(passed.returncode, 0, passed.stdout + passed.stderr)
+            ran = set(re.findall(r'^(test_\w+) \(', passed.stderr, re.M))
+            self.assertEqual(ran, {'test_one', 'test_two', 'test_kept', 'test_more'})
+            for skips in ([], ['test_beta.Skipped'], ['test_gamma'], ['test_beta.Kept', 'test_gamma']):
+                with self.subTest(skips=skips):
+                    self.assertNotEqual(run(skips).returncode, 0)
+
     def test_admission_always_runs_for_every_pr_and_waits_for_required_parts(self):
         text = job(CHECK.read_text(), 'admission')
         self.assertIn("if: ${{ always() && github.event_name == 'pull_request' }}", text)
@@ -352,6 +379,7 @@ class CandidatePlanTest(unittest.TestCase):
                         self.assertEqual(output['linux_codegen'], str(codegen).lower())
                         self.assertEqual(output['cache_execution'], str(selection['cache_execution_checks']).lower())
                         self.assertEqual(output['linux_memory'], str(selection['linux_memory_checks']).lower())
+                        self.assertEqual(json.loads(output['policy_skips']), selection['policy_skips'])
                         required = event == 'pull_request' and phase == 'review'
                         if required:
                             expected = (set(selection['native_targets']) - CHECK_COVERS) | {'admission-debug-integration'}
