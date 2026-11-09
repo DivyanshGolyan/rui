@@ -238,7 +238,7 @@ pub const SessionReportCapture = struct {
         const tools = try sortedToolNames(names, &sorted);
         var buffer: [256]u8 = undefined;
         var sink: ShapeSink = .{ .capture = self, .writer = .{ .vtable = &.{ .drain = ShapeSink.drain }, .buffer = &buffer } };
-        writeToolNames(&sink.writer, tools) catch return sink.failure.?;
+        tool_name.writeNamesJson(&sink.writer, tools) catch return sink.failure.?;
         sink.writer.flush() catch return sink.failure.?;
     }
 
@@ -437,18 +437,6 @@ pub fn sortedToolNames(names: ?[]const u8, sorted: *[tool_catalog.max_tools][]co
         if (index != 0 and std.mem.eql(u8, sorted[index - 1], name)) return error.CorruptStore;
     }
     return sorted[0..count];
-}
-
-/// Writes `names` as a JSON array of strings.
-fn writeToolNames(writer: *std.Io.Writer, names: []const []const u8) std.Io.Writer.Error!void {
-    try writer.writeAll("[");
-    for (names, 0..) |name, index| {
-        if (index != 0) try writer.writeAll(",");
-        try writer.writeAll("\"");
-        try writer.writeAll(name);
-        try writer.writeAll("\"");
-    }
-    try writer.writeAll("]");
 }
 
 /// The first Message of a row with `FirstMessageColumns`, read for the

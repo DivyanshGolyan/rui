@@ -20,3 +20,15 @@ pub fn valid(name: []const u8) bool {
     for (name) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-') return false;
     return true;
 }
+
+/// Writes `names`, each already `valid`, as a JSON list of strings.
+pub fn writeNamesJson(writer: *std.Io.Writer, names: []const []const u8) std.Io.Writer.Error!void {
+    try writer.writeAll("[");
+    for (names, 0..) |name, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writer.writeAll("\"");
+        try writer.writeAll(name);
+        try writer.writeAll("\"");
+    }
+    try writer.writeAll("]");
+}

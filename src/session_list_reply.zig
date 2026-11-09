@@ -3,6 +3,7 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const session_list = @import("session_list.zig");
+const tool_name = @import("tool_name.zig");
 
 /// The visitor that writes one list page into `capture`, a Session report
 /// capture the caller created (`store.SessionReportCapture`). Its tools
@@ -20,7 +21,7 @@ pub fn Reply(comptime Capture: type) type {
 
         pub fn row(reply: *@This(), values: *const session_list.Row) !void {
             var tools = std.Io.Writer.fixed(&reply.tools_json);
-            try writeToolNames(&tools, values.tools);
+            try tool_name.writeNamesJson(&tools, values.tools);
             const work: protocol.SessionWork = .fromCore(values.work);
             const peers: protocol.PeerFacts = .{ .from_person_at = values.peers.from_person_at };
             const fields: protocol.SessionRow.Fields = .{
@@ -61,16 +62,4 @@ pub fn Reply(comptime Capture: type) type {
             std.debug.assert(reply.capture.length + reply.capture.buffered <= shapes.max_bytes);
         }
     };
-}
-
-/// Writes `names` as a JSON array of strings; the Store read them valid.
-fn writeToolNames(writer: *std.Io.Writer, names: []const []const u8) std.Io.Writer.Error!void {
-    try writer.writeAll("[");
-    for (names, 0..) |name, index| {
-        if (index != 0) try writer.writeAll(",");
-        try writer.writeAll("\"");
-        try writer.writeAll(name);
-        try writer.writeAll("\"");
-    }
-    try writer.writeAll("]");
 }
