@@ -4,6 +4,7 @@ const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const named_scratch = @import("../../named_scratch.zig");
 const protocol = @import("../../protocol.zig");
+const session_list = @import("../../session_list.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
@@ -364,7 +365,7 @@ const list_ceiling = rsql.Read(.{
 
 /// A page and one Session more, which says whether there are more: the
 /// `LIMIT` of each page read and its `readEach` bound.
-const list_limit = protocol.session_list_page_size + 1;
+const list_limit = session_list.session_list_page_size + 1;
 
 /// A full traversal's page of Sessions in creation order, with the one
 /// after it. The index walks hidden candidates until nine pass the derived
@@ -399,7 +400,7 @@ const workspace_key = rsql.Read(.{
 const ListPage = struct {
     const Row = struct { created_seq: rsql.Positive, session_ref: SessionText };
 
-    refs: [protocol.session_list_page_size]change_ring.Id = undefined,
+    refs: [session_list.session_list_page_size]change_ring.Id = undefined,
     count: usize = 0,
     last: u64 = 0,
     more: bool = false,
@@ -424,7 +425,7 @@ const ListPage = struct {
     }
 };
 
-pub fn renderSessionList(a: *ReadAccess, request: *const protocol.ListSessions, capture: *SessionReportCapture) !void {
+pub fn renderSessionList(a: *ReadAccess, request: *const session_list.ListSessions, capture: *SessionReportCapture) !void {
     const self = a.store;
     const generation = self.commit_generation.load(.acquire);
     // Changed rows answer while the hint still covers the token; a token
@@ -442,7 +443,7 @@ pub fn renderSessionList(a: *ReadAccess, request: *const protocol.ListSessions, 
 /// scope, `after` and `ceiling`. A list from the beginning reads its ceiling
 /// in the page's round: every
 /// Session is at or below the newest, so the page needs no bound then.
-fn renderAllSessions(a: *ReadAccess, request: *const protocol.ListSessions, generation: u64, capture: *SessionReportCapture) !void {
+fn renderAllSessions(a: *ReadAccess, request: *const session_list.ListSessions, generation: u64, capture: *SessionReportCapture) !void {
     // An aggregate has one row, stepped once, as main did.
     var maximum: reads_domain.First(list_ceiling.Row) = .{};
     if (request.after == 0) a.readEach(list_ceiling, .{}, 1, &maximum);
@@ -459,9 +460,9 @@ fn renderAllSessions(a: *ReadAccess, request: *const protocol.ListSessions, gene
     var token: [change_ring.Token.max_bytes]u8 = undefined;
     const since = (change_ring.Token{ .instance = a.store.instance, .generation = generation }).format(&token);
     if (page.more)
-        try capture.appendShape(protocol.session_list_reply.full_tail, .{ protocol.ListDelta.full, since, page.last, ceiling })
+        try capture.appendShape(protocol.session_list_reply.full_tail, .{ session_list.ListDelta.full, since, page.last, ceiling })
     else
-        try capture.appendShape(protocol.session_list_reply.last_tail, .{ protocol.ListDelta.full, since });
+        try capture.appendShape(protocol.session_list_reply.last_tail, .{ session_list.ListDelta.full, since });
     std.debug.assert(capture.length + capture.buffered <= protocol.session_list_reply.max_bytes);
 }
 
@@ -472,7 +473,7 @@ fn renderAllSessions(a: *ReadAccess, request: *const protocol.ListSessions, gene
 /// does not apply: caches need transitions out of their visible set too.
 /// Tokens are scope-unbound hints; a changed archive/workspace filter needs
 /// a fresh full traversal, not reuse of the previous scope's token.
-fn renderChangedSessions(a: *ReadAccess, request: *const protocol.ListSessions, since: u64, through: u64, capture: *SessionReportCapture) !void {
+fn renderChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions, since: u64, through: u64, capture: *SessionReportCapture) !void {
     var workspace: ?u64 = null;
     if (request.workspace) |*scope| {
         var key: workspace_key.Result = undefined;
@@ -482,16 +483,16 @@ fn renderChangedSessions(a: *ReadAccess, request: *const protocol.ListSessions, 
     }
     const self = a.store;
     const after: ?*const change_ring.Id = if (request.changed) |*changed| &changed.after_reference else null;
-    var references: [protocol.session_list_page_size + 1]change_ring.Id = undefined;
+    var references: [session_list.session_list_page_size + 1]change_ring.Id = undefined;
     const changed = self.changes.changed(since, through, workspace, after, &references);
-    const count = @min(changed.len, protocol.session_list_page_size);
+    const count = @min(changed.len, session_list.session_list_page_size);
     try appendSessionRows(a, changed[0..count], capture);
     var token: [change_ring.Token.max_bytes]u8 = undefined;
     const next = (change_ring.Token{ .instance = self.instance, .generation = through }).format(&token);
     if (changed.len > count)
-        try capture.appendShape(protocol.session_list_reply.changed_tail, .{ protocol.ListDelta.changed, next, through, &changed[count - 1] })
+        try capture.appendShape(protocol.session_list_reply.changed_tail, .{ session_list.ListDelta.changed, next, through, &changed[count - 1] })
     else
-        try capture.appendShape(protocol.session_list_reply.last_tail, .{ protocol.ListDelta.changed, next });
+        try capture.appendShape(protocol.session_list_reply.last_tail, .{ session_list.ListDelta.changed, next });
     std.debug.assert(capture.length + capture.buffered <= protocol.session_list_reply.max_bytes);
 }
 
@@ -676,8 +677,8 @@ fn firstMessage(row: anytype, first: u64) error{CorruptStore}!?protocol.FirstMes
 noinline fn appendSessionRows(a: *ReadAccess, references: []const change_ring.Id, capture: *SessionReportCapture) !void {
     const now_ms = try store_core.readUnixMilliseconds(a.store.io);
     try capture.appendShape(protocol.session_list_reply.head, .{});
-    var firsts: [protocol.session_list_page_size]FirstCandidates = undefined;
-    var works: [protocol.session_list_page_size]WorkRead = undefined;
+    var firsts: [session_list.session_list_page_size]FirstCandidates = undefined;
+    var works: [session_list.session_list_page_size]WorkRead = undefined;
     // Each row's reads queued together: a pass ends where a statement is
     // queued again, so the round takes one pass per row, not two.
     for (references, firsts[0..references.len], works[0..references.len]) |*reference, *first, *work| {
@@ -688,7 +689,7 @@ noinline fn appendSessionRows(a: *ReadAccess, references: []const change_ring.Id
     try runReport(a);
     for (works[0..references.len]) |*work| try work.advance();
     try readWorks(a, works[0..references.len]);
-    var shown: [protocol.session_list_page_size]ShownRow = undefined;
+    var shown: [session_list.session_list_page_size]ShownRow = undefined;
     for (references, firsts[0..references.len], works[0..references.len], shown[0..references.len]) |*reference, *first, *work, *row|
         row.* = .{ .reference = reference, .first = first.admission(), .work = work };
     try renderRows(a, shown[0..references.len], std.math.cast(u64, now_ms) orelse return error.IntegerOutOfRange, capture);

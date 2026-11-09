@@ -7,24 +7,12 @@ const protocol = @import("protocol.zig");
 const named_scratch = @import("named_scratch.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 
-/// The Host's content custody: a parsed value's bytes sit in an unlinked
-/// scratch file, charged to the Host's scratch budget until released.
-pub const Custody = struct {
-    pub const File = std.Io.File;
-    pub const Budget = ScratchBudget;
-    pub const Io = std.Io;
-
-    pub fn release(file: ?File, budget: ?Budget, charged: u64, io: Io) void {
-        if (file) |held| held.close(io);
-        if (budget) |held| held.release(charged);
-    }
-};
-
+pub const Custody = @import("content_custody.zig");
+pub const ContentField = Custody.ContentField;
+pub const Configuration = Custody.Configuration;
+pub const ConfigureCommand = Custody.ConfigureCommand;
+pub const MessageCommand = Custody.MessageCommand;
 const requests = protocol.Requests(Custody);
-pub const ContentField = requests.ContentField;
-pub const Configuration = requests.Configuration;
-pub const ConfigureCommand = requests.ConfigureCommand;
-pub const MessageCommand = requests.MessageCommand;
 pub const Request = requests.Request;
 const Parser = requests.Parser;
 

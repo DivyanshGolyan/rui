@@ -14,9 +14,9 @@
 //! bytes are borrowed until the response head arrives or `deinit`; every
 //! slice an event carries is borrowed until the next `advance`.
 const std = @import("std");
-const builtin = @import("builtin");
 const Parser = @import("Parser.zig");
 const request = @import("request.zig");
+const socket_os = @import("../os/socket.zig");
 
 const Exchange = @This();
 
@@ -87,7 +87,7 @@ pub fn init(self: *Exchange, target: request.Target, bytes: []const u8) error{ L
     if (fd < 0) return error.LocalFailure;
     self.fd = fd;
     errdefer self.deinit();
-    if (!configure(fd)) return error.LocalFailure;
+    if (!socket_os.configure(fd, true)) return error.LocalFailure;
     while (true) switch (std.posix.errno(std.c.connect(fd, @ptrCast(&storage), length))) {
         .SUCCESS => {
             self.state = .open;
@@ -180,7 +180,7 @@ pub fn advance(self: *Exchange) Error!Event {
 fn send(self: *Exchange) Error!bool {
     if (self.pending.len == 0) return false;
     while (true) {
-        const sent = std.c.send(self.fd, self.pending.ptr, self.pending.len, send_flags);
+        const sent = std.c.send(self.fd, self.pending.ptr, self.pending.len, socket_os.send_flags);
         switch (std.posix.errno(sent)) {
             .SUCCESS => {
                 self.sent += @intCast(sent);
@@ -233,21 +233,6 @@ fn finished(self: *Exchange) Event {
     return .end;
 }
 
-const send_flags: c_int = if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL else 0;
-
-fn configure(fd: std.posix.fd_t) bool {
-    if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return false;
-    const flags = std.c.fcntl(fd, std.c.F.GETFL);
-    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
-    if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) < 0) return false;
-    const one: c_int = 1;
-    if (std.c.setsockopt(fd, std.c.IPPROTO.TCP, std.c.TCP.NODELAY, &one, @sizeOf(c_int)) != 0) return false;
-    if (builtin.os.tag.isDarwin()) {
-        if (std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.NOSIGPIPE, &one, @sizeOf(c_int)) != 0) return false;
-    }
-    return true;
-}
-
 // Tests run a real loopback server on a thread. The server reads the whole
 // request before it answers, so what it saw is recorded before the client
 // can finish.
@@ -267,17 +252,11 @@ const TestServer = struct {
     drain_released: std.Io.Event = .unset,
 
     fn start(self: *TestServer) !void {
-        self.listener = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
-        if (self.listener < 0) return error.SocketFailed;
-        var address: std.c.sockaddr.in = std.mem.zeroes(std.c.sockaddr.in);
-        address.family = std.c.AF.INET;
-        address.addr = @bitCast([4]u8{ 127, 0, 0, 1 });
-        if (@hasField(std.c.sockaddr.in, "len")) address.len = @sizeOf(std.c.sockaddr.in);
-        if (std.c.bind(self.listener, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)) != 0) return error.BindFailed;
-        if (std.c.listen(self.listener, 1) != 0) return error.ListenFailed;
-        var length: std.c.socklen_t = @sizeOf(std.c.sockaddr.in);
-        if (std.c.getsockname(self.listener, @ptrCast(&address), &length) != 0) return error.NameFailed;
-        self.port = std.mem.bigToNative(u16, address.port);
+        // std's backlog is ample: Darwin refuses a connect beyond a full
+        // backlog, where Linux queues it.
+        const server = try (try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0")).listen(std.testing.io, .{});
+        self.listener = server.socket.handle;
+        self.port = server.socket.address.getPort();
         self.thread = try std.Thread.spawn(.{}, serve, .{self});
     }
 
@@ -301,7 +280,7 @@ const TestServer = struct {
         for (replies) |part| {
             var written: usize = 0;
             while (written < part.len) {
-                const sent = std.c.send(fd, part[written..].ptr, part.len - written, send_flags);
+                const sent = std.c.send(fd, part[written..].ptr, part.len - written, socket_os.send_flags);
                 if (sent <= 0) return;
                 written += @intCast(sent);
             }
