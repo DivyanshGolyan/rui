@@ -693,7 +693,7 @@ class SelectionTest(unittest.TestCase):
                 (["tests/ci/requirements.txt"], {driver, admission, publication, artifact}),
                 (["build.zig"], {driver, admission}),
                 ([".github/workflows/release.yml"], {admission}),
-                (["src/protocol.zig"], {driver}),
+                (["src/wire_version.zig"], {driver}),
                 (["tests/integration/check.sh"], {driver}),
                 (["tests/integration/host_process.py", "src/cli.zig"], {driver})):
             for phase in ("development", "review"):

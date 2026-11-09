@@ -435,7 +435,7 @@ POLICY_SELF_CHECKS = (
     # imports live_engines.py and h2 and reads the wire version.
     ("test_selection.FullCheckPartitionTest",
      ("tests/ci/*", "build.zig", "tests/integration/check.sh", "tests/integration/host_process.py",
-      "tests/integration/live_engines.py", "tests/integration/requirements.txt", "src/protocol.zig")),
+      "tests/integration/live_engines.py", "tests/integration/requirements.txt", "src/wire_version.zig")),
     ("test_admission", ("tests/ci/*", ".github/*", "build.zig")),
     ("test_release_publication", ("tests/ci/*",)),
     ("test_build_artifact", ("tests/ci/*",)),

@@ -80,6 +80,7 @@ const cores = .{
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
     .{ "wire_field.zig", @import("wire_field.zig") },
+    .{ "wire_version.zig", @import("wire_version.zig") },
     .{ "work_line.zig", @import("work_line.zig") },
 };
 

@@ -7,7 +7,7 @@ const provider_name = @import("provider_name.zig");
 const store_id = @import("store_id.zig");
 const mutation_answer = @import("mutation_answer.zig");
 
-pub const wire_version = "10";
+pub const wire_version = @import("wire_version.zig").wire_version;
 
 /// Host-owned lifecycle state of a Message request.
 pub const MessageRequestState = enum { queued, processing, waiting_for_permission, completed, failed, cancelled, rejected };
