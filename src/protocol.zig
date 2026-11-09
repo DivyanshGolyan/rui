@@ -6,7 +6,6 @@ const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
 const store_id = @import("store_id.zig");
 const mutation_answer = @import("mutation_answer.zig");
-pub const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const wire_version = "10";
 
@@ -76,7 +75,10 @@ pub fn routesAll(route: Route) Routes {
 
 pub fn routeOf(routes: Routes, provider: Provider) Route {
     return switch (provider) {
-        inline else => |tag| @field(routes, @tagName(tag)),
+        inline else => |tag| blk: {
+            const name = @tagName(tag);
+            break :blk @field(routes, name);
+        },
     };
 }
 
@@ -770,7 +772,7 @@ pub const ActivityPage = struct {
     /// At most this many rows, from 1 to `items`.
     limit: u8 = items,
 
-    pub const Kinds = std.EnumSet(ActivityItem.Kind);
+    pub const Kinds = std.enums.EnumSet(ActivityItem.Kind);
     pub const items = @typeInfo(@FieldType(ActivityFacts, "items")).array.len;
 
     /// By pointer: a by-value copy sat in the Store read frame on every
@@ -874,9 +876,12 @@ pub const ToolPresentation = struct {
     /// One non-blank line of UTF-8 within the description bound.
     pub fn validDescription(bytes: []const u8) bool {
         if (bytes.len == 0 or bytes.len > max_tool_description_bytes or !std.unicode.utf8ValidateSlice(bytes)) return false;
-        var scalars = std.unicode.Utf8View.initUnchecked(bytes).iterator();
         var nonblank = false;
-        while (scalars.nextCodepoint()) |scalar| {
+        var index: usize = 0;
+        while (index < bytes.len) {
+            const length = std.unicode.utf8ByteSequenceLength(bytes[index]) catch unreachable;
+            const scalar = std.unicode.utf8Decode(bytes[index..][0..length]) catch unreachable;
+            index += length;
             switch (scalar) {
                 '\n', '\r', 0x85, 0x2028, 0x2029 => return false,
                 ' ', '\t', 0xb, 0xc, 0xa0, 0x1680, 0x2000...0x200a, 0x202f, 0x205f, 0x3000 => {},
@@ -1011,7 +1016,10 @@ pub const ActivityItem = struct {
     pub const max_json_bytes = blk: {
         @setEvalBranchQuota(10_000);
         var bytes = 0;
-        for (std.meta.tags(std.meta.Tag(Value))) |kind| bytes = @max(bytes, shapeBytes(head(kind)) + shapeBytes(@field(value_shapes, @tagName(kind))));
+        for (std.meta.tags(std.meta.Tag(Value))) |kind| {
+            const name = @tagName(kind);
+            bytes = @max(bytes, shapeBytes(head(kind)) + shapeBytes(@field(value_shapes, name)));
+        }
         break :blk bytes + shapeBytes(tail);
     };
 
@@ -1020,10 +1028,13 @@ pub const ActivityItem = struct {
             inline else => |_, kind| try writeShape(out, head(kind), .{ self.position, self.ordinal, self.at }),
         }
         switch (self.value) {
-            inline .admission, .user, .received => |message, tag| try writeShape(out, @field(value_shapes, @tagName(tag)), .{
-                message.admission,   message.key.slice(), message.turn,    message.state,
-                message.admitted_at, message.sender,      message.content,
-            }),
+            inline .admission, .user, .received => |message, tag| {
+                const name = @tagName(tag);
+                try writeShape(out, @field(value_shapes, name), .{
+                    message.admission,   message.key.slice(), message.turn,    message.state,
+                    message.admitted_at, message.sender,      message.content,
+                });
+            },
             .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, sent.target, sent.content }),
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), failed.target, failed.code.slice() }),
             .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal }),
@@ -1609,7 +1620,7 @@ fn ParserOf(comptime Custody: type) type {
             const Field = enum { version, kind, store, text, configuration };
             try self.expectByte('{');
             var members: Members = .{};
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             var kind: ?Kind = null;
             var store: Bounded(max_store_bytes) = .{};
             var key: Bounded(32) = .{};
@@ -1713,14 +1724,14 @@ fn ParserOf(comptime Custody: type) type {
 
         /// The next member of an object whose keys are `Field`'s names, each at
         /// most once, in any order.
-        fn nextField(self: *Parser, comptime Field: type, members: *Members, seen: *std.EnumSet(Field)) !?Field {
+        fn nextField(self: *Parser, comptime Field: type, members: *Members, seen: *std.enums.EnumSet(Field)) !?Field {
             var key: Bounded(32) = .{};
             if (!try members.next(self, &key)) return null;
             return try fieldOf(Field, &key, seen);
         }
 
         /// The command's next member, passing over the header the first pass read.
-        fn nextCommandField(self: *Parser, comptime Field: type, members: *Members, seen: *std.EnumSet(Field)) !?Field {
+        fn nextCommandField(self: *Parser, comptime Field: type, members: *Members, seen: *std.enums.EnumSet(Field)) !?Field {
             var key: Bounded(32) = .{};
             while (try members.next(self, &key)) {
                 if (isHeader(&key)) {
@@ -1745,20 +1756,20 @@ fn ParserOf(comptime Custody: type) type {
             return key.eql("version") or key.eql("kind") or key.eql("store");
         }
 
-        fn fieldOf(comptime Field: type, key: *const Bounded(32), seen: *std.EnumSet(Field)) !Field {
+        fn fieldOf(comptime Field: type, key: *const Bounded(32), seen: *std.enums.EnumSet(Field)) !Field {
             const field = std.meta.stringToEnum(Field, key.slice()) orelse return error.UnexpectedField;
             if (seen.contains(field)) return error.UnexpectedField;
             seen.insert(field);
             return field;
         }
 
-        fn require(comptime Field: type, seen: std.EnumSet(Field), required: []const Field) !void {
+        fn require(comptime Field: type, seen: std.enums.EnumSet(Field), required: []const Field) !void {
             for (required) |field| if (!seen.contains(field)) return error.MissingField;
         }
 
         fn parseHostPause(self: *Parser, out: *@FieldType(Request, "host_pause"), members: *Members) !void {
             const Field = enum { paused };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .paused => out.paused = try self.readBoolean(),
             };
@@ -1774,7 +1785,7 @@ fn ParserOf(comptime Custody: type) type {
 
         fn parseObserveCommand(self: *Parser, out: *ObserveCommand, members: *Members) !void {
             const Field = enum { key, since };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readSmallString(&out.key),
                 .since => out.since = try self.readSessionToken(),
@@ -1784,7 +1795,7 @@ fn ParserOf(comptime Custody: type) type {
 
         fn parseKeyOnly(self: *Parser, key: *Bounded(max_key_bytes), members: *Members) !void {
             const Field = enum { key };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readSmallString(key),
             };
@@ -1794,7 +1805,7 @@ fn ParserOf(comptime Custody: type) type {
         /// Each parser fills its command `out`, whose Store is already set.
         fn parseConfigure(self: *Parser, out: *ConfigureCommand, members: *Members) !void {
             const Field = enum { key, session, configuration, preset, require_model, reload_skills };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readCommandKey(&out.key),
                 .session => try self.readSmallString(&out.session),
@@ -1815,7 +1826,7 @@ fn ParserOf(comptime Custody: type) type {
             const Field = enum { workspace, provider, model, instructions, tools, loaded_tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
             try self.expectByte('{');
             var members: Members = .{};
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextField(Field, &members, &seen)) |field| switch (field) {
                 .workspace => try self.readOptionalSmall(max_workspace_bytes, &out.workspace),
                 .provider => try self.readOptionalSmall(max_provider_bytes, &out.provider),
@@ -1847,7 +1858,7 @@ fn ParserOf(comptime Custody: type) type {
 
         fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
             const Field = enum { key, session, sender, sender_handle, configuration, text, require_model, skill };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readCommandKey(&out.key),
                 .session => try self.readSmallString(&out.session),
@@ -1888,7 +1899,7 @@ fn ParserOf(comptime Custody: type) type {
             const Field = enum { store, session };
             try self.expectByte('{');
             var members: Members = .{};
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextField(Field, &members, &seen)) |field| switch (field) {
                 .store => try self.readSmallString(&out.store),
                 .session => try self.readSmallString(&out.session),
@@ -1898,7 +1909,7 @@ fn ParserOf(comptime Custody: type) type {
 
         fn parseSessionStop(self: *Parser, out: *SessionStopCommand, members: *Members) !void {
             const Field = enum { key, session };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readCommandKey(&out.key),
                 .session => try self.readSmallString(&out.session),
@@ -1908,7 +1919,7 @@ fn ParserOf(comptime Custody: type) type {
 
         fn parseSessionArchive(self: *Parser, out: *SessionArchiveCommand, members: *Members) !void {
             const Field = enum { key, session, archived };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readCommandKey(&out.key),
                 .session => try self.readSmallString(&out.session),
@@ -1919,14 +1930,14 @@ fn ParserOf(comptime Custody: type) type {
 
         fn parseModelInterruption(self: *Parser, out: *ModelInterruptionCommand, members: *Members) !void {
             const Field = enum { key, target };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readCommandKey(&out.key),
                 .target => {
                     const Target = enum { session, turn, operation };
                     try self.expectByte('{');
                     var target_members: Members = .{};
-                    var target_seen: std.EnumSet(Target) = .empty;
+                    var target_seen: std.enums.EnumSet(Target) = .empty;
                     while (try self.nextField(Target, &target_members, &target_seen)) |member| switch (member) {
                         .session => try self.readSmallString(&out.session),
                         .turn => out.turn_id = try self.readCanonicalU64(),
@@ -1940,7 +1951,7 @@ fn ParserOf(comptime Custody: type) type {
 
         fn parsePermissionDecision(self: *Parser, out: *PermissionDecisionCommand, members: *Members) !void {
             const Field = enum { key, session, action, decision };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readCommandKey(&out.key),
                 .session => try self.readSmallString(&out.session),
@@ -1961,7 +1972,7 @@ fn ParserOf(comptime Custody: type) type {
 
         fn parseReadActionArguments(self: *Parser, out: *ReadActionArguments, members: *Members) !void {
             const Field = enum { session, action };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .session => try self.readSmallString(&out.session),
                 .action => out.action_id = try self.readCanonicalU64(),
@@ -1986,7 +1997,7 @@ fn ParserOf(comptime Custody: type) type {
 
         fn parseInspect(self: *Parser, out: *InspectSession, members: *Members) !void {
             const Field = enum { session, profile, failed_response, operation, attempt, since };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             var part: ?FailedResponsePart = null;
             var operation: u64 = 0;
             var attempt: u64 = 0;
@@ -2022,7 +2033,7 @@ fn ParserOf(comptime Custody: type) type {
 
         fn parseListSessions(self: *Parser, out: *ListSessions, members: *Members) !void {
             const Field = enum { workspace, archive, after, ceiling, since, through, after_reference };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             var through: u64 = 0;
             var reference: Bounded(session_id_bytes) = .{};
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
@@ -2060,7 +2071,7 @@ fn ParserOf(comptime Custody: type) type {
 
         fn parseConversationPage(self: *Parser, out: *ConversationPage, members: *Members) !void {
             const Field = enum { session, end, before_position, before_ordinal };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .session => try self.readSmallString(&out.session),
                 .end => out.end = try self.readCanonicalU64(),
@@ -2077,7 +2088,7 @@ fn ParserOf(comptime Custody: type) type {
 
         fn parseConversationContent(self: *Parser, out: *ConversationContent, members: *Members) !void {
             const Field = enum { session, position, ordinal, start, stream };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .session => try self.readSmallString(&out.session),
                 .position => out.position = try self.readCanonicalU64(),
@@ -2095,7 +2106,7 @@ fn ParserOf(comptime Custody: type) type {
 
         fn parseActivityPage(self: *Parser, out: *ActivityPage, members: *Members) !void {
             const Field = enum { session, end, position, ordinal, direction, kinds, limit, since };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .session => try self.readSmallString(&out.session),
                 .since => out.since = try self.readSessionToken(),
@@ -2135,7 +2146,7 @@ fn ParserOf(comptime Custody: type) type {
 
         fn parseActivitySearch(self: *Parser, out: *ActivitySearch, members: *Members) !void {
             const Field = enum { session, query, before_position, before_ordinal, kinds, limit };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .session => try self.readSmallString(&out.session),
                 .query => try self.readSmallString(&out.query),
@@ -2169,7 +2180,7 @@ fn ParserOf(comptime Custody: type) type {
 
         fn parseActivityContent(self: *Parser, out: *ReadActivityContent, members: *Members) !void {
             const Field = enum { session, position, ordinal };
-            var seen: std.EnumSet(Field) = .empty;
+            var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .session => try self.readSmallString(&out.session),
                 .position => out.position = try self.readCanonicalU64(),
@@ -2192,7 +2203,7 @@ fn ParserOf(comptime Custody: type) type {
 
         /// An envelope's state, once its members are read: a value is present
         /// exactly when the state says so.
-        fn envelopeState(state: *const Bounded(16), seen: std.EnumSet(Envelope), allow_null: bool) !FieldState {
+        fn envelopeState(state: *const Bounded(16), seen: std.enums.EnumSet(Envelope), allow_null: bool) !FieldState {
             if (!seen.contains(.state)) return error.MissingField;
             const result: FieldState = if (state.eql("omitted"))
                 .omitted
@@ -2209,7 +2220,7 @@ fn ParserOf(comptime Custody: type) type {
         fn readOptionalSmallNullable(self: *Parser, comptime capacity: usize, field: *OptionalBounded(capacity), allow_null: bool) !void {
             try self.expectByte('{');
             var members: Members = .{};
-            var seen: std.EnumSet(Envelope) = .empty;
+            var seen: std.enums.EnumSet(Envelope) = .empty;
             var state: Bounded(16) = .{};
             while (try self.nextField(Envelope, &members, &seen)) |member| switch (member) {
                 .state => try self.readSmallString(&state),
@@ -2221,7 +2232,7 @@ fn ParserOf(comptime Custody: type) type {
         fn readContent(self: *Parser, field: *ContentField, allow_null: bool, allow_value: bool) !void {
             try self.expectByte('{');
             var members: Members = .{};
-            var seen: std.EnumSet(Envelope) = .empty;
+            var seen: std.enums.EnumSet(Envelope) = .empty;
             var state: Bounded(16) = .{};
             while (try self.nextField(Envelope, &members, &seen)) |member| switch (member) {
                 .state => try self.readSmallString(&state),
@@ -2236,7 +2247,7 @@ fn ParserOf(comptime Custody: type) type {
         fn readTools(self: *Parser, tools: *ToolsField) !void {
             try self.expectByte('{');
             var members: Members = .{};
-            var seen: std.EnumSet(Envelope) = .empty;
+            var seen: std.enums.EnumSet(Envelope) = .empty;
             var state: Bounded(16) = .{};
             while (try self.nextField(Envelope, &members, &seen)) |member| switch (member) {
                 .state => try self.readSmallString(&state),
@@ -2536,7 +2547,7 @@ pub const Hole = union(enum) {
     tag: type,
     /// A `?E` for this enum `E`, as a JSON string of its tag name or `null`.
     optional_tag: type,
-    /// A `std.EnumSet(E)`, as a JSON array of its tag names in tag order.
+    /// A `std.enums.EnumSet(E)`, as a JSON array of its tag names in tag order.
     tag_set: type,
     /// At most this many bytes, as a JSON string.
     string: usize,
@@ -2614,7 +2625,7 @@ pub fn writeShape(out: *std.Io.Writer, comptime shape: anytype, args: anytype) !
                 .tag_set => |T| {
                     try out.writeByte('[');
                     var first = true;
-                    for (std.meta.tags(T)) |tag| if (@as(std.EnumSet(T), argument).contains(tag)) {
+                    for (std.meta.tags(T)) |tag| if (@as(std.enums.EnumSet(T), argument).contains(tag)) {
                         if (!first) try out.writeByte(',');
                         first = false;
                         try out.print("\"{s}\"", .{@tagName(tag)});
@@ -3192,16 +3203,6 @@ test "fixed JSON buffers preserve control bytes and enforce capacity" {
     try std.testing.expectError(error.BufferTooLarge, response.appendJsonString("x"));
 }
 
-test "observation needs no scratch at a full budget" {
-    const json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":\"store\",\"key\":\"key\"}";
-    var source: MetadataSource = .{ .input = json };
-    var used = std.atomic.Value(u64).init(3);
-    var parser = Tested.Parser{ .source = &source };
-    const request = try parseForTest(&parser);
-    try std.testing.expect(request == .observe_command);
-    try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
-}
-
 test "Conversation content stream wire requires start zero and literal true" {
     const cases = [_]struct { suffix: []const u8, stream: bool = false, failure: ?anyerror = null }{
         .{ .suffix = "\"0\"}" },
@@ -3493,7 +3494,7 @@ test "Session inspection selects a closed report profile or exact failed respons
         if (case.expected) |expected| {
             const request = try parseForTest(&parser);
             try std.testing.expectEqual(expected, request.inspect_session.profile);
-            try std.testing.expectEqualDeep(case.failed_response, request.inspect_session.failed_response);
+            try std.testing.expectEqual(case.failed_response, request.inspect_session.failed_response);
         } else {
             try std.testing.expectError(error.UnknownReportProfile, parseForTest(&parser));
         }

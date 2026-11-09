@@ -21,6 +21,7 @@ const platform = @import("platform.zig");
 const provider = @import("provider.zig");
 const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
+const ScratchBudget = @import("ScratchBudget.zig");
 const wire_request = @import("wire_request.zig");
 const store_module = @import("store.zig");
 const launch_frame = @import("launch_frame.zig");
@@ -3859,7 +3860,7 @@ test "retired ordinary capture still consumes its intake classification and reso
         }
         const retained = intake.exchanges.items[0];
         var retained_fd: ?c_int = null;
-        const budget: protocol.ScratchBudget = .{ .used = &host.scratch_used, .limit = 9000 };
+        const budget: ScratchBudget = .{ .used = &host.scratch_used, .limit = 9000 };
         switch (custody) {
             .ingress => {
                 const ingress = try host.allocator.create(wire_request.Ingress);

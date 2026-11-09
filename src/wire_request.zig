@@ -984,3 +984,24 @@ test "skills ingress rejects both invocation and text without retaining capture 
         try std.testing.expect(retained == null);
     }
 }
+
+test "observation needs no scratch at a full budget" {
+    const json = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"observe_command\",\"store\":\"store\",\"key\":\"key\"}";
+    var used = std.atomic.Value(u64).init(3);
+    var retained: ?named_scratch.Owner = null;
+    var ingress: Ingress = undefined;
+    ingress.init(std.testing.allocator, .{
+        .io = std.testing.io,
+        .content_length = json.len,
+        .scratch_path = "unused",
+        .request_number = 0,
+        .retained_scratch = &retained,
+        .scratch_budget = .{ .used = &used, .limit = 3 },
+    });
+    defer ingress.deinit();
+    try ingress.feed(json);
+    const request = try ingress.finish();
+    try std.testing.expect(request.* == .observe_command);
+    try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
+    try std.testing.expect(retained == null);
+}

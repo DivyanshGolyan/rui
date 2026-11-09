@@ -19,6 +19,7 @@ const provider = @import("provider.zig");
 const providers = @import("providers.zig");
 const turn_states_module = @import("turn_states.zig");
 const protocol = @import("protocol.zig");
+const ScratchBudget = @import("ScratchBudget.zig");
 const wire_request = @import("wire_request.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
@@ -2779,7 +2780,7 @@ test "HTTP error capture retires before execution custody" {
     defer workspace.unmap();
     for (0..3) |kind| {
         var used: std.atomic.Value(u64) = .init(17);
-        const budget = protocol.ScratchBudget{ .used = &used, .limit = 4096 };
+        const budget = ScratchBudget{ .used = &used, .limit = 4096 };
         var records: [1]execution.CustodyRecord = @splat(.{});
         var host = Host{
             .io = io,
@@ -2951,7 +2952,7 @@ test "cleanup publication follows complete execution retirement" {
     var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
     try workspace.set(root);
     var used: std.atomic.Value(u64) = .init(0);
-    const budget = protocol.ScratchBudget{ .used = &used, .limit = 4096 };
+    const budget = ScratchBudget{ .used = &used, .limit = 4096 };
     var entries: [2]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
@@ -3754,7 +3755,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used: std.atomic.Value(u64) = .init(0);
-    const root_budget = protocol.ScratchBudget{ .used = &used, .limit = 104 };
+    const root_budget = ScratchBudget{ .used = &used, .limit = 104 };
     var entries: [2]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, root_budget, &entries);
     defer retention.cleanupAll();
