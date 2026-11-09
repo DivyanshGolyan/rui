@@ -1547,7 +1547,7 @@ pub const Ingress = struct {
         var source: MetadataSource = .{ .input = self.metadata.items };
         var parser = Parser{
             .source = &source,
-            .options = self.options,
+            .expected_kind = self.options.expected_kind,
             .captured = self.contents[0..self.content_count],
         };
         try parser.parse(&self.request);
@@ -1655,7 +1655,8 @@ const MetadataSource = struct {
 
 const Parser = struct {
     source: *MetadataSource,
-    options: ParseOptions,
+    /// The Kind the request's route names, when it names one.
+    expected_kind: ?Kind = null,
     content_ordinal: u8 = 0,
     captured: []const ContentField = &.{},
 
@@ -1761,7 +1762,6 @@ const Parser = struct {
                 try self.parseActivityContent(&out.activity_content, &members);
             },
         }
-        errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
         if (!self.source.atEnd()) {
             return error.TrailingInput;
         }
@@ -1799,7 +1799,7 @@ const Parser = struct {
                     var text: Bounded(32) = .{};
                     try self.readSmallString(&text);
                     const named = std.meta.stringToEnum(Kind, text.slice()) orelse return error.UnknownCommand;
-                    if (self.options.expected_kind) |expected| {
+                    if (self.expected_kind) |expected| {
                         if (named != expected) return error.RouteKindMismatch;
                     }
                     kind = named;
@@ -1962,7 +1962,6 @@ const Parser = struct {
 
     /// Each parser fills its command `out`, whose Store is already set.
     fn parseConfigure(self: *Parser, out: *ConfigureCommand, members: *Members) !void {
-        errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
         const Field = enum { key, session, configuration, preset, require_model, reload_skills };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
@@ -1982,7 +1981,6 @@ const Parser = struct {
 
     /// Fills `out`, which holds its defaults.
     fn parseConfiguration(self: *Parser, allow_content: bool, out: *Configuration) !void {
-        errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
         const Field = enum { workspace, provider, model, instructions, tools, loaded_tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
         try self.expectByte('{');
         var members: Members = .{};
@@ -2017,7 +2015,6 @@ const Parser = struct {
     }
 
     fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
-        errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
         const Field = enum { key, session, sender, sender_handle, configuration, text, require_model, skill };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
@@ -3709,15 +3706,7 @@ test "observation needs no scratch at a full budget" {
     const json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":\"store\",\"key\":\"key\"}";
     var source: MetadataSource = .{ .input = json };
     var used = std.atomic.Value(u64).init(3);
-    var retained: ?named_scratch.Owner = null;
-    var parser = Parser{ .source = &source, .options = .{
-        .io = std.testing.io,
-        .content_length = json.len,
-        .scratch_path = "unused",
-        .request_number = 0,
-        .retained_scratch = &retained,
-        .scratch_budget = .{ .used = &used, .limit = 3 },
-    } };
+    var parser = Parser{ .source = &source };
     const request = try parseForTest(&parser);
     try std.testing.expect(request == .observe_command);
     try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
@@ -3736,8 +3725,7 @@ test "Conversation content stream wire requires start zero and literal true" {
         var buffer: [512]u8 = undefined;
         const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_content\",\"store\":\"s\",\"session\":\"x\",\"position\":\"1\",\"ordinal\":\"0\",\"start\":{s}", .{case.suffix});
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
         } else {
@@ -3764,8 +3752,7 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
         var buffer: [512]u8 = undefined;
         const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_page\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.body});
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
         } else {
@@ -3793,8 +3780,7 @@ test "an activity page names its kinds once each, in order, and a limit from 1 t
         var buffer: [512]u8 = undefined;
         const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":\"s\",\"session\":\"x\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":{s}}}", .{case.body});
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
         } else {
@@ -3847,8 +3833,7 @@ test "configuration token heuristics and effort parse sparsely and bind idempote
             "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
             "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"omitted\"}},\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}{s}}}}}", .{case.suffix});
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
             continue;
@@ -3901,14 +3886,7 @@ test "configuration provider envelope preserves exact spelling and omission" {
             .{ case.field, case.suffix },
         );
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = json.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
+        var parser = Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
             continue;
@@ -3957,14 +3935,7 @@ test "configuration tools and loaded tools are tool names, sorted, each once" {
                 "\"" ++ field_name ++ "\":{{\"state\":\"value\",\"value\":{s}}}," ++
                 "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}}}", .{case.value});
             var source: MetadataSource = .{ .input = json };
-            var retained: ?named_scratch.Owner = null;
-            var parser = Parser{ .source = &source, .options = .{
-                .io = std.testing.io,
-                .content_length = json.len,
-                .scratch_path = "unused",
-                .request_number = 0,
-                .retained_scratch = &retained,
-            } };
+            var parser = Parser{ .source = &source };
             if (case.failure) |failure| {
                 try std.testing.expectError(failure, parseForTest(&parser));
             } else {
@@ -4028,14 +3999,7 @@ test "Session inspection selects a closed report profile or exact failed respons
     };
     for (cases) |case| {
         var source: MetadataSource = .{ .input = case.json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = case.json.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
+        var parser = Parser{ .source = &source };
         if (case.expected) |expected| {
             const request = try parseForTest(&parser);
             try std.testing.expectEqual(expected, request.inspect_session.profile);
@@ -4077,14 +4041,7 @@ test "Session listing wire distinguishes all, exact workspace, continuation, sin
     };
     for (cases) |case| {
         var source: MetadataSource = .{ .input = case.json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = case.json.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
+        var parser = Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
             continue;
@@ -4113,8 +4070,7 @@ test "a client command cannot take a key Rui keeps for its own commands" {
         var buffer: [256]u8 = undefined;
         const json = try std.fmt.bufPrint(&buffer, "{s}{s},\"session\":\"peer\"}}", .{ head, case.key });
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Parser{ .source = &source };
         if (case.failure) |failure| try std.testing.expectError(failure, parseForTest(&parser)) else _ = try parseForTest(&parser);
     }
 }
@@ -4142,15 +4098,13 @@ test "protocol peer Store address wire parsing accepts opaque ids and preserves 
         var buffer: [512]u8 = undefined;
         const json = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ prefix, case.store, suffix });
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
         // Ingress has replaced its captured content with an empty placeholder.
-        var parser = Parser{ .source = &source, .captured = &.{.{}}, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Parser{ .source = &source, .captured = &.{.{}} };
         if (case.valid) {
             const request = try parseForTest(&parser);
             try std.testing.expectEqualStrings(case.store, request.message.sender.?.store.slice());
             try std.testing.expectEqualStrings("k7m2qx", request.message.sender.?.session.slice());
         } else try std.testing.expectError(error.InvalidRuiAddress, parseForTest(&parser));
-        try std.testing.expect(retained == null);
     }
 }
 
@@ -4165,10 +4119,8 @@ test "peer wire rejects old sender strings, malformed addresses and missing hand
     };
     for (cases) |case| {
         var source: MetadataSource = .{ .input = case.json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = case.json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Parser{ .source = &source };
         try std.testing.expectError(case.failure, parseForTest(&parser));
-        try std.testing.expect(retained == null);
     }
 }
 
@@ -4575,8 +4527,7 @@ test "protocol creation requires five explicit settings independent of field ord
             try writer.writeByte('}');
             const json = writer.buffered();
             var source: MetadataSource = .{ .input = json };
-            var retained: ?named_scratch.Owner = null;
-            var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+            var parser = Parser{ .source = &source };
             if (skip < fields.len) {
                 try std.testing.expectError(error.MissingField, parseForTest(&parser));
             } else if (comptime std.mem.eql(u8, kind, "message")) {
@@ -4604,8 +4555,7 @@ test "activity search wire validates query and paired backward cursor" {
         var buffer: [1024]u8 = undefined;
         const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_search\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.fields});
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
         } else {
@@ -4641,14 +4591,7 @@ test "presets allow partial creating configure in either field order" {
         head ++ "\"preset\":\"review\",\"configuration\":{},\"require_model\":true}",
     }, 0..) |json, index| {
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser: Parser = .{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = json.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
+        var parser: Parser = .{ .source = &source };
         const request = try parseForTest(&parser);
         try std.testing.expectEqualStrings("review", request.configure.preset.?.slice());
         try std.testing.expectEqual(index == 2, request.configure.require_model);
@@ -4674,14 +4617,7 @@ test "Session reader since is optional nullable and rejects invalid tokens" {
         var input: [512]u8 = undefined;
         const json = try std.fmt.bufPrint(&input, "{s}{s}", .{ head, case.suffix });
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = json.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
+        var parser = Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
         } else {
@@ -4718,14 +4654,7 @@ test "session archive parses default intent and rejects malformed controls" {
     }) |case| {
         const bytes = prefix ++ case[0];
         var source: MetadataSource = .{ .input = bytes };
-        var retained: ?named_scratch.Owner = null;
-        var parser: Parser = .{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = bytes.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
+        var parser: Parser = .{ .source = &source };
         const request = try parseForTest(&parser);
         try std.testing.expectEqual(case[1], request.session_archive.archived);
         try std.testing.expectEqualStrings("k7m2qx", request.session_archive.session.slice());
@@ -4738,14 +4667,7 @@ test "session archive parses default intent and rejects malformed controls" {
     }) |case| {
         const bytes = prefix ++ case[0];
         var source: MetadataSource = .{ .input = bytes };
-        var retained: ?named_scratch.Owner = null;
-        var parser: Parser = .{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = bytes.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
+        var parser: Parser = .{ .source = &source };
         try std.testing.expectError(case[1], parseForTest(&parser));
     }
 }
@@ -4775,8 +4697,7 @@ test "skills native wire preserves explicit invoke and reload intent" {
         configure_prefix ++ "\"configuration\":{},\"reload_skills\":true}",
     }, 0..) |json, index| {
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser: Parser = .{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser: Parser = .{ .source = &source };
         const request = try parseForTest(&parser);
         if (index == 0) {
             try std.testing.expectEqualStrings("demo", request.message.skill.?.slice());
@@ -4798,8 +4719,7 @@ test "skills native wire preserves explicit invoke and reload intent" {
         prefix ++ "\"skill\":\"demo\",\"configuration\":{}}",
     }) |json| {
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser: Parser = .{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser: Parser = .{ .source = &source };
         try std.testing.expectError(error.InvalidMessage, parseForTest(&parser));
     }
 }
