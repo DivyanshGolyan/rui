@@ -2,6 +2,7 @@ const std = @import("std");
 const store = @import("store.zig");
 const protocol = @import("protocol.zig");
 const tools = @import("tools.zig");
+const wire_request = @import("wire_request.zig");
 
 const header = "{\"version\":\"" ++ protocol.wire_version ++ "\",";
 const missing = header ++
@@ -20,7 +21,18 @@ const current_mixed = header ++
     \\"type":"session_report","delta":"full","since":null,"profile":"current","session":{"reference":"<session>","parent":null,"workspace":"<workspace>","provider":"codex","model":"model-a","compaction_trigger":"115200","context_estimate":"56","output_reservation":"0","compaction_trigger_override":"115200","output_reservation_override":null,"reasoning_effort":null,"reasoning_effort_override":null,"revision":"1","tools":["bash","web_search"],"loaded_tools":["bash","web_search"],"permission_mode":"ask","instructions":{"bytes":"0","sha256":"11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"},"output_schema":null,"label":null,"created_at":"<time>"},"archive_state":"active","pending_messages":"0","work":{"state":{"kind":"approval","since":"<time>"},"turn":"2","operation":"2","first_action":"2","latest_outcome":null},"peers":{"from_person_at":"<time>"},"first_message":{"position":"1","admission":"1","admitted_at":"<time>","sender":null,"content":{"bytes":"5","sha256":"295e577a7a0c2608c470cb327496d5b7f60b8f53b5ebf48f6878d2cdd614e333"}},"selected_message":"golden-mixed-key","recent_messages":[{"turn":"1","message":"golden-answer-key","outcome":"completed"}],"actions":{"count":"2","unresolved":[{"action":"2","parent_operation":"2","call_ordinal":"1","tool":"bash","permission_revision":"1","authorization":"pending","call_id":{"type":"text","bytes":"3","sha256":"8e86e6644aa2b109430eaa8ca07939190490ac61a33862f788b398d49d2e35a5"},"arguments":{"type":"text","bytes":"52","sha256":"7ef3f0e0b68ea2d333b93093dbe1261a18c901ad73ef684361bf94d12056045c"},"presentation":{"description":"Run","code":"pending_permission","publication_position":null}}],"resolved":[{"action":"1","parent_operation":"2","call_ordinal":"0","code":"denied","acceptance_position":"13","result":{"type":"text","bytes":"18","sha256":"a251e0c566a1f73bb2338367bf1cd6e75d2ebc1e0b6d0657a7debe776a3bd881"},"presentation":{"description":"Run","code":"denied","publication_position":null}}]},"rejected_calls":{"count":"1","items":[{"parent_operation":"2","call_ordinal":"2","code":"unknown_tool","acceptance_position":"12","result":{"type":"text","bytes":"20","sha256":"e64dbe3bb67e66a800ef3ea2b21801b5f5d5025f4ba2d7a088788e6b4e0d23a7"},"name":{"type":"text","bytes":"5","sha256":"f23807757d15c3493a5f622898047eee4f2949fc3ae4d5d05afa1185dcbd240b"},"call_id":{"type":"text","bytes":"5","sha256":"3decf9438cc4009dec87c0e881fc714a1ad6abdd7fb6f231e1b5996e7aa26932"},"arguments":{"type":"text","bytes":"2","sha256":"de16d1a68a8e3c9eea4e69185cb547810c9ac3a2999dec7e76dbf073dac34663"},"presentation":{"description":null,"code":"unknown_tool","publication_position":null}}]},"actionable_permissions":[{"action":"2","permission_revision":"1"}],"execution":{"status":"partial","dispatch_fenced":false,"custody_occupied":"0","scratch_used_bytes":"0","unavailable":["structured_output"]}}
 ;
 
-const Scenario = enum { missing, current_empty, full_empty, current_mcp, current_mixed };
+const full_mixed = header ++
+    \\"type":"session_report","profile":"full","session":{"reference":"<session>","parent":null,"workspace":"<workspace>","provider":"codex","model":"model-a","compaction_trigger":"115200","context_estimate":"67","output_reservation":"0","compaction_trigger_override":"115200","output_reservation_override":null,"reasoning_effort":null,"reasoning_effort_override":null,"revision":"2","tools":["bash","web_search"],"loaded_tools":["bash","web_search"],"permission_mode":"ask","instructions":{"bytes":"21","sha256":"f80ca68206d345a7a4adc2c8009243019ba10384e01e34f207e4a79ced5a61cd"},"output_schema":null,"label":"revised","created_at":"<time>"},"archive_state":"active","pending_messages":"0","work":{"state":{"kind":"stopped","since":"<time>","cause":"stop"},"turn":"2","operation":"2","first_action":null,"latest_outcome":{"code":"cancelled","content":null}},"peers":{"from_person_at":"<time>"},"first_message":{"position":"2","admission":"1","admitted_at":"<time>","sender":null,"content":{"bytes":"5","sha256":"295e577a7a0c2608c470cb327496d5b7f60b8f53b5ebf48f6878d2cdd614e333"}},"selected_message":null,"recent_messages":[{"turn":"2","message":"golden-mixed-key","outcome":"cancelled"},{"turn":"1","message":"golden-answer-key","outcome":"completed"}],"actions":{"count":"0","unresolved":[],"resolved":[]},"rejected_calls":{"count":"0","items":[]},"actionable_permissions":[],"full":{"session_revisions":[{"revision":"1","command_key":"golden-report-config","workspace":"<workspace>","provider":"codex","model":"model-a","compaction_trigger":"115200","output_reservation":null,"reasoning_effort":null,"label":null,"tools":["bash","web_search"],"loaded_tools":["bash","web_search"],"permission_mode":"ask","instructions":{"type":"text","bytes":"21","sha256":"f80ca68206d345a7a4adc2c8009243019ba10384e01e34f207e4a79ced5a61cd","text":"quote \" slash \\ café"},"output_schema":null},{"revision":"2","command_key":"golden-revision","workspace":"<workspace>","provider":"codex","model":"model-a","compaction_trigger":"115200","output_reservation":null,"reasoning_effort":null,"label":"revised","tools":["bash","web_search"],"loaded_tools":["bash","web_search"],"permission_mode":"ask","instructions":{"bytes":"21","sha256":"f80ca68206d345a7a4adc2c8009243019ba10384e01e34f207e4a79ced5a61cd","owner":{"revision":"1","field":"instructions"}},"output_schema":null}],"messages":[{"admission":"1","command_key":"golden-answer-key","content":{"type":"text","bytes":"5","sha256":"295e577a7a0c2608c470cb327496d5b7f60b8f53b5ebf48f6878d2cdd614e333","text":"input"},"turn":"1","application":"applied","exclusion":null,"outcome":{"code":"completed","content":{"bytes":"4","sha256":"d447f448dba0db368214429935241999ed4fed1eb4fb5f249699db35ce9aec98"}}},{"admission":"2","command_key":"golden-mixed-key","content":{"type":"text","bytes":"7","sha256":"b3d406f1800f595b26a2be8c410f6205a4578cec458ca5219d7b4343b4c3d8d4","text":"propose"},"turn":"2","application":"applied","exclusion":null,"outcome":{"code":"cancelled","content":null}}],"conversation":[{"ordinal":"1","position":"3","kind":"message","turn":"1","source_admission":"1","source_revision":null,"source_catalog_position":null,"source_skill_position":null,"source_operation":null,"content":{"bytes":"5","sha256":"295e577a7a0c2608c470cb327496d5b7f60b8f53b5ebf48f6878d2cdd614e333"}},{"ordinal":"2","position":"5","kind":"assistant","turn":"1","source_admission":null,"source_revision":null,"source_catalog_position":null,"source_skill_position":null,"source_operation":"1","content":{"bytes":"4","sha256":"d447f448dba0db368214429935241999ed4fed1eb4fb5f249699db35ce9aec98"}},{"ordinal":"3","position":"8","kind":"message","turn":"2","source_admission":"2","source_revision":null,"source_catalog_position":null,"source_skill_position":null,"source_operation":null,"content":{"bytes":"7","sha256":"b3d406f1800f595b26a2be8c410f6205a4578cec458ca5219d7b4343b4c3d8d4"}}],"turns":[{"turn":"1","first_admission":"1","input_cutoff":"1","operation":"1","outcome":{"code":"completed","content":{"bytes":"4","sha256":"d447f448dba0db368214429935241999ed4fed1eb4fb5f249699db35ce9aec98"}}},{"turn":"2","first_admission":"2","input_cutoff":"2","operation":"2","outcome":{"code":"cancelled","content":null}}],"model_operations":[{"operation":"1","turn":"1","resolution":{"code":"answer","content":{"type":"text","bytes":"4","sha256":"d447f448dba0db368214429935241999ed4fed1eb4fb5f249699db35ce9aec98","text":"done"}},"interrupted_by":null,"settings_revision":"2","request_id":null,"reasoning_effort":null},{"operation":"2","turn":"2","resolution":{"code":"tool_proposals","content":null},"interrupted_by":null,"settings_revision":"2","request_id":null,"reasoning_effort":null}],"tool_calls":[{"operation":"2","call_ordinal":"0","item_ordinal":"0","rejection":null,"acceptance_position":null,"name":{"type":"text","bytes":"4","sha256":"a0fbca0ae84c22252231e4bffa4714809c6d0949720b266767b8fce2aae50557","text":"bash"},"call_id":{"type":"text","bytes":"3","sha256":"b4457cfe347adbf6057d2f6ac87b2892672e8e9c1aed61119da906cf6089f160","text":"one"},"arguments":{"type":"text","bytes":"52","sha256":"7ef3f0e0b68ea2d333b93093dbe1261a18c901ad73ef684361bf94d12056045c","text":"{\"description\":\"Run\",\"cmd\":\"true\",\"timeout_ms\":null}"},"rejection_result":null},{"operation":"2","call_ordinal":"1","item_ordinal":"1","rejection":null,"acceptance_position":null,"name":{"type":"text","bytes":"4","sha256":"a0fbca0ae84c22252231e4bffa4714809c6d0949720b266767b8fce2aae50557","text":"bash"},"call_id":{"type":"text","bytes":"3","sha256":"8e86e6644aa2b109430eaa8ca07939190490ac61a33862f788b398d49d2e35a5","text":"two"},"arguments":{"type":"text","bytes":"52","sha256":"7ef3f0e0b68ea2d333b93093dbe1261a18c901ad73ef684361bf94d12056045c","text":"{\"description\":\"Run\",\"cmd\":\"true\",\"timeout_ms\":null}"},"rejection_result":null},{"operation":"2","call_ordinal":"2","item_ordinal":"2","rejection":"unknown_tool","acceptance_position":"13","name":{"type":"text","bytes":"5","sha256":"f23807757d15c3493a5f622898047eee4f2949fc3ae4d5d05afa1185dcbd240b","text":"other"},"call_id":{"type":"text","bytes":"5","sha256":"3decf9438cc4009dec87c0e881fc714a1ad6abdd7fb6f231e1b5996e7aa26932","text":"three"},"arguments":{"type":"text","bytes":"2","sha256":"de16d1a68a8e3c9eea4e69185cb547810c9ac3a2999dec7e76dbf073dac34663","text":"{}"},"rejection_result":{"type":"text","bytes":"20","sha256":"e64dbe3bb67e66a800ef3ea2b21801b5f5d5025f4ba2d7a088788e6b4e0d23a7","text":"Unknown tool: other."}}],"actions":[{"action":"1","parent_operation":"2","call_ordinal":"0","permission_revision":"2","permission":"denied","resolution":"denied","result":{"type":"text","bytes":"18","sha256":"a251e0c566a1f73bb2338367bf1cd6e75d2ebc1e0b6d0657a7debe776a3bd881","text":"Permission denied."},"acceptance_position":"14"},{"action":"2","parent_operation":"2","call_ordinal":"1","permission_revision":"2","permission":"requested","resolution":"cancelled","result":{"type":"text","bytes":"26","sha256":"aa1e2635648eede8fa52a127a031a8a1046fa4d61485a913935d25356b8ca66f","text":"Cancelled by Session stop."},"acceptance_position":"16"}],"permission_decisions":[{"command_key":"golden-deny","action":"1","decision":"deny","status":"accepted","code":""}],"session_stops":[{"command_key":"golden-stop","status":"accepted","code":"","selected_turn":"2","admission_cutoff":"2"}],"model_interruptions":[{"command_key":"golden-interrupt","status":"rejected","code":"invalid_target","turn":"0","operation":"1"}],"tool_results":[{"operation":"2","call_ordinal":"2","acceptance_position":"13","call_id":{"type":"text","bytes":"5","sha256":"3decf9438cc4009dec87c0e881fc714a1ad6abdd7fb6f231e1b5996e7aa26932","text":"three"},"code":"unknown_tool","result":{"type":"text","bytes":"20","sha256":"e64dbe3bb67e66a800ef3ea2b21801b5f5d5025f4ba2d7a088788e6b4e0d23a7","text":"Unknown tool: other."}},{"operation":"2","call_ordinal":"0","acceptance_position":"14","call_id":{"type":"text","bytes":"3","sha256":"b4457cfe347adbf6057d2f6ac87b2892672e8e9c1aed61119da906cf6089f160","text":"one"},"code":"denied","result":{"type":"text","bytes":"18","sha256":"a251e0c566a1f73bb2338367bf1cd6e75d2ebc1e0b6d0657a7debe776a3bd881","text":"Permission denied."}},{"operation":"2","call_ordinal":"1","acceptance_position":"16","call_id":{"type":"text","bytes":"3","sha256":"8e86e6644aa2b109430eaa8ca07939190490ac61a33862f788b398d49d2e35a5","text":"two"},"code":"cancelled","result":{"type":"text","bytes":"26","sha256":"aa1e2635648eede8fa52a127a031a8a1046fa4d61485a913935d25356b8ca66f","text":"Cancelled by Session stop."}}]},"execution":{"status":"partial","dispatch_fenced":false,"custody_occupied":"0","scratch_used_bytes":"0","unavailable":["structured_output"]}}
+;
+
+const window_content: [128 * 1024 + 1]u8 = @splat('x');
+const full_window = header ++
+    \\"type":"session_report","profile":"full","session":{"reference":"<session>","parent":null,"workspace":"<workspace>","provider":"codex","model":"model-a","compaction_trigger":"115200","context_estimate":null,"output_reservation":"0","compaction_trigger_override":"115200","output_reservation_override":null,"reasoning_effort":null,"reasoning_effort_override":null,"revision":"1","tools":["bash","web_search"],"loaded_tools":["bash","web_search"],"permission_mode":"bypass","instructions":{"bytes":"131073","sha256":"8609bb358df0dbb7de2318aeabf6f27f5a1cf22aa6e19f38e433c038eaaea7ab"},"output_schema":null,"label":null,"created_at":"<time>"},"archive_state":"active","pending_messages":"0","work":{"state":{"kind":"idle","since":"<time>"},"turn":null,"operation":null,"first_action":null,"latest_outcome":null},"peers":{"from_person_at":null},"first_message":null,"selected_message":null,"recent_messages":[],"actions":{"count":"0","unresolved":[],"resolved":[]},"rejected_calls":{"count":"0","items":[]},"actionable_permissions":[],"full":{"session_revisions":[{"revision":"1","command_key":"golden-report-config","workspace":"<workspace>","provider":"codex","model":"model-a","compaction_trigger":"115200","output_reservation":null,"reasoning_effort":null,"label":null,"tools":["bash","web_search"],"loaded_tools":["bash","web_search"],"permission_mode":"bypass","instructions":{"type":"text","bytes":"131073","sha256":"8609bb358df0dbb7de2318aeabf6f27f5a1cf22aa6e19f38e433c038eaaea7ab","text":"
+++ window_content ++
+    \\"},"output_schema":null}],"messages":[],"conversation":[],"turns":[],"model_operations":[],"tool_calls":[],"actions":[],"permission_decisions":[],"session_stops":[],"model_interruptions":[],"tool_results":[]},"execution":{"status":"partial","dispatch_fenced":false,"custody_occupied":"0","scratch_used_bytes":"0","unavailable":["structured_output"]}}
+;
+
+const Scenario = enum { missing, current_empty, full_empty, current_mcp, current_mixed, full_mixed, full_window };
 
 fn run(case: *store.testing.Case, comptime scenario: Scenario) !void {
     const records = comptime store.testingCatalogRecords(&.{
@@ -50,13 +62,29 @@ fn run(case: *store.testing.Case, comptime scenario: Scenario) !void {
             command.configuration.permission_mode.state = .value;
             try command.configuration.permission_mode.value.set("bypass");
         }
-        if (scenario == .current_mixed) {
+        if (scenario == .current_mixed or scenario == .full_mixed) {
             command.configuration.permission_mode.state = .value;
             try command.configuration.permission_mode.value.set("ask");
         }
+        if (scenario == .full_mixed) {
+            command.configuration.instructions = try store.testingBytesContent(&tmp, "golden-instructions", "quote \" slash \\ café");
+        }
+        if (scenario == .full_window) {
+            const content: [128 * 1024 + 1]u8 = @splat('x');
+            command.configuration.instructions = try store.testingBytesContent(&tmp, "golden-window-instructions", &content);
+        }
+        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
         const configured = try storage.configure(&command, .{});
         try std.testing.expect(configured == .accepted);
         session = configured.accepted.session;
+        if (scenario == .full_mixed) {
+            var update: wire_request.ConfigureCommand = .{};
+            try update.key.set("golden-revision");
+            try update.session.set(session.slice());
+            update.configuration.label.state = .value;
+            try update.configuration.label.value.set("revised");
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
+        }
         if (scenario == .current_mcp) {
             try store.testingSubmitMessage(&storage, &tmp, "golden-mcp-input", "golden-mcp-key", session.slice(), "fetch a page");
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -69,7 +97,7 @@ fn run(case: *store.testing.Case, comptime scenario: Scenario) !void {
                 .decoded_arguments = "{}",
             }});
         }
-        if (scenario == .current_mixed) {
+        if (scenario == .current_mixed or scenario == .full_mixed) {
             try store.testing.answerTestTurn(&storage, &tmp, session.slice(), "golden-answer", &.{.{ .encoded = "done", .decoded = "done" }});
             try store.testingSubmitMessage(&storage, &tmp, "golden-mixed-input", "golden-mixed-key", session.slice(), "propose");
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -89,8 +117,16 @@ fn run(case: *store.testing.Case, comptime scenario: Scenario) !void {
             try deny.session.set(session.slice());
             try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
         }
+        if (scenario == .full_mixed) {
+            var interruption: protocol.ModelInterruptionCommand = .{ .turn_id = 0, .operation_id = 1 };
+            try interruption.key.set("golden-interrupt");
+            try interruption.session.set(session.slice());
+            try std.testing.expect(storage.interruptModel(&interruption, .{}) == .rejected);
+            var stop = try store.testingCompleteSessionStop("golden-stop", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+        }
     }
-    const profile: protocol.ReportProfile = if (scenario == .full_empty) .full else .current;
+    const profile: protocol.ReportProfile = if (scenario == .full_empty or scenario == .full_mixed or scenario == .full_window) .full else .current;
     const bytes = try store.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, profile);
     defer std.testing.allocator.free(bytes);
     const expected = switch (scenario) {
@@ -99,6 +135,8 @@ fn run(case: *store.testing.Case, comptime scenario: Scenario) !void {
         .full_empty => full_empty,
         .current_mcp => current_mcp,
         .current_mixed => current_mixed,
+        .full_mixed => full_mixed,
+        .full_window => full_window,
     };
     var normalized = try std.testing.allocator.dupe(u8, bytes);
     defer std.testing.allocator.free(normalized);
@@ -172,6 +210,20 @@ test "session report golden Current mixed" {
     try store.testing.forEachEngine(struct {
         fn go(case: *store.testing.Case) !void {
             try run(case, .current_mixed);
+        }
+    }.go);
+}
+test "session report golden Full mixed" {
+    try store.testing.forEachEngine(struct {
+        fn go(case: *store.testing.Case) !void {
+            try run(case, .full_mixed);
+        }
+    }.go);
+}
+test "session report golden Full window" {
+    try store.testing.forEachEngine(struct {
+        fn go(case: *store.testing.Case) !void {
+            try run(case, .full_window);
         }
     }.go);
 }
