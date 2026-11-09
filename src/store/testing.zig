@@ -27,6 +27,100 @@ const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 
 pub const OutputMetadataWriter = output_format.OutputMetadataWriter;
 
+/// Compose fixture records with the canonical required runners.
+pub fn catalogRecordsWith(comptime extra: []const tool_catalog.Record) [tool_catalog.built_in.records.len + extra.len]tool_catalog.Record {
+    var records: [tool_catalog.built_in.records.len + extra.len]tool_catalog.Record = undefined;
+    @memcpy(records[0..tool_catalog.built_in.records.len], tool_catalog.built_in.records);
+    @memcpy(records[tool_catalog.built_in.records.len..], extra);
+    sortCatalogRecords(&records);
+    return records;
+}
+
+pub fn sortCatalogRecords(records: []tool_catalog.Record) void {
+    std.mem.sort(tool_catalog.Record, records, {}, struct {
+        fn lessThan(_: void, left: tool_catalog.Record, right: tool_catalog.Record) bool {
+            return std.mem.lessThan(u8, left.name, right.name);
+        }
+    }.lessThan);
+}
+
+pub fn testingStoreCatalog(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, catalog: ?*const tool_catalog.Catalog) !void {
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    return storage.openWithOptions(io, database, root, .{ .catalog = catalog });
+}
+
+pub fn testingSqliteStore(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io) !void {
+    return openSqlite(storage, tmp, io, .{});
+}
+
+/// Opens the SQLite Store in `tmp`. A new Store with the default catalog and
+/// providers starts as a copy of one built once per process, with its own
+/// selector and Store id: building one runs the whole schema bootstrap,
+/// about five times the cost of writing and reopening a copy.
+fn openSqlite(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: TestingStoreOptions) !void {
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    const selector = options.identity orelse root;
+    const default = options.catalog == &tool_catalog.built_in and
+        std.meta.eql(options.served, (TestingStoreOptions{}).served);
+    if (default) if (tmp.dir.statFile(io, "store.sqlite3", .{})) |_| {} else |err| switch (err) {
+        error.FileNotFound => try copyTemplate(tmp, io, database, selector),
+        else => return err,
+    };
+    return storage.openWithOptions(io, database, selector, .{ .served = options.served, .catalog = options.catalog }) catch |err| {
+        std.debug.print("testing Store open failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+}
+
+const Template = struct {
+    var state = std.atomic.Value(u8).init(0); // 0 none, 1 building, 2 built
+    var bytes: []const u8 = &.{};
+
+    fn get(io: std.Io) ![]const u8 {
+        while (true) switch (state.cmpxchgStrong(0, 1, .acquire, .acquire) orelse 0) {
+            0 => break,
+            1 => std.atomic.spinLoopHint(),
+            else => return bytes,
+        };
+        errdefer state.store(0, .release);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+        var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        var storage: Store = undefined;
+        try storage.open(io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root}), root);
+        try storage.close();
+        bytes = try tmp.dir.readFileAlloc(io, "store.sqlite3", std.heap.page_allocator, .unlimited);
+        state.store(2, .release);
+        return bytes;
+    }
+};
+
+fn copyTemplate(tmp: *std.testing.TmpDir, io: std.Io, database: []const u8, selector: []const u8) !void {
+    try tmp.dir.writeFile(io, .{ .sub_path = "store.sqlite3", .data = try Template.get(io) });
+    var path_buffer: [platform.max_database_path_bytes + 1]u8 = undefined;
+    const path = (try std.fmt.bufPrint(&path_buffer, "{s}\x00", .{database}))[0..database.len :0];
+    var connection: ?*sqlite.c.sqlite3 = null;
+    defer _ = sqlite.c.sqlite3_close(connection);
+    if (sqlite.c.sqlite3_open_v2(path, &connection, sqlite.c.SQLITE_OPEN_READWRITE, null) != sqlite.c.SQLITE_OK)
+        return error.SqliteOpenFailed;
+    const statement = try sqlite.prepare(connection.?, "UPDATE store_meta SET meta_value=CASE meta_key " ++
+        "WHEN 'store_selector' THEN ?1 ELSE lower(hex(randomblob(16))) END WHERE meta_key IN ('store_selector','store_id')");
+    defer _ = sqlite.c.sqlite3_finalize(statement);
+    try sqlite.bindText(statement, 1, selector);
+    if (sqlite.c.sqlite3_step(statement) != sqlite.c.SQLITE_DONE or sqlite.c.sqlite3_changes(connection) != 2)
+        return error.SqliteExecFailed;
+}
+
 /// The engines a conformance test runs on, each in this one process.
 pub const Engine = enum { sqlite, mysql };
 
@@ -109,17 +203,7 @@ pub const TestingStoreOptions = struct {
 pub fn testingStoreWith(case: *const Case, storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: TestingStoreOptions) !void {
     switch (case.engine) {
         .mysql => return mysql_testing.open(storage, tmp, io, options),
-        .sqlite => {
-            var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-            const root_length = try tmp.dir.realPath(io, &root_buffer);
-            const root = root_buffer[0..root_length];
-            var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
-            const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
-            return storage.openWithOptions(io, database, options.identity orelse root, .{ .served = options.served, .catalog = options.catalog }) catch |err| {
-                std.debug.print("testing Store open failed: {s}\n", .{@errorName(err)});
-                return err;
-            };
-        },
+        .sqlite => return openSqlite(storage, tmp, io, options),
     }
 }
 

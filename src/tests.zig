@@ -70,7 +70,9 @@ test {
     _ = @import("core_tools.zig");
     _ = @import("read_transcript.zig");
     _ = @import("find_tools.zig");
+    _ = @import("find_tools_tests.zig");
     _ = @import("skills.zig");
+    _ = @import("session_skills.zig");
     _ = @import("client.zig");
     _ = @import("cli.zig");
     _ = @import("cli_args.zig");
@@ -84,5 +86,6 @@ test {
     _ = @import("SessionScreen.zig");
     _ = @import("session_history.zig");
     _ = @import("session_view.zig");
+    _ = @import("session_view_store_tests.zig");
     _ = @import("ClientTask.zig");
 }

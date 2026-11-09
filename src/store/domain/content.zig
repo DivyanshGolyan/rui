@@ -2,6 +2,7 @@
 //! locations and readers.
 
 const std = @import("std");
+const command_reply = @import("../../command_reply.zig");
 const protocol = @import("../../protocol.zig");
 const wire_request = @import("../../wire_request.zig");
 const store_core = @import("../Store.zig");
@@ -12,10 +13,7 @@ const rsql = @import("../rsql.zig");
 const Faults = store_core.Faults;
 const Ordinary = store_core.Ordinary;
 
-pub const ContentReference = struct {
-    length: u64,
-    digest: [32]u8,
-};
+pub const ContentReference = command_reply.ContentReference;
 
 /// Where one canonical content value is, resolved in one Store entry point.
 /// Read only by `ContentReader.open`.

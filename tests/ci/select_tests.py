@@ -213,8 +213,9 @@ class Graph:
 
     def scripts(self, scripts):
         """The modules and source files fixture scripts use, transitively: a
-        function a fixture borrows from another fixture's module may call any
-        helper that module imports."""
+        library a fixture imports may import other libraries. No fixture
+        imports another (test_harness_contracts.FixtureImportTest), so a
+        change to one fixture's script selects only the targets that run it."""
         return self.closure(self.python, scripts)
 
     @staticmethod
@@ -328,12 +329,12 @@ RULES = (
      "Shared model context prose: fixture consumers and Go request oracles"),
     (("src/server*.zig", "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/caller_*.zig", "src/cli_value.zig",
       "src/slash_commands.zig", "src/protocol_reply.zig", "src/ResponseTiming.zig", "src/preferences.zig",
-      "src/provider_selection.zig", "src/client_defaults.zig", "src/new_session_selection.zig",
+      "src/provider_selection.zig", "src/client_defaults.zig", "src/configure_input.zig", "src/new_session_selection.zig",
       "src/preference_values.zig", "src/product_defaults.zig", "tests/integration/product_defaults.py"),
      ("admission-debug-integration",), ("admission-debug-integration",),
      "Admission, capture and CLI selection: the complete Debug recovery matrix"),
     (("src/cli.zig", "src/cli_args.zig", "src/cli_value.zig", "src/client.zig", "src/client_defaults.zig",
-      "src/product_defaults.zig", "src/protocol.zig", "src/store/domain/configuration.zig", "openapi.json"),
+      "src/configure_input.zig", "src/product_defaults.zig", "src/protocol.zig", "src/store/domain/configuration.zig", "openapi.json"),
      ("measurement-check",), ("measurement-check",),
      "CLI configuration surface: the measurement runners' configure call against the current CLI"),
     (("src/store.zig", "src/store/*", "!src/store/wire/*"), ("dispatch-debug-integration",), ("dispatch-debug-integration",),
@@ -349,7 +350,7 @@ RULES = (
     (("tests/integration/canonical_failure_integration.py", "build.zig"),
      ("canonical-failure-integration",), ("canonical-failure-integration",), "Canonical failure caller oracle"),
     (("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_*", "src/*.patch", ".agents/setup",
-      ".github/actions/setup/action.yml"),
+      ".github/actions/setup/action.yml", "screen-emulator/*"),
      ("check-full", "admission-debug-integration", "test-full"),
      ("check-full", "admission-debug-integration", "test-full"),
      "Build, dependency or bootstrap inputs"),
@@ -435,17 +436,26 @@ POLICY_SELF_CHECKS = (
     # imports live_engines.py and h2 and reads the wire version.
     ("test_selection.FullCheckPartitionTest",
      ("tests/ci/*", "build.zig", "tests/integration/check.sh", "tests/integration/host_process.py",
-      "tests/integration/live_engines.py", "tests/integration/requirements.txt", "src/protocol.zig")),
+      "tests/integration/live_engines.py", "tests/integration/requirements.txt", "src/wire_version.zig")),
     ("test_admission", ("tests/ci/*", ".github/*", "build.zig")),
     ("test_release_publication", ("tests/ci/*",)),
     ("test_build_artifact", ("tests/ci/*",)),
 )
 
 
+# Steps that run the PTY screen observer, whose libghostty-vt comes from the
+# test-only package in screen-emulator: setup fetches its packages for these only.
+# A step missing here still builds, fetching them on demand.
+SCREEN_TARGETS = frozenset({"check", "check-full", "terminal-restoration-integration", "canonical-failure-integration",
+                            "host-launch-integration", "upgrade-integration", "human-cli-integration",
+                            "skills-integration", "bash-recovery-integration", "renderer-contracts-selftest",
+                            "direct-pty", "direct-pty-controls", "input-equivalence", "screen-emulator"})
+
+
 def setup_requirements(targets):
     # Every runner installs the same fixture packages (tests/integration/requirements.txt)
     # for any target, so no fixture's import depends on a hand-kept target list.
-    return {"go": bool(({"measurement-check"} | set(RESOURCES)).intersection(targets)), "node": bool({"ts-client", "launch-frame-integration", "check", "check-full"}.intersection(targets)), "python": bool(targets), "tmux": "upgrade-integration" in targets}
+    return {"go": bool(({"measurement-check"} | set(RESOURCES)).intersection(targets)), "node": bool({"ts-client", "launch-frame-integration", "check", "check-full"}.intersection(targets)), "python": bool(targets), "screen": bool(SCREEN_TARGETS.intersection(targets)), "tmux": "upgrade-integration" in targets}
 
 
 def execution_batches(targets, check_part="all"):

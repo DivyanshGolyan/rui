@@ -94,9 +94,17 @@ pub const testingStoreWith = store_testing.testingStoreWith;
 pub const testingCanonicalCwd = store_testing.canonicalCwd;
 pub const testingCompleteConfiguration = store_testing.completeConfiguration;
 pub const testingSubmitMessage = store_testing.submitTestMessage;
+pub const testing = store_testing;
+pub const testing_content_chunk_bytes = store_schema.content_chunk_bytes;
+pub const testingCatalogRecords = store_test_fixtures.testingCatalogRecords;
 pub const settleCallsForTesting = store_test_fixtures.settleCallsForTesting;
 pub const TestingCall = store_test_fixtures.TestingCall;
 pub const testingSessionReportWithProfile = store_test_fixtures.testingSessionReportWithProfile;
+pub const testingSqlite = @import("store/sqlite.zig");
+pub const testingBytesContent = store_test_fixtures.testingBytesContent;
+pub const testingContentReference = store_test_fixtures.testingContentReference;
+pub const testingCompleteSessionStop = store_test_fixtures.completeSessionStop;
+pub const ActionSettlement = action_domain.ActionSettlement;
 pub const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 
 test {
@@ -104,7 +112,6 @@ test {
     _ = @import("store/domain/history_floor.zig");
     _ = @import("store/tests.zig");
     _ = @import("store/archive_tests.zig");
-    _ = @import("store/find_tools_tests.zig");
     _ = @import("store/sqlite_tests.zig");
     _ = @import("store/mysql_dialect_check.zig");
     _ = @import("store/mysql_literal.zig");

@@ -21,6 +21,7 @@ const platform = @import("platform.zig");
 const provider = @import("provider.zig");
 const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
+const host_reply = @import("host_reply.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 const wire_request = @import("wire_request.zig");
 const store_module = @import("store.zig");
@@ -42,6 +43,7 @@ pub const scratch_limit_bytes = server_host.scratch_limit_bytes;
 pub const default_retention_entry_capacity = server_host.default_retention_entry_capacity;
 pub const Limits = server_host.Limits;
 pub const Hooks = server_host.Hooks;
+pub const Tuning = server_host.Tuning;
 const Host = server_host.Host;
 const fenceDispatch = server_host.fenceDispatch;
 const wakeListener = server_host.wakeListener;
@@ -1603,13 +1605,13 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .host_info => {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
             // Atomics and fixed values only: this reply never touches SQLite.
-            try fd.json(200, protocol.max_host_info_response_bytes, renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.turns_paused.load(.acquire), host.providers.routes(), host.store.mysqlDoublewrite() });
+            try fd.json(200, protocol.max_host_info_response_bytes, host_reply.renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.turns_paused.load(.acquire), host.providers.routes(), host.store.mysqlDoublewrite() });
         },
         .host_pause => |pause| {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
             // Execution reads the flag at its next admission pass.
             host.turns_paused.store(pause.paused, .release);
-            try fd.json(200, comptime protocol.shapeBytes(protocol.host_pause_reply), renderHostPause, .{pause.paused});
+            try fd.json(200, comptime protocol.shapeBytes(protocol.host_pause_reply), host_reply.renderHostPause, .{pause.paused});
         },
         .host_stop => {
             if (host.advance(.stopping) != .stopping) wakeListener(host);
@@ -1626,7 +1628,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .conflict => 409,
                 .infrastructure_failure => 500,
             };
-            try fd.json(status, protocol.max_response_bytes, renderConfigureReply, .{ command, result });
+            try fd.json(status, protocol.max_response_bytes, host_reply.renderConfigureReply, .{ command, result });
         },
         .message => |*command| {
             const result = submitMessage(host, command, client_environment.?);
@@ -1639,7 +1641,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .conflict => 409,
                 .infrastructure_failure => 500,
             };
-            try fd.json(status, protocol.max_response_bytes, renderMessageReply, .{ command, result });
+            try fd.json(status, protocol.max_response_bytes, host_reply.renderMessageReply, .{ command, result });
         },
         .session_stop => |*command| {
             var timing = ControlTiming.init(host, command.key, "session_stop", accepted_at_ns);
@@ -1654,7 +1656,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .conflict => 409,
                 .infrastructure_failure => 500,
             };
-            try fd.json(status, protocol.max_response_bytes, renderSessionStopReply, .{ command, result });
+            try fd.json(status, protocol.max_response_bytes, host_reply.renderSessionStopReply, .{ command, result });
             fd.timing = timing;
         },
         .session_archive => |*command| {
@@ -1670,7 +1672,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .conflict => 409,
                 .infrastructure_failure => 500,
             };
-            try fd.json(status, protocol.max_response_bytes, renderSessionArchiveReply, .{ command, result });
+            try fd.json(status, protocol.max_response_bytes, host_reply.renderSessionArchiveReply, .{ command, result });
             fd.timing = timing;
         },
         .model_interruption => |*command| {
@@ -1686,7 +1688,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .conflict => 409,
                 .infrastructure_failure => 500,
             };
-            try fd.json(status, protocol.max_response_bytes, renderModelInterruptionReply, .{ command, result });
+            try fd.json(status, protocol.max_response_bytes, host_reply.renderModelInterruptionReply, .{ command, result });
             fd.timing = timing;
         },
         .permission_decision => |*command| {
@@ -1702,7 +1704,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .conflict => 409,
                 .infrastructure_failure => 500,
             };
-            try fd.json(status, protocol.max_response_bytes, renderPermissionDecisionReply, .{ command, result });
+            try fd.json(status, protocol.max_response_bytes, host_reply.renderPermissionDecisionReply, .{ command, result });
             fd.timing = timing;
         },
         .observe_command => |*command| {
@@ -1720,7 +1722,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                         "request_observation_tier1");
                 },
             }
-            try fd.json(200, commandObservationBytes(&observation), renderCommandObservation, .{ command.key.slice(), &observation });
+            try fd.json(200, host_reply.commandObservationBytes(&observation), host_reply.renderCommandObservation, .{ command.key.slice(), &observation });
         },
         .read_result => |*command| {
             const reference = host.store.commandResult(command.key.slice()) catch |err| switch (err) {
@@ -1791,7 +1793,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             // Store lock, scratch or SQLite.
             if (request_value.since) |since| {
                 if (request_value.changed == null and host.store.notModified(since)) {
-                    return fd.json(200, protocol.max_response_bytes, renderSessionsNotModified, .{since});
+                    return fd.json(200, protocol.max_response_bytes, host_reply.renderSessionsNotModified, .{since});
                 }
             }
             const page = host.store.captureSessionList(request_value, .{
@@ -1822,7 +1824,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            try fd.json(200, protocol.max_conversation_page_response_bytes, renderConversationPage, .{page});
+            try fd.json(200, protocol.max_conversation_page_response_bytes, host_reply.renderConversationPage, .{page});
         },
         .conversation_content => |*command| try prepareConversationContent(host, fd, command),
         .activity_page => |*command| {
@@ -1835,7 +1837,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            try fd.json(200, activityPageBytes(page), renderActivityPage, .{page});
+            try fd.json(200, host_reply.activityPageBytes(page), host_reply.renderActivityPage, .{page});
         },
         .activity_search => |*command| {
             const page = try createUnfilled(host.allocator, protocol.ActivitySearchFacts);
@@ -1847,7 +1849,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            try fd.json(200, protocol.max_activity_search_response_bytes, renderActivitySearch, .{page});
+            try fd.json(200, protocol.max_activity_search_response_bytes, host_reply.renderActivitySearch, .{page});
         },
         .activity_content => |*command| {
             const location = host.store.openActivityContent(command) catch |err| switch (err) {
@@ -1880,17 +1882,6 @@ fn renderModelList(out: protocol.JsonOut, host: *Host) error{BufferTooLarge}!voi
 fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMemory}!*T {
     const bytes = allocator.rawAlloc(@sizeOf(T), .of(T), @returnAddress()) orelse return error.OutOfMemory;
     return @ptrCast(@alignCast(bytes));
-}
-
-fn activityPageBytes(page: *const protocol.ActivityFacts) usize {
-    return if (page.not_modified) protocol.shapeBytes(protocol.ActivityFacts.unchanged) else protocol.max_activity_page_response_bytes;
-}
-
-fn renderActivityPage(out: protocol.JsonOut, page: *const protocol.ActivityFacts) error{BufferTooLarge}!void {
-    page.writeJson(out.writer) catch return error.BufferTooLarge;
-}
-fn renderActivitySearch(out: protocol.JsonOut, page: *const protocol.ActivitySearchFacts) error{BufferTooLarge}!void {
-    page.writeJson(out.writer) catch return error.BufferTooLarge;
 }
 
 fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
@@ -2053,24 +2044,20 @@ const HeaderReader = struct {
     }
 };
 
-fn renderConfigureReply(
-    response: protocol.JsonOut,
-    command: *const wire_request.ConfigureCommand,
-    result: store_module.ConfigureReply,
-) !void {
-    const shapes = protocol.configuration_reply;
-    try switch (result) {
-        .accepted => |value| if (value.skills) |status| response.appendShape(shapes.accepted_skills, .{ value.replayed, value.session.slice(), value.revision, status }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.revision, value.created }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, command.session.slice(), value.code }),
-        .conflict => response.appendShape(shapes.conflict, .{command.session.slice()}),
-        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
+/// The configure and message renderers read only `command.session`, so they
+/// take any command; both mutation tests list them first.
+fn ReplyCommand(comptime render: anytype, comptime index: usize) type {
+    return switch (index) {
+        0 => wire_request.ConfigureCommand,
+        1 => wire_request.MessageCommand,
+        else => @typeInfo(@typeInfo(@TypeOf(render)).@"fn".param_types[1].?).pointer.child,
     };
 }
 
 test "canonical failure classifier accepts every production mutation failure envelope" {
     const protocol_reply = @import("protocol_reply.zig");
-    inline for (.{ renderConfigureReply, renderMessageReply, renderSessionStopReply, renderSessionArchiveReply, renderModelInterruptionReply, renderPermissionDecisionReply }) |render| {
-        const Command = @typeInfo(@typeInfo(@TypeOf(render)).@"fn".param_types[1].?).pointer.child;
+    inline for (.{ host_reply.renderConfigureReply, host_reply.renderMessageReply, host_reply.renderSessionStopReply, host_reply.renderSessionArchiveReply, host_reply.renderModelInterruptionReply, host_reply.renderPermissionDecisionReply }, 0..) |render, index| {
+        const Command = ReplyCommand(render, index);
         var response = protocol.ResponseBuffer{};
         try response.render(render, .{ &Command{}, .infrastructure_failure });
         try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}", response.slice());
@@ -2135,8 +2122,8 @@ test "mutation decoder validates all six actual producers and preserved domain a
     const protocol_reply = @import("protocol_reply.zig");
     const session = "k7m2qx";
     const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
-    inline for (.{ renderConfigureReply, renderMessageReply, renderSessionStopReply, renderModelInterruptionReply, renderPermissionDecisionReply, renderSessionArchiveReply }, 0..) |render, index| {
-        const Command = @typeInfo(@typeInfo(@TypeOf(render)).@"fn".param_types[1].?).pointer.child;
+    inline for (.{ host_reply.renderConfigureReply, host_reply.renderMessageReply, host_reply.renderSessionStopReply, host_reply.renderModelInterruptionReply, host_reply.renderPermissionDecisionReply, host_reply.renderSessionArchiveReply }, 0..) |render, index| {
+        const Command = ReplyCommand(render, index);
         const MutationReply = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
         var command: Command = .{};
         try command.session.set(session);
@@ -2218,27 +2205,13 @@ test "mutation decoder validates all six actual producers and preserved domain a
     }
 }
 
-fn renderMessageReply(
-    response: protocol.JsonOut,
-    command: *const wire_request.MessageCommand,
-    result: store_module.MessageReply,
-) !void {
-    const shapes = protocol.message_reply;
-    try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.admission_id, value.content.length, value.content.digest, value.admission_id }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, command.session.slice(), value.code, value.content.length, value.content.digest }),
-        .conflict => response.appendShape(shapes.conflict, .{command.session.slice()}),
-        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
-    };
-}
-
 test "initial Message reply binds its allocated Session and original input before exposing acceptance" {
     const protocol_reply = @import("protocol_reply.zig");
     const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
     var allocated: protocol.Bounded(protocol.max_session_bytes) = .{};
     try allocated.set("k7m2qx");
     var response: protocol.ResponseBuffer = .{};
-    try response.render(renderMessageReply, .{ &wire_request.MessageCommand{ .configuration = .{} }, store_module.MessageReply{ .accepted = .{
+    try response.render(host_reply.renderMessageReply, .{ &wire_request.MessageCommand{ .configuration = .{} }, store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
         .content = content,
@@ -2256,7 +2229,7 @@ test "initial Message reply binds its allocated Session and original input befor
     try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", changed).answer);
     response = .{};
     try allocated.set("BAD-ID");
-    try response.render(renderMessageReply, .{ &wire_request.MessageCommand{ .configuration = .{} }, store_module.MessageReply{ .accepted = .{
+    try response.render(host_reply.renderMessageReply, .{ &wire_request.MessageCommand{ .configuration = .{} }, store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
         .content = content,
@@ -2265,194 +2238,8 @@ test "initial Message reply binds its allocated Session and original input befor
     try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", target).answer);
 }
 
-fn renderConversationPage(response: protocol.JsonOut, page: *const store_module.PublicConversationPage) !void {
-    const shapes = protocol.conversation_page_reply;
-    try response.appendShape(shapes.head, .{page.end});
-    for (page.items[0..page.count], 0..) |item, index| {
-        if (index != 0) try response.append(",");
-        switch (item.kind) {
-            .hosted_call => try response.appendShape(shapes.hosted_call, .{ item.position, item.ordinal }),
-            inline else => |kind| try response.appendShape(shapes.item(kind), .{ item.position, item.ordinal, item.content.length, item.content.digest }),
-        }
-        switch (item.kind) {
-            .user => if (item.admitted_at) |second| try response.appendShape(shapes.admission, .{ second, item.sender }),
-            .tool_result, .hosted_call => if (item.presentation) |presentation| try response.appendShape(shapes.presentation, .{presentation}),
-            .assistant => {},
-        }
-        try response.appendShape(shapes.item_end, .{});
-    }
-    if (page.more) {
-        const last = page.items[page.count - 1];
-        try response.appendShape(shapes.more, .{ last.position, last.ordinal });
-    } else try response.appendShape(shapes.last, .{});
-}
-
-fn renderSessionStopReply(
-    response: protocol.JsonOut,
-    command: *const protocol.SessionStopCommand,
-    result: store_module.SessionStopReply,
-) !void {
-    const shapes = protocol.session_stop_reply;
-    const session = command.session.slice();
-    try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, value.selection.selected_turn_id, value.selection.admission_cutoff, value.completion }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, value.code }),
-        .conflict => response.appendShape(shapes.conflict, .{session}),
-        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
-    };
-}
-
-fn renderSessionArchiveReply(
-    response: protocol.JsonOut,
-    command: *const protocol.SessionArchiveCommand,
-    result: store_module.SessionArchiveReply,
-) !void {
-    const shapes = protocol.session_archive_reply;
-    const session = command.session.slice();
-    try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, value.archived, value.completion }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, value.code }),
-        .conflict => response.appendShape(shapes.conflict, .{session}),
-        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
-    };
-}
-
-fn renderModelInterruptionReply(
-    response: protocol.JsonOut,
-    command: *const protocol.ModelInterruptionCommand,
-    result: store_module.ModelInterruptionReply,
-) !void {
-    const shapes = protocol.model_interruption_reply;
-    const session = command.session.slice();
-    try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, command.turn_id, command.operation_id }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, command.turn_id, command.operation_id, value.code }),
-        .conflict => response.appendShape(shapes.conflict, .{ session, command.turn_id, command.operation_id }),
-        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
-    };
-}
-
-fn renderPermissionDecisionReply(
-    response: protocol.JsonOut,
-    command: *const protocol.PermissionDecisionCommand,
-    result: store_module.PermissionDecisionReply,
-) !void {
-    const shapes = protocol.permission_decision_reply;
-    const session = command.session.slice();
-    try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, command.action_id, command.decision }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, command.action_id, command.decision, value.code }),
-        .conflict => response.appendShape(shapes.conflict, .{ session, command.action_id, command.decision }),
-        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
-    };
-}
-
-fn commandObservationBytes(observed: *const store_module.Observed) usize {
-    const shapes = protocol.command_observation_reply;
-    return switch (observed.*) {
-        .not_modified => protocol.shapeBytes(shapes.not_modified),
-        .full => |*full| if (full.observation.status == .absent) protocol.shapeBytes(shapes.absent) else switch (full.observation.kind) {
-            inline else => |_, kind| shapes.maxBytes(kind),
-        },
-    };
-}
-
-fn renderCommandObservation(response: protocol.JsonOut, key: []const u8, observed: *const store_module.Observed) !void {
-    var token: [change_ring.SessionToken.max_bytes]u8 = undefined;
-    switch (observed.*) {
-        .not_modified => |since| try response.appendShape(protocol.command_observation_reply.not_modified, .{ key, since.format(&token) }),
-        .full => |*full| try renderFullCommandObservation(response, key, &full.observation, if (full.token) |since| since.format(&token) else null),
-    }
-}
-
-fn renderFullCommandObservation(
-    response: protocol.JsonOut,
-    key: []const u8,
-    observation: *const store_module.CommandObservation,
-    since: ?[]const u8,
-) !void {
-    const shapes = protocol.command_observation_reply;
-    if (observation.status == .absent) return response.appendShape(shapes.absent, .{key});
-    switch (observation.kind) {
-        inline else => |_, kind| try response.appendShape(shapes.head(kind), .{ key, since, observation.status, observation.target.slice() }),
-    }
-    if (observation.code.len != 0) try response.appendShape(shapes.code, .{observation.code.slice()});
-    if (observation.kind == .message) try response.appendShape(shapes.state, .{observation.requestState() orelse return error.InvalidCommandObservation});
-    switch (observation.kind) {
-        .configure => |configured| if (observation.status == .accepted) try response.appendShape(shapes.revision, .{ configured.revision, configured.created }),
-        .message => |*maybe_message| if (maybe_message.*) |*message| {
-            try response.appendShape(shapes.input, .{ message.content.length, message.content.digest });
-            if (message.queue) |accepted| {
-                try response.appendShape(shapes.queue, .{ accepted.admission_id, message.admitted_at });
-                const binding: ?store_module.AttemptBinding = switch (accepted.state) {
-                    .processing => |value| value,
-                    .completed => |value| value.binding,
-                    .cancelled => |value| value.binding,
-                    .failed => |value| value.binding,
-                    .queued, .excluded => null,
-                };
-                if (binding) |bound| try response.appendShape(shapes.binding, .{ bound.turn_id, bound.operation_id, bound.attempt_ordinal });
-                switch (accepted.state) {
-                    .completed => |value| try response.appendShape(shapes.completed, .{ value.answer.length, value.answer.digest }),
-                    .cancelled => |value| try response.appendShape(shapes.cancelled, .{value.code.slice()}),
-                    .excluded => |value| try response.appendShape(shapes.cancelled, .{value.code.slice()}),
-                    .failed => |value| try response.appendShape(shapes.failed, .{value.code.slice()}),
-                    .queued, .processing => {
-                        const work = message.work orelse return error.InvalidCommandObservation;
-                        try response.appendShape(shapes.work, .{ protocol.WorkStateJson{ .state = work.state }, work.first_action });
-                    },
-                }
-                if (message.recovery.count != 0) try response.appendShape(shapes.recovery, .{protocol.MessageRecoveryJson{
-                    .calls = message.recovery.calls[0..message.recovery.count],
-                    .more = message.recovery.more,
-                }});
-            }
-        },
-        .session_stop => |maybe_stop| if (maybe_stop) |stop| try response.appendShape(shapes.session_stop, .{ stop.selection.selected_turn_id, stop.selection.admission_cutoff, stop.completion }),
-        .session_archive => |archive| if (archive) |value| try response.appendShape(shapes.session_archive, .{ value.archived, value.completion }),
-        .model_interruption => |target| try response.appendShape(shapes.model_interruption, .{ target.session.slice(), target.turn_id, target.operation_id }),
-        .permission_decision => |permission| try response.appendShape(shapes.permission_decision, .{ permission.action_id, permission.decision }),
-    }
-    try response.appendShape(shapes.tail, .{});
-}
-
-fn renderHostInfo(
-    response: protocol.JsonOut,
-    store: []const u8,
-    instance: protocol.InstanceId,
-    active_capacity: u64,
-    intake_capacity: u64,
-    descriptor_soft_limit: ?u64,
-    started_at: u64,
-    custody_occupied: u64,
-    paused: bool,
-    routes: protocol.Routes,
-    doublewrite: ?[]const u8,
-) !void {
-    var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
-    const limit_text = if (descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
-    if (doublewrite) |value|
-        try response.appendShape(protocol.host_info_mysql_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, paused, value, routes.codex, routes.openai })
-    else
-        try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, paused, routes.codex, routes.openai });
-}
-
-fn renderHostPause(response: protocol.JsonOut, paused: bool) !void {
-    try response.appendShape(protocol.host_pause_reply, .{paused});
-}
-
-/// Nothing changed since the token: it comes back, with no rows.
-fn renderSessionsNotModified(response: protocol.JsonOut, since: protocol.SinceToken) !void {
-    var token: [protocol.SinceToken.max_bytes]u8 = undefined;
-    try response.appendShape(protocol.session_list_reply.head ++ protocol.session_list_reply.last_tail, .{ protocol.ListDelta.not_modified, since.format(&token) });
-}
-
-fn renderStatic(response: protocol.JsonOut, kind: protocol.ErrorType, code: []const u8) !void {
-    try response.appendShape(protocol.error_reply, .{ kind, code });
-}
-
 fn respondStatic(reply: *Reply, status: u16, kind: protocol.ErrorType, code: []const u8) void {
-    reply.json(status, protocol.max_control_error_response_bytes, renderStatic, .{ kind, code }) catch {};
+    reply.json(status, protocol.max_control_error_response_bytes, host_reply.renderStatic, .{ kind, code }) catch {};
 }
 
 // A reply retains its reader, not a handler stack or a complete content copy.
@@ -3117,7 +2904,7 @@ test "message observation renders Host state binding live work and persistent re
     const Expect = struct {
         fn rendered(observation: *const store_module.CommandObservation, expected: []const u8) !void {
             var response: protocol.CommandObservationBuffer = .{};
-            try response.render(renderFullCommandObservation, .{ "k", observation, null });
+            try response.render(host_reply.renderFullCommandObservation, .{ "k", observation, null });
             try std.testing.expectEqualStrings(expected, response.slice());
         }
     };
@@ -3177,7 +2964,7 @@ test "activity page both unchanged tiers render byte exactly with independent re
     defer std.testing.allocator.destroy(page);
     try storage.activityPage(&request, page);
     try std.testing.expect(!page.not_modified);
-    try std.testing.expectEqual(protocol.max_activity_page_response_bytes, activityPageBytes(page));
+    try std.testing.expectEqual(protocol.max_activity_page_response_bytes, host_reply.activityPageBytes(page));
     request.position = page.end;
     request.since = page.token.?;
     for (0..2) |tier| {
@@ -3189,11 +2976,11 @@ test "activity page both unchanged tiers render byte exactly with independent re
         try std.testing.expect(page.not_modified);
         var bytes: [512]u8 = undefined;
         var writer = std.Io.Writer.fixed(&bytes);
-        try renderActivityPage(.{ .writer = &writer }, page);
+        try host_reply.renderActivityPage(.{ .writer = &writer }, page);
         var expected: [256]u8 = undefined;
         try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.{d}.{s}\"}}", .{ storage.commitGeneration(), session.slice() }), writer.buffered());
-        try std.testing.expectEqual(protocol.shapeBytes(protocol.ActivityFacts.unchanged), activityPageBytes(page));
-        try std.testing.expect(activityPageBytes(page) < protocol.max_activity_page_response_bytes);
+        try std.testing.expectEqual(protocol.shapeBytes(protocol.ActivityFacts.unchanged), host_reply.activityPageBytes(page));
+        try std.testing.expect(host_reply.activityPageBytes(page) < protocol.max_activity_page_response_bytes);
     }
 }
 
@@ -3217,18 +3004,18 @@ test "command observation full and both unchanged tiers render byte exactly with
     const Expect = struct {
         fn full(value: *const store_module.Observed, id: []const u8, generation: u64) !void {
             var response: protocol.CommandObservationBuffer = .{};
-            try response.render(renderCommandObservation, .{ "tier-create", value });
+            try response.render(host_reply.renderCommandObservation, .{ "tier-create", value });
             var expected: [1024]u8 = undefined;
             try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"tier-create\",\"delta\":\"full\",\"since\":\"abababababababababababababababab.{d}.{s}\",\"observation\":{{\"status\":\"accepted\",\"kind\":\"configure\",\"target\":\"{s}\",\"revision\":\"1\",\"created\":true}}}}", .{ generation, id, id }), response.slice());
-            try std.testing.expectEqual(protocol.command_observation_reply.maxBytes(.configure), commandObservationBytes(value));
+            try std.testing.expectEqual(protocol.command_observation_reply.maxBytes(.configure), host_reply.commandObservationBytes(value));
         }
         fn unchanged(value: *const store_module.Observed, id: []const u8, generation: u64) !void {
             var response: protocol.CommandObservationBuffer = .{};
-            try response.render(renderCommandObservation, .{ "tier-create", value });
+            try response.render(host_reply.renderCommandObservation, .{ "tier-create", value });
             var expected: [256]u8 = undefined;
             try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"tier-create\",\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.{d}.{s}\"}}", .{ generation, id }), response.slice());
-            try std.testing.expectEqual(protocol.shapeBytes(protocol.command_observation_reply.not_modified), commandObservationBytes(value));
-            try std.testing.expect(commandObservationBytes(value) < protocol.command_observation_reply.max_bytes);
+            try std.testing.expectEqual(protocol.shapeBytes(protocol.command_observation_reply.not_modified), host_reply.commandObservationBytes(value));
+            try std.testing.expect(host_reply.commandObservationBytes(value) < protocol.command_observation_reply.max_bytes);
         }
     };
     try Expect.full(&observed, session.slice(), first.generation);
@@ -3252,9 +3039,9 @@ test "command observation full and both unchanged tiers render byte exactly with
     try Expect.full(&observed, session.slice(), storage.commitGeneration());
     try storage.observeCommand("absent", null, &observed);
     var absent: protocol.CommandObservationBuffer = .{};
-    try absent.render(renderCommandObservation, .{ "absent", &observed });
+    try absent.render(host_reply.renderCommandObservation, .{ "absent", &observed });
     try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"absent\",\"delta\":\"full\",\"since\":null,\"observation\":{\"status\":\"absent\"}}", absent.slice());
-    try std.testing.expectEqual(protocol.shapeBytes(protocol.command_observation_reply.absent), commandObservationBytes(&observed));
+    try std.testing.expectEqual(protocol.shapeBytes(protocol.command_observation_reply.absent), host_reply.commandObservationBytes(&observed));
 }
 
 test "Message observation work and recovery fit the unchanged resident response bound" {
@@ -3273,7 +3060,7 @@ test "Message observation work and recovery fit the unchanged resident response 
     observation.kind.message.?.recovery.count = protocol.message_recovery_limit;
     for (&observation.kind.message.?.recovery.calls) |*call| call.* = .{ .action_id = max, .operation_id = max, .call = max, .description = description, .at = max };
     var response: protocol.CommandObservationBuffer = .{};
-    try response.render(renderFullCommandObservation, .{ &escaped_key, &observation, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)) });
+    try response.render(host_reply.renderFullCommandObservation, .{ &escaped_key, &observation, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)) });
     try std.testing.expectEqual(protocol.command_observation_reply.maxBytes(.message) - protocol.shapeBytes(protocol.command_observation_reply.code), response.len);
     // The existing response owner is sized by host-info's escaped Store path,
     // not these added per-observation facts; no resident pool grows.
@@ -3307,7 +3094,7 @@ test "control response variants fit exact worst-case JSON bounds" {
             expected: usize,
         ) !void {
             var response: protocol.ResponseBuffer = .{};
-            try response.render(renderSessionStopReply, .{ command, result });
+            try response.render(host_reply.renderSessionStopReply, .{ command, result });
             try std.testing.expectEqual(expected, response.len);
         }
 
@@ -3317,7 +3104,7 @@ test "control response variants fit exact worst-case JSON bounds" {
             expected: usize,
         ) !void {
             var response: protocol.ResponseBuffer = .{};
-            try response.render(renderModelInterruptionReply, .{ command, result });
+            try response.render(host_reply.renderModelInterruptionReply, .{ command, result });
             try std.testing.expectEqual(expected, response.len);
         }
 
@@ -3327,7 +3114,7 @@ test "control response variants fit exact worst-case JSON bounds" {
             expected: usize,
         ) !void {
             var response: protocol.CommandObservationBuffer = .{};
-            try response.render(renderFullCommandObservation, .{ key, &observation, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)) });
+            try response.render(host_reply.renderFullCommandObservation, .{ key, &observation, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)) });
             try std.testing.expectEqual(expected, response.len);
         }
     };
@@ -3341,7 +3128,7 @@ test "control response variants fit exact worst-case JSON bounds" {
         .completion = .completed,
     } }, protocol.shapeBytes(protocol.session_stop_reply.accepted));
     var pending_response: protocol.ResponseBuffer = .{};
-    try pending_response.render(renderSessionStopReply, .{ &stop_command, store_module.SessionStopReply{ .accepted = .{
+    try pending_response.render(host_reply.renderSessionStopReply, .{ &stop_command, store_module.SessionStopReply{ .accepted = .{
         .replayed = false,
         .selection = .{
             .selected_turn_id = std.math.maxInt(u64),
@@ -3440,7 +3227,7 @@ test "an unchanged listing echoes its token with no rows, as a client reads it" 
     const io = std.testing.io;
     const since = try protocol.SinceToken.parse("abababababababababababababababab.42");
     var response: protocol.ResponseBuffer = .{};
-    try response.render(renderSessionsNotModified, .{since});
+    try response.render(host_reply.renderSessionsNotModified, .{since});
     try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", response.slice());
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3450,230 +3237,6 @@ test "an unchanged listing echoes its token with no rows, as a client reads it" 
     const page = try protocol_reply.SessionListPage.read(io, file, response.len, null, .{ .since = since });
     try std.testing.expectEqual(protocol.ListDelta.not_modified, page.delta);
     try std.testing.expectEqual(@as(usize, 0), page.count);
-}
-
-test "every reply renders its exact worst-case bound from the shape it writes" {
-    // Each bound comes from the shape its renderer writes, so the longest
-    // value of every variant must reach it exactly. Text a renderer wrote
-    // outside its shape, or a hole the bound missed, would fail here.
-    const max = std.math.maxInt(u64);
-    const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
-    const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
-    const escaped_code = @as([protocol.max_code_bytes]u8, @splat(1));
-    const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
-    const content: store_module.ContentReference = .{ .length = max, .digest = @splat(0xff) };
-    var session: protocol.Bounded(protocol.max_session_bytes) = .{};
-    try session.set(&escaped_session);
-    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
-    try code.set(&escaped_code);
-    const Worst = struct {
-        /// The tag a bound must allow for: the longest name.
-        fn tag(comptime E: type) E {
-            var longest = std.meta.tags(E)[0];
-            for (std.meta.tags(E)) |value| {
-                if (@tagName(value).len > @tagName(longest).len) longest = value;
-            }
-            return longest;
-        }
-
-        fn reply(render: anytype, command: anytype, results: anytype) !usize {
-            var bytes: usize = 0;
-            inline for (results) |result| {
-                var response: protocol.ResponseBuffer = .{};
-                try response.render(render, .{ command, result });
-                bytes = @max(bytes, response.len);
-            }
-            return bytes;
-        }
-
-        fn observation(key: []const u8, value: store_module.CommandObservation) !usize {
-            var response: protocol.CommandObservationBuffer = .{};
-            try response.render(renderFullCommandObservation, .{ key, &value, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)) });
-            return response.len;
-        }
-    };
-
-    var configure: wire_request.ConfigureCommand = .{};
-    try configure.session.set(&escaped_session);
-    try std.testing.expectEqual(protocol.configuration_reply.max_bytes, try Worst.reply(renderConfigureReply, &configure, .{
-        store_module.ConfigureReply{ .accepted = .{ .replayed = false, .revision = max, .created = false, .session = session, .skills = .unchanged } },
-        store_module.ConfigureReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.ConfigurationRejection) } },
-        store_module.ConfigureReply.conflict,
-    }));
-
-    var message: wire_request.MessageCommand = .{};
-    try message.session.set(&escaped_session);
-    try std.testing.expectEqual(protocol.message_reply.max_bytes, try Worst.reply(renderMessageReply, &message, .{
-        store_module.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = content, .session = session } },
-        store_module.MessageReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.MessageRejection), .content = content } },
-        store_module.MessageReply.conflict,
-    }));
-
-    var stop: protocol.SessionStopCommand = .{};
-    try stop.session.set(&escaped_session);
-    try std.testing.expectEqual(protocol.session_stop_reply.max_bytes, try Worst.reply(renderSessionStopReply, &stop, .{
-        store_module.SessionStopReply{ .accepted = .{ .replayed = false, .selection = .{ .selected_turn_id = max, .admission_cutoff = max }, .completion = Worst.tag(protocol.SessionStopCompletion) } },
-        store_module.SessionStopReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.SessionStopRejection) } },
-        store_module.SessionStopReply.conflict,
-    }));
-
-    var archive: protocol.SessionArchiveCommand = .{};
-    try archive.session.set(&escaped_session);
-    try std.testing.expectEqual(protocol.session_archive_reply.max_bytes, try Worst.reply(renderSessionArchiveReply, &archive, .{
-        store_module.SessionArchiveReply{ .accepted = .{ .replayed = false, .archived = false, .completion = Worst.tag(protocol.SessionStopCompletion) } },
-        store_module.SessionArchiveReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.SessionArchiveRejection) } },
-        store_module.SessionArchiveReply.conflict,
-    }));
-
-    var interruption: protocol.ModelInterruptionCommand = .{ .turn_id = max, .operation_id = max };
-    try interruption.session.set(&escaped_session);
-    try std.testing.expectEqual(protocol.model_interruption_reply.max_bytes, try Worst.reply(renderModelInterruptionReply, &interruption, .{
-        store_module.ModelInterruptionReply{ .accepted = .{ .replayed = false } },
-        store_module.ModelInterruptionReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.ModelInterruptionRejection) } },
-        store_module.ModelInterruptionReply.conflict,
-    }));
-
-    var decision: protocol.PermissionDecisionCommand = .{ .action_id = max, .decision = Worst.tag(protocol.PermissionDecision) };
-    try decision.session.set(&escaped_session);
-    try std.testing.expectEqual(protocol.permission_decision_reply.max_bytes, try Worst.reply(renderPermissionDecisionReply, &decision, .{
-        store_module.PermissionDecisionReply{ .accepted = .{ .replayed = false } },
-        store_module.PermissionDecisionReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.PermissionDecisionRejection) } },
-        store_module.PermissionDecisionReply.conflict,
-    }));
-
-    var failure: protocol.ResponseBuffer = .{};
-    try failure.render(renderStatic, .{ Worst.tag(protocol.ErrorType), &escaped_code });
-    try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
-
-    var host_info: protocol.ResponseBuffer = .{};
-    try host_info.render(renderHostInfo, .{ &escaped_store, @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, false, protocol.routesAll(.chatgpt_device), null });
-    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_reply), host_info.len);
-    host_info.len = 0;
-    try host_info.render(renderHostInfo, .{ &@as([32]u8, @splat(0x01)), @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, false, protocol.routesAll(.chatgpt_device), &@as([32]u8, @splat(0x01)) });
-    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_mysql_reply), host_info.len);
-
-    const observations = protocol.command_observation_reply;
-    var configured = store_module.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .configure = .{ .revision = max, .created = false } } };
-    try configured.target.set(&escaped_session);
-    try std.testing.expectEqual(observations.maxBytes(.configure), try Worst.observation(&escaped_key, configured));
-
-    // Message's full live work plus four recovery descriptions is exercised
-    // separately above; each closed result shape is checked byte-exactly.
-    var stopped = store_module.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .session_stop = .{
-        .selection = .{ .selected_turn_id = max, .admission_cutoff = max },
-        .completion = Worst.tag(protocol.SessionStopCompletion),
-    } } };
-    try stopped.target.set(&escaped_session);
-    try std.testing.expectEqual(observations.maxBytes(.session_stop), try Worst.observation(&escaped_key, stopped));
-
-    var archived = store_module.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .session_archive = .{
-        .archived = false,
-        .completion = Worst.tag(protocol.SessionStopCompletion),
-    } } };
-    try archived.target.set(&escaped_session);
-    try std.testing.expectEqual(observations.maxBytes(.session_archive), try Worst.observation(&escaped_key, archived));
-
-    var interrupted = store_module.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .model_interruption = .{
-        .session = session,
-        .turn_id = max,
-        .operation_id = max,
-    } } };
-    try interrupted.target.set(&escaped_session);
-    try std.testing.expectEqual(observations.maxBytes(.model_interruption), try Worst.observation(&escaped_key, interrupted));
-
-    var decided = store_module.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .permission_decision = .{ .action_id = max, .decision = Worst.tag(protocol.PermissionDecision) } } };
-    try decided.target.set(&escaped_session);
-    try std.testing.expectEqual(observations.maxBytes(.permission_decision), try Worst.observation(&escaped_key, decided));
-    try std.testing.expect(try Worst.observation(&escaped_key, .{ .status = .absent }) <= protocol.command_observation_reply.max_bytes);
-
-    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
-    try description.set(&@as([protocol.max_tool_description_bytes]u8, @splat(1)));
-    const presentation: protocol.ToolPresentation = .{ .description = description, .code = Worst.tag(protocol.ToolPresentation.Code), .publication_position = max };
-    var longest_conversation: usize = 0;
-    for (std.meta.tags(protocol.ConversationItemKind)) |kind| {
-        var page: store_module.PublicConversationPage = .{ .end = max, .count = protocol.public_conversation_page_items, .more = true };
-        for (&page.items) |*item| item.* = .{
-            .position = max,
-            .ordinal = max,
-            .kind = kind,
-            .content = content,
-            .presentation = if (kind == .tool_result or kind == .hosted_call) presentation else null,
-            .admitted_at = if (kind == .user) max else null,
-            .sender = if (kind == .user) .{ .session = session, .label = description } else null,
-        };
-        var response: protocol.FixedJsonBuffer(protocol.max_conversation_page_response_bytes) = .{};
-        try response.render(renderConversationPage, .{&page});
-        longest_conversation = @max(longest_conversation, response.len);
-    }
-    try std.testing.expectEqual(protocol.max_conversation_page_response_bytes, longest_conversation);
-
-    var key: protocol.Bounded(protocol.max_key_bytes) = .{};
-    try key.set(&escaped_key);
-    // A label is a description's size, so the worst one doubles as both.
-    const peer: protocol.NamedPeer = .{ .session = session, .label = description };
-    const reference: protocol.ActivityItem.Content = .{ .length = max, .digest = content.digest };
-    const field: protocol.ProposalFieldReference = .{ .length = max, .digest = content.digest };
-    const values = [_]protocol.ActivityItem.Value{
-        .{ .admission = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
-        .{ .user = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
-        .{ .assistant = .{ .content = reference, .final = false } },
-        .{ .call = .{ .position = max, .operation = max, .turn = max, .call_ordinal = max, .action = max, .rejection = Worst.tag(protocol.ProposalRejection), .fields = @splat(field) } },
-        .{ .tool_result = .{ .content = reference, .presentation = presentation } },
-        .{ .hosted_call = presentation },
-        .{ .turn_ended = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .turn = max, .operation = max, .ending = Worst.tag(protocol.TurnEnding), .code = code, .content = reference } },
-        .{ .stop = .{ .key = key, .turn = max, .cutoff = max, .completion = Worst.tag(protocol.SessionStopCompletion) } },
-        .{ .sent = .{ .admission = max, .target = peer, .content = reference, .admitted_at = max } },
-        .{ .send_failed = .{ .key = key, .target = peer, .code = code } },
-        .{ .received = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
-        .{ .approval_requested = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .action = max, .operation = max, .call_ordinal = max } },
-        .{ .session_changed = .{ .revision = max, .field = .output_reservation } },
-        .{ .compacted = .{ .operation = max, .dropped = max } },
-    };
-    try std.testing.expectEqual(std.meta.tags(std.meta.Tag(protocol.ActivityItem.Value)).len, values.len);
-    var longest_item: protocol.ActivityItem = undefined;
-    var longest_item_bytes: usize = 0;
-    for (values) |value| {
-        const item: protocol.ActivityItem = .{ .position = max, .ordinal = max, .at = max, .value = value };
-        var buffer: [protocol.ActivityItem.max_json_bytes]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&buffer);
-        try item.writeJson(&writer);
-        if (writer.end > longest_item_bytes) {
-            longest_item_bytes = writer.end;
-            longest_item = item;
-        }
-    }
-    try std.testing.expectEqual(protocol.ActivityItem.max_json_bytes, longest_item_bytes);
-    var facts: protocol.ActivityFacts = .{ .end = max, .direction = Worst.tag(@FieldType(protocol.ActivityPage, "direction")), .count = 16, .more = false };
-    @memset(&facts.items, longest_item);
-    facts.call_activity = .{ .total = max, .count = 3 };
-    @memset(&facts.call_activity.entries, .{ .operation = max, .ordinal = max, .presentation = presentation });
-    facts.queued = .{ .count = max, .oldest_position = max, .newest_admission = max, .newest_position = max };
-    // The work state's longest kind: every variant written, the longest kept.
-    var longest_state: protocol.WorkState = undefined;
-    var longest_state_bytes: usize = 0;
-    for ([_]protocol.WorkState{
-        .{ .retrying = .{ .since = max, .due_at_ms = max, .cause = code, .attempt = max } },
-        .{ .bash = .{ .since = max, .call = max, .description = description, .running = max, .approvals = max } },
-        .{ .failed = .{ .since = max, .code = code, .resets_at = max } },
-        .{ .stopped = .{ .since = max, .cause = Worst.tag(protocol.session_work.StopCause) } },
-        .{ .approval = .{ .since = max } },
-    }) |state| {
-        var buffer: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&buffer);
-        try (protocol.WorkStateJson{ .state = state }).writeJson(&writer);
-        if (writer.end > longest_state_bytes) {
-            longest_state_bytes = writer.end;
-            longest_state = state;
-        }
-    }
-    try std.testing.expectEqual(protocol.WorkStateJson.max_json_bytes, longest_state_bytes);
-    facts.work = .{ .work = .{ .state = longest_state, .turn = max, .operation = max, .first_action = max }, .revision = max };
-    @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);
-    facts.work.workspace.len = protocol.max_workspace_bytes;
-    var page_buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
-    var page_writer = std.Io.Writer.fixed(&page_buffer);
-    try facts.writeFullJson(&page_writer, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)));
-    try std.testing.expectEqual(protocol.max_activity_page_response_bytes, page_writer.end);
 }
 
 test "failed send without a canonical target writes explicit null within activity bounds" {
@@ -4732,11 +4295,11 @@ test "MySQL Host readiness reports doublewrite OFF while SQLite stays unchanged"
     const protocol_reply = @import("protocol_reply.zig");
     var response: protocol.ResponseBuffer = .{};
     const id = "0123456789abcdef0123456789abcdef";
-    try response.render(renderHostInfo, .{ id, @as(protocol.InstanceId, @splat(1)), 2, 100, 1024, 1792918800, 0, false, protocol.routesAll(.unserved), "OFF" });
+    try response.render(host_reply.renderHostInfo, .{ id, @as(protocol.InstanceId, @splat(1)), 2, 100, 1024, 1792918800, 0, false, protocol.routesAll(.unserved), "OFF" });
     const status = try protocol_reply.parseHostInfo(response.slice(), id);
     try std.testing.expectEqualStrings("OFF", status.ready.innodb_doublewrite.?.slice());
     response.len = 0;
-    try response.render(renderHostInfo, .{ "/sqlite", @as(protocol.InstanceId, @splat(1)), 2, 100, 1024, 1792918800, 0, false, protocol.routesAll(.unserved), null });
+    try response.render(host_reply.renderHostInfo, .{ "/sqlite", @as(protocol.InstanceId, @splat(1)), 2, 100, 1024, 1792918800, 0, false, protocol.routesAll(.unserved), null });
     try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
     // MySQL's bounded opaque id fits within SQLite's existing reply budget.
     try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_reply), protocol.max_host_info_response_bytes);
@@ -4890,7 +4453,7 @@ test "session archive renders accepted intent and completion for both archive an
         for (std.meta.tags(protocol.SessionStopCompletion)) |completion| {
             for ([_]bool{ false, true }) |replayed| {
                 var response: protocol.ResponseBuffer = .{};
-                try response.render(renderSessionArchiveReply, .{ &command, store_module.SessionArchiveReply{ .accepted = .{
+                try response.render(host_reply.renderSessionArchiveReply, .{ &command, store_module.SessionArchiveReply{ .accepted = .{
                     .replayed = replayed,
                     .archived = archived,
                     .completion = completion,
@@ -4905,7 +4468,7 @@ test "session archive renders accepted intent and completion for both archive an
     }
     for (std.meta.tags(protocol.SessionArchiveRejection)) |code| {
         var response: protocol.ResponseBuffer = .{};
-        try response.render(renderSessionArchiveReply, .{ &command, store_module.SessionArchiveReply{ .rejected = .{ .replayed = true, .code = code } } });
+        try response.render(host_reply.renderSessionArchiveReply, .{ &command, store_module.SessionArchiveReply{ .rejected = .{ .replayed = true, .code = code } } });
         const decoded = try protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "k7m2qx", .{ .session_archive = .{ .archived = true } }).answer;
         try std.testing.expectEqualStrings(@tagName(code), decoded.result.rejected.slice());
     }

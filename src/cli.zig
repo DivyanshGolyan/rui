@@ -6,7 +6,6 @@ const AnswerRenderer = @import("AnswerRenderer.zig");
 const Overview = @import("Overview.zig");
 const session_reads = @import("session_reads.zig");
 const overview_view = @import("overview_view.zig");
-const TestObservation = @import("TestObservation.zig");
 const caller_error = @import("caller_error.zig");
 const caller_exit = @import("caller_exit.zig");
 const caller_rejection = @import("caller_rejection.zig");
@@ -19,6 +18,7 @@ fn recordExit(status: caller_exit.Status) void {
 }
 const cli_value = @import("cli_value.zig");
 const cli_args = @import("cli_args.zig");
+const configure_input = @import("configure_input.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -37,7 +37,6 @@ const slash_commands = @import("slash_commands.zig").conversation;
 const session_view = @import("session_view.zig");
 const provider_selection = @import("provider_selection.zig");
 const protocol = @import("protocol.zig");
-const retry_policy = @import("retry_policy.zig");
 const server = @import("server.zig");
 const signal_stack = @import("signal_stack.zig");
 const pages = @import("os/pages.zig");
@@ -1724,87 +1723,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const bash_timeout_ms = try parsed.number(u64, "bash-timeout-ms") orelse server.default_bash_timeout_ms;
     if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
     const active_capacity = (if (launched) |frame| frame.active_capacity else try parsed.number(usize, "active-capacity")) orelse product_defaults.active_capacity;
-    var limits: server.Limits = .{};
-    var hooks: server.Hooks = .{};
-    if (try parsed.number(u64, "test-bash-scratch-limit-bytes")) |limit| limits.bash_scratch_limit_bytes = limit;
-    if (try parsed.number(usize, "test-retention-entry-capacity")) |capacity| {
-        if (capacity < 2 or capacity > server.default_retention_entry_capacity) return error.InvalidRetentionEntryCapacity;
-        limits.retention_entry_capacity = capacity;
-    }
-    if (parsed.has("test-retention-removal-failure")) hooks.retention_removal = true;
-    for (parsed.all("fault")) |fault| try hooks.inject(fault);
-    if (try parsed.number(i64, "test-provider-inactivity-seconds")) |seconds| {
-        if (seconds < 1) return error.InvalidProviderInactivity;
-        _ = std.math.mul(i64, seconds, std.time.ns_per_s) catch return error.InvalidProviderInactivity;
-        limits.provider_inactivity_seconds = seconds;
-    }
-    if (parsed.get("test-retry-waits-ms")) |waits| limits.retry_waits_ms = try parseRetryWaits(waits);
-    if (try parsed.number(i64, "test-before-launch-delay-ms")) |delay| {
-        if (delay < 0 or delay > 10_000) return error.InvalidLaunchDelay;
-        hooks.pauses.getPtr(.action_launch).delay_ms = delay;
-        hooks.pauses.getPtr(.model_launch).delay_ms = delay;
-    }
-    if (try parsed.number(i64, "test-before-result-delay-ms")) |delay| {
-        if (delay < 0 or delay > 10_000) return error.InvalidResultDelay;
-        hooks.pauses.getPtr(.action_result).delay_ms = delay;
-        hooks.pauses.getPtr(.model_result).delay_ms = delay;
-    }
-    hooks.pauses.getPtr(.model_result).gate_path = parsed.get("test-model-result-gate-path");
-    // The shared integration boundary sets an empty URL for every child,
-    // including detached Hosts. Only catalog cases explicitly opt in.
-    hooks.models_dev_url = parsed.get("test-models-dev-url") orelse init.environ_map.get("RUI_TEST_MODELS_DEV_URL");
-    hooks.retry_recovery_gate_path = parsed.get("test-retry-recovery-gate-path");
-    hooks.inspection_reply.gate_path = parsed.get("test-inspection-reply-gate-path");
-    if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| {
-        if (delay < 0 or delay > 60_000) return error.InvalidInspectionReplyDelay;
-        hooks.inspection_reply.delay_ms = delay;
-    }
-    if (try parsed.number(u32, "test-client-send-buffer-bytes")) |bytes| {
-        if (bytes == 0 or bytes > std.math.maxInt(c_int)) return error.InvalidClientSendBuffer;
-        limits.client_send_buffer_bytes = bytes;
-    }
-    if (parsed.has("test-phase-trace")) hooks.phase_trace = true;
-    if (try parsed.number(c_int, "test-observation-fd")) |fd| {
-        hooks.observation_fd = fd;
-        hooks.phase_trace = true;
-    }
-    if (try parsed.number(c_int, "test-observation-state-fd")) |fd| hooks.observation_state_fd = fd;
-    if (parsed.get("test-observation-plan")) |plan| hooks.observation_plan = std.meta.stringToEnum(TestObservation.Plan, plan) orelse
-        return error.InvalidTestObservationPlan;
-    const transition: ?server.Hooks.Transition = if (parsed.get("test-transition")) |name|
-        server.Hooks.fromOptionName(server.Hooks.Transition, name) orelse return error.UnknownTestTransition
-    else
-        null;
-    const transition_gate_path = parsed.get("test-transition-gate-path");
-    hooks.pauses.getPtr(.bash_exit_observed).gate_path = parsed.get("test-bash-observed-exit-gate-path");
-    hooks.pauses.getPtr(.shutdown_signalled).gate_path = parsed.get("test-shutdown-signalled-gate-path");
-    hooks.bash_reclaim_gate_path = parsed.get("test-bash-cleanup-gate-path");
-    const control_gate_keys = parsed.get("test-control-gate-keys");
-    const control_gate_path = parsed.get("test-control-gate-path");
-    if (parsed.has("test-suppress-first-control-hint")) hooks.suppress_first_control_hint = true;
-    if (parsed.has("test-sqlite-diagnostics")) hooks.sqlite_diagnostics = true;
-    if (parsed.has("test-sqlite-cache-spill-off")) limits.sqlite_cache_spill = false;
-    if (try parsed.number(u32, "test-sqlite-cache-kib")) |kib| {
-        if (kib == 0 or kib > 4096) return error.InvalidSqliteCacheSize;
-        limits.sqlite_cache_kib = kib;
-    }
-    if (try parsed.number(u64, "test-request-scratch-limit")) |limit| limits.request_scratch_limit_bytes = limit;
-    if (try parsed.number(usize, "test-request-preparation-byte-allowance")) |allowance| {
-        if (allowance == 0) return error.InvalidRequestPreparationAllowance;
-        limits.request_preparation_byte_allowance = allowance;
-    }
-    if (try parsed.number(usize, "test-request-preparation-item-allowance")) |allowance| {
-        if (allowance == 0) return error.InvalidRequestPreparationAllowance;
-        limits.request_preparation_item_allowance = allowance;
-    }
-    if (try parsed.number(i64, "test-request-preparation-advance-delay-ms")) |delay| {
-        if (delay < 0) return error.InvalidRequestPreparationDelay;
-        hooks.pauses.getPtr(.preparation_advanced).delay_ms = delay;
-    }
-    if ((control_gate_keys == null) != (control_gate_path == null)) return error.IncompleteControlGate;
-    if ((transition == null) != (transition_gate_path == null)) return error.IncompleteTestTransitionGate;
-    if (control_gate_keys) |keys| hooks.control_gate = .{ .keys = keys, .path = control_gate_path.? };
-    if (transition) |value| hooks.transition = .{ .transition = value, .path = transition_gate_path.? };
+    const tuning = try server.Tuning.fromOptions(parsed, init.environ_map.get("RUI_TEST_MODELS_DEV_URL"));
     if (fixture_endpoint != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null)
         return error.FixtureCredentialPathRequired;
     var credential_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1860,8 +1779,8 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         std.heap.c_allocator,
         try selectedStore(init, store_path, &selected_buffer),
         active_capacity,
-        limits,
-        hooks,
+        tuning.limits,
+        tuning.hooks,
         &served,
         bash_path,
         bash_timeout_ms,
@@ -1873,15 +1792,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     ) catch |err| {
         // A launched Host stops when its stdin closes; that is its clean end.
         if (launched != null and err == error.EffectAwareShutdown) return;
-        if (launched) |frame| if (frame.store == .mysql_url) {
-            if (launch_frame.mysqlRefusal(err)) |refusal| launch_frame.writeRefusal(io, refusal);
-        };
-        if (launched != null and err == error.StoreAlreadyOwned)
-            launch_frame.writeRefusal(io, .{ .code = .store_locked, .message = "another Host owns this Store" });
-        if (launched != null and err == error.RuntimeDirectoryInUse)
-            launch_frame.writeRefusal(io, .{ .code = .runtime_dir_unusable, .message = "another Host owns this runtimeDir" });
-        if (launched != null and err == error.RuntimeDirectoryUnusable)
-            launch_frame.writeRefusal(io, .{ .code = .runtime_dir_unusable, .message = "runtimeDir must be a private (mode 0700) directory this Host can lock" });
+        if (launched) |frame| if (launch_frame.startRefusal(frame.store, err)) |refusal| launch_frame.writeRefusal(io, refusal);
         return err;
     };
 }
@@ -1899,34 +1810,11 @@ noinline fn readLaunchFrame(init: std.process.Init) !*launch_frame.Frame {
     return frame;
 }
 
-fn parseRetryWaits(value: []const u8) !retry_policy.Waits {
-    var waits: retry_policy.Waits = undefined;
-    var parts = std.mem.splitScalar(u8, value, ',');
-    for (&waits) |*wait| {
-        const part = parts.next() orelse return error.InvalidRetryWaits;
-        wait.* = std.fmt.parseInt(u64, part, 10) catch return error.InvalidRetryWaits;
-    }
-    if (parts.next() != null) return error.InvalidRetryWaits;
-    // The Store rechecks the deadlines against its clock at startup.
-    retry_policy.validateWaits(waits, 0) catch return error.InvalidRetryWaits;
-    return waits;
-}
-
-fn policyArgument(text: []const u8) client.OptionalPolicy {
-    return .{ .present = true, .value = if (std.mem.eql(u8, text, "default")) null else text };
-}
-
-test "policy arguments reset and preserve spelling" {
-    const reset = policyArgument("default");
-    try std.testing.expect(reset.present and reset.value == null);
-    try std.testing.expectEqualStrings("00042", policyArgument("00042").value.?);
-}
-
 /// The live Session addresses its own /configure.
 const LiveAddress = struct { store: []const u8, session: []const u8 };
 
 /// "" is the one spelling that clears a Label and can never be one.
-fn labelArgument(text: []const u8) error{InvalidLabel}!client.OptionalPolicy {
+fn labelArgument(text: []const u8) error{InvalidLabel}!configure_input.OptionalPolicy {
     if (text.len == 0) return .{ .present = true, .value = null };
     if (protocol.validLabel(text)) return .{ .present = true, .value = text };
     _ = @import("stderr.zig").write("\nrui: --label must be one line of 1-100 bytes that is not blank. Nothing captured or changed. [invalid_label]\n" ++ cli_args.label_help);
@@ -1976,7 +1864,7 @@ fn admitModel(model: []const u8) error{InvalidModel}!void {
 fn configure(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, start: bool) !bool {
     const io = init.io;
     const named = if (live) |address| address.session else parsed.get("session");
-    var input = client.ConfigureInput{
+    var input = configure_input.ConfigureInput{
         .store = "",
         .session = if (named) |reference| .{ .named = reference } else .create,
         .reload_skills = parsed.has("reload-skills"),
@@ -1995,9 +1883,9 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (parsed.get("permission-mode")) |mode| input.permission_mode = .{ .present = true, .value = mode };
     if (parsed.get("output-schema")) |path| input.output_schema = .{ .state = .value, .path = path };
     if (parsed.has("text-output")) input.output_schema = .{ .state = .explicit_null };
-    if (parsed.get("compaction-trigger")) |text| input.compaction_trigger = policyArgument(text);
-    if (parsed.get("output-reservation")) |text| input.output_reservation = policyArgument(text);
-    if (parsed.get("reasoning-effort")) |text| input.reasoning_effort = policyArgument(text);
+    if (parsed.get("compaction-trigger")) |text| input.compaction_trigger = configure_input.policy(text);
+    if (parsed.get("output-reservation")) |text| input.output_reservation = configure_input.policy(text);
+    if (parsed.get("reasoning-effort")) |text| input.reasoning_effort = configure_input.policy(text);
     if (parsed.get("label")) |text| input.label = try labelArgument(text);
     var binding: new_session_selection.Binding = .{};
     var saved_effort: ?model_capability.ReasoningEffort = null;
@@ -2022,17 +1910,13 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         binding = try snapshot.resolveUnprompted();
         input.provider = .{ .present = true, .value = binding.provider.slice() };
         input.model = .{ .present = true, .value = binding.model.slice() };
-        if (!input.reasoning_effort.present) input.reasoning_effort = client.defaultStartEffort(binding.model.slice(), snapshot.defaults.reasoning_effort);
-        if (input.reasoning_effort.present and input.reasoning_effort.value == null) input.reasoning_effort = client.defaultStartEffort(binding.model.slice(), null);
-        if (!input.compaction_trigger.present or input.compaction_trigger.value == null) input.compaction_trigger = .{ .present = true, .value = try std.fmt.bufPrint(&compaction_buffer, "{d}", .{client.defaultCompactionTrigger(std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?, binding.model.slice())}) };
+        input.completeCreation(std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?, binding.model.slice(), snapshot.defaults.reasoning_effort, &compaction_buffer);
         if (!input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
             const length = try cwd.realPath(io, &workspace_buffer);
             input.workspace = .{ .present = true, .value = workspace_buffer[0..length] };
         }
-        if (input.tools == null) input.tools = product_defaults.tools;
-        if (!input.permission_mode.present) input.permission_mode = .{ .present = true, .value = product_defaults.permission_mode };
     }
     if (start) {
         try message(init, parsed, .{
@@ -2047,14 +1931,14 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     };
 }
 
-fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, configuration: client.ConfigureInput, step: *?client.Step) !bool {
+fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, configuration: configure_input.ConfigureInput, step: *?client.Step) !bool {
     const io = init.io;
     const interactive = live != null;
     var input = configuration;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
     var compaction_buffer: [20]u8 = undefined;
-    if (input.session == .named and ((input.compaction_trigger.present and input.compaction_trigger.value == null) or (input.reasoning_effort.present and input.reasoning_effort.value == null))) {
+    if (input.session == .named and input.resetsToDefault()) {
         var current_model: protocol.Bounded(protocol.max_model_bytes) = .{};
         var current_provider: protocol.Provider = undefined;
         {
@@ -2064,8 +1948,7 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
             try current_model.set(if (input.model.present) input.model.value else observed.current.settings.model.slice());
             current_provider = observed.current.settings.provider.value;
         }
-        if (input.compaction_trigger.present and input.compaction_trigger.value == null) input.compaction_trigger.value = try std.fmt.bufPrint(&compaction_buffer, "{d}", .{client.defaultCompactionTrigger(current_provider, current_model.slice())});
-        if (input.reasoning_effort.present and input.reasoning_effort.value == null) input.reasoning_effort = client.defaultStartEffort(current_model.slice(), null);
+        input.completeReset(current_provider, current_model.slice(), &compaction_buffer);
     }
 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2109,7 +1992,7 @@ fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) v
 }
 
 const StartMessage = struct {
-    input: client.ConfigureInput,
+    input: configure_input.ConfigureInput,
     receipt: StartConfiguration,
 };
 
@@ -3412,7 +3295,7 @@ const StartConfiguration = struct {
     reasoning_effort: ?[]const u8,
     effort_source: enum { flag, saved, model_default },
 
-    fn resolve(input: client.ConfigureInput, effort_flag: bool, saved_effort: ?model_capability.ReasoningEffort) StartConfiguration {
+    fn resolve(input: configure_input.ConfigureInput, effort_flag: bool, saved_effort: ?model_capability.ReasoningEffort) StartConfiguration {
         const model = input.model.value;
         return .{
             .provider = input.provider.value,
@@ -4103,17 +3986,6 @@ fn closeDescriptor(fd: std.posix.fd_t) void {
     _ = std.c.close(fd);
 }
 
-test "cli fresh defaults are explicit for known and unknown models" {
-    const known = client.defaultStartEffort("gpt-6.1-sol", null);
-    try std.testing.expect(known.present);
-    try std.testing.expectEqualStrings(product_defaults.reasoning_effort, known.value.?);
-    const unknown = client.defaultStartEffort("unlisted-model", null);
-    try std.testing.expect(unknown.present);
-    try std.testing.expectEqualStrings(product_defaults.reasoning_effort, unknown.value.?);
-    try std.testing.expectEqual(@as(u64, 115200), client.defaultCompactionTrigger(.openai, "unlisted-model"));
-    try std.testing.expectEqual(model_capability.contextWindow("gpt-6.1-sol") * 90 / 100, client.defaultCompactionTrigger(.openai, "gpt-6.1-sol"));
-}
-
 test "existing explicit captures bypass fresh option choices while new captures refuse" {
     const io = std.Io.Threaded.global_single_threaded.io();
     var tmp = std.testing.tmpDir(.{});
@@ -4438,6 +4310,165 @@ test "CLI boundary preserves Store selector provenance for Host administration" 
     }
     failure_held = .{ .resource = "session", .operation = "list", .not_sent = false };
     try std.testing.expectError(error.StoreUnavailable, rememberStore(init, path, false));
+}
+
+test "host status and start classify a Host's reply however late it comes" {
+    // The clock never advances, so no Host-info deadline expires and a reply
+    // counts however late a loaded runner schedules the peer (#967). The
+    // deadline itself is client.zig's to test.
+    const Frozen = struct {
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            return .fromNanoseconds(0);
+        }
+    };
+    const Peer = struct {
+        listener: *std.Io.net.Server,
+        replies: []const []const u8,
+        answered: usize = 0,
+        failure: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            // Closing the listener drops any connection still queued on it and
+            // refuses later ones, so after a failure the CLI fails fast instead
+            // of waiting for a reply on a clock that never reaches its deadline.
+            defer self.listener.deinit(std.testing.io);
+            for (self.replies) |reply| self.answer(reply) catch |err| {
+                self.failure = err;
+                return;
+            };
+        }
+
+        fn answer(self: *@This(), reply: []const u8) !void {
+            const io = std.testing.io;
+            // Bounded so a broken test fails instead of hanging.
+            try readable(self.listener.socket.handle);
+            const connection = try self.listener.accept(io);
+            defer connection.close(io);
+            const fd = connection.socket.handle;
+            // Read the whole request: closing over unread bytes can reset
+            // the connection before the client reads the reply.
+            var request: [4096]u8 = undefined;
+            var used: usize = 0;
+            const body_start = while (true) {
+                if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| break end + 4;
+                used += try receive(fd, request[used..]);
+            };
+            const field = "\r\nContent-Length: ";
+            const at = (std.mem.indexOf(u8, request[0..body_start], field) orelse return error.TestRequestLengthMissing) + field.len;
+            const length = try std.fmt.parseInt(usize, request[at .. at + std.mem.indexOfScalar(u8, request[at..body_start], '\r').?], 10);
+            while (used < body_start + length) used += try receive(fd, request[used..]);
+            var sent: usize = 0;
+            while (sent < reply.len) {
+                const n = std.c.send(fd, reply[sent..].ptr, reply.len - sent, 0);
+                if (n <= 0) return error.TestReplyFailed;
+                sent += @intCast(n);
+            }
+            self.answered += 1;
+        }
+
+        fn readable(fd: std.posix.fd_t) !void {
+            var poll_fd = [_]std.c.pollfd{.{ .fd = fd, .events = std.c.POLL.IN, .revents = 0 }};
+            if (std.c.poll(&poll_fd, 1, 10_000) <= 0) return error.TestPeerWaitFailed;
+        }
+
+        fn receive(fd: std.posix.fd_t, buffer: []u8) !usize {
+            try readable(fd);
+            const n = std.c.recv(fd, buffer.ptr, buffer.len, 0);
+            if (n <= 0) return error.TestRequestTruncated;
+            return @intCast(n);
+        }
+    };
+    const newer = comptime std.fmt.comptimePrint("{d}", .{(std.fmt.parseInt(u32, protocol.wire_version, 10) catch unreachable) + 1});
+    const incompatible = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: " ++ newer ++ "\r\n\r\n{}";
+    const fenced_body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_unavailable\",\"code\":\"dispatch_fenced\"}";
+    const fenced = std.fmt.comptimePrint("HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{fenced_body.len}) ++ fenced_body;
+
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_bytes: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_bytes);
+    var store_bytes: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = try std.fmt.bufPrint(&store_bytes, "{s}/store", .{root_bytes[0..root_len]});
+    // The lease holds host.lock, so the Store reads as owned.
+    var lease = try platform.StoreLease.acquire(io, store);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    var listener = try (try std.Io.net.UnixAddress.init(lease.paths.socket.slice())).listen(io, .{});
+    defer std.Io.Dir.cwd().deleteFile(io, lease.paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    // The peer closes the listener when it stops.
+    var peer: Peer = .{ .listener = &listener, .replies = &.{ incompatible, incompatible, fenced } };
+    const thread = std.Thread.spawn(.{}, Peer.run, .{&peer}) catch |err| {
+        listener.deinit(io);
+        return err;
+    };
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var vtable = io.vtable.*;
+    vtable.now = Frozen.now;
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = [_][*:0]const u8{"rui"};
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &argv }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = .{ .userdata = io.userdata, .vtable = &vtable }, .environ_map = &environment, .preopens = .empty };
+    const args = [_][]const u8{ "--store", store };
+    var problem: cli_args.Refusal = undefined;
+    const parsed = try cli_args.Command.host_status.definition().parse(&args, arena.allocator(), &problem);
+    const previous = failure_held;
+    defer failure_held = previous;
+
+    const output = try tmp.dir.createFile(io, "stdout", .{ .read = true });
+    defer output.close(io);
+    const diagnostics = try testPipe();
+    defer closeDescriptor(diagnostics[0]);
+    var newer_status: anyerror!void = undefined;
+    var newer_start: anyerror!void = undefined;
+    var fenced_status: anyerror!void = undefined;
+    {
+        defer closeDescriptor(diagnostics[1]);
+        // stdout carries the test runner protocol, so capture it.
+        const saved_stdout = std.c.dup(1);
+        if (saved_stdout < 0) return error.TestDupFailed;
+        defer closeDescriptor(saved_stdout);
+        const saved_stderr = std.c.dup(2);
+        if (saved_stderr < 0) return error.TestDupFailed;
+        defer closeDescriptor(saved_stderr);
+        if (std.c.dup2(output.handle, 1) != 1) return error.TestRedirectFailed;
+        defer std.debug.assert(std.c.dup2(saved_stdout, 1) == 1);
+        if (std.c.dup2(diagnostics[1], 2) != 2) return error.TestRedirectFailed;
+        defer std.debug.assert(std.c.dup2(saved_stderr, 2) == 2);
+        failure_held = .{ .resource = "host", .operation = "status", .not_sent = false };
+        newer_status = host(init, .host_status, &parsed);
+        failure_held = .{ .resource = "host", .operation = "start", .not_sent = false };
+        newer_start = startHost(init, store, false, null, null);
+        failure_held = .{ .resource = "host", .operation = "status", .not_sent = false };
+        fenced_status = host(init, .host_status, &parsed);
+    }
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(@as(?anyerror, null), peer.failure);
+    try std.testing.expectEqual(@as(usize, 3), peer.answered);
+
+    // Status reports an incompatible Host and exits nonzero; start refuses it
+    // and names the way out; a fenced Host is owned but unavailable.
+    try std.testing.expectError(error.IncompatibleHost, newer_status);
+    try std.testing.expectError(error.IncompatibleHost, newer_start);
+    try fenced_status;
+    var stdout_bytes: [1024]u8 = undefined;
+    const stdout_len = try output.readPositionalAll(io, &stdout_bytes, 0);
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_status\",\"status\":";
+    try std.testing.expectEqualStrings(prefix ++ "\"incompatible\"}\n" ++ prefix ++ "\"owned_unavailable\"}\n", stdout_bytes[0..stdout_len]);
+    var stderr_bytes: [4096]u8 = undefined;
+    var stderr_len: usize = 0;
+    while (true) {
+        const n = std.c.read(diagnostics[0], stderr_bytes[stderr_len..].ptr, stderr_bytes.len - stderr_len);
+        if (n < 0) return error.TestReadFailed;
+        if (n == 0) break;
+        stderr_len += @intCast(n);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, stderr_bytes[0..stderr_len], "does not speak this rui's protocol") != null);
 }
 
 test "archive mutation presentation preserves requested intent and pending settlement" {

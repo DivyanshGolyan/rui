@@ -11,7 +11,7 @@ const tool_set_domain = @import("domain/tool_set.zig");
 
 // A stored Host catalog must contain every native tool. Keep that inventory
 // canonical while each fixture independently states its MCP schema and offer.
-fn testingCatalogRecords(comptime extras: []const tool_catalog.Record) [tool_catalog.built_in.records.len + extras.len]tool_catalog.Record {
+pub fn testingCatalogRecords(comptime extras: []const tool_catalog.Record) [tool_catalog.built_in.records.len + extras.len]tool_catalog.Record {
     var records = tool_catalog.built_in.records[0..tool_catalog.built_in.records.len].* ++ extras[0..extras.len].*;
     std.sort.heap(tool_catalog.Record, &records, {}, struct {
         fn lessThan(_: void, left: tool_catalog.Record, right: tool_catalog.Record) bool {
@@ -40,7 +40,6 @@ const model_settlement_domain = @import("domain/model_settlement.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
 const store_schema = @import("schema.zig");
-const test_poll = @import("test_poll");
 const store_testing = @import("testing.zig");
 const turn_domain = @import("domain/turn.zig");
 const AcceptedMessage = command_domain.AcceptedMessage;
@@ -1237,18 +1236,27 @@ test "an Access that touches a fifth Session records everything and still commit
 test "every round of a write Access dates its rows with the transaction's second" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
+            // The Store reads the wall clock through its io; this one runs
+            // ahead by `ahead` instead of waiting for the next second.
+            const Clock = struct {
+                var ahead: std.Io.Duration = .zero;
+                var vtable: std.Io.VTable = undefined;
+                fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+                    const real = std.testing.io.vtable.now(userdata, clock);
+                    return if (clock == .real) real.addDuration(ahead) else real;
+                }
+            };
+            Clock.ahead = .zero;
+            Clock.vtable = std.testing.io.vtable.*;
+            Clock.vtable.now = Clock.now;
+            const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &Clock.vtable };
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            try store_testing.testingStore(case, &storage, &tmp, io);
             defer storage.close() catch unreachable;
             const first = try configureTestSession(&storage, "second-first");
             const second = try configureTestSession(&storage, "second-second");
-            const Clock = struct {
-                fn passed(dated: i64) !bool {
-                    return @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000) > dated;
-                }
-            };
             const entry = try store_core.enter(&storage, .none);
             defer entry.release();
             var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
@@ -1261,7 +1269,8 @@ test "every round of a write Access dates its rows with the transaction's second
             try a.run();
             const dated = try store_core.transactionSecond(&storage);
             // The clock moves on to a later second before the next round dates.
-            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), dated, Clock.passed);
+            Clock.ahead = .fromSeconds(1);
+            try std.testing.expect(@divFloor(try store_core.readUnixMilliseconds(io), 1000) > dated);
             a.write(TestingRound.date_session, .{ .session = heads[1].head, .revision = 1 });
             try a.commit();
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(DISTINCT created_at) FROM session", .{}));
@@ -2479,7 +2488,6 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("domain/skills.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
-        @embedFile("find_tools_tests.zig"),
         @embedFile("mysql_literal.zig"),
         @embedFile("mysql_row.zig"),
         @embedFile("rsql.zig"),
@@ -9134,7 +9142,6 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/skills.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
-        @embedFile("find_tools_tests.zig"),
         @embedFile("mysql_literal.zig"),
         @embedFile("mysql_row.zig"),
         @embedFile("rsql.zig"),
@@ -11230,74 +11237,6 @@ test "core_tools presets retain caller narrowing after overrides resolve" {
                 }
             }
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
-        }
-    }.run);
-}
-
-test "launch presets resolve MCP tools through the same catalog as configure" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            const launch_frame = @import("../launch_frame.zig");
-            const core_tools = @import("../core_tools.zig");
-            var frame: launch_frame.Frame = .{};
-            defer frame.deinit();
-            var refusal: launch_frame.Refusal = undefined;
-            try launch_frame.parse(std.testing.allocator,
-                \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","mcpServers":[{"name":"pages","url":"http://127.0.0.1:3000/mcp","bearerToken":"t","callTimeoutMs":1000}],"presets":{"reader":{"model":"model-a","effort":null,"compactAt":1000,"tools":["fetch_page"],"permissionMode":"ask"}}}
-            , &frame, &refusal);
-            var records = comptime testingCatalogRecords(&.{
-                .{ .name = "fetch_page", .owner = .mcp, .server = "pages", .description = "Fetch page", .input_schema = "{\"type\":\"object\"}" },
-            });
-            var digests: [records.len][32]u8 = undefined;
-            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
-            const offered: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
-            var routes = protocol.routesAll(.unserved);
-            routes.openai = .endpoint;
-            for ([_]bool{ false, true }) |available| {
-                var tmp = std.testing.tmpDir(.{});
-                defer tmp.cleanup();
-                var storage: Store = undefined;
-                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{
-                    .served = routes,
-                    .catalog = if (available) &offered else &tool_catalog.built_in,
-                });
-                defer storage.close() catch unreachable;
-
-                var direct: wire_request.ConfigureCommand = .{};
-                try direct.key.set("mcp-direct");
-                direct.configuration.model.state = .value;
-                try direct.configuration.model.value.set("model-a");
-                direct.configuration.reasoning_effort.state = .explicit_null;
-                direct.configuration.compaction_trigger.state = .value;
-                try direct.configuration.compaction_trigger.value.set("1000");
-                direct.configuration.tools = try .of(&.{"fetch_page"});
-                direct.configuration.permission_mode.state = .value;
-                try direct.configuration.permission_mode.value.set("ask");
-                const ordinary = storage.configure(&direct, .{});
-
-                var request: wire_request.ConfigureCommand = .{ .preset = .{} };
-                try request.key.set("mcp-preset");
-                try request.preset.?.set("reader");
-                var resolved: wire_request.ConfigureCommand = .{ .key = request.key };
-                var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
-                defer memory.deinit();
-                try std.testing.expect(try core_tools.parseAgentSpec(memory.allocator(), frame.presets[0].spec, &resolved.configuration) == .accepted);
-                const preset = storage.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{});
-                if (available) {
-                    try std.testing.expect(ordinary == .accepted);
-                    try std.testing.expect(preset == .accepted);
-                    for ([_]@TypeOf(ordinary.accepted.session){ ordinary.accepted.session, preset.accepted.session }) |session| {
-                        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=s.tool_set_id " ++
-                            "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{session.slice()}));
-                    }
-                } else {
-                    try std.testing.expect(ordinary == .rejected);
-                    try std.testing.expect(preset == .rejected);
-                    try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_tool, ordinary.rejected.code);
-                    try std.testing.expectEqual(ordinary.rejected.code, preset.rejected.code);
-                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
-                }
-            }
         }
     }.run);
 }
