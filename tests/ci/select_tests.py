@@ -185,6 +185,13 @@ class Graph:
         # use or read, and those it reaches only through the code it runs (the
         # owners it drives and its test executables), which cores do not reach.
         self.reached = {target: self.closure(self.every, roots) for target, roots in UNIT_ROOTS.items()}
+        # Native tests outside Store can exercise every Store engine too. A
+        # change they reach must retain the composed run and its live MySQL.
+        conformance = [name for name in self.reached["test-native"]
+                       if name.startswith("src/") and not name.startswith("src/store/")
+                       and name.endswith(".zig") and name in names
+                       and re.search(r'\b\w+\.forEachEngine\s*\(', read(name))]
+        self.live_conformance = self.closure(self.every, conformance)
         self.driven, self.owners = {}, {}
         for target, (scripts, executables, owners) in FIXTURES.items():
             self.owners[target] = set(owners)
@@ -508,6 +515,13 @@ def select(paths, phase, available, graph=None):
             if matches(path, patterns):
                 live_targets.update(set(checks) & served_by)
                 live_reasons.add((reason, served_by))
+        if path in graph.live_conformance and path not in graph.reached["test-store"]:
+            targets.add("test")
+            native_targets.add("test")
+            live_targets.add("test")
+            live_reasons.add(("Native Store conformance tests require live MySQL", LIVE_MYSQL_DIALECT_TARGETS))
+            reasons.add("Native Store conformance tests require live MySQL")
+            matched = True
         if shortcut:
             continue
         if reached:

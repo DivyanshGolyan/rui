@@ -91,6 +91,20 @@ class RuleMatchTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_native_conformance_dependencies_keep_live_mysql(self):
+        graph = tree_graph()
+        for path in ("src/find_tools.zig", "src/find_tools_tests.zig", "src/read_transcript.zig",
+                     "src/launch_frame.zig"):
+            for phase in ("development", "review"):
+                with self.subTest(path=path, phase=phase):
+                    result = select([path], phase, AVAILABLE, graph)
+                    self.assertIn("test", result["targets"])
+                    self.assertIn("test", result["server_targets"])
+        for path in graph.live_conformance & graph.reached["test-native"]:
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE, graph)
+                self.assertTrue(set(result["targets"]) & LIVE_MYSQL_TARGETS)
+
     def test_unit_roots_follow_store_imports(self):
         native = select(["src/session_consent.zig"], "review", AVAILABLE)["targets"]
         self.assertIn("test-native", native)
@@ -571,7 +585,7 @@ class SelectionTest(unittest.TestCase):
     def test_codex_credential_values_keep_portable_and_native_owner_checks(self):
         for path in ("src/codex_credential_policy.zig", "src/codex_token_wire.zig"):
             result = select([path], "review", AVAILABLE)
-            native = ["codex-credential-integration", "codex-h2-integration", "codex-integration", "test-logic", "test-native"]
+            native = ["codex-credential-integration", "codex-h2-integration", "codex-integration", "test", "test-logic"]
             self.assertEqual(result["native_targets"], native)
             self.assertEqual(result["targets"], sorted(native + ["stack-frames"]))
 
