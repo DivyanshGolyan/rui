@@ -1378,8 +1378,6 @@ test "SIGINT and credential publication have one winner" {
 /// Offers each built-in provider: a ready one becomes the saved choice for
 /// new Sessions, and one that is not ready starts its sign-in.
 fn guideProviderLogin(init: std.process.Init, readiness: *const provider_selection.Readinesses, home: []const u8) !void {
-    var interrupt = LoginInterrupt.init();
-    defer interrupt.deinit();
     var prompt_buffer: [160]u8 = undefined;
     var prompt = std.Io.Writer.fixed(&prompt_buffer);
     try prompt.writeAll("Provider:");
@@ -1393,26 +1391,32 @@ fn guideProviderLogin(init: std.process.Init, readiness: *const provider_selecti
     try prompt.writeAll(" [d] defer > ");
     if (!readiness.get(.codex).usable()) try std.Io.File.stdout().writeStreamingAll(init.io, "Codex login stores Rui-owned credentials.\n");
     var choice_buffer: [16]u8 = undefined;
-    const choice = (TerminalEditor.readLine(init.io, &choice_buffer, prompt.buffered(), false) catch |err| switch (err) {
-        error.StreamTooLong, error.InvalidTerminalInput => {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Choose " ++ choice_keys ++ ". No login or preference change.\n");
+    const choice = choice: while (true) {
+        const line = (TerminalEditor.readLine(init.io, &choice_buffer, prompt.buffered()) catch |err| switch (err) {
+            error.StreamTooLong => {
+                try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Choose " ++ choice_keys ++ ". No login or preference change.\n");
+                continue;
+            },
+            else => return err,
+        }) orelse {
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Login deferred.\n");
             return;
-        },
-        else => return err,
-    }) orelse {
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Login deferred.\n");
-        return;
+        };
+        if (std.mem.eql(u8, line, "d")) break :choice line;
+        for (std.enums.values(protocol.Provider)) |candidate| {
+            if (line.len == 1 and line[0] == providerPresentation(candidate).key) break :choice line;
+        }
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Choose " ++ choice_keys ++ ". No login or preference change.\n");
     };
+    var interrupt = LoginInterrupt.init();
+    defer interrupt.deinit();
     if (std.mem.eql(u8, choice, "d")) {
         try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Login deferred.\n");
         return;
     }
     const provider: protocol.Provider = for (std.enums.values(protocol.Provider)) |candidate| {
         if (choice.len == 1 and choice[0] == providerPresentation(candidate).key) break candidate;
-    } else {
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Choose " ++ choice_keys ++ ". No login or preference change.\n");
-        return;
-    };
+    } else unreachable;
     if (loginInterrupted()) {
         try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Login interrupted. No provider preference changed; check credentials before retrying.\n");
         return;

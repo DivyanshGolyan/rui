@@ -6234,12 +6234,87 @@ def renderer_cases():
         resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
 
 
+def provider_line_cases():
+    """Canonical provider choices retry invalid lines and retain terminal modes."""
+    state = screen_fixture_root("rui-provider-lines.")
+    store = state / "store"
+    endpoint = fixture.SuccessEndpoint([])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = None
+    completed = False
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        for choice in ("c", "o", "d", "z", "\x1b", "\x03"):
+            home = state / f"home-{ord(choice)}"
+            config = home / ".config/rui"
+            config.mkdir(parents=True, mode=0o700)
+            if choice in ("c", "o"):
+                codex_fixture.credentials(config / "codex.json")
+                key = config / "openai.key"
+                key.write_text("fixture-provider-choice-key\n")
+                key.chmod(0o600)
+            master, slave = open_pty()
+            original = termios.tcgetattr(slave)
+            ready_read, ready_write = os.pipe()
+            caller = None
+            try:
+                caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
+                    env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
+                    pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE,
+                    default_signals=(signal.SIGINT,))
+                provider_prompt(master, ready_read)
+                if choice in ("z", "\x1b"):
+                    invalid = provider_prompt(master, ready_read, command=choice)
+                    assert "Rui: Choose c, o or d. No login or preference change." in invalid, invalid
+                    assert "Key combination not recognized" not in invalid, invalid
+                    assert not (config / "preferences").exists()
+                    os.write(master, b"d\n")
+                else:
+                    os.write(master, choice.encode() + (b"" if choice == "\x03" else b"\n"))
+                if choice in ("c", "o"):
+                    overview_frame(master, overview_title)
+                    saved = (config / "preferences").read_text()
+                    provider = "codex" if choice == "c" else "openai"
+                    assert f"provider={provider}\n" in saved, saved
+                    caller.send_signal(signal.SIGINT)
+                output, errors = terminal_exit(caller, master)
+                if choice == "\x03":
+                    assert caller.returncode == -signal.SIGINT, (caller.returncode, errors)
+                else:
+                    assert caller.returncode == 0, (choice, caller.returncode, errors)
+                    if choice not in ("c", "o"):
+                        assert b"Rui: Login deferred." in output, output
+                assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
+                if choice not in ("c", "o"):
+                    assert not (config / "preferences").exists()
+                assert not (config / "requests").exists(), "a provider choice captured a Message"
+            finally:
+                dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                            lambda: os.close(master), lambda: os.close(slave),
+                            lambda: os.close(ready_read), lambda: os.close(ready_write))
+        assert endpoint.requests == [], endpoint.requests
+        completed = True
+        print("provider line input: c/o/d, invalid and Esc retries, Ctrl-C and unchanged terminal modes passed", flush=True)
+    finally:
+        dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
+                    endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
+        if completed:
+            shutil.rmtree(state)
+        else:
+            retain_failure_state("provider line input failure state", state)
+
+
 def main(selected="all"):
     import canonical_failure_integration
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "persistent-opening", "incomplete-input", "session-ids", "empty-answers", "copy", "notifications", "command-entry"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "persistent-opening", "incomplete-input", "session-ids", "empty-answers", "copy", "notifications", "command-entry", "provider-lines"), selected
+    if selected in ("all", "callers", "caller-core", "provider-lines"):
+        provider_line_cases()
+    if selected == "provider-lines":
+        return
     if selected == "command-entry":
         command_entry_cases()
         return
@@ -6654,13 +6729,16 @@ def main(selected="all"):
         finally:
             dispose_all(lambda: stop_process(deferred, timeout=5),
                         lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
-        # The one-shot choice decodes keys as a Session does. Backspace edits
-        # in every encoding; an unbound chord is reported and leaves the choice
-        # as typed; a malformed key rejects the line instead of being skipped.
+        # The shell's canonical line input owns editing. Rui accepts only a
+        # single provider letter or defer; it does not decode terminal chords.
         for keys, outcome, notice in (
-                ("cx\x7f\x08\x1b[127ud", "Rui: Login deferred.", None),
-                ("d\x1b.", "Rui: Login deferred.", "Rui: Key combination not recognized; choice unchanged."),
-                ("\u0301d", "Rui: Login deferred.", "Rui: Character not accepted; choice unchanged."),
+                ("dx\x7f", "Rui: Login deferred.", None),
+                ("\x04", "Rui: Login deferred.", None),
+                ("z", "Rui: Choose c, o or d. No login or preference change.", None),
+                ("\x1b", "Rui: Choose c, o or d. No login or preference change.", None),
+                ("x" * 17, "Rui: Choose c, o or d. No login or preference change.", None),
+                ("d\x1b.", "Rui: Choose c, o or d. No login or preference change.", None),
+                ("\u0301d", "Rui: Choose c, o or d. No login or preference change.", None),
                 ("d\x1b[114;999u", "Rui: Choose c, o or d. No login or preference change.", None),
                 ("d\x1b[27;2;13;1~", "Rui: Choose c, o or d. No login or preference change.", None)):
             master, slave = open_pty()
@@ -6678,7 +6756,13 @@ def main(selected="all"):
                 dispose_all(lambda: os.close(ready_write))
             try:
                 provider_prompt(master, ready_read)
-                answered = terminal_step(master, keys, "No new Session created")
+                if "Choose" in outcome:
+                    answered = provider_prompt(master, ready_read, command=keys)
+                    assert outcome in answered, (keys, answered)
+                    assert "Key combination not recognized" not in answered, answered
+                    answered += terminal_step(master, "d", "No new Session created")
+                else:
+                    answered = terminal_step(master, keys, "No new Session created")
                 assert outcome in answered and (notice is None or notice in answered), (keys, answered)
                 assert chooser.wait(timeout=5) == 0
                 restored, expected = termios.tcgetattr(slave), list(original)

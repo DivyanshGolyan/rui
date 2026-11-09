@@ -1701,6 +1701,7 @@ fn refusedNotice(why: keymap.Refusal) []const u8 {
         .invalid, .edit_rejected => "! Input rejected; nothing sent. Enter plain text or paste again.",
         .unbound => "! Key combination not recognized; ignored. Draft unchanged.",
         .overflow => "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
+        .paste_overflow => "! Paste too long; draft unchanged.",
     };
 }
 

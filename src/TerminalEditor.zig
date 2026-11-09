@@ -75,7 +75,7 @@ fn leavePromptMode(original: Attributes) error{TerminalRestoreFailed}!void {
 
 /// One line from the terminal with nothing shown, for a secret. Enter ends
 /// it, Backspace edits it, Ctrl+C cancels it and Ctrl+D on an empty line is
-/// null. As with `readLine`, no line is returned unless the terminal's own
+/// null. No line is returned unless the terminal's own
 /// settings were restored. The caller zeroes `buffer`.
 pub fn readSecretLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
     const original = try enterPromptMode();
@@ -137,26 +137,26 @@ fn validScalar(point: u21, multiline: bool) bool {
 }
 
 /// Returns a slice borrowed from buffer until its caller next reuses it.
-/// No draft, terminal mode or buffered input survives a prompt.
-pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]const u8 {
-    const original = try enterPromptMode();
-
-    // Always attempt both effects, even when rendering or input fails. Do
-    // not return an accepted line if either cleanup step is unconfirmed.
-    const result = drive(io, buffer, prompt, allow_paste);
-    const disabled: anyerror!void = blk: {
-        std.Io.File.stdout().writeStreamingAll(io, "\x1b[?2004l") catch |err| break :blk err;
-        // Input and output may be different terminals. Confirm transmission
-        // on stdout before releasing this prompt's accepted input.
-        while (true) switch (std.posix.errno(termios.tcdrain(1))) {
-            .SUCCESS => break :blk,
-            .INTR => {},
-            else => break :blk error.TerminalCleanupFailed,
+/// The shell's canonical terminal handles editing, echo and signals.
+pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
+    try std.Io.File.stdout().writeStreamingAll(io, prompt);
+    try freshChoice(io);
+    var length: usize = 0;
+    var overflow = false;
+    while (true) {
+        var byte: [1]u8 = undefined;
+        _ = std.Io.File.stdin().readStreaming(io, &.{&byte}) catch |err| switch (err) {
+            error.EndOfStream => return if (overflow) error.StreamTooLong else if (length == 0) null else buffer[0..length],
+            else => return err,
         };
-    };
-    try leavePromptMode(original);
-    disabled catch return error.TerminalCleanupFailed;
-    return try result;
+        if (byte[0] == '\n') return if (overflow) error.StreamTooLong else buffer[0..length];
+        if (length == buffer.len) {
+            overflow = true;
+        } else {
+            buffer[length] = byte[0];
+            length += 1;
+        }
+    }
 }
 
 /// Complete presentation, then discard pre-prompt input before consent.
@@ -172,148 +172,6 @@ pub fn testChoiceReady(io: std.Io) !void {
         const ready: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
         try ready.writeStreamingAll(io, "x");
     }
-}
-
-fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]const u8 {
-    const output = std.Io.File.stdout();
-    try output.writeStreamingAll(io, "\x1b[?2004h");
-    try output.writeStreamingAll(io, prompt);
-    if (!allow_paste) {
-        // The provider choice must come after its complete fresh prompt,
-        // never from queued input or a marked paste.
-        try freshChoice(io);
-    }
-    var editor: Editor = .{ .buffer = buffer, .allow_paste = allow_paste };
-    var input: Input = .{};
-    const size = windowSize();
-    while (true) {
-        // The stream decides when pending input expires, as for a Session.
-        var decoded = switch (input.wait(std.Io.Clock.awake.now(io).nanoseconds, -1)) {
-            .expire => input.expire() catch |err| {
-                try output.writeStreamingAll(io, "\n");
-                return err;
-            },
-            .poll => |timeout| blk: {
-                var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
-                if (try std.posix.poll(&fds, timeout) == 0) continue;
-                var byte: [1]u8 = undefined;
-                if (try std.posix.read(0, &byte) == 0) return if (editor.length == 0) null else error.IncompleteTerminalLine;
-                break :blk input.feed(byte[0], std.Io.Clock.awake.now(io).nanoseconds);
-            },
-        };
-        while (decoded != .none) : (decoded = input.next()) {
-            const old_row = visibleRow(&editor, prompt.len, size);
-            const old_length = editor.length;
-            const outcome = editor.apply(line_keys, decoded);
-            switch (outcome) {
-                .none => {},
-                .refused => |why| switch (why) {
-                    // A dropped chord or a declined edit leaves the choice as
-                    // typed. Say so, then show the prompt and that text again.
-                    .unbound, .edit_rejected => {
-                        try output.writeStreamingAll(io, if (why == .unbound) "\nRui: Key combination not recognized; choice unchanged.\n" else "\nRui: Character not accepted; choice unchanged.\n");
-                        try redraw(io, &editor, prompt, size, 0);
-                    },
-                    .invalid => {
-                        try output.writeStreamingAll(io, "\n");
-                        return error.InvalidTerminalInput;
-                    },
-                    .overflow => {
-                        try output.writeStreamingAll(io, "\n");
-                        return error.StreamTooLong;
-                    },
-                },
-                .append => try output.writeStreamingAll(io, editor.buffer[old_length..editor.length]),
-                .redraw => try redraw(io, &editor, prompt, size, old_row),
-                .submit => {
-                    try output.writeStreamingAll(io, "\n");
-                    return editor.buffer[0..editor.length];
-                },
-                .action => |action| switch (action) {
-                    .eof => {
-                        try output.writeStreamingAll(io, "\n");
-                        return null;
-                    },
-                    .interrupt => {
-                        try output.writeStreamingAll(io, "^C\n");
-                        return error.InteractiveInterrupted;
-                    },
-                },
-            }
-        }
-    }
-}
-
-/// The plain line reader's whole key table: Ctrl-C raises, and Ctrl-D on an
-/// empty line ends input.
-const line_keys: keymap.Keymap(enum { interrupt, eof }) = .init(.{
-    .escape = null,
-    .ctrl_c = .interrupt,
-    .ctrl_d = .eof,
-    .ctrl_g = null,
-    .ctrl_n = null,
-    .ctrl_o = null,
-    .ctrl_p = null,
-    .ctrl_r = null,
-    .ctrl_x = null,
-    .alt_a = null,
-    .up = null,
-    .down = null,
-    .shift_up = null,
-    .shift_down = null,
-    .page_up = null,
-    .page_down = null,
-    .home = null,
-    .end = null,
-    .ctrl_end = null,
-});
-
-fn redraw(io: std.Io, editor: *const Editor, prompt: []const u8, size: std.posix.winsize, old_row: ?usize) !void {
-    const output = std.Io.File.stdout();
-    if (old_row == null or windowSize().col != size.col or windowSize().row != size.row or
-        visibleRow(editor, prompt.len, size) == null)
-    {
-        try output.writeStreamingAll(io, "\n");
-        return error.UncertainTerminalCursor;
-    }
-    // Repaint only while each row is known not to wrap. The terminal positions
-    // the cursor when it paints Unicode; grapheme counts are not cell counts.
-    var control: [32]u8 = undefined;
-    if (old_row.? != 0) try output.writeStreamingAll(io, try std.fmt.bufPrint(&control, "\x1b[{d}A", .{old_row.?}));
-    try output.writeStreamingAll(io, "\r\x1b[0J");
-    try output.writeStreamingAll(io, prompt);
-    try output.writeStreamingAll(io, editor.buffer[0..editor.cursor]);
-    try output.writeStreamingAll(io, "\x1b7");
-    try output.writeStreamingAll(io, editor.buffer[editor.cursor..editor.length]);
-    try output.writeStreamingAll(io, "\x1b8");
-}
-
-fn windowSize() std.posix.winsize {
-    var size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
-    if (std.c.ioctl(1, @intCast(std.c.T.IOCGWINSZ), &size) != 0) size.row = 0;
-    return size;
-}
-
-fn visibleRow(editor: *const Editor, prompt_size: usize, size: std.posix.winsize) ?usize {
-    if (size.row < 2 or size.col <= prompt_size or editor.partial_length != 0) return null;
-    var row: usize = 0;
-    var column = prompt_size;
-    for (editor.buffer[0..editor.length]) |byte| {
-        if (byte == '\t') return null;
-        if (byte == '\n') {
-            row += 1;
-            column = 0;
-        } else {
-            column += 1; // UTF-8 byte count is a conservative cell upper bound.
-            if (column >= size.col) return null;
-        }
-        if (row >= size.row) return null;
-    }
-    row = 0;
-    for (editor.buffer[0..editor.cursor]) |byte| if (byte == '\n') {
-        row += 1;
-    };
-    return row;
 }
 
 /// Applies one decoded event from the invocation's terminal stream. The
@@ -446,10 +304,13 @@ fn take(self: *Editor, decoded: Input.Decoded) KeyOutcome {
         .paste_end => blk: {
             if (!value.pasted or !self.pasting) self.reject(.invalid);
             self.pasting = false;
-            if (self.rejected == .edit_rejected) {
+            if (self.rejected == .edit_rejected or self.rejected == .paste_overflow) {
+                const why = self.rejected.?;
                 self.rejected = null;
-                break :blk .{ .refused = .edit_rejected };
+                break :blk .{ .refused = why };
             }
+            if (self.rejected == null and self.cursor != 0)
+                self.cursor = self.next(self.previous(self.cursor));
             break :blk .none;
         },
         .key_press => |key_value| self.key(key_value, value.pasted),
@@ -724,6 +585,50 @@ test "renderer declines standalone zero-width edits and rolls back an unrepresen
     }
 }
 
+test "oversized marked paste preserves the draft and caret and accepts the next edit" {
+    const keys: keymap.Keymap(void) = comptime .{ .meanings = .initFill(null) };
+    for ([_][]const u8{ "1234", "12345", "123🐄" }) |paste| {
+        var storage: [12]u8 = undefined;
+        @memcpy(storage[0..8], "headTAIL");
+        var editor: Editor = .{ .buffer = &storage, .length = 8, .cursor = 4 };
+        _ = editor.apply(keys, .{ .event = .{ .event = .paste_start, .pasted = false } });
+        _ = editor.apply(keys, .{ .event = .{ .event = .{ .key_press = .{ .codepoint = 0, .text = paste } }, .pasted = true } });
+        const result = editor.apply(keys, .{ .event = .{ .event = .paste_end, .pasted = true } });
+        if (paste.len == 4) {
+            try std.testing.expectEqualStrings("head1234TAIL", storage[0..editor.length]);
+            try std.testing.expectEqual(@as(usize, 8), editor.cursor);
+            try std.testing.expectEqual(.none, result);
+        } else {
+            try std.testing.expectEqualStrings("headTAIL", storage[0..editor.length]);
+            try std.testing.expectEqual(@as(usize, 4), editor.cursor);
+            try std.testing.expect(result == .refused and !result.refused.endsLine());
+            _ = editor.apply(keys, .{ .event = .{ .event = .{ .key_press = .{ .codepoint = 'X', .text = "X" } }, .pasted = false } });
+            try std.testing.expectEqualStrings("headXTAIL", storage[0..editor.length]);
+        }
+        try std.testing.expectEqual(.submit, editor.apply(keys, .{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = false } }));
+    }
+    // A joiner can merge inserted text with the original suffix. Subsequent
+    // paste bytes must still precede that suffix for rollback to preserve it.
+    for ([_][]const u8{ "👨‍", "👨‍123456" }) |paste| {
+        var storage: [20]u8 = undefined;
+        const original = "L👩TAIL";
+        @memcpy(storage[0..original.len], original);
+        var editor: Editor = .{ .buffer = &storage, .length = original.len, .cursor = 1 };
+        _ = editor.apply(keys, .{ .event = .{ .event = .paste_start, .pasted = false } });
+        _ = editor.apply(keys, .{ .event = .{ .event = .{ .key_press = .{ .codepoint = 0, .text = paste } }, .pasted = true } });
+        const result = editor.apply(keys, .{ .event = .{ .event = .paste_end, .pasted = true } });
+        if (paste.len == 7) {
+            try std.testing.expectEqualStrings("L👨‍👩TAIL", storage[0..editor.length]);
+            try std.testing.expectEqual(@as(usize, 12), editor.cursor);
+            try std.testing.expectEqual(.none, result);
+        } else {
+            try std.testing.expectEqualStrings(original, storage[0..editor.length]);
+            try std.testing.expectEqual(@as(usize, 1), editor.cursor);
+            try std.testing.expectEqual(keymap.Refusal.paste_overflow, result.refused);
+        }
+    }
+}
+
 /// A screen's Tab: the text it adds to `draft`, or null to add the tab.
 pub const Completion = struct {
     context: *const anyopaque,
@@ -802,7 +707,7 @@ fn insert(self: *Editor, byte: u8, pasted_input: bool) KeyOutcome {
         };
     }
     if (self.length + self.partial_length + 1 > self.buffer.len) {
-        self.reject(.overflow);
+        if (self.pasting) self.rejectPaste(.paste_overflow) else self.reject(.overflow);
         return .none;
     }
     self.partial[self.partial_length] = byte;
@@ -833,14 +738,7 @@ fn insert(self: *Editor, byte: u8, pasted_input: bool) KeyOutcome {
         if (!joins) {
             self.partial_length = 0;
             if (pasted_input) {
-                // Paste insertion is contiguous. Roll it back without losing
-                // the pre-existing suffix, draft or decoder's paste custody.
-                const added = self.length - self.paste_start.length;
-                const suffix = self.paste_start.cursor + added;
-                std.mem.copyForwards(u8, self.buffer[self.paste_start.cursor..], self.buffer[suffix..self.length]);
-                self.length = self.paste_start.length;
-                self.cursor = self.paste_start.cursor;
-                self.reject(.edit_rejected);
+                self.rejectPaste(.edit_rejected);
                 return .none;
             }
             return .{ .refused = .edit_rejected };
@@ -853,13 +751,24 @@ fn insert(self: *Editor, byte: u8, pasted_input: bool) KeyOutcome {
     self.edits +%= 1;
     self.cursor += self.partial_length;
     self.partial_length = 0;
-    if (!at_end) {
+    if (!at_end and !self.pasting) {
         // A combining mark or joiner can merge the inserted scalar with the
-        // suffix. Never leave the caret inside the newly joined cluster.
+        // suffix. Keep a paste contiguous until its end before snapping the
+        // caret, so later bytes never interleave with the original suffix.
         const cluster_end = self.next(self.previous(self.cursor));
         self.cursor = @max(self.cursor, cluster_end);
     }
     return if (at_end) .append else .redraw;
+}
+
+fn rejectPaste(self: *Editor, why: keymap.Refusal) void {
+    const added = self.length - self.paste_start.length;
+    const suffix = self.paste_start.cursor + added;
+    std.mem.copyForwards(u8, self.buffer[self.paste_start.cursor..], self.buffer[suffix..self.length]);
+    self.length = self.paste_start.length;
+    self.cursor = self.paste_start.cursor;
+    self.partial_length = 0;
+    self.reject(why);
 }
 
 fn previous(self: *const Editor, position: usize) usize {

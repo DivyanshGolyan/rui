@@ -2176,6 +2176,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             switch (why) {
                 .invalid => state.say(.attention, "! Not valid text; nothing sent.", .{}),
                 .overflow => state.say(.attention, "! Too long to send.", .{}),
+                .paste_overflow => state.say(.attention, "! Paste too long; draft unchanged.", .{}),
                 .edit_rejected => state.say(.attention, "! Can't add that character alone.", .{}),
                 .unbound => state.say(.attention, "! That key does nothing here.", .{}),
             }
@@ -2779,7 +2780,7 @@ pub fn nearestIndex(rgb: Rgb) u8 {
 }
 
 /// The same tables as 256-colour entries.
-const indexed = blk: {
+pub const indexed = blk: {
     @setEvalBranchQuota(400_000);
     var tables = std.enums.EnumArray(Skin, struct { colours: std.enums.EnumArray(Colour, u8), backgrounds: std.enums.EnumArray(Background, u8) }).initUndefined();
     for (std.enums.values(Skin)) |skin| {
@@ -5065,6 +5066,7 @@ test "a line the editor rejects says why once; text it could not take clears" {
     for ([_]struct { keymap.Outcome(Action), []const u8, bool }{
         .{ .{ .refused = .invalid }, "! Not valid text; nothing sent.", true },
         .{ .{ .refused = .overflow }, "! Too long to send.", true },
+        .{ .{ .refused = .paste_overflow }, "! Paste too long; draft unchanged.", false },
         .{ .{ .refused = .edit_rejected }, "! Can't add that character alone.", false },
         .{ .{ .refused = .unbound }, "! That key does nothing here.", false },
     }) |case| {

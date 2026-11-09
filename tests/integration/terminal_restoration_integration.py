@@ -3162,6 +3162,185 @@ def native_notice_cases(state):
             dispose_all(lambda: os.close(reader), lambda: os.close(writer))
 
 
+def app_terminal_cases():
+    binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
+    master, slave = open_pty()
+    caller = None
+    original = termios.tcgetattr(slave)
+    try:
+        caller = spawn([str(binary), "app-init-oom"], stdin=slave,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output, diagnostic = caller.communicate(timeout=5)
+        assert caller.returncode == 0, (caller.returncode, diagnostic)
+        assert output == b"", output
+        assert diagnostic == b"App.init: OutOfMemory\n", diagnostic
+        assert termios.tcgetattr(slave) == original, "App left terminal settings changed"
+        print("App.init OutOfMemory: terminal restored and process exited", flush=True)
+    finally:
+        dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                    lambda: os.close(master), lambda: os.close(slave))
+
+
+def app_signal_cases():
+    binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
+    for sent in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        master, slave = open_pty()
+        caller = None
+        original = termios.tcgetattr(slave)
+        try:
+            caller = spawn([str(binary), "app-signal"], stdin=slave,
+                           stdout=slave, stderr=subprocess.PIPE)
+            opening = bytearray()
+            answered = False
+
+            def frame_drawn():
+                nonlocal answered
+                if select.select([master], [], [], 0)[0]:
+                    opening.extend(os.read(master, 65536))
+                    assert len(opening) < 1024 * 1024, "unbounded App startup output"
+                if not answered and b"\x1b[c" in opening:
+                    os.write(master, b"\x1b[?1;2c")
+                    answered = True
+                return b"fixture" in opening and b"\x1b[?2026l" in opening
+
+            try:
+                fixture.wait_for(frame_drawn, "App's first frame", timeout=5)
+            except BaseException as error:
+                error.add_note(f"App startup bytes: {bytes(opening)!r}; exit: {caller.poll()}")
+                raise
+            assert not termios.tcgetattr(slave)[3] & termios.ICANON
+            caller.send_signal(sent)
+            output, diagnostic = human.terminal_exit(caller, master)
+            assert caller.returncode == 0, (sent, caller.returncode, diagnostic)
+            assert diagnostic == b"", diagnostic
+            assert termios.tcgetattr(slave) == original, (sent, "terminal not restored")
+            for reset in (b"\x1b[?1049l", b"\x1b[?2004l", b"\x1b[?1002;1003;1004;1006;1016l"):
+                assert reset in output, (sent, reset, output)
+            print(f"App {sent.name}: terminal settings and enabled modes restored", flush=True)
+        finally:
+            dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                        lambda: os.close(master), lambda: os.close(slave))
+
+
+def app_resize_cases():
+    from terminal_screen import ScreenCapture
+
+    binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
+    for columns, rows in ((0, 1), (1, 0)):
+        master, slave = open_pty(columns=columns, rows=rows)
+        caller = None
+        try:
+            caller = spawn([str(binary), "app-resize"], stdin=slave,
+                           stdout=slave, stderr=subprocess.PIPE)
+            output, diagnostic = bytearray(), bytearray()
+            screen = ScreenCapture(columns=80, rows=24)
+            answered = False
+
+            def collect():
+                nonlocal answered
+                ready = select.select([master, caller.stderr], [], [], 0)[0]
+                if master in ready:
+                    chunk = os.read(master, 65536)
+                    output.extend(chunk)
+                    screen.feed(chunk)
+                if caller.stderr in ready:
+                    diagnostic.extend(os.read(caller.stderr.fileno(), 65536))
+                assert len(output) + len(diagnostic) < 1024 * 1024
+                assert caller.poll() is None, (caller.returncode, bytes(diagnostic))
+                if not answered and b"\x1b[c" in output:
+                    os.write(master, b"\x1b[?1;2c")
+                    answered = True
+
+            def empty_drawn():
+                collect()
+                return f"empty={columns}x{rows}\n".encode() in diagnostic
+
+            fixture.wait_for(empty_drawn, "App draws an empty terminal without exiting", timeout=5)
+            output.clear()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+            caller.send_signal(signal.SIGWINCH)
+
+            def positive_drawn():
+                collect()
+                return "App resize restored" in screen.completed
+
+            fixture.wait_for(positive_drawn, "App redraws after a nonzero resize", timeout=5)
+            os.write(master, b"\r")
+            _, remaining = human.terminal_exit(caller, master)
+            assert caller.returncode == 0, (caller.returncode, remaining)
+            assert remaining == b"", remaining
+            assert diagnostic == f"empty={columns}x{rows}\n".encode(), diagnostic
+            restored = termios.tcgetattr(slave)[3]
+            assert restored & termios.ICANON and restored & termios.ECHO
+            print(f"App {columns}x{rows} → 80x24: redrawn, input accepted, terminal usable", flush=True)
+        finally:
+            dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                        lambda: os.close(master), lambda: os.close(slave))
+
+
+def app_consent_cases():
+    binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
+    for replaced in (True, False):
+        master, slave = open_pty()
+        ready_read, ready_write = os.pipe()
+        caller = None
+        try:
+            caller = spawn([str(binary), "consent-replaced" if replaced else "consent-live"],
+                           stdin=slave, stdout=slave, stderr=subprocess.PIPE,
+                           pass_fds=(ready_write,),
+                           env={**os.environ, "RUI_TEST_ACTION_READY_FD": str(ready_write)})
+            opening = bytearray()
+            answered = 0
+
+            def enter_sent():
+                nonlocal answered
+                if select.select([master], [], [], 0)[0]:
+                    opening.extend(os.read(master, 65536))
+                    assert len(opening) < 1024 * 1024, "unbounded consent fixture output"
+                while opening.count(b"\x1b[c") > answered:
+                    answered += 1
+                    os.write(master, b"\x1b[?1;2c")
+                if select.select([ready_read], [], [], 0)[0]:
+                    assert os.read(ready_read, 1) == b"x"
+                    os.write(master, b"\r")
+                    return True
+                return False
+
+            fixture.wait_for(enter_sent, "Enter after the card draws its request", timeout=5)
+            _, diagnostic = human.terminal_exit(caller, master)
+            assert caller.returncode == 0, (replaced, caller.returncode, diagnostic)
+            expected = b"confirmed=false\n" if replaced else b"confirmed=true\n"
+            assert diagnostic == expected, (replaced, diagnostic)
+            print(f"App consent: request-replaced={replaced}, {diagnostic.decode().strip()}", flush=True)
+        finally:
+            dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                        lambda: os.close(master), lambda: os.close(slave),
+                        lambda: os.close(ready_read), lambda: os.close(ready_write))
+
+
+def app_ready_failure_case():
+    binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
+    master, slave = open_pty()
+    ready_read, ready_write = os.pipe()
+    os.close(ready_read)
+    caller = None
+    try:
+        caller = spawn([str(binary), "consent-live"], stdin=slave, stdout=slave,
+                       stderr=subprocess.PIPE, pass_fds=(ready_write,),
+                       env={**os.environ, "RUI_TEST_ACTION_READY_FD": str(ready_write)})
+        _, diagnostic = human.terminal_exit(caller, master)
+        assert caller.returncode == 1, (caller.returncode, diagnostic)
+        assert b"error: BrokenPipe" in diagnostic, diagnostic
+        assert b"confirmed=" not in diagnostic, diagnostic
+        restored = termios.tcgetattr(slave)[3]
+        assert restored & termios.ICANON and restored & termios.ECHO
+        print("App readiness write failure: run returned BrokenPipe and terminal is usable", flush=True)
+    finally:
+        dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                    lambda: os.close(master), lambda: os.close(slave),
+                    lambda: os.close(ready_write))
+
+
 def main(selected=None):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-terminal-restoration."))
     home = state / "home"
@@ -3170,6 +3349,31 @@ def main(selected=None):
     host = None
     completed = False
     try:
+        if selected in (None, "app-init"):
+            app_terminal_cases()
+        if selected == "app-init":
+            completed = True
+            return
+        if selected in (None, "app-signals"):
+            app_signal_cases()
+        if selected == "app-signals":
+            completed = True
+            return
+        if selected in (None, "app-resize"):
+            app_resize_cases()
+        if selected == "app-resize":
+            completed = True
+            return
+        if selected in (None, "app-consent"):
+            app_consent_cases()
+        if selected == "app-consent":
+            completed = True
+            return
+        if selected in (None, "app-ready-error"):
+            app_ready_failure_case()
+        if selected == "app-ready-error":
+            completed = True
+            return
         if selected == "input-replay":
             from terminal_input_replay import input_replay_cases
             input_replay_cases()

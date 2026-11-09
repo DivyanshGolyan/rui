@@ -6,6 +6,7 @@ const core_boundary = @import("core_boundary.zig");
 /// each one listed here and runs its tests, and selector tests require each
 /// to select test-logic.
 const cores = .{
+    .{ "ActionConsent.zig", @import("ActionConsent.zig") },
     .{ "request_wait.zig", @import("request_wait.zig") },
     .{ "word_search.zig", @import("word_search.zig") },
     .{ "attempt.zig", @import("attempt.zig") },
@@ -80,6 +81,7 @@ const cores = .{
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
+    .{ "ViewportPosition.zig", @import("ViewportPosition.zig") },
     .{ "wire_field.zig", @import("wire_field.zig") },
     .{ "wire_version.zig", @import("wire_version.zig") },
     .{ "work_line.zig", @import("work_line.zig") },

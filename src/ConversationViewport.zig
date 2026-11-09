@@ -19,21 +19,7 @@ pub const longest_cluster = 64;
 
 /// A row of laid-out text: the logical line starting at origin-relative byte
 /// `offset`, and the row within that line's wrapping.
-pub const Position = struct {
-    offset: usize = 0,
-    row: u16 = 0,
-    /// Past every row; a view that has shown this far has shown everything.
-    pub const end: Position = .{ .offset = std.math.maxInt(usize) };
-
-    pub fn order(a: Position, b: Position) std.math.Order {
-        const lines = std.math.order(a.offset, b.offset);
-        return if (lines != .eq) lines else std.math.order(a.row, b.row);
-    }
-
-    pub fn min(a: Position, b: Position) Position {
-        return if (a.order(b) == .gt) b else a;
-    }
-};
+pub const Position = @import("ViewportPosition.zig");
 
 /// The width and width method vaxis lays text out with.
 pub const Layout = struct {
@@ -55,9 +41,10 @@ pub fn representable(cluster: []const u8, method: gwidth.Method) bool {
 }
 
 /// Rows used by a print that ended at `result`. A row is used once text
-/// reaches it; an exact fill leaves the next row unused.
+/// reaches it; an exact fill leaves the next row unused. Overflow means
+/// that at least one more row remains, even when the last visible row filled.
 fn rowsUsed(result: vaxis.Window.PrintResult) u16 {
-    return if (result.col == 0 and result.row != 0) result.row else result.row +| 1;
+    return if (result.col == 0 and result.row != 0 and !result.overflow) result.row else result.row +| 1;
 }
 
 /// The draft as the input draws it, for `draft_layout`: whole clusters
@@ -447,7 +434,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         fn segmentStyle(self: *const Self, position: usize, colour: bool, plain: vaxis.Style) vaxis.Style {
             if (!styled) return plain;
             const value = cellStyle(self.styles[position], colour);
-            return .{ .bold = value.bold, .dim = value.dim, .italic = value.italic, .ul_style = if (value.underline) .single else .off, .fg = if (value.foreground) |index| .{ .index = index } else .default };
+            return .{ .bold = value.bold, .dim = value.dim, .italic = value.italic, .ul_style = if (value.underline) .single else .off, .fg = if (value.foreground) |index| .{ .index = index } else plain.fg, .bg = plain.bg };
         }
 
         pub fn lineRows(self: *const Self, layout: Layout, offset: usize) u16 {
@@ -711,6 +698,20 @@ test "vaxis wraps reading text at words with hanging indentation" {
     try std.testing.expectEqual(@as(u16, 2), whole.caret_column);
 }
 
+test "a clipped final wrapped line leaves an unread row in plain and styled documents" {
+    inline for (.{ false, true }) |styled| {
+        var document: Sized(128, styled) = .{};
+        try document.append(if (styled) "first\nsecond \x1b[1mthird\x1b[0m fourth" else "first\nsecond third fourth");
+        var screen: TestScreen = undefined;
+        for ([_]Position{ .{ .offset = 6 }, .{ .offset = 6, .row = 1 }, .{ .offset = 6, .row = 2 }, .end }, 1..) |expected, height| {
+            const drawn = document.draw(screen.window(8, @intCast(height)), .{}, true, true, .{});
+            try std.testing.expectEqual(expected, drawn.next);
+        }
+        const resumed = document.draw(screen.window(8, 1), .{ .offset = 6, .row = 1 }, true, true, .{});
+        try std.testing.expectEqual(Position{ .offset = 6, .row = 2 }, resumed.next);
+    }
+}
+
 test "positions move by laid-out rows and never skip the first unseen row" {
     var view: Sized(256, false) = .{};
     try view.append("one two three four five six\nseven\neight\n");
@@ -786,6 +787,13 @@ test "trusted renderer styles survive fragmented output retention" {
     _ = marked.draw(test_screen.window(8, 1), .{}, true, true, .{});
     try std.testing.expectEqual(vaxis.Color{ .index = 12 }, test_screen.screen.readCell(0, 0).?.style.fg);
     try std.testing.expectEqual(vaxis.Color.default, test_screen.screen.readCell(2, 0).?.style.fg);
+    for ([_]bool{ false, true }) |colour| {
+        _ = marked.draw(test_screen.window(8, 1), .{}, true, colour, .{ .fg = .{ .index = 255 }, .bg = .{ .index = 19 } });
+        try std.testing.expectEqual(vaxis.Color{ .index = if (colour) 12 else 255 }, test_screen.screen.readCell(0, 0).?.style.fg);
+        try std.testing.expectEqual(vaxis.Color{ .index = 255 }, test_screen.screen.readCell(2, 0).?.style.fg);
+        try std.testing.expectEqual(vaxis.Color{ .index = 19 }, test_screen.screen.readCell(0, 0).?.style.bg);
+        try std.testing.expectEqual(vaxis.Color{ .index = 19 }, test_screen.screen.readCell(2, 0).?.style.bg);
+    }
 }
 
 test "user text is dim italic with colour and keeps its body column without it" {
