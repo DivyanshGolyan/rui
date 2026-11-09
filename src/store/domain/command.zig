@@ -217,7 +217,6 @@ pub const MessageReads = struct {
     sender: message_sender.Result = null,
     /// The text's identity, and the row its lookup found.
     text: content_domain.Import,
-    captured_text: ?[]const u8 = null,
     payload: ?*const protocol.ContentField = null,
     authored: ?content_domain.Import = null,
 };
@@ -325,8 +324,8 @@ fn admitMessage(
     committed: ?MessageCommitted,
     faults: Faults,
 ) !MessageReply {
-    const text_id = if (reads.captured_text) |bytes| try content_domain.importBytes(a, &reads.text, bytes) else try content_domain.importSealed(a, io, reads.payload orelse &command.text, &reads.text, faults);
-    const authored_id = if (reads.authored) |*authored| (if (command.skill != null) try content_domain.importBytes(a, authored, "") else try content_domain.importSealed(a, io, &command.text, authored, faults)) else text_id;
+    const text_id = try content_domain.importSealed(a, io, reads.payload orelse &command.text, &reads.text, faults);
+    const authored_id = if (reads.authored) |*authored| try content_domain.importSealed(a, io, &command.text, authored, faults) else text_id;
     const answer: StoredAnswer = .{ .accepted = true };
     if (configured) |applied| {
         try configuration_domain.queueConfiguredCommand(a, applied, command.key.slice(), .message, &reads.digest, text_id, authored_id, &answer);
@@ -378,7 +377,7 @@ pub fn submitMessage(
     command: *const protocol.MessageCommand,
     committed: ?MessageCommitted,
     initial_skills: ?*const skills_domain.Initial,
-    captured_skill: ?*const skills_domain.Capture,
+    captured_skill: ?*const skills_domain.MessageCapture,
     faults: Faults,
 ) !MessageReply {
     if (command.configuration != null) return submitCreating(a, io, served, selector, command, committed, initial_skills, captured_skill, faults);
@@ -386,19 +385,10 @@ pub fn submitMessage(
     return submitTo(a, io, served, selector, command, committed, captured_skill, faults, &reads);
 }
 
-fn prepareMessageReads(a: anytype, command: *const protocol.MessageCommand, reads: *MessageReads, captured: *const skills_domain.Capture) !void {
-    reads.authored = if (command.skill != null) .ofBytes("", false) else content_domain.sealedIdentity(&command.text);
-    switch (captured.*) {
-        .payload => |payload| {
-            reads.payload = payload;
-            reads.text = content_domain.sealedIdentity(payload);
-        },
-        .invocation => |bytes| {
-            reads.captured_text = bytes;
-            reads.text = .ofBytes(bytes, false);
-        },
-        else => return error.CorruptStore,
-    }
+fn prepareMessageReads(a: anytype, command: *const protocol.MessageCommand, reads: *MessageReads, payload: *const protocol.ContentField) !void {
+    reads.authored = content_domain.sealedIdentity(&command.text);
+    reads.payload = payload;
+    reads.text = content_domain.sealedIdentity(payload);
     content_domain.lookup(a, &reads.authored.?);
     content_domain.lookup(a, &reads.text);
     try a.run();
@@ -415,7 +405,7 @@ noinline fn submitTo(
     selector: []const u8,
     command: *const protocol.MessageCommand,
     committed: ?MessageCommitted,
-    captured_skill: ?*const skills_domain.Capture,
+    captured_skill: ?*const skills_domain.MessageCapture,
     faults: Faults,
     reads: *MessageReads,
 ) !MessageReply {
@@ -440,10 +430,12 @@ noinline fn submitTo(
     else
         null;
     if (rejection) |code| return rejectMessage(a, command, reads, command.sender != null and sender_valid, code, faults);
-    if (command.skill != null or command.skills.len != 0) {
+    if (command.skills.len != 0) {
         const captured = captured_skill orelse return rejectMessage(a, command, reads, command.sender != null and sender_valid, .skills_unavailable, faults);
-        if (captured.* == .failed) return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, captured.failed.rejection(protocol.MessageRejection), captured.failed, faults);
-        try prepareMessageReads(a, command, reads, captured);
+        switch (captured.*) {
+            .failed => |failure| return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, failure.rejection(protocol.MessageRejection), failure, faults),
+            .payload => |payload| try prepareMessageReads(a, command, reads, payload),
+        }
     }
     if (target.?.archive_state == .archived) a.write(clear_archive, .{ .session = target.?.session });
     return admitMessage(a, io, command, reads, target.?.session, command.session, null, committed, faults);
@@ -465,7 +457,7 @@ noinline fn submitCreating(
     command: *const protocol.MessageCommand,
     committed: ?MessageCommitted,
     initial_skills: ?*const skills_domain.Initial,
-    captured_skill: ?*const skills_domain.Capture,
+    captured_skill: ?*const skills_domain.MessageCapture,
     faults: Faults,
 ) !MessageReply {
     const configuration = &command.configuration.?;
@@ -496,10 +488,12 @@ noinline fn submitCreating(
     };
     // Configuration's validation-only phase owns ordinary refusal precedence.
     // No configuration/content/Session writes exist when a batch refuses.
-    if (command.skill != null or command.skills.len != 0) {
+    if (command.skills.len != 0) {
         const captured = captured_skill orelse return rejectMessage(a, command, reads, command.sender != null and sender_valid, .skills_unavailable, faults);
-        if (captured.* == .failed) return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, captured.failed.rejection(protocol.MessageRejection), captured.failed, faults);
-        try prepareMessageReads(a, command, reads, captured);
+        switch (captured.*) {
+            .failed => |failure| return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, failure.rejection(protocol.MessageRejection), failure, faults),
+            .payload => |payload| try prepareMessageReads(a, command, reads, payload),
+        }
     }
     switch (try configuration_domain.applyValidatedConfiguration(a, io, "", configuration, initial_skills, faults, creation, plan)) {
         .rejected => |code| rejection = std.meta.stringToEnum(protocol.MessageRejection, @tagName(code)).?,

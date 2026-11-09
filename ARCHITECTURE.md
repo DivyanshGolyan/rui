@@ -507,7 +507,8 @@ Normal defaults offer/load `skill` even with no skills; an explicit restricted t
 
 The model `skill` tool accepts `invoke` with a name or `reload` without one.
 Native `session send` accepts repeatable `--skill NAME` alongside stdin text.
-The wire keeps the exclusive `skill` form that `/skill NAME` sends and adds an ordered `skills` vector alongside literal text; both are explicit intent, not slash-text parsing.
+The wire's only way to invoke skills is an ordered `skills` vector of at most 64 distinct names beside the Message's literal text; it is explicit intent, not slash-text parsing. There is no `/skill` command and no exclusive `skill` field.
+A peer Session's Message may list skills too; the Host resolves them against the recipient's catalog.
 The Host resolves the distinct names against one catalog snapshot, in their order, and captures the batch before atomic admission; the captured text is admitted as an ordinary User Message.
 The admitted Message keeps the caller's authored text beside it, which `activity_content` reads with the `authored` selector and Ctrl-P recall uses.
 Catalog suggestions (`skill_suggestions`) are bounded metadata-only reads with copied query scope, not a frontend filesystem reader or persistent active-skill registry.
@@ -2709,7 +2710,7 @@ A stop shows the Messages that waited just before it, searching the Activity row
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
 
-Wire version 11 adds ordered skill names with text, authored Message content metadata and selection, and bounded skill suggestions; different versions, including saved request records, refuse each other.
+Wire version 11 replaces wire 10's exclusive `skill` field with ordered skill names beside the text, and adds authored Message content metadata and selection and bounded skill suggestions; different versions, including saved request records, refuse each other.
 
 Wire version 10 adds explicit native skill invocation and idle catalog reload intent, typed capture refusals and reload acknowledgements; different versions refuse each other rather than silently discarding the new intent.
 Wire version 8 later gained the `activity_search` request; a Host built before it answers that request as unknown.

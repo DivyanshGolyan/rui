@@ -122,7 +122,6 @@ const ConversationName = enum {
     requests,
     result,
     setup,
-    skill,
     status,
     unarchive,
     upgrade,
@@ -149,7 +148,6 @@ pub const conversation = Commands(ConversationName, .{
     .requests = .{ .description = "recovery handles; pick one to recover it or read its answer", .listed = false },
     .result = .{ .argument = .{ .required = "KEY" }, .description = "a saved answer", .listed = false },
     .setup = .{ .argument = .{ .options = setup_options }, .description = "future defaults" },
-    .skill = .{ .argument = .{ .required = "NAME" }, .description = "invoke an advertised skill as ordinary input" },
     .status = .{ .description = "settings and work" },
     .unarchive = .{ .description = "restore this Session without restarting work" },
     .upgrade = .{ .description = "check stable Rui; install restarts this Store's Host" },
@@ -764,14 +762,13 @@ test "a command admits exactly the arguments its shape names" {
 test "the list names the listed commands a command word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "details", "effort ", "exit", "help", "history", "model", "reload-skills", "rename ", "setup ", "skill ", "status", "unarchive", "upgrade" } },
+        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "details", "effort ", "exit", "help", "history", "model", "reload-skills", "rename ", "setup ", "status", "unarchive", "upgrade" } },
         .{ .draft = "/c", .shown = &.{ "configure ", "copy " }, .first = "onfigure " },
         .{ .draft = "/cop", .shown = &.{"copy "}, .first = "y " },
         .{ .draft = "/st", .shown = &.{"status"}, .first = "atus" },
         .{ .draft = "/re", .shown = &.{ "reload-skills", "rename " } },
         .{ .draft = "/rel", .shown = &.{"reload-skills"}, .first = "oad-skills" },
-        .{ .draft = "/s", .shown = &.{ "setup ", "skill ", "status" }, .first = "etup " },
-        .{ .draft = "/sk", .shown = &.{"skill "}, .first = "ill " },
+        .{ .draft = "/s", .shown = &.{ "setup ", "status" }, .first = "etup " },
         // Recovery commands work, and /help names them, but the list leaves them out.
         .{ .draft = "/req", .shown = &.{} },
         .{ .draft = "/w", .shown = &.{} },
@@ -781,7 +778,6 @@ test "the list names the listed commands a command word starts, and Tab puts the
         .{ .draft = "/copy f", .shown = &.{"file"}, .first = "ile" },
         .{ .draft = "/copy file ", .shown = null },
         .{ .draft = "/rename ", .shown = null },
-        .{ .draft = "/skill ", .shown = null },
         .{ .draft = "/reload-skills ", .shown = null },
         .{ .draft = "/status ", .shown = null },
         .{ .draft = "/nope ", .shown = null },
@@ -803,13 +799,10 @@ test "the list names the listed commands a command word starts, and Tab puts the
     }
 }
 
-test "skills completion distinguishes immediate reload from invocation awaiting a name" {
+test "skills completion runs reload immediately" {
     const reload = conversation.suggest("/reload", .{}).?.shown()[0];
     try std.testing.expectEqualStrings("reload-skills", reload.word);
     try std.testing.expect(reload.runs);
-    const invoke = conversation.suggest("/skill", .{}).?.shown()[0];
-    try std.testing.expectEqualStrings("skill ", invoke.word);
-    try std.testing.expect(!invoke.runs);
 }
 
 test "/effort offers every grammar value for an unlisted model" {
@@ -932,7 +925,6 @@ test "the list order is the names' order and every listed usage fits before the 
     try std.testing.expectEqualStrings("/effort LEVEL", conversation.usage.get(.effort));
     try std.testing.expectEqualStrings("/configure [OPTIONS]", conversation.usage.get(.configure));
     try std.testing.expectEqualStrings("/reload-skills", conversation.usage.get(.@"reload-skills"));
-    try std.testing.expectEqualStrings("/skill NAME", conversation.usage.get(.skill));
 }
 
 test "/copy takes each Copy's name but the answer's, which it copies alone" {

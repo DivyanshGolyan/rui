@@ -172,11 +172,17 @@ pub fn importFailure(a: anytype, failure: Failure, faults: store_core.Faults) !u
     return content.importBytes(a, &outcome, failure.bytes);
 }
 
+/// A model skill tool call's or a catalog reload's capture.
 pub const Capture = union(enum) {
-    /// Sealed Host-prepared Message payload, never a model skill tool result.
-    payload: *const protocol.ContentField,
     invocation: []const u8,
     reload: catalog.Catalog,
+    failed: Failure,
+};
+
+/// A Message's listed skills, prepared by the Host before admission: the
+/// sealed payload (its text, then each invocation), or why none was made.
+pub const MessageCapture = union(enum) {
+    payload: *const protocol.ContentField,
     failed: Failure,
 };
 
@@ -184,7 +190,6 @@ pub const Result = struct { bytes: []const u8, succeeded: bool, reload_status: ?
 
 pub fn apply(a: anytype, allocator: std.mem.Allocator, session: rsql.SessionHead, captured: *const Capture, faults: store_core.Faults) !Result {
     return switch (captured.*) {
-        .payload => error.CorruptStore,
         .invocation => |bytes| .{ .bytes = bytes, .succeeded = true },
         .failed => |failure| .{ .bytes = failure.bytes, .succeeded = false },
         .reload => |candidate| try reload(a, allocator, session, candidate, faults),

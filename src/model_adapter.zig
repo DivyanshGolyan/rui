@@ -4703,13 +4703,19 @@ test "skills native conversation is append-only across invoke reload replay and 
     defer std.testing.allocator.free(initial_report);
     try std.testing.expect(std.mem.indexOf(u8, initial_report, "\"turn\":null") != null);
 
-    var invoke: protocol.MessageCommand = .{ .session = session, .skill = .{} };
+    // A skill-only user Message: empty authored text and one listed skill.
+    var invoke: protocol.MessageCommand = .{ .session = session, .text = .{ .state = .value, .digest = protocol.contentDigest("") } };
     try invoke.key.set("skills-user-invoke");
-    try invoke.skill.?.set("demo");
-    const captured = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .invoke, .name = invoke.skill }, null);
+    var demo: protocol.Bounded(64) = .{};
+    try demo.set("demo");
+    invoke.skills = &.{demo};
+    const captured = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .invoke, .name = demo }, null);
     try std.testing.expect(captured == .invocation);
     try std.testing.expect(std.mem.endsWith(u8, captured.invocation, raw));
-    const admitted_message = setup.storage.submitMessageCapturedSkills(&invoke, null, null, &captured, .{});
+    var retained: ?named_scratch.Owner = null;
+    const prepared = try skill_owner.prepareMessage(arena, std.testing.allocator, std.testing.io, &setup.storage, &invoke, null, .{ .io = std.testing.io, .content_length = 0, .scratch_path = setup.root, .request_number = 1, .retained_scratch = &retained });
+    defer prepared.deinit(std.testing.io);
+    const admitted_message = setup.storage.submitMessageCapturedSkills(&invoke, null, null, &prepared.captured.?, .{});
     try std.testing.expect(admitted_message == .accepted);
     try std.testing.expectEqual(captured.invocation.len, admitted_message.accepted.content.length);
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -4739,7 +4745,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     });
     const action = (try setup.storage.nextCoreWork()).?.action;
     try std.testing.expectEqual(@TypeOf(action.tool).skill, action.tool);
-    const current = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .invoke, .name = invoke.skill }, null);
+    const current = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .invoke, .name = demo }, null);
     try std.testing.expect(std.mem.endsWith(u8, current.invocation, current_raw));
     try std.testing.expect(try setup.storage.settleSkillTool(action.binding, arena, &current, .{}));
     admitted = (try setup.storage.admitNextModelAttempt(.{})).?;

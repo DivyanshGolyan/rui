@@ -117,8 +117,6 @@ pub const routes = [_]Route{
         .kind = .message,
         .summary = "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
         .variants = &.{
-            variant(protocol.message_request.head ++ protocol.message_request.skill, .{}),
-            variant(protocol.message_request.sender_head ++ protocol.message_request.skill, .{ .{ 3, "\"/s\"" }, .{ 4, "\"aaaaaa\"" } }),
             variant(protocol.message_request.head ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{}),
             // A sending Session's address: an absolute Store path and a Session id.
             variant(protocol.message_request.sender_head ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{ .{ 3, "\"/s\"" }, .{ 4, "\"aaaaaa\"" } }),
@@ -318,7 +316,7 @@ const SkillName = struct {
         return d.object(.{ .type = Value{ .string = "string" }, .minLength = Value{ .integer = 1 }, .maxLength = Value{ .integer = 64 } });
     }
 };
-const SkillNames = BoundedListOf(SkillName, 4096, true);
+const SkillNames = BoundedListOf(SkillName, protocol.max_message_skills, true);
 
 /// A string of any length, which the Host saves as content.
 const Content = struct {

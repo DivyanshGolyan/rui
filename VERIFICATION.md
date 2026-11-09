@@ -830,7 +830,6 @@ The [small Host memory trial](research/memory-trial/README.md) is a collection e
 It exercises Host-owned Configure and initial-Message creation, default and explicitly restricted tools, full raw invocation/path, idle no-op and metadata reload, keyed replay after file deletion and process restart, bound model invocation and child `start_agent` discovery.
 The fixture uses native public readers and actual provider inputs, not direct Store edits or terminal excerpts.
 Mismatched repository symlinks and HOME directory aliases retain their declared names through creation, invocation, reload and replay.
-An actual PTY `/skill` invocation announces a normal HOME-owned request handle; plain `request inspect`, `list` and `recover` retain that identity and frozen admitted bytes after the source file and terminal receipt disappear, without another provider request or Conversation input.
 
 `zig build yaml-linux-compile` compiles all pinned libyaml sources as strict C99 against Linux glibc headers for x86-64 and ARM64 without linking or executing a Host.
 It reuses `configureYaml`, whose POSIX feature exposure is scoped to the dependency's C sources; removing it must fail at libyaml's `strdup` declaration, not witness setup.

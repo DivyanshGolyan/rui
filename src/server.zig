@@ -1867,6 +1867,8 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             const scope: @import("skill_suggestions.zig").Scope = if (command.session) |*session| .{ .session = session.slice() } else .{ .workspace = command.workspace.?.slice() };
             var page = readSkillSuggestions(host, host.allocator, scope, command.prefix.slice()) catch |err| {
                 if (err == error.CanonicalStoreFailure) return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+                // Heap exhaustion is the Host being busy, as for a Message: 503.
+                if (err == error.OutOfMemory) return error.OutOfMemory;
                 return respondStatic(fd, 409, .activity_unavailable, if (err == error.SessionNotFound) "SessionNotFound" else "skills_unavailable");
             };
             defer page.deinit(host.allocator);
@@ -5003,4 +5005,44 @@ test "inline skills overlapping capture pressure returns 507 without key admissi
     try store_module.testingFailReadsOf(&storage, "session_skill_catalog");
     try std.testing.expectError(error.CanonicalStoreFailure, readSkillSuggestions(&host, std.testing.allocator, .{ .session = configured.accepted.session.slice() }, ""));
     try std.testing.expect(storage.isFenced() and !host.launchAllowed());
+}
+
+test "inline skills suggestions answer heap exhaustion as busy, not a catalog refusal" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    try lease.paths.store.set("s");
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+    host.retention = &retention;
+    var request_buffer: [512]u8 = undefined;
+    const request = try std.fmt.bufPrint(&request_buffer, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"skill_suggestions\",\"store\":\"s\",\"workspace\":\"{s}\",\"prefix\":\"\"}}", .{root});
+    var sockets: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+    defer _ = std.c.close(sockets[1]);
+    try setNonblocking(sockets[0]);
+    var header_buffer: [256]u8 = undefined;
+    try writeAll(std.testing.io, sockets[1], try std.fmt.bufPrint(&header_buffer, "POST /v1/skill-suggestions HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nContent-Length: {d}\r\n\r\n", .{request.len}));
+    try writeAll(std.testing.io, sockets[1], request);
+    const exchange = try std.testing.allocator.create(Intake.Exchange);
+    exchange.* = .{ .owner = undefined, .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = std.math.maxInt(i128) };
+    defer std.debug.assert(exchange.destroy());
+    try exchange.read();
+    try std.testing.expectEqual(.ready, exchange.state);
+    const reply = try exchange.ensureReply();
+    // Discovery and the page allocate from the Host's allocator; none is left.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    host.allocator = failing.allocator();
+    exchange.prepare() catch |err| exchange.fail(err);
+    host.allocator = std.testing.allocator;
+    try std.testing.expect(std.mem.startsWith(u8, reply.header[0..reply.header_length], "HTTP/1.1 503 "));
+    try std.testing.expect(!storage.isFenced() and host.launchAllowed());
 }

@@ -702,7 +702,7 @@ pub const Store = struct {
         return self.submitMessageCapturedSkills(command, committed, initial_skills, null, faults);
     }
 
-    pub fn submitMessageCapturedSkills(self: *Store, command: *const protocol.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.Capture, faults: Faults) MessageReply {
+    pub fn submitMessageCapturedSkills(self: *Store, command: *const protocol.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.MessageCapture, faults: Faults) MessageReply {
         return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, faults });
     }
 
@@ -711,7 +711,7 @@ pub const Store = struct {
         command: *const protocol.MessageCommand,
         committed: ?MessageCommitted,
         initial_skills: ?*const skills_domain.Initial,
-        captured_skill: ?*const skills_domain.Capture,
+        captured_skill: ?*const skills_domain.MessageCapture,
         faults: Faults,
     ) MessageReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
@@ -1696,12 +1696,12 @@ const accepted_settlement_growth = 14352;
 comptime {
     // The settlement batch is the larger use: 19240 bytes, the original
     // 14480 plus 4760 for per-batch call names, membership flags and their
-    // lookup visitor. The creation reads use 15048, including command/Message
+    // lookup visitor. The creation reads use 15032, including command/Message
     // facts, saved parent reference and the saved tool and loaded names a
     // subset update reads, sealed payload/authored identity and the one retained
     // validation plan. This uses existing scratch, with no resident growth.
     // Exact, so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 15048 or scratch_bytes != 19240)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 15032 or scratch_bytes != 19240)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }

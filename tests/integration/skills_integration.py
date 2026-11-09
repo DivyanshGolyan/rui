@@ -9,7 +9,6 @@ import http.server
 import json
 import os
 import pathlib
-import re
 import shutil
 import subprocess
 import tempfile
@@ -399,7 +398,8 @@ def main():
         assert unchanged["status"] == "accepted" and unchanged["skills"] == "unchanged", unchanged
         assert len(endpoint.decoded()) == count, "idle reload scheduled a model turn"
         native = {"version": host_process.WIRE_VERSION, "kind": "message", "store": str(store),
-                  "key": "native-invoke", "session": parent, "sender": None, "sender_handle": None, "skill": "demo"}
+                  "key": "native-invoke", "session": parent, "sender": None, "sender_handle": None,
+                  "skills": ["demo"], "text": {"state": "value", "value": ""}}
         expected_invocation = f'Skill file: {json.dumps(demo["path"], ensure_ascii=False, separators=(",", ":"))}\n\n' + raw.decode()
         admitted = post(native)["answer"]
         assert admitted["status"] == "accepted" and not admitted["replayed"], admitted
@@ -442,6 +442,31 @@ def main():
         assert failed_second["answer"]["status"] == "rejected" and failed_second["answer"]["code"] == "skill_file_unavailable", failed_second
         assert conversation(parent) == before_replay, "second file failure partially admitted its first file"
         assert len(endpoint.decoded()) == count, "second file failure or recovery scheduled model work"
+
+        # Native refusals bind the caller's own empty text, fresh and on
+        # recovery: each is a saved refusal (exit 3), never an unconfirmed
+        # binding mismatch (exit 4). demo's file is gone; zzzzzz names no Session.
+        for label, to, names, code in (("unknown-skill", parent, ["shared", "not-advertised"], "unknown_skill"),
+                                       ("unreadable-skill", parent, ["demo"], "skill_file_unavailable"),
+                                       ("unknown-session", "zzzzzz", ["demo"], "unknown_session")):
+            key = f"inline-refused-{label}"
+            record = state / f"{key}.json"
+            arguments = ["session", "send", "--store", store, "--to", to, "--record", record, "--key", key]
+            for name in names:
+                arguments += ["--skill", name]
+            fresh = subprocess.run([str(fixture.RUI), *map(str, arguments)], input="", text=True,
+                                   capture_output=True, timeout=15, env=environment)
+            assert fresh.returncode == 3, (label, fresh.returncode, fresh.stdout, fresh.stderr)
+            answer = json.loads(fresh.stdout)["answer"]
+            assert (answer["status"], answer["replayed"], answer["code"]) == ("rejected", False, code), (label, answer)
+            captured = record.read_bytes()
+            recovered = subprocess.run([str(fixture.RUI), "request", "recover", "--store", str(store), "--record", str(record),
+                                        "--kind", "message"], text=True, capture_output=True, timeout=15, env=environment)
+            assert recovered.returncode == 3, (label, recovered.returncode, recovered.stdout, recovered.stderr)
+            assert json.loads(recovered.stdout)["answer"] == {**answer, "replayed": True}, (label, recovered.stdout)
+            assert record.read_bytes() == captured, "recovery rewrote the refused record"
+        assert conversation(parent) == before_replay, "a refused skills Message admitted input"
+        assert len(endpoint.decoded()) == count, "a refused skills Message scheduled model work"
 
         pathlib.Path(demo["path"]).write_bytes(raw)
         send("tool-invoke", "invoke with the skill tool")
@@ -570,49 +595,8 @@ def main():
         else:
             assert child_saved["recent_messages"][0]["outcome"] == "completed", child_saved
             assert b'{"child":"ok"}' in [content for item, content in child_conversation if item["kind"] == "assistant"], child_conversation
-        # Exercise the real slash adapter, not a caller-side expansion or a
-        # constructed native Message. Its announced handle must use the same
-        # HOME-owned capture directory as ordinary inspect/list/recover.
-        import human_cli_integration as human
-        before_handles = set(invoke("request", "list"))
-        count = len(endpoint.decoded())
-        with human.terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store), parent],
-                cwd=workspace, env={**environment, "TERM": "xterm-256color", "LANG": "C.UTF-8"}) as (_, master):
-            human.read_terminal(master, "› ")
-            os.write(master, b"/skill demo\r")
-            page = human.read_terminal(master, "request: ")
-            (state / "slash-skill-screen.txt").write_text(page)
-            announced = re.search(r"request: (\S+)", page)
-            assert announced, page
-            handle = announced.group(1)
-            # This plain HANDLE route is the independent regression oracle:
-            # passing --store/--key here would conceal a misplaced capture.
-            inspected = invoke("request", "inspect", handle)
-            assert inspected["observation"]["target"] == parent, inspected
-            assert set(invoke("request", "list")) - before_handles == {handle}
-            record = home / ".config" / "rui" / "requests" / f"{handle}.json"
-            captured = record.read_bytes()
-            operation = json.loads(captured)
-            assert (operation["store"], operation["session"], operation["key"], operation["skill"]) == (
-                str(store), parent, handle, "demo"), operation
-            assert not (store / f"{handle}.json").exists(), "slash capture leaked into the Store"
-            complete(handle)
-            assert len(endpoint.decoded()) == count + 1, endpoint.decoded()
-            assert user_text(endpoint.decoded()[-1]) == expected_invocation
-        # Lose the terminal's receipt and the source file. Normal handle-only
-        # recovery must replay the captured operation, not admit current bytes.
-        pathlib.Path(demo["path"]).unlink()
-        before_recovery = conversation(parent)
-        recovered = invoke("request", "recover", handle)
-        assert recovered["answer"]["status"] == "accepted" and recovered["answer"]["replayed"] is True, recovered
-        assert recovered["context"]["session"] == parent and recovered["context"]["key"] == handle, recovered
-        assert recovered["input"] == {"type": "text", **content_reference(expected_invocation.encode())}, recovered
-        assert invoke("request", "inspect", handle)["observation"]["target"] == parent
-        assert record.read_bytes() == captured
-        assert conversation(parent) == before_recovery, "slash recovery duplicated Conversation input"
-        assert len(endpoint.decoded()) == count + 1, "slash recovery duplicated provider work"
         endpoint.decoded()
-        print("skills Host wire passed: creation, default/restricted tools, raw invocation, idle metadata-only reload, restart replay and slash handle recovery")
+        print("skills Host wire passed: creation, default/restricted tools, raw invocation, idle metadata-only reload, and restart replay")
     except BaseException:
         retain_failure_state("skills integration failure state", state)
         state = None

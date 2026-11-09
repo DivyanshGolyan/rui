@@ -50,7 +50,7 @@ pub fn capture(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocato
             } else return .{ .failed = .{ .code = .unknown_skill, .bytes = "No advertised skill has that name. Reload skills to refresh the catalog." } };
             const bytes = catalog.invocation(allocator, io, selected) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                else => return readFailure(allocator, name, err),
+                else => return .{ .failed = try readFailure(allocator, name, err) },
             };
             return .{ .invocation = bytes };
         },
@@ -63,17 +63,17 @@ pub fn capture(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocato
 
 /// One request owner, borrowed by the Store through synchronous settlement.
 /// Its expanded descriptor shares the Ingress scratch budget and cleanup home.
-fn readFailure(allocator: std.mem.Allocator, name: []const u8, err: anyerror) !Capture {
-    return .{ .failed = .{ .code = switch (err) {
+fn readFailure(allocator: std.mem.Allocator, name: []const u8, err: anyerror) !@FieldType(Capture, "failed") {
+    return .{ .code = switch (err) {
         error.SkillFileTooLarge, error.SkillBatchTooLarge => .skill_file_too_large,
         error.InvalidUtf8 => .skill_text_invalid,
         else => .skill_file_unavailable,
-    }, .bytes = try std.fmt.allocPrint(allocator, "Rui could not read skill {s}: {s}. The catalog was not changed.", .{ name, @errorName(err) }) } };
+    }, .bytes = try std.fmt.allocPrint(allocator, "Rui could not read skill {s}: {s}. The catalog was not changed.", .{ name, @errorName(err) }) };
 }
 
 pub const PreparedMessage = struct {
     initial: ?*const storage.InitialSkills = null,
-    captured: ?Capture = null,
+    captured: ?storage.CapturedMessageSkills = null,
     payload: protocol.ContentField = .{},
 
     pub fn deinit(self: *PreparedMessage, io: std.Io) void {
@@ -87,7 +87,7 @@ pub fn prepareMessage(allocator: std.mem.Allocator, scratch_allocator: std.mem.A
     // This includes accepted, rejected and conflicting keys: no metadata or
     // file discovery precedes the Store's authoritative replay classification.
     if (try store.commandExists(command.key.slice())) return prepared;
-    const invokes = command.skill != null or command.skills.len != 0;
+    const invokes = command.skills.len != 0;
     var found: catalog.Catalog = .{ .entries = &.{} };
     if (command.configuration) |*configuration| {
         const initial_value = try allocator.create(storage.InitialSkills);
@@ -119,8 +119,7 @@ pub fn prepareMessage(allocator: std.mem.Allocator, scratch_allocator: std.mem.A
 const max_batch_body_bytes = 1024 * 1024;
 
 fn preparePayload(prepared: *PreparedMessage, result_allocator: std.mem.Allocator, allocator: std.mem.Allocator, io: std.Io, command: *const protocol.MessageCommand, found: catalog.Catalog, options: protocol.ParseOptions) !void {
-    const names = if (command.skill) |*name| @as([]const protocol.Bounded(64), @as([*]const protocol.Bounded(64), @ptrCast(name))[0..1]) else command.skills;
-    if (names.len > catalog.max_entries) return error.SkillCatalogLimit;
+    const names = command.skills;
     // Resolve the complete intent before prompt copying, scratch acquisition or
     // skill I/O. Entries borrow this request's one authoritative snapshot.
     const selected = try allocator.alloc(catalog.Entry, names.len);
@@ -138,24 +137,24 @@ fn preparePayload(prepared: *PreparedMessage, result_allocator: std.mem.Allocato
     defer allocator.destroy(destination);
     try destination.init(options, 3); // Ingress owns ordinals 1 and 2.
     defer destination.deinit();
-    if (command.skill == null) try destination.copy(&command.text);
+    try destination.copy(&command.text);
     var total: usize = 0;
     for (selected, names, 0..) |entry, name, index| {
         // The per-file allocation is released before the next file is read.
         const invocation = catalog.invocationWithLength(allocator, io, entry) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => {
-                prepared.captured = try readFailure(result_allocator, name.slice(), err);
+                prepared.captured = .{ .failed = try readFailure(result_allocator, name.slice(), err) };
                 return;
             },
         };
         defer allocator.free(invocation.bytes);
         total = std.math.add(usize, total, invocation.raw_length) catch return error.SkillBatchTooLarge;
         if (total > max_batch_body_bytes) {
-            prepared.captured = try readFailure(result_allocator, name.slice(), error.SkillBatchTooLarge);
+            prepared.captured = .{ .failed = try readFailure(result_allocator, name.slice(), error.SkillBatchTooLarge) };
             return;
         }
-        if (command.skill == null and (command.text.length != 0 or index != 0)) try destination.write("\n\n");
+        if (command.text.length != 0 or index != 0) try destination.write("\n\n");
         try destination.write(invocation.bytes);
     }
     prepared.payload = try destination.seal();

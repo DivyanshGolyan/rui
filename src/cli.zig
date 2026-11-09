@@ -2485,12 +2485,6 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
                 stderr.diagnostic("rui: result: {s}\n", .{@tagName(caller_error.of(err))});
             };
         },
-        .skill => {
-            var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            var captured = try client.captureMessage(init.io, .{ .store = destination, .session = reference, .text_path = "", .skill = argument }, .{ .generated = try requestDirectory(init, &directory_buffer) }).get();
-            var step: ?client.Step = null;
-            try sendCapturedMutation(requests_context, &captured, .{ .map = init.environ_map }, &step, .json);
-        },
         .@"reload-skills" => {
             _ = try liveConfigure(init, requests_context, live, &.{"--reload-skills"}, "Usage: /reload-skills\n");
         },

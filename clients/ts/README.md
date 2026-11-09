@@ -142,4 +142,4 @@ Both methods notify local activity followers without submitting a Message or sta
 
 ## Sending skills
 
-`session.send("literal text", { idempotencyKey: "message:1", skills: ["first", "second"] })` includes distinct catalog names in order with the text. Names and the key are copied before the asynchronous exchange, including retries. Omit `skills` for an ordinary Message; slash text is not interpreted by this API.
+`session.send("literal text", { idempotencyKey: "message:1", skills: ["first", "second"] })` includes up to 64 distinct catalog names in order with the text. Names and the key are copied before the asynchronous exchange, including retries. Omit `skills` for an ordinary Message; slash text is not interpreted by this API.

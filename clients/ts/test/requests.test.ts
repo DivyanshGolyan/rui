@@ -194,13 +194,13 @@ test("send snapshots ordered skills and key across deferred exchanges without ch
 	};
 	const skills = ["second", "first"];
 	const options = { idempotencyKey: "original", skills };
-	const pending = new Session(link, "session").send("literal /skill first\n", options);
+	const pending = new Session(link, "session").send("literal /reload-skills first\n", options);
 	skills.reverse(); skills.push("later"); options.idempotencyKey = "changed";
 	resume();
 	assert.deepEqual(await pending, { messageId: "42" });
 	assert.deepEqual(requests, Array(2).fill({
 		version: WIRE_VERSION, kind: "message", store: "store", key: "original", session: "session",
-		sender: null, sender_handle: null, text: { state: "value", value: "literal /skill first\n" }, skills: ["second", "first"],
+		sender: null, sender_handle: null, text: { state: "value", value: "literal /reload-skills first\n" }, skills: ["second", "first"],
 	}));
 });
 
@@ -208,8 +208,8 @@ test("ordinary send omits skills and preserves literal text", async () => {
 	const link: Link = { async exchange(_path, build) {
 		const body = JSON.parse(build("store"));
 		assert.equal(Object.hasOwn(body, "skills"), false);
-		assert.deepEqual(body.text, { state: "value", value: "/skill untouched\n" });
+		assert.deepEqual(body.text, { state: "value", value: "/reload-skills untouched\n" });
 		return Buffer.from(JSON.stringify({ answer: { status: "accepted", admission: "1" } }));
 	} };
-	await new Session(link, "session").send("/skill untouched\n", { idempotencyKey: "k" });
+	await new Session(link, "session").send("/reload-skills untouched\n", { idempotencyKey: "k" });
 });

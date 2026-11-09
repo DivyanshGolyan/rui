@@ -10,6 +10,10 @@ pub const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const wire_version = "11";
 
+/// Skills one Message may list. A person attaches each by hand, so this is a
+/// human number; it also bounds the Ingress metadata every request may hold.
+pub const max_message_skills = 64;
+
 /// Host-owned lifecycle state of a Message request.
 pub const MessageRequestState = enum { queued, processing, waiting_for_permission, completed, failed, cancelled, rejected };
 
@@ -360,8 +364,6 @@ pub const MessageCommand = struct {
     sender: ?Address = null,
     sender_handle: ?Bounded(max_sender_handle_bytes) = null,
     text: ContentField = .{},
-    /// Explicit skill invocation, alternative to caller text.
-    skill: ?Bounded(64) = null,
     /// Explicit ordered, distinct references; borrowed from the Ingress owner.
     skills: []const Bounded(64) = &.{},
     // Non-null means create a fresh Session and admit this first Message in
@@ -386,18 +388,13 @@ pub const MessageCommand = struct {
         }
         hash.update(&.{@intFromBool(self.sender_handle != null)});
         if (self.sender_handle) |handle| hashField(&hash, handle.slice());
-        if (self.skill) |name| {
-            hashField(&hash, "skill-invocation/v1");
-            hashField(&hash, name.slice());
-        } else {
-            hashContent(&hash, &self.text);
-            if (self.skills.len != 0) {
-                hashField(&hash, "inline-skills/v1");
-                var count: [8]u8 = undefined;
-                std.mem.writeInt(u64, &count, self.skills.len, .big);
-                hash.update(&count);
-                for (self.skills) |name| hashField(&hash, name.slice());
-            }
+        hashContent(&hash, &self.text);
+        if (self.skills.len != 0) {
+            hashField(&hash, "inline-skills/v1");
+            var count: [8]u8 = undefined;
+            std.mem.writeInt(u64, &count, self.skills.len, .big);
+            hash.update(&count);
+            for (self.skills) |name| hashField(&hash, name.slice());
         }
         if (self.configuration) |*configuration| {
             // The creation's own digest covers its capability condition.
@@ -1486,8 +1483,9 @@ pub const Ingress = struct {
     // Allow worst-case escaping of both, of a full `tools` list, and of 128
     // short grammar tokens (keys, states and literals, each at most 32
     // bytes), plus punctuation and one preserved whitespace separator at
-    // every lexical boundary.
-    const metadata_limit = 4096 * (6 * 64 + 3) + 2 * (6 * (max_store_bytes + max_key_bytes + max_session_bytes +
+    // every lexical boundary. A Message's skills add each name escaped with
+    // its quotes and comma.
+    const metadata_limit = max_message_skills * (6 * 64 + 3) + 2 * (6 * (max_store_bytes + max_key_bytes + max_session_bytes +
         max_workspace_bytes + max_provider_bytes + max_model_bytes + 16 + 2 * max_tool_list_name_bytes + 128 * 32) + (128 + 2 * max_tools) * 8);
 
     /// Builds the Ingress in its home. `request` stays unwritten.
@@ -2073,7 +2071,7 @@ const Parser = struct {
 
     fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
         errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
-        const Field = enum { key, session, sender, sender_handle, configuration, text, require_model, skill, skills };
+        const Field = enum { key, session, sender, sender_handle, configuration, text, require_model, skills };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
             .key => try self.readCommandKey(&out.key),
@@ -2096,7 +2094,7 @@ const Parser = struct {
                 const names = self.skill_names orelse return error.InvalidMessage;
                 try self.expectByte('[');
                 if (!try self.consumeIf(']')) while (true) {
-                    if (names.items.len == 4096) return error.ValueTooLong;
+                    if (names.items.len == max_message_skills) return error.ValueTooLong;
                     var name: Bounded(64) = .{};
                     try self.readSmallString(&name);
                     if (name.len == 0) return error.InvalidMessage;
@@ -2107,23 +2105,16 @@ const Parser = struct {
                 };
                 out.skills = names.items;
             },
-            .skill => {
-                out.skill = .{};
-                try self.readSmallString(&out.skill.?);
-            },
             .require_model => out.require_model = try self.readBoolean(),
         };
-        try require(Field, seen, &.{ .key, .session, .sender, .sender_handle });
-        if (seen.contains(.skill) and seen.contains(.skills)) return error.InvalidMessage;
-        if (seen.contains(.text) == seen.contains(.skill)) return error.InvalidMessage;
-        if (out.skill != null and (out.skill.?.len == 0 or out.configuration != null)) return error.InvalidMessage;
+        try require(Field, seen, &.{ .key, .session, .sender, .sender_handle, .text });
         // Only a creating Message, one with no Session yet, carries a
         // configuration and a capability condition, and it must carry the
         // configuration.
         if (out.session.len == 0 and out.configuration == null) return error.MissingField;
         if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
         if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
-        if (out.skill == null and out.text.state != .value) return error.InvalidMessage;
+        if (out.text.state != .value) return error.InvalidMessage;
         if (seen.contains(.require_model) and out.configuration == null) return error.InvalidMessage;
     }
 
@@ -2417,7 +2408,7 @@ const Parser = struct {
             .selector => {
                 var value: Bounded(16) = .{};
                 try self.readSmallString(&value);
-                out.selector = std.meta.stringToEnum(ActivityContentSelector, value.slice()) orelse return error.InvalidCursor;
+                out.selector = std.meta.stringToEnum(ActivityContentSelector, value.slice()) orelse return error.InvalidSelector;
             },
             .session => try self.readSmallString(&out.session),
             .position => out.position = try self.readCanonicalU64(),
@@ -3134,7 +3125,6 @@ pub const message_request = struct {
     pub const sender_head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"sender\":{\"store\":", store_hole, ",\"session\":", session_hole, "},\"sender_handle\":", Hole{ .optional_string = max_sender_handle_bytes } };
     /// The configuration object of a creating Message follows.
     pub const configuration = .{",\"configuration\":"};
-    pub const skill = .{ ",\"skill\":", Hole{ .string = 64 }, "}" };
     /// The text, as a JSON string, follows.
     pub const text = .{",\"text\":{\"state\":\"value\",\"value\":"};
     pub const tail = .{"}}"};
@@ -4874,92 +4864,23 @@ test "session archive digest binds the domain session and intent not transport i
     try std.testing.expect(!std.mem.eql(u8, &digest, &stop.semanticDigest()));
 }
 
-test "skills native wire preserves explicit invoke and reload intent" {
-    const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,";
-    const configure_prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",";
-    for ([_][]const u8{
-        prefix ++ "\"skill\":\"demo\"}",
-        configure_prefix ++ "\"configuration\":{},\"reload_skills\":true}",
-    }, 0..) |json, index| {
-        var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser: Parser = .{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
-        const request = try parseForTest(&parser);
-        if (index == 0) {
-            try std.testing.expectEqualStrings("demo", request.message.skill.?.slice());
-            const digest = request.message.semanticDigest();
-            var plain = request.message;
-            plain.skill = null;
-            try std.testing.expect(!std.mem.eql(u8, &digest, &plain.semanticDigest()));
-        } else {
-            try std.testing.expect(request.configure.reload_skills);
-            const digest = request.configure.semanticDigest();
-            var plain = request.configure;
-            plain.reload_skills = false;
-            try std.testing.expect(!std.mem.eql(u8, &digest, &plain.semanticDigest()));
-        }
-    }
-    for ([_][]const u8{
-        prefix ++ "\"skill\":\"\"}",
-        prefix ++ "\"skill\":\"demo\",\"text\":{\"state\":\"omitted\"}}",
-        prefix ++ "\"skill\":\"demo\",\"configuration\":{}}",
-    }) |json| {
-        var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser: Parser = .{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
-        try std.testing.expectError(error.InvalidMessage, parseForTest(&parser));
-    }
+test "skills native wire preserves explicit reload intent and has no exclusive skill field" {
+    const reload = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"configuration\":{},\"reload_skills\":true}";
+    var source: MetadataSource = .{ .input = reload };
+    var retained: ?named_scratch.Owner = null;
+    var parser: Parser = .{ .source = &source, .options = .{ .io = std.testing.io, .content_length = reload.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+    const request = try parseForTest(&parser);
+    try std.testing.expect(request.configure.reload_skills);
+    const digest = request.configure.semanticDigest();
+    var plain = request.configure;
+    plain.reload_skills = false;
+    try std.testing.expect(!std.mem.eql(u8, &digest, &plain.semanticDigest()));
+    // Skills are invoked only through the ordered `skills` vector beside text.
+    const removed = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"skill\":\"demo\"}";
+    source = .{ .input = removed };
+    parser = .{ .source = &source, .options = .{ .io = std.testing.io, .content_length = removed.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+    try std.testing.expectError(error.UnexpectedField, parseForTest(&parser));
 }
-
-test "skills ingress transfers explicit invocation intent without caller text custody" {
-    const bytes = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"skills-no-text\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"skill\":\"demo\"}";
-    for ([_]usize{ 1, 17, bytes.len }) |fragment| {
-        const ingress = try std.testing.allocator.create(Ingress);
-        defer std.testing.allocator.destroy(ingress);
-        var retained: ?named_scratch.Owner = null;
-        var used: std.atomic.Value(u64) = .init(0);
-        ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = bytes.len, .scratch_path = "unused-no-capture", .request_number = 1, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 0 }, .expected_kind = .message });
-        defer ingress.deinit();
-        var offset: usize = 0;
-        while (offset < bytes.len) {
-            const end = @min(offset + fragment, bytes.len);
-            try ingress.feed(bytes[offset..end]);
-            offset = end;
-        }
-        const request = try ingress.finish();
-        defer request.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expectEqualStrings("demo", request.message.skill.?.slice());
-        try std.testing.expectEqual(@as(usize, 0), ingress.content_count);
-        try std.testing.expectEqual(FieldState.omitted, request.message.text.state);
-        try std.testing.expect(request.message.text.file == null);
-        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-        try std.testing.expect(retained == null);
-    }
-}
-
-test "skills ingress rejects both invocation and text without retaining capture custody" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try std.testing.allocator.alloc(u8, std.Io.Dir.max_path_bytes);
-    defer std.testing.allocator.free(root);
-    const path = root[0..try tmp.dir.realPath(std.testing.io, root)];
-    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"skills-both\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,";
-    for ([_][]const u8{
-        head ++ "\"skill\":\"demo\",\"text\":{\"state\":\"value\",\"value\":\"text\"}}",
-        head ++ "\"text\":{\"state\":\"value\",\"value\":\"text\"},\"skill\":\"demo\"}",
-    }) |bytes| {
-        const ingress = try std.testing.allocator.create(Ingress);
-        defer std.testing.allocator.destroy(ingress);
-        var retained: ?named_scratch.Owner = null;
-        var used: std.atomic.Value(u64) = .init(0);
-        ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = bytes.len, .scratch_path = path, .request_number = 1, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 4 }, .expected_kind = .message });
-        try std.testing.expectError(error.InvalidMessage, ingress.feed(bytes));
-        ingress.deinit();
-        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-        try std.testing.expect(retained == null);
-    }
-}
-
 test "inline skills digest binds ordered names and authored identity without changing ordinary v4" {
     var command: MessageCommand = .{ .text = .{ .state = .value, .length = 6, .digest = contentDigest("hello!") } };
     const ordinary = command.semanticDigest();
@@ -4985,13 +4906,12 @@ test "inline skills ingress accepts ordered text references and rejects ambiguou
     var root: [max_store_bytes]u8 = undefined;
     const path = root[0..try tmp.dir.realPath(std.testing.io, &root)];
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"vector\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,";
-    const cases = [_]struct { bytes: []const u8, valid: bool }{
-        .{ .bytes = head ++ "\"skills\":[\"demo\",\"other\"],\"text\":{\"state\":\"value\",\"value\":\"literal /demo 雪\"}}", .valid = true },
-        .{ .bytes = head ++ "\"skills\":[],\"text\":{\"state\":\"value\",\"value\":\"\"}}", .valid = true },
-        .{ .bytes = head ++ "\"skills\":[\"demo\",\"demo\"],\"text\":{\"state\":\"value\",\"value\":\"x\"}}", .valid = false },
-        .{ .bytes = head ++ "\"skills\":[\"\"],\"text\":{\"state\":\"value\",\"value\":\"x\"}}", .valid = false },
-        .{ .bytes = head ++ "\"skills\":[],\"skill\":\"demo\"}", .valid = false },
-        .{ .bytes = head ++ "\"skills\":[\"demo\"]}", .valid = false },
+    const cases = [_]struct { bytes: []const u8, refusal: ?anyerror = null }{
+        .{ .bytes = head ++ "\"skills\":[\"demo\",\"other\"],\"text\":{\"state\":\"value\",\"value\":\"literal /demo 雪\"}}" },
+        .{ .bytes = head ++ "\"skills\":[],\"text\":{\"state\":\"value\",\"value\":\"\"}}" },
+        .{ .bytes = head ++ "\"skills\":[\"demo\",\"demo\"],\"text\":{\"state\":\"value\",\"value\":\"x\"}}", .refusal = error.InvalidMessage },
+        .{ .bytes = head ++ "\"skills\":[\"\"],\"text\":{\"state\":\"value\",\"value\":\"x\"}}", .refusal = error.InvalidMessage },
+        .{ .bytes = head ++ "\"skills\":[\"demo\"]}", .refusal = error.MissingField },
     };
     for (cases, 0..) |case, index| {
         const ingress = try std.testing.allocator.create(Ingress);
@@ -4999,13 +4919,13 @@ test "inline skills ingress accepts ordered text references and rejects ambiguou
         var retained: ?named_scratch.Owner = null;
         var used: std.atomic.Value(u64) = .init(0);
         ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = case.bytes.len, .scratch_path = path, .request_number = index, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 128 } });
-        if (case.valid) {
+        if (case.refusal) |refusal| try std.testing.expectError(refusal, ingress.feed(case.bytes)) else {
             for (case.bytes) |byte| try ingress.feed(&.{byte});
             const request = try ingress.finish();
             try std.testing.expectEqual(@as(usize, if (index == 0) 2 else 0), request.message.skills.len);
             if (index == 0) try std.testing.expectEqualStrings("demo", request.message.skills[0].slice());
             try request.removeTemporaryContent(std.testing.io);
-        } else try std.testing.expectError(error.InvalidMessage, ingress.feed(case.bytes));
+        }
         ingress.deinit();
         try std.testing.expect(retained == null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
@@ -5020,7 +4940,6 @@ test "inline skills leave every existing canonical mutation digest unchanged" {
         .{ .body = head ++ "\"kind\":\"configure\",\"session\":\"k7m2qx\",\"configuration\":{}}", .digest = "db4015965f28197d8bfae4b13f61edb8b1047904643d764a7cc8ce10f9680e30" },
         .{ .body = head ++ "\"kind\":\"configure\",\"session\":\"k7m2qx\",\"configuration\":{},\"reload_skills\":true}", .digest = "14764e8bb9e20125961c2b950bac15e919dfc6653fe2cc7359b027faa0ee89b5" },
         .{ .body = head ++ "\"kind\":\"message\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"\"}}", .digest = "e8cea677d75e3de98bcb68ccbbfcc6cda23fe42bd180da1c742f741f8c73975f" },
-        .{ .body = head ++ "\"kind\":\"message\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"skill\":\"demo\"}", .digest = "ea06c3a3dd1e358d9f9b5a10ac2ad6897642f32fbedc8244aafbe43c90d4bcad" },
         .{ .body = head ++ "\"kind\":\"session_stop\",\"session\":\"k7m2qx\"}", .digest = "f8e8c1514a14cc72fe18bad111508cffa2b5b55812f6ba2deaed959740940d48" },
         .{ .body = head ++ "\"kind\":\"session_archive\",\"session\":\"k7m2qx\",\"archived\":true}", .digest = "ab777e65fc2476bbadf1d8eb793e2bf4d7d3bd49334bd79b4ca15a0f0c536d6b" },
         .{ .body = head ++ "\"kind\":\"session_archive\",\"session\":\"k7m2qx\",\"archived\":false}", .digest = "07e24427f9ec75478b887d3d2e5bd3a072bcc57a587c6d0826eb5bf0f6aa86df" },
@@ -5046,33 +4965,55 @@ test "inline skills leave every existing canonical mutation digest unchanged" {
     }
 }
 
-test "inline skills ingress admits 4096 worst-escaped chunked names with arbitrary field order" {
-    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer bytes.deinit();
-    try bytes.writer.writeAll("{\"skills\":[");
-    for (0..4096) |index| {
-        if (index != 0) try bytes.writer.writeByte(',');
-        try bytes.writer.writeByte('"');
-        var name_buffer: [64]u8 = @splat('x');
-        _ = try std.fmt.bufPrint(name_buffer[59..], "{d:0>5}", .{index});
-        for (name_buffer) |byte| try bytes.writer.print("\\u00{x:0>2}", .{byte});
-        try bytes.writer.writeByte('"');
-    }
-    try bytes.writer.writeAll("],\"version\":\"" ++ wire_version ++ "\",\"store\":\"s\",\"kind\":\"message\",\"key\":\"max-vector\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"x\"}}");
+test "inline skills ingress admits the most worst-escaped chunked names a Message may list, and no more" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root: [max_store_bytes]u8 = undefined;
     const path = root[0..try tmp.dir.realPath(std.testing.io, &root)];
-    const ingress = try std.testing.allocator.create(Ingress);
-    defer std.testing.allocator.destroy(ingress);
-    var retained: ?named_scratch.Owner = null;
-    ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = bytes.written().len, .scratch_path = path, .request_number = 1, .retained_scratch = &retained });
-    defer ingress.deinit();
-    // Every escape and multibyte boundary can cross a transport fragment.
-    for (bytes.written()) |byte| try ingress.feed(&.{byte});
-    const request = try ingress.finish();
-    try std.testing.expectEqual(@as(usize, 4096), request.message.skills.len);
-    try std.testing.expectEqualStrings("04095", request.message.skills[4095].slice()[59..]);
-    try std.testing.expectEqual(@as(u64, 1), request.message.text.length);
-    try request.removeTemporaryContent(std.testing.io);
+    for ([_]usize{ max_message_skills, max_message_skills + 1 }) |count| {
+        var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer bytes.deinit();
+        try bytes.writer.writeAll("{\"skills\":[");
+        for (0..count) |index| {
+            if (index != 0) try bytes.writer.writeByte(',');
+            try bytes.writer.writeByte('"');
+            var name_buffer: [64]u8 = @splat('x');
+            _ = try std.fmt.bufPrint(name_buffer[59..], "{d:0>5}", .{index});
+            for (name_buffer) |byte| try bytes.writer.print("\\u00{x:0>2}", .{byte});
+            try bytes.writer.writeByte('"');
+        }
+        try bytes.writer.writeAll("],\"version\":\"" ++ wire_version ++ "\",\"store\":\"s\",\"kind\":\"message\",\"key\":\"max-vector\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"x\"}}");
+        const ingress = try std.testing.allocator.create(Ingress);
+        defer std.testing.allocator.destroy(ingress);
+        var retained: ?named_scratch.Owner = null;
+        ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = bytes.written().len, .scratch_path = path, .request_number = 1, .retained_scratch = &retained });
+        defer ingress.deinit();
+        if (count > max_message_skills) {
+            try std.testing.expectError(error.ValueTooLong, ingress.feed(bytes.written()));
+            continue;
+        }
+        // Every escape and multibyte boundary can cross a transport fragment.
+        for (bytes.written()) |byte| try ingress.feed(&.{byte});
+        const request = try ingress.finish();
+        try std.testing.expectEqual(@as(usize, max_message_skills), request.message.skills.len);
+        try std.testing.expectEqualStrings("00063", request.message.skills[max_message_skills - 1].slice()[59..]);
+        try std.testing.expectEqual(@as(u64, 1), request.message.text.length);
+        try request.removeTemporaryContent(std.testing.io);
+    }
+}
+
+test "inline skills activity content names its selector, and an unknown one is refused as a selector" {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":\"s\",\"session\":\"k7m2qx\",\"position\":\"4\",\"ordinal\":\"0\"";
+    for ([_]struct { bytes: []const u8, selector: ?ActivityContentSelector }{
+        .{ .bytes = head ++ "}", .selector = .admitted },
+        .{ .bytes = head ++ ",\"selector\":\"authored\"}", .selector = .authored },
+        .{ .bytes = head ++ ",\"selector\":\"expanded\"}", .selector = null },
+    }) |case| {
+        var source: MetadataSource = .{ .input = case.bytes };
+        var retained: ?named_scratch.Owner = null;
+        var parser: Parser = .{ .source = &source, .options = .{ .io = std.testing.io, .content_length = case.bytes.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        if (case.selector) |selector| {
+            try std.testing.expectEqual(selector, (try parseForTest(&parser)).activity_content.selector);
+        } else try std.testing.expectError(error.InvalidSelector, parseForTest(&parser));
+    }
 }

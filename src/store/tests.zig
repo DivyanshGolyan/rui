@@ -12142,14 +12142,15 @@ test "skills peer refusal persists authenticated activity diagnostic and keyed r
             const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
             var input: BashExecutionInput = undefined;
             try storage.readBashExecutionInput(action, &input);
-            var command: protocol.MessageCommand = .{ .session = receiver, .skill = .{}, .sender = .{}, .sender_handle = input.sender_handle };
+            var command: protocol.MessageCommand = .{ .session = receiver, .text = .{ .state = .value, .digest = protocol.contentDigest("") }, .sender = .{}, .sender_handle = input.sender_handle };
             try command.key.set("skills-peer-refusal");
-            try command.skill.?.set("missing-peer-skill");
+            var name: protocol.Bounded(64) = .{};
+            try name.set("missing-peer-skill");
+            command.skills = &.{name};
             try command.sender.?.store.set(storage.selector.slice());
             command.sender.?.session = sender;
-            command.text.digest = protocol.contentDigest("");
             const diagnostic = "Skill missing-peer-skill is not in the receiver's saved catalog; nothing was sent.";
-            const captured: skills_fixture_domain.Capture = .{ .failed = .{ .code = .unknown_skill, .bytes = diagnostic } };
+            const captured: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .unknown_skill, .bytes = diagnostic } };
             const sender_position = (try store_core.readSessionForTesting(&storage, sender.slice())).?.next_position;
             const receiver_position = (try store_core.readSessionForTesting(&storage, receiver.slice())).?.next_position;
             var activity_request: protocol.ActivityPage = .{ .session = sender };
@@ -12160,7 +12161,7 @@ test "skills peer refusal persists authenticated activity diagnostic and keyed r
             try storage.revokeActionSender(action);
             // Neither later capture text nor a revoked handle may rewrite the
             // original keyed outcome, including after a genuine database reopen.
-            const later: skills_fixture_domain.Capture = .{ .failed = .{ .code = .skill_file_unavailable, .bytes = "A different later disk failure" } };
+            const later: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .skill_file_unavailable, .bytes = "A different later disk failure" } };
             for (0..2) |pass| {
                 if (pass == 1) {
                     try storage.close();
@@ -12188,6 +12189,63 @@ test "skills peer refusal persists authenticated activity diagnostic and keyed r
                 try std.testing.expectEqual(bytes.len, try reader.read(0, &bytes));
                 try std.testing.expectEqualStrings(diagnostic, &bytes);
             }
+        }
+    }.run);
+}
+
+test "inline skills a peer Session's Message may list the recipient's skills" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const sender = try configureTestSession(&storage, "skills-peer-accept-sender");
+            const receiver = try configureTestSession(&storage, "skills-peer-accept-receiver");
+            var update: protocol.ConfigureCommand = .{ .session = sender };
+            try update.key.set("skills-peer-accept-bypass");
+            update.configuration.tools = try .of(&.{"bash"});
+            update.configuration.permission_mode.state = .value;
+            try update.configuration.permission_mode.value.set("bypass");
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try submitTestMessage(&storage, &tmp, "skills-peer-accept-input", "skills-peer-accept-input", sender.slice(), "Ask my peer to use its skill");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, model, "skills-peer-accept-call");
+            const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            var input: BashExecutionInput = undefined;
+            try storage.readBashExecutionInput(action, &input);
+            const authored = "check the flaky tests";
+            var command = try completeMessage("skills-peer-accept", receiver.slice(), try tmp.dir.createFile(std.testing.io, "peer-authored", .{ .read = true }), authored);
+            try command.text.file.?.writeStreamingAll(std.testing.io, authored);
+            defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+            command.sender = .{};
+            try command.sender.?.store.set(storage.selector.slice());
+            command.sender.?.session = sender;
+            command.sender_handle = input.sender_handle;
+            var name: protocol.Bounded(64) = .{};
+            try name.set("demo");
+            command.skills = &.{name};
+            // The Host resolved demo against the receiver's catalog.
+            const expanded_bytes = authored ++ "\n\nSkill file: \"/receiver/skills/demo/SKILL.md\"\n\nreceiver body";
+            var expanded: protocol.ContentField = .{ .state = .value, .file = try tmp.dir.createFile(std.testing.io, "peer-expanded", .{ .read = true }), .length = expanded_bytes.len, .digest = protocol.contentDigest(expanded_bytes) };
+            try expanded.file.?.writeStreamingAll(std.testing.io, expanded_bytes);
+            defer protocol.removeContent(&expanded, std.testing.io) catch unreachable;
+            const capture: skills_fixture_domain.MessageCapture = .{ .payload = &expanded };
+            var activity_request: protocol.ActivityPage = .{ .session = receiver };
+            activity_request.position = (try store_core.activityPageForTesting(&storage, activity_request)).end;
+            const reply = storage.submitMessageCapturedSkills(&command, null, null, &capture, .{});
+            try std.testing.expect(reply == .accepted and !reply.accepted.replayed);
+            const page = try store_core.activityPageForTesting(&storage, activity_request);
+            try std.testing.expectEqual(@as(usize, 1), page.count);
+            const received = switch (page.items[0].value) {
+                .admission, .received => |message| message,
+                else => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqualStrings("skills-peer-accept", received.key.slice());
+            try std.testing.expectEqualStrings(sender.slice(), received.sender.?.session.slice());
+            try std.testing.expectEqualSlices(u8, &expanded.digest, &received.content.digest);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(authored), &received.authored.digest);
         }
     }.run);
 }
@@ -12326,10 +12384,12 @@ test "skills preserve archive intent until a fresh invocation is admitted" {
             try archive.key.set("skills-archive");
             try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
             try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
-            var command: protocol.MessageCommand = .{ .session = session, .skill = .{} };
+            var command: protocol.MessageCommand = .{ .session = session, .text = .{ .state = .value, .digest = protocol.contentDigest("") } };
             try command.key.set("skills-archive-refused");
-            try command.skill.?.set("demo");
-            const failed: skills_fixture_domain.Capture = .{ .failed = .{ .code = .unknown_skill, .bytes = "The advertised name was not found" } };
+            var name: protocol.Bounded(64) = .{};
+            try name.set("demo");
+            command.skills = &.{name};
+            const failed: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .unknown_skill, .bytes = "The advertised name was not found" } };
             const refused = storage.submitMessageCapturedSkills(&command, null, null, &failed, .{});
             try std.testing.expect(refused == .rejected and refused.rejected.code == .unknown_skill);
             try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
@@ -12339,7 +12399,11 @@ test "skills preserve archive intent until a fresh invocation is admitted" {
             try std.testing.expect(storage.configureWithCapturedSkills(&reload, null, null, &empty, .{}) == .accepted);
             try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
             try command.key.set("skills-archive-admitted");
-            const invocation: skills_fixture_domain.Capture = .{ .invocation = "Skill file: \"/skills/demo/SKILL.md\"\n\nComplete ordinary skill input" };
+            const invocation_bytes = "Skill file: \"/skills/demo/SKILL.md\"\n\nComplete ordinary skill input";
+            var expanded: protocol.ContentField = .{ .state = .value, .file = try tmp.dir.createFile(std.testing.io, "expanded", .{ .read = true }), .length = invocation_bytes.len, .digest = protocol.contentDigest(invocation_bytes) };
+            try expanded.file.?.writeStreamingAll(std.testing.io, invocation_bytes);
+            defer protocol.removeContent(&expanded, std.testing.io) catch unreachable;
+            const invocation: skills_fixture_domain.MessageCapture = .{ .payload = &expanded };
             const accepted = storage.submitMessageCapturedSkills(&command, null, null, &invocation, .{});
             try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
             try std.testing.expectEqual(protocol.SessionArchiveState.active, (try storage.inspectSessionForTesting(session.slice())).archive_state);
@@ -12446,7 +12510,7 @@ test "inline skills authored provenance stays distinct and required on every pub
                 var expanded: protocol.ContentField = .{ .state = .value, .file = try tmp.dir.createFile(std.testing.io, "expanded", .{ .read = true }), .length = "literal authored /demo\n\ncomplete skill".len, .digest = protocol.contentDigest("literal authored /demo\n\ncomplete skill") };
                 try expanded.file.?.writeStreamingAll(std.testing.io, "literal authored /demo\n\ncomplete skill");
                 defer protocol.removeContent(&expanded, std.testing.io) catch unreachable;
-                const capture: skills_fixture_domain.Capture = .{ .payload = &expanded };
+                const capture: skills_fixture_domain.MessageCapture = .{ .payload = &expanded };
                 try std.testing.expect(storage.submitMessageCapturedSkills(&command, null, null, &capture, .{}) == .accepted);
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key='authored-message' AND secondary_content_id<>primary_content_id", .{}));
                 const request: protocol.ActivityPage = .{ .session = session, .kinds = .initOne(.admission) };
@@ -12506,7 +12570,7 @@ test "inline skills initial failure preserves all ordinary configuration refusal
                 var name: protocol.Bounded(64) = .{};
                 try name.set("missing");
                 command.skills = &.{name};
-                const failed: skills_fixture_domain.Capture = .{ .failed = .{ .code = .unknown_skill, .bytes = "missing skill" } };
+                const failed: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .unknown_skill, .bytes = "missing skill" } };
                 const baseline = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
                 const reply = storage.submitMessageCapturedSkills(&command, null, &skills_fixture_initial, &failed, .{});
                 try std.testing.expect(reply == .rejected);

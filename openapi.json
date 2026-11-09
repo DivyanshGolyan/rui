@@ -6617,137 +6617,6 @@
                   }
                 ]
               },
-              "skill": {
-                "type": "string",
-                "maxLength": 64,
-                "x-rui-max-bytes": 64
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "sender",
-              "sender_handle",
-              "skill"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "message"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "sender": {
-                "type": "object",
-                "properties": {
-                  "store": {
-                    "type": "string",
-                    "maxLength": 492,
-                    "x-rui-max-bytes": 492
-                  },
-                  "session": {
-                    "type": "string",
-                    "maxLength": 128,
-                    "x-rui-max-bytes": 128
-                  }
-                },
-                "required": [
-                  "store",
-                  "session"
-                ],
-                "additionalProperties": false
-              },
-              "sender_handle": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 32,
-                    "x-rui-max-bytes": 32
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "skill": {
-                "type": "string",
-                "maxLength": 64,
-                "x-rui-max-bytes": 64
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "sender",
-              "sender_handle",
-              "skill"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "message"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "sender": {
-                "type": "null"
-              },
-              "sender_handle": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 32,
-                    "x-rui-max-bytes": 32
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
               "text": {
                 "type": "object",
                 "properties": {
@@ -7060,7 +6929,7 @@
                   "minLength": 1,
                   "maxLength": 64
                 },
-                "maxItems": 4096,
+                "maxItems": 64,
                 "uniqueItems": true
               },
               "text": {
@@ -7157,7 +7026,7 @@
                   "minLength": 1,
                   "maxLength": 64
                 },
-                "maxItems": 4096,
+                "maxItems": 64,
                 "uniqueItems": true
               },
               "text": {
@@ -7240,7 +7109,7 @@
                   "minLength": 1,
                   "maxLength": 64
                 },
-                "maxItems": 4096,
+                "maxItems": 64,
                 "uniqueItems": true
               },
               "text": {
@@ -7324,7 +7193,7 @@
                   "minLength": 1,
                   "maxLength": 64
                 },
-                "maxItems": 4096,
+                "maxItems": 64,
                 "uniqueItems": true
               },
               "text": {

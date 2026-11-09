@@ -1683,31 +1683,6 @@ export interface components {
             session: string;
             sender: null;
             sender_handle: string | null;
-            skill: string;
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "message";
-            store: string;
-            key: string;
-            session: string;
-            sender: {
-                store: string;
-                session: string;
-            };
-            sender_handle: string | null;
-            skill: string;
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "message";
-            store: string;
-            key: string;
-            session: string;
-            sender: null;
-            sender_handle: string | null;
             text: {
                 /** @constant */
                 state: "value";
