@@ -21,7 +21,7 @@ class Endpoint(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, tls, population, refuse_at=None, dead_reuse=False, bad_header=False, drop_once=False, sse=False, isolation=None, after_progress=False, early_protocol_error=False, eager_sse=False, observed_shape=False, held=False):
+    def __init__(self, tls, population, refuse_at=None, dead_reuse=False, bad_header=False, drop_once=False, sse=False, isolation=None, after_progress=False, early_protocol_error=False, eager_sse=False, observed_shape=False, held=False, flow_probe=False):
         super().__init__(("127.0.0.1", 0), StreamHandler)
         self.tls = tls
         self.population = population
@@ -59,6 +59,12 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.held_prefix_bytes = 0  # Body bytes sent before the hold, all streams.
         self.held_prefixes = {}  # The same, by request text.
         self.held = threading.Event()
+        # Flow probe: "quick" is answered at once; "flow" gets its head, then
+        # waits for `flow_release` before its long body and a PING follow.
+        self.flow_probe = flow_probe
+        self.flow_release = threading.Event()
+        self.flow_ping_acked = threading.Event()
+        self.flow_body_sent = threading.Event()
         self.ready = threading.Event()
         self.lock = threading.Lock()
 
@@ -135,6 +141,8 @@ class StreamHandler(socketserver.BaseRequestHandler):
         outgoing_bodies = {}
         held_bodies = {}
         held_models = []
+        flow_bodies = {}
+        flow_open = set()
         get_headers = {}
 
         def answer_models(stream_id):
@@ -159,7 +167,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
             try:
                 data = sock.recv(65536)
             except TimeoutError:
-                if not held_bodies and not held_models:
+                if not held_bodies and not held_models and not flow_bodies:
                     return
                 data = None  # Polling for release.
             except OSError:
@@ -174,6 +182,12 @@ class StreamHandler(socketserver.BaseRequestHandler):
             if held_bodies and self.server.release.is_set():
                 outgoing_bodies.update(held_bodies)
                 held_bodies.clear()
+                sock.settimeout(45)
+            if flow_bodies and self.server.flow_release.is_set():
+                outgoing_bodies.update(flow_bodies)
+                flow_open.update(flow_bodies)
+                flow_bodies.clear()
+                conn.ping(b"rui-flow")
                 sock.settimeout(45)
             for event in conn.receive_data(data) if data else ():
                 if isinstance(event, h2.events.RequestReceived):
@@ -220,6 +234,9 @@ class StreamHandler(socketserver.BaseRequestHandler):
                         if self.server.sse:
                             if self.server.observed_shape:
                                 answer = observed_shape_answer(text)
+                            elif self.server.flow_probe and text == "flow":
+                                # Many times one stream's 16-KiB receive window.
+                                answer = "F" * 256 * 1024
                             elif self.server.after_progress and text == "held-0":
                                 # The interrupt target exceeds the 10-KiB prefix the peer sends.
                                 answer = "L" * 80_000 + text
@@ -292,6 +309,10 @@ class StreamHandler(socketserver.BaseRequestHandler):
                                     (":status", "200"), ("content-type", "text/event-stream"),
                                     ("content-length", str(len(payload))),
                                 ])
+                                if self.server.flow_probe and text == "flow":
+                                    flow_bodies[stream] = payload
+                                    sock.settimeout(0.05)  # Poll for release.
+                                    continue
                                 if self.server.release is not None and not self.server.release.is_set():
                                     sent = min(self.server.held_bytes, len(payload) - 1)
                                     with self.server.lock:
@@ -312,6 +333,9 @@ class StreamHandler(socketserver.BaseRequestHandler):
                             conn.send_headers(stream, headers)
                             conn.send_data(stream, b"bad", end_stream=True)
                         pending.clear()
+                elif isinstance(event, h2.events.PingAckReceived):
+                    if event.ping_data == b"rui-flow":
+                        self.server.flow_ping_acked.set()
                 elif isinstance(event, h2.events.StreamReset):
                     with self.server.lock:
                         self.server.resets.append(event.stream_id)
@@ -340,6 +364,9 @@ class StreamHandler(socketserver.BaseRequestHandler):
                     del outgoing_bodies[stream]
                 else:
                     outgoing_bodies[stream] = body
+            for stream in [stream for stream in flow_open if stream not in outgoing_bodies]:
+                flow_open.discard(stream)
+                self.server.flow_body_sent.set()
             outgoing = conn.data_to_send()
             if outgoing:
                 sock.sendall(outgoing)

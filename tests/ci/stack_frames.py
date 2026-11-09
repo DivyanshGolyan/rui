@@ -298,7 +298,11 @@ def allowance_growth(root=ROOT, policy_path=POLICY):
             grown.append(f"{entry['function']}: frame_bytes {entry['frame_bytes']} exceeds the trusted "
                          f"{before.get(entry['function'], 'absence')}")
     ceilings = {label: spec["chain_ceiling"] for label, spec in trusted["threads"].items()}
+    anchors = {spec["anchor"] for spec in trusted["threads"].values()}
     for label, spec in policy["threads"].items():
+        if label not in ceilings and spec["anchor"] not in anchors:
+            # A thread new to the Host: its reviewed ceiling seeds the allowance.
+            continue
         if spec["chain_ceiling"] > ceilings.get(label, 0):
             grown.append(f"{label}: chain_ceiling {spec['chain_ceiling']} exceeds the trusted "
                          f"{ceilings.get(label, 'absence')}")

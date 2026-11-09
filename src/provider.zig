@@ -74,12 +74,26 @@ pub fn hostField(name: []const u8) bool {
 
 pub const max_turn_state_bytes = 4096;
 
-/// Takes a routing value while its header block is decoded, so a Transfer
-/// keeps no copy. The value is borrowed for the call only.
+/// The Turn routing table, reached only under the Reactor's lock: `capture`
+/// takes a value while its header block is decoded, so a Transfer keeps no
+/// copy, and `replay` reads a Turn's value as its Transfer starts, so a
+/// capture cannot free it before h2 copies it.
 pub const TurnStateSink = struct {
     context: *anyopaque,
+    /// The value is borrowed for the call only.
     capture: *const fn (context: *anyopaque, key: TurnStateKey, value: []const u8) void,
+    /// The launch epoch and the Turn's value, borrowed until the next call.
+    replay: *const fn (context: *anyopaque, served: protocol.Provider, turn_id: u64, owner: RoutingOwner) Replay,
+
+    pub const Replay = struct { epoch: u64, value: []const u8 };
 };
+
+/// An opaque digest of the credential identity a Transfer presents
+/// (`providers.Credential.routingOwner`).
+pub const RoutingOwner = [32]u8;
+
+/// What a starting Transfer asks the routing table for.
+pub const Routing = struct { turn_id: u64, owner: RoutingOwner };
 
 /// The one transfer-specific part of turn-state delivery: its provider and
 /// Turn, and the epoch selected at launch.
@@ -184,13 +198,19 @@ pub const SharedCredential = struct {
 
 /// At most one copy per distinct token and account in use, so a handful at
 /// most (a refresh overlaps the old token's last Transfers); each lookup is
-/// a scan of that short list.
+/// a scan of that short list. The execution thread takes uses and the
+/// transport thread releases them at a first response head, so the list
+/// has its own lock.
 pub const Credentials = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
+    mutex: std.Io.Mutex = .init,
     head: ?*SharedCredential = null,
 
     /// A use of the copy of these bytes, made now if none is live.
     pub fn share(self: *Credentials, access_token: []const u8, account_id: []const u8) error{OutOfMemory}!*SharedCredential {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         const scheme = SharedCredential.scheme;
         var node = self.head;
         while (node) |shared| : (node = shared.next) {
@@ -221,6 +241,8 @@ pub const Credentials = struct {
     }
 
     pub fn release(self: *Credentials, shared: *SharedCredential) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         shared.users -= 1;
         if (shared.users != 0) return;
         var link = &self.head;
@@ -232,6 +254,12 @@ pub const Credentials = struct {
     }
 };
 
+/// The Host's provider transport. Its own thread (`serve`) drives the h2
+/// Client, so streams, PING answers and flow control keep moving while the
+/// execution thread waits on the Store. The execution thread still makes
+/// every decision: it starts, launches and cancels Transfers and takes their
+/// completions, each a short call under `mutex`, and it never holds `mutex`
+/// across anything else. The transport thread never touches the Store.
 pub const Reactor = struct {
     client: h2.Client,
     endpoints: std.EnumArray(protocol.Provider, ?h2.Endpoint),
@@ -242,7 +270,18 @@ pub const Reactor = struct {
     credentials: Credentials,
     listing_endpoints: std.EnumArray(ListingKind, ?h2.Endpoint),
     catalog_endpoint_error: ?h2.EndpointError,
+    /// Written only by the execution thread, under `mutex`; the transport
+    /// thread reads it under `mutex` as it observes.
     listings: std.EnumArray(ListingKind, ?*ListingFetch),
+    /// Guards the Client, every live Transfer and the routing table.
+    mutex: std.Io.Mutex = .init,
+    /// Under `mutex`. Set by `stop`; `serve` returns at its next pass.
+    stopping: bool = false,
+    /// Under `mutex`. The failure that ended `serve`.
+    failure: ?h2.DriveError = null,
+    /// Set by `serve` when a stream has finished or it failed, so the
+    /// execution thread's wait ends; only `awaitFinished` resets it.
+    finished: std.Io.Event = .unset,
 
     /// In final storage: h2's Client is pointer-stable. Host startup has
     /// already run `checkLibraries` and `validateEndpoint`.
@@ -259,7 +298,7 @@ pub const Reactor = struct {
             .observation = options.observation,
             .scratch_path = options.scratch_path,
             .budget = options.budget,
-            .credentials = .{ .allocator = allocator },
+            .credentials = .{ .allocator = allocator, .io = io },
             .listing_endpoints = .initFill(null),
             .catalog_endpoint_error = null,
             .listings = .initFill(null),
@@ -292,6 +331,8 @@ pub const Reactor = struct {
 
     /// Fields are copied by prepare; response is borrowed until endListing.
     pub fn startListing(self: *Reactor, kind: ListingKind, fetch: *ListingFetch, fields: []const h2.Field, response: []u8) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.unlockWaking();
         std.debug.assert(self.listings.get(kind) == null);
         fetch.* = .{ .stream = .idle, .finished = false };
         try self.client.prepare(&fetch.stream, .{
@@ -305,6 +346,8 @@ pub const Reactor = struct {
         self.client.launch(&fetch.stream);
     }
 
+    /// A finished fetch is the execution thread's: only `nextCompletion`
+    /// marks it.
     pub fn finishedListing(self: *Reactor, kind: ListingKind) ?*ListingFetch {
         const fetch = self.listings.get(kind) orelse return null;
         return if (fetch.finished) fetch else null;
@@ -317,12 +360,15 @@ pub const Reactor = struct {
 
     pub fn endListing(self: *Reactor, kind: ListingKind) void {
         const fetch = self.listings.get(kind) orelse return;
+        self.mutex.lockUncancelable(self.io);
+        defer self.unlockWaking();
         self.client.cancel(&fetch.stream);
         fetch.stream.deinit();
         self.listings.set(kind, null);
         if (kind == .catalog) self.client.retireConnections(self.listing_endpoints.get(kind).?);
     }
 
+    /// After `serve` has returned.
     pub fn deinit(self: *Reactor) void {
         std.debug.assert(self.credentials.head == null and !self.listingPending());
         self.client.deinit();
@@ -331,24 +377,79 @@ pub const Reactor = struct {
 
     /// Infallible, and no request byte exists before it returns.
     pub fn launch(self: *Reactor, transfer: *Transfer) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.unlockWaking();
         self.client.launch(&transfer.stream);
     }
 
-    pub fn drive(self: *Reactor) !void {
-        try self.client.drive(self);
+    /// The transport thread, until `stop`: drives the Client under `mutex`
+    /// and polls with it released, and wakes the execution thread whenever
+    /// a stream has finished. A drive or poll failure ends it; the
+    /// execution thread finds it with `failed` and fences. Noinline: the
+    /// stack-frame gate names this thread by it.
+    pub noinline fn serve(self: *Reactor) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        while (!self.stopping) {
+            self.client.drive(self) catch |err| return self.fail(err);
+            if (self.client.finishedCount() != 0) self.finished.set(self.io);
+            // Only the engine's own deadlines bound the poll: every other
+            // thread's call that gives the Client work wakes it.
+            const armed = self.client.armWait(std.math.maxInt(u32));
+            self.mutex.unlock(self.io);
+            const blocked = armed.block();
+            self.mutex.lockUncancelable(self.io);
+            blocked catch |err| return self.fail(err);
+        }
     }
 
-    pub fn wait(self: *Reactor, timeout_ms: u32) !void {
-        try self.client.wait(timeout_ms);
+    fn fail(self: *Reactor, err: h2.DriveError) void {
+        self.failure = err;
+        self.finished.set(self.io);
     }
 
-    pub fn finishedCount(self: *const Reactor) usize {
+    /// Ends `serve` at its next pass; the caller then joins its thread.
+    pub fn stop(self: *Reactor) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.unlockWaking();
+        self.stopping = true;
+    }
+
+    /// The failure that ended `serve`, if one did.
+    pub fn failed(self: *Reactor) ?h2.DriveError {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.failure;
+    }
+
+    /// The execution thread, between passes: returns once a stream has
+    /// finished or the transport failed, or after `timeout_ms`.
+    pub fn awaitFinished(self: *Reactor, timeout_ms: u32) void {
+        self.finished.waitTimeout(self.io, .{ .duration = .{
+            .raw = .fromMilliseconds(timeout_ms),
+            .clock = .awake,
+        } }) catch {};
+        self.finished.reset();
+    }
+
+    /// Releases `mutex` after a call that gave the Client work, so `serve`
+    /// stops polling and takes it up.
+    fn unlockWaking(self: *Reactor) void {
+        self.mutex.unlock(self.io);
+        self.client.wake();
+    }
+
+    pub fn finishedCount(self: *Reactor) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         return self.client.finishedCount();
     }
 
     /// A connection with no Transfer left still needs driving: the reset
     /// of a cancelled stream, PING answers and the idle close.
-    pub fn hasConnections(self: *const Reactor) bool {
+    pub fn hasConnections(self: *Reactor) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         return self.client.hasConnections();
     }
 
@@ -357,6 +458,8 @@ pub const Reactor = struct {
     /// A finished stream with an impossible status is an error: the
     /// caller fences, since no settlement can be derived from it.
     pub fn nextCompletion(self: *Reactor, fail_seal: bool) error{InvalidHttpEvidence}!?Completion {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         const stream = next: while (self.client.nextFinished()) |stream| {
             for (self.listings.values) |listing| {
                 if (listing) |fetch| if (stream == &fetch.stream) {
@@ -379,7 +482,7 @@ pub const Reactor = struct {
         return .{ .transfer = transfer, .outcome = outcome, .queued_after = self.client.finishedCount() };
     }
 
-    /// h2's receiver, inside `drive` on the execution thread.
+    /// h2's receiver, inside `drive` on the transport thread.
     pub fn observe(self: *Reactor, stream: *h2.Stream, event: h2.Event) h2.Verdict {
         for (self.listings.values, std.enums.values(ListingKind)) |listing, kind| {
             if (listing) |fetch| if (stream == &fetch.stream) {
@@ -648,7 +751,9 @@ pub const Transfer = struct {
         /// at its first response head, in `deinit`, or in `start` when it
         /// fails.
         credential: ?*SharedCredential = null,
-        turn_state: ?TurnStateKey = null,
+        /// Echo the Turn's routing value and file the one this Transfer
+        /// receives; null for neither.
+        routing: ?Routing = null,
         faults: Faults = .{},
     };
 
@@ -661,11 +766,11 @@ pub const Transfer = struct {
     };
 
     /// Opens the response capture, then prepares the stream with
-    /// `content-type: application/json`, the request's codec headers and
-    /// the options' fields, in that order. Takes the request's file and
-    /// charge. Touches no socket; `Reactor.launch` is the handoff. Unlink
-    /// failure still hands back the named owner through
-    /// `retained_response`.
+    /// `content-type: application/json`, the request's codec headers, the
+    /// options' fields and the Turn's routing value, in that order. Takes
+    /// the request's file and charge. Touches no socket; `Reactor.launch`
+    /// is the handoff. Unlink failure still hands back the named owner
+    /// through `retained_response`.
     pub fn start(
         self: *Transfer,
         reactor: *Reactor,
@@ -675,8 +780,9 @@ pub const Transfer = struct {
         retained_response: *?named_scratch.Owner,
     ) !void {
         errdefer if (options.credential) |shared| reactor.credentials.release(shared);
-        const count = 1 + request.headers.count + options.fields.len;
-        if (count > h2.max_fields) return error.TooManyProviderHeaders;
+        var count = 1 + request.headers.count + options.fields.len;
+        // The routing value takes one more field when the Turn has one.
+        if (count + @intFromBool(options.routing != null) > h2.max_fields) return error.TooManyProviderHeaders;
         var fields: [h2.max_fields]h2.Field = undefined;
         fields[0] = content_type;
         for (fields[1..][0..request.headers.count], request.headers.names[0..request.headers.count], 0..) |*field, name, index|
@@ -696,13 +802,29 @@ pub const Transfer = struct {
             .reactor = reactor,
             .request = .{ .file = request.file, .charged = request.charged, .structured_output = request.structured_output, .codec = request.codec },
             .response = response,
-            .headers = .{ .turn_state = options.turn_state },
+            .headers = .{},
             .credential = options.credential,
         };
         errdefer {
             self.response.deinit(reactor.io, reactor.budget);
             self.* = undefined;
         }
+        // The replayed value is borrowed until the next capture, which only
+        // runs under this lock, and h2 copies it before the lock is released.
+        reactor.mutex.lockUncancelable(reactor.io);
+        defer reactor.mutex.unlock(reactor.io);
+        if (options.routing) |routing| if (reactor.observation.turn_state) |table| {
+            const replay = table.replay(table.context, request.provider, routing.turn_id, routing.owner);
+            self.headers.turn_state = .{ .provider = request.provider, .turn_id = routing.turn_id, .epoch = replay.epoch };
+            // Every request echoes its Turn's routing value, whatever its
+            // provider: one that never sends the codec's routing header has
+            // none to echo.
+            const name = reactor.observation.names.turn_state;
+            if (name.len != 0 and replay.value.len != 0) {
+                fields[count] = .{ .name = name, .value = replay.value };
+                count += 1;
+            }
+        };
         try reactor.client.prepare(&self.stream, .{
             .endpoint = reactor.endpoints.get(request.provider).?,
             .fields = fields[0..count],
@@ -719,6 +841,8 @@ pub const Transfer = struct {
     /// file still held and releases both charges.
     pub fn deinit(self: *Transfer) void {
         const reactor = self.reactor;
+        reactor.mutex.lockUncancelable(reactor.io);
+        defer reactor.unlockWaking();
         reactor.client.cancel(&self.stream);
         self.stream.deinit();
         self.retireRequest();
@@ -847,10 +971,14 @@ test "idle reactor reports zero finished transfers and no completion" {
         .budget = .{ .used = &used, .limit = 1 },
     });
     defer reactor.deinit();
-    try std.testing.expectEqual(@as(usize, 0), reactor.finishedCount());
-    try reactor.drive();
+    // With nothing to drive, the transport thread blocks with no deadline
+    // until `stop` wakes it.
+    const transport = try std.Thread.spawn(.{}, Reactor.serve, .{&reactor});
     try std.testing.expectEqual(@as(usize, 0), reactor.finishedCount());
     try std.testing.expectEqual(@as(?Completion, null), try reactor.nextCompletion(false));
+    reactor.stop();
+    transport.join();
+    try std.testing.expectEqual(@as(?h2.DriveError, null), reactor.failed());
 }
 
 test "catalog endpoint setup failure leaves HTTP provider and listing usable" {
@@ -875,7 +1003,6 @@ test "catalog endpoint setup failure leaves HTTP provider and listing usable" {
         var response: [1]u8 = undefined;
         try reactor.startListing(.provider, &fetch, &.{}, &response);
         defer reactor.endListing(.provider);
-        try reactor.drive();
         try std.testing.expectEqual(@as(?Completion, null), try reactor.nextCompletion(false));
     }
     // A served HTTPS provider still requires working trust; only the optional
@@ -887,7 +1014,7 @@ test "catalog endpoint setup failure leaves HTTP provider and listing usable" {
 
 test "Transfers presenting one credential share one copy, freed with the last use" {
     // The testing allocator fails the test on a leak or a double free.
-    var credentials: Credentials = .{ .allocator = std.testing.allocator };
+    var credentials: Credentials = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     const first = try credentials.share("token-a", "account");
     const second = try credentials.share("token-a", "account");
     try std.testing.expectEqual(first, second);
@@ -911,7 +1038,7 @@ test "a Transfer's credential use ends at its first response head, once" {
     var reactor: Reactor = undefined;
     reactor.io = std.testing.io;
     reactor.observation = .{};
-    reactor.credentials = .{ .allocator = std.testing.allocator };
+    reactor.credentials = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     var transfer: Transfer = undefined;
     transfer.reactor = &reactor;
     transfer.headers = .{};
@@ -930,7 +1057,7 @@ test "a Transfer's credential use ends at its first response head, once" {
 
 test "a Transfer that fails to start releases its credential use" {
     var reactor: Reactor = undefined;
-    reactor.credentials = .{ .allocator = std.testing.allocator };
+    reactor.credentials = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     var transfer: Transfer = undefined;
     var retained: ?named_scratch.Owner = null;
     var request: PreparedRequest = undefined;
@@ -1086,7 +1213,11 @@ const TurnStateRecord = struct {
     captures: usize = 0,
 
     fn sink(self: *TurnStateRecord) TurnStateSink {
-        return .{ .context = self, .capture = capture };
+        return .{ .context = self, .capture = capture, .replay = replay };
+    }
+
+    fn replay(_: *anyopaque, _: protocol.Provider, _: u64, _: RoutingOwner) TurnStateSink.Replay {
+        unreachable;
     }
 
     fn capture(context: *anyopaque, key: TurnStateKey, value: []const u8) void {
