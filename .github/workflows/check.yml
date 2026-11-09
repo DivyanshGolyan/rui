@@ -3,8 +3,7 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && format('Selected check
 on:
   pull_request:
     # Edits and draft conversion never cancel a running candidate. A
-    # retargeted PR runs again on its next push, which the up-to-date rule
-    # requires; reopen it when its head already contains the new base.
+    # retargeted PR runs again on its next push, or when reopened.
     types: [opened, synchronize, reopened, ready_for_review]
   # Diagnose a ref against a chosen base without publishing it.
   workflow_dispatch:
@@ -476,7 +475,6 @@ jobs:
           python3 -B tests/integration/mysql_server.py wait rui-mysql "$RUNNER_TEMP/mysql-started" \
             || { cat "$RUNNER_TEMP/mysql-start.log"; exit 1; }
       - name: Run selected targets
-        id: run
         timeout-minutes: 35
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
@@ -505,17 +503,13 @@ jobs:
           path: ${{ runner.temp }}/rui-failure-artifacts
           retention-days: 3
           if-no-files-found: ignore
-      - name: Bisect the promotion batch with this shard's targets
-        if: ${{ failure() && inputs.promotion && steps.run.outcome == 'failure' }}
+      - name: Bisect the promotion batch with each failed step
+        if: ${{ failure() && inputs.promotion }}
         timeout-minutes: 240
         env:
           BASE: ${{ inputs.base }}
           HEAD_SHA: ${{ needs.plan.outputs.candidate_ref }}
-          TARGETS: ${{ toJSON(matrix.targets) }}
-          CHECK_PART: ${{ matrix.part }}
-        run: |
-          python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect" \
-            -- python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART"
+        run: python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect"
       - name: Retain the bisect's verdict and replay logs
         if: ${{ failure() && inputs.promotion }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -605,7 +599,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID" --artifact-id "$UNIT_ARTIFACT_ID"
       - name: Run required native targets
-        id: run
         timeout-minutes: 35
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
@@ -625,17 +618,13 @@ jobs:
           path: ${{ runner.temp }}/rui-failure-artifacts
           retention-days: 3
           if-no-files-found: ignore
-      - name: Bisect the promotion batch with this shard's targets
-        if: ${{ failure() && inputs.promotion && steps.run.outcome == 'failure' }}
+      - name: Bisect the promotion batch with each failed step
+        if: ${{ failure() && inputs.promotion }}
         timeout-minutes: 240
         env:
           BASE: ${{ inputs.base }}
           HEAD_SHA: ${{ needs.plan.outputs.candidate_ref }}
-          TARGETS: ${{ toJSON(matrix.targets) }}
-          CHECK_PART: ${{ matrix.part }}
-        run: |
-          python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect" \
-            -- python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART"
+        run: python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect"
       - name: Retain the bisect's verdict and replay logs
         if: ${{ failure() && inputs.promotion }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

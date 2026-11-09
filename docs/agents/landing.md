@@ -11,7 +11,7 @@ Every PR commit states its actual test commands and results.
 Performance changes include A/B numbers, and TUI changes include a real-screen tmux capture.
 Keep published commits unchanged so their CI evidence retains its SHA.
 
-Green means the required `admission` check completed successfully for the current, up-to-date PR merge candidate.
+Green means the required `admission` check completed successfully for the PR's current head; it need not be rerun after `main` moves.
 [The main ruleset](../../.github/main-ruleset.json) records the required GitHub enforcement.
 Its active remote configuration must match before the publication cutover.
 Pending, skipped, cancelled or earlier-head success is not green.
@@ -47,6 +47,6 @@ Issues record defects; they do not form a separate publication gate.
 
 Promotion publishes a release and advances `stable`; merging never does.
 Ask the user before dispatching it: `gh workflow run promote.yml --ref main`.
-A red promotion names, on each `promotion-red` issue it files, the first batch commit where that job fails; when a job has several causes, another may come from a later commit.
+A red promotion names, on each `promotion-red` issue it files, the first batch commit where each failed step of that job fails; a suite batch with several causes names only its earliest.
 Fix forward through an ordinary PR, then promote again.
 Recover an interrupted publication by rerunning that promotion's failed jobs, which reuses the same release identity.

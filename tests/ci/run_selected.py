@@ -8,6 +8,7 @@ import time
 
 from select_tests import execution_batches
 from build_artifact import pr_ci
+from steps import record_failure
 
 # Marks a batch's retry in the job log; report_issue.py files the failure before it.
 RETRIED = "one automatic retry"
@@ -36,6 +37,8 @@ def main():
             if not returncode:
                 summarize(f"{' '.join(batch)} passed on its automatic retry after failing.")
         if returncode:
+            # A replay in another commit's tree builds from its source, not this run's artifacts.
+            record_failure(' '.join(batch), command(batch))
             summarize(f"Executed {' '.join(batch)}: failed (exit {returncode}). "
                       "Inspect the failed step. Retained artifacts are diagnostics, not acceptance.")
             raise SystemExit(returncode)
@@ -48,14 +51,17 @@ def summarize(line):
             print(line, file=summary)
 
 
-def execute(batch, ci_artifacts):
-    print("Executing: " + " ".join(batch), flush=True)
-    start = time.monotonic()
+def command(batch, ci_artifacts=None):
     artifacts = ["-Dci-artifacts=" + ci_artifacts] if ci_artifacts else []
     # Fixtures copy their own retained diagnostics; this only runs the gate.
     mode = ["-Dpr-ci=true"] if pr_ci() else []
-    returncode = subprocess.run(["zig", "build", *batch, *mode, *artifacts, "--summary", "all",
-                                 "--test-timeout", TEST_TIMEOUT]).returncode
+    return ["zig", "build", *batch, *mode, *artifacts, "--summary", "all", "--test-timeout", TEST_TIMEOUT]
+
+
+def execute(batch, ci_artifacts):
+    print("Executing: " + " ".join(batch), flush=True)
+    start = time.monotonic()
+    returncode = subprocess.run(command(batch, ci_artifacts)).returncode
     print(f"Completed {' '.join(batch)}: {time.monotonic() - start:.3f}s; exit {returncode}", flush=True)
     return returncode
 

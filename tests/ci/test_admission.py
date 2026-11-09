@@ -6,9 +6,11 @@ import re
 import subprocess
 import tempfile
 import textwrap
+import shlex
 import unittest
 
 from select_tests import select
+import steps
 from strict_paths import STRICT, strict
 
 
@@ -113,13 +115,12 @@ class AdmissionTest(unittest.TestCase):
             self.assertEqual(step_budget(job(text, name), step), 35)
         upgrade = job(UPGRADE.read_text(), 'upgrade')
         self.assertIn("    timeout-minutes: ${{ inputs.batch-base && 300 || 45 }}", upgrade)
-        for step in ('Normal detached startup under the default soft limit',
-                     'Install, save real work, reinstall and restart the same Store'):
-            self.assertEqual(step_budget(upgrade, step), 45)
+        self.assertEqual(step_budget(upgrade, 'Start detached, then install, save real work, reinstall and '
+                                     'restart the same Store'), 45)
         for name in ('linux_build', 'linux_build_unit', 'macos_build_unit'):
             self.assertEqual(budget(job(text, name)), 15)
 
-    def test_main_ruleset_requires_strict_admission_and_prs_without_bypass(self):
+    def test_main_ruleset_requires_admission_and_prs_without_bypass(self):
         ruleset = json.loads((ROOT / '.github/main-ruleset.json').read_text())
         self.assertEqual(ruleset['target'], 'branch')
         self.assertEqual(ruleset['enforcement'], 'active')
@@ -130,7 +131,8 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn('non_fast_forward', rules)
         self.assertIn('deletion', rules)
         checks = rules['required_status_checks']['parameters']
-        self.assertTrue(checks['strict_required_status_checks_policy'])
+        # Promotion qualifies the merged batch, so a green PR need not rerun after main moves.
+        self.assertFalse(checks['strict_required_status_checks_policy'])
         self.assertEqual(checks['required_status_checks'], [{'context': 'admission', 'integration_id': 15368}])
 
     def admission(self, **changes):
@@ -615,58 +617,53 @@ class ReleaseFlowTest(unittest.TestCase):
                     self.assertEqual(output['upgrade'], 'false')  # promote.yml calls it directly
                     self.assertEqual(output['linux_codegen'], 'false')
 
-    def test_failed_promotion_jobs_bisect_with_their_own_command(self):
-        check = CHECK.read_text()
-        for name, step in (('linux_suites', 'Run selected targets'), ('macos_suites', 'Run required native targets')):
-            body = job(check, name)
-            self.assertIn(f'      - name: {step}\n        id: run\n', body)
-            bisect = body.split('      - name: Bisect the promotion batch', 1)[1].split('\n      - ', 1)[0]
-            self.assertIn("failure() && inputs.promotion && steps.run.outcome == 'failure'", bisect)
-            self.assertIn('BASE: ${{ inputs.base }}', bisect)
-            self.assertIn('tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART"', bisect)
-        for path in (UPGRADE, RENDERER):
-            with self.subTest(workflow=path.name):
-                self.assertIn('python3 -B tests/ci/promotion.py --base "$BASE"', path.read_text())
-
+    BISECT = 'python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect"'
 
     @staticmethod
-    def replay(body, outcomes):
-        """The bisect's replay command for these step outcomes, as GitHub would expand FAILED."""
-        step = body.split('      - name: Bisect the promotion batch', 1)[1].split('\n      - ', 1)[0]
-        block = re.search(r'(?ms)^          FAILED: >-\n(.*?)(?=^        run:)', step)[1]
-        parts = re.findall(r"\$\{\{ steps\.(\w+)\.outcome == 'failure' && '(.*?)' \|\| '' \}\}", block)
-        assert len(parts) == len([line for line in block.splitlines() if line.strip()]), block
-        for name, _ in parts:
-            assert f'        id: {name}\n' in body, name
-        return ' '.join(command for name, command in parts if outcomes.get(name) == 'failure')
+    def step_list(body):
+        """The NAME=COMMAND arguments a job passes to steps.py, as the shell would split them."""
+        script = body.split('python3 -B tests/ci/steps.py', 1)[1].split('\n      - ', 1)[0]
+        return [steps.parse(argument) for argument in shlex.split(script.replace('\\\n', ' '))
+                if not argument.startswith('--') and '=' in argument and not argument.startswith('$')]
 
-    def test_upgrade_bisect_replays_only_the_steps_that_failed(self):
-        upgrade = job(UPGRADE.read_text(), 'upgrade')
-        # A failed startup skips the previous release's checkout: the replay must not need it.
-        startup = self.replay(upgrade, dict(startup='failure', upgrade='skipped'))
-        self.assertIn('zig build host-launch-integration', startup)
-        self.assertNotIn('previous-release', startup)
-        self.assertNotIn('previous_release_upgrade.py', startup)
-        later = self.replay(upgrade, dict(startup='success', upgrade='failure'))
-        self.assertNotIn('host-launch-integration', later)
-        self.assertIn('previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .', later)
-        # Each replay is its step's own command.
-        self.assertIn('run: zig build host-launch-integration -j2 --summary all', upgrade)
-        for line in ('python3 -B tests/integration/previous_release_upgrade.py . .',
-                     'python3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .'):
-            self.assertIn(line, upgrade.split('id: upgrade', 1)[1].split('      - name:', 1)[0])
-        self.assertIn('-- bash -euc "$FAILED"', upgrade)
+    def test_every_promotion_bisect_replays_only_its_jobs_record(self):
+        # The replayed command is the recorded one: no bisect may restate or select commands.
+        check = CHECK.read_text()
+        jobs = [('linux_suites', job(check, 'linux_suites'), 'run_selected.py'),
+                ('macos_suites', job(check, 'macos_suites'), 'run_selected.py'),
+                ('upgrade', job(UPGRADE.read_text(), 'upgrade'), 'steps.py'),
+                ('contracts', job(RENDERER.read_text(), 'contracts'), 'steps.py')]
+        for name, body, recorder in jobs:
+            with self.subTest(job=name):
+                bisect = body.split('      - name: Bisect the promotion batch with each failed step\n', 1)[1]
+                bisect = bisect.split('\n      - ', 1)[0]
+                self.assertIn(f'        run: {self.BISECT}', bisect)
+                self.assertNotIn('steps.', bisect)
+                self.assertNotIn('FAILED', bisect)
+                self.assertIn(f'tests/ci/{recorder}', body.split('Bisect the promotion batch', 1)[0])
 
-    def test_renderer_bisect_needs_completed_setup_and_replays_failed_contracts(self):
-        contracts = job(RENDERER.read_text(), 'contracts')
-        step = contracts.split('      - name: Bisect the promotion batch', 1)[1].split('\n      - ', 1)[0]
-        self.assertIn("steps.selftest.outcome != 'skipped'", step)
-        # The self-tests are the one contract step that runs only after setup succeeds.
-        selftest = contracts.split('        id: selftest\n', 1)[1].split('      - name:', 1)[0]
-        self.assertNotIn('if:', selftest)
-        only = self.replay(contracts, dict(selftest='success', sequence='failure'))
-        self.assertIn('zig build sequence-model', only)
-        self.assertNotIn('direct-pty', only)
+    def test_promotion_step_lists_name_each_check_once_with_a_fresh_output(self):
+        upgrade = self.step_list(job(UPGRADE.read_text(), 'upgrade'))
+        self.assertEqual([name for name, _ in upgrade], ['startup', 'current-upgrade', 'previous-upgrade'])
+        contracts = self.step_list(job(RENDERER.read_text(), 'contracts'))
+        self.assertEqual([name for name, _ in contracts],
+                         ['selftest', 'pty', 'ghostty', 'controls', 'recovery', 'replay', 'sequence'])
+        for name, command in upgrade + contracts:
+            with self.subTest(step=name):
+                # Harnesses refuse an existing output; replays get a fresh $STEP_OUTPUT.
+                self.assertNotIn('/contracts/', command)
+                if '--output' in command:
+                    self.assertIn('--output "$STEP_OUTPUT"', command)
+
+    def test_upgrade_prepares_the_previous_release_before_any_check(self):
+        # A failed check must not leave a later check, or its replay, without its setup.
+        body = job(UPGRADE.read_text(), 'upgrade')
+        checks = body.index('tests/ci/steps.py')
+        for setup in ('ref: 0e4b2225d106dd63fa9c38801188facb5e9c6335',
+                      'mv .amp/previous-release "$RUNNER_TEMP/previous-release"',
+                      'uses: actions/cache/restore@'):
+            self.assertLess(body.index(setup), checks, setup)
+
 
     def test_candidate_jobs_are_read_only_and_cache_proof_covers_both_platforms(self):
         for path in (CHECK, UPGRADE):
