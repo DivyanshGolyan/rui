@@ -6,6 +6,7 @@ const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
 const store_id = @import("store_id.zig");
 const mutation_answer = @import("mutation_answer.zig");
+const provider_route = @import("provider_route.zig");
 const outcome_code = @import("outcome_code.zig");
 const content_string = @import("content_string.zig");
 const tool_presentation = @import("tool_presentation.zig");
@@ -49,34 +50,11 @@ pub const max_preset_name_bytes = 64;
 pub const max_label_bytes = tool_presentation.max_label_bytes;
 pub const validLabel = tool_presentation.validLabel;
 pub const Provider = provider_name.Provider;
-/// How a Host serves a provider: not at all, at a development endpoint
-/// that takes no credential, or at its own endpoint with its credential.
-pub const Route = enum { unserved, endpoint, chatgpt_device, key_file };
-
-/// Each provider's Route, as `host_info` reports it.
-pub const Routes = std.enums.EnumFieldStruct(Provider, Route, null);
-
-/// Every provider on `route`.
-pub fn routesAll(route: Route) Routes {
-    var routes: Routes = undefined;
-    inline for (@typeInfo(Provider).@"enum".field_names) |name| @field(routes, name) = route;
-    return routes;
-}
-
-pub fn routeOf(routes: Routes, provider: Provider) Route {
-    return switch (provider) {
-        inline else => |tag| blk: {
-            const name = @tagName(tag);
-            break :blk @field(routes, name);
-        },
-    };
-}
-
-/// Whether a Host with these Routes makes model requests for any provider.
-pub fn servesModel(routes: Routes) bool {
-    inline for (@typeInfo(Provider).@"enum".field_names) |name| if (@field(routes, name) != .unserved) return true;
-    return false;
-}
+pub const Route = provider_route.Route;
+pub const Routes = provider_route.Routes;
+pub const routesAll = provider_route.all;
+pub const routeOf = provider_route.of;
+pub const servesModel = provider_route.servesModel;
 
 pub const Codec = provider_name.Codec;
 pub const ReasoningEffort = model_capability.ReasoningEffort;

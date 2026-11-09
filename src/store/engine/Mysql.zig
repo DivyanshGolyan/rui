@@ -3,6 +3,7 @@ const std = @import("std");
 const engine = @import("../engine.zig");
 const Store = @import("../Store.zig");
 const protocol = @import("../../protocol.zig");
+const provider_route = @import("../../provider_route.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const rsql = @import("../rsql.zig");
 const wire = @import("../wire/mysql_connection.zig");
@@ -28,7 +29,7 @@ state: *State,
 pub const State = struct {
     connection: wire.Connection,
     testing_shape: if (is_test) QueryShape else void = if (is_test) .{} else {},
-    served: *const protocol.Routes = &unserved,
+    served: *const provider_route.Routes = &unserved,
     epoch: u64 = 0,
     commit_seq: u64 = 0,
     changes: i64 = 0,
@@ -72,7 +73,7 @@ const Begin = union(enum) {
 /// A new SAVEPOINT rui_write not yet sent. An older one already sent
 /// stays independent of it (`Begin.sent.savepoint`).
 const Replacement = enum { none, pending, buffered };
-const unserved = protocol.routesAll(.unserved);
+const unserved = provider_route.all(.unserved);
 pub const ContentSink = content.ContentSink;
 pub const insert_chunk = rsql.Write(.{
     .sql = "INSERT INTO content_chunk(content_id,chunk_index,bytes) VALUES(?1,?2,?3)",

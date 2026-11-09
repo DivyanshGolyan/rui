@@ -61,6 +61,7 @@ const cores = .{
     .{ "product_defaults.zig", @import("product_defaults.zig") },
     .{ "protocol.zig", @import("protocol.zig") },
     .{ "provider_name.zig", @import("provider_name.zig") },
+    .{ "provider_route.zig", @import("provider_route.zig") },
     .{ "provider_selection.zig", @import("provider_selection.zig") },
     .{ "queued_line.zig", @import("queued_line.zig") },
     .{ "retention_capacity.zig", @import("retention_capacity.zig") },

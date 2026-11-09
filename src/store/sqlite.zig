@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../protocol.zig");
+const provider_route = @import("../provider_route.zig");
 const Bounded = @import("../bounded.zig").Bounded;
 const model_capability = @import("../model_capability.zig");
 const provider_name = @import("../provider_name.zig");
@@ -271,11 +272,11 @@ pub fn setLimit(database: *c.sqlite3, category: c_int, value: c_int) !void {
 /// `rui_served(provider)`: 1 when the opening's served set has the label.
 pub fn servedFunction(context: ?*c.sqlite3_context, argc: c_int, argv: [*c]?*c.sqlite3_value) callconv(.c) void {
     std.debug.assert(argc == 1);
-    const routes: *const protocol.Routes = @ptrCast(@alignCast(c.sqlite3_user_data(context)));
+    const routes: *const provider_route.Routes = @ptrCast(@alignCast(c.sqlite3_user_data(context)));
     const text = c.sqlite3_value_text(argv[0]);
     const length = c.sqlite3_value_bytes(argv[0]);
     const served = if (text == null or length < 0) false else if (std.meta.stringToEnum(provider_name.Provider, text[0..@intCast(length)])) |provider|
-        protocol.routeOf(routes.*, provider) != .unserved
+        provider_route.of(routes.*, provider) != .unserved
     else
         false;
     c.sqlite3_result_int(context, @intFromBool(served));

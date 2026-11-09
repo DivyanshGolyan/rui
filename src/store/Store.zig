@@ -7,6 +7,7 @@ const command_reply = @import("../command_reply.zig");
 const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
 const protocol = @import("../protocol.zig");
+const provider_route = @import("../provider_route.zig");
 const outcome_code = @import("../outcome_code.zig");
 const content_string = @import("../content_string.zig");
 const Bounded = @import("../bounded.zig").Bounded;
@@ -106,7 +107,7 @@ pub const Store = struct {
     /// change ring, so a new identity does not grow the Store.
     /// The labels of the providers whose Sessions get model Attempts, each
     /// between commas, fixed at open.
-    served: protocol.Routes = protocol.routesAll(.unserved),
+    served: provider_route.Routes = provider_route.all(.unserved),
     /// Which use holds the out-of-line scratch in this entry point.
     scratch_use: ScratchUse = .none,
     /// The batch of writes the holder is running (`Queue.Batch`). `.ready`
@@ -1616,7 +1617,7 @@ pub const AttemptBinding = attempt.AttemptBinding;
 
 pub const OpenOptions = struct {
     /// The providers whose Sessions get model Attempts.
-    served: protocol.Routes = protocol.routesAll(.endpoint),
+    served: provider_route.Routes = provider_route.all(.endpoint),
     cache_spill: bool = true,
     cache_kib: u32 = 1024,
     found_schema_version: ?*u32 = null,

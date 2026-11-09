@@ -4,6 +4,7 @@
 const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const protocol = @import("../../protocol.zig");
+const provider_route = @import("../../provider_route.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const tool_name = @import("../../tool_name.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -79,10 +80,10 @@ fn requestsBash(requested: *const wire_request.Configuration) bool {
 /// D133: an omitted provider selects the Host's single served provider.
 /// A Host serving several has no default (D221), so a creation must name
 /// one. An idle Host keeps the product's, which its unserved check refuses.
-fn defaultProvider(routes: protocol.Routes) ?provider_name.Provider {
+fn defaultProvider(routes: provider_route.Routes) ?provider_name.Provider {
     var selected: ?provider_name.Provider = null;
     inline for (std.enums.values(provider_name.Provider)) |provider| {
-        if (protocol.routeOf(routes, provider) != .unserved) {
+        if (provider_route.of(routes, provider) != .unserved) {
             if (selected != null) return null;
             selected = provider;
         }
@@ -1035,7 +1036,7 @@ pub fn servesProviderOf(served: anytype, configuration: ?*const wire_request.Con
         std.meta.stringToEnum(provider_name.Provider, configuration.?.provider.value.slice()) orelse return true
     else
         saved orelse (if (configuration != null) defaultProvider(served) orelse return true else return true);
-    return protocol.routeOf(served, provider) != .unserved;
+    return provider_route.of(served, provider) != .unserved;
 }
 
 /// Queues saving the command that carries `applied`, then the Session's
