@@ -5,7 +5,7 @@ import json
 import os
 import pathlib
 import re
-import socket
+import os_semantics
 import socketserver
 import subprocess
 import threading
@@ -111,7 +111,7 @@ class Exchange(socketserver.BaseRequestHandler):
         if route == self.server.route and self.server.before_forward is not None:
             if not self.server.before_forward(record):
                 return  # Held full request was cancelled before Host admission.
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as backend:
+        with os_semantics.unix_stream() as backend:
             backend.settimeout(15)
             backend.connect(str(self.server.backend))
             backend.sendall(head + b"\r\n\r\n" + body)

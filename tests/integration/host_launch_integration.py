@@ -317,7 +317,7 @@ def startup_limits(root, env):
                 borrowers = []
                 try:
                     for _ in range(capacity):
-                        peer = socket.socket(socket.AF_UNIX)
+                        peer = os_semantics.unix_stream()
                         borrowers.append(peer)
                         peer.settimeout(3)
                         peer.connect(socket_path)
@@ -325,7 +325,7 @@ def startup_limits(root, env):
                     # Discovery is prepared by intake after reading preceding
                     # borrowers, so its reply establishes their classification.
                     assert status(store, env)["status"] == "ready"
-                    with socket.socket(socket.AF_UNIX) as peer:
+                    with os_semantics.unix_stream() as peer:
                         peer.settimeout(3)
                         peer.connect(socket_path)
                         peer.sendall(b"POST /v1/configure HTTP/1.1\r\n")
@@ -339,7 +339,7 @@ def startup_limits(root, env):
                         }, response
                     assert status(store, env)["status"] == "ready"
                     for _ in range(3):
-                        peer = socket.socket(socket.AF_UNIX)
+                        peer = os_semantics.unix_stream()
                         borrowers.append(peer)
                         peer.settimeout(3)
                         peer.connect(socket_path)
@@ -347,7 +347,7 @@ def startup_limits(root, env):
                     for _ in range(3):
                         borrowers.pop().close()
                     for _ in range(2):
-                        peer = socket.socket(socket.AF_UNIX)
+                        peer = os_semantics.unix_stream()
                         borrowers.append(peer)
                         peer.settimeout(3)
                         peer.connect(socket_path)
@@ -360,7 +360,7 @@ def startup_limits(root, env):
                             pass
                         peer.settimeout(3)
                     for route in (b"/v1/control/session-stop", b"/v1/control/unknown"):
-                        with socket.socket(socket.AF_UNIX) as excess:
+                        with os_semantics.unix_stream() as excess:
                             excess.settimeout(3)
                             excess.connect(socket_path)
                             excess.sendall(b"POST " + route + b" HTTP/1.1\r\n")
@@ -372,7 +372,7 @@ def startup_limits(root, env):
                             assert json.loads(body) == {
                                 "version": host_process.WIRE_VERSION, "type": "busy", "code": "control_capacity_exhausted",
                             }, response
-                    peer = socket.socket(socket.AF_UNIX)
+                    peer = os_semantics.unix_stream()
                     borrowers.append(peer)
                     peer.connect(socket_path)
                     assert status(store, env)["status"] == "ready", "unknown route blocked reserved discovery"
@@ -382,12 +382,12 @@ def startup_limits(root, env):
                     # place. Exercise both request-line and body stalls.
                     fields = b"Content-Type: application/json\r\nX-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\nContent-Length: 2\r\n\r\n"
                     for tail in (b"", fields + b"{"):
-                        discovery = socket.socket(socket.AF_UNIX)
+                        discovery = os_semantics.unix_stream()
                         borrowers.append(discovery)
                         discovery.settimeout(3)
                         discovery.connect(socket_path)
                         discovery.sendall(b"POST /v1/host-info HTTP/1.1\r\n" + tail)
-                        with socket.socket(socket.AF_UNIX) as excess:
+                        with os_semantics.unix_stream() as excess:
                             excess.settimeout(3)
                             excess.connect(socket_path)
                             excess.sendall(b"POST /v1/host-info HTTP/1.1\r\n")
@@ -400,7 +400,7 @@ def startup_limits(root, env):
                                 "version": host_process.WIRE_VERSION, "type": "busy", "code": "discovery_capacity_exhausted",
                             }, response
                         for _ in range(2):
-                            control = socket.socket(socket.AF_UNIX)
+                            control = os_semantics.unix_stream()
                             borrowers.append(control)
                             control.settimeout(3)
                             control.connect(socket_path)

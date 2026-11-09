@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -10,7 +11,7 @@ import textwrap
 import unittest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from platform_boundary import (bind_sites, mac_path, python_sites, sites, typescript_sites,  # noqa: E402
+from platform_boundary import (bind_sites, mac_path, python_sites, shell_sites, sites, typescript_sites,  # noqa: E402
                                unlistened_binds, violations, zig_sites)
 from select_tests import select  # noqa: E402
 from qualification import split_build  # noqa: E402
@@ -83,6 +84,36 @@ class PlatformBoundaryTest(unittest.TestCase):
             self.assertEqual(zig_sites(source), 1, source)
         for source in ('// MSG.NOSIGNAL', '"SO.NOSIGPIPE"', 'socket_os.send_flags', 'MSG.OTHER'):
             self.assertEqual(zig_sites(source), 0, source)
+
+    def test_unix_stream_constructors_belong_to_fixture_owner(self):
+        self.assertEqual(python_sites('socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)'), 1)
+        self.assertEqual(python_sites('# socket.socket(socket.AF_UNIX)\ns = "socket.socket(socket.AF_UNIX)"\n'), 0)
+        self.assertEqual(python_sites('os_semantics.unix_stream()\nsocket.socket(socket.AF_INET)'), 0)
+        self.assertEqual(shell_sites("python3 - <<'PY'\npeer = socket.socket(socket.AF_UNIX)\nPY\n"), 1)
+        self.assertEqual(shell_sites("python3 - <<'PY'\n# socket.socket(socket.AF_UNIX)\ns = 'socket.socket(socket.AF_UNIX)'\nPY\n"), 0)
+
+    def test_unix_stream_limits_unread_linux_send_capacity(self):
+        sys.path.insert(0, str(Path(__file__).parents[1] / "integration"))
+        import os_semantics
+        if not os_semantics.PROC_FS:
+            self.skipTest("Linux socket buffer sizing")
+        with socket.socket(socket.AF_UNIX) as listener:
+            path = f"\0rui-buffer-{os.getpid()}"
+            listener.bind(path)
+            listener.listen(1)
+            with os_semantics.unix_stream() as sender:
+                sender.connect(path)
+                receiver, _ = listener.accept()
+                with receiver:
+                    sender.setblocking(False)
+                    total = 0
+                    while True:
+                        try:
+                            total += sender.send(b"x" * 65536)
+                        except BlockingIOError:
+                            break
+                    self.assertGreaterEqual(total, 4096)
+                    self.assertLessEqual(total, 8192)
 
     def test_fixture_trust_through_ssl_cert_variables_is_a_platform_site(self):
         # The feed-host test before #997 trusted its CA this way and failed only on Darwin.

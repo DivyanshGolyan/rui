@@ -1,6 +1,6 @@
 """Launch frame helpers shared by the SQLite and MySQL launch-frame fixtures."""
 import json
-import socket
+import os_semantics
 import struct
 
 import host_process
@@ -20,7 +20,7 @@ def host_info(path, store):
 
 def post(path, route, request, extra=b"", expected_status=200):
     body = json.dumps(request).encode()
-    with socket.socket(socket.AF_UNIX) as connection:
+    with os_semantics.unix_stream() as connection:
         connection.settimeout(10)
         connection.connect(str(path))
         connection.sendall(b"POST /v1/" + route.encode() + b" HTTP/1.1\r\nContent-Type: application/json\r\n" + extra +
