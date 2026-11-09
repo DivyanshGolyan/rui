@@ -5,6 +5,7 @@ const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const skills_domain = @import("skills.zig");
 const protocol = @import("../../protocol.zig");
+const turn_ending = @import("../../turn_ending.zig");
 const message_admission = @import("../../message_admission.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
@@ -527,7 +528,7 @@ const settle_owed_ending = rsql.Write(.{
 
 /// What the parent of a child that ended without an answer reads, as a
 /// Message from the child (D161).
-fn endingText(buffer: []u8, ending: protocol.TurnEnding) []const u8 {
+fn endingText(buffer: []u8, ending: turn_ending.TurnEnding) []const u8 {
     return std.fmt.bufPrint(buffer, "[Rui: this agent's Turn ended without an answer: {s}.]", .{@tagName(ending)}) catch unreachable;
 }
 

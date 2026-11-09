@@ -6,6 +6,7 @@ const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
 const store_id = @import("store_id.zig");
 const mutation_answer = @import("mutation_answer.zig");
+const turn_ending = @import("turn_ending.zig");
 const tool_proposal = @import("tool_proposal.zig");
 const message_admission = @import("message_admission.zig");
 const configuration_admission = @import("configuration_admission.zig");
@@ -466,23 +467,7 @@ pub const SessionArchiveState = @import("session_archive.zig").State;
 pub const SessionArchiveFilter = @import("session_archive.zig").Filter;
 pub const SessionArchiveObservation = mutation_answer.SessionArchiveObservation;
 
-/// How a Turn ended, as its `turn_ended` Activity row names it.
-pub const TurnEnding = enum {
-    /// The Turn's answer is its `final` assistant row.
-    done,
-    /// The conversation no longer fits the model's context, even after compaction.
-    context_full,
-    /// The provider answered with a refusal that resending will meet again.
-    provider_refused,
-    /// The provider could not be reached, or retries ran out.
-    provider_unavailable,
-    /// A Session stop ended it.
-    stopped,
-    /// A Model Interruption ended it.
-    interrupted,
-    /// Any other failure, which the row's `code` names.
-    failed,
-};
+pub const TurnEnding = turn_ending.TurnEnding;
 pub const SessionStopRejection = mutation_answer.SessionStopRejection;
 pub const SessionArchiveRejection = mutation_answer.SessionArchiveRejection;
 pub const ModelInterruptionRejection = mutation_answer.ModelInterruptionRejection;

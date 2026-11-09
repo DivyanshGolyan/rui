@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const turn_ending = @import("../../turn_ending.zig");
 const session_id = @import("../../session_id.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
@@ -58,7 +59,7 @@ pub const TurnOutcome = union(enum) {
     /// The ending the feed names. A cancelled Turn was `stopped` when a
     /// Session stop selected it, and otherwise interrupted by a Model
     /// Interruption.
-    pub fn ending(outcome: TurnOutcome, stopped: bool) protocol.TurnEnding {
+    pub fn ending(outcome: TurnOutcome, stopped: bool) turn_ending.TurnEnding {
         return switch (outcome) {
             .completed => .done,
             .cancelled => if (stopped) .stopped else .interrupted,
