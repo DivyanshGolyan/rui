@@ -213,8 +213,9 @@ class Graph:
 
     def scripts(self, scripts):
         """The modules and source files fixture scripts use, transitively: a
-        function a fixture borrows from another fixture's module may call any
-        helper that module imports."""
+        library a fixture imports may import other libraries. No fixture
+        imports another (test_harness_contracts.FixtureImportTest), so a
+        change to one fixture's script selects only the targets that run it."""
         return self.closure(self.python, scripts)
 
     @staticmethod
