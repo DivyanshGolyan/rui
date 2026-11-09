@@ -13,13 +13,15 @@
   },
   {
     "name": "ghostty-kitty-ctrl-enter",
-    "scenario": "rejection",
-    "chunks": [{"hex": "611b5b31333b35750d"}]
+    "scenario": "editor",
+    "chunks": [{"hex": "611b5b31333b35750d"}],
+    "expected": "a"
   },
   {
     "name": "ghostty-legacy-ctrl-enter",
-    "scenario": "rejection",
-    "chunks": [{"hex": "611b5b32373b353b31337e0d"}]
+    "scenario": "editor",
+    "chunks": [{"hex": "611b5b32373b353b31337e0d"}],
+    "expected": "a"
   },
   {
     "name": "ghostty-kitty-recovery",

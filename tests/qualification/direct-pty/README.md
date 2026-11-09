@@ -41,7 +41,7 @@ frame from crediting an overshooting key batch; it never submits a Message.
 
 **A green default run is not complete Ghostty conformance.** `ghostty.json` is a
 separate mandatory conformance workload with no expected-failure conversion.
-It checks Kitty and legacy case27 Shift-Enter, Ctrl-Enter rejection, and encoded
+It checks Kitty and legacy case27 Shift-Enter, Ctrl-Enter ignored with the draft kept, and encoded
 Ctrl-R recovery. On the unchanged renderer base, the Kitty modified-Enter
 probes pass; legacy case27 modified Enter and both encoded recovery probes
 remain runtime failures until the renderer owner supplies a separately approved

@@ -3300,7 +3300,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                     proxy.route = "/v1/activity-page"
                     notice_release.touch()
                     fixture.wait_for(notice_held.is_set, "silent Activity result before notice")
-                    os.write(master, b"\x00\n")
+                    os.write(master, b"\xc3(\n")
                     read_terminal(master, "! Input rejected; nothing sent.", composer=True)
                     notice_reply_release.set()
                     read_terminal(master, "compact complete", composer=True)
@@ -3376,7 +3376,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                         pending_release.set()
                         prefix += terminal_gate(caller, master, refreshed_held, "permission refresh without an Action")
                         if with_notice:
-                            os.write(master, b"\x00\n")
+                            os.write(master, b"\xc3(\n")
                             read_terminal(master, "! Input rejected; nothing sent.", composer=True)
                             before_notice = current_screen(master)
                             # The released page applies whole: its approval
@@ -4172,9 +4172,11 @@ def long_input_case(home, store, workspace, endpoint, host):
         assert next(item["content"][0]["text"] for item in reversed(body["input"])
             if item.get("role") == "user") == "shorter replacement", body
         accepted_count += 1
-        rejected = terminal_step(master, "invalid\x00x", "Input rejected; nothing sent.")
+        # Raw bytes: a str would encode U+00C3 as valid UTF-8.
+        os.write(master, b"invalid\xc3(x\n")
+        rejected = read_terminal(master, "Input rejected; nothing sent.")
         assert "Input rejected; nothing sent." in rejected and "--text FILE" not in rejected, rejected
-        assert len(endpoint.requests) == accepted_count, "unsupported control reached Host"
+        assert len(endpoint.requests) == accepted_count, "invalid input reached Host"
         assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
         assert termios.tcgetattr(master)[3] & termios.ICANON
