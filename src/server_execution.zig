@@ -19,6 +19,7 @@ const provider = @import("provider.zig");
 const providers = @import("providers.zig");
 const turn_states_module = @import("turn_states.zig");
 const protocol = @import("protocol.zig");
+const wire_request = @import("wire_request.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
@@ -3318,7 +3319,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
             defer directory.close(std.testing.io);
             const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
-            var command: protocol.ConfigureCommand = .{};
+            var command: wire_request.ConfigureCommand = .{};
             try command.key.set("failed-admission-config");
             command.configuration.workspace.state = .value;
             try command.configuration.workspace.value.set(workspace);
@@ -3337,7 +3338,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             const file = try tmp.dir.createFile(std.testing.io, "failed-admission-message", .{ .read = true });
             try file.writeStreamingAll(std.testing.io, "hello");
             try file.sync(std.testing.io);
-            var message: protocol.MessageCommand = .{};
+            var message: wire_request.MessageCommand = .{};
             try message.key.set("failed-admission-key");
             message.session = configured.accepted.session;
             message.text = .{
@@ -3545,7 +3546,7 @@ test "preparing slots belong to their live preparations" {
     var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
     defer directory.close(std.testing.io);
     const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
-    var command: protocol.ConfigureCommand = .{};
+    var command: wire_request.ConfigureCommand = .{};
     try command.key.set("prep-belong-config");
     command.configuration.workspace.state = .value;
     try command.configuration.workspace.value.set(workspace);
@@ -3564,7 +3565,7 @@ test "preparing slots belong to their live preparations" {
     const file = try tmp.dir.createFile(std.testing.io, "prep-belong-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
     try file.sync(std.testing.io);
-    var message: protocol.MessageCommand = .{};
+    var message: wire_request.MessageCommand = .{};
     try message.key.set("prep-belong-key");
     message.session = configured.accepted.session;
     message.text = .{
@@ -3872,7 +3873,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
     defer directory.close(std.testing.io);
     const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
-    var command: protocol.ConfigureCommand = .{};
+    var command: wire_request.ConfigureCommand = .{};
     try command.key.set("encode-failure-config");
     command.configuration.workspace.state = .value;
     try command.configuration.workspace.value.set(workspace);
@@ -3891,7 +3892,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
     try file.sync(std.testing.io);
-    var message: protocol.MessageCommand = .{};
+    var message: wire_request.MessageCommand = .{};
     try message.key.set("encode-failure-key");
     message.session = configured.accepted.session;
     message.text = .{

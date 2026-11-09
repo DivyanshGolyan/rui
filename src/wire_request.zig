@@ -7,6 +7,27 @@ const protocol = @import("protocol.zig");
 const named_scratch = @import("named_scratch.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 
+/// The Host's content custody: a parsed value's bytes sit in an unlinked
+/// scratch file, charged to the Host's scratch budget until released.
+pub const Custody = struct {
+    pub const File = std.Io.File;
+    pub const Budget = ScratchBudget;
+    pub const Io = std.Io;
+
+    pub fn release(file: ?File, budget: ?Budget, charged: u64, io: Io) void {
+        if (file) |held| held.close(io);
+        if (budget) |held| held.release(charged);
+    }
+};
+
+const requests = protocol.Requests(Custody);
+pub const ContentField = requests.ContentField;
+pub const Configuration = requests.Configuration;
+pub const ConfigureCommand = requests.ConfigureCommand;
+pub const MessageCommand = requests.MessageCommand;
+pub const Request = requests.Request;
+const Parser = requests.Parser;
+
 /// Injected failures of a request's content capture.
 pub const ContentFaults = struct {
     acquire: bool = false,
@@ -40,12 +61,12 @@ pub const Ingress = struct {
     /// Live while `content_state` is `.capturing`.
     capture: ContentCapture = undefined,
     decoder: protocol.StringDecoder = .{},
-    contents: [protocol.max_request_contents]protocol.ContentField = @splat(.{}),
+    contents: [protocol.max_request_contents]ContentField = @splat(.{}),
     content_count: usize = 0,
     complete: bool = false,
     /// The one home of the parsed Request: preview and finish parse into it.
     /// After finish, the Ingress's owner borrows it until it releases the Ingress.
-    request: protocol.Request = undefined,
+    request: Request = undefined,
 
     // Initial Message combines configuration scalars and sender identity.
     // Allow worst-case escaping of both, of a full `tools` list, and of 128
@@ -63,7 +84,7 @@ pub const Ingress = struct {
     pub fn deinit(self: *Ingress) void {
         if (self.content_state == .capturing) self.capture.deinit();
         self.content_state = .metadata;
-        for (&self.contents) |*field| protocol.removeContent(field, self.options.io) catch unreachable;
+        for (&self.contents) |*field| field.removeTemporaryContent(self.options.io) catch unreachable;
         self.metadata.deinit(self.allocator);
         self.metadata = .empty;
     }
@@ -134,7 +155,7 @@ pub const Ingress = struct {
 
     fn parse(self: *Ingress) !void {
         var source: protocol.MetadataSource = .{ .input = self.metadata.items };
-        var parser = protocol.Parser{
+        var parser = Parser{
             .source = &source,
             .expected_kind = self.options.expected_kind,
             .captured = self.contents[0..self.content_count],
@@ -159,7 +180,7 @@ pub const Ingress = struct {
 
     /// Parses the complete body into `request`, moves the captured content
     /// into it, and returns it.
-    pub fn finish(self: *Ingress) !*protocol.Request {
+    pub fn finish(self: *Ingress) !*Request {
         if (self.received != self.options.content_length) return error.UnexpectedEndOfBody;
         self.parse() catch |err| switch (err) {
             error.NeedInput, error.NeedContent => return error.UnexpectedEndOfBody,
@@ -172,7 +193,7 @@ pub const Ingress = struct {
         var moved: usize = 0;
         switch (request.*) {
             .configure => |*command| {
-                for ([_]*protocol.ContentField{ &command.configuration.instructions, &command.configuration.output_schema }) |field| {
+                for ([_]*ContentField{ &command.configuration.instructions, &command.configuration.output_schema }) |field| {
                     if (field.state != .value) continue;
                     self.take(field);
                     moved += 1;
@@ -192,7 +213,7 @@ pub const Ingress = struct {
         return request;
     }
 
-    fn take(self: *Ingress, field: *protocol.ContentField) void {
+    fn take(self: *Ingress, field: *ContentField) void {
         const index = field.capture - 1;
         field.* = self.contents[index];
         self.contents[index] = .{};
@@ -253,7 +274,7 @@ const ContentCapture = struct {
         self.transferred = false;
     }
 
-    fn seal(self: *ContentCapture) !protocol.ContentField {
+    fn seal(self: *ContentCapture) !ContentField {
         if (self.options.content_faults.write) return error.InjectedContentWriteFailure;
         try self.sink.finish();
         if (self.options.content_faults.seal) return error.InjectedContentSealFailure;
@@ -348,7 +369,7 @@ const ContentSink = struct {
 };
 
 /// Captures one JSON string the way Ingress.feed does, into `field`.
-fn captureForTest(field: *protocol.ContentField, options: ParseOptions, ordinal: u8, json: []const u8) !void {
+fn captureForTest(field: *ContentField, options: ParseOptions, ordinal: u8, json: []const u8) !void {
     std.debug.assert(json[0] == '"');
     var capture: ContentCapture = undefined;
     try capture.init(options, ordinal);
@@ -367,8 +388,8 @@ test "captured content cleanup closes sealed custody" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(std.testing.io, "content", .{ .read = true });
-    var content: protocol.ContentField = .{ .state = .value, .file = file };
-    try protocol.removeContent(&content, std.testing.io);
+    var content: ContentField = .{ .state = .value, .file = file };
+    try content.removeTemporaryContent(std.testing.io);
     try std.testing.expect(!content.hasFile());
 }
 
@@ -440,16 +461,16 @@ test "configuration content sealing peaks at four descriptors with its socket" {
         .request_number = 1,
         .retained_scratch = &retained,
     };
-    var instructions = protocol.ContentField{};
-    errdefer protocol.removeContent(&instructions, io) catch unreachable;
-    var output_schema = protocol.ContentField{};
-    errdefer protocol.removeContent(&output_schema, io) catch unreachable;
+    var instructions = ContentField{};
+    errdefer instructions.removeTemporaryContent(io) catch unreachable;
+    var output_schema = ContentField{};
+    errdefer output_schema.removeTemporaryContent(io) catch unreachable;
     try captureForTest(&instructions, options, 1, "\"instructions\"");
     try captureForTest(&output_schema, options, 2, "\"schema\"");
     try std.testing.expectEqual(@as(usize, 4), 1 + Probe.maximum_live_files);
     try std.testing.expectEqual(@as(usize, 0), Probe.directory_opens);
-    try protocol.removeContent(&output_schema, io);
-    try protocol.removeContent(&instructions, io);
+    try output_schema.removeTemporaryContent(io);
+    try instructions.removeTemporaryContent(io);
     try std.testing.expectEqual(@as(usize, 0), Probe.live_files);
 }
 
@@ -483,7 +504,7 @@ test "ingress charges decoded growth and transfers file charge through cleanup" 
     var used = std.atomic.Value(u64).init(0);
     var retained: ?named_scratch.Owner = null;
     for ([_][]const u8{ "\"abc\"", "\"\\u0061\\u0062\\u0063\"" }, 0..) |json, ordinal| {
-        var field = protocol.ContentField{};
+        var field = ContentField{};
         try captureForTest(&field, .{
             .io = io,
             .content_length = 999999,
@@ -494,7 +515,7 @@ test "ingress charges decoded growth and transfers file charge through cleanup" 
         }, 1, json);
         try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
         try std.testing.expectEqual(@as(u64, 3), field.length);
-        try protocol.removeContent(&field, io);
+        try field.removeTemporaryContent(io);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
     const file = try tmp.dir.createFile(io, "bounded", .{});
@@ -536,12 +557,12 @@ test "failed ingress unlink retains an actionable owner and only the affected ch
     try tmp.dir.deleteFile(io, "good");
     const budget = ScratchBudget{ .used = &used, .limit = 8 };
     try std.testing.expect(budget.charge(2));
-    var good_field = protocol.ContentField{ .file = good_file, .scratch_budget = budget, .charged = 2 };
-    var field = protocol.ContentField{};
+    var good_field = ContentField{ .file = good_file, .scratch_budget = budget, .charged = 2 };
+    var field = ContentField{};
     try std.testing.expectError(error.AccessDenied, captureForTest(&field, options, 1, json));
     try std.testing.expect(!field.hasFile());
     try std.testing.expectEqual(@as(u64, 5), used.load(.acquire));
-    try protocol.removeContent(&good_field, io);
+    try good_field.removeTemporaryContent(io);
     try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
     try std.testing.expectEqual(@as(u64, 3), (try tmp.dir.statFile(io, "request-1-1.tmp", .{})).size);
     try std.testing.expect(retained != null);
@@ -573,8 +594,8 @@ test "ingress unknown write failure keeps submitted charge until close" {
     try std.testing.expectError(error.NoSpaceLeft, sink.finish());
     try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
     try tmp.dir.deleteFile(io, "failed");
-    var field = protocol.ContentField{ .file = file, .scratch_budget = sink.scratch_budget, .charged = sink.charged };
-    try protocol.removeContent(&field, io);
+    var field = ContentField{ .file = file, .scratch_budget = sink.scratch_budget, .charged = sink.charged };
+    try field.removeTemporaryContent(io);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
@@ -768,7 +789,7 @@ test "incremental ingress preserves grammar and releases both captures after lat
                 // A mismatched kind must fail before file acquisition.
                 .content_faults = .{ .acquire = case.kind != .configure },
             });
-            const result: anyerror!*protocol.Request = blk: {
+            const result: anyerror!*Request = blk: {
                 ingress.feed(case.bytes[0..split]) catch |err| break :blk err;
                 ingress.feed(case.bytes[split..]) catch |err| break :blk err;
                 break :blk ingress.finish();
@@ -779,7 +800,7 @@ test "incremental ingress preserves grammar and releases both captures after lat
                 const request = try result;
                 try std.testing.expectEqual(@as(u64, 8), used.load(.acquire));
                 try std.testing.expectEqual(index == 1, request.configure.require_model);
-                const fields = [_]protocol.ContentField{ request.configure.configuration.instructions, request.configure.configuration.output_schema };
+                const fields = [_]ContentField{ request.configure.configuration.instructions, request.configure.configuration.output_schema };
                 const expected = [_][]const u8{ "first\n", "{}" };
                 for (fields, expected) |field, bytes| {
                     var buffer: [8]u8 = undefined;
@@ -836,7 +857,7 @@ test "a request's members may come in any order, and its content lands in its ow
             try std.testing.expect(request.configure.require_model);
             try std.testing.expectEqualStrings("Map", configuration.label.value.slice());
             try std.testing.expectEqual(@as(u2, 1), configuration.tools.count);
-            const fields = [_]protocol.ContentField{ configuration.instructions, configuration.output_schema };
+            const fields = [_]ContentField{ configuration.instructions, configuration.output_schema };
             for (fields, [_][]const u8{ "first\n", "{}" }) |field, expected| {
                 var buffer: [8]u8 = undefined;
                 const count = try field.file.?.readPositionalAll(io, &buffer, 0);
