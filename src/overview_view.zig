@@ -77,8 +77,8 @@ pub const upgrade_poll_ms = 16;
 /// A generated request handle, as `rui request recover` takes it.
 pub const max_handle_bytes = 36;
 
-pub const Group = enum { yours, active, queued, idle, finished, ended };
-pub const Mark = enum { active, queued, waiting, finished, failed, stopped };
+pub const Group = enum { needs_you, yours, active, idle, finished, ended };
+pub const Mark = enum { needs_you, active, queued, waiting, finished, failed, stopped };
 /// Text roles. Each skin's `palettes` entry gives each its colour; without
 /// colour every role draws in the terminal's own.
 pub const Colour = enum {
@@ -116,9 +116,8 @@ pub const Rule = struct {
     /// The model or a tool is at work, so your own row's mark turns the
     /// spinner. A retry counting down or a stop holds still.
     spins: bool = false,
-    /// A failed or stopped row names the Session that sent its first
-    /// Message, by Label, else reference.
-    starter: bool = false,
+    /// A failed row names its failure's cause.
+    cause: bool = false,
     /// Ctrl-X may stop a Session in this state.
     stoppable: bool,
 };
@@ -126,18 +125,19 @@ pub const Rule = struct {
 /// The one per-kind table. `step` and `render` read it and switch on no kind.
 pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
     .idle = .{ .group = .idle, .mark = .waiting, .colour = .normal, .word = "idle", .stoppable = false },
-    .pending = .{ .group = .queued, .mark = .queued, .colour = .normal, .stoppable = true },
+    .pending = .{ .group = .active, .mark = .queued, .colour = .quiet, .stoppable = true },
     .working = .{ .group = .active, .mark = .active, .colour = .ink, .spins = true, .stoppable = true },
     .retrying = .{ .group = .active, .mark = .active, .colour = .ink, .says = true, .stoppable = true },
     .bash = .{ .group = .active, .mark = .active, .colour = .ink, .says = true, .spins = true, .stoppable = true },
-    .approval = .{ .group = .active, .mark = .waiting, .colour = .normal, .says = true, .stoppable = true },
+    .approval = .{ .group = .needs_you, .mark = .needs_you, .colour = .attention, .stoppable = true },
     .stopping = .{ .group = .active, .mark = .active, .colour = .ink, .says = true, .stoppable = false },
     .finished = .{ .group = .finished, .mark = .finished, .colour = .mark, .word = "finished", .stoppable = false },
-    .failed = .{ .group = .ended, .mark = .failed, .colour = .failure, .word = "failed", .starter = true, .stoppable = false },
-    .stopped = .{ .group = .ended, .mark = .stopped, .colour = .normal, .word = "stopped", .starter = true, .stoppable = false },
+    .failed = .{ .group = .ended, .mark = .failed, .colour = .failure, .word = "failed", .cause = true, .stoppable = false },
+    .stopped = .{ .group = .ended, .mark = .stopped, .colour = .normal, .word = "stopped", .stoppable = false },
 });
 
 pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii: []const u8 }).init(.{
+    .needs_you = .{ .unicode = "?", .ascii = "?" },
     .active = .{ .unicode = "●", .ascii = "*" },
     .queued = .{ .unicode = "◌", .ascii = ":" },
     .waiting = .{ .unicode = "○", .ascii = "o" },
@@ -151,9 +151,9 @@ pub const spinner = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 
 /// `under_way`: its rows' work is under way, so the headline says "Running."
 pub const groups = std.enums.EnumArray(Group, struct { title: []const u8, help: []const u8 = "", folds: bool, under_way: bool = false }).init(.{
+    .needs_you = .{ .title = "Needs you", .folds = false },
     .yours = .{ .title = "Yours", .folds = false },
     .active = .{ .title = "Active", .folds = false, .under_way = true },
-    .queued = .{ .title = "Queued", .folds = false, .under_way = true },
     .idle = .{ .title = "Idle", .folds = false },
     .finished = .{ .title = "Finished", .folds = true },
     .ended = .{ .title = "Stopped or failed", .folds = true },
@@ -325,6 +325,14 @@ pub const FirstLine = struct {
 };
 
 /// What host-info says of the serving Host.
+/// Bytes in a mebibyte, the unit memory shows in below a gibibyte.
+pub const mib = 1024 * 1024;
+
+/// Live physical memory, as the shell reads it about once a second:
+/// `rui` is this TUI plus its Host; `tools` the tool processes the Host
+/// runs, null while none runs.
+pub const Memory = struct { rui: u64, tools: ?u64 };
+
 pub const Host = struct {
     /// Unix seconds.
     started_at: u64,
@@ -386,6 +394,10 @@ pub const Event = union(enum) {
     open: Reference,
     /// The Host's facts, read as a listing starts; null when it gave none.
     host: ?Host,
+    /// A memory read ended.
+    memory: Memory,
+    /// A needs-you row's command read ended.
+    command: CommandText,
     conversed: Conversed,
     /// A model-list read ended.
     models: ModelsRead,
@@ -568,6 +580,28 @@ pub const ConversationInput = union(enum) { other, stop, archive: ArchiveState, 
 pub const Conversed = struct { reference: Reference, work: Kind, input: ConversationInput };
 
 pub const Read = struct { reference: Reference, position: u64, admission: u64 };
+
+/// A needs-you row's waiting Action, whose command the shell reads with
+/// `read_action_arguments`.
+pub const CommandRead = struct { reference: Reference, action: u64 };
+pub const Commands = struct {
+    items: [max_first_line_reads]CommandRead = undefined,
+    len: usize = 0,
+
+    pub fn slice(self: *const Commands) []const CommandRead {
+        return self.items[0..self.len];
+    }
+};
+
+/// A command read's answer: the Action's command, or null when the read
+/// failed or its tool has no command to show.
+pub const CommandText = struct {
+    reference: Reference,
+    action: u64,
+    text: ?[]const u8,
+    /// No answer came, as when the Host is down: the next listing asks again.
+    unanswered: bool = false,
+};
 pub const Reads = struct {
     items: [max_first_line_reads]Read = undefined,
     len: usize = 0,
@@ -582,6 +616,9 @@ pub const Effect = union(enum) {
     /// from the last completed listing's token.
     list: ?Token,
     read_first_lines: Reads,
+    /// Read the commands of these needs-you rows' waiting Actions, and
+    /// answer each with `command`.
+    read_commands: Commands,
     start: StartRequest,
     open: Reference,
     stop: Reference,
@@ -676,7 +713,7 @@ pub const Alert = struct { name: []const u8, kind: attention.Kind, more: usize }
 
 /// Each event brings at most two effects today; the shell runs them in order.
 pub const Effects = struct {
-    items: [2]Effect = undefined,
+    items: [3]Effect = undefined,
     len: usize = 0,
 
     pub fn slice(self: *const Effects) []const Effect {
@@ -863,14 +900,29 @@ pub const Row = struct {
     first: ?First,
     from_person_at: ?u64,
     line: Line = .unread,
+    /// The command of the Action `first_action` names, while the row
+    /// needs you.
+    command: Line = .unread,
 
     /// What the listing said of the row's work, as `attention.observe` reads it.
     fn work(self: *const Row) session_work.Work {
         return .{ .state = self.state, .turn = self.turn, .first_action = self.first_action };
     }
 
+    /// An Action waiting on the person leads, whoever started the
+    /// Session; Yours keeps the rest of your own.
     pub fn group(self: *const Row) Group {
+        if (self.needsYou()) return .needs_you;
         return if (self.from_person_at != null) .yours else rules.get(self.state).group;
+    }
+
+    /// An Action awaits a decision: alone, or beside running Bash.
+    pub fn needsYou(self: *const Row) bool {
+        return switch (self.state) {
+            .approval => true,
+            .bash => |bash| bash.approvals != 0,
+            else => false,
+        };
     }
 };
 
@@ -929,6 +981,8 @@ pub const State = struct {
     left: bool = false,
     /// The serving Host's facts, from the latest host-info read.
     host: ?Host = null,
+    /// The latest memory read; null before the first.
+    memory: ?Memory = null,
 
     /// The person's default for new Sessions. A pick replaces it at once,
     /// and a save follows it to the preferences file. `nextBinding` says
@@ -1391,7 +1445,11 @@ pub const State = struct {
     }
 };
 
+/// What the counts line shows, one count per mark.
+pub const Counts = struct { needs_you: usize = 0, working: usize = 0, queued: usize = 0, failed: usize = 0 };
+
 pub const Summary = struct {
+    counts: Counts = .{},
     /// A row works: its state's group has work under way, whatever its section.
     working: bool = false,
     approvals: usize = 0,
@@ -1633,6 +1691,8 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             effects.add(.{ .open = ref });
         },
         .host => |facts| state.host = facts,
+        .memory => |memory| state.memory = memory,
+        .command => |answer| try commandRead(state, answer),
         .models => |read| readModels(state, read),
         .ran => |ran| try ranCommand(state, ran),
         .saved => |answer| {
@@ -1843,6 +1903,7 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
     state.listing = false;
     state.upgrade_pending = false;
     try readFirstLines(state, effects);
+    readCommands(state, effects);
 }
 
 const Newsworthy = struct { reference: Reference, kind: attention.Kind, more: usize };
@@ -1947,6 +2008,8 @@ fn carry(state: *State, incoming: *Row, old: *const Row) void {
     // unreadable or asked for, still holds.
     const same = if (incoming.first) |first| if (old.first) |known| first.admission == known.admission else false else false;
     if (same) incoming.line = old.line;
+    // The same waiting Action has the same command.
+    if (incoming.first_action != null and incoming.first_action == old.first_action) incoming.command = old.command;
     retitle(state, incoming, title(state, old).text);
 }
 
@@ -2013,14 +2076,18 @@ fn arrange(state: *State) error{OutOfMemory}!void {
         state.summary.approvals += @intFromBool(row.state == .approval);
         state.summary.latest = @max(state.summary.latest, row.state.since());
         if (row.group() == .yours and row.state != .finished) state.summary.answered = false;
-        const age: u128 = latest - @min(row.state.since(), latest);
-        key.* = .{ .key = @as(u128, @backingInt(row.group())) << 82 | age << 48 | referenceKey(row.reference), .index = @intCast(at) };
+        const queued = shownKind(state, row) == .pending;
+        // Work first, newest first; then queued rows, longest wait first.
+        const since = @min(shownSince(state, row), latest);
+        const age: u128 = if (queued) since else latest - since;
+        key.* = .{ .key = @as(u128, @backingInt(row.group())) << 83 | @as(u128, @intFromBool(queued)) << 82 | age << 48 | referenceKey(row.reference), .index = @intCast(at) };
     }
     std.mem.sortUnstable(SortKey, state.sort_keys.items, {}, struct {
         fn less(_: void, a: SortKey, b: SortKey) bool {
             return a.key < b.key;
         }
     }.less);
+    state.summary.counts = counts(state);
     state.order.items.len = rows.len;
     state.runs = .initFill(.{});
     for (state.order.items, state.sort_keys.items, 0..) |*slot, key, at| {
@@ -2032,6 +2099,19 @@ fn arrange(state: *State) error{OutOfMemory}!void {
     if (state.selectedRow()) |row| {
         if (!visible(state, position(state, row.reference).?)) state.unfolded.insert(row.group());
     } else if (state.selected == null and rows.len != 0) state.selected = rows[state.order.items[0]].reference;
+}
+
+/// How many rows show each mark the counts line counts.
+fn counts(state: *const State) Counts {
+    var result: Counts = .{};
+    for (state.rows.items) |*row| switch (rules.get(shownKind(state, row)).mark) {
+        .needs_you => result.needs_you += 1,
+        .active => result.working += 1,
+        .queued => result.queued += 1,
+        .failed => result.failed += 1,
+        .waiting, .finished, .stopped => {},
+    };
+    return result;
 }
 
 fn folded(state: *const State, group: Group) bool {
@@ -2061,6 +2141,38 @@ fn readFirstLines(state: *State, effects: *Effects) error{OutOfMemory}!void {
         reads.len += 1;
     }
     if (reads.len != 0) effects.add(.{ .read_first_lines = reads });
+}
+
+/// Asks for the commands of up to eight needs-you rows not yet read.
+fn readCommands(state: *State, effects: *Effects) void {
+    var reads: Commands = .{};
+    for (state.order.items) |at| {
+        if (reads.len == reads.items.len) break;
+        const row = &state.rows.items[at];
+        if (!row.needsYou() or row.command != .unread) continue;
+        const action = row.first_action orelse continue;
+        row.command = .requested;
+        reads.items[reads.len] = .{ .reference = row.reference, .action = action };
+        reads.len += 1;
+    }
+    if (reads.len != 0) effects.add(.{ .read_commands = reads });
+}
+
+/// Keeps a command's first line for the row still waiting on that Action.
+fn commandRead(state: *State, answer: CommandText) error{OutOfMemory}!void {
+    const at = lookup(state.by_reference.items, answer.reference) orelse return;
+    const row = &state.rows.items[at];
+    if (row.command != .requested or row.first_action != answer.action) return;
+    if (answer.unanswered) {
+        row.command = .unread;
+        return;
+    }
+    const bytes = answer.text orelse {
+        row.command = .unavailable;
+        return;
+    };
+    try state.lines.append(state.gpa, session_line.cut(max_line_bytes, session_line.firstLine(bytes)));
+    row.command = .{ .read = @intCast(state.lines.items.len - 1) };
 }
 
 fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
@@ -2226,7 +2338,14 @@ fn stoppable(state: *const State, ref: Reference, work: Kind) bool {
 /// The kind a row shows, with a retry that has fallen due as the work it
 /// became.
 fn shownKind(state: *const State, row: *const Row) Kind {
+    if (state.openStop(row.reference) == null and row.needsYou()) return .approval;
     return kindShown(state, row.reference, row.state.asOf(state.now_ms));
+}
+
+/// When the row's shown state began: a retry that has fallen due waits
+/// from its due time.
+fn shownSince(state: *const State, row: *const Row) u64 {
+    return row.state.asOf(state.now_ms).since();
 }
 
 /// What a row's work is doing now, as `shownKind` reads it; null for idle or
@@ -3829,7 +3948,7 @@ fn list(painter: *Painter, state: *const State, lines: [][]const Span) error{Out
         line.* = switch (item) {
             .gap => &.{},
             .heading => |group| try heading(painter, group, state.runs.get(group).len),
-            .row => |at| try rowLine(painter, state, at, columns),
+            .row => |at| try rowLine(painter, state, at, columns, .painted),
             .more => |more| try moreLine(painter, more),
         };
     }
@@ -3956,10 +4075,10 @@ const Columns = struct {
     }
 };
 
-fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) error{OutOfMemory}![]const Span {
+fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns, selection: enum { painted, unpainted }) error{OutOfMemory}![]const Span {
     const row = &state.rows.items[state.order.items[at]];
     const selected = if (state.selected) |*ref| std.mem.eql(u8, ref, &row.reference) else false;
-    painter.begin(selected);
+    painter.begin(selected and selection == .painted);
     const kind = shownKind(state, row);
     const rule = rules.get(kind);
     var words: [work_line.max_words_bytes]u8 = undefined;
@@ -3998,19 +4117,120 @@ fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) 
     const overflow = painter.measure(text) -| (word_end -| columns.word);
     const word_column = @max(columns.word -| overflow, @min(columns.word, Columns.title + Columns.min_title + 2));
     const workspace_cells = if (word_column < columns.word) 0 else @min(painter.measure(workspace), columns.workspace);
-    const title_end = (word_column -| 2) -| (if (workspace_cells == 0) 0 else workspace_cells + 2);
+    // Without a detail column the title still leaves the age its room.
+    const title_end = @min((word_column -| 2) -| (if (workspace_cells == 0) 0 else workspace_cells + 2), word_end -| 1);
     _ = try painter.put(Columns.title, row_title, title_end -| Columns.title, .{ .colour = title_colour, .bold = yours and !faded });
     _ = try painter.putTail(title_end + 2, workspace, workspace_cells, .{ .colour = if (faded) .quiet else .normal });
 
     if (columns.word != columns.end) {
         // Colour only for what needs the person, or quiet as the work asks.
         const settled: Colour = if (rule.colour == .failure) .failure else .normal;
-        const tone = if (faded) .quiet else if (line) |shown| toneColour(shown.tone, .normal) else settled;
+        // A needs-you row's command is plain: the mark already asks.
+        const tone = if (faded) .quiet else if (row.needsYou()) .normal else if (line) |shown| toneColour(shown.tone, .normal) else settled;
         _ = try painter.put(word_column, text, word_end -| word_column, .{ .colour = tone });
     }
     var buffer: [8]u8 = undefined;
     try painter.putRight(columns.end, ageText(&buffer, (state.now_ms / 1000) -| row.state.since()), .{ .colour = .quiet });
     return painter.finish();
+}
+
+/// The Session row at `at` in screen order, laid out for `width` cells as
+/// segments that fill the width, so a list draws it as given. The list
+/// marks the selection; the segments never do. Allocates from `arena`.
+pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}![]const Segment {
+    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = frame };
+    const spans = try rowLine(&painter, state, at, Columns.of(width), .unpainted);
+    return segmentsOf(arena, spans, width, .{});
+}
+
+/// `spans` as segments that fill `width` cells, gaps in `fill`.
+fn segmentsOf(arena: Allocator, spans: []const Span, width: u16, fill: Style) error{OutOfMemory}![]const Segment {
+    const segments = try arena.alloc(Segment, spans.len * 2 + 1);
+    var count: usize = 0;
+    var column: usize = 0;
+    for (spans) |span| {
+        if (span.column > column) {
+            segments[count] = .{ .text = try blankCells(arena, span.column - column), .style = fill };
+            count += 1;
+        }
+        segments[count] = .{ .text = span.text, .style = span.style };
+        count += 1;
+        column = @as(usize, span.column) + span.cells;
+    }
+    if (width > column) {
+        segments[count] = .{ .text = try blankCells(arena, width - column), .style = fill };
+        count += 1;
+    }
+    return segments[0..count];
+}
+
+/// The overview's top line: the wordmark, then each mark's count where it
+/// is not zero, with the model slots while a Session waits for one; on the
+/// right, live memory and the archive view when it is not the default.
+/// Memory drops first on a narrow screen, `rui` before `tools`.
+pub fn countsSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
+    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
+    painter.begin(false);
+    const bar: Style = .{ .background = .bar };
+    const end = painter.width -| 1;
+    var column: usize = 1;
+    // रुई beside rui, as on a station board; ASCII has rui alone.
+    const wordmark: Style = .{ .colour = .strong, .background = .bar, .bold = true };
+    if (caps.unicode) column += try painter.put(column, "रुई", end -| column, wordmark) + 1;
+    column += try painter.put(column, "rui", end -| column, wordmark);
+    const counts_ = state.summary.counts;
+    const shown = [_]struct { Mark, usize, Colour }{
+        .{ .needs_you, counts_.needs_you, .attention },
+        .{ .active, counts_.working, .normal },
+        .{ .queued, counts_.queued, .normal },
+        .{ .failed, counts_.failed, .failure },
+    };
+    for (shown) |entry| {
+        const mark, const count, const colour = entry;
+        if (count == 0) continue;
+        const glyph = if (caps.unicode) marks.get(mark).unicode else marks.get(mark).ascii;
+        var number: [32]u8 = undefined;
+        const text = if (mark == .queued and state.host != null)
+            try std.fmt.allocPrint(arena, "{s} {s} {s} slots {d}/{d}", .{ glyph, grouped(&number, count), painter.glyphs.dot, state.host.?.slots_in_use, state.host.?.slots })
+        else
+            try std.fmt.allocPrint(arena, "{s} {s}", .{ glyph, grouped(&number, count) });
+        column = column + 2 + try painter.put(column + 2, text, end -| (column + 2), .{ .colour = colour, .background = .bar });
+    }
+    // The right side, widest first, dropping what does not fit.
+    const view: []const u8 = if (state.archive == .active) "" else archiveViewName(state.archive);
+    var rui_buffer: [16]u8 = undefined;
+    var tools_buffer: [16]u8 = undefined;
+    const choices: [3][]const u8 = if (state.memory) |memory| choices: {
+        const rui = try std.fmt.allocPrint(arena, "rui {s}", .{sizeText(&rui_buffer, memory.rui)});
+        const tools = if (memory.tools) |bytes| try std.fmt.allocPrint(arena, "tools {s}", .{sizeText(&tools_buffer, bytes)}) else "";
+        break :choices if (tools.len == 0) .{ rui, "", "" } else .{ try std.fmt.allocPrint(arena, "{s} {s} {s}", .{ rui, painter.glyphs.dot, tools }), tools, "" };
+    } else .{ "", "", "" };
+    for (choices) |memory| {
+        const text = if (memory.len == 0) view else if (view.len == 0) memory else try std.fmt.allocPrint(arena, "{s}  {s}", .{ memory, view });
+        const cells = painter.measure(text);
+        if (text.len != 0 and column + 2 + cells > end) continue;
+        try painter.pad(end -| cells, bar);
+        try painter.putRight(end, text, bar);
+        break;
+    }
+    try painter.pad(painter.width, bar);
+    return segmentsOf(arena, try painter.finish(), width, bar);
+}
+
+/// Memory in whole mebibytes, or gibibytes to a tenth, as `42 MB` or `1.8 GB`.
+fn sizeText(buffer: *[16]u8, bytes: u64) []const u8 {
+    const gib = 1024 * mib;
+    if (bytes >= gib) {
+        const tenths = (bytes / (gib / 10)) + @intFromBool(bytes % (gib / 10) >= gib / 20);
+        return std.fmt.bufPrint(buffer, "{d}.{d} GB", .{ tenths / 10, tenths % 10 }) catch unreachable;
+    }
+    return std.fmt.bufPrint(buffer, "{d} MB", .{(bytes + mib / 2) / mib}) catch unreachable;
+}
+
+fn blankCells(arena: Allocator, cells: usize) error{OutOfMemory}![]const u8 {
+    const bytes = try arena.alloc(u8, cells);
+    @memset(bytes, ' ');
+    return bytes;
 }
 
 /// The row title: its Label, else the first line of its first Message (a
@@ -4028,34 +4248,47 @@ fn toneColour(tone: work_line.Tone, neutral: Colour) Colour {
     };
 }
 
-/// Bytes the row's word takes at most: work's words and its clock, or an
-/// ended state's word naming its starter by quoted Label or reference.
-const max_word_bytes = max: {
-    var said = 0;
-    for (rules.values) |rule| if (rule.word) |text| {
-        said = @max(said, text.len);
-    };
-    const starter = said + " ".len + work_line.max_dot_bytes + " for ".len + @max("\"\"".len + max_label_bytes, @sizeOf(Reference));
-    break :max @max(work_line.max_words_bytes + work_line.max_clock_bytes, starter);
-};
+/// Bytes the row's word takes at most: work's words and its clock, or a
+/// failure's cause or saved code.
+const max_word_bytes = @max(work_line.max_words_bytes + work_line.max_clock_bytes, session_work.max_code_bytes);
 
-/// What the row says beside its title, only where the mark and the group
-/// leave something out: work that needs the person or explains a wait, in
-/// the conversation's words, or the Session that started a failed or
-/// stopped one. Otherwise nothing.
+/// What the row says in its detail column, only where the mark and the
+/// group leave something out: a wait's countdown, work that explains a
+/// wait, or a failure's cause. Otherwise nothing.
 fn word(buffer: *[max_word_bytes]u8, state: *const State, row: *const Row, rule: Rule, line: ?work_line.Line, script: work_line.Script) []const u8 {
     if (row.archive_state == .archiving) return "Stopping and archiving";
+    // A needs-you row names the command its Action would run, once read.
+    if (row.needsYou() and state.openStop(row.reference) == null) return switch (row.command) {
+        .read => |index| state.lines.items[index].slice(),
+        else => "",
+    };
     if (line) |shown| {
         if (!rule.says) return "";
         var clock: [work_line.max_clock_bytes]u8 = undefined;
         return std.fmt.bufPrint(buffer, "{s}{s}", .{ shown.words, work_line.clockText(&clock, shown.clock, .row, script) }) catch unreachable;
     }
-    if (!rule.starter) return "";
-    const said = rule.word.?;
-    const dot = work_line.glyphs.get(script).dot;
-    const sender = (row.first orelse return "").sender orelse return "";
-    if (state.find(sender)) |starter| if (starter.label) |*text| return std.fmt.bufPrint(buffer, "{s} {s} for \"{s}\"", .{ said, dot, text.slice() }) catch unreachable;
-    return std.fmt.bufPrint(buffer, "{s} {s} for {s}", .{ said, dot, &sender }) catch unreachable;
+    if (!rule.cause) return "";
+    return switch (row.state) {
+        .failed => |*failed| causeOf(failed.code.slice()),
+        else => "",
+    };
+}
+
+/// A failure's cause in a few words, else its saved code.
+fn causeOf(code: []const u8) []const u8 {
+    return switch (failure_class.of(code)) {
+        .policy => "Refused by the provider",
+        .quota => "Out of quota",
+        .plan => "Model not in plan",
+        .model => "Model not served",
+        .sign_in => "Sign-in expired",
+        .api_key => "API key rejected",
+        .overflow => "Context full",
+        .unreachable_provider => "Provider unreachable",
+        .retries_exhausted => "Retries ran out",
+        .interrupted => "Interrupted",
+        .refused, .other => code,
+    };
 }
 
 /// Compact age: 42s, 7m, 3h, 12d.
@@ -4188,6 +4421,14 @@ fn submit(state: *State, draft: Draft) !Effects {
     return step(state, .{ .composed = .{ .input = input, .draft = draft } });
 }
 
+/// One needs-you row's command read.
+fn commandReadOf(ref: *const [6]u8, action: u64) Effect {
+    var reads: Commands = .{};
+    reads.items[0] = .{ .reference = ref.*, .action = action };
+    reads.len = 1;
+    return .{ .read_commands = reads };
+}
+
 fn expectEffects(expected: []const Effect, actual: Effects) !void {
     const effects = actual.slice();
     try std.testing.expectEqual(expected.len, effects.len);
@@ -4233,6 +4474,13 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                 try std.testing.expectEqual(command.name, got.command.name);
                 try std.testing.expectEqualStrings(command.text, got.command.text);
                 try std.testing.expectEqual(command.session, got.command.session);
+            },
+            .read_commands => |reads| {
+                try std.testing.expectEqual(reads.len, got.read_commands.len);
+                for (reads.slice(), got.read_commands.slice()) |x, y| {
+                    try std.testing.expectEqualStrings(&x.reference, &y.reference);
+                    try std.testing.expectEqual(x.action, y.action);
+                }
             },
             .list_models, .clear_draft, .upgrade, .exit => {},
         }
@@ -4411,6 +4659,302 @@ test "each heading counts its group, and Yours takes a Session from the group it
     // A queued row shows its own mark, under Yours too, and no word.
     try std.testing.expect(std.mem.indexOf(u8, text, "  ◌ Mine, waiting                                                            9s\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Waiting for a slot                                                       5s\n") != null);
+}
+
+/// Each group's labels, in screen order.
+fn expectGroups(state: *const State, expected: []const struct { Group, []const []const u8 }) !void {
+    var seen: usize = 0;
+    for (expected) |entry| {
+        const group, const labels = entry;
+        const run = state.runs.get(group);
+        try std.testing.expectEqual(labels.len, run.len);
+        for (labels, state.order.items[run.start..][0..run.len]) |label, index| {
+            try std.testing.expectEqualStrings(label, state.rows.items[index].label.?.slice());
+        }
+        seen += run.len;
+    }
+    try std.testing.expectEqual(state.rows.items.len, seen);
+}
+
+test "a Session waiting on an Action leads in Needs you, yours or not, and Yours keeps the rest" {
+    const beside_bash: WorkState = .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 1 } };
+    const running_bash: WorkState = .{ .bash = .{ .since = test_now_s - 20, .call = 0, .description = bounded(max_label_bytes, "Run the store tests"), .running = 1, .approvals = 0 } };
+    var state = try opened(&.{
+        session("y0urs1", .{ .working = ago(40) }, .{ .label = "Mine, thinking", .yours = true }),
+        session("y0urs2", .{ .approval = ago(9) }, .{ .label = "Mine, asking", .yours = true }),
+        session("a5k1ng", .{ .approval = ago(5) }, .{ .label = "Theirs, asking" }),
+        session("b4sh01", beside_bash, .{ .label = "Theirs, asking beside Bash" }),
+        session("b4sh02", running_bash, .{ .label = "Theirs, running Bash" }),
+        session("f1n1sh", .{ .finished = ago(60) }, .{ .label = "Theirs, finished" }),
+    });
+    defer state.deinit();
+    // Newest wait first, as every group orders its rows; your own wait
+    // leaves Yours for Needs you.
+    try expectGroups(&state, &.{
+        .{ .needs_you, &.{ "Theirs, asking", "Mine, asking", "Theirs, asking beside Bash" } },
+        .{ .yours, &.{"Mine, thinking"} },
+        .{ .active, &.{"Theirs, running Bash"} },
+        .{ .finished, &.{"Theirs, finished"} },
+    });
+    try std.testing.expectEqualStrings("Needs you", groups.get(.needs_you).title);
+    // The list opens on what needs you.
+    try std.testing.expectEqualStrings("a5k1ng", &state.selected.?);
+}
+
+test "queued rows sit last in their group, longest wait first, after work newest first" {
+    // A retry already due waits for a slot as a queued Session does.
+    const due: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 - 2_000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
+    const later: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 18) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
+    var state = try opened(&.{
+        session("q00010", .{ .pending = ago(10) }, .{ .label = "Queued 10s" }),
+        session("w00040", .{ .working = ago(40) }, .{ .label = "Working 40s" }),
+        session("q00040", .{ .pending = ago(40) }, .{ .label = "Queued 40s" }),
+        session("r3try0", later, .{ .label = "Retrying in 18s" }),
+        session("d0e000", due, .{ .label = "Retry due" }),
+        session("q00025", .{ .pending = ago(25) }, .{ .label = "Queued 25s" }),
+        session("s70p00", .{ .stopping = ago(50) }, .{ .label = "Stopping 50s" }),
+        session("y0q070", .{ .pending = ago(70) }, .{ .label = "Mine, queued 70s", .yours = true }),
+        session("y0w050", .{ .working = ago(50) }, .{ .label = "Mine, working 50s", .yours = true }),
+        session("y0f005", .{ .finished = ago(5) }, .{ .label = "Mine, finished 5s", .yours = true }),
+    });
+    defer state.deinit();
+    try expectGroups(&state, &.{
+        .{ .yours, &.{ "Mine, finished 5s", "Mine, working 50s", "Mine, queued 70s" } },
+        .{ .active, &.{ "Retrying in 18s", "Working 40s", "Stopping 50s", "Queued 40s", "Queued 25s", "Queued 10s", "Retry due" } },
+    });
+}
+
+test "the summary counts what the counts line shows by mark: needs you, working, queued and failed" {
+    const beside_bash: WorkState = .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = null, .running = 1, .approvals = 2 } };
+    const due: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 - 2_000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
+    const later: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 18) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
+    var state = try opened(&.{
+        session("a5k1ng", .{ .approval = ago(5) }, .{ .label = "Asking", .yours = true }),
+        session("b4sh01", beside_bash, .{ .label = "Asking beside Bash" }),
+        session("w00001", .{ .working = ago(40) }, .{ .label = "Working", .yours = true }),
+        session("r3try0", later, .{ .label = "Retrying" }),
+        session("s70p00", .{ .stopping = ago(8) }, .{ .label = "Stopping" }),
+        session("q00001", .{ .pending = ago(10) }, .{ .label = "Queued" }),
+        session("q00002", .{ .pending = ago(20) }, .{ .label = "Mine, queued", .yours = true }),
+        session("d0e000", due, .{ .label = "Retry due" }),
+        failedRow("f4iled", 60, "provider_output_invalid", null),
+        session("s70pd0", .{ .stopped = .{ .since = test_now_s - 90, .cause = .stop } }, .{ .label = "Stopped" }),
+        session("f1n1sh", .{ .finished = ago(60) }, .{ .label = "Finished" }),
+        session("1d1e00", .{ .idle = ago(600) }, .{ .label = "Idle" }),
+    });
+    defer state.deinit();
+    try std.testing.expectEqual(Counts{ .needs_you = 2, .working = 3, .queued = 3, .failed = 1 }, state.summary.counts);
+}
+
+/// The row titled `label` as `rowSegments` gives it at `width`, unselected.
+fn rowOf(arena: Allocator, state: *State, label: []const u8, width: u16, caps: Caps) ![]const Segment {
+    for (state.order.items, 0..) |index, at| {
+        const row = &state.rows.items[index];
+        if (row.label != null and std.mem.eql(u8, row.label.?.slice(), label)) return rowSegments(arena, state, at, width, caps, 0);
+    }
+    return error.TestUnexpectedResult;
+}
+
+/// What a row says, as its non-blank segments, and the cells it fills.
+fn expectRow(segments: []const Segment, width: u16, expected: []const struct { []const u8, Colour }) !void {
+    var said: usize = 0;
+    var cells: usize = 0;
+    for (segments) |segment| {
+        // One cell per code point: these rows hold no wide text.
+        for (segment.text) |byte| cells += @intFromBool(byte & 0xc0 != 0x80);
+        const text = std.mem.trim(u8, segment.text, " ");
+        if (text.len == 0) continue;
+        try std.testing.expect(said < expected.len);
+        try std.testing.expectEqualStrings(expected[said][0], text);
+        try std.testing.expectEqual(expected[said][1], segment.style.colour);
+        said += 1;
+    }
+    try std.testing.expectEqual(expected.len, said);
+    // Padded to the width, so a list draws it as one row.
+    try std.testing.expectEqual(@as(usize, width), cells);
+}
+
+test "row segments say each state with its mark, and words only for a cause or a wait's countdown" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const later: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 18) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
+    const beside_bash: WorkState = .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 1 } };
+    const started = First{ .position = 1, .admission = 4, .sender = "a5k1ng".* };
+    var state = try opened(&.{
+        session("a5k1ng", .{ .approval = ago(120) }, .{ .label = "Fix flaky store test" }),
+        session("b4sh01", beside_bash, .{ .label = "Asking beside Bash" }),
+        session("q00001", .{ .pending = ago(10) }, .{ .label = "Check install script" }),
+        session("r3try0", later, .{ .label = "Investigate retry storm" }),
+        session("f4iled", .{ .failed = .{ .since = test_now_s - 20 * 60, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .{ .label = "Benchmark memory", .first = started }),
+        session("0ther0", .{ .failed = .{ .since = test_now_s - 60, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Odd failure", .first = started }),
+        session("s70pd0", .{ .stopped = .{ .since = test_now_s - 90, .cause = .stop } }, .{ .label = "Stopped by me", .first = started }),
+    });
+    defer state.deinit();
+    state.selected = null;
+    const a = arena.allocator();
+    // Needs you: `?` in the attention colour and no word, beside running
+    // Bash too; the command comes from the Action once read.
+    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .ink }, .{ "2m", .quiet } });
+    try expectRow(try rowOf(a, &state, "Asking beside Bash", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Asking beside Bash", .ink }, .{ "1m", .quiet } });
+    // Queued: a dim `◌`, the title and the wait, no word.
+    try expectRow(try rowOf(a, &state, "Check install script", 100, .{}), 100, &.{ .{ "◌", .quiet }, .{ "Check install script", .ink }, .{ "10s", .quiet } });
+    // A rate limit counts down without the attempt number.
+    try expectRow(try rowOf(a, &state, "Investigate retry storm", 100, .{}), 100, &.{ .{ "●", .attention }, .{ "Investigate retry storm", .ink }, .{ "Rate limited · retry in 18s", .attention }, .{ "30s", .quiet } });
+    // A failure names its cause in the failure colour, else its saved
+    // code; a stop says nothing beyond its mark, and neither names the
+    // Session that started it.
+    try expectRow(try rowOf(a, &state, "Benchmark memory", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Benchmark memory", .quiet }, .{ "Sign-in expired", .failure }, .{ "20m", .quiet } });
+    try expectRow(try rowOf(a, &state, "Odd failure", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Odd failure", .quiet }, .{ "provider_output_invalid", .failure }, .{ "1m", .quiet } });
+    try expectRow(try rowOf(a, &state, "Stopped by me", 100, .{}), 100, &.{ .{ "■", .normal }, .{ "Stopped by me", .quiet }, .{ "1m", .quiet } });
+}
+
+test "row segments drop the detail column on a narrow screen and keep mark, title and age" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var state = try opened(&.{
+        session("f4iled", .{ .failed = .{ .since = test_now_s - 20 * 60, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .{ .label = "Benchmark memory" }),
+    });
+    defer state.deinit();
+    state.selected = null;
+    try expectRow(try rowOf(arena.allocator(), &state, "Benchmark memory", 40, .{}), 40, &.{ .{ "×", .failure }, .{ "Benchmark memory", .quiet }, .{ "20m", .quiet } });
+}
+
+/// The style of the segment that holds `needle`.
+fn styleOf(segments: []const Segment, needle: []const u8) !Style {
+    for (segments) |segment| if (std.mem.indexOf(u8, segment.text, needle) != null) return segment.style;
+    return error.TestUnexpectedResult;
+}
+
+/// What a line of segments says, its non-blank pieces in order.
+fn expectLine(segments: []const Segment, width: u16, expected: []const []const u8) !void {
+    var line: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer line.deinit();
+    var cells: usize = 0;
+    const measurer: Painter = .{ .arena = undefined, .caps = .{}, .glyphs = unicode_glyphs, .width = 0, .frame = 0 };
+    for (segments) |segment| {
+        cells += measurer.measure(segment.text);
+        try line.writer.writeAll(segment.text);
+    }
+    var said: usize = 0;
+    var pieces = std.mem.tokenizeSequence(u8, line.written(), "  ");
+    while (pieces.next()) |piece| {
+        const text = std.mem.trim(u8, piece, " ");
+        if (text.len == 0) continue;
+        try std.testing.expect(said < expected.len);
+        try std.testing.expectEqualStrings(expected[said], text);
+        said += 1;
+    }
+    try std.testing.expectEqual(expected.len, said);
+    try std.testing.expectEqual(@as(usize, width), cells);
+}
+
+test "the counts line counts by mark, leaves zeros out, and colours only needs you and failures" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var state = try opened(&.{
+        session("a5k1ng", .{ .approval = ago(5) }, .{ .label = "Asking" }),
+        session("w00001", .{ .working = ago(40) }, .{ .label = "Working" }),
+        session("w00002", .{ .working = ago(30) }, .{ .label = "Working too" }),
+        failedRow("f4iled", 60, "provider_output_invalid", null),
+    });
+    defer state.deinit();
+    const line = try countsSegments(a, &state, 100, .{});
+    try expectLine(line, 100, &.{ "रुई rui", "? 1", "● 2", "× 1" });
+    try std.testing.expectEqual(Colour.attention, (try styleOf(line, "? 1")).colour);
+    try std.testing.expectEqual(Colour.normal, (try styleOf(line, "● 2")).colour);
+    try std.testing.expectEqual(Colour.failure, (try styleOf(line, "× 1")).colour);
+    // Every cell sits on the bar.
+    for (line) |segment| try std.testing.expectEqual(Background.bar, segment.style.background);
+    // ASCII: rui alone, and the ASCII marks.
+    try expectLine(try countsSegments(a, &state, 100, .{ .unicode = false }), 100, &.{ "rui", "? 1", "* 2", "x 1" });
+}
+
+test "the counts line shows the slots only while something queues, and memory on the right" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var state = try opened(&.{
+        session("w00001", .{ .working = ago(40) }, .{ .label = "Working" }),
+        session("q00001", .{ .pending = ago(10) }, .{ .label = "Queued" }),
+    });
+    defer state.deinit();
+    // No Host facts yet: the queue counts without slots.
+    try expectLine(try countsSegments(a, &state, 100, .{}), 100, &.{ "रुई rui", "● 1", "◌ 1" });
+    _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 60, .slots = 2, .slots_in_use = 2 } });
+    _ = try step(&state, .{ .memory = .{ .rui = 42 * mib, .tools = 1843 * mib } });
+    try expectLine(try countsSegments(a, &state, 100, .{}), 100, &.{ "रुई rui", "● 1", "◌ 1 · slots 2/2", "rui 42 MB · tools 1.8 GB" });
+    // Nothing queued: no slots, and no tools while none run.
+    _ = try refresh(&state, .changed, testToken(2), &.{session("q00001", .{ .working = ago(0) }, .{ .label = "Queued" })});
+    _ = try step(&state, .{ .memory = .{ .rui = 37 * mib, .tools = null } });
+    try expectLine(try countsSegments(a, &state, 100, .{}), 100, &.{ "रुई rui", "● 2", "rui 37 MB" });
+    // Narrow: memory drops before the counts, rui before tools.
+    _ = try step(&state, .{ .memory = .{ .rui = 42 * mib, .tools = 1843 * mib } });
+    try expectLine(try countsSegments(a, &state, 30, .{}), 30, &.{ "रुई rui", "● 2", "tools 1.8 GB" });
+    try expectLine(try countsSegments(a, &state, 16, .{}), 16, &.{ "रुई rui", "● 2" });
+}
+
+test "the counts line names the archive view only off the default" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var state = try opened(&.{});
+    defer state.deinit();
+    try expectLine(try countsSegments(a, &state, 80, .{}), 80, &.{"रुई rui"});
+    state.archive = .archived;
+    try expectLine(try countsSegments(a, &state, 80, .{}), 80, &.{ "रुई rui", "Archived" });
+    state.archive = .all;
+    try expectLine(try countsSegments(a, &state, 80, .{}), 80, &.{ "रुई rui", "All" });
+}
+
+test "a needs-you row reads its waiting Action's command once, and again only when the Action changes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var state = try testState();
+    defer state.deinit();
+    _ = try step(&state, .{ .tick = test_now_s * 1000 });
+    const asking = session("a5k1ng", .{ .approval = ago(120) }, .{ .label = "Fix flaky store test", .turn = 3, .first_action = 41 });
+    const working = session("w00001", .{ .working = ago(40) }, .{ .label = "Working", .turn = 2 });
+    const listed = try respond(&state, .full, testToken(1), &.{ asking, working });
+    // One read, for the row that needs you; none for the working row.
+    var asked: ?Commands = null;
+    for (listed.slice()) |effect| if (effect == .read_commands) {
+        asked = effect.read_commands;
+    };
+    try std.testing.expectEqual(@as(usize, 1), asked.?.len);
+    try std.testing.expectEqualStrings("a5k1ng", &asked.?.items[0].reference);
+    try std.testing.expectEqual(@as(u64, 41), asked.?.items[0].action);
+    // Until it answers, the row says nothing in its detail column.
+    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .ink }, .{ "2m", .quiet } });
+    // A command's first line shows, in the row's normal ink.
+    _ = try step(&state, .{ .command = .{ .reference = "a5k1ng".*, .action = 41, .text = "zig build test-store\n-Dfilter=retry" } });
+    state.selected = null;
+    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .ink }, .{ "zig build test-store", .normal }, .{ "2m", .quiet } });
+    // The same Action listed again asks nothing.
+    for ((try refresh(&state, .changed, testToken(2), &.{asking})).slice()) |effect| try std.testing.expect(effect != .read_commands);
+    // A later Action asks again; an answer for the earlier one is dropped.
+    var next = asking;
+    next.first_action = 42;
+    var again: ?Commands = null;
+    for ((try refresh(&state, .changed, testToken(3), &.{next})).slice()) |effect| if (effect == .read_commands) {
+        again = effect.read_commands;
+    };
+    try std.testing.expectEqual(@as(u64, 42), again.?.items[0].action);
+    _ = try step(&state, .{ .command = .{ .reference = "a5k1ng".*, .action = 41, .text = "stale" } });
+    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .ink }, .{ "2m", .quiet } });
+    // No answer asks again at the next listing.
+    _ = try step(&state, .{ .command = .{ .reference = "a5k1ng".*, .action = 42, .text = null, .unanswered = true } });
+    var retried: ?Commands = null;
+    for ((try refresh(&state, .changed, testToken(4), &.{next})).slice()) |effect| if (effect == .read_commands) {
+        retried = effect.read_commands;
+    };
+    try std.testing.expectEqual(@as(u64, 42), retried.?.items[0].action);
+    // A tool with no command to show keeps the mark and title only, and
+    // is not asked again.
+    _ = try step(&state, .{ .command = .{ .reference = "a5k1ng".*, .action = 42, .text = null } });
+    for ((try refresh(&state, .changed, testToken(5), &.{next})).slice()) |effect| try std.testing.expect(effect != .read_commands);
+    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .ink }, .{ "2m", .quiet } });
 }
 
 /// The rows the picker tests open on: work, ends and an approval.
@@ -5401,7 +5945,8 @@ test "a listing notifies once of each Session that newly finished, failed or nee
     try expectEffects(&.{.{ .notify = .{ .name = "Fix the flaky resize test", .kind = .finished, .more = 0 } }}, try refresh(&state, .changed, testToken(5), &.{next_turn}));
     // Approval outranks a failure and a finish listed before it; a stop and
     // work under way are no news; an unseen Session's finish is.
-    try expectEffects(&.{.{ .notify = .{ .name = "Find why store tests fail", .kind = .approval, .more = 2 } }}, try refresh(&state, .changed, testToken(6), &.{
+    // The new wait also asks for its command.
+    try expectEffects(&.{ .{ .notify = .{ .name = "Find why store tests fail", .kind = .approval, .more = 2 } }, commandReadOf("a1b2c3", 1) }, try refresh(&state, .changed, testToken(6), &.{
         session("b2c3d4", .{ .failed = .{ .since = test_now_s, .code = bounded(session_work.max_code_bytes, "provider_http_500"), .resets_at = null } }, .{ .label = "Profile the curl send queue" }),
         session("e5f6g7", .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .{ .label = "List unused build steps" }),
         session("d4e5f6", .{ .working = ago(0) }, .{ .label = "Trace Host shutdown order" }),
@@ -5412,7 +5957,7 @@ test "a listing notifies once of each Session that newly finished, failed or nee
     try expectEffects(&.{.{ .notify = .{ .name = "yy8yy8", .kind = .finished, .more = 0 } }}, try refresh(&state, .changed, testToken(7), &.{session("yy8yy8", .{ .finished = ago(0) }, .{ .first = null })}));
     // The next Action to wait, once the first is decided, is a new wait.
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(8), &.{session("a1b2c3", .{ .approval = ago(0) }, .{ .label = "Find why store tests fail", .first_action = 1 })}));
-    try expectEffects(&.{.{ .notify = .{ .name = "Find why store tests fail", .kind = .approval, .more = 0 } }}, try refresh(&state, .changed, testToken(9), &.{session("a1b2c3", .{ .approval = ago(0) }, .{ .label = "Find why store tests fail", .first_action = 2 })}));
+    try expectEffects(&.{ .{ .notify = .{ .name = "Find why store tests fail", .kind = .approval, .more = 0 } }, commandReadOf("a1b2c3", 2) }, try refresh(&state, .changed, testToken(9), &.{session("a1b2c3", .{ .approval = ago(0) }, .{ .label = "Find why store tests fail", .first_action = 2 })}));
 }
 
 /// Takes every program status record waiting for the shell, as sent.
@@ -5525,7 +6070,7 @@ test "the listing and the open conversation read one record, so each news comes 
     // the conversation notified it, is no news to the listing either.
     const started = session("n3w5es", .{ .approval = ago(0) }, .{ .label = "Start the notes", .first = null, .first_action = 3 });
     try expectEffects(&.{}, try step(&state, .{ .observed = .{ .reference = "n3w5es".*, .work = .{ .state = .{ .approval = ago(0) }, .first_action = 3 }, .name = "Start the notes", .opening = true } }));
-    try expectEffects(&.{}, try refresh(&state, .changed, testToken(4), &.{started}));
+    try expectEffects(&.{commandReadOf("n3w5es", 3)}, try refresh(&state, .changed, testToken(4), &.{started}));
     try expectEffects(&.{.{ .notify = .{ .name = "Start the notes", .kind = .finished, .more = 0 } }}, try step(&state, .{ .observed = .{ .reference = "n3w5es".*, .work = .{ .state = .{ .finished = ago(0) }, .turn = 1 }, .name = "Start the notes", .opening = false } }));
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(5), &.{session("n3w5es", .{ .finished = ago(0) }, .{ .label = "Start the notes", .first = null, .turn = 1 })}));
 }
