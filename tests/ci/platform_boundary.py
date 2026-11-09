@@ -4,8 +4,9 @@
 Linux CI predicts Mac CI only while platform differences stay where a reader,
 and the selector, can find them. Only a Mac path may name the platform
 (`builtin.os`, `sys.platform`) or call a syscall whose Linux and Darwin
-semantics diverge. PRs run Mac Selected when they change a Mac path; each
-promotion runs it before a release.
+semantics diverge. Mac paths are the code Linux never executes the way a
+Mac does; PRs run Mac Selected only when they change one, and each promotion
+runs it before a release.
 """
 import argparse
 import fnmatch
@@ -30,11 +31,14 @@ MAC_PATHS = (
     # Trust loading reads the host's bundles, which differ on macOS.
     "src/tls_client/*",
     "src/*.c", "src/*.h", "src/*.inc", "src/*.patch", "src/*.sh", "tests/integration/*.c",
-    "build.zig", "build.zig.zon",
-    ".github/actions/setup/*", ".github/workflows/qualify-macos.yml",
-    "tests/ci/qualification.py",
+    ".github/workflows/qualify-macos.yml",
     "install.sh", "release/*",
+    # build.zig's Darwin-only linking and test settings, which Linux never runs.
+    "build/darwin.zig",
 )
+# Build plumbing (build.zig, build.zig.zon, the setup action, the CI
+# qualification helpers) is not here: Linux runs it, typecheck-macos compiles
+# Rui for Darwin on every PR, and promotion links and runs it on a Mac.
 
 # fnmatch patterns, as prepush.py and the selector read them: `*` spans
 # directories, so src/*.zig covers src/http1/Exchange.zig too.
