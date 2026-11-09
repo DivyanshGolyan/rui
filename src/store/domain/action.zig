@@ -111,7 +111,7 @@ const next_core_action = rsql.Read(.{
         "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND " ++ coreCallSql(1) ++ " " ++
         "ORDER BY action.action_id LIMIT 1",
     .Args = struct { message_agent_name: [32]u8, read_transcript_name: [32]u8, start_agent_name: [32]u8, find_tools_name: [32]u8, skill_name: [32]u8 },
-    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: Bounded(protocol.max_session_bytes), tool: CoreTool },
+    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: Bounded(session_id.max_reference_bytes), tool: CoreTool },
     .cardinality = .optional,
 });
 
@@ -122,7 +122,7 @@ pub const CoreTool = enum { message_agent, read_transcript, start_agent, find_to
 pub const CoreActionInput = struct {
     binding: ActionAttemptBinding,
     tool: CoreTool,
-    session: Bounded(protocol.max_session_bytes),
+    session: Bounded(session_id.max_reference_bytes),
     arguments: ContentReference,
 };
 
@@ -279,7 +279,7 @@ pub const ActionDispatchPermit = attempt.ActionDispatchPermit;
 
 /// What a Bash execution reads from its Attempt.
 pub const BashExecutionInput = struct {
-    session: Bounded(protocol.max_session_bytes),
+    session: Bounded(session_id.max_reference_bytes),
     sender_handle: Bounded(32),
     workspace: Bounded(protocol.max_workspace_bytes),
     arguments: ContentReference,
@@ -287,9 +287,9 @@ pub const BashExecutionInput = struct {
 };
 
 pub const McpExecutionInput = struct {
-    session: Bounded(protocol.max_session_bytes),
-    parent: ?Bounded(protocol.max_session_bytes),
-    root: Bounded(protocol.max_session_bytes),
+    session: Bounded(session_id.max_reference_bytes),
+    parent: ?Bounded(session_id.max_reference_bytes),
+    root: Bounded(session_id.max_reference_bytes),
     name: Bounded(protocol.max_tool_name_bytes),
     server: Bounded(tool_catalog.max_server_bytes),
     input_schema: ContentReference,
@@ -395,7 +395,7 @@ const bash_input = rsql.Read(.{
     .Row = struct {
         position: ?rsql.Positive,
         workspace: *Bounded(protocol.max_workspace_bytes),
-        session: *Bounded(protocol.max_session_bytes),
+        session: *Bounded(session_id.max_reference_bytes),
         sender_handle: *Bounded(32),
         timeout_ms: rsql.Positive,
     },
@@ -787,7 +787,7 @@ const mcp_input = rsql.Read(.{
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 AND action." ++ action_attempted_sql ++
         " AND action.resolution_code IS NULL AND " ++ mcpCallSql("action", "operation"),
     .Args = struct { action_id: u64, parent_operation_id: u64, turn_id: u64 },
-    .Row = struct { position: ?rsql.Positive, session: *Bounded(protocol.max_session_bytes), sender_handle: *Bounded(32), name: *Bounded(protocol.max_tool_name_bytes), server: *Bounded(tool_catalog.max_server_bytes), digest: [32]u8, length: u64, timeout_ms: rsql.Positive },
+    .Row = struct { position: ?rsql.Positive, session: *Bounded(session_id.max_reference_bytes), sender_handle: *Bounded(32), name: *Bounded(protocol.max_tool_name_bytes), server: *Bounded(tool_catalog.max_server_bytes), digest: [32]u8, length: u64, timeout_ms: rsql.Positive },
     .cardinality = .optional,
 });
 test "MCP execution input uses each engine's tool-name content layout" {
@@ -805,7 +805,7 @@ test "MCP execution input uses each engine's tool-name content layout" {
 const session_parent = rsql.Read(.{
     .sql = "SELECT parent_ref AS parent FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { parent: ?Bounded(protocol.max_session_bytes) },
+    .Row = struct { parent: ?Bounded(session_id.max_reference_bytes) },
     .cardinality = .optional,
 });
 pub fn readMcpExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *McpExecutionInput) !void {

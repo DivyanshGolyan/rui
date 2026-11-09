@@ -453,7 +453,7 @@ noinline fn configureDigest(
 /// Settings `applyConfiguration` wrote to a Session, whose revision row
 /// `queueConfiguredCommand` records with the command.
 pub const Applied = struct {
-    session: Bounded(protocol.max_session_bytes),
+    session: Bounded(session_id.max_reference_bytes),
     head: rsql.SessionHead,
     revision: u64,
     instructions_id: ?u64,
@@ -947,7 +947,7 @@ pub fn applyConfiguration(
     } else if (creating or configuration.loaded_tools.state == .value or configuration.tools.state == .value) {
         next.loaded_tool_set_id = null;
     }
-    var target: Bounded(protocol.max_session_bytes) = .{};
+    var target: Bounded(session_id.max_reference_bytes) = .{};
     var head: rsql.SessionHead = undefined;
     if (created) {
         std.debug.assert(next.revision == 1);

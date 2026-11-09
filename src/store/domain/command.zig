@@ -104,7 +104,7 @@ const message_replay = rsql.Read(.{
     .sql = "SELECT m.admission_id,m.session_ref,m.content_id,content.byte_length AS length,content.digest FROM message_admission m " ++
         "JOIN content ON content.content_id=m.content_id WHERE m.command_key=?1",
     .Args = struct { key: []const u8 },
-    .Row = struct { admission_id: rsql.Positive, session_ref: Bounded(protocol.max_session_bytes), content_id: rsql.Positive, length: u64, digest: [32]u8 },
+    .Row = struct { admission_id: rsql.Positive, session_ref: Bounded(session_id.max_reference_bytes), content_id: rsql.Positive, length: u64, digest: [32]u8 },
     .cardinality = .one,
 });
 
@@ -242,7 +242,7 @@ fn admitMessage(
     command: *const wire_request.MessageCommand,
     reads: *MessageReads,
     head: rsql.SessionHead,
-    session: Bounded(protocol.max_session_bytes),
+    session: Bounded(session_id.max_reference_bytes),
     configured: ?*const configuration_domain.Applied,
     committed: ?MessageCommitted,
     faults: Faults,
@@ -1228,7 +1228,7 @@ const interruption_operation = rsql.Read(.{
     .sql = "SELECT o.turn_id,o.session_ref,o.resolution_code IS NULL AS unresolved,EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=o.turn_id " ++
         "AND t.session_ref=o.session_ref AND t.operation_id=o.operation_id AND t.outcome_code IS NULL) AS current FROM model_operation o WHERE o.operation_id=?1",
     .Args = struct { operation_id: u64 },
-    .Row = struct { turn_id: rsql.Positive, session_ref: Bounded(protocol.max_session_bytes), unresolved: bool, current: bool },
+    .Row = struct { turn_id: rsql.Positive, session_ref: Bounded(session_id.max_reference_bytes), unresolved: bool, current: bool },
     .cardinality = .optional,
 });
 
@@ -1247,7 +1247,7 @@ const applicable_pending = rsql.Read(.{
 const interruption_target = rsql.Read(.{
     .sql = "SELECT session_ref,turn_id,operation_id FROM model_interruption_command WHERE command_key=?1",
     .Args = struct { key: []const u8 },
-    .Row = struct { session_ref: Bounded(protocol.max_session_bytes), turn_id: Bounded(20), operation_id: Bounded(20) },
+    .Row = struct { session_ref: Bounded(session_id.max_reference_bytes), turn_id: Bounded(20), operation_id: Bounded(20) },
     .cardinality = .one,
 });
 
@@ -1472,7 +1472,7 @@ pub fn decidePermission(a: anytype, command: *const protocol.PermissionDecisionC
 
 const ExistingCommand = struct {
     kind: cli_value.CommandKind,
-    target: Bounded(protocol.max_session_bytes),
+    target: Bounded(session_id.max_reference_bytes),
     digest: [32]u8,
     accepted: bool,
     code: Bounded(protocol.max_code_bytes),
@@ -1497,7 +1497,7 @@ pub const saved_command = rsql.Read(.{
     .Args = struct { key: []const u8 },
     .Row = struct {
         kind: u8,
-        target: Bounded(protocol.max_session_bytes),
+        target: Bounded(session_id.max_reference_bytes),
         input_digest: [32]u8,
         accepted: bool,
         code: Bounded(protocol.max_code_bytes),
@@ -1652,7 +1652,7 @@ const message_observation = rsql.Read(.{
         "WHERE m.command_key=?1",
     .Args = struct { key: []const u8 },
     .Row = struct {
-        session_ref: Bounded(protocol.max_session_bytes),
+        session_ref: Bounded(session_id.max_reference_bytes),
         content_id: rsql.Positive,
         admission_id: rsql.Positive,
         command_key: Bounded(128),

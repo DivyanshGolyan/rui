@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const session_id = @import("../../session_id.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const model_capability = @import("../../model_capability.zig");
 const provider_name = @import("../../provider_name.zig");
@@ -73,7 +74,7 @@ pub const HistoricalSettings = struct {
     /// The originating Operation's own address: canonical Store selector and
     /// exact Session reference, for the Rui-owned request context.
     store: Bounded(protocol.max_store_bytes),
-    session: Bounded(protocol.max_session_bytes),
+    session: Bounded(session_id.max_reference_bytes),
     session_affinity: [16]u8,
     baseline_instructions: HistoricalContent,
     output_schema: ?HistoricalContent,
@@ -99,7 +100,7 @@ pub const HistoricalEntry = struct {
     content: ?HistoricalContent = null,
     requested_model: ?Bounded(model_capability.max_model_bytes) = null,
     // A User entry's peer sender, in this view's Store.
-    sender: ?Bounded(protocol.max_session_bytes) = null,
+    sender: ?Bounded(session_id.max_reference_bytes) = null,
     /// An Operation entry's frozen effort.
     effort: ?model_capability.ReasoningEffort = null,
     /// An Operation entry's frozen tool set, and whether its boundary
@@ -699,7 +700,7 @@ const historical_settings = rsql.Read(.{
         member_count: u64,
         provider_count: u64,
         provider: provider_name.Provider,
-        session_ref: *Bounded(protocol.max_session_bytes),
+        session_ref: *Bounded(session_id.max_reference_bytes),
         workspace: *Bounded(protocol.max_workspace_bytes),
         compaction_trigger: ?u64,
         output_reservation: ?u64,
@@ -1053,7 +1054,7 @@ const historical_entries = rsql.Read(.{
         item_kind: ?u8,
         item_id_digest: ?[32]u8,
         consistent: ?bool,
-        sender: ?Bounded(protocol.max_session_bytes),
+        sender: ?Bounded(session_id.max_reference_bytes),
         effort: ?model_capability.ReasoningEffort,
         tool_set_id: ?rsql.Positive,
         declares: ?bool,
@@ -1211,7 +1212,7 @@ const group_item = rsql.Read(.{
         "FROM model_output_item item JOIN model_operation source ON source.operation_id=item.operation_id " ++
         "WHERE item.operation_id=?1 AND item.item_ordinal>=?2 ORDER BY item.item_ordinal LIMIT 1",
     .Args = struct { operation: u64, ordinal: u64 },
-    .Row = struct { item_ordinal: u64, item_kind: u8, session_ref: Bounded(protocol.max_session_bytes), session_position: rsql.Positive, consistent: bool },
+    .Row = struct { item_ordinal: u64, item_kind: u8, session_ref: Bounded(session_id.max_reference_bytes), session_position: rsql.Positive, consistent: bool },
     .cardinality = .optional,
 });
 

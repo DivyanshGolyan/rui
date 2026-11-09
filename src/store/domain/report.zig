@@ -41,7 +41,7 @@ const TurnOutcome = turn_domain.TurnOutcome;
 const max_action_resolution_code_bytes = action_domain.max_action_resolution_code_bytes;
 const max_permission_decision_bytes = command_domain.max_permission_decision_bytes;
 pub const ReadAccess = reads_domain.ReadAccess;
-const SessionText = Bounded(protocol.max_session_bytes);
+const SessionText = Bounded(session_id.max_reference_bytes);
 const Code = Bounded(protocol.max_code_bytes);
 
 pub const SessionReportExecution = struct {
@@ -1306,7 +1306,7 @@ pub const CurrentJson = struct {
     };
     pub const Settings = struct {
         pub const json_shape = .{
-            "{\"reference\":",                     H{ .string = protocol.max_session_bytes },
+            "{\"reference\":",                     H{ .string = session_id.max_reference_bytes },
             ",\"parent\":",                        H{ .optional_string = session_id.bytes },
             ",\"workspace\":",                     H{ .string = protocol.max_workspace_bytes },
             ",\"provider\":\"",                    H{ .tag = provider_name.Provider },

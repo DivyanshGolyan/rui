@@ -38,7 +38,7 @@ const content_metadata = content_domain.content_metadata;
 /// The Access every entry point here reads through.
 pub const ReadAccess = store_access.Access(.read, error{});
 
-const SessionText = Bounded(protocol.max_session_bytes);
+const SessionText = Bounded(session_id.max_reference_bytes);
 
 /// The rows of an `.each` read, up to `max`, kept in the caller's frame.
 /// The visit that fills the last slot stops the read, so it steps at most
@@ -352,7 +352,7 @@ pub const AcceptedMessageQueue = command_reply.AcceptedMessageQueue;
 pub const SessionObservation = struct {
     found: bool = false,
     archive_state: session_archive.State = .active,
-    session: Bounded(protocol.max_session_bytes) = .{},
+    session: Bounded(session_id.max_reference_bytes) = .{},
     workspace: Bounded(protocol.max_workspace_bytes) = .{},
     provider: ?provider_name.Provider = null,
     model: Bounded(model_capability.max_model_bytes) = .{},

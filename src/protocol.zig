@@ -23,7 +23,7 @@ pub const max_key_bytes = 128;
 /// agent start, and the stop an attached child owes. A client command
 /// with one is refused.
 pub const reserved_key_prefix = "rui.core/";
-pub const max_session_bytes = 128;
+pub const max_session_bytes = session_id.max_reference_bytes;
 // SQLite's Unix VFS needs eight bytes beyond the database path for journals.
 // The Store selector plus "/rui.sqlite3" and the journal suffix must stay
 // within its compiled 512-byte pathname limit.

@@ -3,6 +3,7 @@
 //! and their tests need no Store.
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const session_id = @import("session_id.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const cli_value = @import("cli_value.zig");
 const mutation_answer = @import("mutation_answer.zig");
@@ -20,7 +21,7 @@ pub const AcceptedConfiguration = struct {
     revision: u64 = 0,
     created: bool = false,
     skills: ?mutation_answer.SkillsReloadStatus = null,
-    session: Bounded(protocol.max_session_bytes) = .{},
+    session: Bounded(session_id.max_reference_bytes) = .{},
 };
 
 pub const RejectedConfiguration = struct {
@@ -39,7 +40,7 @@ pub const AcceptedMessage = struct {
     replayed: bool,
     admission_id: u64,
     content: ContentReference,
-    session: Bounded(protocol.max_session_bytes),
+    session: Bounded(session_id.max_reference_bytes),
 };
 
 pub const RejectedMessage = struct {
@@ -57,7 +58,7 @@ pub const MessageReply = union(enum) {
 
 pub const CommandObservation = struct {
     status: protocol.CommandObservationStatus,
-    target: Bounded(protocol.max_session_bytes) = .{},
+    target: Bounded(session_id.max_reference_bytes) = .{},
     code: Bounded(protocol.max_code_bytes) = .{},
     kind: union(cli_value.CommandKind) {
         configure: struct { revision: u64 = 0, created: bool = false },
@@ -98,7 +99,7 @@ pub const SessionStopObservation = struct {
 };
 
 pub const ModelInterruptionTarget = struct {
-    session: Bounded(protocol.max_session_bytes),
+    session: Bounded(session_id.max_reference_bytes),
     turn_id: u64,
     operation_id: u64,
 };
