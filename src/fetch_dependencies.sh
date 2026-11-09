@@ -48,10 +48,12 @@ download() {
 # Stock Zig 0.17 no-save fetch caches the archive's outer directory and ignores
 # --pkg-dir. Save into a disposable manifest to install correctly rooted trees.
 # Prepare transitive packages too: Zig's resolver cannot parse some orb DNS configs.
+# Download a manifest's archives before importing any of them: the first zig fetch
+# compiles Zig's build runner, and orb setup overlaps that compile with these downloads.
 prepared=' '
 prepare_dependencies() {
-    local manifest=$1 name url expected archive actual revision remote
-    local names
+    local manifest=$1 name url expected archive actual revision remote index
+    local names fetch_names=() fetch_hashes=() fetch_archives=()
     names=$(sed -n '/^    \.dependencies = /,/^    },/s/^        \.\([[:alnum:]_]*\) = .{/\1/p' "$manifest")
     for name in $names; do
         url=$(sed -n "/\.$name = /,/},/s/.*\.url = \"\([^\"]*\)\".*/\1/p" "$manifest")
@@ -71,10 +73,23 @@ prepare_dependencies() {
                 ;;
         esac
         case "$prepared" in *" $expected "*) continue ;; esac
+        archive=
         if [[ ! -d "$packages/$expected" ]]; then
-            archive="$scratch/${url##*/}"
+            archive="$scratch/$expected/${url##*/}"
+            mkdir -p "${archive%/*}"
             printf 'Preparing pinned %s dependency ...\n' "$name"
             download "$url" "$archive"
+        fi
+        fetch_names+=("$name")
+        fetch_hashes+=("$expected")
+        fetch_archives+=("$archive")
+    done
+    for ((index = 0; index < ${#fetch_names[@]}; index++)); do
+        name=${fetch_names[index]}
+        expected=${fetch_hashes[index]}
+        archive=${fetch_archives[index]}
+        case "$prepared" in *" $expected "*) continue ;; esac
+        if [[ ! -d "$packages/$expected" ]]; then
             cp "$manifest" "$scratch/build.zig.zon"
             (cd -- "$scratch" && zig fetch --pkg-dir "$packages" "--save=$name" "$archive")
             actual=$(sed -n "/\.$name = /,/},/s/.*\.hash = \"\([^\"]*\)\".*/\1/p" "$scratch/build.zig.zon")
