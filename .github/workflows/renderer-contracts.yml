@@ -67,8 +67,6 @@ jobs:
         with:
           targets: '["terminal-restoration-integration"]'
           check-part: renderer-contracts
-      - name: Install tmux for the smoke rows
-        run: command -v tmux || { sudo apt-get update -q && sudo apt-get install -yq tmux; }
       - name: Self-tests, direct-PTY, Ghostty, controls, recovery encodings, input replay and sequence models
         # Each contract's only copy. Every one runs even after another fails;
         # steps.py records the failed ones for a promotion to replay.
