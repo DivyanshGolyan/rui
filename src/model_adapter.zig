@@ -3083,7 +3083,7 @@ test "request preparation replays a large private reasoning item within each adv
             try writer.writeAll("\",");
             for (0..1000) |_| try writer.writeAll("\"future\":{\"open\":[0,null]},");
         }
-        try item.writeAll("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}]," ++ summary ++ ",");
+        try item.writeAll("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"REASONING-TEXT\",\"annotations\":[],\"annotations\":false}]," ++ summary ++ ",");
         try item.writeAll("\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}");
         try replayed.writeAll("\"id\":\"r\",\"status\":\"completed\"}");
         try settleComposedForTesting(&setup, first, "large-metadata", .reasoning, item.buffered(), &.{});
@@ -3114,7 +3114,8 @@ test "request preparation replays a large private reasoning item within each adv
                     var request_buffer: [64 * 1024]u8 = undefined;
                     const length = try request.file.readPositionalAll(std.testing.io, &request_buffer, 0);
                     try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], replayed.buffered()) != null);
-                    try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], "private") == null);
+                    // The request carries the workspace path, so the marker is one no path contains.
+                    try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], "REASONING-TEXT") == null);
                     break;
                 },
             }
@@ -3308,16 +3309,16 @@ test "request preparation replays reasoning continuation without its private rea
     // no reasoning text and stays.
     const cases = [_]struct { saved: []const u8, replayed: []const u8 }{
         .{
-            .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\"},{\"type\":\"reasoning_text\",\"text\":\"more private\"}],\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
+            .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"REASONING-TEXT\"},{\"type\":\"reasoning_text\",\"text\":\"more REASONING-TEXT\"}],\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
             // Rebuilt from Rui's form: parts first, then the provider bag.
             .replayed = "{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"id\":\"r\",\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
         },
         .{
-            .saved = "{\"content\" : [ {\"text\":\"private\",\"type\":\"reasoning_text\",\"annotations\":[]} ] , \"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
+            .saved = "{\"content\" : [ {\"text\":\"REASONING-TEXT\",\"type\":\"reasoning_text\",\"annotations\":[]} ] , \"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
             .replayed = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
         },
         .{
-            .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"c\\u006fntent\":[{\"type\":\"reasoning_text\",\"text\":\"private\"}]}",
+            .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"c\\u006fntent\":[{\"type\":\"reasoning_text\",\"text\":\"REASONING-TEXT\"}]}",
             .replayed = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
         },
         .{
@@ -3353,7 +3354,8 @@ test "request preparation replays reasoning continuation without its private rea
         const expected = try requestGolden(setup.workspace, session.slice(), body);
         defer std.testing.allocator.free(expected);
         try std.testing.expectEqualStrings(expected, result.bytes);
-        try std.testing.expect(std.mem.indexOf(u8, result.bytes, "private") == null);
+        // The request carries the workspace path, so the marker is one no path contains.
+        try std.testing.expect(std.mem.indexOf(u8, result.bytes, "REASONING-TEXT") == null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     };
 }
