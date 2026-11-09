@@ -2855,6 +2855,11 @@ pub const Style = struct {
     reverse: bool = false,
 };
 
+pub const Segment = struct {
+    text: []const u8,
+    style: Style,
+};
+
 pub const Span = struct {
     column: u16,
     /// Display cells `text` takes.
