@@ -3160,7 +3160,7 @@ test "the composer edits at its caret, as a conversation's draft does" {
     try expectStarted(rig, "a\x1b\rb\x1b[AX\x1b[D\x04\r", "a\nb");
     try expectStarted(rig, "one two\x17three\r", "one three");
     // Esc clears the draft, a rejected one included.
-    try expectStarted(rig, "junk\x02\x1b[27uok\r", "ok");
+    try expectStarted(rig, "junk\xff\x1b[27uok\r", "ok");
 }
 
 test "a start freezes the composer until its answer, and the overview's keys still act" {
@@ -3227,7 +3227,7 @@ test "Tab completes from the draft's own list, however many keys arrive before a
 test "Shift-Up and Shift-Down select the row above and below, whatever the draft holds" {
     const rig = try openListed();
     defer rig.close();
-    for ([_][]const u8{ "", "two\x1b\rlines", "junk\x00" }) |draft| {
+    for ([_][]const u8{ "", "two\x1b\rlines", "junk\xff" }) |draft| {
         for ([_]struct { bytes: []const u8, row: usize }{
             .{ .bytes = "\x1b[1;2A", .row = 1 },
             .{ .bytes = "\x1b[1;2:1A", .row = 1 },
@@ -3302,7 +3302,7 @@ fn pressKey(rig: *Rig, bytes: []const u8) !?Ending {
 }
 
 test "every key does what the overview's table says, through the editor, in every encoding, on an empty and on a rejected draft" {
-    for (std.enums.values(keymap.Key)) |key| for (key_encodings.get(key)) |bytes| for ([_][]const u8{ "", "\x00" }) |draft| {
+    for (std.enums.values(keymap.Key)) |key| for (key_encodings.get(key)) |bytes| for ([_][]const u8{ "", "\xff" }) |draft| {
         errdefer std.debug.print("key={s} bytes={s} draft={s}\n", .{ @tagName(key), bytes[1..], draft });
         try std.testing.expectEqual(@as(?keymap.Key, key), try keyOf(bytes));
         const rig = try openListed();
@@ -3612,7 +3612,7 @@ test "Alt-A overview preserves draft bytes caret and revision through ask cancel
         defer rig.close();
         const overview = rig.overview;
         try std.testing.expect(try rig.press("/rename unfinished\x1b[D\x1b[D") == null);
-        if (rejected) try std.testing.expect(try rig.press("\x00") == null);
+        if (rejected) try std.testing.expect(try rig.press("\xff") == null);
         const before = overview.composerDraft();
         const target = overview.state.selected.?;
         try std.testing.expect(try rig.press(chord) == null);
