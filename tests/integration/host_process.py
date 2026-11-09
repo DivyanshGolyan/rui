@@ -4,6 +4,7 @@ import os
 import sys
 
 import live_engines
+import os_semantics
 
 NON_ROOT_INSTRUCTION = (
     "Rui fixtures must run as a non-root user. This fixture is running as root "
@@ -34,7 +35,7 @@ INHERITED = (
     *live_engines.VARIABLES,
 )
 # Withheld from every fixture; only the opt-in live journey hands them to its Host.
-NETWORK = ("https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR")
+NETWORK = ("https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY", *os_semantics.TRUST_VARIABLES)
 
 
 def enter():

@@ -89,6 +89,21 @@ def simulate(platform_name):
     return mock.patch.multiple(_module, **semantics(platform_name))
 
 
+TRUST_VARIABLES = ("SSL_CERT_FILE", "SSL_CERT_DIR")
+
+
+def system_trust(certificate):
+    """Environment that adds `certificate` to a child Host's system trust.
+
+    Only Linux's system trust reads it (SSL_CERT_FILE_TRUST); Darwin's SecTrust
+    would ignore it and quietly test the system roots instead, so this refuses
+    there. A fixture that must run on both passes --provider-ca-file or the
+    launch frame's caFile instead.
+    """
+    assert _module.SSL_CERT_FILE_TRUST, "Darwin system trust ignores SSL_CERT_FILE; pass the CA explicitly"
+    return {"SSL_CERT_FILE": str(certificate)}
+
+
 def user_termios(attributes):
     """A copy of termios attributes without kernel-owned history flags."""
     copy = list(attributes)
