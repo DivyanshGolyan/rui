@@ -7,9 +7,11 @@ Exact input is checked at the Host separately.
 import codecs
 import collections
 import ctypes
+import itertools
 import os
 import re
 import unicodedata
+import weakref
 
 
 LIMIT = 1024 * 1024
@@ -111,8 +113,18 @@ def library():
     return _library
 
 
-# Each live capture, by the userdata its terminal passes to callbacks.
-_terminals = {}
+# Each live capture, by the userdata its terminal passes to callbacks. The
+# registry does not own them: a capture nobody holds is collected, and its
+# finalizer frees its native terminal.
+_terminals = weakref.WeakValueDictionary()
+_keys = itertools.count(1)
+
+
+def _free(lib, terminal, state, rows_iterator, row_cells):
+    lib.ghostty_render_state_row_cells_free(row_cells)
+    lib.ghostty_render_state_row_iterator_free(rows_iterator)
+    lib.ghostty_render_state_free(state)
+    lib.ghostty_terminal_free(terminal)
 
 
 @WRITE_PTY
@@ -139,7 +151,8 @@ class ScreenCapture:
                                (lib.ghostty_render_state_row_iterator_new, self.rows_iterator),
                                (lib.ghostty_render_state_row_cells_new, self.row_cells)):
             assert create(None, ctypes.byref(handle)) == 0
-        self.key = id(self)
+        self.free = weakref.finalize(self, _free, lib, self.terminal, self.state, self.rows_iterator, self.row_cells)
+        self.key = next(_keys)
         _terminals[self.key] = self
         assert lib.ghostty_terminal_set(self.terminal, OPT_USERDATA, self.key) == 0
         assert lib.ghostty_terminal_set(self.terminal, OPT_WRITE_PTY, ctypes.cast(_write_pty, ctypes.c_void_p)) == 0
@@ -170,15 +183,6 @@ class ScreenCapture:
         # its exact bytes, which the terminal's clipboard effect decodes.
         self.clipboard = []
         self.clipboard_pending = b""
-
-    def __del__(self):
-        lib = _library
-        if lib is None or _terminals.pop(getattr(self, "key", None), None) is None:
-            return
-        lib.ghostty_render_state_row_cells_free(self.row_cells)
-        lib.ghostty_render_state_row_iterator_free(self.rows_iterator)
-        lib.ghostty_render_state_free(self.state)
-        lib.ghostty_terminal_free(self.terminal)
 
     @property
     def screen(self):

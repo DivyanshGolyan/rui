@@ -919,7 +919,18 @@ def terminal_wait_oracles():
     finally:
         os.close(master)
         forget_terminal(master)
-    print("terminal wait oracles passed: committed frames only, replaced frames seen, composer cursor, bounded frames and closure", flush=True)
+    # A capture nobody holds frees its emulator: cases discard many.
+    import gc
+    import weakref
+    from terminal_screen import ScreenCapture
+    discarded = [ScreenCapture(reply=lambda data: None) for _ in range(3)]
+    for each in discarded:
+        each.feed(b"\x1b[c")
+    released = [weakref.ref(each) for each in discarded]
+    del discarded, each
+    gc.collect()
+    assert not any(ref() for ref in released), "a discarded capture stayed alive with its emulator"
+    print("terminal wait oracles passed: committed frames only, replaced frames seen, composer cursor, bounded frames and closure, released captures", flush=True)
 
 
 def shown_bash_command(master):
