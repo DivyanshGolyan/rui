@@ -80,23 +80,24 @@ pub const Selection = struct {
 /// A cell in this widget's coordinates; a forwarded drag may be outside it.
 const Point = struct { row: i32, col: i32 };
 
+/// What the last draw showed, as plain data: events lay out the row under
+/// the pointer again from retained bytes, never from a past frame's cells.
 const Drawn = struct {
-    cells: []vaxis.Cell = &.{},
+    /// Which text was drawn: a selection in other text is dropped.
+    document: ?*const viewport.Document = null,
+    replacements: u32 = 0,
     width: u16 = 0,
     height: u16 = 0,
-    origin: u64 = 0,
-    /// The retained bytes' address range while drawing: drawn text cells
-    /// point into it.
-    base: usize = 0,
-    length: usize = 0,
+    /// The first row drawn, its line as an absolute offset.
+    line: u64 = 0,
+    row: u16 = 0,
 };
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
 }
 
-/// Whether a drag is under way. While it is, the screen forwards mouse
-/// events outside this widget to `mouse`, so a release anywhere ends it.
+/// Whether a press or drag is under way.
 pub fn dragging(self: *const Self) bool {
     return self.selection != null;
 }
@@ -105,6 +106,12 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!v
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (input) {
         .mouse => |value| try self.mouse(ctx, value),
+        // vxfw sends no release once the pointer has left: a press or drag
+        // ends there, copying nothing, so no highlight stays behind.
+        .mouse_leave => if (self.selection != null) {
+            self.selection = null;
+            ctx.redraw = true;
+        },
         .tick => {
             const selection = if (self.selection) |*value| value else return;
             if (!selection.dragging or selection.edge == .none) {
@@ -124,14 +131,14 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!v
 const edge_interval_ms = 50;
 
 /// One mouse event in this widget's coordinates.
-pub fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) anyerror!void {
+fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) anyerror!void {
     const handler = self.handler orelse return;
-    if (self.drawn.cells.len == 0) return;
+    if (self.drawn.document != self.document or self.drawn.width == 0 or self.drawn.height == 0) return;
     const at: Point = .{ .row = value.row, .col = value.col };
     switch (value.type) {
         .press => {
             if (value.button != .left) return;
-            const spot = self.spotAt(at);
+            const spot = try self.spotAt(ctx.alloc, at);
             self.selection = .{ .press = at, .anchor = spot, .head = spot };
             ctx.consumeEvent();
         },
@@ -139,7 +146,7 @@ pub fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) anyerror!
             const selection = if (self.selection) |*held| held else return;
             if (!selection.dragging and std.meta.eql(at, selection.press)) return;
             selection.dragging = true;
-            selection.head = self.spotAt(at);
+            selection.head = try self.spotAt(ctx.alloc, at);
             selection.edge = if (at.row <= 0) .up else if (at.row >= self.drawn.height - 1) .down else .none;
             if (selection.edge != .none and !selection.ticking) {
                 selection.ticking = true;
@@ -157,7 +164,7 @@ pub fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) anyerror!
                 if (selection.anchor.start != selection.anchor.end) if (self.document.sessionAt(offset)) |id| return handler.on_open(handler.userdata, ctx, id);
             }
             const clicked = handler.on_click orelse return;
-            if (self.rowAt(@intCast(at.row))) |position| try clicked(handler.userdata, ctx, position);
+            if (at.row >= 0) if (self.rowPosition(self.laidFirst(), @intCast(at.row))) |position| try clicked(handler.userdata, ctx, position);
         },
         .motion => {},
     }
@@ -189,17 +196,19 @@ fn relative(self: *const Self, at: u64) ?usize {
     return if (offset <= self.document.text().len) @intCast(offset) else null;
 }
 
-/// Where a drawn text cell's cluster starts, or null for a cell that shows
-/// no body text: blank, indent, margin time, `…` or `┆`.
+/// Where a cell's cluster starts in the current text, as an absolute
+/// offset, or null for a cell that shows no body text: blank, indent,
+/// margin time, `…` or `┆`. Cells come from laying out the current text.
 fn source(self: *const Self, cell: vaxis.Cell) ?u64 {
     const address = @intFromPtr(cell.char.grapheme.ptr);
-    if (cell.char.grapheme.len == 0 or address < self.drawn.base or address >= self.drawn.base + self.drawn.length) return null;
-    const offset = address - self.drawn.base;
+    const base = @intFromPtr(&self.document.bytes);
+    if (cell.char.grapheme.len == 0 or address < base or address >= base + self.document.text().len) return null;
+    const offset = address - base;
     if (!self.document.selectable(offset)) return null;
-    return self.drawn.origin + offset;
+    return self.document.origin + offset;
 }
 
-/// Each cell's spot along one drawn row, left to right.
+/// Each cell's spot along one laid-out row, left to right.
 const RowSpots = struct {
     transcript: *const Self,
     cells: []const vaxis.Cell,
@@ -209,9 +218,7 @@ const RowSpots = struct {
     cover: Spot = undefined,
     column: usize = 0,
 
-    fn init(transcript: *const Self, row: u16) RowSpots {
-        const width = transcript.drawn.width;
-        const cells = transcript.drawn.cells[@as(usize, row) * width ..][0..width];
+    fn init(transcript: *const Self, cells: []const vaxis.Cell) RowSpots {
         var spots: RowSpots = .{ .transcript = transcript, .cells = cells, .boundary = null };
         for (cells) |cell| {
             if (transcript.source(cell)) |at| {
@@ -237,60 +244,65 @@ const RowSpots = struct {
     }
 };
 
-fn spotAt(self: *const Self, at: Point) Spot {
-    const last_row: i32 = self.drawn.height - 1;
-    if (at.row < 0) return self.spotAt(.{ .row = 0, .col = 0 });
-    if (at.row > last_row) return self.spotAt(.{ .row = last_row, .col = self.drawn.width });
-    const row: u16 = @intCast(at.row);
-    var spots: RowSpots = .init(self, row);
-    if (spots.boundary == null) return Spot.point(self.lineOf(row));
+fn layout(self: *const Self) viewport.Layout {
+    return .{ .width = self.drawn.width, .method = self.method };
+}
+
+/// The first row the last draw showed, in the current text. Once its line
+/// has been evicted the text's first row stands in.
+fn laidFirst(self: *const Self) viewport.Position {
+    const offset = self.relative(self.drawn.line) orelse return .{};
+    return self.document.clamp(self.layout(), .{ .offset = offset, .row = self.drawn.row });
+}
+
+/// The logical line and wrapped row `row` rows below `first`, or null
+/// below the text.
+fn rowPosition(self: *const Self, first: viewport.Position, row: u16) ?viewport.Position {
+    if (self.document.text().len == 0) return null;
+    if (self.document.measure(self.layout(), first, row +| 1).rows <= row) return null;
+    return self.document.down(self.layout(), first, row);
+}
+
+/// The spot under column `col` of a laid-out row at `line`.
+fn spotIn(self: *const Self, cells: []const vaxis.Cell, line: ?viewport.Position, col: i32) Spot {
+    const position = line orelse return Spot.point(self.document.origin + self.document.text().len);
+    var spots: RowSpots = .init(self, cells);
+    const boundary = spots.boundary orelse return Spot.point(self.document.origin + position.offset);
     var column: i32 = 0;
-    var spot: Spot = Spot.point(spots.boundary.?);
+    var spot: Spot = Spot.point(boundary);
     while (spots.next()) |value| : (column += 1) {
         spot = value;
-        if (column >= at.col) return spot;
+        if (column >= col) return spot;
     }
     // Past the row's last cell: after its text.
     return Spot.point(spot.end);
 }
 
-/// The logical line and wrapped row drawn at `row`, or null below the text.
-fn rowAt(self: *const Self, row: u16) ?viewport.Position {
-    const document = self.document;
-    const layout: viewport.Layout = .{ .width = self.drawn.width, .method = self.method };
-    const text = document.text();
-    var reached: i64 = -@as(i64, self.first.row);
-    var line: ?usize = if (self.first.offset < text.len) self.first.offset else null;
-    while (line) |offset| : (line = document.nextLine(offset)) {
-        const start = reached;
-        reached += document.lineRows(layout, offset);
-        if (row < reached) return .{ .offset = offset, .row = @intCast(row - start) };
+/// The spot under a pointer, laying out its row from the retained text at
+/// the position last drawn. A pointer above or below the rows takes the
+/// first row's start or the last row's end.
+fn spotAt(self: *const Self, gpa: std.mem.Allocator, at: Point) !Spot {
+    const last_row: i32 = self.drawn.height - 1;
+    const row: u16 = @intCast(std.math.clamp(at.row, 0, last_row));
+    const col: i32 = if (at.row < 0) 0 else if (at.row > last_row) self.drawn.width else at.col;
+    const line = self.rowPosition(self.laidFirst(), row);
+    const cells = try gpa.alloc(vaxis.Cell, self.drawn.width);
+    defer gpa.free(cells);
+    @memset(cells, .{});
+    if (line) |position| {
+        var screen: vaxis.Screen = .{ .width = self.drawn.width, .height = 1, .width_method = self.method, .buf = cells };
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.width, .height = 1, .screen = &screen };
+        _ = self.document.draw(window, position, true, false, .{});
     }
-    return null;
-}
-
-/// Where a row with no body text sits: the start of its logical line (an
-/// empty line, or a line whose only text is a margin time), or the text's
-/// end below the last line.
-fn lineOf(self: *const Self, row: u16) u64 {
-    const document = self.document;
-    const layout: viewport.Layout = .{ .width = self.drawn.width, .method = self.method };
-    const text = document.text();
-    var reached: i64 = -@as(i64, self.first.row);
-    var line: ?usize = if (self.first.offset < text.len) self.first.offset else null;
-    while (line) |offset| : (line = document.nextLine(offset)) {
-        reached += document.lineRows(layout, offset);
-        if (row < reached) return document.origin + offset;
-    }
-    return document.origin + text.len;
+    return self.spotIn(cells, line, col);
 }
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const surface = try vxfw.Surface.init(ctx.arena, self.widget(), ctx.max.size());
     self.size = surface.size;
-    const layout: viewport.Layout = .{ .width = @max(1, self.size.width), .method = self.method };
-    self.first = self.document.first(layout, self.size.height);
+    const shape: viewport.Layout = .{ .width = @max(1, self.size.width), .method = self.method };
+    self.first = self.document.first(shape, self.size.height);
     @memset(surface.buffer, .{ .style = self.style });
     var screen: vaxis.Screen = .{
         .width = surface.size.width,
@@ -307,7 +319,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .height = screen.height,
         .screen = &screen,
     };
-    const below = if (self.more == null or self.size.height < 2) 0 else self.document.measure(layout, self.first, std.math.maxInt(u16)).rows;
+    const below = if (self.more == null or self.size.height < 2) 0 else self.document.measure(shape, self.first, std.math.maxInt(u16)).rows;
     var text = window;
     if (below > self.size.height) text.height -= 1;
     const drawn = self.document.draw(text, self.first, true, self.colour, self.style);
@@ -318,27 +330,34 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         const hint = try std.fmt.allocPrint(ctx.arena, "{d} more lines · {s}", .{ below - drawn.rows, self.more.? });
         _ = window.child(.{ .y_off = text.height, .height = 1 }).print(&.{.{ .text = hint, .style = dim }}, .{ .wrap = .none });
     }
+    // Replaced content (another document, or this one cleared) ends a press
+    // or drag over the old text without copying.
+    if (self.drawn.document != self.document or self.drawn.replacements != self.document.replacements) self.selection = null;
     self.drawn = .{
-        .cells = surface.buffer,
+        .document = self.document,
+        .replacements = self.document.replacements,
         .width = surface.size.width,
         .height = text.height,
-        .origin = self.document.origin,
-        .base = @intFromPtr(&self.document.bytes),
-        .length = self.document.text().len,
+        .line = self.document.origin + @min(self.first.offset, self.document.text().len),
+        .row = self.first.row,
     };
-    if (self.selection) |*selection| if (selection.dragging and self.drawn.cells.len != 0) {
+    if (self.selection) |*selection| if (selection.dragging and surface.buffer.len != 0) {
+        const width = surface.size.width;
+        const height = text.height;
         // Held at an edge, the selection follows the rows scrolled in.
         switch (selection.edge) {
             .none => {},
-            .up => selection.head = self.spotAt(.{ .row = 0, .col = 0 }),
-            .down => selection.head = self.spotAt(.{ .row = self.drawn.height - 1, .col = self.drawn.width }),
+            .up => selection.head = self.spotIn(surface.buffer[0..width], self.rowPosition(self.first, 0), 0),
+            .down => selection.head = self.spotIn(surface.buffer[(height - 1) * width ..][0..width], self.rowPosition(self.first, height - 1), width),
         }
         const from = selection.from();
         const to = selection.to();
-        for (0..self.drawn.height) |row| {
-            var spots: RowSpots = .init(self, @intCast(row));
-            if (spots.boundary == null) spots.boundary = self.lineOf(@intCast(row));
-            for (surface.buffer[row * surface.size.width ..][0..surface.size.width]) |*cell| {
+        for (0..height) |row| {
+            const cells = surface.buffer[row * width ..][0..width];
+            const line = self.rowPosition(self.first, @intCast(row));
+            var spots: RowSpots = .init(self, cells);
+            if (spots.boundary == null) spots.boundary = if (line) |position| self.document.origin + position.offset else self.document.origin + self.document.text().len;
+            for (cells) |*cell| {
                 if (spots.next().?.within(from, to)) cell.style.reverse = true;
             }
         }
@@ -474,8 +493,8 @@ const Harness = struct {
     fn scroll(raw: *anyopaque, _: *vxfw.EventContext, up: bool) anyerror!void {
         const self: *Harness = @ptrCast(@alignCast(raw));
         self.scrolls += if (up) -1 else 1;
-        const layout: viewport.Layout = .{ .width = self.size.width, .method = self.transcript.method };
-        self.transcript.first = if (up) self.document.up(layout, self.transcript.first, 1) else self.document.down(layout, self.transcript.first, 1).min(self.document.bottom(layout, self.size.height));
+        const shape: viewport.Layout = .{ .width = self.size.width, .method = self.transcript.method };
+        self.transcript.first = if (up) self.document.up(shape, self.transcript.first, 1) else self.document.down(shape, self.transcript.first, 1).min(self.document.bottom(shape, self.size.height));
     }
 };
 
@@ -572,7 +591,7 @@ test "a drag held at an edge scrolls one row a tick and selects the rows it brin
     try h.transcript.widget().handleEvent(&h.ctx, .tick);
     try std.testing.expectEqual(@as(i32, -2), h.scrolls);
     try std.testing.expectEqual(@as(usize, 0), h.ctx.cmds.items.len);
-    // Down past the last row, as forwarded from below the widget.
+    // Down past the last row.
     try h.drag(.{ 0, 1 }, .{ 3, 5 });
     try h.transcript.widget().handleEvent(&h.ctx, .tick);
     _ = try h.frame();
@@ -599,4 +618,60 @@ test "a drag past the clipboard limit copies nothing and says why" {
     var copied: [8]u8 = undefined;
     try std.testing.expectEqualStrings("", h.copies(&copied));
     try std.testing.expectEqualStrings("Too large for the clipboard · /copy file", h.notices.items[0]);
+}
+
+test "a press or drag ends without copying when the pointer leaves or the content is replaced" {
+    const h = try Harness.init("first line\nsecond line\n", .{ .width = 16, .height = 3 });
+    defer h.deinit();
+    var copied: [64]u8 = undefined;
+    var row: [16]u8 = undefined;
+    // Leaving mid-drag: the highlight goes, and a later release copies nothing.
+    try h.drag(.{ 0, 0 }, .{ 4, 1 });
+    try std.testing.expectEqualStrings("################", Harness.reversed(try h.frame(), 0, &row));
+    try h.transcript.widget().handleEvent(&h.ctx, .mouse_leave);
+    try std.testing.expect(!h.transcript.dragging());
+    try std.testing.expectEqualStrings("................", Harness.reversed(try h.frame(), 0, &row));
+    try h.send(.release, 4, 1);
+    try std.testing.expectEqualStrings("", h.copies(&copied));
+    // Leaving after a press: the release back on that cell is no click.
+    try h.send(.press, 0, 0);
+    try h.transcript.widget().handleEvent(&h.ctx, .mouse_leave);
+    try h.send(.release, 0, 0);
+    try std.testing.expectEqual(@as(usize, 0), h.clicks.items.len);
+    // The same document cleared and refilled mid-drag.
+    try h.drag(.{ 0, 0 }, .{ 4, 1 });
+    h.document.clear();
+    try h.document.append("other text\nmore\n");
+    try std.testing.expectEqualStrings("................", Harness.reversed(try h.frame(), 0, &row));
+    try std.testing.expect(!h.transcript.dragging());
+    try h.send(.release, 4, 1);
+    try std.testing.expectEqualStrings("", h.copies(&copied));
+    // Another document put in place mid-drag, as a Message page is.
+    const page = try std.testing.allocator.create(viewport.Document);
+    defer std.testing.allocator.destroy(page);
+    page.* = .{};
+    try page.append("page text\n");
+    try h.drag(.{ 0, 0 }, .{ 4, 1 });
+    h.transcript.document = page;
+    try std.testing.expectEqualStrings("................", Harness.reversed(try h.frame(), 0, &row));
+    try h.send(.release, 4, 1);
+    try std.testing.expectEqualStrings("", h.copies(&copied));
+    try std.testing.expectEqual(@as(usize, 0), h.notices.items.len);
+}
+
+test "a drag over cells drawn before the text changed copies the text they showed" {
+    const h = try Harness.init("first\nsecond line\nthird\n", .{ .width = 16, .height = 2 });
+    defer h.deinit();
+    h.transcript.first = .{ .offset = "first\n".len };
+    _ = try h.frame();
+    var copied: [64]u8 = undefined;
+    // Between the draw and the gesture, a worker drops the line above the
+    // view and appends another, as eviction and live output do: the rows
+    // drawn keep meaning the text they showed.
+    h.document.discardFront(h.document.origin + "first\n".len);
+    try h.document.append("fourth\n");
+    try h.send(.press, 0, 1);
+    try h.send(.drag, 4, 1);
+    try h.send(.release, 4, 1);
+    try std.testing.expectEqualStrings("third", h.copies(&copied));
 }
