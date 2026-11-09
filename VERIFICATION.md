@@ -224,7 +224,7 @@ PR caches never feed a privileged workflow.
 Each platform builds its target closure once with `ci-build -Dci-targets=...`.
 On Linux and macOS, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.
 [build_artifact.py](tests/ci/build_artifact.py) transfers the executables and pinned package sources through immutable same-run artifacts that expire after one day.
-Workers accept either one whole part or exactly the unit and rest parts, with disjoint executable inventories that together match the extracted tree, and verify each exact artifact ID, archive digest, run and attempt, source and tree, platform selection, OS, architecture, compiler digest and executable hashes before use; runner image versions are logged, not compared.
+Workers accept either one whole part or exactly the unit and rest parts, with disjoint executable inventories that together match the extracted tree, and verify each exact artifact ID, archive digest, run, source and tree, an attempt no later than their own (a rerun of failed jobs keeps its passed producer's artifact), platform selection, OS, architecture, compiler digest and executable hashes before use; runner image versions are logged, not compared.
 Extraction rejects traversal, special files, hardlinks and symlinks.
 On any mismatch or rejection the worker discards the artifact, fetches pinned packages and compiles its own checkout with `ci-build`, stating why; a failed local fetch or compile stops the worker with its exit status.
 The receipt records compilation, never a test result.
