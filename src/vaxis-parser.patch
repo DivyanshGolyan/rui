@@ -2458,7 +2458,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          return .{
 --- a/src/Loop.zig
 +++ b/src/Loop.zig
-@@ -9,18 +9,64 @@
+@@ -9,18 +9,67 @@
  const Vaxis = @import("Vaxis.zig");
  
  const log = std.log.scoped(.vaxis);
@@ -2499,15 +2499,18 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          const Event = T;
 +        pub const Stamped = struct { event: T, sequence: u64 };
 +        pub const ReadinessGuard = struct {
-+            empty_reads: u8 = 0,
++            empty_reads: u16 = 0,
  
 +            pub fn noReadiness(self: *@This()) void {
 +                self.empty_reads = 0;
 +            }
 +
-+            pub fn emptyRead(self: *@This()) !void {
++            pub fn emptyRead(self: *@This()) !bool {
 +                self.empty_reads += 1;
-+                if (self.empty_reads >= 8) return error.InputReadinessUnavailable;
++                // Bound both CPU and total consecutive false readiness. A
++                // real timeout or successful read resets the counter.
++                if (self.empty_reads >= 512) return error.InputReadinessUnavailable;
++                return self.empty_reads % 8 == 0;
 +            }
 +        };
 +
@@ -2524,7 +2527,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          thread: ?std.Io.Future(void) = null,
          // Queued key text must outlive the input task, including on failure.
          cache: GraphemeCache = .{},
-@@ -98,7 +144,7 @@
+@@ -98,7 +147,7 @@
          /// Returns the next event, blocking until available. After buffered events
          /// are drained, returns Closed on stop or the input task's failure.
          pub fn nextEvent(self: *Self) !T {
@@ -2533,7 +2536,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          }
  
          /// blocks until an event is available. Useful when your application is
-@@ -109,17 +155,80 @@
+@@ -109,17 +158,80 @@
  
          /// returns an event if one is available, otherwise null. Non-blocking.
          pub fn tryEvent(self: *Self) !?T {
@@ -2545,8 +2548,8 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +        /// frame was presented. A failed push may leave a harmless serial gap.
 +        pub fn tryStampedEvent(self: *Self) !?Stamped {
              return try self.queue.tryPop();
-+        }
-+
+         }
+ 
 +        pub fn inputWatermark(self: *Self) u64 {
 +            return self.issued_sequence.load(.acquire);
 +        }
@@ -2576,8 +2579,8 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +            var count: c_int = 0;
 +            if (ioctl(self.tty.fd.handle, request, &count) != 0 or count < 0) return error.InputFreshnessUnavailable;
 +            return @intCast(count);
-         }
- 
++        }
++
 +        fn issueSequence(self: *Self) u64 {
 +            const previous = self.issued_sequence.fetchAdd(1, .acq_rel);
 +            if (previous == std.math.maxInt(u64)) @panic("input sequence exhausted");
@@ -2616,7 +2619,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          }
  
          pub fn winsizeCallback(ptr: *anyopaque) void {
-@@ -150,13 +259,14 @@
+@@ -150,13 +262,14 @@
              var retry: ReadRetry = .{};
              while (true) {
                  try self.io.checkCancel();
@@ -2632,7 +2635,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
              }
          }
  
-@@ -178,33 +288,58 @@
+@@ -178,33 +291,58 @@
                          try self.postEvent(.{ .winsize = winsize });
                      }
  
@@ -2669,7 +2672,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +                        const bytes_read = std.posix.read(input_fd, buf[read_start..][0..read_limit]) catch |err| {
 +                            self.unlockInput();
 +                            if (err == error.WouldBlock) {
-+                                try readiness.emptyRead();
++                                if (try readiness.emptyRead()) try self.io.sleep(.fromMilliseconds(16), .awake);
 +                                continue;
 +                            }
                              try retry.wait(self.io, err);
@@ -2699,7 +2702,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
                                      continue :read_loop;
                                  }
                              }
-@@ -214,6 +349,7 @@
+@@ -214,6 +352,7 @@
                                  // There is no consumed length on parse errors. Discard
                                  // this batch rather than retrying the same bad bytes.
                                  read_start = 0;
@@ -2707,7 +2710,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
                                  continue :read_loop;
                              };
                              if (result.n == 0) {
-@@ -224,14 +360,16 @@
+@@ -224,14 +363,16 @@
                                      buf[seq_start - initial_start] = buf[seq_start];
                                  }
                                  read_start = seq_start - initial_start;

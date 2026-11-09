@@ -404,11 +404,12 @@ test "native frame fences kernel backlog and fails closed when unavailable" {
     try std.testing.expect(ctx.frame_input_watermark < std.math.maxInt(u64));
 }
 
-test "native repeated false readiness fails closed without consuming input" {
+test "native false readiness yields and eventually fails without consuming input" {
     var guard: vaxis.Loop(fw.Event).ReadinessGuard = .{};
-    for (0..7) |_| try guard.emptyRead();
+    for (0..7) |_| try std.testing.expect(!try guard.emptyRead());
+    try std.testing.expect(try guard.emptyRead());
     guard.noReadiness();
-    for (0..7) |_| try guard.emptyRead();
+    for (0..511) |i| try std.testing.expectEqual((i + 1) % 8 == 0, try guard.emptyRead());
     try std.testing.expectError(error.InputReadinessUnavailable, guard.emptyRead());
 }
 

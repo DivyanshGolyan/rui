@@ -211,8 +211,12 @@ pub fn run(init: std.process.Init, options: Overview.Options, hooks: Overview.Ho
     }
     var tty_buffer: [65536]u8 = undefined;
     var app = try fw.App.init(init.io, init.gpa, init.environ_map, &tty_buffer);
-    defer app.deinit();
-    try app.run(self.widget(), .{});
+    const result = app.run(self.widget(), .{});
+    app.deinit();
+    result catch |err| {
+        stderr.diagnostic("rui: Native terminal stopped: {s}. Unsent drafts are not saved.\n", .{@errorName(err)});
+        return err;
+    };
 }
 
 fn deinit(self: *Self) void {
