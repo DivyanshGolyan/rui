@@ -47,6 +47,7 @@ jobs:
       native: ${{ steps.select.outputs.native }}
       upgrade: ${{ steps.select.outputs.upgrade }}
       retry: ${{ steps.select.outputs.retry }}
+      quarantine: ${{ steps.select.outputs.quarantine }}
       linux_memory: ${{ steps.select.outputs.linux_memory }}
       cache_execution: ${{ steps.select.outputs.cache_execution }}
       linux_matrix: ${{ steps.select.outputs.linux_matrix }}
@@ -90,6 +91,10 @@ jobs:
               kind = ChangeKind.NORMAL
           p['change_kind'] = kind.value
           ready_pr = os.environ['EVENT_NAME'] == 'pull_request' and p['phase'] == 'review'
+          # Listed flakes (quarantine.json) never excuse a strict change; promotion
+          # still blocks on a listed flake's second consecutive failure.
+          quarantine = ('promotion' if os.environ['PROMOTION'] == 'true'
+                        else 'admission' if p['retry'] else 'off')
           if kind == ChangeKind.DOCUMENTATION:
               p['targets'] = []
               p['native_targets'] = []
@@ -134,6 +139,7 @@ jobs:
               print('native=' + str(p['native_required']).lower(), file=f)
               print('upgrade=' + str(p['upgrade_required']).lower(), file=f)
               print('retry=' + str(p['retry']).lower(), file=f)
+              print('quarantine=' + quarantine, file=f)
               print('linux_memory=' + str(p['linux_memory_checks']).lower(), file=f)
               print('cache_execution=' + str(p['cache_execution_checks']).lower(), file=f)
               print('policy_skips=' + json.dumps(p['policy_skips']), file=f)
@@ -481,13 +487,14 @@ jobs:
           TARGETS: ${{ toJSON(matrix.targets) }}
           CHECK_PART: ${{ matrix.part }}
           RETRY: ${{ needs.plan.outputs.retry == 'true' && '--retry' || '' }}
+          QUARANTINE: ${{ needs.plan.outputs.quarantine }}
           RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
           echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           zig fmt --check --ast-check build.zig src
-          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled $RETRY
+          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --quarantine "$QUARANTINE" $RETRY
       - name: Require that the live MySQL dialect check ran
         # Fails when the unit binary left no record or PREPAREd nothing, so
         # any path that keeps the check from running (selection, launcher
@@ -616,12 +623,13 @@ jobs:
           TARGETS: ${{ toJSON(matrix.targets) }}
           CHECK_PART: ${{ matrix.part }}
           RETRY: ${{ needs.plan.outputs.retry == 'true' && '--retry' || '' }}
+          QUARANTINE: ${{ needs.plan.outputs.quarantine }}
           RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
           echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
-          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled $RETRY
+          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --quarantine "$QUARANTINE" $RETRY
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

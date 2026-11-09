@@ -213,7 +213,7 @@ A signature that already fails on main is not permission to bypass admission.
 Assertions, unexplained timeouts and unknown results require diagnosis, not replay.
 Pause the affected outcome, not independent work; a publication failure does not create another main admission gate.
 Diagnostic reruns need no routine grant; state the hypothesis or correction and preserve every failure.
-An unexplained fail-then-pass is not reliable green.
+An unexplained fail-then-pass is not reliable green; only a [listed flake](VERIFICATION.md#listed-flakes)'s signature may fail then pass.
 
 Required checks execute on the gated tip; build caches accelerate compilation and never cache test acceptance.
 Keep results in PR checks and existing artifacts rather than growing coordination records.

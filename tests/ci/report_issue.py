@@ -137,8 +137,13 @@ def fixture_cause(path, spans):
     return None
 
 
-def failure_causes(log, cases):
-    """Every failure signature in one job's log, without repeats."""
+def failure_causes(log, cases, keep_unexplained=False):
+    """Every failure signature in one job's log, without repeats.
+
+    A failed case without a traceback or a known fixture is dropped once
+    another cause explains the log, unless keep_unexplained, as the flake
+    quarantine needs: there, an unexplained failure must stay a failure.
+    """
     log = untimed(log)
     found, unparsed = [], []
     records = list(RECORD.finditer(log))
@@ -183,7 +188,7 @@ def failure_causes(log, cases):
         found.append(Cause("whitespace check (git diff --check) failed", paths[:WHITESPACE_PATHS],
                            f"{len(problems)} problems in {len(paths)} files, first:\n{detail}"))
     # A record the logs explain elsewhere (a Zig binary's case) adds nothing.
-    found += [cause for cause in unparsed if cause.paths or not found]
+    found += [cause for cause in unparsed if keep_unexplained or cause.paths or not found]
     unique = {}
     for cause in found:
         unique.setdefault(cause.signature, cause)
