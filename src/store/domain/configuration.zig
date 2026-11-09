@@ -937,7 +937,7 @@ pub fn validateConfiguration(
     return .{ .ready = &reads.validated };
 }
 
-pub fn applyConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const wire_request.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads) !Application {
+pub fn applyConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads) !Application {
     const checked = try validateConfiguration(a, io, session, configuration, initial_skills, reads);
     return switch (checked) {
         .rejected => |code| .{ .rejected = code },
@@ -945,7 +945,7 @@ pub fn applyConfiguration(a: anytype, io: std.Io, session: []const u8, configura
     };
 }
 
-pub fn applyValidatedConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const wire_request.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads, plan: *const ValidatedConfiguration) !Application {
+pub fn applyValidatedConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads, plan: *const ValidatedConfiguration) !Application {
     const creating = session.len == 0;
     const created = !reads.found.get();
     const next = &reads.next;
