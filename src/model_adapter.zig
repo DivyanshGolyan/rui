@@ -644,9 +644,7 @@ pub const Preparation = struct {
     const MemoSpan = struct {
         /// Request offset of the span's first byte, flushed before a copy.
         start: u64,
-        /// The Session's memo copied as the span's prefix, once its copy
-        /// begins; dropped with a failed copy.
-        copy: ?MemoCopy = null,
+        source: MemoSource = .rebuild,
         /// The finished span, kept as the Session's memo once the request
         /// seals.
         next: ?history_memo.Memo = null,
@@ -667,10 +665,20 @@ pub const Preparation = struct {
         admission_position: u64,
     };
 
+    /// Where the span's first bytes come from.
+    const MemoSource = union(enum) {
+        /// The history is encoded in full from the Store.
+        rebuild,
+        /// The Session's memo, being copied as the span's prefix.
+        copying: MemoCopy,
+        /// The memo whose copied bytes matched its digest, and the digest
+        /// state after them, which a memo of this span continues.
+        copied: history_memo.Prefix,
+    };
+
     const MemoCopy = struct {
         memo: history_memo.Memo,
-        /// Open only while copying.
-        file: ?std.Io.File,
+        file: std.Io.File,
         copied: u64 = 0,
         /// The writer's charge before the copy, restored by a rewind.
         charged: u64,
@@ -1114,7 +1122,7 @@ pub const Preparation = struct {
         try self.writer.flush();
         const file = memos.open(self.writer.io, &memo) orelse return .pending;
         // A memo is the span's first bytes and records the codec's carry.
-        self.state.span.?.copy = .{ .memo = memo, .file = file, .charged = self.writer.charged };
+        self.state.span.?.source = .{ .copying = .{ .memo = memo, .file = file, .charged = self.writer.charged } };
         self.state.emission = .{ .history_memo = {} };
         return .pending;
     }
@@ -1133,7 +1141,7 @@ pub const Preparation = struct {
         if (self.state.faults.memo_read_failure_after) |after| {
             if (copy.copied + destination.len > after) return error.InjectedMemoReadFailure;
         }
-        const count = try copy.file.?.readPositionalAll(self.writer.io, destination, copy.copied);
+        const count = try copy.file.readPositionalAll(self.writer.io, destination, copy.copied);
         if (count == 0) return error.EndOfStream;
         return count;
     }
@@ -1141,7 +1149,7 @@ pub const Preparation = struct {
     /// Copy the memo's bytes into the request, hashing as they go, one
     /// item per chunk. Returns true once the copy ends, matched or lost.
     fn advanceMemoCopy(self: *Preparation, bytes_left: *usize, items_left: *usize) !bool {
-        const copy = &self.state.span.?.copy.?;
+        const copy = &self.state.span.?.source.copying;
         while (copy.copied != copy.memo.length) {
             if (bytes_left.* == 0 or items_left.* == 0) return false;
             items_left.* -= 1;
@@ -1162,30 +1170,25 @@ pub const Preparation = struct {
     /// The copied bytes match the memo's digest: resume encoding exactly as
     /// the producing request's encoder stood after its last entry.
     fn finishMemoCopy(self: *Preparation) void {
-        self.closeMemoFile();
-        const memo = &self.state.span.?.copy.?.memo;
-        self.state.history_position = memo.history_position;
-        self.carry = memo.carry;
-        self.view.resumeToolGroups(memo.tool_group_cursor);
+        const source = &self.state.span.?.source;
+        const copy = source.copying;
+        copy.file.close(self.writer.io);
+        source.* = .{ .copied = .{ .memo = copy.memo, .hasher = copy.hasher } };
+        self.state.history_position = copy.memo.history_position;
+        self.carry = copy.memo.carry;
+        self.view.resumeToolGroups(copy.memo.tool_group_cursor);
     }
 
     /// A failed read or a digest mismatch loses only the memo that was
     /// copied: discard the partial span and its charge, drop that memo and
     /// rebuild the history from the Store.
     fn abandonMemoCopy(self: *Preparation) void {
-        self.closeMemoFile();
         const span = &self.state.span.?;
-        const copy = span.copy.?;
-        span.copy = null;
+        const copy = span.source.copying;
+        copy.file.close(self.writer.io);
+        span.source = .rebuild;
         self.writer.rewind(span.start, copy.charged);
         self.state.memos.?.forget(self.writer.io, &copy.memo);
-    }
-
-    fn closeMemoFile(self: *Preparation) void {
-        const span = &(self.state.span orelse return);
-        const copy = &(span.copy orelse return);
-        if (copy.file) |file| file.close(self.writer.io);
-        copy.file = null;
     }
 
     /// The span ends after the last entry; keep it as this Session's next
@@ -1209,8 +1212,11 @@ pub const Preparation = struct {
     /// Bytes of this request's span that a memo supplied.
     fn memoCopied(self: *const Preparation) u64 {
         const span = self.state.span orelse return 0;
-        const copy = span.copy orelse return 0;
-        return copy.copied;
+        return switch (span.source) {
+            .rebuild => 0,
+            .copying => |copy| copy.copied,
+            .copied => |prefix| prefix.memo.length,
+        };
     }
 
     fn flushAndYield(self: *Preparation) PreparationProgress {
@@ -1340,10 +1346,13 @@ pub const Preparation = struct {
         self.writer.close();
         self.state.stage = .history_store;
         const span = &(self.state.span orelse return);
+        // The history_memo emission drains before the history's next item,
+        // so a copy has ended, matched or lost, before the request seals.
+        std.debug.assert(span.source != .copying);
         const next = span.next orelse return;
         // A memo copy is this Host's own earlier encoding; only a full
         // rebuild can disagree with what an earlier Host sent.
-        if (span.copy == null) {
+        if (span.source == .rebuild) {
             const stored = try self.view.prefixSeal();
             const bound = if (stored) |held| if (held.binds(next.key.anchor, next.admission_position)) held else null else null;
             // A seal from a later view, as when an earlier Operation is
@@ -1365,8 +1374,12 @@ pub const Preparation = struct {
             };
         }
         const memos = self.state.memos orelse return;
-        const prefix: ?history_memo.Prefix = if (span.copy) |copy| .{ .memo = copy.memo, .hasher = copy.hasher } else null;
-        self.state.memo_write = memos.begin(self.writer.io, next, span.start, if (prefix) |*value| value else null);
+        const prefix: ?*const history_memo.Prefix = switch (span.source) {
+            .copied => |*copied| copied,
+            .rebuild => null,
+            .copying => unreachable,
+        };
+        self.state.memo_write = memos.begin(self.writer.io, next, span.start, prefix);
     }
 
     /// Hash the rebuilt span from the sealed request, one window per step
@@ -1433,7 +1446,10 @@ pub const Preparation = struct {
 
     pub fn cancel(self: *Preparation) void {
         std.debug.assert(self.state.active);
-        self.closeMemoFile();
+        if (self.state.span) |*span| switch (span.source) {
+            .copying => |copy| copy.file.close(self.writer.io),
+            .rebuild, .copied => {},
+        };
         self.abandonMemoWrite();
         self.closeEmission();
         self.view.close();
@@ -4609,6 +4625,25 @@ test "a preparation cancelled while keeping its memo keeps nothing of it" {
     try expectMemoStoreCancelForTesting(&setup, session.slice(), binding, &memos);
     binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
     try expectMemoStoreCancelForTesting(&setup, session.slice(), binding, &memos);
+    // Cancelled part-way through copying the held memo: the memo's file
+    // closes with the request's, and the memo stays whole for the next
+    // request.
+    const held = heldMemoLength(&memos, session.slice());
+    const descriptors = @import("os/descriptor_limit.zig");
+    const baseline = (try descriptors.observe(std.testing.io)).open_descriptors;
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try setup.storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
+    defer if (preparation.state.active) preparation.cancel();
+    while (preparation.memoCopied() == 0) try std.testing.expect(preparation.advance(7, 3) == .pending);
+    try std.testing.expect(preparation.memoCopied() < held);
+    preparation.cancel();
+    try std.testing.expectEqual(baseline, (try descriptors.observe(std.testing.io)).open_descriptors);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectEqual(held, heldMemoLength(&memos, session.slice()));
+    try std.testing.expectEqual(held, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
 }
 
 fn skillsConfigurationForTesting(setup: *PreparationTestSetup, key: []const u8, command: *protocol.ConfigureCommand) !void {
