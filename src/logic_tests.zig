@@ -33,6 +33,7 @@ const cores = .{
     .{ "environment.zig", @import("environment.zig") },
     .{ "failure_class.zig", @import("failure_class.zig") },
     .{ "home_path.zig", @import("home_path.zig") },
+    .{ "host_reply.zig", @import("host_reply.zig") },
     .{ "http1/Parser.zig", @import("http1/Parser.zig") },
     .{ "http1/request.zig", @import("http1/request.zig") },
     .{ "json_ascii.zig", @import("json_ascii.zig") },
