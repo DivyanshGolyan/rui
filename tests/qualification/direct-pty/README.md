@@ -8,20 +8,20 @@ qualification.
 
 ## Commands
 
-The runner requires Python 3.11 or newer, the pinned packages in
-`requirements.txt`, and a native built Rui binary.
+The runner requires Python 3.11 or newer, the libghostty-vt that
+`zig build screen-emulator` installs, named in `RUI_TEST_GHOSTTY_VT`, and a
+native built Rui binary.
 Each worker sets its soft `RLIMIT_NOFILE` to 256 without changing the hard limit.
 The controller runs up to `--jobs` independent worker processes, each with its own
 HOME, Store, Host, provider endpoint, caller, and PTY.
 
 ```sh
-python3 -m venv .amp/td4/venv
-.amp/td4/venv/bin/pip install -r tests/qualification/direct-pty/requirements.txt
-zig build -Doptimize=ReleaseSafe
-.amp/td4/venv/bin/python tests/qualification/direct-pty/test_driver.py -v
-.amp/td4/venv/bin/python tests/qualification/direct-pty/matrix.py "$PWD/zig-out/bin/rui" --output .amp/td4/matrix --jobs 4
-.amp/td4/venv/bin/python tests/qualification/direct-pty/controls.py "$PWD/zig-out/bin/rui" --output .amp/td4/controls
-.amp/td4/venv/bin/python tests/qualification/direct-pty/matrix.py "$PWD/zig-out/bin/rui" --output .amp/td4/ghostty --jobs 4 --vectors tests/qualification/direct-pty/ghostty.json
+zig build -Doptimize=ReleaseSafe install screen-emulator
+export RUI_TEST_GHOSTTY_VT="$PWD/zig-out/lib/libghostty-vt.so"  # libghostty-vt.dylib on macOS
+python3 tests/qualification/direct-pty/test_driver.py -v
+python3 tests/qualification/direct-pty/matrix.py "$PWD/zig-out/bin/rui" --output .amp/td4/matrix --jobs 4
+python3 tests/qualification/direct-pty/controls.py "$PWD/zig-out/bin/rui" --output .amp/td4/controls
+python3 tests/qualification/direct-pty/matrix.py "$PWD/zig-out/bin/rui" --output .amp/td4/ghostty --jobs 4 --vectors tests/qualification/direct-pty/ghostty.json
 ```
 
 Output directories must be fresh. `--row NAME` is repeatable.
