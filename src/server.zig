@@ -43,6 +43,7 @@ pub const scratch_limit_bytes = server_host.scratch_limit_bytes;
 pub const default_retention_entry_capacity = server_host.default_retention_entry_capacity;
 pub const Limits = server_host.Limits;
 pub const Hooks = server_host.Hooks;
+pub const Tuning = server_host.Tuning;
 const Host = server_host.Host;
 const fenceDispatch = server_host.fenceDispatch;
 const wakeListener = server_host.wakeListener;
