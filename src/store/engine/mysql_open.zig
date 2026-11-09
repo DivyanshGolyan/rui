@@ -7,6 +7,7 @@ const rows = @import("../mysql_row.zig");
 const literal = @import("../mysql_literal.zig");
 const schema = @import("../schema.zig");
 const protocol = @import("../../protocol.zig");
+const store_path = @import("../../store_path.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const wire_version = @import("../../wire_version.zig").wire_version;
 const policy = @import("mysql_refusal.zig");
@@ -39,7 +40,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     // The database name is also MySQL's connection-owned lock name.
     // GET_LOCK accepts at most 64 characters; do not truncate and collide.
     if (options.database.len == 0 or options.database.len > 64) return error.WrongStoreIdentity;
-    if (selector.len > protocol.max_store_bytes) return error.WrongStoreIdentity;
+    if (selector.len > store_path.max_bytes) return error.WrongStoreIdentity;
     const w = conn.batch();
     for (schema.mysql_session) |sql| {
         try w.writeAll(sql);
@@ -69,7 +70,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     })) |failure| return failure;
 
     try conn.query("SELECT meta_key,meta_value FROM store_meta;" ++ comptime schema.catalogSql("DATABASE()"));
-    const Meta = struct { key: Bounded(32), value: Bounded(protocol.max_store_bytes) };
+    const Meta = struct { key: Bounded(32), value: Bounded(store_path.max_bytes) };
     var meta_columns = try columns(Meta, conn);
     var store_id: [2 * schema.store_id_bytes]u8 = undefined;
     var seen: packed struct { format: bool = false, wire_version: bool = false, selector: bool = false, store_id: bool = false } = .{};

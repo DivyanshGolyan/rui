@@ -7,6 +7,7 @@ const command_reply = @import("../command_reply.zig");
 const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
 const protocol = @import("../protocol.zig");
+const store_path = @import("../store_path.zig");
 const provider_route = @import("../provider_route.zig");
 const outcome_code = @import("../outcome_code.zig");
 const content_string = @import("../content_string.zig");
@@ -85,7 +86,7 @@ pub const Store = struct {
     /// The connection, its prepared statements and an Entry's content
     /// read handle.
     engine: Engine,
-    selector: Bounded(protocol.max_store_bytes),
+    selector: Bounded(store_path.max_bytes),
     fenced: std.atomic.Value(bool) = .init(false),
     /// Advances before `release` of any entry point that changed rows, so
     /// after every successful COMMIT. An unchanged value proves no canonical
@@ -202,7 +203,7 @@ pub const Store = struct {
         const opened = try Sqlite.open(io, database_path, selector, options);
         errdefer opened.abandon();
 
-        var stored_selector: Bounded(protocol.max_store_bytes) = .{};
+        var stored_selector: Bounded(store_path.max_bytes) = .{};
         try stored_selector.set(selector);
         const changes = try createRing();
         errdefer destroyRing(changes);
@@ -311,7 +312,7 @@ pub const Store = struct {
         errdefer self.* = undefined;
         var opened = try Mysql.open(io, connection, selector, options);
         errdefer opened.close() catch {};
-        var stored_selector: Bounded(protocol.max_store_bytes) = .{};
+        var stored_selector: Bounded(store_path.max_bytes) = .{};
         try stored_selector.set(selector);
         const changes = try createRing();
         errdefer destroyRing(changes);

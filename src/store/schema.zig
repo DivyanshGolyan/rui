@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const protocol = @import("../protocol.zig");
+const store_path = @import("../store_path.zig");
 const tool_name = @import("../tool_name.zig");
 const Bounded = @import("../bounded.zig").Bounded;
 const wire_version = @import("../wire_version.zig").wire_version;
@@ -22,7 +23,7 @@ pub const application_id: u32 = 0x4c544631; // LTF1
 pub const schema_version: u32 = 59;
 
 pub const IdentityMismatch = struct {
-    saved_selector: Bounded(protocol.max_store_bytes) = .{},
+    saved_selector: Bounded(store_path.max_bytes) = .{},
 };
 
 /// `digest()` of each schema_version, oldest first. Each format PR appends
@@ -2121,7 +2122,7 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_selector'");
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreIdentity;
-        var stored_selector: Bounded(protocol.max_store_bytes) = .{};
+        var stored_selector: Bounded(store_path.max_bytes) = .{};
         try sqlite.readText(statement, 0, &stored_selector);
         if (!stored_selector.eql(selector)) {
             if (identity_mismatch) |out| out.saved_selector = stored_selector;
@@ -2355,9 +2356,9 @@ test "schema 57 migration creates the canonical archive objects on SQLite and My
 test "schema 57 preserves Commands and stop references while adding nullable archive intent" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var path_buffer: [protocol.max_store_bytes + 32]u8 = undefined;
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
     const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/store.sqlite3", .{root}, 0);
     var raw: ?*c.sqlite3 = null;
     defer _ = c.sqlite3_close(raw);

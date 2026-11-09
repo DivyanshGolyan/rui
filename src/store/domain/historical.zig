@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const store_path = @import("../../store_path.zig");
 const content_string = @import("../../content_string.zig");
 const session_id = @import("../../session_id.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -74,7 +75,7 @@ pub const HistoricalSettings = struct {
     workspace: Bounded(protocol.max_workspace_bytes),
     /// The originating Operation's own address: canonical Store selector and
     /// exact Session reference, for the Rui-owned request context.
-    store: Bounded(protocol.max_store_bytes),
+    store: Bounded(store_path.max_bytes),
     session: Bounded(session_id.max_reference_bytes),
     session_affinity: [16]u8,
     baseline_instructions: HistoricalContent,
