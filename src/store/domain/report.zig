@@ -4,6 +4,7 @@ const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const named_scratch = @import("../../named_scratch.zig");
 const protocol = @import("../../protocol.zig");
+const content_string = @import("../../content_string.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const tool_name = @import("../../tool_name.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
@@ -1443,7 +1444,7 @@ fn renderUnresolved(capture: *SessionReportCapture, row: *const unresolved_actio
 fn actionTool(digest: *const [32]u8) ?built_in_tool.BuiltInTool {
     for (std.enums.values(built_in_tool.BuiltInTool)) |tool| {
         const owned = tool_catalog.record(tool);
-        if (owned.owner == .rui and std.mem.eql(u8, digest, &protocol.contentDigest(owned.name))) return tool;
+        if (owned.owner == .rui and std.mem.eql(u8, digest, &content_string.digest(owned.name))) return tool;
     }
     return null;
 }

@@ -27,6 +27,7 @@ const cores = .{
     .{ "command_reply.zig", @import("command_reply.zig") },
     .{ "command_value.zig", @import("command_value.zig") },
     .{ "configure_input.zig", @import("configure_input.zig") },
+    .{ "content_string.zig", @import("content_string.zig") },
     .{ "deadline.zig", @import("deadline.zig") },
     .{ "descriptor_capacity.zig", @import("descriptor_capacity.zig") },
     .{ "draft_layout.zig", @import("draft_layout.zig") },

@@ -7,6 +7,7 @@ const command_reply = @import("../command_reply.zig");
 const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
 const protocol = @import("../protocol.zig");
+const content_string = @import("../content_string.zig");
 const Bounded = @import("../bounded.zig").Bounded;
 const model_capability = @import("../model_capability.zig");
 const session_id = @import("../session_id.zig");
@@ -434,8 +435,8 @@ pub const Store = struct {
             const schema = take(saved.texts, &used, @intCast(row.schema_length));
             try self.readCatalogText(row.description_id.get(), description);
             try self.readCatalogText(row.schema_id.get(), schema);
-            if (!std.mem.eql(u8, &protocol.contentDigest(description), &row.description_digest) or
-                !std.mem.eql(u8, &protocol.contentDigest(schema), &row.schema_digest)) return error.CorruptStore;
+            if (!std.mem.eql(u8, &content_string.digest(description), &row.description_digest) or
+                !std.mem.eql(u8, &content_string.digest(schema), &row.schema_digest)) return error.CorruptStore;
             out.* = .{ .name = name, .owner = row.owner, .server = server, .description = description, .input_schema = schema };
             digest.* = tool_catalog.recordDigest(out);
         }

@@ -5,6 +5,7 @@
 const std = @import("std");
 const platform = @import("../../platform.zig");
 const protocol = @import("../../protocol.zig");
+const content_string = @import("../../content_string.zig");
 const change_ring = @import("../../change_ring.zig");
 const engine = @import("../engine.zig");
 const rsql = @import("../rsql.zig");
@@ -93,7 +94,7 @@ pub noinline fn open(io: std.Io, database_path: []const u8, selector: []const u8
         if (database) |db| _ = c.sqlite3_close(db);
     }
 
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LENGTH, @intCast(protocol.max_sqlite_content_bytes + 4096));
+    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LENGTH, @intCast(content_string.max_bytes + 4096));
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_SQL_LENGTH, 16 * 1024);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COLUMN, 32);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, protocol.max_json_depth);

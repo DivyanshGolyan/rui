@@ -6,6 +6,7 @@ const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
 const store_id = @import("store_id.zig");
 const mutation_answer = @import("mutation_answer.zig");
+const content_string = @import("content_string.zig");
 const tool_presentation = @import("tool_presentation.zig");
 const tool_name = @import("tool_name.zig");
 const idempotency_key = @import("idempotency_key.zig");
@@ -88,7 +89,7 @@ pub const max_header_bytes = 16 * 1024;
 pub const content_window_bytes = 4096;
 pub const public_conversation_page_items = 16;
 pub const max_json_depth = 64;
-pub const max_sqlite_content_bytes: u64 = 1024 * 1024 * 1024 - 4096;
+pub const max_sqlite_content_bytes = content_string.max_bytes;
 pub const session_list_page_size: usize = 8;
 
 pub const Bounded = @import("bounded.zig").Bounded;
@@ -1424,17 +1425,8 @@ fn hashContent(hash: *std.crypto.hash.sha2.Sha256, field: anytype) void {
     }
 }
 
-pub fn contentHasher() std.crypto.hash.sha2.Sha256 {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    hashField(&hash, "rui/content/v1");
-    return hash;
-}
-
-pub fn contentDigest(value: []const u8) [32]u8 {
-    var hash = contentHasher();
-    hash.update(value);
-    return hash.finalResult();
-}
+pub const contentHasher = content_string.hasher;
+pub const contentDigest = content_string.digest;
 
 /// The metadata an Ingress has received so far, the Parser's only input.
 /// Content strings never reach it: the Ingress captures them.

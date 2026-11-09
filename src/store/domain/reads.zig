@@ -9,6 +9,7 @@ const command_reply = @import("../../command_reply.zig");
 const word_search = @import("../../word_search.zig");
 const pages = @import("../../os/pages.zig");
 const protocol = @import("../../protocol.zig");
+const content_string = @import("../../content_string.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -543,7 +544,7 @@ pub fn publicConversationPage(a: *ReadAccess, request: *const protocol.Conversat
             4 => .tool_result,
             5 => .hosted_call,
             else => return error.CorruptStore,
-        }, .content = .{ .length = 0, .digest = protocol.contentDigest("") } };
+        }, .content = .{ .length = 0, .digest = content_string.digest("") } };
         if (row.kind == 5) {
             if (row.ordinal != 0) return error.CorruptStore;
         } else if ((row.content_id orelse 0) == 0 or (row.kind == 4) != (row.ordinal > 0)) return error.CorruptStore;

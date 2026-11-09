@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const content_string = @import("../../content_string.zig");
 const session_id = @import("../../session_id.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const model_capability = @import("../../model_capability.zig");
@@ -213,7 +214,7 @@ pub const HistoricalView = struct {
         next: u64 = 0,
         /// Bytes of the text read so far, all in order from its start.
         read: u64 = 0,
-        hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
+        hash: @TypeOf(content_string.hasher()) = content_string.hasher(),
     };
 
     /// The view's selected Compaction Base: its admission position, from
@@ -1402,7 +1403,7 @@ fn outputAt(a: *ReadAccess, view: *HistoricalView, position: u64) !HistoricalOut
         const content = try viewContent(view, id.get(), &text_row, false);
         // Its parts' reads check a nonempty text; an empty one is
         // checked here.
-        if (content.length == 0 and !std.mem.eql(u8, &content.digest, &protocol.contentDigest(""))) return error.CorruptStore;
+        if (content.length == 0 and !std.mem.eql(u8, &content.digest, &content_string.digest(""))) return error.CorruptStore;
         text = .{ .content_id = content.content_id, .length = content.length, .digest = content.digest };
     }
     var call: ?[3]HistoricalContent = null;

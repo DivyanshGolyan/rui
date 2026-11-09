@@ -6,6 +6,7 @@
 //! only the sets saved after it.
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const content_string = @import("../../content_string.zig");
 const tool_name = @import("../../tool_name.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const tool_catalog = @import("../../tools.zig");
@@ -285,9 +286,9 @@ pub fn insertCatalog(a: anytype, catalog: *const tool_catalog.Catalog, digest: *
         .name = each.name,
         .owner = each.owner,
         .server = each.server,
-        .description = protocol.contentDigest(each.description),
+        .description = content_string.digest(each.description),
         .description_bytes = each.description.len,
-        .input_schema = protocol.contentDigest(each.input_schema),
+        .input_schema = content_string.digest(each.input_schema),
         .input_schema_bytes = each.input_schema.len,
     });
 }

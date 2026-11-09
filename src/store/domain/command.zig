@@ -5,6 +5,7 @@ const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const skills_domain = @import("skills.zig");
 const protocol = @import("../../protocol.zig");
+const content_string = @import("../../content_string.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -473,7 +474,7 @@ pub fn deliverAgentMessage(
         const text_id = try content_domain.importBytes(a, &message, text);
         var digest = std.crypto.hash.sha2.Sha256.init(.{});
         digest.update("rui/core/message_agent/v1");
-        digest.update(&protocol.contentDigest(text));
+        digest.update(&content_string.digest(text));
         try queueCommand(a, key, .message, target, &digest.finalResult(), text_id, null, &.{ .accepted = true });
         a.write(admit_sent_message, .{
             .admission_id = try a.identity(.admission_id),
@@ -571,7 +572,7 @@ pub fn deliverChildEnding(a: anytype, turn_id: u64, faults: Faults) !bool {
     const head = parent.session;
     const content_id: u64, const content_digest: [32]u8 = switch (outcome) {
         .completed => |answer| .{ @intCast(answer), found.digest orelse return error.CorruptStore },
-        else => .{ try content_domain.importBytes(a, &message, text), protocol.contentDigest(text) },
+        else => .{ try content_domain.importBytes(a, &message, text), content_string.digest(text) },
     };
     var digest = std.crypto.hash.sha2.Sha256.init(.{});
     digest.update("rui/core/child_ending/v1");
@@ -696,7 +697,7 @@ pub fn startAgent(
         const text_id = try content_domain.importBytes(a, &message, task);
         var digest = std.crypto.hash.sha2.Sha256.init(.{});
         digest.update("rui/core/start_agent/v1");
-        digest.update(&protocol.contentDigest(task));
+        digest.update(&content_string.digest(task));
         const answer: StoredAnswer = .{ .accepted = true, .revision = value.revision, .created = true };
         try configuration_domain.queueConfiguredCommand(a, value, key, .message, &digest.finalResult(), text_id, null, &answer);
         admission_id = try a.identity(.admission_id);

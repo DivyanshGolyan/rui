@@ -3,6 +3,7 @@
 const std = @import("std");
 const catalog = @import("../../skills.zig");
 const protocol = @import("../../protocol.zig");
+const content_string = @import("../../content_string.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const mutation_answer = @import("../../mutation_answer.zig");
 const content = @import("content.zig");
@@ -147,7 +148,7 @@ pub fn read(a: anytype, allocator: std.mem.Allocator, session: []const u8) !cata
         try a.readRaw(id.get(), offset, bytes[offset..end]);
         offset = end;
     }
-    if (!std.mem.eql(u8, &protocol.contentDigest(bytes), &digest)) return error.CorruptStore;
+    if (!std.mem.eql(u8, &content_string.digest(bytes), &digest)) return error.CorruptStore;
     const decoded = catalog.decodeCatalog(allocator, bytes) catch return error.CorruptStore;
     if (position == 0 and decoded.entries.len != 0) return error.CorruptStore;
     return decoded;

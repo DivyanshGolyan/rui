@@ -1,6 +1,7 @@
 //! Loading saved tools is one call-keyed command, revision and resolution.
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const content_string = @import("../../content_string.zig");
 const tool_name = @import("../../tool_name.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const core = @import("../../core_tools.zig");
@@ -218,7 +219,7 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
     var answer: command.StoredAnswer = .{ .accepted = refusal == null, .revision = revision };
     if (refusal != null) try answer.code.set("invalid_arguments");
     // The call's binding uniquely identifies its saved arguments, even on retry.
-    const digest = protocol.contentDigest(key);
+    const digest = content_string.digest(key);
     if (matches.count > 0) {
         var loaded: ?u64 = null;
         if (matches.remaining > 0) {

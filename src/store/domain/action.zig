@@ -3,6 +3,7 @@
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const protocol = @import("../../protocol.zig");
+const content_string = @import("../../content_string.zig");
 const tool_name = @import("../../tool_name.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -47,11 +48,11 @@ pub const CoreNames = struct {
 
     pub fn of() CoreNames {
         return .{
-            .message_agent = protocol.contentDigest(tool_catalog.message_agent_record.name),
-            .read_transcript = protocol.contentDigest(tool_catalog.read_transcript_record.name),
-            .start_agent = protocol.contentDigest(tool_catalog.start_agent_record.name),
-            .find_tools = protocol.contentDigest(tool_catalog.find_tools_record.name),
-            .skill = protocol.contentDigest(tool_catalog.skill_record.name),
+            .message_agent = content_string.digest(tool_catalog.message_agent_record.name),
+            .read_transcript = content_string.digest(tool_catalog.read_transcript_record.name),
+            .start_agent = content_string.digest(tool_catalog.start_agent_record.name),
+            .find_tools = content_string.digest(tool_catalog.find_tools_record.name),
+            .skill = content_string.digest(tool_catalog.skill_record.name),
         };
     }
 };

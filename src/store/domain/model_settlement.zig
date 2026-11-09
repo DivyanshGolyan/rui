@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const tool_catalog = @import("../../tools.zig");
@@ -1805,7 +1806,7 @@ fn writeChecked(sink: ?store_access.ContentSink, hash: *std.crypto.hash.sha2.Sha
 /// checking its digest. noinline with a small window, so the settlement
 /// frame stays small.
 noinline fn streamSourceRange(io: std.Io, file: std.Io.File, start: u64, length: u64, digest: *const [32]u8, sink: ?store_access.ContentSink, faults: Faults) !void {
-    var copy: content_domain.HashedWindow(import_window_bytes) = .{ .hash = protocol.contentHasher() };
+    var copy: content_domain.HashedWindow(import_window_bytes) = .{ .hash = content_string.hasher() };
     var offset: u64 = 0;
     while (offset < length) {
         const wanted: usize = @intCast(@min(length - offset, copy.window.len));
@@ -1825,7 +1826,7 @@ noinline fn streamBag(io: std.Io, output: *const ValidatedOutput, trailer: Outpu
     var members = try OutputMetadataReader.init(io, output.metadata, output.item_count);
     members.offset = start;
     members.length = end;
-    var copy: content_domain.HashedWindow(import_window_bytes) = .{ .hash = protocol.contentHasher() };
+    var copy: content_domain.HashedWindow(import_window_bytes) = .{ .hash = content_string.hasher() };
     var written: u64 = 0;
     var first = true;
     while (try members.next()) |member| {
@@ -1852,7 +1853,7 @@ noinline fn streamMessageText(io: std.Io, output: *const ValidatedOutput, text: 
     var parts = try OutputMetadataReader.init(io, output.metadata, output.item_count);
     parts.offset = start;
     parts.length = end;
-    var decoded: content_domain.HashedWindow(import_window_bytes) = .{ .hash = protocol.contentHasher() };
+    var decoded: content_domain.HashedWindow(import_window_bytes) = .{ .hash = content_string.hasher() };
     var written: u64 = 0;
     while (try parts.next()) |part| {
         if (part.tag != .part or (part.part_kind != .output_text and part.part_kind != .refusal)) continue;
@@ -1864,7 +1865,7 @@ noinline fn streamMessageText(io: std.Io, output: *const ValidatedOutput, text: 
 
 /// Decodes one saved string into `sink`.
 noinline fn streamDecoded(io: std.Io, output: *const ValidatedOutput, part: OutputMetadataRecord, sink: store_access.ContentSink, faults: Faults) !void {
-    var decoded: content_domain.HashedWindow(import_window_bytes) = .{ .hash = protocol.contentHasher() };
+    var decoded: content_domain.HashedWindow(import_window_bytes) = .{ .hash = content_string.hasher() };
     var written: u64 = 0;
     try writeDecoded(io, output, sink, &decoded, part, &written, part.decoded_length);
     if (faults.output_import) return error.InjectedOutputImportFailure;
