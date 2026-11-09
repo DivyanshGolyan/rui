@@ -4,6 +4,7 @@ const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const named_scratch = @import("../../named_scratch.zig");
 const protocol = @import("../../protocol.zig");
+const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const built_in_tool = @import("../../built_in_tool.zig");
 const cli_value = @import("../../cli_value.zig");
@@ -793,7 +794,7 @@ pub const json_shapes = struct {
     const H = protocol.Hole;
     const head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_report\",\"profile\":\""};
     const current_head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\""};
-    const facts = .{ "\",\"session\":", H{ .json = CurrentJson.Settings }, ",\"archive_state\":\"", H{ .tag = session_archive.State }, "\",\"pending_messages\":\"", H.decimal, "\",\"work\":", H{ .json = CurrentJson.Work }, ",\"peers\":", H{ .json = protocol.PeerFacts }, ",\"first_message\":", H{ .optional_json = protocol.FirstMessage }, ",\"selected_message\":", H{ .optional_string = protocol.max_key_bytes }, ",\"recent_messages\":", ListOf(CurrentJson.Recent), ",\"actions\":", H{ .json = CurrentJson.Actions }, ",\"rejected_calls\":", H{ .json = CurrentJson.RejectedCalls }, ",\"actionable_permissions\":", ListOf(CurrentJson.Actionable) };
+    const facts = .{ "\",\"session\":", H{ .json = CurrentJson.Settings }, ",\"archive_state\":\"", H{ .tag = session_archive.State }, "\",\"pending_messages\":\"", H.decimal, "\",\"work\":", H{ .json = CurrentJson.Work }, ",\"peers\":", H{ .json = protocol.PeerFacts }, ",\"first_message\":", H{ .optional_json = protocol.FirstMessage }, ",\"selected_message\":", H{ .optional_string = idempotency_key.max_bytes }, ",\"recent_messages\":", ListOf(CurrentJson.Recent), ",\"actions\":", H{ .json = CurrentJson.Actions }, ",\"rejected_calls\":", H{ .json = CurrentJson.RejectedCalls }, ",\"actionable_permissions\":", ListOf(CurrentJson.Actionable) };
     const tail = .{ ",\"execution\":", H{ .json = ExecutionJson }, "}" };
     const missing = "\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}";
     pub const current = current_head ++ .{"current"} ++ facts ++ tail;
@@ -953,7 +954,7 @@ const selected_active = rsql.Read(.{
     .cardinality = .each,
 });
 
-const SelectedRow = struct { command_key: Bounded(protocol.max_key_bytes) };
+const SelectedRow = struct { command_key: Bounded(idempotency_key.max_bytes) };
 
 /// Without an active Turn, the oldest Message queued after the latest
 /// stop's cutoff ?2.
@@ -975,7 +976,7 @@ const recent_messages = rsql.Read(.{
         "WHERE t.session_ref=?1 AND t.outcome_code IS NOT NULL AND m.session_ref=t.session_ref AND m.turn_id=t.turn_id " ++
         "ORDER BY t.turn_id DESC,m.admission_id DESC LIMIT 10",
     .Args = struct { session: []const u8 },
-    .Row = struct { turn_id: rsql.Positive, command_key: Bounded(protocol.max_key_bytes), outcome_code: Code },
+    .Row = struct { turn_id: rsql.Positive, command_key: Bounded(idempotency_key.max_bytes), outcome_code: Code },
     .cardinality = .each,
 });
 
@@ -1336,7 +1337,7 @@ pub const CurrentJson = struct {
         pub const json_shape = .{"{"} ++ protocol.SessionWork.fields ++ .{ ",\"latest_outcome\":", H{ .optional_json = Outcome }, "}" };
     };
     pub const Recent = struct {
-        pub const json_shape = .{ "{\"turn\":\"", H.decimal, "\",\"message\":", H{ .string = protocol.max_key_bytes }, ",\"outcome\":", H{ .string = protocol.max_code_bytes }, "}" };
+        pub const json_shape = .{ "{\"turn\":\"", H.decimal, "\",\"message\":", H{ .string = idempotency_key.max_bytes }, ",\"outcome\":", H{ .string = protocol.max_code_bytes }, "}" };
     };
     pub const Unresolved = struct {
         pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"tool\":\"", H{ .tag = built_in_tool.BuiltInTool }, "\",\"permission_revision\":\"", H.decimal, "\",\"authorization\":\"", H{ .tag = enum { core, pending, bypass, allow_once } }, "\",\"call_id\":", H{ .json = TextReference }, ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentation }, "}" };

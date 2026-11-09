@@ -9,6 +9,7 @@ const command_reply = @import("../../command_reply.zig");
 const word_search = @import("../../word_search.zig");
 const pages = @import("../../os/pages.zig");
 const protocol = @import("../../protocol.zig");
+const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const provider_name = @import("../../provider_name.zig");
 const session_archive = @import("../../session_archive.zig");
@@ -1393,7 +1394,7 @@ const activity_message = rsql.Read(.{
         "WHERE m.session_ref=?1 AND m.admission_id=?3",
     .Args = struct { session: []const u8, end: u64, admission: u64 },
     .Row = struct {
-        command_key: Bounded(protocol.max_key_bytes),
+        command_key: Bounded(idempotency_key.max_bytes),
         turn_id: ?rsql.Positive,
         content_id: rsql.Positive,
         applied: bool,
@@ -1458,7 +1459,7 @@ const send_failure = rsql.Read(.{
         "LEFT JOIN core_command c ON c.command_key=s.command_key WHERE s.sender_session_ref=?1 AND s.sender_position=?2",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct {
-        command_key: Bounded(protocol.max_key_bytes),
+        command_key: Bounded(idempotency_key.max_bytes),
         target: SessionText,
         code: Bounded(protocol.max_code_bytes),
         consistent: bool,
@@ -1499,7 +1500,7 @@ const session_stop = rsql.Read(.{
         "FROM session_stop s LEFT JOIN core_command c ON c.command_key=s.command_key LEFT JOIN turn t ON t.turn_id=s.selected_turn_id WHERE s.session_ref=?1 AND s.position=?2",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct {
-        command_key: Bounded(protocol.max_key_bytes),
+        command_key: Bounded(idempotency_key.max_bytes),
         selected_turn_id: ?rsql.Positive,
         admission_cutoff: u64,
         outcome_position: ?rsql.Positive,

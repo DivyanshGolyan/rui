@@ -6,6 +6,7 @@ const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
 const store_id = @import("store_id.zig");
 const mutation_answer = @import("mutation_answer.zig");
+const idempotency_key = @import("idempotency_key.zig");
 
 pub const wire_version = @import("wire_version.zig").wire_version;
 
@@ -18,11 +19,8 @@ pub const message_recovery_limit = 4;
 pub const next_wire_version = std.fmt.comptimePrint("{d}", .{wire_number + 1});
 pub const previous_wire_version = std.fmt.comptimePrint("{d}", .{wire_number - 1});
 const wire_number = std.fmt.parseInt(u32, wire_version, 10) catch unreachable;
-pub const max_key_bytes = 128;
-/// Command keys Rui gives its own commands: a core tool call's Message or
-/// agent start, and the stop an attached child owes. A client command
-/// with one is refused.
-pub const reserved_key_prefix = "rui.core/";
+pub const max_key_bytes = idempotency_key.max_bytes;
+pub const reserved_key_prefix = idempotency_key.reserved_prefix;
 pub const max_session_bytes = session_id.max_reference_bytes;
 // SQLite's Unix VFS needs eight bytes beyond the database path for journals.
 // The Store selector plus "/rui.sqlite3" and the journal suffix must stay

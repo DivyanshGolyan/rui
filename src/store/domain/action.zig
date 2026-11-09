@@ -3,6 +3,7 @@
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const protocol = @import("../../protocol.zig");
+const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const session_id = @import("../../session_id.zig");
 const tool_catalog = @import("../../tools.zig");
@@ -134,7 +135,7 @@ pub const CoreActionInput = struct {
 /// never run is run again under the same key.
 pub const OwedStop = struct {
     session: Bounded(session_id.bytes),
-    key: Bounded(protocol.max_key_bytes),
+    key: Bounded(idempotency_key.max_bytes),
 };
 
 /// An attached child's Turn ending its parent is owed as a Message (D39),
@@ -214,7 +215,7 @@ pub fn nextCoreWork(a: anytype, include_mcp: bool) !?CoreWork {
     try a.run();
     if (stop) |owed| {
         var work: OwedStop = .{ .session = owed.child_ref, .key = .{} };
-        var buffer: [protocol.max_key_bytes]u8 = undefined;
+        var buffer: [idempotency_key.max_bytes]u8 = undefined;
         try work.key.set(try owedStopKey(&buffer, owed.child_ref.slice(), owed.cause_ref.slice(), owed.cause_position));
         return .{ .stop = work };
     }
@@ -253,7 +254,7 @@ const attempt_action = rsql.Write(.{
 pub const ActionAttemptBinding = attempt.ActionAttemptBinding;
 
 pub const SupersedingControl = struct {
-    command_key: Bounded(protocol.max_key_bytes),
+    command_key: Bounded(idempotency_key.max_bytes),
 };
 
 pub const ActionAttemptAdmission = struct {
@@ -494,7 +495,7 @@ const superseding_stop = rsql.Read(.{
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql,
     .Args = struct { action_id: u64, parent_operation_id: u64 },
-    .Row = struct { command_key: ?Bounded(protocol.max_key_bytes) },
+    .Row = struct { command_key: ?Bounded(idempotency_key.max_bytes) },
     .cardinality = .one,
 });
 

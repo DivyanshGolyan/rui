@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const tool_catalog = @import("../../tools.zig");
 const tool_set = @import("tool_set.zig");
@@ -257,7 +258,7 @@ pub fn currentAttemptSession(a: anytype, binding: AttemptBinding) !rsql.SessionH
 const superseding_control = rsql.Read(.{
     .sql = "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",
     .Args = struct { operation_id: u64 },
-    .Row = struct { turn_id: i64, attempt_ordinal: i64, interrupted_by_command_key: ?Bounded(protocol.max_key_bytes) },
+    .Row = struct { turn_id: i64, attempt_ordinal: i64, interrupted_by_command_key: ?Bounded(idempotency_key.max_bytes) },
     .cardinality = .optional,
 });
 

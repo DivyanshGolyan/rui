@@ -5,6 +5,7 @@ const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const skills_domain = @import("skills.zig");
 const protocol = @import("../../protocol.zig");
+const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const cli_value = @import("../../cli_value.zig");
 const mutation_answer = @import("../../mutation_answer.zig");
@@ -418,7 +419,7 @@ pub const AgentDelivery = enum {
 
 /// The command key a `message_agent` call's Message is saved under. Keys a
 /// person or script sends are theirs; a taken key fails the call.
-fn agentMessageKey(buffer: *[protocol.max_key_bytes]u8, action_id: u64) []const u8 {
+fn agentMessageKey(buffer: *[idempotency_key.max_bytes]u8, action_id: u64) []const u8 {
     return std.fmt.bufPrint(buffer, "rui.core/message_agent/{d}", .{action_id}) catch unreachable;
 }
 
@@ -433,7 +434,7 @@ pub fn deliverAgentMessage(
     text: []const u8,
     faults: Faults,
 ) !AgentDelivery {
-    var key_buffer: [protocol.max_key_bytes]u8 = undefined;
+    var key_buffer: [idempotency_key.max_bytes]u8 = undefined;
     const key = agentMessageKey(&key_buffer, binding.action_id);
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
@@ -490,7 +491,7 @@ pub fn deliverAgentMessage(
     return if (delivered) .delivered else .failed;
 }
 
-fn childEndingKey(buffer: *[protocol.max_key_bytes]u8, turn_id: u64) []const u8 {
+fn childEndingKey(buffer: *[idempotency_key.max_bytes]u8, turn_id: u64) []const u8 {
     return std.fmt.bufPrint(buffer, "rui.core/ending/{d}", .{turn_id}) catch unreachable;
 }
 
@@ -533,7 +534,7 @@ fn endingText(buffer: []u8, ending: protocol.TurnEnding) []const u8 {
 /// False when nothing was owed any more. Its `rui.core/` key is free:
 /// clients cannot use one, and settling marks the row with the admission.
 pub fn deliverChildEnding(a: anytype, turn_id: u64, faults: Faults) !bool {
-    var key_buffer: [protocol.max_key_bytes]u8 = undefined;
+    var key_buffer: [idempotency_key.max_bytes]u8 = undefined;
     const key = childEndingKey(&key_buffer, turn_id);
     var owed: owed_ending_facts.Result = undefined;
     a.read(owed_ending_facts, .{ .turn_id = turn_id }, &owed);
@@ -629,7 +630,7 @@ pub fn startAgent(
     initial_skills: ?*const skills_domain.Initial,
     faults: Faults,
 ) !AgentStart {
-    var key_buffer: [protocol.max_key_bytes]u8 = undefined;
+    var key_buffer: [idempotency_key.max_bytes]u8 = undefined;
     const key = std.fmt.bufPrint(&key_buffer, "rui.core/start_agent/{d}", .{binding.action_id}) catch unreachable;
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
@@ -758,7 +759,7 @@ const stop_target = rsql.Read(.{
         /// Whether `key` is the key of the stop this Session owes now.
         fn owedUnder(row: *const @This(), key: []const u8) bool {
             const cause = row.owed_cause orelse return false;
-            var buffer: [protocol.max_key_bytes]u8 = undefined;
+            var buffer: [idempotency_key.max_bytes]u8 = undefined;
             const owed = action_domain.owedStopKey(&buffer, row.session.ref[0..], cause.slice(), row.owed_position.?) catch return false;
             return std.mem.eql(u8, owed, key);
         }
@@ -905,7 +906,7 @@ pub fn stopSession(a: anytype, command: *const protocol.SessionStopCommand, faul
 }
 
 /// The stop an attached child owes (D38), under its owed key. Clients
-/// cannot use `rui.core/` keys (`protocol.reserved_key_prefix`), so the
+/// cannot use `rui.core/` keys (`idempotency_key.reserved_prefix`), so the
 /// key is free while the obligation stands. Any stop settles what the
 /// Session owes, and a newer obligation has another key: an owed stop
 /// whose key is not the one owed now runs nothing and answers conflict.
