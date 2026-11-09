@@ -5,6 +5,7 @@ const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const skills_domain = @import("skills.zig");
 const protocol = @import("../../protocol.zig");
+const message_admission = @import("../../message_admission.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
@@ -176,7 +177,7 @@ fn readMessage(a: anytype, selector: []const u8, command: *const wire_request.Me
 /// one. An accepted replay reads its admission and text in a round of its
 /// own.
 fn replayMessage(a: anytype, command: *const wire_request.MessageCommand, reads: *const MessageReads) !?MessageReply {
-    switch (try classify(protocol.MessageRejection, &reads.saved, .message, command.session.slice(), &reads.digest)) {
+    switch (try classify(message_admission.Rejection, &reads.saved, .message, command.session.slice(), &reads.digest)) {
         .fresh => return null,
         .conflict => {
             try a.abandon(.{});
@@ -210,7 +211,7 @@ fn rejectMessage(
     command: *const wire_request.MessageCommand,
     reads: *const MessageReads,
     sender_known: bool,
-    code: protocol.MessageRejection,
+    code: message_admission.Rejection,
     faults: Faults,
 ) !MessageReply {
     return rejectMessageWithFailure(a, command, reads, sender_known, code, null, faults);
@@ -221,7 +222,7 @@ fn rejectMessageWithFailure(
     command: *const wire_request.MessageCommand,
     reads: *const MessageReads,
     sender_known: bool,
-    code: protocol.MessageRejection,
+    code: message_admission.Rejection,
     failure: ?skills_domain.Failure,
     faults: Faults,
 ) !MessageReply {
@@ -335,7 +336,7 @@ noinline fn submitTo(
     try a.run();
     if (try replayMessage(a, command, reads)) |reply| return reply;
     const sender_valid = senderValid(command, selector, reads.sender);
-    const rejection: ?protocol.MessageRejection = if (!session_id.valid(session))
+    const rejection: ?message_admission.Rejection = if (!session_id.valid(session))
         .invalid_session_reference
     else if (!sender_valid)
         .invalid_sender_handle
@@ -350,7 +351,7 @@ noinline fn submitTo(
     if (rejection) |code| return rejectMessage(a, command, reads, command.sender != null and sender_valid, code, faults);
     if (command.skill != null) {
         const captured = captured_skill orelse return rejectMessage(a, command, reads, command.sender != null and sender_valid, .skills_unavailable, faults);
-        if (captured.* == .failed) return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, captured.failed.rejection(protocol.MessageRejection), captured.failed, faults);
+        if (captured.* == .failed) return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, captured.failed.rejection(message_admission.Rejection), captured.failed, faults);
         if (captured.* != .invocation) return rejectMessage(a, command, reads, command.sender != null and sender_valid, .skills_unavailable, faults);
         reads.captured_text = captured.invocation;
         reads.text = .ofBytes(captured.invocation, false);
@@ -391,7 +392,7 @@ noinline fn submitCreating(
     try a.run();
     if (try replayMessage(a, command, reads)) |reply| return reply;
     const sender_valid = senderValid(command, selector, reads.sender);
-    var rejection: ?protocol.MessageRejection = if (command.session.len != 0)
+    var rejection: ?message_admission.Rejection = if (command.session.len != 0)
         .invalid_session_reference
     else if (!sender_valid)
         .invalid_sender_handle
@@ -400,7 +401,7 @@ noinline fn submitCreating(
     else
         null;
     if (rejection == null) switch (try configuration_domain.applyConfiguration(a, io, "", configuration, initial_skills, faults, creation)) {
-        .rejected => |code| rejection = std.meta.stringToEnum(protocol.MessageRejection, @tagName(code)).?,
+        .rejected => |code| rejection = std.meta.stringToEnum(message_admission.Rejection, @tagName(code)).?,
         .accepted => |applied| {
             content_domain.lookup(a, &reads.text);
             try a.run();

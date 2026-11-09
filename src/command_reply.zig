@@ -3,6 +3,7 @@
 //! and their tests need no Store.
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const message_admission = @import("message_admission.zig");
 const configuration_admission = @import("configuration_admission.zig");
 const outcome_code = @import("outcome_code.zig");
 const tool_presentation = @import("tool_presentation.zig");
@@ -48,7 +49,7 @@ pub const AcceptedMessage = struct {
 
 pub const RejectedMessage = struct {
     replayed: bool,
-    code: protocol.MessageRejection,
+    code: message_admission.Rejection,
     content: ContentReference,
 };
 
