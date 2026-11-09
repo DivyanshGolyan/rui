@@ -30,6 +30,25 @@ pub fn recovery(original: ?Original, accepted: ?Accepted) Recovery {
     return .{ .saved = .{ .original = .{ .kind = held.kind, .key = held.key }, .rejected = held.state == .rejected } };
 }
 
+/// The lines an exit prints for `held`.
+pub fn writeGuide(held: Recovery, out: *std.Io.Writer) std.Io.Writer.Error!void {
+    switch (held) {
+        .none => {},
+        .not_sent => |kind| try out.print("rui: {s} was not sent: capture did not begin. You may submit it again; no recovery record was published for this attempt.\n", .{if (kind == .decision) "Decision" else "Message"}),
+        .uncertain => |key| try out.print("rui: Capture not confirmed. Inspect rui request list for reserved key {s}; reservation does not prove publication. Recover only that original, never replacement input.\n", .{key}),
+        .saved => |saved| {
+            if (saved.rejected) {
+                try out.print("rui: Original request rejected. Use rui request inspect {s} to inspect its saved outcome.\n", .{saved.original.key});
+            } else try out.print("rui: {s} not confirmed. Use rui request recover {s} to retry the exact original; do not resubmit it.\n", .{ if (saved.original.kind == .decision) "Decision" else "Message", saved.original.key });
+        },
+        .accepted => |accepted| {
+            if (accepted.kind == .message) {
+                try out.print("rui: Message accepted; do not resubmit it. Use rui request read-result {s} for the same Message's answer.\n", .{accepted.key});
+            } else try out.print("rui: Decision accepted; do not repeat it. Use rui request inspect {s} to inspect the same saved admission.\n", .{accepted.key});
+        },
+    }
+}
+
 /// Where a failed Admission leaves its original: not started while nothing
 /// was captured, else unconfirmed, since the Store may hold it.
 pub fn failed(publication: Publication) State {

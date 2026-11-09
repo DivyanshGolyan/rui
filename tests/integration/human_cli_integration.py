@@ -1499,8 +1499,8 @@ def overview_cases():
         allocated = recovered["answer"]["session"]
         assert recovered["context"]["session"] == allocated and allocated != started, recovered
         fixture.wait_for(lambda: len(endpoint.requests) == 3, "recovered start's Turn")
-        # Ctrl-X asks, a second Ctrl-X stops the selected working Session, and
-        # its row turns stopped without leaving the overview.
+        # One Ctrl-X stops the selected working Session, and its row turns
+        # stopped without leaving the overview.
         before = set(records.glob("*.json"))
         caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env,
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
@@ -1511,12 +1511,11 @@ def overview_cases():
         held = fixture.observe(store, record.stem)["target"]
         # The Session is yours and working, so its mark is the spinner.
         overview_frame(master, lambda frame: re.search(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏*] Hold for a stop", frame), keys=b"\x1b")
-        overview_frame(master, lambda frame: f"Stop {held}? ctrl+x yes" in frame, keys=b"\x18")
         overview_frame(master, lambda frame: re.search(r"[■#] Hold for a stop", frame), keys=b"\x18")
         work = fixture.command("session", "inspect", "--store", store, "--session", held)["work"]["state"]
         assert work["kind"] == "stopped", work
         # In a conversation the line under the input offers ctrl+x stop
-        # while there is work, and Ctrl-X twice stops its Session there.
+        # while there is work, and one Ctrl-X stops its Session there.
         before = set(records.glob("*.json"))
         sent = len(endpoint.requests)
         os.write(master, b"Hold in the conversation\n")
@@ -1525,10 +1524,6 @@ def overview_cases():
         talking = fixture.observe(store, record.stem)["target"]
         session_line = lambda screen: screen.rstrip("\n").rsplit("\n", 1)[-1]
         keyed_frame(master, b"", lambda screen, x, y: composer_ready(screen, x, y) and session_line(screen).endswith(" · ctrl+x stop"))
-        keyed_frame(master, b"\x18", lambda screen, x, y: session_line(screen) == f"Stop {talking}? ctrl+x yes · esc no")
-        # Esc only cancels the ask; the conversation stays open.
-        keyed_frame(master, b"\x1b", lambda screen, x, y: composer_ready(screen, x, y) and session_line(screen).endswith(" · ctrl+x stop"))
-        keyed_frame(master, b"\x18", lambda screen, x, y: session_line(screen).startswith("Stop "))
         os.write(master, b"\x18")
         fixture.wait_for(draining(master, lambda: fixture.command("session", "inspect", "--store", store, "--session", talking)["work"]["state"]["kind"] == "stopped"), "conversation stop")
         stopped = keyed_frame(master, b"", lambda screen, x, y: composer_ready(screen, x, y) and "Session stopped." in screen)
@@ -2524,7 +2519,7 @@ def persistent_input_cases():
             if len(proxy.exchanges) == 3:
                 next_received.set()
                 assert next_admission_release.wait(15), "next Admission gate was not released"
-            return b"" if len(proxy.exchanges) in (1, 4) else response
+            return b"" if len(proxy.exchanges) in (1, 4, 8) else response
 
         caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             session], env={**os.environ, "HOME": str(home)},
@@ -2602,6 +2597,9 @@ def persistent_input_cases():
         os.write(master, b"original before capture failure\n")
         failed = read_terminal(master, "Not confirmed")
         assert "Original reserved request" not in failed, failed
+        # Nothing was saved, so Esc keeps the only copy of the original.
+        os.write(master, b"\x1b")
+        failed += read_terminal(master, "Esc returns to the overview once Ctrl-R retries the original.")
         # Diagnostics run with canonical input restored. Their final line is
         # not readiness: the next raw-entry flush follows it. Await the resumed
         # composer under the same response budget before typing the next draft.
@@ -2641,15 +2639,23 @@ def persistent_input_cases():
         assert fixture.command("session", "inspect", "--store", store,
             "--session", session)["session"]["permission_mode"] == "ask"
         assert len(endpoint.requests) == 5 and len(proxy.exchanges) == 7, "command suffix reached Host"
-        os.write(master, b"\x03")
-        read_terminal(master, "Detached.")
+        # Esc leaves a conversation whose original is unconfirmed: the
+        # overview names its key, and quitting prints how to recover it.
+        before_left = set(records.glob("*.json"))
+        os.write(master, b"\x15left unconfirmed\n")
+        read_terminal(master, "Not confirmed")
+        left_record, = set(records.glob("*.json")) - before_left
+        left_key = left_record.stem
+        overview_frame(master, lambda frame: f"! Not confirmed · rui request recover {left_key}" in frame, keys=b"\x1b")
+        leave_overview(master)
         _, errors = caller.communicate(timeout=5)
         assert caller.returncode == 0, errors
+        assert f"rui: Message not confirmed. Use rui request recover {left_key} to retry the exact original".encode() in errors, errors
         actual = termios.tcgetattr(slave)
         # NOW restores user configuration, not kernel-owned history flags.
         assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "persistent terminal configuration was not restored"
         completed = True
-        print("persistent public Session: exact original replay, joined acceptance, next Unicode cursor, malformed→valid, prepublication repair, restoration passed", flush=True)
+        print("persistent public Session: exact original replay, joined acceptance, next Unicode cursor, malformed→valid, prepublication repair, Esc with an unconfirmed original, restoration passed", flush=True)
     finally:
         records = home / ".config/rui/requests"
 

@@ -36,7 +36,7 @@ pub const Intent = union(enum) {
 };
 pub const Kind = original_state.Kind;
 pub const State = original_state.State;
-const Publication = original_state.Publication;
+pub const Publication = original_state.Publication;
 pub const Accepted = original_state.Accepted;
 pub const View = struct { kind: Kind, state: State, key: [36]u8, last_error: ?anyerror };
 pub const Recovery = original_state.Recovery;
@@ -78,6 +78,12 @@ retry: ?[36]u8 = null,
 pub fn view(self: *const Self) ?View {
     const intent = self.intent orelse return null;
     return .{ .kind = intent.kind(), .state = self.state, .key = self.key, .last_error = self.last_error };
+}
+
+/// Whether the original's request is published, so a saved copy outlives
+/// this frontend. False while a worker runs: it owns publication until join.
+pub fn published(self: *const Self) bool {
+    return self.task.thread == null and self.publication == .published;
 }
 
 /// Recovery guidance is read only after both frontend borrowers have joined.

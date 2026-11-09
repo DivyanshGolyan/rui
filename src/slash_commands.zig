@@ -168,7 +168,7 @@ const session_views = &[_]Choice{
     .{ .word = "all", .description = "unarchived and archived Sessions" },
 };
 
-pub const overview = Commands(enum { archive, configure, exit, help, model, rename, sessions, setup, unarchive, undo, upgrade }, .{
+pub const overview = Commands(enum { archive, configure, exit, help, model, rename, sessions, setup, unarchive, upgrade }, .{
     .archive = .{ .description = "archive the selected Session; stop active work first" },
     .configure = .{ .argument = .{ .options = start_options }, .description = "hold settings for the next Session" },
     .exit = .{ .description = "leave; Host work continues" },
@@ -178,7 +178,6 @@ pub const overview = Commands(enum { archive, configure, exit, help, model, rena
     .sessions = .{ .choice_name = "VIEW", .argument = .{ .choice = session_views }, .description = "view Unarchived, Archived or All Sessions" },
     .setup = conversation.table.get(.setup),
     .unarchive = .{ .description = "restore the selected Session without restarting work" },
-    .undo = .{ .description = "restore the last Session archived here" },
     .upgrade = conversation.table.get(.upgrade),
 });
 
@@ -1010,7 +1009,7 @@ test "archive commands and server archive view choices parse on their owning scr
     }
     try std.testing.expect(overview.parse("/sessions") == .command);
     try std.testing.expect(overview.parse("/sessions active") == .misused);
-    try std.testing.expect(overview.parse("/undo") == .command);
+    try std.testing.expect(overview.parse("/undo") == .unknown);
     try std.testing.expect(conversation.parse("/sessions archived") == .unknown);
 }
 
@@ -1028,7 +1027,4 @@ test "archive and upgrade retain separate local command identities after merge" 
             try std.testing.expect(list.enter(0).runs);
         }
     }
-    const restored = overview.parse("/undo").command;
-    try std.testing.expectEqual(.undo, restored.name);
-    try std.testing.expect(conversation.parse("/undo") == .unknown);
 }

@@ -70,14 +70,20 @@ pub fn busy(facts: Busy) []const u8 {
 
 pub const Close = union(enum) { leave, stay: []const u8 };
 
-/// Esc at the settled latest view: back to the overview once neither a
-/// held original nor the draft would be lost, else what resolves them.
-pub fn close(held: ?submission.State, draft_empty: bool) Close {
-    if (held) |state| return .{ .stay = switch (state) {
-        .rejected => "Esc returns to the overview once /discard clears the rejected original.",
-        .submitting => "Esc returns to the overview once the original is confirmed.",
-        .not_started, .unconfirmed => "Esc returns to the overview once Ctrl-R retries the original.",
-    } };
+/// Esc at the settled latest view: back to the overview unless unsent text
+/// would be lost, else what resolves it. An unconfirmed original whose
+/// request was published is saved under its key, which the overview names;
+/// a rejected one is released.
+pub fn close(held: ?submission.State, published: bool, draft_empty: bool) Close {
+    if (held) |state| switch (state) {
+        // Not yet saved: the original lives only here.
+        .not_started => return .{ .stay = "Esc returns to the overview once Ctrl-R retries the original." },
+        // Leaving would cancel it, maybe before its capture began.
+        .submitting => return .{ .stay = "Esc returns to the overview once the original is confirmed." },
+        // A capture that failed may have saved nothing to recover.
+        .unconfirmed => if (!published) return .{ .stay = "Esc returns to the overview once Ctrl-R retries the original." },
+        .rejected => {},
+    };
     // No draft outlives the frontend, so leaving would lose it.
     return if (draft_empty) .leave else .{ .stay = "Esc returns to the overview once the draft is empty." };
 }
@@ -119,11 +125,15 @@ test "a waiting Action that is a preview says it is decided in the shell, whethe
     try std.testing.expectEqualStrings("! Action needs a decision; Esc returns to the choice. Draft retained.", decision(.{ .preview = false, .visible = true, .reason = false }));
 }
 
-test "Esc leaves the settled view only with no original held and an empty draft" {
-    try std.testing.expectEqual(Close.leave, close(null, true));
-    try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", close(null, false).stay);
-    for (std.enums.values(submission.State)) |state| for ([_]bool{ false, true }) |empty| {
-        try std.testing.expect(close(state, empty) == .stay);
-    };
-    try std.testing.expectEqualStrings("Esc returns to the overview once the original is confirmed.", close(.submitting, true).stay);
+test "Esc leaves the settled view with an empty draft unless the held original is not yet saved" {
+    for ([_]?submission.State{ null, .unconfirmed, .rejected }) |held| {
+        try std.testing.expectEqual(Close.leave, close(held, true, true));
+        try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", close(held, true, false).stay);
+    }
+    // A capture that failed before publishing left nothing to recover.
+    try std.testing.expectEqualStrings("Esc returns to the overview once Ctrl-R retries the original.", close(.unconfirmed, false, true).stay);
+    for ([_]bool{ false, true }) |empty| {
+        try std.testing.expectEqualStrings("Esc returns to the overview once Ctrl-R retries the original.", close(.not_started, false, empty).stay);
+        try std.testing.expectEqualStrings("Esc returns to the overview once the original is confirmed.", close(.submitting, false, empty).stay);
+    }
 }
