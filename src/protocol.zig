@@ -1608,7 +1608,7 @@ fn ParserOf(comptime Custody: type) type {
                 .skill_suggestions => {
                     out.* = .{ .skill_suggestions = .{ .store = store } };
                     const Field = enum { session, workspace, prefix };
-                    var seen: std.EnumSet(Field) = .empty;
+                    var seen: std.enums.EnumSet(Field) = .empty;
                     while (try self.nextCommandField(Field, &members, &seen)) |field| switch (field) {
                         .session => {
                             out.skill_suggestions.session = .{};
