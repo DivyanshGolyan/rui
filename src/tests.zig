@@ -71,6 +71,7 @@ test {
     _ = @import("read_transcript.zig");
     _ = @import("find_tools.zig");
     _ = @import("skills.zig");
+    _ = @import("session_skills.zig");
     _ = @import("client.zig");
     _ = @import("cli.zig");
     _ = @import("cli_args.zig");
