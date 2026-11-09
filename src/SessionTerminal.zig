@@ -459,9 +459,9 @@ pub fn enableAlternateScroll(self: *Self) !void {
 
 /// Sets the terminal's clipboard (OSC 52) to `length` bytes of `file` from
 /// `start`, base64-encoded a window at a time as it is written. At most
-/// `clipboard_limit` bytes.
+/// `Text.clipboard_limit` bytes.
 pub fn clipboard(self: *Self, io: std.Io, file: std.Io.File, start: u64, length: u64) !void {
-    std.debug.assert(length <= clipboard_limit);
+    std.debug.assert(length <= Text.clipboard_limit);
     try self.write("");
     std.debug.assert(self.clipboard_sequence == .closed);
     // CAN abandons the sequence, so a failure never sets part of the bytes.
@@ -482,10 +482,6 @@ pub fn clipboard(self: *Self, io: std.Io, file: std.Io.File, start: u64, length:
     self.clipboard_sequence = .closed;
     try self.write("");
 }
-
-/// The most bytes /copy sends: hterm's osc52.sh sends at most 100,000
-/// base64 bytes, the smallest limit a terminal's own tooling documents.
-pub const clipboard_limit = 100_000 / 4 * 3;
 
 test "the clipboard takes its bytes as one OSC 52 sequence, whatever their size" {
     const io = std.testing.io;
@@ -527,7 +523,7 @@ test "a clipboard copy interrupted while the terminal is full ends with CAN befo
     const file = try tmp.dir.createFile(io, "answer", .{ .read = true });
     defer file.close(io);
     // Its base64 is more than the pipe holds.
-    var answer: [clipboard_limit]u8 = undefined;
+    var answer: [Text.clipboard_limit]u8 = undefined;
     @memset(&answer, 'a');
     try file.writePositionalAll(io, &answer, 0);
     for ([_]bool{ false, true }) |leaves| {
