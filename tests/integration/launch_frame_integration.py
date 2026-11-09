@@ -63,10 +63,8 @@ def post(path, route, request, extra=b"", expected_status=200):
 
 
 def output(process, timeout=20):
-    """What the Host wrote, within `timeout`. communicate() flushes stdin, so a closed stdin is dropped first."""
-    if process.stdin is not None:
-        process.stdin.close()
-        process.stdin = None
+    """What the Host wrote, within `timeout`, after its stdin closes."""
+    host_process.close_stdin(process)
     return process.communicate(timeout=timeout)
 
 
@@ -145,7 +143,7 @@ def sdk_catalog(root, good, network, ci):
             base = dict(good, runtimeDir=str(runtime), store=str(root / "sdk-store"))
             host = launch(frame(dict(base, mcpServers=[entry])))
             wait_for_socket(runtime / "rui.sock", host)
-            host.stdin.close()
+            host_process.close_stdin(host)
             assert host.wait(timeout=30) == 0, output(host)
             for name in ("echo", "fail", "slow", "progress"):
                 collision = mcp_server([name])
@@ -234,7 +232,7 @@ def main(network, ci):
 
     # Closing stdin stops the Host; its socket goes with it.
     started = time.monotonic()
-    host.stdin.close()
+    host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
     elapsed = time.monotonic() - started
     assert elapsed < 10, elapsed
@@ -256,7 +254,7 @@ def main(network, ci):
                   b"X-Rui-Host-Instance: " + info["instance"].encode() + b"\r\n")
     assert lifted["paused"] is False, lifted
     assert host_info(sock, str(store))["paused"] is False
-    host.stdin.close()
+    host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
 
     # Presets are launch-only seeds; the saved Session contains resolved fields.
@@ -279,7 +277,7 @@ def main(network, ci):
     assert unknown["answer"]["code"] == "unknown_preset", unknown
     update = post(sock, "configure", dict(create, key="preset:update", session=session))
     assert update["answer"]["code"] == "preset_on_update", update
-    host.stdin.close()
+    host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
 
     for presets, field in [
@@ -299,7 +297,7 @@ def main(network, ci):
         (b"\x00\x00", "4-byte frame length"),
     ]:
         process = launch(raw)
-        process.stdin.close()
+        host_process.close_stdin(process)
         refused = refusal(process)
         assert refused["code"] == "launch_frame_invalid", refused
         assert message in refused["message"], refused
@@ -314,7 +312,7 @@ def main(network, ci):
     base = dict(good, store=str(root / "store5"), runtimeDir=str(mcp_root))
     host = launch(frame(dict(base, mcpServers=[mcp_entry("docs", docs)])))
     wait_for_socket(mcp_root / "rui.sock", host)
-    host.stdin.close()
+    host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
     # The launcher stays connected until the refusal arrives: a closed stdin
     # while listing is a launcher that went away, and stops the Host quietly.
@@ -328,7 +326,7 @@ def main(network, ci):
     docs.server_close()
     host = launch(frame(dict(base, mcpServers=[mcp_entry("docs", docs)])))
     wait_for_socket(mcp_root / "rui.sock", host)
-    host.stdin.close()
+    host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
 
     # A launcher that goes away while a server withholds its answer stops the
@@ -344,7 +342,7 @@ def main(network, ci):
     silent.settimeout(20)
     held, _ = silent.accept()
     started = time.monotonic()
-    host.stdin.close()
+    host_process.close_stdin(host)
     assert host.wait(timeout=5) == 0, output(host)
     assert time.monotonic() - started < 3
     held.close()

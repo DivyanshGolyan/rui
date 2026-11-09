@@ -1302,6 +1302,19 @@ def dispose_all(*disposals):
             raise primary
 
 
+def close_stdin(process):
+    """Send `process` end of input and drop its stdin, so a later communicate() still works.
+
+    communicate() flushes the stdin it holds, and a stdin closed by hand makes
+    that fail with "flush of closed file" (#898). Fixtures close a child's
+    stdin only here; tests/ci/test_harness_contracts.py rejects any other
+    `.stdin.close()`.
+    """
+    if process.stdin is not None:
+        process.stdin.close()
+        process.stdin = None
+
+
 def stop_process(process, timeout=10, *, seal_observations=True):
     deadline = time.monotonic() + timeout
     errors = []

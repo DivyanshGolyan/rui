@@ -460,7 +460,7 @@ def prove_short_optional_receipt():
         os.close(writer)
         stop_process(process)
         diagnostics.close()
-        process.stdin.close()
+        host_process.close_stdin(process)
     print("Host optional receipt: short write visible with writer open and no filler, no native evidence")
 
 

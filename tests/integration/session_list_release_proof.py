@@ -224,7 +224,7 @@ def case(binary, client, probe, mode):
                 diagnostics._read_error = original_error
                 assert not worker.is_alive(), "proof census worker retained"
             diagnostics.close()
-            process.stdin.close()
+            host_process.close_stdin(process)
             fixture.stop_process(process)
 
 
