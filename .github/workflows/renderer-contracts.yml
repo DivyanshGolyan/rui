@@ -99,7 +99,9 @@ jobs:
           ulimit -Sn 256
           zig build sequence-model -j2 --summary all -- --output "$RUNNER_TEMP/contracts/sequence"
       - name: Bisect the promotion batch with the failed contracts
-        if: ${{ failure() && inputs.batch-base }}
+        # The self-tests run only after setup and tmux succeed; without them every
+        # replay fails and the verdict would blame stable.
+        if: ${{ failure() && inputs.batch-base && steps.selftest.outcome != 'skipped' }}
         timeout-minutes: 240
         env:
           BASE: ${{ inputs.batch-base }}

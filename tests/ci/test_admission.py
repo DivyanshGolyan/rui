@@ -629,6 +629,45 @@ class ReleaseFlowTest(unittest.TestCase):
                 self.assertIn('python3 -B tests/ci/promotion.py --base "$BASE"', path.read_text())
 
 
+    @staticmethod
+    def replay(body, outcomes):
+        """The bisect's replay command for these step outcomes, as GitHub would expand FAILED."""
+        step = body.split('      - name: Bisect the promotion batch', 1)[1].split('\n      - ', 1)[0]
+        block = re.search(r'(?ms)^          FAILED: >-\n(.*?)(?=^        run:)', step)[1]
+        parts = re.findall(r"\$\{\{ steps\.(\w+)\.outcome == 'failure' && '(.*?)' \|\| '' \}\}", block)
+        assert len(parts) == len([line for line in block.splitlines() if line.strip()]), block
+        for name, _ in parts:
+            assert f'        id: {name}\n' in body, name
+        return ' '.join(command for name, command in parts if outcomes.get(name) == 'failure')
+
+    def test_upgrade_bisect_replays_only_the_steps_that_failed(self):
+        upgrade = job(UPGRADE.read_text(), 'upgrade')
+        # A failed startup skips the previous release's checkout: the replay must not need it.
+        startup = self.replay(upgrade, dict(startup='failure', upgrade='skipped'))
+        self.assertIn('zig build host-launch-integration', startup)
+        self.assertNotIn('previous-release', startup)
+        self.assertNotIn('previous_release_upgrade.py', startup)
+        later = self.replay(upgrade, dict(startup='success', upgrade='failure'))
+        self.assertNotIn('host-launch-integration', later)
+        self.assertIn('previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .', later)
+        # Each replay is its step's own command.
+        self.assertIn('run: zig build host-launch-integration -j2 --summary all', upgrade)
+        for line in ('python3 -B tests/integration/previous_release_upgrade.py . .',
+                     'python3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .'):
+            self.assertIn(line, upgrade.split('id: upgrade', 1)[1].split('      - name:', 1)[0])
+        self.assertIn('-- bash -euc "$FAILED"', upgrade)
+
+    def test_renderer_bisect_needs_completed_setup_and_replays_failed_contracts(self):
+        contracts = job(RENDERER.read_text(), 'contracts')
+        step = contracts.split('      - name: Bisect the promotion batch', 1)[1].split('\n      - ', 1)[0]
+        self.assertIn("steps.selftest.outcome != 'skipped'", step)
+        # The self-tests are the one contract step that runs only after setup succeeds.
+        selftest = contracts.split('        id: selftest\n', 1)[1].split('      - name:', 1)[0]
+        self.assertNotIn('if:', selftest)
+        only = self.replay(contracts, dict(selftest='success', sequence='failure'))
+        self.assertIn('zig build sequence-model', only)
+        self.assertNotIn('direct-pty', only)
+
     def test_candidate_jobs_are_read_only_and_cache_proof_covers_both_platforms(self):
         for path in (CHECK, UPGRADE):
             with self.subTest(workflow=path.name):
