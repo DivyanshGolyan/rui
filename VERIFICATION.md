@@ -97,7 +97,7 @@ GitHub must require pull requests and the GitHub Actions `admission` check on `m
 Use squash merges under linear history.
 A PR's checks qualify its merge with the base they ran on, so a green PR merges without rerunning after `main` moves.
 Two PRs that pass alone but break together are caught by promotion, which qualifies main HEAD and bisects to the commit that broke it.
-A changed head or base requires current candidate checks before merge.
+A changed head requires current candidate checks before merge.
 
 [Selected checks](.github/workflows/check.yml) qualify each ready PR's immutable merge candidate.
 For normal changes, Linux runs the affected targets from [select_tests.py](tests/ci/select_tests.py), `typecheck-macos` and, when selected, the `stack-frames` oracle.
@@ -159,7 +159,8 @@ Both must pass.
 The execution partition overlaps native tests with its serial process fixtures; the unsplit gate remains serial.
 Their disjoint fixtures cover the full gate once; callers run Host-process, allocator, launch and Debug smoke cases serially after the parallel batch.
 [qualification.py](tests/ci/qualification.py) packs other Linux targets so a Selected run never exceeds ten shards.
-Only when the diff touches no strict path does a shard rerun a failed batch once and report both results; a pass after the rerun is a flake to fix.
+Only draft and manually dispatched runs whose diff touches no strict path rerun a failed batch once and report both results; a pass after the rerun is a flake to fix.
+Ready PRs, promotions and the documentation lane never rerun.
 Qualification keeps one job per target. macOS packs native work into at most three workers: execution plus portable logic, callers, and remaining native targets.
 Composed gates, long witnesses, launch, Debug admission, reply delivery and H2 stay isolated from other target batches.
 The `linux` and `macos` statuses fail if any selected job fails or is cancelled.
@@ -244,7 +245,7 @@ Warm baselines are not test acceptance.
 Maintenance also builds the pinned previous release per platform for the read-only upgrade check.
 The API-only cleanup job runs trusted main code with cache-deletion permission and consumes no producer code, caches or artifacts.
 
-CI uses only standard `ubuntu-24.04` and Apple Silicon `macos-15` runners in this public repository, with no paid host or storage expansion.
+CI uses only standard `ubuntu-24.04` and Apple Silicon `macos-15` runners, plus `ubuntu-24.04-arm` for the Linux arm64 release build, in this public repository, with no paid host or storage expansion.
 Free eligibility does not prove capacity; report the actual runner outcome and do not raise paid spend silently.
 Apart from the shard rerun above, test execution has no automatic retry.
 
