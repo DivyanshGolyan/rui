@@ -47,7 +47,7 @@ const tls_client = @import("tls_client");
 /// Socket setup and send flags for the Store's wire clients, which cannot
 /// reach src/os, so Darwin's SIGPIPE and Linux's MSG_NOSIGNAL stay here.
 pub const socket = struct {
-    pub const send_flags = tls.send_flags;
+    pub const send_flags = @import("tls.zig").send_flags;
     pub const configure = @import("Connection.zig").configureSocket;
 };
 
