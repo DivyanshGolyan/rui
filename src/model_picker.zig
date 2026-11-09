@@ -4,6 +4,8 @@
 //! ahead of them all.
 const std = @import("std");
 const catalog = @import("model_catalog.zig");
+const client_defaults = @import("client_defaults.zig");
+const product_defaults = @import("product_defaults.zig");
 const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
@@ -94,6 +96,140 @@ pub const Shown = struct {
         return self.menu.others + @intFromBool(lead >= self.menu.others);
     }
 };
+
+pub const ReasoningEffort = model_capability.ReasoningEffort;
+
+/// What new Sessions use now: the model, and the sign-in and effort saved
+/// for them; null where none is.
+pub const Defaults = struct {
+    model: ?[]const u8 = null,
+    provider: ?Provider = null,
+    effort: ?ReasoningEffort = null,
+};
+
+pub const Side = enum { lower, higher };
+
+/// A row as the picker shows it: what Enter on it saves for new Sessions,
+/// and the choices its model leaves. Moving to another row starts from
+/// that row's own.
+pub const Row = struct {
+    /// Null for a model that takes no effort.
+    effort: ?ReasoningEffort,
+    provider: Provider,
+    /// The efforts the model offers: its catalog row's, or every one Rui
+    /// knows for a model the catalog does not list, as a start admits.
+    efforts: catalog.Efforts,
+    providers: Providers,
+    /// New Sessions use this model now: the row's ✓.
+    current: bool,
+
+    /// The next effort on `side` the model offers; at the end, or with one
+    /// effort or none, the same.
+    pub fn stepEffort(self: Row, side: Side) Row {
+        const now = self.effort orelse return self;
+        const order = std.enums.values(ReasoningEffort);
+        var at = std.mem.indexOfScalar(ReasoningEffort, order, now).?;
+        while (true) {
+            switch (side) {
+                .lower => at = std.math.sub(usize, at, 1) catch return self,
+                .higher => {
+                    at += 1;
+                    if (at == order.len) return self;
+                },
+            }
+            if (self.efforts.contains(order[at])) {
+                var next = self;
+                next.effort = order[at];
+                return next;
+            }
+        }
+    }
+
+    /// The next sign-in the row offers, round to the first; with one, the
+    /// same.
+    pub fn nextSignIn(self: Row) Row {
+        const order = std.enums.values(Provider);
+        var at = std.mem.indexOfScalar(Provider, order, self.provider).?;
+        while (true) {
+            at = (at + 1) % order.len;
+            if (self.providers.contains(order[at])) {
+                var next = self;
+                next.provider = order[at];
+                return next;
+            }
+        }
+    }
+};
+
+/// The words typed after `/model`. Each word keeps the rows whose ID holds
+/// it, or that offer an effort or sign-in its name begins with; a word that
+/// names one whole sets it on each row that offers it, the last such word
+/// winning. So `/model terra low api` leaves one row, set to save as typed.
+pub const Query = struct {
+    words: []const u8,
+    effort: ?ReasoningEffort = null,
+    provider: ?Provider = null,
+
+    pub fn parse(words: []const u8) Query {
+        var query: Query = .{ .words = words };
+        var each = std.mem.tokenizeScalar(u8, words, ' ');
+        while (each.next()) |word| {
+            for (std.enums.values(ReasoningEffort)) |effort| {
+                if (std.ascii.eqlIgnoreCase(@tagName(effort), word)) query.effort = effort;
+            }
+            for (std.enums.values(Provider)) |provider| {
+                if (std.ascii.eqlIgnoreCase(signInWord(provider), word)) query.provider = provider;
+            }
+        }
+        return query;
+    }
+
+    /// The row of `entry`, or null when a word leaves it out. Its effort
+    /// and sign-in are the typed ones where the model offers them, else the
+    /// saved ones where it offers those, else the model's own: the product's
+    /// sign-in where it offers both, the effort a start applies.
+    pub fn row(self: Query, entry: Entry, defaults: Defaults) ?Row {
+        var efforts: catalog.Efforts = .empty;
+        for (std.enums.values(ReasoningEffort)) |effort| {
+            if (model_capability.supportsReasoningEffort(entry.id, effort)) efforts.insert(effort);
+        }
+        var each = std.mem.tokenizeScalar(u8, self.words, ' ');
+        while (each.next()) |word| {
+            if (std.ascii.findIgnoreCase(entry.id, word) != null) continue;
+            if (beginsOne(word, efforts, entry.providers)) continue;
+            return null;
+        }
+        const product_provider = comptime std.meta.stringToEnum(Provider, product_defaults.provider).?;
+        // An entry's providers are never empty.
+        const provider = for ([_]?Provider{ self.provider, defaults.provider, product_provider }) |wanted| {
+            if (wanted) |one| if (entry.providers.contains(one)) break one;
+        } else for (std.enums.values(Provider)) |one| {
+            if (entry.providers.contains(one)) break one;
+        } else unreachable;
+        return .{
+            .effort = model_capability.startEffort(self.effort, entry.id) orelse client_defaults.startEffort(entry.id, defaults.effort),
+            .provider = provider,
+            .efforts = efforts,
+            .providers = entry.providers,
+            .current = if (defaults.model) |model| std.mem.eql(u8, model, entry.id) else false,
+        };
+    }
+
+    /// `word` begins the name of one of `efforts` or `providers`.
+    fn beginsOne(word: []const u8, efforts: catalog.Efforts, providers: Providers) bool {
+        var efforts_offered = efforts.iterator();
+        while (efforts_offered.next()) |effort| if (std.ascii.startsWithIgnoreCase(@tagName(effort), word)) return true;
+        var providers_offered = providers.iterator();
+        while (providers_offered.next()) |provider| if (std.ascii.startsWithIgnoreCase(signInWord(provider), word)) return true;
+        return false;
+    }
+};
+
+/// The word a sign-in is typed as: its name's first, `chatgpt` or `api`.
+fn signInWord(provider: Provider) []const u8 {
+    const name = provider.signIn();
+    return name[0 .. std.mem.indexOfScalar(u8, name, ' ') orelse name.len];
+}
 
 /// The menu of a `model_list` reply's `providers` array, owned by `gpa`. A
 /// reply Rui cannot read is error.InvalidModelList.
@@ -316,4 +452,192 @@ test "a reply Rui cannot read is refused whole" {
         "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[]},{\"provider\":\"openai\",\"source\":\"catalog\",\"models\":[]}]",
         "[] []",
     }) |reply| try std.testing.expectError(error.InvalidModelList, read(std.testing.allocator, reply));
+}
+
+/// ChatGPT's catalog list, and an API key's list: two known models, a dated
+/// and a fine-tuned one Rui does not list, and five Rui's catalog lists with
+/// a gap in their efforts, one effort or none, two with an effort's name.
+fn pickerMenu() !Menu {
+    return testMenu(&.{
+        .{ .provider = .codex, .list = .catalog },
+        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6.1-terra\ngpt-6.1-sol\ngpt-6.1-sol-2026-10-14\nft:custom\n" ++
+            "@cf/deepseek-ai/deepseek-v4-flash-0731\nazure/gpt-5-pro\nopenai/whisper-1\nalibaba/qwen-max\nauto/mistralai/mistral-medium-3.5\n" } } },
+    });
+}
+
+fn entryOf(menu: *const Menu, id: []const u8) Entry {
+    return menu.entries[menu.find(id).?];
+}
+
+/// The row of `id` with nothing typed after `/model`.
+fn plainRow(menu: *const Menu, id: []const u8, defaults: Defaults) Row {
+    return Query.parse("").row(entryOf(menu, id), defaults).?;
+}
+
+test "a row would save the saved effort and sign-in where its model offers them, else the model's own" {
+    var menu = try pickerMenu();
+    defer menu.deinit(std.testing.allocator);
+    const Case = struct { id: []const u8, effort: ?ReasoningEffort, provider: Provider };
+    // Saved: the API key at effort none, which gpt-6.1-sol does not offer.
+    const saved: Defaults = .{ .model = "gpt-6.1-sol", .provider = .openai, .effort = .none };
+    for ([_]Case{
+        .{ .id = "gpt-6.1-terra", .effort = .none, .provider = .openai },
+        // The product's low, not the saved none, and not the model's lowest.
+        .{ .id = "gpt-6.1-sol", .effort = .low, .provider = .openai },
+        // Only ChatGPT offers it, so not the saved API key.
+        .{ .id = "gpt-6-astra", .effort = .low, .provider = .codex },
+        // It offers neither none nor low: its lowest.
+        .{ .id = "gpt-5.5-pro", .effort = .medium, .provider = .codex },
+        // Rui's catalog does not list it, so the provider decides.
+        .{ .id = "ft:custom", .effort = .none, .provider = .openai },
+        .{ .id = "azure/gpt-5-pro", .effort = .high, .provider = .openai },
+        .{ .id = "openai/whisper-1", .effort = null, .provider = .openai },
+    }) |case| {
+        const row = plainRow(&menu, case.id, saved);
+        try std.testing.expectEqual(case.effort, row.effort);
+        try std.testing.expectEqual(case.provider, row.provider);
+    }
+    // Nothing saved: the product's sign-in where the row offers both, and
+    // its effort where the model offers it.
+    for ([_]Case{
+        .{ .id = "gpt-6.1-sol", .effort = .low, .provider = .codex },
+        .{ .id = "gpt-5.5-pro", .effort = .medium, .provider = .codex },
+        .{ .id = "ft:custom", .effort = .low, .provider = .openai },
+        .{ .id = "azure/gpt-5-pro", .effort = .high, .provider = .openai },
+    }) |case| {
+        const row = plainRow(&menu, case.id, .{});
+        try std.testing.expectEqual(case.effort, row.effort);
+        try std.testing.expectEqual(case.provider, row.provider);
+    }
+    // Saved effort high reaches every row that offers it.
+    try std.testing.expectEqual(@as(?ReasoningEffort, .high), plainRow(&menu, "gpt-5.5-pro", .{ .effort = .high }).effort);
+    try std.testing.expectEqual(@as(?ReasoningEffort, .high), plainRow(&menu, "gpt-6.1-sol", .{ .effort = .high }).effort);
+}
+
+test "the ✓ marks the row of the model new Sessions use, whatever its sign-in" {
+    var menu = try pickerMenu();
+    defer menu.deinit(std.testing.allocator);
+    var marked: usize = 0;
+    for (menu.entries) |entry| {
+        const row = Query.parse("").row(entry, .{ .model = "gpt-6.1-sol", .provider = .codex }).?;
+        try std.testing.expectEqual(std.mem.eql(u8, entry.id, "gpt-6.1-sol"), row.current);
+        marked += @intFromBool(row.current);
+        try std.testing.expect(!Query.parse("").row(entry, .{ .provider = .codex, .effort = .high }).?.current);
+    }
+    try std.testing.expectEqual(@as(usize, 1), marked);
+}
+
+test "left and right step the effort through those the model offers and stop at either end" {
+    var menu = try pickerMenu();
+    defer menu.deinit(std.testing.allocator);
+    const Case = struct { id: []const u8, side: Side, steps: []const ?ReasoningEffort };
+    const saved: Defaults = .{ .provider = .codex, .effort = .high };
+    for ([_]Case{
+        .{ .id = "gpt-6.1-sol", .side = .higher, .steps = &.{ .high, .xhigh, .max, .max } },
+        // gpt-6.1-sol offers no none.
+        .{ .id = "gpt-6.1-sol", .side = .lower, .steps = &.{ .high, .medium, .low, .low } },
+        // This one offers none, low, high and max: medium is skipped.
+        .{ .id = "@cf/deepseek-ai/deepseek-v4-flash-0731", .side = .lower, .steps = &.{ .high, .low, .none, .none } },
+        .{ .id = "@cf/deepseek-ai/deepseek-v4-flash-0731", .side = .higher, .steps = &.{ .high, .max, .max } },
+        // Unlisted: every effort Rui knows.
+        .{ .id = "ft:custom", .side = .lower, .steps = &.{ .high, .medium, .low, .none, .none } },
+        .{ .id = "ft:custom", .side = .higher, .steps = &.{ .high, .xhigh, .max, .max } },
+        // One effort, or none: the keys do nothing.
+        .{ .id = "azure/gpt-5-pro", .side = .lower, .steps = &.{ .high, .high } },
+        .{ .id = "azure/gpt-5-pro", .side = .higher, .steps = &.{ .high, .high } },
+        .{ .id = "openai/whisper-1", .side = .lower, .steps = &.{ null, null } },
+        .{ .id = "openai/whisper-1", .side = .higher, .steps = &.{ null, null } },
+    }) |case| {
+        var row = plainRow(&menu, case.id, saved);
+        for (case.steps) |expected| {
+            try std.testing.expectEqual(expected, row.effort);
+            row = row.stepEffort(case.side);
+        }
+        // Stepping never changes the sign-in.
+        try std.testing.expectEqual(plainRow(&menu, case.id, saved).provider, row.provider);
+    }
+    try std.testing.expectEqual(@as(usize, 5), plainRow(&menu, "gpt-6.1-sol", saved).efforts.count());
+    try std.testing.expectEqual(@as(usize, 6), plainRow(&menu, "ft:custom", saved).efforts.count());
+    try std.testing.expectEqual(@as(usize, 1), plainRow(&menu, "azure/gpt-5-pro", saved).efforts.count());
+    try std.testing.expectEqual(@as(usize, 0), plainRow(&menu, "openai/whisper-1", saved).efforts.count());
+}
+
+test "tab switches between the sign-ins the row offers, and does nothing with one" {
+    var menu = try pickerMenu();
+    defer menu.deinit(std.testing.allocator);
+    const both = plainRow(&menu, "gpt-6.1-sol", .{ .provider = .codex, .effort = .high });
+    try std.testing.expectEqual(Provider.codex, both.provider);
+    try std.testing.expectEqual(Provider.openai, both.nextSignIn().provider);
+    try std.testing.expectEqual(Provider.codex, both.nextSignIn().nextSignIn().provider);
+    // Switching never changes the effort.
+    try std.testing.expectEqual(@as(?ReasoningEffort, .high), both.nextSignIn().effort);
+    for ([_][]const u8{ "gpt-6-astra", "ft:custom" }) |id| {
+        const one = plainRow(&menu, id, .{ .provider = .openai });
+        try std.testing.expectEqual(one.provider, one.nextSignIn().provider);
+        try std.testing.expectEqual(@as(usize, 1), one.providers.count());
+    }
+}
+
+/// The IDs of the rows `typed` leaves, in the menu's order.
+fn expectRows(menu: *const Menu, typed: []const u8, ids: []const []const u8) !void {
+    const query = Query.parse(typed);
+    var at: usize = 0;
+    for (menu.entries) |entry| if (query.row(entry, .{}) != null) {
+        try std.testing.expect(at < ids.len);
+        try std.testing.expectEqualStrings(ids[at], entry.id);
+        at += 1;
+    };
+    try std.testing.expectEqual(ids.len, at);
+}
+
+test "/model terra low api leaves one row, set to low on the API key, whatever was saved" {
+    var menu = try pickerMenu();
+    defer menu.deinit(std.testing.allocator);
+    const saved: Defaults = .{ .model = "gpt-6.1-sol", .provider = .codex, .effort = .high };
+    // Word order and case do not matter, and extra spaces are no words.
+    for ([_][]const u8{ "terra low api", "api low terra", "  TERRA  Low API ", "terra high low api chatgpt api" }) |typed| {
+        try expectRows(&menu, typed, &.{"gpt-6.1-terra"});
+        const row = Query.parse(typed).row(entryOf(&menu, "gpt-6.1-terra"), saved).?;
+        try std.testing.expectEqual(@as(?ReasoningEffort, .low), row.effort);
+        try std.testing.expectEqual(Provider.openai, row.provider);
+        try std.testing.expect(!row.current);
+    }
+    // Without the sign-in, ChatGPT's gpt-5.6-terra stays too.
+    try expectRows(&menu, "terra low", &.{ "gpt-5.6-terra", "gpt-6.1-terra" });
+    try expectRows(&menu, "terra chatgpt", &.{ "gpt-5.6-terra", "gpt-6.1-terra" });
+    const chatgpt = Query.parse("terra chatgpt").row(entryOf(&menu, "gpt-6.1-terra"), .{ .provider = .openai, .effort = .medium }).?;
+    try std.testing.expectEqual(Provider.codex, chatgpt.provider);
+    try std.testing.expectEqual(@as(?ReasoningEffort, .medium), chatgpt.effort);
+}
+
+test "a word narrows to the rows whose ID holds it or that offer the effort or sign-in it begins" {
+    var menu = try pickerMenu();
+    defer menu.deinit(std.testing.allocator);
+    // Typing towards low or api keeps the row, which keeps its own effort
+    // and sign-in until the word is whole.
+    for ([_][]const u8{ "6.1-terra l", "6.1-terra lo", "6.1-terra ap", "6.1-terra AP" }) |typed| {
+        try expectRows(&menu, typed, &.{"gpt-6.1-terra"});
+        const row = Query.parse(typed).row(entryOf(&menu, "gpt-6.1-terra"), .{ .provider = .codex, .effort = .high }).?;
+        try std.testing.expectEqual(@as(?ReasoningEffort, .high), row.effort);
+        try std.testing.expectEqual(Provider.codex, row.provider);
+    }
+    // gpt-6.1-sol offers no none, but the dated one Rui does not list may;
+    // gpt-6-astra offers no API key.
+    try expectRows(&menu, "6.1-sol none", &.{"gpt-6.1-sol-2026-10-14"});
+    try expectRows(&menu, "astra api", &.{});
+    try expectRows(&menu, "6.1-terra q", &.{});
+    // An ID that holds an effort's name stays though its model offers no
+    // effort, and the row then saves none.
+    try expectRows(&menu, "qwen max", &.{"alibaba/qwen-max"});
+    try std.testing.expectEqual(@as(?ReasoningEffort, null), Query.parse("qwen max").row(entryOf(&menu, "alibaba/qwen-max"), .{ .effort = .low }).?.effort);
+    // An effort its model lacks leaves the row at the saved one, where the
+    // model offers that, else at the model's own.
+    try expectRows(&menu, "mistral medium", &.{"auto/mistralai/mistral-medium-3.5"});
+    const mistral = entryOf(&menu, "auto/mistralai/mistral-medium-3.5");
+    try std.testing.expectEqual(@as(?ReasoningEffort, .high), Query.parse("mistral medium").row(mistral, .{ .effort = .high }).?.effort);
+    try std.testing.expectEqual(@as(?ReasoningEffort, .none), Query.parse("mistral medium").row(mistral, .{ .effort = .xhigh }).?.effort);
+    // Every row stays with nothing typed.
+    var all: usize = 0;
+    for (menu.entries) |entry| all += @intFromBool(Query.parse(" ").row(entry, .{}) != null);
+    try std.testing.expectEqual(menu.entries.len, all);
 }
