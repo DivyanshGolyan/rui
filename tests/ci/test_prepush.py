@@ -14,9 +14,10 @@ ROOT = prepush.ROOT
 
 SOURCE_CHECKS = {"tests/ci: test_import_architecture.py", "tests/ci: test_provider_locality.py",
                  "tests/ci: test_wire_version.py", "tests/ci: test_harness_contracts.py",
-                 "tests/ci: test_platform_boundary.py"}
+                 "tests/ci: test_platform_boundary.py", "tests/ci: test_fixture_literals.py"}
 FIXTURE_CHECKS = {"tests/ci: test_wire_version.py", "tests/ci: test_harness_contracts.py",
-                  "tests/ci: test_platform_boundary.py"}
+                  "tests/ci: test_platform_boundary.py", "tests/ci: test_store_schema_fixtures.py",
+                  "tests/ci: test_fixture_literals.py"}
 
 AVAILABLE = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', (prepush.ROOT / "build.zig").read_text()))
 
@@ -97,11 +98,11 @@ class PrepushTest(unittest.TestCase):
         self.commands(paths)
         commands = list(prepush.checks(paths + paths, AVAILABLE, "BASE"))
         self.assertEqual(len(commands), len(dict(commands)))
-        self.assertEqual(set(dict(commands)), SOURCE_CHECKS | {"whitespace", "zig fmt", "caller errors", "undefined Python names", "development selection", "macOS type check"})
+        self.assertEqual(set(dict(commands)), SOURCE_CHECKS | FIXTURE_CHECKS | {"whitespace", "zig fmt", "caller errors", "undefined Python names", "development selection", "macOS type check"})
 
     def test_deleted_files_still_select_owner_checks_but_not_file_tools(self):
         commands = self.commands(["src/cli_args.zig", "tests/integration/activity_integration.py", "AGENTS.md"], deleted=["src/cli_args.zig", "tests/integration/activity_integration.py", "AGENTS.md"])
-        self.assertEqual(set(commands), SOURCE_CHECKS | {"whitespace", "caller errors", "development selection", "macOS type check"})
+        self.assertEqual(set(commands), SOURCE_CHECKS | FIXTURE_CHECKS | {"whitespace", "caller errors", "development selection", "macOS type check"})
         self.assertIn("tests/ci", self.commands(["tests/ci/test_removed.py"], deleted=["tests/ci/test_removed.py"]))
 
     def test_build_changes_keep_development_selection_and_cross_compilation(self):
@@ -127,7 +128,8 @@ class PrepushTest(unittest.TestCase):
 
     def test_qualification_go_keeps_wire_and_native_evidence_policies(self):
         commands = self.commands(["tests/qualification/example.go"])
-        self.assertEqual(set(commands), {"whitespace", "development selection", "tests/ci: test_wire_version.py", "tests/ci: test_harness_contracts.py"})
+        self.assertEqual(set(commands), {"whitespace", "development selection", "tests/ci: test_wire_version.py",
+                                         "tests/ci: test_store_schema_fixtures.py", "tests/ci: test_harness_contracts.py"})
         self.assertEqual(commands["tests/ci: test_harness_contracts.py"][-2:], ["-k", "QualificationEvidenceTest"])
 
     def test_experimental_zig_does_not_borrow_another_owners_build_targets(self):

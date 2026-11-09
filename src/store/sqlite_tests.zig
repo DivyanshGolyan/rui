@@ -1298,9 +1298,14 @@ test "a fresh Store creates a Session with instructions, an output schema and th
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    // At open, six local tools each have two texts, plus web search's
-    // shared empty text; configure has imported nothing yet.
-    try std.testing.expectEqual(@as(u64, 13), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+    // At open, each distinct built-in tool text is saved once (web search's
+    // empty texts share one row); configure has imported nothing yet.
+    var texts: std.StringHashMapUnmanaged(void) = .empty;
+    defer texts.deinit(std.testing.allocator);
+    for (tool_catalog.built_in.records) |record| for ([_][]const u8{ record.description, record.input_schema }) |text|
+        try texts.put(std.testing.allocator, text, {});
+    const tool_texts: u64 = texts.count();
+    try std.testing.expectEqual(tool_texts, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     var command = try completeConfiguration("fresh-tool-texts", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
     command.configuration.instructions = try testingBytesContent(&tmp, "fresh-instructions", "Be brief.");
@@ -1308,7 +1313,7 @@ test "a fresh Store creates a Session with instructions, an output schema and th
     defer command.removeTemporaryContent(std.testing.io) catch unreachable;
     // The configure adds its two values.
     try std.testing.expect(storage.configure(&command, .{}) == .accepted);
-    try std.testing.expectEqual(@as(u64, 15), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+    try std.testing.expectEqual(tool_texts + 2, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
 }
 
 test "a Session's tools are saved once and read back as saved, not as today's built-ins" {
@@ -1333,19 +1338,26 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
             };
         }
     };
-    // The Host's catalog: one set of the seven built-ins, saved at open.
-    try std.testing.expectEqual([3]u64{ 1, 7, 7 }, try Tools.counts(&storage));
+    // The Host's catalog: one set of every built-in, saved at open.
+    const built_ins: u64 = tool_catalog.built_in.records.len;
+    const all_names = comptime names: {
+        var names: [tool_catalog.built_in.records.len][]const u8 = undefined;
+        for (tool_catalog.built_in.records, &names) |record, *name| name.* = record.name;
+        const final = names;
+        break :names final;
+    };
+    try std.testing.expectEqual([3]u64{ 1, built_ins, built_ins }, try Tools.counts(&storage));
     // Two Sessions offering Bash share one set, of the catalog's record.
     const first = try configureTestSessionAsk(&storage, "saved-tools-first");
     const second = try configureTestSessionAsk(&storage, "saved-tools-second");
-    try std.testing.expectEqual([3]u64{ 2, 7, 8 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 2, built_ins, built_ins + 1 }, try Tools.counts(&storage));
     // A set with the catalog's members is the catalog's set.
-    try Tools.set(&storage, "saved-tools-all", first, &.{ "bash", "find_tools", "message_agent", "read_transcript", "skill", "start_agent", "web_search" });
-    try std.testing.expectEqual([3]u64{ 2, 7, 8 }, try Tools.counts(&storage));
+    try Tools.set(&storage, "saved-tools-all", first, &all_names);
+    try std.testing.expectEqual([3]u64{ 2, built_ins, built_ins + 1 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-both", second, &.{ "bash", "web_search" });
-    try std.testing.expectEqual([3]u64{ 3, 7, 10 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 3, built_ins, built_ins + 3 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-none", first, &.{});
-    try std.testing.expectEqual([3]u64{ 4, 7, 10 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 4, built_ins, built_ins + 3 }, try Tools.counts(&storage));
     // Each revision keeps the set it was saved with.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT tool_set_id) FROM session_revision WHERE revision IN (1,2) AND " ++
         "session_ref=(SELECT session_ref FROM session_revision WHERE command_key='saved-tools-both')", .{}));

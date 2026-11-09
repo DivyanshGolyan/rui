@@ -34,6 +34,7 @@ wire_configure() {
     PYTHONPATH="$root/tests/integration" python3 - "$rui" "$store" "$ready" "$@" <<'PYWIRE'
 import json, pathlib, socket, subprocess, sys
 from host_process import WIRE_VERSION
+from product_defaults import compaction_trigger
 binary, store, ready, key, record, encoded, *drop = sys.argv[1:]
 values = json.loads(encoded)
 fields = ('workspace', 'provider', 'model', 'instructions', 'tools', 'permission_mode', 'output_schema')
@@ -42,7 +43,7 @@ configuration = {name: {'state': 'value', 'value': values[name]} if name in valu
 # domain rejections, which the parser only reaches with a complete spec.
 if configuration['tools']['state'] == 'omitted': configuration['tools'] = {'state': 'value', 'value': []}
 if configuration['permission_mode']['state'] == 'omitted': configuration['permission_mode'] = {'state': 'value', 'value': 'bypass'}
-configuration['compaction_trigger'] = {'state': 'value', 'value': '115200'}
+configuration['compaction_trigger'] = {'state': 'value', 'value': str(compaction_trigger('codex', None))}
 configuration['reasoning_effort'] = {'state': 'null'}
 body = json.dumps({'version': WIRE_VERSION, 'kind': 'configure', 'store': store,
                    'key': key, 'session': '', 'configuration': configuration}, separators=(',', ':')).encode()
@@ -307,6 +308,7 @@ drain_socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$drain_ready")
 PYTHONPATH="$root/tests/integration" python3 - "$rui" "$drain_socket" "$drain_store" "$root" "$state" <<'PY'
 import json, os, pathlib, socket, subprocess, sys, time
 from host_process import WIRE_VERSION, is_peer_disconnect, preserve_failure_metadata, stop_process
+from product_defaults import compaction_trigger
 rui, socket_path, store, workspace, state = sys.argv[1:]
 state = pathlib.Path(state)
 body = json.dumps({
@@ -323,7 +325,7 @@ body = json.dumps({
         "tools": {"state": "value", "value": ["bash"]},
         "permission_mode": {"state": "value", "value": "bypass"},
         "output_schema": {"state": "omitted"},
-        "compaction_trigger": {"state": "value", "value": "244800"},
+        "compaction_trigger": {"state": "value", "value": str(compaction_trigger("codex", "gpt-6-sol"))},
         "reasoning_effort": {"state": "value", "value": "medium"},
     },
 }, separators=(",", ":")).encode()

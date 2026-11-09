@@ -23,6 +23,7 @@ import h2.settings
 
 import control_integration as control
 import model_fixture as dispatch
+from product_defaults import compaction_trigger
 import host_process
 from host_process import HostDiagnostics, TestHTTPServer, TRANSPORT_EXCHANGE_LIMIT, _failure_destination, preserve_failure_metadata, wait_for_execution_release as wait_for_drain
 import os_semantics
@@ -570,7 +571,7 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
                             "instructions": {"state": "omitted"},
                             "tools": {"state": "value", "value": ["bash"]},
                             "permission_mode": {"state": "value", "value": "ask"},
-                            "compaction_trigger": {"state": "value", "value": "244800"},
+                            "compaction_trigger": {"state": "value", "value": str(compaction_trigger("codex", "gpt-6-sol"))},
                             "reasoning_effort": {"state": "value", "value": "medium"},
                             "output_schema": {"state": "omitted"},
                         },
@@ -726,7 +727,7 @@ def held_population(root):
                             "instructions": {"state": "omitted"},
                             "tools": {"state": "value", "value": ["bash"]},
                             "permission_mode": {"state": "value", "value": "ask"},
-                            "compaction_trigger": {"state": "value", "value": "244800"},
+                            "compaction_trigger": {"state": "value", "value": str(compaction_trigger("codex", "gpt-6-sol"))},
                             "reasoning_effort": {"state": "value", "value": "medium"},
                             "output_schema": {"state": "omitted"},
                         },

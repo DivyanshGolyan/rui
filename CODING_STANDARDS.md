@@ -192,6 +192,8 @@ Shared fixture owners hold the I/O and platform cases that broke fixtures before
 Fixtures and qualification harnesses observe the Host only through its boundaries.
 Read native evidence from the lossless test observation channel; stderr phase traces drop records under contention and are never evidence (`tests/ci/test_harness_contracts.py` rejects them in qualification).
 Take Host-decided values such as the canonical Store, capacities and descriptor requirements from readiness rather than recomputing them; pass each Host option once through the shared launcher; and let synthesized durable populations pass a production read before measuring them.
+A value another file owns is pinned only by that owner's tests: other tests read the Store format, wire version, product defaults, catalog windows and efforts, and built-in tools from their owners (`host_process`, `product_defaults` and `tools.built_in`), and match a caller error by its exit status, the invocation's context and its `[code]`, not the catalog's prose.
+`test_store_schema_fixtures.py`, `test_wire_version.py` and `test_fixture_literals.py` in `tests/ci` take the forbidden values from the owners and reject restated ones.
 Code that runs only on scheduled or one-platform jobs gets no other drift check.
 
 For each new owner-boundary regression on a [strict path](tests/ci/strict_paths.py), demonstrate that its counterexample goes red on the unfixed path or a targeted mutation at the intended assertion, not fixture setup.
