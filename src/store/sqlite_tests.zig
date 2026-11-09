@@ -281,7 +281,7 @@ test "a Workspace's changed page reads only its own Sessions, however many other
     const Page = struct {
         fn configure(store: *Store, key: []const u8, session: []const u8, place: []const u8) !change_ring.Id {
             var command = try completeConfiguration(key, session, place, "model");
-            const configured = store.configure(&command, .{});
+            const configured = try store.configure(&command, .{});
             try std.testing.expect(configured == .accepted);
             return configured.accepted.session.slice()[0..protocol.session_id_bytes].*;
         }
@@ -518,7 +518,7 @@ test "a statement that fails after an entry point touched its Session fails and 
                 try relabel.configuration.label.value.set("Relabelled");
                 fault.arm(storage.sqliteDatabase());
                 defer fault.disarm(storage.sqliteDatabase());
-                try std.testing.expectEqual(std.meta.Tag(ConfigureReply).infrastructure_failure, std.meta.activeTag(storage.configure(&relabel, .{})));
+                try std.testing.expectEqual(std.meta.Tag(ConfigureReply).infrastructure_failure, std.meta.activeTag(try storage.configure(&relabel, .{})));
             },
             .message => {
                 const file = try tmp.dir.createFile(std.testing.io, "key-fault-message", .{ .read = true });
@@ -602,7 +602,7 @@ test "a rolled-back transaction's identities are handed out again, a committed o
     try tools.key.set("identity-later-tools");
     tools.session = second_session;
     tools.configuration.tools = try .of(&.{ "bash", "test_tool" });
-    try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&tools, .{}) == .accepted);
     const after = try takeEveryIdentityForTesting(&storage);
     for (before.identities, after) |given_back, next| try std.testing.expect(next > given_back);
 }
@@ -1280,7 +1280,7 @@ test "a fresh Store creates a Session with instructions, an output schema and th
     command.configuration.output_schema = try testingBytesContent(&tmp, "fresh-schema", "{\"type\":\"object\"}");
     defer command.removeTemporaryContent(std.testing.io) catch unreachable;
     // The configure adds its two values.
-    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&command, .{}) == .accepted);
     try std.testing.expectEqual(tool_texts + 2, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
 }
 
@@ -1296,7 +1296,7 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
             try command.key.set(key);
             command.session = session;
             command.configuration.tools = try .of(offered);
-            try std.testing.expect(store.configure(&command, .{}) == .accepted);
+            try std.testing.expect(try store.configure(&command, .{}) == .accepted);
         }
         fn counts(store: *Store) ![3]u64 {
             return .{
@@ -1366,7 +1366,7 @@ test "a Bash call the Operation did not offer is rejected and keeps its descript
     var command = try completeConfiguration("unoffered-config", "", workspace, "model-a");
     command.configuration.tools.state = .value;
     command.configuration.tools = try .of(&.{});
-    const reply = storage.configure(&command, .{});
+    const reply = try storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     const session = reply.accepted.session;
     try submitTestMessage(&storage, &tmp, "unoffered-message", "unoffered-message", session.slice(), "classify");
@@ -1388,7 +1388,7 @@ test "loaded tools hide configured tools from frozen requests reports and call s
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     var empty = try completeConfiguration("loaded-empty", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
     empty.configuration.tools = try .of(&.{});
-    const empty_reply = storage.configure(&empty, .{});
+    const empty_reply = try storage.configure(&empty, .{});
     try std.testing.expect(empty_reply == .accepted);
     const session = try configureTestSessionAsk(&storage, "loaded-hidden");
     // An empty loaded set is deliberately unreachable through configure. Seed
@@ -1433,7 +1433,7 @@ test "loaded tools hide configured tools from frozen requests reports and call s
     try update.key.set("loaded-hidden-grow");
     update.session = session;
     update.configuration.loaded_tools = try .of(&.{"bash"});
-    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
     const calls = [_]TestingCall{
         .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\"}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\"}" },
     };
@@ -3073,7 +3073,7 @@ fn expectBindingPreserved(storage: *Store, session: []const u8, phase: []const u
             update.configuration.permission_mode.state = .value;
             try update.configuration.permission_mode.value.set("bypass");
         }
-        const reply = storage.configure(&update, .{});
+        const reply = try storage.configure(&update, .{});
         if (variant < 4) {
             try std.testing.expect(reply == .accepted);
             try std.testing.expectEqual(before.revision + 1, reply.accepted.revision);
@@ -3104,7 +3104,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try configuration.configuration.permission_mode.value.set("ask");
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
-    const created_session_0_reply = storage.configure(&configuration, .{});
+    const created_session_0_reply = try storage.configure(&configuration, .{});
     try std.testing.expect(created_session_0_reply == .accepted);
     const created_session_0 = created_session_0_reply.accepted.session;
     try expectBindingPreserved(&storage, created_session_0.slice(), "before-reopen");
@@ -3201,7 +3201,7 @@ test "configuration rejections bypass content effects and replay committed answe
     {
         var storage: Store = undefined;
         try testingStore(&storage, &tmp, std.testing.io);
-        try std.testing.expect(storage.configure(&command, .{
+        try std.testing.expect(try storage.configure(&command, .{
             .content_import = true,
             .before_commit = true,
         }) == .infrastructure_failure);
@@ -3217,7 +3217,7 @@ test "configuration rejections bypass content effects and replay committed answe
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(rolled_back_content));
         try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(rolled_back_content, 0));
 
-        const rejected = storage.configure(&command, .{ .content_import = true });
+        const rejected = try storage.configure(&command, .{ .content_import = true });
         try std.testing.expect(rejected == .rejected);
         try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_session_reference, rejected.rejected.code);
         const committed_content = try sqlite.prepare(
@@ -3229,7 +3229,7 @@ test "configuration rejections bypass content effects and replay committed answe
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(committed_content));
         try std.testing.expectEqual(@as(i64, 1), c.sqlite3_column_int64(committed_content, 0));
 
-        const replay = storage.configure(&command, .{ .content_import = true });
+        const replay = try storage.configure(&command, .{ .content_import = true });
         try std.testing.expect(replay == .rejected);
         try std.testing.expect(replay.rejected.replayed);
         try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_session_reference, replay.rejected.code);
@@ -3400,7 +3400,7 @@ test "an outside SQLite writer cannot take the open Store's lock" {
         workspace,
         "model-a",
     );
-    const configured = storage.configure(&command, .{});
+    const configured = try storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     try std.testing.expect(!storage.isFenced());
 
@@ -3457,7 +3457,7 @@ test "real SQLite full during import publishes no canonical prefix" {
             defer entry.release();
             var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
             defer a.deinit();
-            break :configure a.end(.{}, configuration_domain.configure(&a, storage.io, storage.served, &command, null, null, null, .{}));
+            break :configure a.end(.{}, configuration_domain.configure(&a, storage.io, storage.served, &command, null, null, null, std.heap.c_allocator, .{}));
         },
     );
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
@@ -3484,7 +3484,7 @@ test "message admissions remain queued in order and retain bounded canonical con
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var configuration = try completeConfiguration("configure", "", workspace, "model-a");
-    const created_session_0_reply = storage.configure(&configuration, .{});
+    const created_session_0_reply = try storage.configure(&configuration, .{});
     try std.testing.expect(created_session_0_reply == .accepted);
     const created_session_0 = created_session_0_reply.accepted.session;
 
@@ -3569,7 +3569,7 @@ fn attemptBashForTesting(storage: *Store, tmp: *std.testing.TmpDir, session: []c
     tools.configuration.tools = try .of(&.{"bash"});
     tools.configuration.permission_mode.state = .value;
     try tools.configuration.permission_mode.value.set("bypass");
-    try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&tools, .{}) == .accepted);
     try submitTestMessage(storage, tmp, "bash-seed", "bash-seed", session, "run two");
     try settleTwoActionsForTesting(storage, tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "bash-calls");
     return (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
@@ -3683,7 +3683,7 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
     {
         var storage: Store = undefined;
         try testingStore(&storage, &tmp, std.testing.io);
-        const configured = storage.configure(&configuration, .{});
+        const configured = try storage.configure(&configuration, .{});
         try std.testing.expect(configured == .accepted);
         message.session = configured.accepted.session;
         try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
@@ -3698,7 +3698,7 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
         try std.testing.expect(storage.isFenced());
         try std.testing.expectError(error.StoreFenced, storage.admitNextModelAttempt(.{}));
         var later = try completeConfiguration("rollback-later", "", workspace, "model-a");
-        try std.testing.expect(storage.configure(&later, .{}) == .infrastructure_failure);
+        try std.testing.expect(try storage.configure(&later, .{}) == .infrastructure_failure);
         try storage.close();
     }
 
@@ -4246,9 +4246,9 @@ test "a Workspace is matched by its digest and then its text" {
     const other_workspace = other_buffer[0..try nested.realPath(std.testing.io, &other_buffer)];
 
     var first_command = try completeConfiguration("digest-first", "", first_workspace, "model");
-    const first = storage.configure(&first_command, .{}).accepted.session;
+    const first = (try storage.configure(&first_command, .{})).accepted.session;
     var sibling_command = try completeConfiguration("digest-sibling", "", first_workspace, "model");
-    const sibling = storage.configure(&sibling_command, .{}).accepted.session;
+    const sibling = (try storage.configure(&sibling_command, .{})).accepted.session;
     // A digest collision: the first Workspace's Sessions carry the other's digest.
     {
         var sql: [160]u8 = undefined;
@@ -4256,7 +4256,7 @@ test "a Workspace is matched by its digest and then its text" {
         try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&sql, "UPDATE session SET workspace_digest=x'{s}'", .{&forged}, 0));
     }
     var other_command = try completeConfiguration("digest-other", "", other_workspace, "model");
-    const other = storage.configure(&other_command, .{}).accepted.session;
+    const other = (try storage.configure(&other_command, .{})).accepted.session;
 
     const first_key = try store_testing.sqlite_only.queryU64(&storage, "SELECT workspace_key FROM session WHERE session_ref=?1", .{first.slice()});
     try std.testing.expectEqual(first_key, try store_testing.sqlite_only.queryU64(&storage, "SELECT workspace_key FROM session WHERE session_ref=?1", .{sibling.slice()}));
@@ -4330,7 +4330,7 @@ test "canonical observation failure fences later admission" {
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var command = try completeConfiguration("create", "", workspace, "model-a");
-    const created_session_0_reply = storage.configure(&command, .{});
+    const created_session_0_reply = try storage.configure(&command, .{});
     try std.testing.expect(created_session_0_reply == .accepted);
     const created_session_0 = created_session_0_reply.accepted.session;
 
@@ -4340,7 +4340,7 @@ test "canonical observation failure fences later admission" {
     try std.testing.expectError(error.CorruptStore, storage.inspectSessionForTesting(created_session_0.slice()));
 
     var later = try completeConfiguration("later", "", workspace, "model-a");
-    try std.testing.expect(storage.configure(&later, .{}) == .infrastructure_failure);
+    try std.testing.expect(try storage.configure(&later, .{}) == .infrastructure_failure);
     try std.testing.expectError(error.StoreFenced, store_testing.observeCommandForTesting(&storage, "later"));
 }
 
@@ -4898,7 +4898,7 @@ test "one committed selection freezes its settings and input prefix" {
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var configuration = try completeConfiguration("configure", "", workspace, "model-a");
-    const created_session_0_reply = storage.configure(&configuration, .{});
+    const created_session_0_reply = try storage.configure(&configuration, .{});
     try std.testing.expect(created_session_0_reply == .accepted);
     const created_session_0 = created_session_0_reply.accepted.session;
 
@@ -4921,7 +4921,7 @@ test "one committed selection freezes its settings and input prefix" {
     try instructions_update.session.set(created_session_0.slice());
     instructions_update.configuration.instructions = try testingContent(&tmp, "instructions-before", 'b', 1);
     defer instructions_update.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.configure(&instructions_update, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&instructions_update, .{}) == .accepted);
 
     try std.testing.expectError(
         error.InjectedAttemptCommitFailure,
@@ -4970,7 +4970,7 @@ test "one committed selection freezes its settings and input prefix" {
     try update.session.set(created_session_0.slice());
     update.configuration.model.state = .value;
     try update.configuration.model.value.set("model-b");
-    const active_update = storage.configure(&update, .{});
+    const active_update = try storage.configure(&update, .{});
     try std.testing.expect(active_update == .rejected);
     try std.testing.expectEqual(
         protocol.ConfigurationRejection.model_is_immutable,
@@ -5034,7 +5034,7 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(created_session_0.slice())).pending_messages);
 
     try update.key.set("configure-after-failure");
-    const failed_update = storage.configure(&update, .{});
+    const failed_update = try storage.configure(&update, .{});
     try std.testing.expect(failed_update == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.model_is_immutable, failed_update.rejected.code);
     try expectBindingPreserved(&storage, created_session_0.slice(), "after-failure");
@@ -5044,7 +5044,7 @@ test "one committed selection freezes its settings and input prefix" {
     try tools_update.session.set(created_session_0.slice());
     tools_update.configuration.tools.state = .value;
     tools_update.configuration.tools.count = 0;
-    try std.testing.expect(storage.configure(&tools_update, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&tools_update, .{}) == .accepted);
 
     const later = (try storage.admitNextModelAttempt(.{})).?;
     var later_view: HistoricalView = undefined;
@@ -5080,7 +5080,7 @@ test "continued accepted output keeps model immutable and public text readable" 
         workspace,
         "model-a",
     );
-    const created_session_0_reply = storage.configure(&configuration, .{});
+    const created_session_0_reply = try storage.configure(&configuration, .{});
     try std.testing.expect(created_session_0_reply == .accepted);
     const created_session_0 = created_session_0_reply.accepted.session;
 
@@ -5195,7 +5195,7 @@ test "continued accepted output keeps model immutable and public text readable" 
     try update.session.set(created_session_0.slice());
     update.configuration.model.state = .value;
     try update.configuration.model.value.set("model-b");
-    const rejected = storage.configure(&update, .{});
+    const rejected = try storage.configure(&update, .{});
     try std.testing.expect(rejected == .rejected);
     try std.testing.expectEqual(
         protocol.ConfigurationRejection.model_is_immutable,
@@ -5233,7 +5233,7 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
     {
         var storage: Store = undefined;
         try testingStore(&storage, &tmp, std.testing.io);
-        const created_session_0_reply = storage.configure(&configuration, .{});
+        const created_session_0_reply = try storage.configure(&configuration, .{});
         try std.testing.expect(created_session_0_reply == .accepted);
         created_session_0 = created_session_0_reply.accepted.session;
         const message_file = try tmp.dir.createFile(std.testing.io, "failure-message", .{ .read = true });
@@ -5429,7 +5429,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var configuration = try completeConfiguration("retry-config", "", workspace, "model-a");
-    const created_session_0_reply = storage.configure(&configuration, .{});
+    const created_session_0_reply = try storage.configure(&configuration, .{});
     try std.testing.expect(created_session_0_reply == .accepted);
     const created_session_0 = created_session_0_reply.accepted.session;
     const message_file = try tmp.dir.createFile(std.testing.io, "retry-message", .{ .read = true });
@@ -5553,7 +5553,7 @@ test "canonical historical read failure fences dispatch without a fabricated out
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var configuration = try completeConfiguration("historical-config", "", workspace, "model-a");
-    const created_session_0_reply = storage.configure(&configuration, .{});
+    const created_session_0_reply = try storage.configure(&configuration, .{});
     try std.testing.expect(created_session_0_reply == .accepted);
     const created_session_0 = created_session_0_reply.accepted.session;
     const file = try tmp.dir.createFile(std.testing.io, "historical-message", .{ .read = true });
@@ -6360,7 +6360,7 @@ test "Session work dates a tool group by its last acceptance, even when the cloc
     try update.session.set(bypass.slice());
     update.configuration.permission_mode.state = .value;
     try update.configuration.permission_mode.value.set("bypass");
-    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
     try submitTestMessage(&storage, &tmp, "stepped-bypass-input", "stepped-bypass-input", bypass.slice(), "propose");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "stepped-bypass-calls");
     const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
@@ -6713,7 +6713,7 @@ test "the Current report fences an unauthorized Action proposed under bypass" {
     try update.session.set(session.slice());
     update.configuration.permission_mode.state = .value;
     try update.configuration.permission_mode.value.set("bypass");
-    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
     try submitTestMessage(&storage, &tmp, "unauthorized-input", "input", session.slice(), "propose");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "unauthorized-calls");
     // The CHECK pairs a grant with its decision, so the damage clears both.
@@ -6729,7 +6729,7 @@ fn configureTestEffort(storage: *Store, key: []const u8, session: []const u8, st
     try command.session.set(session);
     command.configuration.reasoning_effort.state = state;
     if (state == .value) try command.configuration.reasoning_effort.value.set(value);
-    return storage.configure(&command, .{});
+    return try storage.configure(&command, .{});
 }
 
 fn testingRevisionEfforts(storage: *Store, session: []const u8, destination: []?protocol.ReasoningEffort) !usize {
@@ -6756,7 +6756,7 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     var create = try completeConfiguration("effort-create", "", workspace, "gpt-6.1-sol");
     create.configuration.reasoning_effort.state = .value;
     try create.configuration.reasoning_effort.value.set("high");
-    const created = storage.configure(&create, .{});
+    const created = try storage.configure(&create, .{});
     try std.testing.expect(created == .accepted);
     const session = created.accepted.session;
     var observed = try storage.inspectSessionForTesting(session.slice());
@@ -7079,7 +7079,7 @@ test "model admission work excludes accepted compaction base history" {
             try patch.session.set(session.slice());
             patch.configuration.compaction_trigger.state = .value;
             try patch.configuration.compaction_trigger.value.set("1000");
-            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
             try submitTestMessage(&storage, &tmp, "pending", "pending", session.slice(), "");
             var measured: @This() = .{};
             const admitted = blk: {
@@ -7127,7 +7127,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                 tools.configuration.tools = try .of(&.{"bash"});
                 tools.configuration.permission_mode.state = .value;
                 try tools.configuration.permission_mode.value.set("bypass");
-                try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&tools, .{}) == .accepted);
             }
             const call = TestingCall{ .item_id = "item", .name = if (kind == .action) "bash" else "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = if (kind == .action) "{\\\"description\\\":\\\"Run no-op\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}" else "{}", .decoded_arguments = if (kind == .action) "{\"description\":\"Run no-op\",\"cmd\":\"true\",\"timeout_ms\":null}" else "{}" };
             const instructions: [400]u8 = @splat('x');
@@ -7139,7 +7139,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                     try patch.session.set(session.slice());
                     patch.configuration.instructions = try testingBytesContent(&tmp, "instruction", &instructions);
                     defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
-                    try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                    try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
                 }
                 const message_key = try std.fmt.bufPrint(&key, "message-{d}", .{index});
                 try submitTestMessage(&storage, &tmp, "input", message_key, session.slice(), "old input");
@@ -7171,14 +7171,14 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                 patch.configuration.instructions = try testingBytesContent(&tmp, "pending-instruction", &instructions);
             }
             defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
             if (kind == .instruction) {
                 var clear: wire_request.ConfigureCommand = .{};
                 try clear.key.set("clear");
                 try clear.session.set(session.slice());
                 clear.configuration.instructions = try testingBytesContent(&tmp, "clear-instruction", "");
                 defer clear.removeTemporaryContent(std.testing.io) catch unreachable;
-                try std.testing.expect(storage.configure(&clear, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&clear, .{}) == .accepted);
             }
             try submitTestMessage(&storage, &tmp, "pending", "pending", session.slice(), "");
             var measured: @This() = .{};
@@ -7222,7 +7222,7 @@ test "admission fails before COMMIT when a counted write changes other than its 
         try patch.session.set(session.slice());
         patch.configuration.instructions = try testingBytesContent(&tmp, "counted-admission-instruction", "an instruction");
         defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+        try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
         try submitTestMessage(&storage, &tmp, "counted-admission-input", "counted-admission-message", session.slice(), "work");
         try sqlite.exec(storage.sqliteDatabase(), case.trigger);
         try std.testing.expectError(case.expected, storage.admitModelAttempt(.message, .{}));
@@ -7496,7 +7496,7 @@ test "admission's context read answers CorruptStore, as admission names it" {
         try patch.session.set(session.slice());
         patch.configuration.compaction_trigger.state = .value;
         try patch.configuration.compaction_trigger.value.set("1000");
-        try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+        try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
         try submitTestMessage(&storage, &tmp, "context-fold-one", "context-fold-one", session.slice(), "one");
         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two");
@@ -7602,7 +7602,7 @@ fn costFixtureForTesting(storage: *Store, tmp: *std.testing.TmpDir, cycles: usiz
     reconfigure.configuration.instructions = try testingBytesContent(tmp, "probe-instructions", "Be brief and careful.");
     reconfigure.configuration.label.state = .value;
     try reconfigure.configuration.label.value.set("probe label");
-    try std.testing.expect(storage.configure(&reconfigure, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&reconfigure, .{}) == .accepted);
     for (0..cycles) |index| try costCycleForTesting(storage, tmp, session.slice(), index);
     try submitTestMessage(storage, tmp, "probe-stopped-input", "probe-stopped-key", session.slice(), "start something long");
     _ = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
@@ -8011,7 +8011,7 @@ test "Full revisions read no statement past a last revision that shows content" 
     try reconfigure.key.set("last-revision");
     try reconfigure.session.set(session.slice());
     reconfigure.configuration.instructions = try testingBytesContent(&tmp, "last-revision-instructions", "Be brief.");
-    try std.testing.expect(storage.configure(&reconfigure, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&reconfigure, .{}) == .accepted);
     _ = testingRuns(&storage, report_domain.full_revisions);
     std.testing.allocator.free(try testingFullHistory(&storage, &tmp, session.slice(), null));
     // The chunk stops after the second revision to stream its
@@ -8580,7 +8580,7 @@ test "schema 53 moves forward with loaded tools defaulting to NULL" {
     }
     var configure: wire_request.ConfigureCommand = .{};
     try configure.key.set("legacy-configure");
-    const configure_replay = storage.configure(&configure, .{});
+    const configure_replay = try storage.configure(&configure, .{});
     try std.testing.expect(configure_replay == .rejected);
     try std.testing.expect(configure_replay.rejected.replayed);
     try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, configure_replay.rejected.code);
@@ -8898,7 +8898,7 @@ fn configureMessagingSession(storage: *Store, key: []const u8) !protocol.Bounded
     command.configuration.tools = try .of(&.{"message_agent"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
-    const reply = storage.configure(&command, .{});
+    const reply = try storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     return reply.accepted.session;
 }
@@ -9349,7 +9349,7 @@ test "a start_agent call creates its agent where its caller works, with the task
     command.configuration.tools = try .of(&.{ "message_agent", "start_agent" });
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
-    const caller = storage.configure(&command, .{}).accepted.session;
+    const caller = (try storage.configure(&command, .{})).accepted.session;
     try submitTestMessage(&storage, &tmp, "start-task", "start-task", caller.slice(), "split the work");
     const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
@@ -9536,7 +9536,7 @@ test "a Session offering an MCP server's tool is listed, reported and settled" {
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var command = try completeConfiguration("mcp-config", "", workspace, "model-a");
     command.configuration.tools = try .of(&.{ "bash", "fetch_page" });
-    const reply = storage.configure(&command, .{});
+    const reply = try storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     const session = reply.accepted.session;
     // Reading and reconfiguring it neither refuses nor fences.
@@ -9545,12 +9545,12 @@ test "a Session offering an MCP server's tool is listed, reported and settled" {
     try reworded.key.set("mcp-reconfigure");
     reworded.session = session;
     reworded.configuration.tools = try .of(&.{ "bash", "fetch_page", "test_tool" });
-    try std.testing.expect(storage.configure(&reworded, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&reworded, .{}) == .accepted);
     reworded = .{};
     try reworded.key.set("mcp-reconfigure-back");
     reworded.session = session;
     reworded.configuration.tools = try .of(&.{ "bash", "fetch_page" });
-    try std.testing.expect(storage.configure(&reworded, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&reworded, .{}) == .accepted);
     try std.testing.expect(!storage.isFenced());
 
     try submitTestMessage(&storage, &tmp, "mcp-message", "mcp-message", session.slice(), "fetch");
@@ -9612,7 +9612,7 @@ test "MCP Actions follow ask and bypass permission and continue after resolution
         command.configuration.tools = try .of(&.{ "bash", "fetch_page" });
         command.configuration.permission_mode.state = .value;
         try command.configuration.permission_mode.value.set(mode);
-        const reply = storage.configure(&command, .{});
+        const reply = try storage.configure(&command, .{});
         try std.testing.expect(reply == .accepted);
         const session = reply.accepted.session;
         try submitTestMessage(&storage, &tmp, "mcp-permission-message", "mcp-permission-message", session.slice(), "fetch");
@@ -9622,7 +9622,7 @@ test "MCP Actions follow ask and bypass permission and continue after resolution
         try update.key.set("mcp-permission-remove");
         update.session = session;
         update.configuration.tools = try .of(&.{"bash"});
-        try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+        try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
         const calls = [_]TestingCall{
             .{ .item_id = "item-1", .name = "fetch_page", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{}", .decoded_arguments = "{}" },
             .{ .item_id = "item-2", .name = "fetch_page", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{", .decoded_arguments = "{" },
@@ -9671,13 +9671,13 @@ test "an MCP tool outside the loaded tools gets the unknown-tool result instead 
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var empty = try completeConfiguration("mcp-loaded-empty", "", workspace, "model-a");
     empty.configuration.tools = try .of(&.{});
-    const empty_reply = storage.configure(&empty, .{});
+    const empty_reply = try storage.configure(&empty, .{});
     try std.testing.expect(empty_reply == .accepted);
     var command = try completeConfiguration("mcp-loaded-hidden", "", workspace, "model-a");
     command.configuration.tools = try .of(&.{"fetch_page"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("bypass");
-    const reply = storage.configure(&command, .{});
+    const reply = try storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     const session = reply.accepted.session;
     try store_testing.setLoadedToolsForTesting(&storage, session.slice(), empty_reply.accepted.session.slice());
@@ -9699,14 +9699,14 @@ test "a removed MCP tool gets the removed-tool result instead of an Action" {
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     var command = try completeConfiguration("mcp-removed-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
     command.configuration.tools = try .of(&.{ "bash", "fetch_page" });
-    const reply = storage.configure(&command, .{});
+    const reply = try storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     const session = reply.accepted.session;
     var update: wire_request.ConfigureCommand = .{};
     try update.key.set("mcp-remove");
     update.session = session;
     update.configuration.tools = try .of(&.{"bash"});
-    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
     try submitTestMessage(&storage, &tmp, "mcp-removed-message", "mcp-removed-message", session.slice(), "fetch");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{.{ .item_id = "removed-item", .name = "fetch_page", .encoded_call_id = "removed-call", .decoded_call_id = "removed-call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
@@ -9778,7 +9778,7 @@ test "MCP invalid and removed calls share their batch rejection lookup rounds" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             var command = try completeConfiguration("mcp-rounds-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
             command.configuration.tools = try .of(&.{ "bash", "fetch_page" });
-            const configured = storage.configure(&command, .{});
+            const configured = try storage.configure(&command, .{});
             try std.testing.expect(configured == .accepted);
             const session = configured.accepted.session;
             if (removed) {
@@ -9786,7 +9786,7 @@ test "MCP invalid and removed calls share their batch rejection lookup rounds" {
                 try update.key.set("mcp-rounds-remove");
                 update.session = session;
                 update.configuration.tools = try .of(&.{"bash"});
-                try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+                try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             }
             try submitTestMessage(&storage, &tmp, "mcp-rounds-message", "mcp-rounds-message", session.slice(), "fetch");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -9829,7 +9829,7 @@ test "MCP permission and core authorization coexist in one Turn" {
     command.configuration.tools = try .of(&.{ "bash", "fetch_page", "message_agent", "start_agent" });
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
-    const configured = storage.configure(&command, .{});
+    const configured = try storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
     try submitTestMessage(&storage, &tmp, "mixed-input", "mixed-key", session.slice(), "fetch and delegate");
@@ -9885,7 +9885,7 @@ test "MCP work selected before its parent stops yields to the owed child stop" {
     configuration.configuration.tools = try .of(&.{"fetch_page"});
     configuration.configuration.permission_mode.state = .value;
     try configuration.configuration.permission_mode.value.set("bypass");
-    const configured = storage.configure(&configuration, .{});
+    const configured = try storage.configure(&configuration, .{});
     try std.testing.expect(configured == .accepted);
     const child = configured.accepted.session;
     try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
@@ -9941,7 +9941,7 @@ test "an empty MCP selection does not visit queued Bash Actions from a Bash-only
         configuration.configuration.tools = try .of(&.{"bash"});
         configuration.configuration.permission_mode.state = .value;
         try configuration.configuration.permission_mode.value.set("bypass");
-        const configured = storage.configure(&configuration, .{});
+        const configured = try storage.configure(&configuration, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session;
         try submitTestMessage(&storage, &tmp, "bash-population-input", "bash-population-input", session.slice(), "propose");
@@ -9975,7 +9975,7 @@ test "MCP attempts serialize Sessions and recover without replay" {
         command.configuration.tools = try .of(&.{ "fetch_page", "message_agent" });
         command.configuration.permission_mode.state = .value;
         try command.configuration.permission_mode.value.set("bypass");
-        const reply = storage.configure(&command, .{});
+        const reply = try storage.configure(&command, .{});
         try std.testing.expect(reply == .accepted);
         session.* = reply.accepted.session;
         try submitTestMessage(&storage, &tmp, key, if (index == 0) "mcp-serial-message-a" else "mcp-serial-message-b", session.slice(), "fetch");
@@ -10484,7 +10484,7 @@ test "K4 malformed delivered approval forwards fence page cursor and direct hydr
         var bypass = try store_testing.completeConfiguration("k4-corrupt-bypass", child.slice(), workspace, "model-a");
         bypass.configuration.permission_mode.state = .value;
         try bypass.configuration.permission_mode.value.set("bypass");
-        try std.testing.expect(storage.configure(&bypass, .{}) == .accepted);
+        try std.testing.expect(try storage.configure(&bypass, .{}) == .accepted);
         try submitTestMessage(&storage, &tmp, "k4-corrupt-input", "k4-corrupt-input", child.slice(), "propose");
         const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try tests.settleTwoActionsForTesting(&storage, &tmp, model, "k4-corrupt-calls");
@@ -10890,4 +10890,65 @@ test "skills schema 58 wire 10 upgrades populated archive and refusal rows to th
     }
     try std.testing.expect(migrated_rows.written().len > 1000);
     try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
+}
+
+test "an engine OutOfMemory under configure, a skills reload or a catalog read answers OutOfMemory without fencing" {
+    const skills = @import("../skills.zig");
+    const skills_domain = @import("domain/skills.zig");
+    for ([_]enum { configure, reload, read, tool }{ .configure, .reload, .read, .tool }) |door| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try store_testing.testingStore(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const saved: skills.Catalog = .{ .entries = &.{.{ .name = "demo", .description = "engine pressure", .path = "/skills/demo/SKILL.md" }} };
+        const initial: skills_domain.Initial = .{ .ready = .{
+            .encoded = try skills.encodeCatalog(arena.allocator(), saved),
+            .instruction = try skills.initialInstruction(arena.allocator(), saved),
+        } };
+        var path: [protocol.max_workspace_bytes]u8 = undefined;
+        const workspace = try store_testing.canonicalCwd(std.testing.io, &path);
+        var create = try store_testing.completeConfiguration("engine-oom", "", workspace, "model-a");
+        create.configuration.tools = try .of(&.{"skill"});
+        const session = (try storage.configureWithInitialSkills(&create, null, &initial, .{})).accepted.session;
+        const candidate: skills_domain.Capture = .{ .reload = .{ .entries = &.{} } };
+        const binding = if (door == .tool) binding: {
+            try store_testing.submitTestMessage(&storage, &tmp, "engine-oom-input", "engine-oom-message", session.slice(), "reload");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{.{ .item_id = "reload-item", .name = "skill", .encoded_call_id = "reload-call", .decoded_call_id = "reload-call", .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}", .decoded_arguments = "{\"operation\":\"reload\"}" }};
+            try settleCallsForTesting(&storage, &tmp, model, "engine-oom-calls", &calls);
+            break :binding (try storage.nextCoreWork()).?.action.binding;
+        } else undefined;
+        // The first statement the call prepares again fails in the engine,
+        // as when its cache cannot grow, with the caller's own memory to spare.
+        const cache = &storage.engine.sqlite.statements;
+        var cached: [512][*:0]const u8 = undefined;
+        var count: usize = 0;
+        // Test oracles on temp tables stay cached; only Store statements go.
+        for (cache.slots) |slot| if (slot.sql) |sql| if (std.mem.indexOf(u8, std.mem.span(sql), "temp.") == null) {
+            cached[count] = sql;
+            count += 1;
+        };
+        for (cached[0..count]) |sql| cache.remove(sql);
+        sqlite.testing_fail_next_insert = true;
+        defer sqlite.testing_fail_next_insert = false;
+        switch (door) {
+            .configure => {
+                var update = try store_testing.completeConfiguration("engine-oom-update", session.slice(), workspace, "model-a");
+                update.configuration.tools = try .of(&.{"skill"});
+                try std.testing.expectError(error.OutOfMemory, storage.configure(&update, .{}));
+            },
+            .reload => {
+                var reload: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
+                try reload.key.set("engine-oom-reload");
+                try std.testing.expectError(error.OutOfMemory, storage.configureWithCapturedSkills(&reload, null, null, &candidate, std.testing.allocator, .{}));
+            },
+            .read => try std.testing.expectError(error.OutOfMemory, storage.readSkills(arena.allocator(), session.slice())),
+            .tool => try std.testing.expectError(error.OutOfMemory, storage.settleSkillTool(binding, arena.allocator(), &candidate, .{})),
+        }
+        try std.testing.expect(!sqlite.testing_fail_next_insert);
+        try std.testing.expect(!storage.isFenced());
+    }
 }

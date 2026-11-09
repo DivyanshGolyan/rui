@@ -1391,6 +1391,8 @@ noinline fn runSkill(host: *Host, input: *const store_module.CoreActionInput) ex
         };
     _ = host.store.settleSkillTool(input.binding, arena, &captured, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         error.StaleActionAttemptBinding => return .admitted,
+        // A reload's write rolled back; the call runs again later.
+        error.OutOfMemory => return .retry_later,
         else => {
             fenceDispatch(host, "skill core settlement", err);
             return .retry_later;
@@ -3358,7 +3360,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             command.configuration.compaction_trigger.state = .value;
             try command.configuration.compaction_trigger.value.set("115200");
             command.configuration.reasoning_effort.state = .explicit_null;
-            const configured = storage.configure(&command, .{});
+            const configured = try storage.configure(&command, .{});
             try std.testing.expect(configured == .accepted);
             const file = try tmp.dir.createFile(std.testing.io, "failed-admission-message", .{ .read = true });
             try file.writeStreamingAll(std.testing.io, "hello");
@@ -3585,7 +3587,7 @@ test "preparing slots belong to their live preparations" {
     command.configuration.compaction_trigger.state = .value;
     try command.configuration.compaction_trigger.value.set("115200");
     command.configuration.reasoning_effort.state = .explicit_null;
-    const configured = storage.configure(&command, .{});
+    const configured = try storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "prep-belong-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
@@ -3912,7 +3914,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     command.configuration.compaction_trigger.state = .value;
     try command.configuration.compaction_trigger.value.set("115200");
     command.configuration.reasoning_effort.state = .explicit_null;
-    const configured = storage.configure(&command, .{});
+    const configured = try storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
@@ -4209,7 +4211,7 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
     command.configuration.tools = try .of(&.{ "bash", "fetch_page" });
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("bypass");
-    const configured = storage.configure(&command, .{});
+    const configured = try storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
     try store_module.testingSubmitMessage(&storage, &tmp, "host-mcp-message", "host-mcp-message", session.slice(), "fetch");
@@ -4256,4 +4258,60 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
     try std.testing.expect(std.mem.indexOf(u8, report, "mcp_server_unavailable") != null);
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
+}
+
+test "a skill tool reload under heap exhaustion runs again later without fencing" {
+    const skills = @import("skills.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io, .{});
+    defer storage.close() catch unreachable;
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    // The workspace's skills are not these 65, so the reload replaces a saved
+    // catalog large enough that reading it allocates inside the held write.
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = workspace_buffer[0..try tmp.dir.realPath(std.testing.io, &workspace_buffer)];
+    var entries: [65]skills.Entry = undefined;
+    var names: [65][6]u8 = undefined;
+    for (&entries, &names, 0..) |*entry, *name, index| {
+        _ = try std.fmt.bufPrint(name, "pad-{d:0>2}", .{index});
+        entry.* = .{ .name = name, .description = "Metadata", .path = "/never-read" };
+    }
+    const initial = try skills.initialCatalog(memory.allocator(), .{ .entries = &entries });
+    var command = try store_module.testingCompleteConfiguration("skill-reload-config", "", workspace, "model-a");
+    command.configuration.tools = try .of(&.{"skill"});
+    const configured = try storage.configureWithInitialSkills(&command, null, &.{ .ready = .{ .encoded = initial.encoded, .instruction = initial.instruction } }, .{});
+    const session = configured.accepted.session;
+    try store_module.testingSubmitMessage(&storage, &tmp, "skill-reload-message", "skill-reload-message", session.slice(), "reload");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, binding, "skill-reload-calls", &.{.{
+        .item_id = "item-1",
+        .name = "skill",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}",
+        .decoded_arguments = "{\"operation\":\"reload\"}",
+    }});
+    const input = (try storage.nextCoreWork()).?.action;
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    // Each allocation in turn fails, the settlement's held write included,
+    // until the call settles: the call waits, and nothing fences.
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        host.allocator = failing.allocator();
+        const admission = runSkill(&host, &input);
+        host.allocator = std.testing.allocator;
+        try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+        if (!failing.has_induced_failure) {
+            try std.testing.expectEqual(execution_turn.Admission.admitted, admission);
+            break;
+        }
+        try std.testing.expectEqual(execution_turn.Admission.retry_later, admission);
+        try std.testing.expectEqual(entries.len, (try storage.readSkills(memory.allocator(), session.slice())).catalog.entries.len);
+    }
+    try std.testing.expect(fail_index > 2);
+    try std.testing.expect((try storage.readSkills(memory.allocator(), session.slice())).catalog.entries.len != entries.len);
 }

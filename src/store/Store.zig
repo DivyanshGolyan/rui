@@ -638,7 +638,7 @@ pub const Store = struct {
         self: *Store,
         command: *const content_custody.ConfigureCommand,
         faults: Faults,
-    ) ConfigureReply {
+    ) error{OutOfMemory}!ConfigureReply {
         return self.configureWithInitialSkills(command, null, null, faults);
     }
 
@@ -650,16 +650,16 @@ pub const Store = struct {
         command: *const content_custody.ConfigureCommand,
         preset: *const configuration_domain.PresetDecision,
         faults: Faults,
-    ) ConfigureReply {
+    ) error{OutOfMemory}!ConfigureReply {
         return self.configureWithInitialSkills(command, preset, null, faults);
     }
 
-    pub fn configureWithInitialSkills(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, faults: Faults) ConfigureReply {
-        return self.configureWithCapturedSkills(command, preset, initial_skills, null, faults);
+    pub fn configureWithInitialSkills(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, faults: Faults) error{OutOfMemory}!ConfigureReply {
+        return self.configureWithCapturedSkills(command, preset, initial_skills, null, std.heap.c_allocator, faults);
     }
 
-    pub fn configureWithCapturedSkills(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, faults: Faults) ConfigureReply {
-        return self.queue().write(configureHeld, .{ self, command, preset, initial_skills, reload_capture, faults });
+    pub fn configureWithCapturedSkills(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, allocator: std.mem.Allocator, faults: Faults) error{OutOfMemory}!ConfigureReply {
+        return self.queue().write(configureHeld, .{ self, command, preset, initial_skills, reload_capture, allocator, faults });
     }
 
     fn configureHeld(
@@ -668,13 +668,19 @@ pub const Store = struct {
         preset: ?*const configuration_domain.PresetDecision,
         initial_skills: ?*const skills_domain.Initial,
         reload_capture: ?*const skills_domain.Capture,
+        allocator: std.mem.Allocator,
         faults: Faults,
-    ) ConfigureReply {
+    ) error{OutOfMemory}!ConfigureReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
         defer entry.release();
         var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, initial_skills, reload_capture, faults))) catch .infrastructure_failure;
+        // Running out of memory, the caller's for a reload or the engine's,
+        // rolls the write back cleanly and is the caller's to answer.
+        return entry.finishTransaction(error{OutOfMemory}, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, initial_skills, reload_capture, allocator, faults))) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => .infrastructure_failure,
+        };
     }
 
     /// A fresh Message admission, as `MessageCommitted` receives it.
@@ -1345,7 +1351,9 @@ pub const Store = struct {
         defer entry.release();
         var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, skills_domain.runTool(&access, allocator, binding, captured, faults)));
+        // A reload allocates from `allocator` inside the write; running out
+        // of it rolls back cleanly and is the caller's to retry.
+        return entry.finishTransaction(Ordinary.action_attempt || error{OutOfMemory}, faults, access.end(faults, skills_domain.runTool(&access, allocator, binding, captured, faults)));
     }
 
     /// Fails the core tool call `binding` names with `result`, in one

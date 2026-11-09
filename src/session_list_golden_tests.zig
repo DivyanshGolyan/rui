@@ -35,7 +35,7 @@ fn run(case: *store.testing.Case, comptime scenario: enum { one, pages, escaping
             command.configuration.label.state = .value;
             try command.configuration.label.value.set("quote \" slash \\ café");
         }
-        const result = storage.configure(&command, .{});
+        const result = try storage.configure(&command, .{});
         try std.testing.expect(result == .accepted);
         id.* = result.accepted.session;
     }
@@ -63,7 +63,7 @@ fn run(case: *store.testing.Case, comptime scenario: enum { one, pages, escaping
         var command = try store.testingCompleteConfiguration("golden-change", ids[0].slice(), workspace, "model");
         command.configuration.label.state = .value;
         try command.configuration.label.value.set("changed");
-        try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+        try std.testing.expect(try storage.configure(&command, .{}) == .accepted);
         const changed = try store.testingSessionList(&storage, &tmp, .{ .since = token }, &used, 2);
         defer std.testing.allocator.free(changed);
         try compare(changed, &storage, workspace, ids[0..count], since_changed);

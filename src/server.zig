@@ -1542,24 +1542,24 @@ noinline fn submitMessage(host: *Host, command: *const wire_request.MessageComma
 /// configuration; a preset lookup/update refusal binds the original request,
 /// including its name. The Store keeps that identity for a saved refusal even
 /// if the preset later exists: the same request cannot become an acceptance.
-noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureCommand) store_module.ConfigureReply {
+noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureCommand) error{OutOfMemory}!store_module.ConfigureReply {
     const name = command.preset orelse return configureCapturedSkills(host, command, null);
     var decision: store_module.PresetDecision = .{ .request_digest = command.presetRequestDigest() };
     if (command.session.len != 0) {
         decision.rejection = .preset_on_update;
-        return host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
+        return try host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
     }
     const preset = for (host.presets) |*entry| {
         if (std.mem.eql(u8, entry.name, name.slice())) break entry;
     } else {
         decision.rejection = .unknown_preset;
-        return host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
+        return try host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
     };
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
     const arena = memory.allocator();
     // Configuration is kilobytes, owned by this request rather than the stack.
-    const resolved = arena.create(wire_request.ConfigureCommand) catch return .infrastructure_failure;
+    const resolved = try arena.create(wire_request.ConfigureCommand);
     resolved.* = .{
         .store = command.store,
         .key = command.key,
@@ -1567,7 +1567,7 @@ noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureC
         .require_model = command.require_model,
         .reload_skills = command.reload_skills,
     };
-    const checked = core_tools.parseAgentSpec(arena, preset.spec, &resolved.configuration) catch return .infrastructure_failure;
+    const checked = core_tools.parseAgentSpec(arena, preset.spec, &resolved.configuration) catch |err| return configureFailure(host, err);
     // The immutable launch frame checked this same spec with this parser.
     std.debug.assert(checked == .accepted);
     inline for (@typeInfo(wire_request.Configuration).@"struct".field_names) |field| {
@@ -1577,18 +1577,25 @@ noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureC
     return configureCapturedSkills(host, resolved, &decision);
 }
 
-noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.ConfigureCommand, preset: ?*const store_module.PresetDecision) store_module.ConfigureReply {
+/// The Store owns canonical fault classification. Running out of heap
+/// outside held access cannot corrupt the Store: the Host is busy.
+fn configureFailure(host: *Host, err: anyerror) error{OutOfMemory}!store_module.ConfigureReply {
+    if (host.store.isFenced()) return .infrastructure_failure;
+    return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
+}
+
+noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.ConfigureCommand, preset: ?*const store_module.PresetDecision) error{OutOfMemory}!store_module.ConfigureReply {
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
     const reload_capture: ?store_module.CapturedSkill = if (command.reload_skills and !(host.store.commandExists(command.key.slice()) catch return .infrastructure_failure))
-        @import("session_skills.zig").capture(memory.allocator(), host.allocator, host.io, host.store, command.session.slice(), &.{ .operation = .reload }, host.bash_facts.home) catch return .infrastructure_failure
+        @import("session_skills.zig").capture(memory.allocator(), host.allocator, host.io, host.store, command.session.slice(), &.{ .operation = .reload }, host.bash_facts.home) catch |err| return configureFailure(host, err)
     else
         null;
     const initial_skills = if (command.session.len == 0 and !command.reload_skills)
-        @import("session_skills.zig").initial(memory.allocator(), host.allocator, host.io, host.store, command.key.slice(), &command.configuration, host.bash_facts.home) catch return .infrastructure_failure
+        @import("session_skills.zig").initial(memory.allocator(), host.allocator, host.io, host.store, command.key.slice(), &command.configuration, host.bash_facts.home) catch |err| return configureFailure(host, err)
     else
         null;
-    return host.store.configureWithCapturedSkills(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.hooks.storeFaults(.command));
+    return host.store.configureWithCapturedSkills(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, host.hooks.storeFaults(.command));
 }
 
 /// `client_environment` holds a Message's checked environment.
@@ -1640,7 +1647,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (header.drop != .after_commit) try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack});
         },
         .configure => |*command| {
-            const result = submitConfigure(host, command);
+            const result = try submitConfigure(host, command);
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "configuration save", error.CanonicalStoreFailure);
             }
@@ -2957,7 +2964,7 @@ test "activity page both unchanged tiers render byte exactly with independent re
     defer storage.close() catch unreachable;
     storage.instance = @splat(0xab);
     var configure = try store_module.testingCompleteConfiguration("page-tier-create", "", root, "model-a");
-    const session = storage.configure(&configure, .{}).accepted.session;
+    const session = (try storage.configure(&configure, .{})).accepted.session;
     var request: protocol.ActivityPage = .{};
     try request.session.set(session.slice());
     const page = try std.testing.allocator.create(protocol.ActivityFacts);
@@ -2970,7 +2977,7 @@ test "activity page both unchanged tiers render byte exactly with independent re
     for (0..2) |tier| {
         if (tier == 1) {
             try configure.key.set("page-tier-sibling");
-            try std.testing.expect(storage.configure(&configure, .{}) == .accepted);
+            try std.testing.expect(try storage.configure(&configure, .{}) == .accepted);
         }
         try storage.activityPage(&request, page);
         try std.testing.expect(page.not_modified);
@@ -2995,7 +3002,7 @@ test "command observation full and both unchanged tiers render byte exactly with
     defer storage.close() catch unreachable;
     storage.instance = @splat(0xab);
     var configure = try store_module.testingCompleteConfiguration("tier-create", "", root, "model-a");
-    const configured = storage.configure(&configure, .{});
+    const configured = try storage.configure(&configure, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
     var observed: store_module.Observed = undefined;
@@ -3024,7 +3031,7 @@ test "command observation full and both unchanged tiers render byte exactly with
     try Expect.unchanged(&observed, session.slice(), first.generation);
     // Tier 2 advances over a sibling's commit, without a read access.
     try configure.key.set("tier-sibling");
-    try std.testing.expect(storage.configure(&configure, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&configure, .{}) == .accepted);
     try storage.observeCommand("tier-create", first, &observed);
     try std.testing.expect(observed.not_modified.generation > first.generation);
     try Expect.unchanged(&observed, session.slice(), storage.commitGeneration());
@@ -3034,7 +3041,7 @@ test "command observation full and both unchanged tiers render byte exactly with
     try update.session.set(session.slice());
     update.configuration.label.state = .value;
     try update.configuration.label.value.set("changed");
-    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
     try storage.observeCommand("tier-create", sibling, &observed);
     try Expect.full(&observed, session.slice(), storage.commitGeneration());
     try storage.observeCommand("absent", null, &observed);
@@ -3839,7 +3846,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         configure.configuration.compaction_trigger.state = .value;
         try configure.configuration.compaction_trigger.value.set("115200");
         configure.configuration.reasoning_effort.state = .explicit_null;
-        const configured = storage.configure(&configure, .{});
+        const configured = try storage.configure(&configure, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session.slice();
         const message = try std.mem.replaceOwned(u8, std.testing.allocator, message_template, "peer", session);
@@ -4150,7 +4157,7 @@ test "only a fresh Message changes its Session's environment; a replay or a reje
     configure.configuration.compaction_trigger.state = .value;
     try configure.configuration.compaction_trigger.value.set("115200");
     configure.configuration.reasoning_effort.state = .explicit_null;
-    const configured = storage.configure(&configure, .{});
+    const configured = try storage.configure(&configure, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session.slice();
     var environments: SessionEnvironments = undefined;
@@ -4345,13 +4352,13 @@ test "presets seed configure before Store validation and idempotency" {
     const reload = try arena.create(wire_request.ConfigureCommand);
     reload.* = .{ .preset = create.preset, .reload_skills = true };
     try reload.key.set("skills-reload-preset-empty");
-    const reload_refused = submitConfigure(&host, reload);
+    const reload_refused = try submitConfigure(&host, reload);
     try std.testing.expect(reload_refused == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_session, reload_refused.rejected.code);
-    try std.testing.expect(submitConfigure(&host, reload).rejected.replayed);
+    try std.testing.expect((try submitConfigure(&host, reload)).rejected.replayed);
     reload.reload_skills = false;
-    try std.testing.expect(submitConfigure(&host, reload) == .conflict);
-    const first = submitConfigure(&host, create);
+    try std.testing.expect(try submitConfigure(&host, reload) == .conflict);
+    const first = try submitConfigure(&host, create);
     try std.testing.expect(first == .accepted);
     try std.testing.expect(!first.accepted.replayed);
     const session = first.accepted.session;
@@ -4362,7 +4369,7 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expectEqualStrings("ask", observed.permission_mode.slice());
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Preset instructions"), &observed.instructions.digest);
     try std.testing.expect(observed.output_schema != null);
-    const replay = submitConfigure(&host, create);
+    const replay = try submitConfigure(&host, create);
     try std.testing.expect(replay == .accepted and replay.accepted.replayed);
     try std.testing.expectEqualStrings(session.slice(), replay.accepted.session.slice());
     try std.testing.expectEqual(first.accepted.revision, replay.accepted.revision);
@@ -4390,7 +4397,7 @@ test "presets seed configure before Store validation and idempotency" {
         .length = "Overridden instructions".len,
         .digest = protocol.contentDigest("Overridden instructions"),
     };
-    const overridden = submitConfigure(&host, override);
+    const overridden = try submitConfigure(&host, override);
     try std.testing.expect(overridden == .accepted);
     try storage.inspectSession(overridden.accepted.session.slice(), &observed);
     try std.testing.expectEqualStrings("preset-override-model", observed.model.slice());
@@ -4410,10 +4417,10 @@ test "presets seed configure before Store validation and idempotency" {
     , .{})).object;
     const edited_presets = [_]core_tools.Preset{.{ .name = "review", .spec = edited_spec }};
     host.presets = &edited_presets;
-    const same = submitConfigure(&host, override);
+    const same = try submitConfigure(&host, override);
     try std.testing.expect(same == .accepted and same.accepted.replayed);
     try std.testing.expectEqualStrings(overridden.accepted.session.slice(), same.accepted.session.slice());
-    try std.testing.expect(submitConfigure(&host, create) == .conflict);
+    try std.testing.expect(try submitConfigure(&host, create) == .conflict);
     // Changing the catalog does not change the already created Session.
     try storage.inspectSession(session.slice(), &observed);
     try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
@@ -4422,27 +4429,27 @@ test "presets seed configure before Store validation and idempotency" {
     invalid.* = .{ .preset = create.preset };
     try invalid.key.set("preset-invalid-resolved");
     invalid.configuration.compaction_trigger.state = .explicit_null;
-    const refused = submitConfigure(&host, invalid);
+    const refused = try submitConfigure(&host, invalid);
     try std.testing.expect(refused == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_compaction_trigger, refused.rejected.code);
     host.presets = &.{};
-    try std.testing.expect(submitConfigure(&host, create) == .conflict);
+    try std.testing.expect(try submitConfigure(&host, create) == .conflict);
     const missing = try arena.create(wire_request.ConfigureCommand);
     missing.* = .{ .preset = create.preset };
     try missing.key.set("preset-missing");
-    const unknown = submitConfigure(&host, missing);
+    const unknown = try submitConfigure(&host, missing);
     try std.testing.expect(unknown == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, unknown.rejected.code);
     host.presets = &presets;
-    const refused_again = submitConfigure(&host, missing);
+    const refused_again = try submitConfigure(&host, missing);
     try std.testing.expect(refused_again == .rejected and refused_again.rejected.replayed);
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, refused_again.rejected.code);
     invalid.session = session;
     try invalid.key.set("preset-on-update");
-    const update = submitConfigure(&host, invalid);
+    const update = try submitConfigure(&host, invalid);
     try std.testing.expect(update == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update.rejected.code);
-    const update_replay = submitConfigure(&host, invalid);
+    const update_replay = try submitConfigure(&host, invalid);
     try std.testing.expect(update_replay == .rejected and update_replay.rejected.replayed);
     try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update_replay.rejected.code);
 }
@@ -4507,7 +4514,7 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     try storage.open(std.testing.io, database, root);
     defer storage.close() catch unreachable;
     const configure = try store_module.testingCompleteConfiguration("pressure-config", "", root, "model-a");
-    const configured = storage.configureWithInitialSkills(&configure, null, &.{ .ready = .{ .encoded = initial.encoded, .instruction = initial.instruction } }, .{});
+    const configured = try storage.configureWithInitialSkills(&configure, null, &.{ .ready = .{ .encoded = initial.encoded, .instruction = initial.instruction } }, .{});
     try std.testing.expect(configured == .accepted);
     var lease: platform.StoreLease = undefined;
     lease.paths = .{};
@@ -4563,6 +4570,25 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     try std.testing.expect(accepted == .accepted and accepted.accepted.replayed);
     try std.testing.expectEqual(@as(u64, text.len), accepted.accepted.content.length);
     try std.testing.expect(host.launchAllowed() and !storage.isFenced());
+    // A skills reload's capture and its held write answer the same way; the
+    // root's skills are not the 65 saved, so the reload replaces them.
+    var reload: wire_request.ConfigureCommand = .{ .session = configured.accepted.session, .reload_skills = true };
+    try reload.key.set("pressure-reload");
+    fail_index = 0;
+    while (true) : (fail_index += 1) {
+        failing = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        host.allocator = failing.allocator();
+        const result = submitConfigure(&host, &reload);
+        host.allocator = std.testing.allocator;
+        try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+        if (!failing.has_induced_failure) {
+            try std.testing.expectEqual(protocol.SkillsReloadStatus.reloaded, (try result).accepted.skills.?);
+            break;
+        }
+        try std.testing.expectError(error.OutOfMemory, result);
+        try std.testing.expect(!try storage.commandExists(reload.key.slice()));
+    }
+    try std.testing.expect(fail_index > 2);
     try store_module.testingFailReadsOf(&storage, "session_skill_catalog");
     try std.testing.expectError(error.CanonicalStoreFailure, readSkillSuggestions(&host, std.testing.allocator, .{ .session = configured.accepted.session.slice() }, ""));
     try std.testing.expect(storage.isFenced() and !host.launchAllowed());
