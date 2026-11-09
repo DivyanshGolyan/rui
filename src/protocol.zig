@@ -4,10 +4,8 @@ const built_in_tool = @import("built_in_tool.zig");
 const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
-const named_scratch = @import("named_scratch.zig");
 const store_id = @import("store_id.zig");
 const mutation_answer = @import("mutation_answer.zig");
-pub const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const wire_version = "10";
 
@@ -33,7 +31,7 @@ pub const max_store_bytes = 492;
 pub const max_workspace_bytes = 4096;
 /// Content strings one request carries at most: a configure command's
 /// instructions and output schema.
-const max_request_contents = 2;
+pub const max_request_contents = 2;
 pub const max_sender_handle_bytes = 32;
 /// Most bytes of client environment entries one Message carries.
 pub const max_environment_bytes = 64 * 1024;
@@ -77,7 +75,10 @@ pub fn routesAll(route: Route) Routes {
 
 pub fn routeOf(routes: Routes, provider: Provider) Route {
     return switch (provider) {
-        inline else => |tag| @field(routes, @tagName(tag)),
+        inline else => |tag| blk: {
+            const name = @tagName(tag);
+            break :blk @field(routes, name);
+        },
     };
 }
 
@@ -134,33 +135,61 @@ pub fn OptionalBounded(comptime capacity: usize) type {
     };
 }
 
-pub const ContentField = struct {
-    state: FieldState = .omitted,
-    // A parsed request owns an unlinked file descriptor. The Store imports
-    // through this sealed custody; no pathname can be swapped after capture.
-    file: ?std.Io.File = null,
-    /// D113: bounded start_agent content borrows its call arena through commit;
-    /// `length` counts it. Wire content still uses sealed file custody; this
-    /// pointer is never saved. A bare pointer keeps ContentField, which the
-    /// configure path copies, no larger than one word.
-    borrowed: ?[*]const u8 = null,
-    scratch_budget: ?ScratchBudget = null,
-    charged: u64 = 0,
-    length: u64 = 0,
-    digest: [32]u8 = @splat(0),
-    /// While a request is parsed, which Ingress capture holds this value,
-    /// counted from 1 in arrival order; 0 once it holds its own file.
-    capture: u8 = 0,
+/// The request types that hold content, and their Parser, over one custody:
+/// `Custody.File` holds a value's sealed bytes, `Custody.Budget` is the
+/// scratch it charges, and `Custody.release` gives both back through a
+/// `Custody.Io`. wire_request.zig supplies the Host's custody.
+pub fn Requests(comptime Custody: type) type {
+    return struct {
+        pub const ContentField = ContentFieldOf(Custody);
+        pub const Configuration = ConfigurationOf(Custody);
+        pub const ConfigureCommand = ConfigureCommandOf(Custody);
+        pub const MessageCommand = MessageCommandOf(Custody);
+        pub const Request = RequestOf(Custody);
+        pub const Parser = ParserOf(Custody);
+    };
+}
 
-    pub fn borrowedBytes(self: *const ContentField) ?[]const u8 {
-        const bytes = self.borrowed orelse return null;
-        return bytes[0..@intCast(self.length)];
-    }
+fn ContentFieldOf(comptime Custody: type) type {
+    return struct {
+        const ContentField = @This();
 
-    pub fn hasFile(self: *const ContentField) bool {
-        return self.file != null;
-    }
-};
+        state: FieldState = .omitted,
+        // A parsed request owns an unlinked file descriptor. The Store imports
+        // through this sealed custody; no pathname can be swapped after capture.
+        file: ?Custody.File = null,
+        /// D113: bounded start_agent content borrows its call arena through commit;
+        /// `length` counts it. Wire content still uses sealed file custody; this
+        /// pointer is never saved. A bare pointer keeps ContentField, which the
+        /// configure path copies, no larger than one word.
+        borrowed: ?[*]const u8 = null,
+        scratch_budget: ?Custody.Budget = null,
+        charged: u64 = 0,
+        length: u64 = 0,
+        digest: [32]u8 = @splat(0),
+        /// While a request is parsed, which Ingress capture holds this value,
+        /// counted from 1 in arrival order; 0 once it holds its own file.
+        capture: u8 = 0,
+
+        pub fn borrowedBytes(self: *const ContentField) ?[]const u8 {
+            const bytes = self.borrowed orelse return null;
+            return bytes[0..@intCast(self.length)];
+        }
+
+        pub fn hasFile(self: *const ContentField) bool {
+            return self.file != null;
+        }
+
+        /// Releases the custody this value holds, and leaves it omitted.
+        pub fn removeTemporaryContent(self: *ContentField, io: Custody.Io) !void {
+            Custody.release(self.file, self.scratch_budget, self.charged, io);
+            self.charged = 0;
+            self.file = null;
+            self.borrowed = null;
+            self.state = .omitted;
+        }
+    };
+}
 
 /// A `tools` list: tool names, sorted by bytes with none repeated, so one
 /// list has one spelling and one digest. The names are held one space
@@ -232,32 +261,37 @@ pub fn validToolName(name: []const u8) bool {
     return true;
 }
 
-pub const Configuration = struct {
-    workspace: OptionalBounded(max_workspace_bytes) = .{},
-    provider: OptionalBounded(max_provider_bytes) = .{},
-    model: OptionalBounded(max_model_bytes) = .{},
-    instructions: ContentField = .{},
-    tools: ToolsField = .{},
-    loaded_tools: ToolsField = .{},
-    permission_mode: OptionalBounded(16) = .{},
-    output_schema: ContentField = .{},
-    compaction_trigger: OptionalBounded(20) = .{},
-    output_reservation: OptionalBounded(20) = .{},
-    reasoning_effort: OptionalBounded(16) = .{},
-    /// Display text only: never model input, an address or a selector.
-    label: OptionalBounded(max_label_bytes) = .{},
+fn ConfigurationOf(comptime Custody: type) type {
+    const ContentField = Requests(Custody).ContentField;
+    return struct {
+        const Configuration = @This();
 
-    pub fn removeTemporaryContent(self: *Configuration, io: std.Io) !void {
-        var cleanup_error: ?anyerror = null;
-        removeContent(&self.instructions, io) catch |err| {
-            cleanup_error = err;
-        };
-        removeContent(&self.output_schema, io) catch |err| {
-            cleanup_error = err;
-        };
-        if (cleanup_error) |err| return err;
-    }
-};
+        workspace: OptionalBounded(max_workspace_bytes) = .{},
+        provider: OptionalBounded(max_provider_bytes) = .{},
+        model: OptionalBounded(max_model_bytes) = .{},
+        instructions: ContentField = .{},
+        tools: ToolsField = .{},
+        loaded_tools: ToolsField = .{},
+        permission_mode: OptionalBounded(16) = .{},
+        output_schema: ContentField = .{},
+        compaction_trigger: OptionalBounded(20) = .{},
+        output_reservation: OptionalBounded(20) = .{},
+        reasoning_effort: OptionalBounded(16) = .{},
+        /// Display text only: never model input, an address or a selector.
+        label: OptionalBounded(max_label_bytes) = .{},
+
+        pub fn removeTemporaryContent(self: *Configuration, io: Custody.Io) !void {
+            var cleanup_error: ?anyerror = null;
+            self.instructions.removeTemporaryContent(io) catch |err| {
+                cleanup_error = err;
+            };
+            self.output_schema.removeTemporaryContent(io) catch |err| {
+                cleanup_error = err;
+            };
+            if (cleanup_error) |err| return err;
+        }
+    };
+}
 
 pub const Kind = enum {
     host_info,
@@ -283,44 +317,49 @@ pub const Kind = enum {
     model_list,
 };
 
-pub const ConfigureCommand = struct {
-    store: Bounded(max_store_bytes) = .{},
-    key: Bounded(max_key_bytes) = .{},
-    session: Bounded(max_session_bytes) = .{},
-    configuration: Configuration = .{},
-    /// Host-memory creation seed; its resolution or refusal is supplied to the Store.
-    preset: ?Bounded(max_preset_name_bytes) = null,
-    require_model: bool = false,
-    reload_skills: bool = false,
+fn ConfigureCommandOf(comptime Custody: type) type {
+    const Configuration = Requests(Custody).Configuration;
+    return struct {
+        const ConfigureCommand = @This();
 
-    pub fn removeTemporaryContent(self: *ConfigureCommand, io: std.Io) !void {
-        return self.configuration.removeTemporaryContent(io);
-    }
+        store: Bounded(max_store_bytes) = .{},
+        key: Bounded(max_key_bytes) = .{},
+        session: Bounded(max_session_bytes) = .{},
+        configuration: Configuration = .{},
+        /// Host-memory creation seed; its resolution or refusal is supplied to the Store.
+        preset: ?Bounded(max_preset_name_bytes) = null,
+        require_model: bool = false,
+        reload_skills: bool = false,
 
-    pub fn semanticDigest(self: *const ConfigureCommand) [32]u8 {
-        const base = configureDigest(self.session.slice(), &self.configuration, self.require_model);
-        if (!self.reload_skills) return base;
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hash.update("rui/core/reload-skills/v1");
-        hash.update(&base);
-        return hash.finalResult();
-    }
+        pub fn removeTemporaryContent(self: *ConfigureCommand, io: Custody.Io) !void {
+            return self.configuration.removeTemporaryContent(io);
+        }
 
-    /// A preset refusal binds the unresolved request, including its name;
-    /// unlike an accepted creation, it has no resolved spec to identify.
-    pub fn presetRequestDigest(self: *const ConfigureCommand) [32]u8 {
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hashField(&hash, "rui/core/configure-preset-request/v1");
-        hash.update(&self.semanticDigest());
-        hash.update(&.{@intFromBool(self.preset != null)});
-        if (self.preset) |name| hashField(&hash, name.slice());
-        return hash.finalResult();
-    }
-};
+        pub fn semanticDigest(self: *const ConfigureCommand) [32]u8 {
+            const base = configureDigest(self.session.slice(), &self.configuration, self.require_model);
+            if (!self.reload_skills) return base;
+            var hash = std.crypto.hash.sha2.Sha256.init(.{});
+            hash.update("rui/core/reload-skills/v1");
+            hash.update(&base);
+            return hash.finalResult();
+        }
+
+        /// A preset refusal binds the unresolved request, including its name;
+        /// unlike an accepted creation, it has no resolved spec to identify.
+        pub fn presetRequestDigest(self: *const ConfigureCommand) [32]u8 {
+            var hash = std.crypto.hash.sha2.Sha256.init(.{});
+            hashField(&hash, "rui/core/configure-preset-request/v1");
+            hash.update(&self.semanticDigest());
+            hash.update(&.{@intFromBool(self.preset != null)});
+            if (self.preset) |name| hashField(&hash, name.slice());
+            return hash.finalResult();
+        }
+    };
+}
 
 /// The digest of a Configure command with these parts; a creating Message
 /// binds its initial configuration through the same digest.
-fn configureDigest(session: []const u8, configuration: *const Configuration, require_model: bool) [32]u8 {
+fn configureDigest(session: []const u8, configuration: anytype, require_model: bool) [32]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hashField(&hash, "rui/core/configure/v1");
     hashField(&hash, session);
@@ -352,50 +391,56 @@ pub const SkillRequest = struct {
     name: ?Bounded(64) = null,
 };
 
-pub const MessageCommand = struct {
-    store: Bounded(max_store_bytes) = .{},
-    key: Bounded(max_key_bytes) = .{},
-    session: Bounded(max_session_bytes) = .{},
-    // The full sending address; null when a human or script sends.
-    sender: ?Address = null,
-    sender_handle: ?Bounded(max_sender_handle_bytes) = null,
-    text: ContentField = .{},
-    /// Explicit skill invocation, alternative to caller text.
-    skill: ?Bounded(64) = null,
-    // Non-null means create a fresh Session and admit this first Message in
-    // one transaction. The requested Session must then be empty. Initial
-    // configuration cannot supply instruction or schema content values.
-    configuration: ?Configuration = null,
-    // A creating Message only: create nothing unless the Host has a model.
-    require_model: bool = false,
+fn MessageCommandOf(comptime Custody: type) type {
+    const Configuration = Requests(Custody).Configuration;
+    const ContentField = Requests(Custody).ContentField;
+    return struct {
+        const MessageCommand = @This();
 
-    pub fn removeTemporaryContent(self: *MessageCommand, io: std.Io) !void {
-        try removeContent(&self.text, io);
-    }
+        store: Bounded(max_store_bytes) = .{},
+        key: Bounded(max_key_bytes) = .{},
+        session: Bounded(max_session_bytes) = .{},
+        // The full sending address; null when a human or script sends.
+        sender: ?Address = null,
+        sender_handle: ?Bounded(max_sender_handle_bytes) = null,
+        text: ContentField = .{},
+        /// Explicit skill invocation, alternative to caller text.
+        skill: ?Bounded(64) = null,
+        // Non-null means create a fresh Session and admit this first Message in
+        // one transaction. The requested Session must then be empty. Initial
+        // configuration cannot supply instruction or schema content values.
+        configuration: ?Configuration = null,
+        // A creating Message only: create nothing unless the Host has a model.
+        require_model: bool = false,
 
-    pub fn semanticDigest(self: *const MessageCommand) [32]u8 {
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hashField(&hash, "rui/core/message/v4");
-        hashField(&hash, self.session.slice());
-        hash.update(&.{@intFromBool(self.sender != null)});
-        if (self.sender) |sender| {
-            hashField(&hash, sender.store.slice());
-            hashField(&hash, sender.session.slice());
+        pub fn removeTemporaryContent(self: *MessageCommand, io: Custody.Io) !void {
+            try self.text.removeTemporaryContent(io);
         }
-        hash.update(&.{@intFromBool(self.sender_handle != null)});
-        if (self.sender_handle) |handle| hashField(&hash, handle.slice());
-        if (self.skill) |name| {
-            hashField(&hash, "skill-invocation/v1");
-            hashField(&hash, name.slice());
-        } else hashContent(&hash, &self.text);
-        if (self.configuration) |*configuration| {
-            // The creation's own digest covers its capability condition.
-            hashField(&hash, "initial-configuration");
-            hash.update(&configureDigest("", configuration, self.require_model));
+
+        pub fn semanticDigest(self: *const MessageCommand) [32]u8 {
+            var hash = std.crypto.hash.sha2.Sha256.init(.{});
+            hashField(&hash, "rui/core/message/v4");
+            hashField(&hash, self.session.slice());
+            hash.update(&.{@intFromBool(self.sender != null)});
+            if (self.sender) |sender| {
+                hashField(&hash, sender.store.slice());
+                hashField(&hash, sender.session.slice());
+            }
+            hash.update(&.{@intFromBool(self.sender_handle != null)});
+            if (self.sender_handle) |handle| hashField(&hash, handle.slice());
+            if (self.skill) |name| {
+                hashField(&hash, "skill-invocation/v1");
+                hashField(&hash, name.slice());
+            } else hashContent(&hash, &self.text);
+            if (self.configuration) |*configuration| {
+                // The creation's own digest covers its capability condition.
+                hashField(&hash, "initial-configuration");
+                hash.update(&configureDigest("", configuration, self.require_model));
+            }
+            return hash.finalResult();
         }
-        return hash.finalResult();
-    }
-};
+    };
+}
 
 pub const SessionStopCommand = struct {
     store: Bounded(max_store_bytes) = .{},
@@ -727,7 +772,7 @@ pub const ActivityPage = struct {
     /// At most this many rows, from 1 to `items`.
     limit: u8 = items,
 
-    pub const Kinds = std.EnumSet(ActivityItem.Kind);
+    pub const Kinds = std.enums.EnumSet(ActivityItem.Kind);
     pub const items = @typeInfo(@FieldType(ActivityFacts, "items")).array.len;
 
     /// By pointer: a by-value copy sat in the Store read frame on every
@@ -831,9 +876,12 @@ pub const ToolPresentation = struct {
     /// One non-blank line of UTF-8 within the description bound.
     pub fn validDescription(bytes: []const u8) bool {
         if (bytes.len == 0 or bytes.len > max_tool_description_bytes or !std.unicode.utf8ValidateSlice(bytes)) return false;
-        var scalars = std.unicode.Utf8View.initUnchecked(bytes).iterator();
         var nonblank = false;
-        while (scalars.nextCodepoint()) |scalar| {
+        var index: usize = 0;
+        while (index < bytes.len) {
+            const length = std.unicode.utf8ByteSequenceLength(bytes[index]) catch unreachable;
+            const scalar = std.unicode.utf8Decode(bytes[index..][0..length]) catch unreachable;
+            index += length;
             switch (scalar) {
                 '\n', '\r', 0x85, 0x2028, 0x2029 => return false,
                 ' ', '\t', 0xb, 0xc, 0xa0, 0x1680, 0x2000...0x200a, 0x202f, 0x205f, 0x3000 => {},
@@ -968,7 +1016,10 @@ pub const ActivityItem = struct {
     pub const max_json_bytes = blk: {
         @setEvalBranchQuota(10_000);
         var bytes = 0;
-        for (std.meta.tags(std.meta.Tag(Value))) |kind| bytes = @max(bytes, shapeBytes(head(kind)) + shapeBytes(@field(value_shapes, @tagName(kind))));
+        for (std.meta.tags(std.meta.Tag(Value))) |kind| {
+            const name = @tagName(kind);
+            bytes = @max(bytes, shapeBytes(head(kind)) + shapeBytes(@field(value_shapes, name)));
+        }
         break :blk bytes + shapeBytes(tail);
     };
 
@@ -977,10 +1028,13 @@ pub const ActivityItem = struct {
             inline else => |_, kind| try writeShape(out, head(kind), .{ self.position, self.ordinal, self.at }),
         }
         switch (self.value) {
-            inline .admission, .user, .received => |message, tag| try writeShape(out, @field(value_shapes, @tagName(tag)), .{
-                message.admission,   message.key.slice(), message.turn,    message.state,
-                message.admitted_at, message.sender,      message.content,
-            }),
+            inline .admission, .user, .received => |message, tag| {
+                const name = @tagName(tag);
+                try writeShape(out, @field(value_shapes, name), .{
+                    message.admission,   message.key.slice(), message.turn,    message.state,
+                    message.admitted_at, message.sender,      message.content,
+                });
+            },
             .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, sent.target, sent.content }),
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), failed.target, failed.code.slice() }),
             .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal }),
@@ -1326,53 +1380,50 @@ pub const ActivityFacts = struct {
     }
 };
 
-pub const Request = union(Kind) {
-    host_info: struct { store: Bounded(max_store_bytes) = .{} },
-    host_stop: struct { store: Bounded(max_store_bytes) = .{} },
-    /// Sets whether the Host holds every new Turn (D193).
-    host_pause: struct { store: Bounded(max_store_bytes) = .{}, paused: bool = false },
-    configure: ConfigureCommand,
-    message: MessageCommand,
-    session_stop: SessionStopCommand,
-    session_archive: SessionArchiveCommand,
-    model_interruption: ModelInterruptionCommand,
-    permission_decision: PermissionDecisionCommand,
-    observe_command: ObserveCommand,
-    read_result: ReadResult,
-    read_action_call_id: ReadActionArguments,
-    read_action_arguments: ReadActionArguments,
-    inspect_session: InspectSession,
-    list_sessions: ListSessions,
-    conversation_page: ConversationPage,
-    conversation_content: ConversationContent,
-    activity_page: ActivityPage,
-    activity_search: ActivitySearch,
-    activity_content: ReadActivityContent,
-    model_list: struct { store: Bounded(max_store_bytes) = .{} },
+fn RequestOf(comptime Custody: type) type {
+    const ConfigureCommand = Requests(Custody).ConfigureCommand;
+    const MessageCommand = Requests(Custody).MessageCommand;
+    return union(Kind) {
+        const Request = @This();
 
-    pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
-        switch (self.*) {
-            .configure => |*command| try command.removeTemporaryContent(io),
-            .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .model_list => {},
+        host_info: struct { store: Bounded(max_store_bytes) = .{} },
+        host_stop: struct { store: Bounded(max_store_bytes) = .{} },
+        /// Sets whether the Host holds every new Turn (D193).
+        host_pause: struct { store: Bounded(max_store_bytes) = .{}, paused: bool = false },
+        configure: ConfigureCommand,
+        message: MessageCommand,
+        session_stop: SessionStopCommand,
+        session_archive: SessionArchiveCommand,
+        model_interruption: ModelInterruptionCommand,
+        permission_decision: PermissionDecisionCommand,
+        observe_command: ObserveCommand,
+        read_result: ReadResult,
+        read_action_call_id: ReadActionArguments,
+        read_action_arguments: ReadActionArguments,
+        inspect_session: InspectSession,
+        list_sessions: ListSessions,
+        conversation_page: ConversationPage,
+        conversation_content: ConversationContent,
+        activity_page: ActivityPage,
+        activity_search: ActivitySearch,
+        activity_content: ReadActivityContent,
+        model_list: struct { store: Bounded(max_store_bytes) = .{} },
+
+        pub fn removeTemporaryContent(self: *Request, io: Custody.Io) !void {
+            switch (self.*) {
+                .configure => |*command| try command.removeTemporaryContent(io),
+                .message => |*command| try command.removeTemporaryContent(io),
+                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .model_list => {},
+            }
         }
-    }
 
-    /// Borrows the active payload's Store bytes until this Request is replaced.
-    pub fn store(self: *const Request) []const u8 {
-        return switch (self.*) {
-            inline else => |*request| request.store.slice(),
-        };
-    }
-};
-
-fn removeContent(content: *ContentField, io: std.Io) !void {
-    if (content.file) |file| file.close(io);
-    if (content.scratch_budget) |budget| budget.release(content.charged);
-    content.charged = 0;
-    content.file = null;
-    content.borrowed = null;
-    content.state = .omitted;
+        /// Borrows the active payload's Store bytes until this Request is replaced.
+        pub fn store(self: *const Request) []const u8 {
+            return switch (self.*) {
+                inline else => |*request| request.store.slice(),
+            };
+        }
+    };
 }
 
 fn hashField(hash: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
@@ -1396,7 +1447,7 @@ fn hashOptional(hash: *std.crypto.hash.sha2.Sha256, field: anytype) void {
     if (field.state == .value) hashField(hash, field.value.slice());
 }
 
-fn hashContent(hash: *std.crypto.hash.sha2.Sha256, field: *const ContentField) void {
+fn hashContent(hash: *std.crypto.hash.sha2.Sha256, field: anytype) void {
     hash.update(&.{@backingInt(field.state)});
     if (field.state == .value) {
         var length: [8]u8 = undefined;
@@ -1418,226 +1469,9 @@ pub fn contentDigest(value: []const u8) [32]u8 {
     return hash.finalResult();
 }
 
-/// Injected failures of a request's content capture.
-pub const ContentFaults = struct {
-    acquire: bool = false,
-    write: bool = false,
-    seal: bool = false,
-};
-
-pub const ParseOptions = struct {
-    io: std.Io,
-    content_length: u64,
-    scratch_path: []const u8,
-    request_number: u64,
-    content_faults: ContentFaults = .{},
-    retained_scratch: *?named_scratch.Owner,
-    scratch_budget: ?ScratchBudget = null,
-    expected_kind: ?Kind = null,
-};
-
-/// Resumable ingress owns captures until complete framing and validation.
-/// Parser remains the sole wire grammar: only its content-read instruction
-/// can open a capture. Replays see metadata, never descriptors or charges.
-pub const Ingress = struct {
-    allocator: std.mem.Allocator,
-    options: ParseOptions,
-    metadata: std.ArrayList(u8) = .empty,
-    received: u64 = 0,
-    lexical: enum { plain, string, escape } = .plain,
-    /// Where the next byte goes: the metadata, the opening quote of a
-    /// content string, or `capture`.
-    content_state: enum { metadata, awaiting_quote, capturing } = .metadata,
-    /// Live while `content_state` is `.capturing`.
-    capture: ContentCapture = undefined,
-    decoder: StringDecoder = .{},
-    contents: [max_request_contents]ContentField = @splat(.{}),
-    content_count: usize = 0,
-    complete: bool = false,
-    /// The one home of the parsed Request: preview and finish parse into it.
-    /// After finish, the Ingress's owner borrows it until it releases the Ingress.
-    request: Request = undefined,
-
-    // Initial Message combines configuration scalars and sender identity.
-    // Allow worst-case escaping of both, of a full `tools` list, and of 128
-    // short grammar tokens (keys, states and literals, each at most 32
-    // bytes), plus punctuation and one preserved whitespace separator at
-    // every lexical boundary.
-    const metadata_limit = 2 * (6 * (max_store_bytes + max_key_bytes + max_session_bytes +
-        max_workspace_bytes + max_provider_bytes + max_model_bytes + 16 + 2 * max_tool_list_name_bytes + 128 * 32) + (128 + 2 * max_tools) * 8);
-
-    /// Builds the Ingress in its home. `request` stays unwritten.
-    pub fn init(self: *Ingress, allocator: std.mem.Allocator, options: ParseOptions) void {
-        self.* = .{ .allocator = allocator, .options = options };
-    }
-
-    pub fn deinit(self: *Ingress) void {
-        if (self.content_state == .capturing) self.capture.deinit();
-        self.content_state = .metadata;
-        for (&self.contents) |*field| removeContent(field, self.options.io) catch unreachable;
-        self.metadata.deinit(self.allocator);
-        self.metadata = .empty;
-    }
-
-    pub fn feed(self: *Ingress, bytes: []const u8) !void {
-        if (bytes.len > self.options.content_length - self.received) return error.TrailingInput;
-        for (bytes) |byte| {
-            if (self.complete) return error.TrailingInput;
-            self.received += 1;
-            switch (self.content_state) {
-                .metadata => {},
-                .awaiting_quote => {
-                    switch (byte) {
-                        ' ', '\t', '\r', '\n' => continue,
-                        '"' => {},
-                        else => return error.InvalidJsonShape,
-                    }
-                    try self.capture.init(self.options, @intCast(self.content_count + 1));
-                    self.content_state = .capturing;
-                    self.decoder = .{};
-                    continue;
-                },
-                .capturing => {
-                    if (try self.decoder.feed(byte, &self.capture.sink)) {
-                        self.contents[self.content_count] = try self.capture.seal();
-                        self.content_count += 1;
-                        self.capture.deinit();
-                        self.content_state = .metadata;
-                        try self.append('"');
-                        try self.append('"');
-                        try self.preview();
-                    }
-                    continue;
-                },
-            }
-            var boundary = false;
-            switch (self.lexical) {
-                .plain => switch (byte) {
-                    ' ', '\t', '\r', '\n' => {
-                        // Do not join tokens (t rue) or erase trailing input.
-                        if (self.metadata.items.len == 0 or self.metadata.items[self.metadata.items.len - 1] != ' ')
-                            try self.append(' ');
-                        continue;
-                    },
-                    '"' => self.lexical = .string,
-                    '{', '}', '[', ']', ',', ':' => boundary = true,
-                    else => {},
-                },
-                .string => switch (byte) {
-                    '"' => {
-                        self.lexical = .plain;
-                        boundary = true;
-                    },
-                    '\\' => self.lexical = .escape,
-                    else => {},
-                },
-                .escape => self.lexical = .string,
-            }
-            try self.append(byte);
-            if (boundary) try self.preview();
-        }
-    }
-
-    fn append(self: *Ingress, byte: u8) !void {
-        if (self.metadata.items.len == metadata_limit) return error.ValueTooLong;
-        try self.metadata.append(self.allocator, byte);
-    }
-
-    fn parse(self: *Ingress) !void {
-        var source: MetadataSource = .{ .input = self.metadata.items };
-        var parser = Parser{
-            .source = &source,
-            .options = self.options,
-            .captured = self.contents[0..self.content_count],
-        };
-        try parser.parse(&self.request);
-        std.debug.assert(parser.content_ordinal == self.content_count);
-    }
-
-    fn preview(self: *Ingress) !void {
-        self.parse() catch |err| switch (err) {
-            error.NeedInput => return,
-            error.NeedContent => {
-                std.debug.assert(self.content_count < self.contents.len);
-                self.content_state = .awaiting_quote;
-                return;
-            },
-            else => return err,
-        };
-        self.complete = true;
-        if (self.received != self.options.content_length) return error.TrailingInput;
-    }
-
-    /// Parses the complete body into `request`, moves the captured content
-    /// into it, and returns it.
-    pub fn finish(self: *Ingress) !*Request {
-        if (self.received != self.options.content_length) return error.UnexpectedEndOfBody;
-        self.parse() catch |err| switch (err) {
-            error.NeedInput, error.NeedContent => return error.UnexpectedEndOfBody,
-            else => return err,
-        };
-        const request = &self.request;
-        // All fallible validation precedes this non-failing custody transfer.
-        // Each value takes the capture its string arrived in, whatever the
-        // members' order.
-        var moved: usize = 0;
-        switch (request.*) {
-            .configure => |*command| {
-                for ([_]*ContentField{ &command.configuration.instructions, &command.configuration.output_schema }) |field| {
-                    if (field.state != .value) continue;
-                    self.take(field);
-                    moved += 1;
-                }
-            },
-            .message => |*command| {
-                if (command.text.state == .value) {
-                    self.take(&command.text);
-                    moved = 1;
-                }
-            },
-            else => {},
-        }
-        std.debug.assert(moved == self.content_count);
-        self.metadata.deinit(self.allocator);
-        self.metadata = .empty;
-        return request;
-    }
-
-    fn take(self: *Ingress, field: *ContentField) void {
-        const index = field.capture - 1;
-        field.* = self.contents[index];
-        self.contents[index] = .{};
-    }
-};
-
-// One absolute budget; progress cannot extend an absolute exchange.
-pub fn pollExchange(io: std.Io, fd: std.posix.fd_t, events: i16, deadline: ?i128) !void {
-    const end = deadline orelse {
-        var descriptors = [_]std.posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
-        if (try std.posix.poll(&descriptors, 60_000) == 0) return error.TransferInactive;
-        return;
-    };
-    while (true) {
-        const remaining = end - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-        if (remaining <= 0) return error.ExchangeDeadlineExceeded;
-        const milliseconds: c_int = @intCast(@min(60_000, @divTrunc(remaining + std.time.ns_per_ms - 1, std.time.ns_per_ms)));
-        var descriptors = [_]std.c.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
-        // Recompute after EINTR rather than retrying the original timeout.
-        const result = std.c.poll(&descriptors, descriptors.len, milliseconds);
-        switch (std.posix.errno(result)) {
-            .SUCCESS => if (result > 0) {
-                if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= end) return error.ExchangeDeadlineExceeded;
-                return;
-            },
-            .INTR => {},
-            else => return error.PollFailed,
-        }
-    }
-}
-
 /// The metadata an Ingress has received so far, the Parser's only input.
 /// Content strings never reach it: the Ingress captures them.
-const MetadataSource = struct {
+pub const MetadataSource = struct {
     input: []const u8,
     start: usize = 0,
 
@@ -1653,933 +1487,965 @@ const MetadataSource = struct {
     }
 };
 
-const Parser = struct {
-    source: *MetadataSource,
-    options: ParseOptions,
-    content_ordinal: u8 = 0,
-    captured: []const ContentField = &.{},
+fn ParserOf(comptime Custody: type) type {
+    const ContentField = Requests(Custody).ContentField;
+    const Configuration = Requests(Custody).Configuration;
+    const ConfigureCommand = Requests(Custody).ConfigureCommand;
+    const MessageCommand = Requests(Custody).MessageCommand;
+    const Request = Requests(Custody).Request;
+    return struct {
+        const Parser = @This();
 
-    /// Members of every request object may come in any order, as JSON
-    /// allows, so a client generated in any language can build one (D212).
-    /// The first pass reads `version`, `kind` and `store` wherever they sit
-    /// and counts content strings as they arrive; the second sets the
-    /// command's arm in `out` and fills it in place, meeting the content
-    /// strings in the same order.
-    fn parse(self: *Parser, out: *Request) !void {
-        const start = self.source.start;
-        const header = try self.scanHeader();
-        self.source.start = start;
-        self.content_ordinal = 0;
-        try self.expectByte('{');
-        var members: Members = .{};
-        const store = header.store;
-        // Each arm is a literal written straight into `out`, then filled in
-        // place: @unionInit would build a whole Request on the stack first.
-        switch (header.kind) {
-            .host_info => {
-                out.* = .{ .host_info = .{ .store = store } };
-                try self.endCommand(&members);
-            },
-            .host_stop => {
-                out.* = .{ .host_stop = .{ .store = store } };
-                try self.endCommand(&members);
-            },
-            .host_pause => {
-                out.* = .{ .host_pause = .{ .store = store } };
-                try self.parseHostPause(&out.host_pause, &members);
-            },
-            .model_list => {
-                out.* = .{ .model_list = .{ .store = store } };
-                try self.endCommand(&members);
-            },
-            .configure => {
-                out.* = .{ .configure = .{ .store = store, .configuration = .{ .workspace = .{ .value = .{ .len = 0 } } } } };
-                try self.parseConfigure(&out.configure, &members);
-            },
-            .message => {
-                out.* = .{ .message = .{ .store = store } };
-                try self.parseMessage(&out.message, &members);
-            },
-            .session_stop => {
-                out.* = .{ .session_stop = .{ .store = store } };
-                try self.parseSessionStop(&out.session_stop, &members);
-            },
-            .session_archive => {
-                out.* = .{ .session_archive = .{ .store = store } };
-                try self.parseSessionArchive(&out.session_archive, &members);
-            },
-            .model_interruption => {
-                out.* = .{ .model_interruption = .{ .store = store } };
-                try self.parseModelInterruption(&out.model_interruption, &members);
-            },
-            .permission_decision => {
-                out.* = .{ .permission_decision = .{ .store = store } };
-                try self.parsePermissionDecision(&out.permission_decision, &members);
-            },
-            .observe_command => {
-                out.* = .{ .observe_command = .{ .store = store } };
-                try self.parseObserveCommand(&out.observe_command, &members);
-            },
-            .read_result => {
-                out.* = .{ .read_result = .{ .store = store } };
-                try self.parseKeyOnly(&out.read_result.key, &members);
-            },
-            .read_action_call_id => {
-                out.* = .{ .read_action_call_id = .{ .store = store } };
-                try self.parseReadActionArguments(&out.read_action_call_id, &members);
-            },
-            .read_action_arguments => {
-                out.* = .{ .read_action_arguments = .{ .store = store } };
-                try self.parseReadActionArguments(&out.read_action_arguments, &members);
-            },
-            .inspect_session => {
-                out.* = .{ .inspect_session = .{ .store = store } };
-                try self.parseInspect(&out.inspect_session, &members);
-            },
-            .list_sessions => {
-                out.* = .{ .list_sessions = .{ .store = store } };
-                try self.parseListSessions(&out.list_sessions, &members);
-            },
-            .conversation_page => {
-                out.* = .{ .conversation_page = .{ .store = store } };
-                try self.parseConversationPage(&out.conversation_page, &members);
-            },
-            .conversation_content => {
-                out.* = .{ .conversation_content = .{ .store = store } };
-                try self.parseConversationContent(&out.conversation_content, &members);
-            },
-            .activity_search => {
-                out.* = .{ .activity_search = .{ .store = store } };
-                try self.parseActivitySearch(&out.activity_search, &members);
-            },
-            .activity_page => {
-                out.* = .{ .activity_page = .{ .store = store } };
-                try self.parseActivityPage(&out.activity_page, &members);
-            },
-            .activity_content => {
-                out.* = .{ .activity_content = .{ .store = store } };
-                try self.parseActivityContent(&out.activity_content, &members);
-            },
-        }
-        errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
-        if (!self.source.atEnd()) {
-            return error.TrailingInput;
-        }
-    }
+        source: *MetadataSource,
+        /// The Kind the request's route names, when it names one.
+        expected_kind: ?Kind = null,
+        content_ordinal: u8 = 0,
+        captured: []const ContentField = &.{},
 
-    const Header = struct { kind: Kind, store: Bounded(max_store_bytes) };
-
-    /// The first pass. It passes over every member but the header, except
-    /// that it counts a content string where a Message's text or a
-    /// configuration's instructions or output schema holds one, so the
-    /// Ingress captures it whatever the order. Once `kind` is known, content
-    /// the kind cannot carry fails before any capture.
-    fn scanHeader(self: *Parser) !Header {
-        const Field = enum { version, kind, store, text, configuration };
-        try self.expectByte('{');
-        var members: Members = .{};
-        var seen: std.EnumSet(Field) = .empty;
-        var kind: ?Kind = null;
-        var store: Bounded(max_store_bytes) = .{};
-        var key: Bounded(32) = .{};
-        while (try members.next(self, &key)) {
-            const field = std.meta.stringToEnum(Field, key.slice()) orelse {
-                try self.skipValue();
-                continue;
-            };
-            if (seen.contains(field)) return error.UnexpectedField;
-            seen.insert(field);
-            switch (field) {
-                .version => {
-                    var version: Bounded(8) = .{};
-                    try self.readSmallString(&version);
-                    if (!version.eql(wire_version)) return error.WrongWireVersion;
+        /// Members of every request object may come in any order, as JSON
+        /// allows, so a client generated in any language can build one (D212).
+        /// The first pass reads `version`, `kind` and `store` wherever they sit
+        /// and counts content strings as they arrive; the second sets the
+        /// command's arm in `out` and fills it in place, meeting the content
+        /// strings in the same order.
+        pub fn parse(self: *Parser, out: *Request) !void {
+            const start = self.source.start;
+            const header = try self.scanHeader();
+            self.source.start = start;
+            self.content_ordinal = 0;
+            try self.expectByte('{');
+            var members: Members = .{};
+            const store = header.store;
+            // Each arm is a literal written straight into `out`, then filled in
+            // place: @unionInit would build a whole Request on the stack first.
+            switch (header.kind) {
+                .host_info => {
+                    out.* = .{ .host_info = .{ .store = store } };
+                    try self.endCommand(&members);
                 },
-                .kind => {
-                    var text: Bounded(32) = .{};
-                    try self.readSmallString(&text);
-                    const named = std.meta.stringToEnum(Kind, text.slice()) orelse return error.UnknownCommand;
-                    if (self.options.expected_kind) |expected| {
-                        if (named != expected) return error.RouteKindMismatch;
-                    }
-                    kind = named;
+                .host_stop => {
+                    out.* = .{ .host_stop = .{ .store = store } };
+                    try self.endCommand(&members);
                 },
-                .store => try self.readSmallString(&store),
-                .text => {
-                    if (kind) |named| if (named != .message) return error.UnexpectedField;
-                    try self.scanContentEnvelope(true);
+                .host_pause => {
+                    out.* = .{ .host_pause = .{ .store = store } };
+                    try self.parseHostPause(&out.host_pause, &members);
                 },
-                .configuration => {
-                    if (kind) |named| if (named != .configure and named != .message) return error.UnexpectedField;
-                    // Only a configure command's configuration carries content.
-                    try self.scanConfiguration(if (kind) |named| named == .configure else true);
+                .model_list => {
+                    out.* = .{ .model_list = .{ .store = store } };
+                    try self.endCommand(&members);
+                },
+                .configure => {
+                    out.* = .{ .configure = .{ .store = store, .configuration = .{ .workspace = .{ .value = .{ .len = 0 } } } } };
+                    try self.parseConfigure(&out.configure, &members);
+                },
+                .message => {
+                    out.* = .{ .message = .{ .store = store } };
+                    try self.parseMessage(&out.message, &members);
+                },
+                .session_stop => {
+                    out.* = .{ .session_stop = .{ .store = store } };
+                    try self.parseSessionStop(&out.session_stop, &members);
+                },
+                .session_archive => {
+                    out.* = .{ .session_archive = .{ .store = store } };
+                    try self.parseSessionArchive(&out.session_archive, &members);
+                },
+                .model_interruption => {
+                    out.* = .{ .model_interruption = .{ .store = store } };
+                    try self.parseModelInterruption(&out.model_interruption, &members);
+                },
+                .permission_decision => {
+                    out.* = .{ .permission_decision = .{ .store = store } };
+                    try self.parsePermissionDecision(&out.permission_decision, &members);
+                },
+                .observe_command => {
+                    out.* = .{ .observe_command = .{ .store = store } };
+                    try self.parseObserveCommand(&out.observe_command, &members);
+                },
+                .read_result => {
+                    out.* = .{ .read_result = .{ .store = store } };
+                    try self.parseKeyOnly(&out.read_result.key, &members);
+                },
+                .read_action_call_id => {
+                    out.* = .{ .read_action_call_id = .{ .store = store } };
+                    try self.parseReadActionArguments(&out.read_action_call_id, &members);
+                },
+                .read_action_arguments => {
+                    out.* = .{ .read_action_arguments = .{ .store = store } };
+                    try self.parseReadActionArguments(&out.read_action_arguments, &members);
+                },
+                .inspect_session => {
+                    out.* = .{ .inspect_session = .{ .store = store } };
+                    try self.parseInspect(&out.inspect_session, &members);
+                },
+                .list_sessions => {
+                    out.* = .{ .list_sessions = .{ .store = store } };
+                    try self.parseListSessions(&out.list_sessions, &members);
+                },
+                .conversation_page => {
+                    out.* = .{ .conversation_page = .{ .store = store } };
+                    try self.parseConversationPage(&out.conversation_page, &members);
+                },
+                .conversation_content => {
+                    out.* = .{ .conversation_content = .{ .store = store } };
+                    try self.parseConversationContent(&out.conversation_content, &members);
+                },
+                .activity_search => {
+                    out.* = .{ .activity_search = .{ .store = store } };
+                    try self.parseActivitySearch(&out.activity_search, &members);
+                },
+                .activity_page => {
+                    out.* = .{ .activity_page = .{ .store = store } };
+                    try self.parseActivityPage(&out.activity_page, &members);
+                },
+                .activity_content => {
+                    out.* = .{ .activity_content = .{ .store = store } };
+                    try self.parseActivityContent(&out.activity_content, &members);
                 },
             }
-        }
-        if (!seen.contains(.version) or !seen.contains(.store)) return error.MissingField;
-        return .{ .kind = kind orelse return error.MissingField, .store = store };
-    }
-
-    fn scanConfiguration(self: *Parser, content: bool) !void {
-        try self.expectByte('{');
-        var members: Members = .{};
-        var instructions = false;
-        var output_schema = false;
-        var key: Bounded(32) = .{};
-        while (try members.next(self, &key)) {
-            const seen = if (key.eql("instructions"))
-                &instructions
-            else if (key.eql("output_schema"))
-                &output_schema
-            else {
-                try self.skipValue();
-                continue;
-            };
-            if (seen.*) return error.UnexpectedField;
-            seen.* = true;
-            try self.scanContentEnvelope(content);
-        }
-    }
-
-    fn scanContentEnvelope(self: *Parser, content: bool) !void {
-        try self.expectByte('{');
-        var members: Members = .{};
-        var value = false;
-        var key: Bounded(32) = .{};
-        while (try members.next(self, &key)) {
-            if (!key.eql("value")) {
-                try self.skipValue();
-                continue;
+            if (!self.source.atEnd()) {
+                return error.TrailingInput;
             }
-            if (value) return error.UnexpectedField;
-            if (!content) return error.InvalidFieldState;
-            value = true;
-            // A third content string has no capture to go to.
-            if (self.content_ordinal == max_request_contents) return error.UnexpectedField;
-            var counted: ContentField = .{};
-            try self.readContentString(&counted);
         }
-    }
 
-    /// Walks one object's members after its opening brace.
-    const Members = struct {
-        started: bool = false,
+        const Header = struct { kind: Kind, store: Bounded(max_store_bytes) };
 
-        /// Reads the next member's key and colon, or the closing brace.
-        fn next(self: *Members, parser: *Parser, key: *Bounded(32)) !bool {
-            if (try parser.consumeIf('}')) return false;
-            if (self.started) try parser.expectByte(',');
-            self.started = true;
-            key.* = .{};
-            parser.readSmallString(key) catch |err| return switch (err) {
-                error.ValueTooLong => error.UnexpectedField,
-                else => err,
-            };
-            try parser.expectByte(':');
-            return true;
-        }
-    };
-
-    /// The next member of an object whose keys are `Field`'s names, each at
-    /// most once, in any order.
-    fn nextField(self: *Parser, comptime Field: type, members: *Members, seen: *std.EnumSet(Field)) !?Field {
-        var key: Bounded(32) = .{};
-        if (!try members.next(self, &key)) return null;
-        return try fieldOf(Field, &key, seen);
-    }
-
-    /// The command's next member, passing over the header the first pass read.
-    fn nextCommandField(self: *Parser, comptime Field: type, members: *Members, seen: *std.EnumSet(Field)) !?Field {
-        var key: Bounded(32) = .{};
-        while (try members.next(self, &key)) {
-            if (isHeader(&key)) {
-                try self.skipValue();
-                continue;
+        /// The first pass. It passes over every member but the header, except
+        /// that it counts a content string where a Message's text or a
+        /// configuration's instructions or output schema holds one, so the
+        /// Ingress captures it whatever the order. Once `kind` is known, content
+        /// the kind cannot carry fails before any capture.
+        fn scanHeader(self: *Parser) !Header {
+            const Field = enum { version, kind, store, text, configuration };
+            try self.expectByte('{');
+            var members: Members = .{};
+            var seen: std.enums.EnumSet(Field) = .empty;
+            var kind: ?Kind = null;
+            var store: Bounded(max_store_bytes) = .{};
+            var key: Bounded(32) = .{};
+            while (try members.next(self, &key)) {
+                const field = std.meta.stringToEnum(Field, key.slice()) orelse {
+                    try self.skipValue();
+                    continue;
+                };
+                if (seen.contains(field)) return error.UnexpectedField;
+                seen.insert(field);
+                switch (field) {
+                    .version => {
+                        var version: Bounded(8) = .{};
+                        try self.readSmallString(&version);
+                        if (!version.eql(wire_version)) return error.WrongWireVersion;
+                    },
+                    .kind => {
+                        var text: Bounded(32) = .{};
+                        try self.readSmallString(&text);
+                        const named = std.meta.stringToEnum(Kind, text.slice()) orelse return error.UnknownCommand;
+                        if (self.expected_kind) |expected| {
+                            if (named != expected) return error.RouteKindMismatch;
+                        }
+                        kind = named;
+                    },
+                    .store => try self.readSmallString(&store),
+                    .text => {
+                        if (kind) |named| if (named != .message) return error.UnexpectedField;
+                        try self.scanContentEnvelope(true);
+                    },
+                    .configuration => {
+                        if (kind) |named| if (named != .configure and named != .message) return error.UnexpectedField;
+                        // Only a configure command's configuration carries content.
+                        try self.scanConfiguration(if (kind) |named| named == .configure else true);
+                    },
+                }
             }
-            return try fieldOf(Field, &key, seen);
+            if (!seen.contains(.version) or !seen.contains(.store)) return error.MissingField;
+            return .{ .kind = kind orelse return error.MissingField, .store = store };
         }
-        return null;
-    }
 
-    /// Finishes a command that has no members beyond its header.
-    fn endCommand(self: *Parser, members: *Members) !void {
-        var key: Bounded(32) = .{};
-        while (try members.next(self, &key)) {
-            if (!isHeader(&key)) return error.UnexpectedField;
-            try self.skipValue();
-        }
-    }
-
-    fn isHeader(key: *const Bounded(32)) bool {
-        return key.eql("version") or key.eql("kind") or key.eql("store");
-    }
-
-    fn fieldOf(comptime Field: type, key: *const Bounded(32), seen: *std.EnumSet(Field)) !Field {
-        const field = std.meta.stringToEnum(Field, key.slice()) orelse return error.UnexpectedField;
-        if (seen.contains(field)) return error.UnexpectedField;
-        seen.insert(field);
-        return field;
-    }
-
-    fn require(comptime Field: type, seen: std.EnumSet(Field), required: []const Field) !void {
-        for (required) |field| if (!seen.contains(field)) return error.MissingField;
-    }
-
-    fn parseHostPause(self: *Parser, out: *@FieldType(Request, "host_pause"), members: *Members) !void {
-        const Field = enum { paused };
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .paused => out.paused = try self.readBoolean(),
-        };
-        try require(Field, seen, &.{.paused});
-    }
-
-    fn readSessionToken(self: *Parser) !?change_ring.SessionToken {
-        if (try self.readNull()) return null;
-        var token: Bounded(change_ring.SessionToken.max_bytes) = .{};
-        self.readSmallString(&token) catch return error.InvalidSince;
-        return change_ring.SessionToken.parse(token.slice()) catch return error.InvalidSince;
-    }
-
-    fn parseObserveCommand(self: *Parser, out: *ObserveCommand, members: *Members) !void {
-        const Field = enum { key, since };
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readSmallString(&out.key),
-            .since => out.since = try self.readSessionToken(),
-        };
-        try require(Field, seen, &.{.key});
-    }
-
-    fn parseKeyOnly(self: *Parser, key: *Bounded(max_key_bytes), members: *Members) !void {
-        const Field = enum { key };
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readSmallString(key),
-        };
-        try require(Field, seen, &.{.key});
-    }
-
-    /// Each parser fills its command `out`, whose Store is already set.
-    fn parseConfigure(self: *Parser, out: *ConfigureCommand, members: *Members) !void {
-        errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
-        const Field = enum { key, session, configuration, preset, require_model, reload_skills };
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readCommandKey(&out.key),
-            .session => try self.readSmallString(&out.session),
-            .configuration => try self.parseConfiguration(true, &out.configuration),
-            .preset => {
-                out.preset = .{};
-                try self.readSmallString(&out.preset.?);
-            },
-            .require_model => out.require_model = try self.readBoolean(),
-            .reload_skills => out.reload_skills = try self.readBoolean(),
-        };
-        try require(Field, seen, &.{ .key, .session, .configuration });
-        if (out.session.len == 0 and out.preset == null) try validateCreatingConfiguration(&out.configuration);
-    }
-
-    /// Fills `out`, which holds its defaults.
-    fn parseConfiguration(self: *Parser, allow_content: bool, out: *Configuration) !void {
-        errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
-        const Field = enum { workspace, provider, model, instructions, tools, loaded_tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
-        try self.expectByte('{');
-        var members: Members = .{};
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextField(Field, &members, &seen)) |field| switch (field) {
-            .workspace => try self.readOptionalSmall(max_workspace_bytes, &out.workspace),
-            .provider => try self.readOptionalSmall(max_provider_bytes, &out.provider),
-            .model => try self.readOptionalSmall(max_model_bytes, &out.model),
-            .instructions => try self.readContent(&out.instructions, false, allow_content),
-            .tools => try self.readTools(&out.tools),
-            .loaded_tools => try self.readTools(&out.loaded_tools),
-            .permission_mode => try self.readOptionalSmall(16, &out.permission_mode),
-            .output_schema => try self.readContent(&out.output_schema, true, allow_content),
-            .compaction_trigger => try self.readOptionalPolicy(&out.compaction_trigger),
-            .output_reservation => try self.readOptionalPolicy(&out.output_reservation),
-            .reasoning_effort => try self.readOptionalSmallNullable(16, &out.reasoning_effort, true),
-            .label => try self.readOptionalSmallNullable(max_label_bytes, &out.label, true),
-        };
-    }
-
-    fn validateCreatingConfiguration(configuration: *const Configuration) !void {
-        if (configuration.model.state != .value or
-            configuration.compaction_trigger.state != .value or
-            configuration.tools.state != .value or
-            configuration.permission_mode.state != .value or
-            configuration.reasoning_effort.state == .omitted) return error.MissingField;
-        var tools = configuration.tools.iterator();
-        while (tools.next()) |tool| {
-            if (std.mem.eql(u8, tool, "bash") and configuration.workspace.state != .value)
-                return error.MissingField;
-        }
-    }
-
-    fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
-        errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
-        const Field = enum { key, session, sender, sender_handle, configuration, text, require_model, skill };
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readCommandKey(&out.key),
-            .session => try self.readSmallString(&out.session),
-            .sender => if (!try self.readNull()) {
-                out.sender = .{};
-                try self.parseAddress(&out.sender.?);
-                try out.sender.?.validate();
-            },
-            .sender_handle => if (!try self.readNull()) {
-                out.sender_handle = .{};
-                try self.readSmallString(&out.sender_handle.?);
-            },
-            .configuration => {
-                out.configuration = .{ .workspace = .{ .value = .{ .len = 0 } } };
-                try self.parseConfiguration(false, &out.configuration.?);
-            },
-            .text => try self.readContent(&out.text, false, true),
-            .skill => {
-                out.skill = .{};
-                try self.readSmallString(&out.skill.?);
-            },
-            .require_model => out.require_model = try self.readBoolean(),
-        };
-        try require(Field, seen, &.{ .key, .session, .sender, .sender_handle });
-        if (seen.contains(.text) == seen.contains(.skill)) return error.InvalidMessage;
-        if (out.skill != null and (out.skill.?.len == 0 or out.configuration != null)) return error.InvalidMessage;
-        // Only a creating Message, one with no Session yet, carries a
-        // configuration and a capability condition, and it must carry the
-        // configuration.
-        if (out.session.len == 0 and out.configuration == null) return error.MissingField;
-        if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
-        if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
-        if (out.skill == null and out.text.state != .value) return error.InvalidMessage;
-        if (seen.contains(.require_model) and out.configuration == null) return error.InvalidMessage;
-    }
-
-    fn parseAddress(self: *Parser, out: *Address) !void {
-        const Field = enum { store, session };
-        try self.expectByte('{');
-        var members: Members = .{};
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextField(Field, &members, &seen)) |field| switch (field) {
-            .store => try self.readSmallString(&out.store),
-            .session => try self.readSmallString(&out.session),
-        };
-        try require(Field, seen, &.{ .store, .session });
-    }
-
-    fn parseSessionStop(self: *Parser, out: *SessionStopCommand, members: *Members) !void {
-        const Field = enum { key, session };
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readCommandKey(&out.key),
-            .session => try self.readSmallString(&out.session),
-        };
-        try require(Field, seen, &.{ .key, .session });
-    }
-
-    fn parseSessionArchive(self: *Parser, out: *SessionArchiveCommand, members: *Members) !void {
-        const Field = enum { key, session, archived };
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readCommandKey(&out.key),
-            .session => try self.readSmallString(&out.session),
-            .archived => out.archived = try self.readBoolean(),
-        };
-        try require(Field, seen, &.{ .key, .session });
-    }
-
-    fn parseModelInterruption(self: *Parser, out: *ModelInterruptionCommand, members: *Members) !void {
-        const Field = enum { key, target };
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readCommandKey(&out.key),
-            .target => {
-                const Target = enum { session, turn, operation };
-                try self.expectByte('{');
-                var target_members: Members = .{};
-                var target_seen: std.EnumSet(Target) = .empty;
-                while (try self.nextField(Target, &target_members, &target_seen)) |member| switch (member) {
-                    .session => try self.readSmallString(&out.session),
-                    .turn => out.turn_id = try self.readCanonicalU64(),
-                    .operation => out.operation_id = try self.readCanonicalU64(),
+        fn scanConfiguration(self: *Parser, content: bool) !void {
+            try self.expectByte('{');
+            var members: Members = .{};
+            var instructions = false;
+            var output_schema = false;
+            var key: Bounded(32) = .{};
+            while (try members.next(self, &key)) {
+                const seen = if (key.eql("instructions"))
+                    &instructions
+                else if (key.eql("output_schema"))
+                    &output_schema
+                else {
+                    try self.skipValue();
+                    continue;
                 };
-                try require(Target, target_seen, &.{ .session, .turn, .operation });
-            },
-        };
-        try require(Field, seen, &.{ .key, .target });
-    }
-
-    fn parsePermissionDecision(self: *Parser, out: *PermissionDecisionCommand, members: *Members) !void {
-        const Field = enum { key, session, action, decision };
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readCommandKey(&out.key),
-            .session => try self.readSmallString(&out.session),
-            .action => out.action_id = try self.readCanonicalU64(),
-            .decision => {
-                var decision: Bounded(16) = .{};
-                try self.readSmallString(&decision);
-                out.decision = if (decision.eql("deny"))
-                    .deny
-                else if (decision.eql("allow_once"))
-                    .allow_once
-                else
-                    return error.UnsupportedPermissionDecision;
-            },
-        };
-        try require(Field, seen, &.{ .key, .session, .action, .decision });
-    }
-
-    fn parseReadActionArguments(self: *Parser, out: *ReadActionArguments, members: *Members) !void {
-        const Field = enum { session, action };
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .session => try self.readSmallString(&out.session),
-            .action => out.action_id = try self.readCanonicalU64(),
-        };
-        try require(Field, seen, &.{ .session, .action });
-    }
-
-    fn readCanonicalU64(self: *Parser) !u64 {
-        try self.expectByte('"');
-        var digits: [20]u8 = undefined;
-        var used: usize = 0;
-        while (true) {
-            const byte = try self.source.readByte();
-            if (byte == '"') break;
-            if (byte < '0' or byte > '9' or used == digits.len) return error.InvalidIdentity;
-            digits[used] = byte;
-            used += 1;
-        }
-        if (used == 0 or (used > 1 and digits[0] == '0')) return error.InvalidIdentity;
-        return std.fmt.parseInt(u64, digits[0..used], 10) catch error.InvalidIdentity;
-    }
-
-    fn parseInspect(self: *Parser, out: *InspectSession, members: *Members) !void {
-        const Field = enum { session, profile, failed_response, operation, attempt, since };
-        var seen: std.EnumSet(Field) = .empty;
-        var part: ?FailedResponsePart = null;
-        var operation: u64 = 0;
-        var attempt: u64 = 0;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .session => try self.readSmallString(&out.session),
-            .profile => {
-                var profile: Bounded(16) = .{};
-                try self.readSmallString(&profile);
-                out.profile = if (profile.eql("full")) .full else return error.UnknownReportProfile;
-            },
-            .failed_response => {
-                var text: Bounded(16) = .{};
-                try self.readSmallString(&text);
-                part = std.meta.stringToEnum(FailedResponsePart, text.slice()) orelse return error.InvalidTarget;
-            },
-            .operation => operation = try self.readCanonicalU64(),
-            .attempt => attempt = try self.readCanonicalU64(),
-            .since => out.since = try self.readSessionToken(),
-        };
-        try require(Field, seen, &.{.session});
-        if (seen.contains(.since) and (seen.contains(.profile) or seen.contains(.failed_response))) return error.UnexpectedField;
-        // A report profile or one failed response stream, never both; the
-        // stream is named by its Operation and attempt.
-        const selected = part orelse {
-            if (seen.contains(.operation) or seen.contains(.attempt)) return error.UnexpectedField;
-            return;
-        };
-        if (seen.contains(.profile)) return error.UnexpectedField;
-        try require(Field, seen, &.{ .operation, .attempt });
-        if (operation == 0 or operation > std.math.maxInt(i64) or attempt == 0 or attempt > std.math.maxInt(i64)) return error.InvalidTarget;
-        out.failed_response = .{ .operation = operation, .attempt = attempt, .part = selected };
-    }
-
-    fn parseListSessions(self: *Parser, out: *ListSessions, members: *Members) !void {
-        const Field = enum { workspace, archive, after, ceiling, since, through, after_reference };
-        var seen: std.EnumSet(Field) = .empty;
-        var through: u64 = 0;
-        var reference: Bounded(session_id_bytes) = .{};
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .workspace => if (!try self.readNull()) {
-                out.workspace = .{ .len = 0 };
-                try self.readSmallString(&out.workspace.?);
-            },
-            .archive => {
-                var archive: Bounded(16) = .{};
-                try self.readSmallString(&archive);
-                out.archive = std.meta.stringToEnum(SessionArchiveFilter, archive.slice()) orelse return error.InvalidArchiveFilter;
-            },
-            .after => out.after = try self.readCanonicalU64(),
-            .ceiling => out.ceiling = try self.readCanonicalU64(),
-            .since => {
-                var token: Bounded(SinceToken.max_bytes) = .{};
-                try self.readSmallString(&token);
-                out.since = SinceToken.parse(token.slice()) catch return error.InvalidCursor;
-            },
-            .through => through = try self.readCanonicalU64(),
-            .after_reference => {
-                try self.readSmallString(&reference);
-                if (reference.len != session_id_bytes) return error.InvalidCursor;
-            },
-        };
-        try require(Field, seen, &.{ .workspace, .after, .ceiling });
-        // A changed continuation names both its generation and its last
-        // Session, and only follows a `since` token.
-        if (seen.contains(.through) or seen.contains(.after_reference)) {
-            if (!seen.contains(.through) or !seen.contains(.after_reference) or out.since == null) return error.InvalidCursor;
-            out.changed = .{ .through = through, .after_reference = reference.bytes[0..session_id_bytes].* };
-        }
-        try out.validate();
-    }
-
-    fn parseConversationPage(self: *Parser, out: *ConversationPage, members: *Members) !void {
-        const Field = enum { session, end, before_position, before_ordinal };
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .session => try self.readSmallString(&out.session),
-            .end => out.end = try self.readCanonicalU64(),
-            .before_position => out.before_position = try self.readCanonicalU64(),
-            .before_ordinal => out.before_ordinal = try self.readCanonicalU64(),
-        };
-        try require(Field, seen, &.{ .session, .end, .before_position, .before_ordinal });
-        if (out.end > std.math.maxInt(i64) or out.before_position > std.math.maxInt(i64) or
-            out.before_ordinal > std.math.maxInt(i64) or
-            (out.end == 0 and out.before_position != 0) or
-            (out.before_position == 0 and out.before_ordinal != 0) or
-            (out.end != 0 and out.before_position > out.end)) return error.InvalidCursor;
-    }
-
-    fn parseConversationContent(self: *Parser, out: *ConversationContent, members: *Members) !void {
-        const Field = enum { session, position, ordinal, start, stream };
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .session => try self.readSmallString(&out.session),
-            .position => out.position = try self.readCanonicalU64(),
-            .ordinal => out.ordinal = try self.readCanonicalU64(),
-            .start => out.start = try self.readCanonicalU64(),
-            .stream => {
-                for ("true") |byte| try self.expectByte(byte);
-                out.stream = true;
-            },
-        };
-        try require(Field, seen, &.{ .session, .position, .ordinal, .start });
-        if (out.position == 0 or out.position > std.math.maxInt(i64) or
-            out.ordinal > std.math.maxInt(i64) or (out.stream and out.start != 0)) return error.InvalidCursor;
-    }
-
-    fn parseActivityPage(self: *Parser, out: *ActivityPage, members: *Members) !void {
-        const Field = enum { session, end, position, ordinal, direction, kinds, limit, since };
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .session => try self.readSmallString(&out.session),
-            .since => out.since = try self.readSessionToken(),
-            .end => if (!try self.readNull()) {
-                out.end = try self.readCanonicalU64();
-            },
-            .position => out.position = try self.readCanonicalU64(),
-            .ordinal => if (!try self.readNull()) {
-                out.ordinal = try self.readCanonicalU64();
-            },
-            .direction => {
-                var direction: Bounded(8) = .{};
-                try self.readSmallString(&direction);
-                out.direction = std.meta.stringToEnum(@FieldType(ActivityPage, "direction"), direction.slice()) orelse return error.InvalidCursor;
-            },
-            .kinds => {
-                try self.expectByte('[');
-                // Each kind at most once, in tag order, so one set has one spelling.
-                out.kinds = .empty;
-                var last: ?ActivityItem.Kind = null;
-                if (!try self.consumeIf(']')) while (true) {
-                    var name: Bounded(32) = .{};
-                    try self.readSmallString(&name);
-                    const kind = std.meta.stringToEnum(ActivityItem.Kind, name.slice()) orelse return error.InvalidCursor;
-                    if (last) |previous| if (@backingInt(kind) <= @backingInt(previous)) return error.InvalidJsonShape;
-                    out.kinds.insert(kind);
-                    last = kind;
-                    if (try self.consumeIf(']')) break;
-                    try self.expectByte(',');
-                };
-            },
-            .limit => out.limit = std.math.cast(u8, try self.readCanonicalU64()) orelse return error.InvalidCursor,
-        };
-        try require(Field, seen, &.{ .session, .end, .position, .ordinal, .direction, .kinds, .limit });
-        try out.validate();
-    }
-
-    fn parseActivitySearch(self: *Parser, out: *ActivitySearch, members: *Members) !void {
-        const Field = enum { session, query, before_position, before_ordinal, kinds, limit };
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .session => try self.readSmallString(&out.session),
-            .query => try self.readSmallString(&out.query),
-            .before_position => if (!try self.readNull()) {
-                out.before_position = try self.readCanonicalU64();
-            },
-            .before_ordinal => if (!try self.readNull()) {
-                out.before_ordinal = try self.readCanonicalU64();
-            },
-            .kinds => {
-                try self.expectByte('[');
-                // Each kind at most once, in tag order, so one set has one spelling.
-                out.kinds = .empty;
-                var last: ?ActivityItem.Kind = null;
-                if (!try self.consumeIf(']')) while (true) {
-                    var name: Bounded(32) = .{};
-                    try self.readSmallString(&name);
-                    const kind = std.meta.stringToEnum(ActivityItem.Kind, name.slice()) orelse return error.InvalidCursor;
-                    if (last) |previous| if (@backingInt(kind) <= @backingInt(previous)) return error.InvalidJsonShape;
-                    out.kinds.insert(kind);
-                    last = kind;
-                    if (try self.consumeIf(']')) break;
-                    try self.expectByte(',');
-                };
-            },
-            .limit => out.limit = std.math.cast(u8, try self.readCanonicalU64()) orelse return error.InvalidCursor,
-        };
-        try require(Field, seen, &.{ .session, .query });
-        try out.validate();
-    }
-
-    fn parseActivityContent(self: *Parser, out: *ReadActivityContent, members: *Members) !void {
-        const Field = enum { session, position, ordinal };
-        var seen: std.EnumSet(Field) = .empty;
-        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .session => try self.readSmallString(&out.session),
-            .position => out.position = try self.readCanonicalU64(),
-            .ordinal => out.ordinal = try self.readCanonicalU64(),
-        };
-        try require(Field, seen, &.{ .session, .position, .ordinal });
-        if (out.position == 0 or out.position > std.math.maxInt(i64) or out.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
-    }
-
-    fn readOptionalPolicy(self: *Parser, field: *OptionalBounded(20)) !void {
-        try self.readOptionalSmallNullable(20, field, true);
-    }
-
-    fn readOptionalSmall(self: *Parser, comptime capacity: usize, field: *OptionalBounded(capacity)) !void {
-        try self.readOptionalSmallNullable(capacity, field, false);
-    }
-
-    /// The members of a `{"state":…,"value":…}` envelope.
-    const Envelope = enum { state, value };
-
-    /// An envelope's state, once its members are read: a value is present
-    /// exactly when the state says so.
-    fn envelopeState(state: *const Bounded(16), seen: std.EnumSet(Envelope), allow_null: bool) !FieldState {
-        if (!seen.contains(.state)) return error.MissingField;
-        const result: FieldState = if (state.eql("omitted"))
-            .omitted
-        else if (allow_null and state.eql("null"))
-            .explicit_null
-        else if (state.eql("value"))
-            .value
-        else
-            return error.InvalidFieldState;
-        if (seen.contains(.value) != (result == .value)) return error.InvalidFieldState;
-        return result;
-    }
-
-    fn readOptionalSmallNullable(self: *Parser, comptime capacity: usize, field: *OptionalBounded(capacity), allow_null: bool) !void {
-        try self.expectByte('{');
-        var members: Members = .{};
-        var seen: std.EnumSet(Envelope) = .empty;
-        var state: Bounded(16) = .{};
-        while (try self.nextField(Envelope, &members, &seen)) |member| switch (member) {
-            .state => try self.readSmallString(&state),
-            .value => try self.readSmallString(&field.value),
-        };
-        field.state = try envelopeState(&state, seen, allow_null);
-    }
-
-    fn readContent(self: *Parser, field: *ContentField, allow_null: bool, allow_value: bool) !void {
-        try self.expectByte('{');
-        var members: Members = .{};
-        var seen: std.EnumSet(Envelope) = .empty;
-        var state: Bounded(16) = .{};
-        while (try self.nextField(Envelope, &members, &seen)) |member| switch (member) {
-            .state => try self.readSmallString(&state),
-            .value => {
-                if (!allow_value) return error.InvalidFieldState;
-                try self.readContentString(field);
-            },
-        };
-        field.state = try envelopeState(&state, seen, allow_null);
-    }
-
-    fn readTools(self: *Parser, tools: *ToolsField) !void {
-        try self.expectByte('{');
-        var members: Members = .{};
-        var seen: std.EnumSet(Envelope) = .empty;
-        var state: Bounded(16) = .{};
-        while (try self.nextField(Envelope, &members, &seen)) |member| switch (member) {
-            .state => try self.readSmallString(&state),
-            .value => {
-                try self.expectByte('[');
-                tools.* = .{};
-                if (!try self.consumeIf(']')) while (true) {
-                    var name: Bounded(max_tool_name_bytes) = .{};
-                    self.readSmallString(&name) catch |err| return if (err == error.ValueTooLong) error.InvalidToolName else err;
-                    if (!validToolName(name.slice())) return error.InvalidToolName;
-                    // The Host offers the built-ins; MCP servers' tools join them later.
-                    try tools.append(name.slice());
-                    if (try self.consumeIf(']')) break;
-                    try self.expectByte(',');
-                };
-            },
-        };
-        tools.state = try envelopeState(&state, seen, false);
-    }
-
-    /// Reads a literal null, or leaves the input where it was.
-    fn readNull(self: *Parser) !bool {
-        if (!try self.consumeIf('n')) return false;
-        for ("ull") |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
-        return true;
-    }
-
-    /// Passes over one value nested at most `max_skipped_depth` objects or
-    /// arrays deep, without recursion.
-    fn skipValue(self: *Parser) !void {
-        const max_skipped_depth = 4;
-        var closers: [max_skipped_depth]u8 = undefined;
-        var depth: usize = 0;
-        var discard: DiscardSink = .{};
-        while (true) {
-            try self.skipWhitespace();
-            const first = try self.source.readByte();
-            switch (first) {
-                '"' => {
-                    self.source.start -= 1;
-                    try self.readJsonString(&discard);
-                },
-                't', 'f', 'n' => {
-                    const rest: []const u8 = switch (first) {
-                        't' => "rue",
-                        'f' => "alse",
-                        else => "ull",
-                    };
-                    for (rest) |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
-                },
-                '{', '[' => {
-                    const closer: u8 = if (first == '{') '}' else ']';
-                    if (!try self.consumeIf(closer)) {
-                        if (depth == closers.len) return error.InvalidJsonShape;
-                        closers[depth] = closer;
-                        depth += 1;
-                        if (closer == '}') try self.skipKey(&discard);
-                        continue;
-                    }
-                },
-                else => return error.InvalidJsonShape,
+                if (seen.*) return error.UnexpectedField;
+                seen.* = true;
+                try self.scanContentEnvelope(content);
             }
-            // A value ended: close each container it finished, then step to
-            // the next element of the innermost open one.
-            while (depth > 0) {
-                if (try self.consumeIf(closers[depth - 1])) {
-                    depth -= 1;
+        }
+
+        fn scanContentEnvelope(self: *Parser, content: bool) !void {
+            try self.expectByte('{');
+            var members: Members = .{};
+            var value = false;
+            var key: Bounded(32) = .{};
+            while (try members.next(self, &key)) {
+                if (!key.eql("value")) {
+                    try self.skipValue();
                     continue;
                 }
-                try self.expectByte(',');
-                if (closers[depth - 1] == '}') try self.skipKey(&discard);
-                break;
+                if (value) return error.UnexpectedField;
+                if (!content) return error.InvalidFieldState;
+                value = true;
+                // A third content string has no capture to go to.
+                if (self.content_ordinal == max_request_contents) return error.UnexpectedField;
+                var counted: ContentField = .{};
+                try self.readContentString(&counted);
             }
-            if (depth == 0) return;
         }
-    }
 
-    fn skipKey(self: *Parser, discard: *DiscardSink) !void {
-        try self.readJsonString(discard);
-        try self.expectByte(':');
-    }
+        /// Walks one object's members after its opening brace.
+        const Members = struct {
+            started: bool = false,
 
-    /// A command's key. Keys under `reserved_key_prefix` are Rui's own
-    /// commands', so a client command cannot take one first.
-    fn readCommandKey(self: *Parser, key: *Bounded(max_key_bytes)) !void {
-        try self.readSmallString(key);
-        if (std.mem.startsWith(u8, key.slice(), reserved_key_prefix)) return error.ReservedCommandKey;
-    }
-
-    fn readSmallString(self: *Parser, destination: anytype) !void {
-        var sink = SmallSink(@TypeOf(destination.*)){ .destination = destination };
-        try self.readJsonString(&sink);
-        if (!std.unicode.utf8ValidateSlice(destination.slice())) return error.InvalidUtf8;
-    }
-
-    /// Reads the empty placeholder the Ingress left for a captured string.
-    fn readContentString(self: *Parser, field: *ContentField) !void {
-        self.content_ordinal += 1;
-        if (self.content_ordinal > self.captured.len) return error.NeedContent;
-        try self.expectByte('"');
-        if (try self.source.readByte() != '"') return error.InvalidJsonShape;
-        const original = self.captured[self.content_ordinal - 1];
-        // Speculative request disposal has no resource authority.
-        field.length = original.length;
-        field.digest = original.digest;
-        field.capture = self.content_ordinal;
-    }
-
-    fn readJsonString(self: *Parser, sink: anytype) !void {
-        try self.expectByte('"');
-        var decoder = StringDecoder{};
-        while (!try decoder.feed(try self.source.readByte(), sink)) {}
-    }
-
-    fn expectKey(self: *Parser, key: []const u8) !void {
-        try self.skipWhitespace();
-        try self.expectByte('"');
-        for (key) |expected| if (try self.source.readByte() != expected) return error.UnexpectedField;
-        if (try self.source.readByte() != '"') return error.UnexpectedField;
-        try self.expectByte(':');
-    }
-
-    fn expectByte(self: *Parser, expected: u8) !void {
-        try self.skipWhitespace();
-        if (try self.source.readByte() != expected) return error.InvalidJsonShape;
-    }
-
-    fn readBoolean(self: *Parser) !bool {
-        try self.skipWhitespace();
-        const first = try self.source.readByte();
-        const rest: []const u8 = switch (first) {
-            't' => "rue",
-            'f' => "alse",
-            else => return error.InvalidJsonShape,
+            /// Reads the next member's key and colon, or the closing brace.
+            fn next(self: *Members, parser: *Parser, key: *Bounded(32)) !bool {
+                if (try parser.consumeIf('}')) return false;
+                if (self.started) try parser.expectByte(',');
+                self.started = true;
+                key.* = .{};
+                parser.readSmallString(key) catch |err| return switch (err) {
+                    error.ValueTooLong => error.UnexpectedField,
+                    else => err,
+                };
+                try parser.expectByte(':');
+                return true;
+            }
         };
-        for (rest) |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
-        return first == 't';
-    }
 
-    fn consumeIf(self: *Parser, expected: u8) !bool {
-        try self.skipWhitespace();
-        const byte = try self.source.readByte();
-        if (byte == expected) return true;
-        self.source.start -= 1;
-        return false;
-    }
+        /// The next member of an object whose keys are `Field`'s names, each at
+        /// most once, in any order.
+        fn nextField(self: *Parser, comptime Field: type, members: *Members, seen: *std.enums.EnumSet(Field)) !?Field {
+            var key: Bounded(32) = .{};
+            if (!try members.next(self, &key)) return null;
+            return try fieldOf(Field, &key, seen);
+        }
 
-    fn skipWhitespace(self: *Parser) !void {
-        while (true) {
-            const byte = try self.source.readByte();
-            switch (byte) {
-                ' ', '\t', '\r', '\n' => {},
-                else => {
-                    self.source.start -= 1;
-                    return;
-                },
+        /// The command's next member, passing over the header the first pass read.
+        fn nextCommandField(self: *Parser, comptime Field: type, members: *Members, seen: *std.enums.EnumSet(Field)) !?Field {
+            var key: Bounded(32) = .{};
+            while (try members.next(self, &key)) {
+                if (isHeader(&key)) {
+                    try self.skipValue();
+                    continue;
+                }
+                return try fieldOf(Field, &key, seen);
+            }
+            return null;
+        }
+
+        /// Finishes a command that has no members beyond its header.
+        fn endCommand(self: *Parser, members: *Members) !void {
+            var key: Bounded(32) = .{};
+            while (try members.next(self, &key)) {
+                if (!isHeader(&key)) return error.UnexpectedField;
+                try self.skipValue();
             }
         }
+
+        fn isHeader(key: *const Bounded(32)) bool {
+            return key.eql("version") or key.eql("kind") or key.eql("store");
+        }
+
+        fn fieldOf(comptime Field: type, key: *const Bounded(32), seen: *std.enums.EnumSet(Field)) !Field {
+            const field = std.meta.stringToEnum(Field, key.slice()) orelse return error.UnexpectedField;
+            if (seen.contains(field)) return error.UnexpectedField;
+            seen.insert(field);
+            return field;
+        }
+
+        fn require(comptime Field: type, seen: std.enums.EnumSet(Field), required: []const Field) !void {
+            for (required) |field| if (!seen.contains(field)) return error.MissingField;
+        }
+
+        fn parseHostPause(self: *Parser, out: *@FieldType(Request, "host_pause"), members: *Members) !void {
+            const Field = enum { paused };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .paused => out.paused = try self.readBoolean(),
+            };
+            try require(Field, seen, &.{.paused});
+        }
+
+        fn readSessionToken(self: *Parser) !?change_ring.SessionToken {
+            if (try self.readNull()) return null;
+            var token: Bounded(change_ring.SessionToken.max_bytes) = .{};
+            self.readSmallString(&token) catch return error.InvalidSince;
+            return change_ring.SessionToken.parse(token.slice()) catch return error.InvalidSince;
+        }
+
+        fn parseObserveCommand(self: *Parser, out: *ObserveCommand, members: *Members) !void {
+            const Field = enum { key, since };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .key => try self.readSmallString(&out.key),
+                .since => out.since = try self.readSessionToken(),
+            };
+            try require(Field, seen, &.{.key});
+        }
+
+        fn parseKeyOnly(self: *Parser, key: *Bounded(max_key_bytes), members: *Members) !void {
+            const Field = enum { key };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .key => try self.readSmallString(key),
+            };
+            try require(Field, seen, &.{.key});
+        }
+
+        /// Each parser fills its command `out`, whose Store is already set.
+        fn parseConfigure(self: *Parser, out: *ConfigureCommand, members: *Members) !void {
+            const Field = enum { key, session, configuration, preset, require_model, reload_skills };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .key => try self.readCommandKey(&out.key),
+                .session => try self.readSmallString(&out.session),
+                .configuration => try self.parseConfiguration(true, &out.configuration),
+                .preset => {
+                    out.preset = .{};
+                    try self.readSmallString(&out.preset.?);
+                },
+                .require_model => out.require_model = try self.readBoolean(),
+                .reload_skills => out.reload_skills = try self.readBoolean(),
+            };
+            try require(Field, seen, &.{ .key, .session, .configuration });
+            if (out.session.len == 0 and out.preset == null) try validateCreatingConfiguration(&out.configuration);
+        }
+
+        /// Fills `out`, which holds its defaults.
+        fn parseConfiguration(self: *Parser, allow_content: bool, out: *Configuration) !void {
+            const Field = enum { workspace, provider, model, instructions, tools, loaded_tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
+            try self.expectByte('{');
+            var members: Members = .{};
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextField(Field, &members, &seen)) |field| switch (field) {
+                .workspace => try self.readOptionalSmall(max_workspace_bytes, &out.workspace),
+                .provider => try self.readOptionalSmall(max_provider_bytes, &out.provider),
+                .model => try self.readOptionalSmall(max_model_bytes, &out.model),
+                .instructions => try self.readContent(&out.instructions, false, allow_content),
+                .tools => try self.readTools(&out.tools),
+                .loaded_tools => try self.readTools(&out.loaded_tools),
+                .permission_mode => try self.readOptionalSmall(16, &out.permission_mode),
+                .output_schema => try self.readContent(&out.output_schema, true, allow_content),
+                .compaction_trigger => try self.readOptionalPolicy(&out.compaction_trigger),
+                .output_reservation => try self.readOptionalPolicy(&out.output_reservation),
+                .reasoning_effort => try self.readOptionalSmallNullable(16, &out.reasoning_effort, true),
+                .label => try self.readOptionalSmallNullable(max_label_bytes, &out.label, true),
+            };
+        }
+
+        fn validateCreatingConfiguration(configuration: *const Configuration) !void {
+            if (configuration.model.state != .value or
+                configuration.compaction_trigger.state != .value or
+                configuration.tools.state != .value or
+                configuration.permission_mode.state != .value or
+                configuration.reasoning_effort.state == .omitted) return error.MissingField;
+            var tools = configuration.tools.iterator();
+            while (tools.next()) |tool| {
+                if (std.mem.eql(u8, tool, "bash") and configuration.workspace.state != .value)
+                    return error.MissingField;
+            }
+        }
+
+        fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
+            const Field = enum { key, session, sender, sender_handle, configuration, text, require_model, skill };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .key => try self.readCommandKey(&out.key),
+                .session => try self.readSmallString(&out.session),
+                .sender => if (!try self.readNull()) {
+                    out.sender = .{};
+                    try self.parseAddress(&out.sender.?);
+                    try out.sender.?.validate();
+                },
+                .sender_handle => if (!try self.readNull()) {
+                    out.sender_handle = .{};
+                    try self.readSmallString(&out.sender_handle.?);
+                },
+                .configuration => {
+                    out.configuration = .{ .workspace = .{ .value = .{ .len = 0 } } };
+                    try self.parseConfiguration(false, &out.configuration.?);
+                },
+                .text => try self.readContent(&out.text, false, true),
+                .skill => {
+                    out.skill = .{};
+                    try self.readSmallString(&out.skill.?);
+                },
+                .require_model => out.require_model = try self.readBoolean(),
+            };
+            try require(Field, seen, &.{ .key, .session, .sender, .sender_handle });
+            if (seen.contains(.text) == seen.contains(.skill)) return error.InvalidMessage;
+            if (out.skill != null and (out.skill.?.len == 0 or out.configuration != null)) return error.InvalidMessage;
+            // Only a creating Message, one with no Session yet, carries a
+            // configuration and a capability condition, and it must carry the
+            // configuration.
+            if (out.session.len == 0 and out.configuration == null) return error.MissingField;
+            if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
+            if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
+            if (out.skill == null and out.text.state != .value) return error.InvalidMessage;
+            if (seen.contains(.require_model) and out.configuration == null) return error.InvalidMessage;
+        }
+
+        fn parseAddress(self: *Parser, out: *Address) !void {
+            const Field = enum { store, session };
+            try self.expectByte('{');
+            var members: Members = .{};
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextField(Field, &members, &seen)) |field| switch (field) {
+                .store => try self.readSmallString(&out.store),
+                .session => try self.readSmallString(&out.session),
+            };
+            try require(Field, seen, &.{ .store, .session });
+        }
+
+        fn parseSessionStop(self: *Parser, out: *SessionStopCommand, members: *Members) !void {
+            const Field = enum { key, session };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .key => try self.readCommandKey(&out.key),
+                .session => try self.readSmallString(&out.session),
+            };
+            try require(Field, seen, &.{ .key, .session });
+        }
+
+        fn parseSessionArchive(self: *Parser, out: *SessionArchiveCommand, members: *Members) !void {
+            const Field = enum { key, session, archived };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .key => try self.readCommandKey(&out.key),
+                .session => try self.readSmallString(&out.session),
+                .archived => out.archived = try self.readBoolean(),
+            };
+            try require(Field, seen, &.{ .key, .session });
+        }
+
+        fn parseModelInterruption(self: *Parser, out: *ModelInterruptionCommand, members: *Members) !void {
+            const Field = enum { key, target };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .key => try self.readCommandKey(&out.key),
+                .target => {
+                    const Target = enum { session, turn, operation };
+                    try self.expectByte('{');
+                    var target_members: Members = .{};
+                    var target_seen: std.enums.EnumSet(Target) = .empty;
+                    while (try self.nextField(Target, &target_members, &target_seen)) |member| switch (member) {
+                        .session => try self.readSmallString(&out.session),
+                        .turn => out.turn_id = try self.readCanonicalU64(),
+                        .operation => out.operation_id = try self.readCanonicalU64(),
+                    };
+                    try require(Target, target_seen, &.{ .session, .turn, .operation });
+                },
+            };
+            try require(Field, seen, &.{ .key, .target });
+        }
+
+        fn parsePermissionDecision(self: *Parser, out: *PermissionDecisionCommand, members: *Members) !void {
+            const Field = enum { key, session, action, decision };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .key => try self.readCommandKey(&out.key),
+                .session => try self.readSmallString(&out.session),
+                .action => out.action_id = try self.readCanonicalU64(),
+                .decision => {
+                    var decision: Bounded(16) = .{};
+                    try self.readSmallString(&decision);
+                    out.decision = if (decision.eql("deny"))
+                        .deny
+                    else if (decision.eql("allow_once"))
+                        .allow_once
+                    else
+                        return error.UnsupportedPermissionDecision;
+                },
+            };
+            try require(Field, seen, &.{ .key, .session, .action, .decision });
+        }
+
+        fn parseReadActionArguments(self: *Parser, out: *ReadActionArguments, members: *Members) !void {
+            const Field = enum { session, action };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .session => try self.readSmallString(&out.session),
+                .action => out.action_id = try self.readCanonicalU64(),
+            };
+            try require(Field, seen, &.{ .session, .action });
+        }
+
+        fn readCanonicalU64(self: *Parser) !u64 {
+            try self.expectByte('"');
+            var digits: [20]u8 = undefined;
+            var used: usize = 0;
+            while (true) {
+                const byte = try self.source.readByte();
+                if (byte == '"') break;
+                if (byte < '0' or byte > '9' or used == digits.len) return error.InvalidIdentity;
+                digits[used] = byte;
+                used += 1;
+            }
+            if (used == 0 or (used > 1 and digits[0] == '0')) return error.InvalidIdentity;
+            return std.fmt.parseInt(u64, digits[0..used], 10) catch error.InvalidIdentity;
+        }
+
+        fn parseInspect(self: *Parser, out: *InspectSession, members: *Members) !void {
+            const Field = enum { session, profile, failed_response, operation, attempt, since };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            var part: ?FailedResponsePart = null;
+            var operation: u64 = 0;
+            var attempt: u64 = 0;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .session => try self.readSmallString(&out.session),
+                .profile => {
+                    var profile: Bounded(16) = .{};
+                    try self.readSmallString(&profile);
+                    out.profile = if (profile.eql("full")) .full else return error.UnknownReportProfile;
+                },
+                .failed_response => {
+                    var text: Bounded(16) = .{};
+                    try self.readSmallString(&text);
+                    part = std.meta.stringToEnum(FailedResponsePart, text.slice()) orelse return error.InvalidTarget;
+                },
+                .operation => operation = try self.readCanonicalU64(),
+                .attempt => attempt = try self.readCanonicalU64(),
+                .since => out.since = try self.readSessionToken(),
+            };
+            try require(Field, seen, &.{.session});
+            if (seen.contains(.since) and (seen.contains(.profile) or seen.contains(.failed_response))) return error.UnexpectedField;
+            // A report profile or one failed response stream, never both; the
+            // stream is named by its Operation and attempt.
+            const selected = part orelse {
+                if (seen.contains(.operation) or seen.contains(.attempt)) return error.UnexpectedField;
+                return;
+            };
+            if (seen.contains(.profile)) return error.UnexpectedField;
+            try require(Field, seen, &.{ .operation, .attempt });
+            if (operation == 0 or operation > std.math.maxInt(i64) or attempt == 0 or attempt > std.math.maxInt(i64)) return error.InvalidTarget;
+            out.failed_response = .{ .operation = operation, .attempt = attempt, .part = selected };
+        }
+
+        fn parseListSessions(self: *Parser, out: *ListSessions, members: *Members) !void {
+            const Field = enum { workspace, archive, after, ceiling, since, through, after_reference };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            var through: u64 = 0;
+            var reference: Bounded(session_id_bytes) = .{};
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .workspace => if (!try self.readNull()) {
+                    out.workspace = .{ .len = 0 };
+                    try self.readSmallString(&out.workspace.?);
+                },
+                .archive => {
+                    var archive: Bounded(16) = .{};
+                    try self.readSmallString(&archive);
+                    out.archive = std.meta.stringToEnum(SessionArchiveFilter, archive.slice()) orelse return error.InvalidArchiveFilter;
+                },
+                .after => out.after = try self.readCanonicalU64(),
+                .ceiling => out.ceiling = try self.readCanonicalU64(),
+                .since => {
+                    var token: Bounded(SinceToken.max_bytes) = .{};
+                    try self.readSmallString(&token);
+                    out.since = SinceToken.parse(token.slice()) catch return error.InvalidCursor;
+                },
+                .through => through = try self.readCanonicalU64(),
+                .after_reference => {
+                    try self.readSmallString(&reference);
+                    if (reference.len != session_id_bytes) return error.InvalidCursor;
+                },
+            };
+            try require(Field, seen, &.{ .workspace, .after, .ceiling });
+            // A changed continuation names both its generation and its last
+            // Session, and only follows a `since` token.
+            if (seen.contains(.through) or seen.contains(.after_reference)) {
+                if (!seen.contains(.through) or !seen.contains(.after_reference) or out.since == null) return error.InvalidCursor;
+                out.changed = .{ .through = through, .after_reference = reference.bytes[0..session_id_bytes].* };
+            }
+            try out.validate();
+        }
+
+        fn parseConversationPage(self: *Parser, out: *ConversationPage, members: *Members) !void {
+            const Field = enum { session, end, before_position, before_ordinal };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .session => try self.readSmallString(&out.session),
+                .end => out.end = try self.readCanonicalU64(),
+                .before_position => out.before_position = try self.readCanonicalU64(),
+                .before_ordinal => out.before_ordinal = try self.readCanonicalU64(),
+            };
+            try require(Field, seen, &.{ .session, .end, .before_position, .before_ordinal });
+            if (out.end > std.math.maxInt(i64) or out.before_position > std.math.maxInt(i64) or
+                out.before_ordinal > std.math.maxInt(i64) or
+                (out.end == 0 and out.before_position != 0) or
+                (out.before_position == 0 and out.before_ordinal != 0) or
+                (out.end != 0 and out.before_position > out.end)) return error.InvalidCursor;
+        }
+
+        fn parseConversationContent(self: *Parser, out: *ConversationContent, members: *Members) !void {
+            const Field = enum { session, position, ordinal, start, stream };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .session => try self.readSmallString(&out.session),
+                .position => out.position = try self.readCanonicalU64(),
+                .ordinal => out.ordinal = try self.readCanonicalU64(),
+                .start => out.start = try self.readCanonicalU64(),
+                .stream => {
+                    for ("true") |byte| try self.expectByte(byte);
+                    out.stream = true;
+                },
+            };
+            try require(Field, seen, &.{ .session, .position, .ordinal, .start });
+            if (out.position == 0 or out.position > std.math.maxInt(i64) or
+                out.ordinal > std.math.maxInt(i64) or (out.stream and out.start != 0)) return error.InvalidCursor;
+        }
+
+        fn parseActivityPage(self: *Parser, out: *ActivityPage, members: *Members) !void {
+            const Field = enum { session, end, position, ordinal, direction, kinds, limit, since };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .session => try self.readSmallString(&out.session),
+                .since => out.since = try self.readSessionToken(),
+                .end => if (!try self.readNull()) {
+                    out.end = try self.readCanonicalU64();
+                },
+                .position => out.position = try self.readCanonicalU64(),
+                .ordinal => if (!try self.readNull()) {
+                    out.ordinal = try self.readCanonicalU64();
+                },
+                .direction => {
+                    var direction: Bounded(8) = .{};
+                    try self.readSmallString(&direction);
+                    out.direction = std.meta.stringToEnum(@FieldType(ActivityPage, "direction"), direction.slice()) orelse return error.InvalidCursor;
+                },
+                .kinds => {
+                    try self.expectByte('[');
+                    // Each kind at most once, in tag order, so one set has one spelling.
+                    out.kinds = .empty;
+                    var last: ?ActivityItem.Kind = null;
+                    if (!try self.consumeIf(']')) while (true) {
+                        var name: Bounded(32) = .{};
+                        try self.readSmallString(&name);
+                        const kind = std.meta.stringToEnum(ActivityItem.Kind, name.slice()) orelse return error.InvalidCursor;
+                        if (last) |previous| if (@backingInt(kind) <= @backingInt(previous)) return error.InvalidJsonShape;
+                        out.kinds.insert(kind);
+                        last = kind;
+                        if (try self.consumeIf(']')) break;
+                        try self.expectByte(',');
+                    };
+                },
+                .limit => out.limit = std.math.cast(u8, try self.readCanonicalU64()) orelse return error.InvalidCursor,
+            };
+            try require(Field, seen, &.{ .session, .end, .position, .ordinal, .direction, .kinds, .limit });
+            try out.validate();
+        }
+
+        fn parseActivitySearch(self: *Parser, out: *ActivitySearch, members: *Members) !void {
+            const Field = enum { session, query, before_position, before_ordinal, kinds, limit };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .session => try self.readSmallString(&out.session),
+                .query => try self.readSmallString(&out.query),
+                .before_position => if (!try self.readNull()) {
+                    out.before_position = try self.readCanonicalU64();
+                },
+                .before_ordinal => if (!try self.readNull()) {
+                    out.before_ordinal = try self.readCanonicalU64();
+                },
+                .kinds => {
+                    try self.expectByte('[');
+                    // Each kind at most once, in tag order, so one set has one spelling.
+                    out.kinds = .empty;
+                    var last: ?ActivityItem.Kind = null;
+                    if (!try self.consumeIf(']')) while (true) {
+                        var name: Bounded(32) = .{};
+                        try self.readSmallString(&name);
+                        const kind = std.meta.stringToEnum(ActivityItem.Kind, name.slice()) orelse return error.InvalidCursor;
+                        if (last) |previous| if (@backingInt(kind) <= @backingInt(previous)) return error.InvalidJsonShape;
+                        out.kinds.insert(kind);
+                        last = kind;
+                        if (try self.consumeIf(']')) break;
+                        try self.expectByte(',');
+                    };
+                },
+                .limit => out.limit = std.math.cast(u8, try self.readCanonicalU64()) orelse return error.InvalidCursor,
+            };
+            try require(Field, seen, &.{ .session, .query });
+            try out.validate();
+        }
+
+        fn parseActivityContent(self: *Parser, out: *ReadActivityContent, members: *Members) !void {
+            const Field = enum { session, position, ordinal };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .session => try self.readSmallString(&out.session),
+                .position => out.position = try self.readCanonicalU64(),
+                .ordinal => out.ordinal = try self.readCanonicalU64(),
+            };
+            try require(Field, seen, &.{ .session, .position, .ordinal });
+            if (out.position == 0 or out.position > std.math.maxInt(i64) or out.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
+        }
+
+        fn readOptionalPolicy(self: *Parser, field: *OptionalBounded(20)) !void {
+            try self.readOptionalSmallNullable(20, field, true);
+        }
+
+        fn readOptionalSmall(self: *Parser, comptime capacity: usize, field: *OptionalBounded(capacity)) !void {
+            try self.readOptionalSmallNullable(capacity, field, false);
+        }
+
+        /// The members of a `{"state":…,"value":…}` envelope.
+        const Envelope = enum { state, value };
+
+        /// An envelope's state, once its members are read: a value is present
+        /// exactly when the state says so.
+        fn envelopeState(state: *const Bounded(16), seen: std.enums.EnumSet(Envelope), allow_null: bool) !FieldState {
+            if (!seen.contains(.state)) return error.MissingField;
+            const result: FieldState = if (state.eql("omitted"))
+                .omitted
+            else if (allow_null and state.eql("null"))
+                .explicit_null
+            else if (state.eql("value"))
+                .value
+            else
+                return error.InvalidFieldState;
+            if (seen.contains(.value) != (result == .value)) return error.InvalidFieldState;
+            return result;
+        }
+
+        fn readOptionalSmallNullable(self: *Parser, comptime capacity: usize, field: *OptionalBounded(capacity), allow_null: bool) !void {
+            try self.expectByte('{');
+            var members: Members = .{};
+            var seen: std.enums.EnumSet(Envelope) = .empty;
+            var state: Bounded(16) = .{};
+            while (try self.nextField(Envelope, &members, &seen)) |member| switch (member) {
+                .state => try self.readSmallString(&state),
+                .value => try self.readSmallString(&field.value),
+            };
+            field.state = try envelopeState(&state, seen, allow_null);
+        }
+
+        fn readContent(self: *Parser, field: *ContentField, allow_null: bool, allow_value: bool) !void {
+            try self.expectByte('{');
+            var members: Members = .{};
+            var seen: std.enums.EnumSet(Envelope) = .empty;
+            var state: Bounded(16) = .{};
+            while (try self.nextField(Envelope, &members, &seen)) |member| switch (member) {
+                .state => try self.readSmallString(&state),
+                .value => {
+                    if (!allow_value) return error.InvalidFieldState;
+                    try self.readContentString(field);
+                },
+            };
+            field.state = try envelopeState(&state, seen, allow_null);
+        }
+
+        fn readTools(self: *Parser, tools: *ToolsField) !void {
+            try self.expectByte('{');
+            var members: Members = .{};
+            var seen: std.enums.EnumSet(Envelope) = .empty;
+            var state: Bounded(16) = .{};
+            while (try self.nextField(Envelope, &members, &seen)) |member| switch (member) {
+                .state => try self.readSmallString(&state),
+                .value => {
+                    try self.expectByte('[');
+                    tools.* = .{};
+                    if (!try self.consumeIf(']')) while (true) {
+                        var name: Bounded(max_tool_name_bytes) = .{};
+                        self.readSmallString(&name) catch |err| return if (err == error.ValueTooLong) error.InvalidToolName else err;
+                        if (!validToolName(name.slice())) return error.InvalidToolName;
+                        // The Host offers the built-ins; MCP servers' tools join them later.
+                        try tools.append(name.slice());
+                        if (try self.consumeIf(']')) break;
+                        try self.expectByte(',');
+                    };
+                },
+            };
+            tools.state = try envelopeState(&state, seen, false);
+        }
+
+        /// Reads a literal null, or leaves the input where it was.
+        fn readNull(self: *Parser) !bool {
+            if (!try self.consumeIf('n')) return false;
+            for ("ull") |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
+            return true;
+        }
+
+        /// Passes over one value nested at most `max_skipped_depth` objects or
+        /// arrays deep, without recursion.
+        fn skipValue(self: *Parser) !void {
+            const max_skipped_depth = 4;
+            var closers: [max_skipped_depth]u8 = undefined;
+            var depth: usize = 0;
+            var discard: DiscardSink = .{};
+            while (true) {
+                try self.skipWhitespace();
+                const first = try self.source.readByte();
+                switch (first) {
+                    '"' => {
+                        self.source.start -= 1;
+                        try self.readJsonString(&discard);
+                    },
+                    't', 'f', 'n' => {
+                        const rest: []const u8 = switch (first) {
+                            't' => "rue",
+                            'f' => "alse",
+                            else => "ull",
+                        };
+                        for (rest) |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
+                    },
+                    '{', '[' => {
+                        const closer: u8 = if (first == '{') '}' else ']';
+                        if (!try self.consumeIf(closer)) {
+                            if (depth == closers.len) return error.InvalidJsonShape;
+                            closers[depth] = closer;
+                            depth += 1;
+                            if (closer == '}') try self.skipKey(&discard);
+                            continue;
+                        }
+                    },
+                    else => return error.InvalidJsonShape,
+                }
+                // A value ended: close each container it finished, then step to
+                // the next element of the innermost open one.
+                while (depth > 0) {
+                    if (try self.consumeIf(closers[depth - 1])) {
+                        depth -= 1;
+                        continue;
+                    }
+                    try self.expectByte(',');
+                    if (closers[depth - 1] == '}') try self.skipKey(&discard);
+                    break;
+                }
+                if (depth == 0) return;
+            }
+        }
+
+        fn skipKey(self: *Parser, discard: *DiscardSink) !void {
+            try self.readJsonString(discard);
+            try self.expectByte(':');
+        }
+
+        /// A command's key. Keys under `reserved_key_prefix` are Rui's own
+        /// commands', so a client command cannot take one first.
+        fn readCommandKey(self: *Parser, key: *Bounded(max_key_bytes)) !void {
+            try self.readSmallString(key);
+            if (std.mem.startsWith(u8, key.slice(), reserved_key_prefix)) return error.ReservedCommandKey;
+        }
+
+        fn readSmallString(self: *Parser, destination: anytype) !void {
+            var sink = SmallSink(@TypeOf(destination.*)){ .destination = destination };
+            try self.readJsonString(&sink);
+            if (!std.unicode.utf8ValidateSlice(destination.slice())) return error.InvalidUtf8;
+        }
+
+        /// Reads the empty placeholder the Ingress left for a captured string.
+        fn readContentString(self: *Parser, field: *ContentField) !void {
+            self.content_ordinal += 1;
+            if (self.content_ordinal > self.captured.len) return error.NeedContent;
+            try self.expectByte('"');
+            if (try self.source.readByte() != '"') return error.InvalidJsonShape;
+            const original = self.captured[self.content_ordinal - 1];
+            // Speculative request disposal has no resource authority.
+            field.length = original.length;
+            field.digest = original.digest;
+            field.capture = self.content_ordinal;
+        }
+
+        fn readJsonString(self: *Parser, sink: anytype) !void {
+            try self.expectByte('"');
+            var decoder = StringDecoder{};
+            while (!try decoder.feed(try self.source.readByte(), sink)) {}
+        }
+
+        fn expectKey(self: *Parser, key: []const u8) !void {
+            try self.skipWhitespace();
+            try self.expectByte('"');
+            for (key) |expected| if (try self.source.readByte() != expected) return error.UnexpectedField;
+            if (try self.source.readByte() != '"') return error.UnexpectedField;
+            try self.expectByte(':');
+        }
+
+        fn expectByte(self: *Parser, expected: u8) !void {
+            try self.skipWhitespace();
+            if (try self.source.readByte() != expected) return error.InvalidJsonShape;
+        }
+
+        fn readBoolean(self: *Parser) !bool {
+            try self.skipWhitespace();
+            const first = try self.source.readByte();
+            const rest: []const u8 = switch (first) {
+                't' => "rue",
+                'f' => "alse",
+                else => return error.InvalidJsonShape,
+            };
+            for (rest) |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
+            return first == 't';
+        }
+
+        fn consumeIf(self: *Parser, expected: u8) !bool {
+            try self.skipWhitespace();
+            const byte = try self.source.readByte();
+            if (byte == expected) return true;
+            self.source.start -= 1;
+            return false;
+        }
+
+        fn skipWhitespace(self: *Parser) !void {
+            while (true) {
+                const byte = try self.source.readByte();
+                switch (byte) {
+                    ' ', '\t', '\r', '\n' => {},
+                    else => {
+                        self.source.start -= 1;
+                        return;
+                    },
+                }
+            }
+        }
+    };
+}
+
+pub const Utf8State = struct {
+    bytes: [4]u8 = undefined,
+    used: u3 = 0,
+    expected: u3 = 0,
+
+    pub fn feed(self: *Utf8State, input: []const u8) !void {
+        for (input) |byte| {
+            if (self.used == 0) {
+                if (byte < 0x80) continue;
+                self.expected = std.unicode.utf8ByteSequenceLength(byte) catch return error.InvalidUtf8;
+            }
+            self.bytes[self.used] = byte;
+            self.used += 1;
+            if (self.used == self.expected) {
+                _ = std.unicode.utf8Decode(self.bytes[0..self.expected]) catch return error.InvalidUtf8;
+                self.used = 0;
+                self.expected = 0;
+            }
+        }
+    }
+
+    pub fn complete(self: *const Utf8State) bool {
+        return self.used == 0;
     }
 };
 
 // Shared by the synchronous metadata grammar and suspended content ingestion.
 // The opening quote belongs to the caller; feed consumes through the closing
 // quote and never consumes subsequent syntax.
-const StringDecoder = struct {
+pub const StringDecoder = struct {
     state: enum { plain, escape, hex, surrogate_slash, surrogate_u } = .plain,
     digits: u3 = 0,
     value: u16 = 0,
     high_surrogate: ?u16 = null,
 
-    fn feed(self: *StringDecoder, byte: u8, sink: anytype) !bool {
+    pub fn feed(self: *StringDecoder, byte: u8, sink: anytype) !bool {
         switch (self.state) {
             .plain => switch (byte) {
                 '"' => {
@@ -2645,81 +2511,6 @@ const StringDecoder = struct {
     }
 };
 
-const ContentCapture = struct {
-    options: ParseOptions,
-    path: [max_store_bytes + "/scratch/request-".len + 20 + 1 + 3 + ".tmp".len]u8 = undefined,
-    path_len: usize,
-    sink: ContentSink,
-    writer_open: bool = true,
-    sealed: ?std.Io.File = null,
-    transferred: bool = false,
-
-    /// Opens the scratch file and builds the capture in place. On error
-    /// nothing is open and the capture is not live.
-    fn init(self: *ContentCapture, options: ParseOptions, ordinal: u8) !void {
-        if (options.content_faults.acquire) return error.InjectedContentAcquireFailure;
-        var name_buffer: [96]u8 = undefined;
-        const name = try named_scratch.NumericName.request.format(&name_buffer, options.request_number, ordinal);
-        const path = try std.fmt.bufPrint(&self.path, "{s}/{s}", .{ options.scratch_path, name });
-        const writer = try std.Io.Dir.createFileAbsolute(options.io, path, .{
-            .read = true,
-            .exclusive = true,
-            .permissions = .fromMode(0o600),
-        });
-        self.options = options;
-        self.path_len = path.len;
-        self.sink = .{ .io = options.io, .file = writer, .scratch_budget = options.scratch_budget };
-        self.writer_open = true;
-        self.sealed = null;
-        self.transferred = false;
-    }
-
-    fn seal(self: *ContentCapture) !ContentField {
-        if (self.options.content_faults.write) return error.InjectedContentWriteFailure;
-        try self.sink.finish();
-        if (self.options.content_faults.seal) return error.InjectedContentSealFailure;
-        self.sealed = try std.Io.Dir.openFileAbsolute(self.options.io, self.path[0..self.path_len], .{});
-        self.sink.file.close(self.options.io);
-        self.writer_open = false;
-        try std.Io.Dir.deleteFileAbsolute(self.options.io, self.path[0..self.path_len]);
-        self.transferred = true;
-        return .{
-            .state = .value,
-            .file = self.sealed.?,
-            .scratch_budget = self.sink.scratch_budget,
-            .charged = self.sink.charged,
-            .length = self.sink.length,
-            .digest = self.sink.hash.finalResult(),
-        };
-    }
-
-    fn deinit(self: *ContentCapture) void {
-        if (self.transferred) return;
-        const removed = if (std.Io.Dir.deleteFileAbsolute(self.options.io, self.path[0..self.path_len])) |_| true else |err| switch (err) {
-            error.FileNotFound => true,
-            else => false,
-        };
-        if (removed) {
-            if (self.writer_open) self.sink.file.close(self.options.io);
-            if (self.sealed) |file| file.close(self.options.io);
-            if (self.sink.scratch_budget) |budget| budget.release(self.sink.charged);
-        } else {
-            const retained = self.options.retained_scratch;
-            std.debug.assert(retained.* == null);
-            retained.* = named_scratch.Owner.init(
-                self.options.io,
-                if (self.writer_open) self.sink.file else self.sealed.?,
-                if (self.writer_open) self.sealed else null,
-                std.fs.path.basename(self.path[0..self.path_len]),
-                self.sink.scratch_budget,
-                self.sink.charged,
-                .native,
-            );
-        }
-        self.transferred = true;
-    }
-};
-
 const DiscardSink = struct {
     fn write(_: *DiscardSink, _: []const u8) !void {}
     fn endString(_: *DiscardSink) !void {}
@@ -2739,80 +2530,6 @@ fn SmallSink(comptime T: type) type {
     };
 }
 
-const ContentSink = struct {
-    scratch_budget: ?ScratchBudget = null,
-    charged: u64 = 0,
-    io: std.Io,
-    file: std.Io.File,
-    buffer: [content_window_bytes]u8 = undefined,
-    used: usize = 0,
-    length: u64 = 0,
-    hash: std.crypto.hash.sha2.Sha256 = contentHasher(),
-    utf8: Utf8State = .{},
-
-    fn write(self: *ContentSink, bytes: []const u8) !void {
-        const next_length = std.math.add(u64, self.length, bytes.len) catch return error.ContentTooLarge;
-        if (next_length > max_sqlite_content_bytes) return error.ContentTooLarge;
-        try self.utf8.feed(bytes);
-        self.hash.update(bytes);
-        self.length = next_length;
-        var offset: usize = 0;
-        while (offset < bytes.len) {
-            const count = @min(self.buffer.len - self.used, bytes.len - offset);
-            @memcpy(self.buffer[self.used..][0..count], bytes[offset..][0..count]);
-            self.used += count;
-            offset += count;
-            if (self.used == self.buffer.len) try self.flush();
-        }
-    }
-
-    fn endString(self: *ContentSink) !void {
-        if (!self.utf8.complete()) return error.InvalidUtf8;
-    }
-
-    fn finish(self: *ContentSink) !void {
-        try self.flush();
-    }
-
-    fn flush(self: *ContentSink) !void {
-        if (self.used == 0) return;
-        if (self.scratch_budget) |budget| {
-            if (!budget.allocate(self.used)) return error.ScratchCapacityExhausted;
-            // A failed streaming write may have written a prefix. Retain the
-            // complete submitted increment until this file is safely removed.
-            self.charged += self.used;
-        }
-        try self.file.writeStreamingAll(self.io, self.buffer[0..self.used]);
-        self.used = 0;
-    }
-};
-
-pub const Utf8State = struct {
-    bytes: [4]u8 = undefined,
-    used: u3 = 0,
-    expected: u3 = 0,
-
-    pub fn feed(self: *Utf8State, input: []const u8) !void {
-        for (input) |byte| {
-            if (self.used == 0) {
-                if (byte < 0x80) continue;
-                self.expected = std.unicode.utf8ByteSequenceLength(byte) catch return error.InvalidUtf8;
-            }
-            self.bytes[self.used] = byte;
-            self.used += 1;
-            if (self.used == self.expected) {
-                _ = std.unicode.utf8Decode(self.bytes[0..self.expected]) catch return error.InvalidUtf8;
-                self.used = 0;
-                self.expected = 0;
-            }
-        }
-    }
-
-    pub fn complete(self: *const Utf8State) bool {
-        return self.used == 0;
-    }
-};
-
 pub fn maximumJsonStringBytes(input_bytes: usize) usize {
     return 2 + 6 * input_bytes;
 }
@@ -2830,7 +2547,7 @@ pub const Hole = union(enum) {
     tag: type,
     /// A `?E` for this enum `E`, as a JSON string of its tag name or `null`.
     optional_tag: type,
-    /// A `std.EnumSet(E)`, as a JSON array of its tag names in tag order.
+    /// A `std.enums.EnumSet(E)`, as a JSON array of its tag names in tag order.
     tag_set: type,
     /// At most this many bytes, as a JSON string.
     string: usize,
@@ -2908,7 +2625,7 @@ pub fn writeShape(out: *std.Io.Writer, comptime shape: anytype, args: anytype) !
                 .tag_set => |T| {
                     try out.writeByte('[');
                     var first = true;
-                    for (std.meta.tags(T)) |tag| if (@as(std.EnumSet(T), argument).contains(tag)) {
+                    for (std.meta.tags(T)) |tag| if (@as(std.enums.EnumSet(T), argument).contains(tag)) {
                         if (!first) try out.writeByte(',');
                         first = false;
                         try out.print("\"{s}\"", .{@tagName(tag)});
@@ -3414,30 +3131,24 @@ pub const RequestBuffer = FixedJsonBuffer(max_client_request_bytes);
 pub const ResponseBuffer = FixedJsonBuffer(max_response_bytes);
 pub const CommandObservationBuffer = FixedJsonBuffer(command_observation_reply.max_bytes);
 
-fn parseForTest(parser: *Parser) !Request {
-    var request: Request = undefined;
+/// Value-only custody for this file's tests: a parsed Request's content
+/// holds no file until wire_request.zig's ingress hands it one.
+const TestCustody = struct {
+    pub const File = struct {};
+    pub const Budget = struct {};
+    pub const Io = void;
+    pub fn release(_: ?File, _: ?Budget, _: u64, _: Io) void {}
+};
+const Tested = Requests(TestCustody);
+
+fn parseForTest(parser: *Tested.Parser) !Tested.Request {
+    var request: Tested.Request = undefined;
     try parser.parse(&request);
     return request;
 }
 
-/// Captures one JSON string the way Ingress.feed does, into `field`.
-fn captureForTest(field: *ContentField, options: ParseOptions, ordinal: u8, json: []const u8) !void {
-    std.debug.assert(json[0] == '"');
-    var capture: ContentCapture = undefined;
-    try capture.init(options, ordinal);
-    defer capture.deinit();
-    var decoder: StringDecoder = .{};
-    for (json[1..]) |byte| {
-        if (try decoder.feed(byte, &capture.sink)) {
-            field.* = try capture.seal();
-            return;
-        }
-    }
-    return error.UnexpectedEndOfBody;
-}
-
 test "semantic digest distinguishes omission, null, and value" {
-    var omitted = ConfigureCommand{};
+    var omitted = Tested.ConfigureCommand{};
     try omitted.session.set("s");
     var null_schema = omitted;
     null_schema.configuration.output_schema.state = .explicit_null;
@@ -3446,7 +3157,7 @@ test "semantic digest distinguishes omission, null, and value" {
     value_schema.configuration.output_schema.digest = @splat(1);
     try std.testing.expect(!std.mem.eql(u8, &omitted.semanticDigest(), &null_schema.semanticDigest()));
     try std.testing.expect(!std.mem.eql(u8, &null_schema.semanticDigest(), &value_schema.semanticDigest()));
-    var efforts: [4]ConfigureCommand = @splat(omitted);
+    var efforts: [4]Tested.ConfigureCommand = @splat(omitted);
     efforts[1].configuration.reasoning_effort.state = .explicit_null;
     efforts[2].configuration.reasoning_effort.state = .value;
     try efforts[2].configuration.reasoning_effort.value.set("none");
@@ -3459,7 +3170,7 @@ test "semantic digest distinguishes omission, null, and value" {
 }
 
 test "Request Store borrow remains in its active union payload" {
-    var requests = [_]Request{
+    var requests = [_]Tested.Request{
         .{ .configure = .{} },
         .{ .message = .{} },
         .{ .session_stop = .{} },
@@ -3482,116 +3193,6 @@ test "Request Store borrow remains in its active union payload" {
     };
 }
 
-test "captured content cleanup closes sealed custody" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const file = try tmp.dir.createFile(std.testing.io, "content", .{ .read = true });
-    var content: ContentField = .{ .state = .value, .file = file };
-    try removeContent(&content, std.testing.io);
-    try std.testing.expect(!content.hasFile());
-}
-
-test "configuration content sealing peaks at four descriptors with its socket" {
-    const Probe = struct {
-        var live_files: usize = 0;
-        var maximum_live_files: usize = 0;
-        var directory_opens: usize = 0;
-
-        fn createFile(
-            userdata: ?*anyopaque,
-            dir: std.Io.Dir,
-            path: []const u8,
-            options: std.Io.Dir.CreateFileOptions,
-        ) std.Io.File.OpenError!std.Io.File {
-            const file = try std.testing.io.vtable.dirCreateFile(userdata, dir, path, options);
-            live_files += 1;
-            maximum_live_files = @max(maximum_live_files, live_files);
-            return file;
-        }
-
-        fn openFile(
-            userdata: ?*anyopaque,
-            dir: std.Io.Dir,
-            path: []const u8,
-            options: std.Io.Dir.OpenFileOptions,
-        ) std.Io.File.OpenError!std.Io.File {
-            const file = try std.testing.io.vtable.dirOpenFile(userdata, dir, path, options);
-            live_files += 1;
-            maximum_live_files = @max(maximum_live_files, live_files);
-            return file;
-        }
-
-        fn closeFiles(userdata: ?*anyopaque, files: []const std.Io.File) void {
-            std.debug.assert(live_files >= files.len);
-            live_files -= files.len;
-            std.testing.io.vtable.fileClose(userdata, files);
-        }
-
-        fn openDir(
-            userdata: ?*anyopaque,
-            dir: std.Io.Dir,
-            path: []const u8,
-            options: std.Io.Dir.OpenOptions,
-        ) std.Io.Dir.OpenError!std.Io.Dir {
-            directory_opens += 1;
-            return std.testing.io.vtable.dirOpenDir(userdata, dir, path, options);
-        }
-    };
-    Probe.live_files = 0;
-    Probe.maximum_live_files = 0;
-    Probe.directory_opens = 0;
-
-    var vtable = std.testing.io.vtable.*;
-    vtable.dirCreateFile = Probe.createFile;
-    vtable.dirOpenFile = Probe.openFile;
-    vtable.fileClose = Probe.closeFiles;
-    vtable.dirOpenDir = Probe.openDir;
-    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(std.testing.io, &root);
-    var retained: ?named_scratch.Owner = null;
-    const options: ParseOptions = .{
-        .io = io,
-        .content_length = 22,
-        .scratch_path = root[0..root_len],
-        .request_number = 1,
-        .retained_scratch = &retained,
-    };
-    var instructions = ContentField{};
-    errdefer removeContent(&instructions, io) catch unreachable;
-    var output_schema = ContentField{};
-    errdefer removeContent(&output_schema, io) catch unreachable;
-    try captureForTest(&instructions, options, 1, "\"instructions\"");
-    try captureForTest(&output_schema, options, 2, "\"schema\"");
-    try std.testing.expectEqual(@as(usize, 4), 1 + Probe.maximum_live_files);
-    try std.testing.expectEqual(@as(usize, 0), Probe.directory_opens);
-    try removeContent(&output_schema, io);
-    try removeContent(&instructions, io);
-    try std.testing.expectEqual(@as(usize, 0), Probe.live_files);
-}
-
-test "content sink enforces the decoded consumer boundary before retention" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const file = try tmp.dir.createFile(std.testing.io, "content", .{});
-    defer file.close(std.testing.io);
-
-    var escaped = ContentSink{ .io = std.testing.io, .file = file };
-    escaped.length = max_sqlite_content_bytes - 1;
-    try escaped.write("\n");
-    try std.testing.expectEqual(max_sqlite_content_bytes, escaped.length);
-    try std.testing.expectError(error.ContentTooLarge, escaped.write("x"));
-    try escaped.finish();
-    try std.testing.expectEqual(@as(u64, 1), try file.length(std.testing.io));
-
-    var multibyte = ContentSink{ .io = std.testing.io, .file = file };
-    multibyte.length = max_sqlite_content_bytes - 3;
-    try multibyte.write("€");
-    try std.testing.expectEqual(max_sqlite_content_bytes, multibyte.length);
-    try std.testing.expectError(error.ContentTooLarge, multibyte.write("x"));
-}
 test "fixed JSON buffers preserve control bytes and enforce capacity" {
     var response: ResponseBuffer = .{};
     try response.appendJsonString("\x00\x1f\"\\\n\r\t\x08\x0c\xc3\xa9");
@@ -3600,127 +3201,6 @@ test "fixed JSON buffers preserve control bytes and enforce capacity" {
     try response.appendJsonString("");
     try std.testing.expectEqual(response.bytes.len, response.len);
     try std.testing.expectError(error.BufferTooLarge, response.appendJsonString("x"));
-}
-test "ingress charges decoded growth and transfers file charge through cleanup" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &root);
-    var used = std.atomic.Value(u64).init(0);
-    var retained: ?named_scratch.Owner = null;
-    for ([_][]const u8{ "\"abc\"", "\"\\u0061\\u0062\\u0063\"" }, 0..) |json, ordinal| {
-        var field = ContentField{};
-        try captureForTest(&field, .{
-            .io = io,
-            .content_length = 999999,
-            .scratch_path = root[0..n],
-            .request_number = ordinal,
-            .retained_scratch = &retained,
-            .scratch_budget = .{ .used = &used, .limit = 3 },
-        }, 1, json);
-        try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
-        try std.testing.expectEqual(@as(u64, 3), field.length);
-        try removeContent(&field, io);
-        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-    }
-    const file = try tmp.dir.createFile(io, "bounded", .{});
-    defer file.close(io);
-    var sink = ContentSink{ .io = io, .file = file, .scratch_budget = .{ .used = &used, .limit = 3 } };
-    try sink.write("abcd");
-    try std.testing.expectError(error.ScratchCapacityExhausted, sink.finish());
-    try std.testing.expectEqual(@as(u64, 0), try file.length(io));
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-}
-
-test "failed ingress unlink retains an actionable owner and only the affected charge" {
-    const FailDelete = struct {
-        fn delete(_: ?*anyopaque, _: std.Io.Dir, _: []const u8) std.Io.Dir.DeleteFileError!void {
-            return error.AccessDenied;
-        }
-    };
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &root);
-    var used = std.atomic.Value(u64).init(0);
-    var vtable = io.vtable.*;
-    vtable.dirDeleteFile = FailDelete.delete;
-    const failing_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    var retained: ?named_scratch.Owner = null;
-    const json = "\"abc\"";
-    const options: ParseOptions = .{
-        .io = failing_io,
-        .content_length = json.len,
-        .scratch_path = root[0..n],
-        .request_number = 1,
-        .retained_scratch = &retained,
-        .scratch_budget = .{ .used = &used, .limit = 8 },
-    };
-    const good_file = try tmp.dir.createFile(io, "good", .{});
-    try good_file.writeStreamingAll(io, "ok");
-    try tmp.dir.deleteFile(io, "good");
-    const budget = ScratchBudget{ .used = &used, .limit = 8 };
-    try std.testing.expect(budget.charge(2));
-    var good_field = ContentField{ .file = good_file, .scratch_budget = budget, .charged = 2 };
-    var field = ContentField{};
-    try std.testing.expectError(error.AccessDenied, captureForTest(&field, options, 1, json));
-    try std.testing.expect(!field.hasFile());
-    try std.testing.expectEqual(@as(u64, 5), used.load(.acquire));
-    try removeContent(&good_field, io);
-    try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 3), (try tmp.dir.statFile(io, "request-1-1.tmp", .{})).size);
-    try std.testing.expect(retained != null);
-    try std.testing.expectError(error.AccessDenied, retained.?.reclaim(root[0..n]));
-    try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
-    vtable.dirDeleteFile = io.vtable.dirDeleteFile;
-    try std.testing.expectEqual(named_scratch.Reclamation.removed, try retained.?.reclaim(root[0..n]));
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "request-1-1.tmp", .{}));
-}
-
-test "ingress unknown write failure keeps submitted charge until close" {
-    const FailWrite = struct {
-        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-            if (operation == .file_write_streaming) return .{ .file_write_streaming = error.NoSpaceLeft };
-            return std.testing.io.vtable.operate(userdata, operation);
-        }
-    };
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const file = try tmp.dir.createFile(io, "failed", .{});
-    var used = std.atomic.Value(u64).init(0);
-    var vtable = io.vtable.*;
-    vtable.operate = FailWrite.operate;
-    const failing_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    var sink = ContentSink{ .io = failing_io, .file = file, .scratch_budget = .{ .used = &used, .limit = 3 } };
-    try sink.write("abc");
-    try std.testing.expectError(error.NoSpaceLeft, sink.finish());
-    try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
-    try tmp.dir.deleteFile(io, "failed");
-    var field = ContentField{ .file = file, .scratch_budget = sink.scratch_budget, .charged = sink.charged };
-    try removeContent(&field, io);
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-}
-
-test "observation needs no scratch at a full budget" {
-    const json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":\"store\",\"key\":\"key\"}";
-    var source: MetadataSource = .{ .input = json };
-    var used = std.atomic.Value(u64).init(3);
-    var retained: ?named_scratch.Owner = null;
-    var parser = Parser{ .source = &source, .options = .{
-        .io = std.testing.io,
-        .content_length = json.len,
-        .scratch_path = "unused",
-        .request_number = 0,
-        .retained_scratch = &retained,
-        .scratch_budget = .{ .used = &used, .limit = 3 },
-    } };
-    const request = try parseForTest(&parser);
-    try std.testing.expect(request == .observe_command);
-    try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
 }
 
 test "Conversation content stream wire requires start zero and literal true" {
@@ -3736,8 +3216,7 @@ test "Conversation content stream wire requires start zero and literal true" {
         var buffer: [512]u8 = undefined;
         const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_content\",\"store\":\"s\",\"session\":\"x\",\"position\":\"1\",\"ordinal\":\"0\",\"start\":{s}", .{case.suffix});
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Tested.Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
         } else {
@@ -3764,8 +3243,7 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
         var buffer: [512]u8 = undefined;
         const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_page\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.body});
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Tested.Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
         } else {
@@ -3793,8 +3271,7 @@ test "an activity page names its kinds once each, in order, and a limit from 1 t
         var buffer: [512]u8 = undefined;
         const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":\"s\",\"session\":\"x\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":{s}}}", .{case.body});
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Tested.Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
         } else {
@@ -3847,8 +3324,7 @@ test "configuration token heuristics and effort parse sparsely and bind idempote
             "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
             "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"omitted\"}},\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}{s}}}}}", .{case.suffix});
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Tested.Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
             continue;
@@ -3901,14 +3377,7 @@ test "configuration provider envelope preserves exact spelling and omission" {
             .{ case.field, case.suffix },
         );
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = json.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
+        var parser = Tested.Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
             continue;
@@ -3957,14 +3426,7 @@ test "configuration tools and loaded tools are tool names, sorted, each once" {
                 "\"" ++ field_name ++ "\":{{\"state\":\"value\",\"value\":{s}}}," ++
                 "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}}}", .{case.value});
             var source: MetadataSource = .{ .input = json };
-            var retained: ?named_scratch.Owner = null;
-            var parser = Parser{ .source = &source, .options = .{
-                .io = std.testing.io,
-                .content_length = json.len,
-                .scratch_path = "unused",
-                .request_number = 0,
-                .retained_scratch = &retained,
-            } };
+            var parser = Tested.Parser{ .source = &source };
             if (case.failure) |failure| {
                 try std.testing.expectError(failure, parseForTest(&parser));
             } else {
@@ -4028,18 +3490,11 @@ test "Session inspection selects a closed report profile or exact failed respons
     };
     for (cases) |case| {
         var source: MetadataSource = .{ .input = case.json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = case.json.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
+        var parser = Tested.Parser{ .source = &source };
         if (case.expected) |expected| {
             const request = try parseForTest(&parser);
             try std.testing.expectEqual(expected, request.inspect_session.profile);
-            try std.testing.expectEqualDeep(case.failed_response, request.inspect_session.failed_response);
+            try std.testing.expectEqual(case.failed_response, request.inspect_session.failed_response);
         } else {
             try std.testing.expectError(error.UnknownReportProfile, parseForTest(&parser));
         }
@@ -4077,14 +3532,7 @@ test "Session listing wire distinguishes all, exact workspace, continuation, sin
     };
     for (cases) |case| {
         var source: MetadataSource = .{ .input = case.json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = case.json.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
+        var parser = Tested.Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
             continue;
@@ -4113,8 +3561,7 @@ test "a client command cannot take a key Rui keeps for its own commands" {
         var buffer: [256]u8 = undefined;
         const json = try std.fmt.bufPrint(&buffer, "{s}{s},\"session\":\"peer\"}}", .{ head, case.key });
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Tested.Parser{ .source = &source };
         if (case.failure) |failure| try std.testing.expectError(failure, parseForTest(&parser)) else _ = try parseForTest(&parser);
     }
 }
@@ -4142,15 +3589,13 @@ test "protocol peer Store address wire parsing accepts opaque ids and preserves 
         var buffer: [512]u8 = undefined;
         const json = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ prefix, case.store, suffix });
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
         // Ingress has replaced its captured content with an empty placeholder.
-        var parser = Parser{ .source = &source, .captured = &.{.{}}, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Tested.Parser{ .source = &source, .captured = &.{.{}} };
         if (case.valid) {
             const request = try parseForTest(&parser);
             try std.testing.expectEqualStrings(case.store, request.message.sender.?.store.slice());
             try std.testing.expectEqualStrings("k7m2qx", request.message.sender.?.session.slice());
         } else try std.testing.expectError(error.InvalidRuiAddress, parseForTest(&parser));
-        try std.testing.expect(retained == null);
     }
 }
 
@@ -4165,356 +3610,17 @@ test "peer wire rejects old sender strings, malformed addresses and missing hand
     };
     for (cases) |case| {
         var source: MetadataSource = .{ .input = case.json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = case.json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Tested.Parser{ .source = &source };
         try std.testing.expectError(case.failure, parseForTest(&parser));
-        try std.testing.expect(retained == null);
     }
-}
-
-test "incremental ingress streams fragmented content and transfers charged custody only at complete framing" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(io, &root);
-    const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"p\\u0000é\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
-    const encoded = @as([8193]u8, @splat('x')) ++ "\\n\\ud83d\\ude42\\u0000é\\\"\\\\";
-    const expected = @as([8193]u8, @splat('x')) ++ "\n🙂\x00é\"\\";
-    const suffix = "\"}}";
-    var used = std.atomic.Value(u64).init(0);
-    var retained: ?named_scratch.Owner = null;
-    var ingress: Ingress = undefined;
-    ingress.init(std.testing.allocator, .{
-        .io = io,
-        .content_length = prefix.len + encoded.len + suffix.len,
-        .scratch_path = root[0..root_len],
-        .request_number = 42,
-        .retained_scratch = &retained,
-        .scratch_budget = .{ .used = &used, .limit = expected.len },
-        .expected_kind = .message,
-    });
-    defer ingress.deinit();
-    for (prefix ++ encoded) |byte| try ingress.feed(&.{byte});
-    try std.testing.expectEqual(@as(u64, 8192), used.load(.acquire));
-    try std.testing.expectError(error.UnexpectedEndOfBody, ingress.finish());
-    for (suffix) |byte| try ingress.feed(&.{byte});
-    const request = try ingress.finish();
-    defer request.removeTemporaryContent(io) catch unreachable;
-    // Disposing the exchange's parser cannot refund or close admitted ingress.
-    ingress.deinit();
-    try std.testing.expectEqual(@as(u64, expected.len), used.load(.acquire));
-    try std.testing.expectEqualStrings("p\x00é", request.message.session.slice());
-    var actual: [expected.len]u8 = undefined;
-    try std.testing.expectEqual(actual.len, try request.message.text.file.?.readPositionalAll(io, &actual, 0));
-    try std.testing.expectEqualStrings(expected, &actual);
-    var hash = contentHasher();
-    hash.update(expected);
-    try std.testing.expectEqualSlices(u8, &hash.finalResult(), &request.message.text.digest);
-    try request.removeTemporaryContent(io);
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-    try std.testing.expect(retained == null);
-}
-
-test "initial Message ingress retains text custody and rejects extra content before capture" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(io, &root);
-    const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
-        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"value\",\"value\":\"model\"},\"instructions\":";
-    const between = ",\"tools\":{\"state\":\"value\",\"value\":[]},\"permission_mode\":{\"state\":\"value\",\"value\":\"default\"},\"compaction_trigger\":{\"state\":\"value\",\"value\":\"1000\"},\"reasoning_effort\":{\"state\":\"null\"},\"output_schema\":";
-    const suffix = "},\"text\":{\"state\":\"value\",\"value\":\"assignment\\u0000雪\\n\\n\"}}";
-    const omitted = "{\"state\":\"omitted\"}";
-    const value = "{\"state\":\"value\",\"value\":\"rules\\n\"}";
-    const json = prefix ++ omitted ++ between ++ omitted ++ suffix;
-    const expected = "assignment\x00雪\n\n";
-    var used = std.atomic.Value(u64).init(0);
-    var retained: ?named_scratch.Owner = null;
-    const options: ParseOptions = .{
-        .io = io,
-        .content_length = json.len,
-        .scratch_path = root[0..root_len],
-        .request_number = 43,
-        .retained_scratch = &retained,
-        .scratch_budget = .{ .used = &used, .limit = expected.len },
-        .expected_kind = .message,
-    };
-    var ingress: Ingress = undefined;
-    ingress.init(std.testing.allocator, options);
-    defer ingress.deinit();
-    for (json) |byte| try ingress.feed(&.{byte});
-    const request = try ingress.finish();
-    defer request.removeTemporaryContent(io) catch unreachable;
-    ingress.deinit();
-    try std.testing.expectEqual(.omitted, request.message.configuration.?.instructions.state);
-    try std.testing.expectEqual(.omitted, request.message.configuration.?.output_schema.state);
-    try std.testing.expectEqual(@as(u64, expected.len), used.load(.acquire));
-    var actual: [64]u8 = undefined;
-    const count = try request.message.text.file.?.readPositionalAll(io, &actual, 0);
-    try std.testing.expectEqualStrings(expected, actual[0..count]);
-    var hash = contentHasher();
-    hash.update(expected);
-    try std.testing.expectEqualSlices(u8, &hash.finalResult(), &request.message.text.digest);
-    try request.removeTemporaryContent(io);
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-    try std.testing.expect(retained == null);
-    inline for (.{ prefix ++ value ++ between ++ omitted ++ suffix, prefix ++ omitted ++ between ++ value ++ suffix }) |invalid| {
-        var rejection_options = options;
-        rejection_options.content_length = invalid.len;
-        var rejected: Ingress = undefined;
-        rejected.init(std.testing.allocator, rejection_options);
-        defer rejected.deinit();
-        try std.testing.expectError(error.InvalidFieldState, rejected.feed(invalid));
-        try std.testing.expectEqual(@as(usize, 0), rejected.content_count);
-        try std.testing.expect(rejected.content_state != .capturing);
-        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-    }
-}
-
-test "only a creating Message carries require_model, and it binds the digest" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(io, &root);
-    const creating = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
-        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"value\",\"value\":\"model\"},\"instructions\":{\"state\":\"omitted\"}," ++
-        "\"tools\":{\"state\":\"value\",\"value\":[]},\"permission_mode\":{\"state\":\"value\",\"value\":\"default\"},\"compaction_trigger\":{\"state\":\"value\",\"value\":\"1000\"},\"reasoning_effort\":{\"state\":\"null\"},\"output_schema\":{\"state\":\"omitted\"}},\"text\":{\"state\":\"value\",\"value\":\"go\"}";
-    const addressed = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"go\"}";
-    const cases = [_]struct { bytes: []const u8, require_model: bool = false, failure: ?anyerror = null }{
-        .{ .bytes = creating ++ "}" },
-        .{ .bytes = creating ++ ",\"require_model\":false}" },
-        .{ .bytes = creating ++ ",\"require_model\":true}", .require_model = true },
-        .{ .bytes = creating ++ ",\"require_model\":1}", .failure = error.InvalidJsonShape },
-        .{ .bytes = creating ++ ",\"required_model\":true}", .failure = error.UnexpectedField },
-        .{ .bytes = addressed ++ "}" },
-        .{ .bytes = addressed ++ ",\"require_model\":true}", .failure = error.InvalidMessage },
-        .{ .bytes = addressed ++ ",\"require_model\":false}", .failure = error.InvalidMessage },
-    };
-    var digests: [cases.len][32]u8 = undefined;
-    for (cases, 0..) |case, index| {
-        var used = std.atomic.Value(u64).init(0);
-        var retained: ?named_scratch.Owner = null;
-        var ingress: Ingress = undefined;
-        ingress.init(std.testing.allocator, .{
-            .io = io,
-            .content_length = case.bytes.len,
-            .scratch_path = root[0..root_len],
-            .request_number = 44,
-            .retained_scratch = &retained,
-            .scratch_budget = .{ .used = &used, .limit = 16 },
-            .expected_kind = .message,
-        });
-        defer ingress.deinit();
-        if (case.failure) |failure| {
-            const result = if (ingress.feed(case.bytes)) |_| ingress.finish() else |err| err;
-            try std.testing.expectError(failure, result);
-            continue;
-        }
-        try ingress.feed(case.bytes);
-        const request = try ingress.finish();
-        defer request.removeTemporaryContent(io) catch unreachable;
-        try std.testing.expectEqual(case.require_model, request.message.require_model);
-        digests[index] = request.message.semanticDigest();
-    }
-    // An explicit false is the omitted condition; true is a different intent.
-    try std.testing.expectEqualSlices(u8, &digests[0], &digests[1]);
-    try std.testing.expect(!std.mem.eql(u8, &digests[0], &digests[2]));
-    try std.testing.expect(!std.mem.eql(u8, &digests[0], &digests[5]));
-}
-
-test "incremental ingress preserves grammar and releases both captures after late failure" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(io, &root);
-    const configure = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{" ++
-        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"}," ++
-        "\"instructions\":{\"state\":\"value\",\"value\":\"first\\n\"},\"tools\":{\"state\":\"omitted\"}," ++
-        "\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":{\"state\":\"value\",\"value\":\"{}\"}}";
-    const cases = [_]struct { bytes: []const u8, kind: Kind = .configure, failure: ?anyerror = null }{
-        .{ .bytes = configure ++ "}" },
-        .{ .bytes = configure ++ ",\"require_model\":true}" },
-        .{ .bytes = configure ++ ",\"require_model\":t rue}", .failure = error.InvalidJsonShape },
-        .{ .bytes = configure ++ "} ", .failure = error.TrailingInput },
-        .{ .bytes = configure ++ ",\"extra\":true}", .failure = error.UnexpectedField },
-        .{ .bytes = configure ++ "}", .kind = .session_stop, .failure = error.RouteKindMismatch },
-        .{ .bytes = configure, .failure = error.UnexpectedEndOfBody },
-    };
-    var used = std.atomic.Value(u64).init(0);
-    var retained: ?named_scratch.Owner = null;
-    for (cases, 0..) |case, index| {
-        // Every split of this small command must have the same grammar and
-        // capture lifetime, including suspension between surrogate/quote bytes.
-        for (0..case.bytes.len + 1) |split| {
-            var ingress: Ingress = undefined;
-            ingress.init(std.testing.allocator, .{
-                .io = io,
-                .content_length = case.bytes.len,
-                .scratch_path = root[0..root_len],
-                .request_number = index,
-                .retained_scratch = &retained,
-                .scratch_budget = .{ .used = &used, .limit = 8 },
-                .expected_kind = case.kind,
-                // A mismatched kind must fail before file acquisition.
-                .content_faults = .{ .acquire = case.kind != .configure },
-            });
-            const result: anyerror!*Request = blk: {
-                ingress.feed(case.bytes[0..split]) catch |err| break :blk err;
-                ingress.feed(case.bytes[split..]) catch |err| break :blk err;
-                break :blk ingress.finish();
-            };
-            if (case.failure) |failure| {
-                try std.testing.expectError(failure, result);
-            } else {
-                const request = try result;
-                try std.testing.expectEqual(@as(u64, 8), used.load(.acquire));
-                try std.testing.expectEqual(index == 1, request.configure.require_model);
-                const fields = [_]ContentField{ request.configure.configuration.instructions, request.configure.configuration.output_schema };
-                const expected = [_][]const u8{ "first\n", "{}" };
-                for (fields, expected) |field, bytes| {
-                    var buffer: [8]u8 = undefined;
-                    const count = try field.file.?.readPositionalAll(io, &buffer, 0);
-                    try std.testing.expectEqualStrings(bytes, buffer[0..count]);
-                }
-                try request.removeTemporaryContent(io);
-            }
-            ingress.deinit();
-            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-            try std.testing.expect(retained == null);
-        }
-    }
-}
-
-test "a request's members may come in any order, and its content lands in its own field" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(io, &root);
-    // The output schema arrives before the instructions, values before
-    // states, and the header last.
-    const reordered = "{\"configuration\":{\"output_schema\":{\"value\":\"{}\",\"state\":\"value\"},\"label\":{\"value\":\"Map\",\"state\":\"value\"}," ++
-        "\"tools\":{\"value\":[\"bash\"],\"state\":\"value\"},\"permission_mode\":{\"state\":\"omitted\"},\"instructions\":{\"value\":\"first\\n\",\"state\":\"value\"}," ++
-        "\"model\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"workspace\":{\"state\":\"omitted\"}}," ++
-        "\"require_model\":true,\"session\":\"peer\",\"key\":\"k\",\"store\":\"s\",\"kind\":\"configure\",\"version\":\"" ++ wire_version ++ "\"}";
-    const ordered = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{" ++
-        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"}," ++
-        "\"instructions\":{\"state\":\"value\",\"value\":\"first\\n\"},\"tools\":{\"state\":\"value\",\"value\":[\"bash\"]}," ++
-        "\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":{\"state\":\"value\",\"value\":\"{}\"},\"label\":{\"state\":\"value\",\"value\":\"Map\"}},\"require_model\":true}";
-    var used = std.atomic.Value(u64).init(0);
-    var retained: ?named_scratch.Owner = null;
-    var digests: [2][32]u8 = undefined;
-    for ([_][]const u8{ ordered, reordered }, 0..) |bytes, index| {
-        // Every split suspends capture at a different byte.
-        for (0..bytes.len + 1) |split| {
-            var ingress: Ingress = undefined;
-            ingress.init(std.testing.allocator, .{
-                .io = io,
-                .content_length = bytes.len,
-                .scratch_path = root[0..root_len],
-                .request_number = index,
-                .retained_scratch = &retained,
-                .scratch_budget = .{ .used = &used, .limit = 8 },
-                .expected_kind = .configure,
-            });
-            defer ingress.deinit();
-            try ingress.feed(bytes[0..split]);
-            try ingress.feed(bytes[split..]);
-            const request = try ingress.finish();
-            defer request.removeTemporaryContent(io) catch unreachable;
-            const configuration = request.configure.configuration;
-            try std.testing.expect(request.configure.require_model);
-            try std.testing.expectEqualStrings("Map", configuration.label.value.slice());
-            try std.testing.expectEqual(@as(u2, 1), configuration.tools.count);
-            const fields = [_]ContentField{ configuration.instructions, configuration.output_schema };
-            for (fields, [_][]const u8{ "first\n", "{}" }) |field, expected| {
-                var buffer: [8]u8 = undefined;
-                const count = try field.file.?.readPositionalAll(io, &buffer, 0);
-                try std.testing.expectEqualStrings(expected, buffer[0..count]);
-            }
-            digests[index] = request.configure.semanticDigest();
-        }
-    }
-    try std.testing.expectEqualSlices(u8, &digests[0], &digests[1]);
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-}
-
-test "an order-free request still names each member once, carries every required one, and holds content only where its kind allows" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(io, &root);
-    const header = "\"version\":\"" ++ wire_version ++ "\",\"store\":\"s\"";
-    const omitted = "{\"state\":\"omitted\"}";
-    const value = "{\"value\":\"x\",\"state\":\"value\"}";
-    const configuration = "{\"workspace\":" ++ omitted ++ ",\"provider\":" ++ omitted ++ ",\"model\":" ++ omitted ++ ",\"tools\":" ++ omitted ++
-        ",\"permission_mode\":" ++ omitted;
-    const cases = [_]struct { json: []const u8, failure: ?anyerror = null }{
-        .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\"," ++ header ++ "}" },
-        .{ .json = "{\"archived\":false,\"session\":\"x\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"session_archive\"}" },
-        .{ .json = "{\"target\":{\"operation\":\"2\",\"turn\":\"1\",\"session\":\"x\"},\"key\":\"k\"," ++ header ++ ",\"kind\":\"model_interruption\"}" },
-        .{ .json = "{\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":{\"session\":\"k7m2qx\",\"store\":\"/s\"},\"session\":\"x\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}" },
-        .{ .json = "{\"attempt\":\"1\",\"operation\":\"2\",\"failed_response\":\"body\",\"session\":\"x\",\"kind\":\"inspect_session\"," ++ header ++ "}" },
-        .{ .json = "{\"session\":\"x\",\"kind\":\"session_stop\"," ++ header ++ "}", .failure = error.MissingField },
-        .{ .json = "{\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.MissingField },
-        .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\",\"store\":\"s\"}", .failure = error.MissingField },
-        .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\",\"kind\":\"session_stop\"," ++ header ++ "}", .failure = error.UnexpectedField },
-        .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"session\":\"y\",\"kind\":\"session_stop\"," ++ header ++ "}", .failure = error.UnexpectedField },
-        .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\",\"extra\":[[[[[\"deep\"]]]]]," ++ header ++ "}", .failure = error.InvalidJsonShape },
-        .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\",\"extra\":{\"a\":[1]}," ++ header ++ "}", .failure = error.InvalidJsonShape },
-        .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\",\"extra\":{\"a\":[true,null]}," ++ header ++ "}", .failure = error.UnexpectedField },
-        .{ .json = "{\"kind\":\"session_stop\",\"text\":" ++ value ++ ",\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.UnexpectedField },
-        // A value with no state, or a state with no value.
-        .{ .json = "{\"kind\":\"message\",\"text\":{\"value\":\"x\"},\"sender_handle\":null,\"sender\":null,\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.MissingField },
-        .{ .json = "{\"kind\":\"message\",\"text\":{\"state\":\"value\"},\"sender_handle\":null,\"sender\":null,\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.InvalidFieldState },
-        // A Message's configuration holds no content; once the kind is
-        // known that fails before capture, otherwise after it.
-        .{ .json = "{\"kind\":\"message\",\"configuration\":" ++ configuration ++ ",\"output_schema\":" ++ omitted ++ ",\"instructions\":" ++ value ++ "}," ++
-            "\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":null,\"session\":\"\",\"key\":\"k\"," ++ header ++ "}", .failure = error.InvalidFieldState },
-        .{ .json = "{\"configuration\":" ++ configuration ++ ",\"output_schema\":" ++ omitted ++ ",\"instructions\":" ++ value ++ "}," ++
-            "\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":null,\"session\":\"\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}", .failure = error.InvalidFieldState },
-        // Three content strings before the kind: no capture is left.
-        .{ .json = "{\"configuration\":" ++ configuration ++ ",\"output_schema\":" ++ value ++ ",\"instructions\":" ++ value ++ "}," ++
-            "\"text\":" ++ value ++ ",\"key\":\"k\",\"session\":\"x\"," ++ header ++ ",\"kind\":\"configure\"}", .failure = error.UnexpectedField },
-        .{ .json = "{\"configuration\":" ++ configuration ++ ",\"output_schema\":" ++ omitted ++ ",\"instructions\":" ++ omitted ++ "}," ++
-            "\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":null,\"session\":\"x\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}", .failure = error.UnexpectedField },
-    };
-    var used = std.atomic.Value(u64).init(0);
-    var retained: ?named_scratch.Owner = null;
-    for (cases, 0..) |case, index| {
-        var ingress: Ingress = undefined;
-        ingress.init(std.testing.allocator, .{
-            .io = io,
-            .content_length = case.json.len,
-            .scratch_path = root[0..root_len],
-            .request_number = index,
-            .retained_scratch = &retained,
-            .scratch_budget = .{ .used = &used, .limit = 8 },
-        });
-        defer ingress.deinit();
-        const result = if (ingress.feed(case.json)) |_| ingress.finish() else |err| err;
-        if (case.failure) |failure| {
-            try std.testing.expectError(failure, result);
-            continue;
-        }
-        const request = try result;
-        try request.removeTemporaryContent(io);
-    }
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-    try std.testing.expect(retained == null);
 }
 
 test "omitted loaded tools preserve pre-T4a Configure and creating Message digests" {
     // Golden bytes of the pre-T4a hash stream, not recomputed by the
     // implementation under test. Keys are deliberately outside identity.
-    var configure: ConfigureCommand = .{};
+    var configure: Tested.ConfigureCommand = .{};
     try std.testing.expectEqualStrings("e983bd4a7dce4a1ec777d065815928f654ac824dc57a57b397b8f78e7a4ede3a", &std.fmt.bytesToHex(configure.semanticDigest(), .lower));
-    var message: MessageCommand = .{ .configuration = .{} };
+    var message: Tested.MessageCommand = .{ .configuration = .{} };
     message.text = .{ .state = .value, .length = 2, .digest = contentDigest("go") };
     try std.testing.expectEqualStrings("29da99db4ed9dcdf55128d1f956d9551106135b126ec23d2e97cc768618b8127", &std.fmt.bytesToHex(message.semanticDigest(), .lower));
     const previous = configure.semanticDigest();
@@ -4575,8 +3681,7 @@ test "protocol creation requires five explicit settings independent of field ord
             try writer.writeByte('}');
             const json = writer.buffered();
             var source: MetadataSource = .{ .input = json };
-            var retained: ?named_scratch.Owner = null;
-            var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+            var parser = Tested.Parser{ .source = &source };
             if (skip < fields.len) {
                 try std.testing.expectError(error.MissingField, parseForTest(&parser));
             } else if (comptime std.mem.eql(u8, kind, "message")) {
@@ -4604,8 +3709,7 @@ test "activity search wire validates query and paired backward cursor" {
         var buffer: [1024]u8 = undefined;
         const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_search\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.fields});
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Tested.Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
         } else {
@@ -4633,6 +3737,71 @@ test "activity search reply bounds preserve snippets and nullable continuation" 
     try std.testing.expectEqualStrings("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":[],\"next\":null}", out.buffered());
 }
 
+test "the request parser refuses what each command's grammar forbids" {
+    const v = "{\"version\":\"" ++ wire_version ++ "\",";
+    const message = v ++ "\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,";
+    const inspect = v ++ "\"kind\":\"inspect_session\",\"store\":\"s\",\"session\":\"peer\",";
+    const content = v ++ "\"kind\":\"activity_content\",\"store\":\"s\",\"session\":\"peer\",";
+    const configure = v ++ "\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{";
+    const since = "\"since\":\"abababababababababababababababab.42.k7m2qx\"";
+    // The Ingress leaves an empty placeholder where it captured content.
+    const value = "{\"state\":\"value\",\"value\":\"\"}";
+    const i64_past = "\"9223372036854775808\"";
+    // Each refusal sits beside the nearest request the grammar accepts.
+    const cases = [_]struct { json: []const u8, failure: ?anyerror = null, route: ?Kind = null }{
+        .{ .json = "{\"version\":\"" ++ previous_wire_version ++ "\",\"kind\":\"host_info\",\"store\":\"s\"}", .failure = error.WrongWireVersion },
+        .{ .json = "{\"version\":\"" ++ next_wire_version ++ "\",\"kind\":\"host_info\",\"store\":\"s\"}", .failure = error.WrongWireVersion },
+        .{ .json = v ++ "\"kind\":\"host_info\",\"store\":\"s\"}" },
+        .{ .json = v ++ "\"kind\":\"host_info\"}", .failure = error.MissingField },
+        .{ .json = "{\"kind\":\"host_info\",\"store\":\"s\"}", .failure = error.MissingField },
+        .{ .json = v ++ "\"store\":\"s\"}", .failure = error.MissingField },
+        .{ .json = v ++ "\"kind\":\"host_info\",\"store\":\"s\"}", .failure = error.RouteKindMismatch, .route = .host_stop },
+        .{ .json = v ++ "\"kind\":\"host_info\",\"store\":\"s\"}", .route = .host_info },
+        // Content strings are counted before the kind is known; a third has
+        // no capture to go to.
+        .{ .json = "{\"text\":" ++ value ++ ",\"configuration\":{\"instructions\":" ++ value ++ ",\"output_schema\":" ++ value ++ "}," ++ "\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\"}", .failure = error.UnexpectedField },
+        .{ .json = configure ++ "\"instructions\":" ++ value ++ ",\"output_schema\":" ++ value ++ "}}" },
+        .{ .json = configure ++ "\"instructions\":" ++ value ++ ",\"instructions\":" ++ value ++ "}}", .failure = error.UnexpectedField },
+        // A Message to an existing Session carries no configuration and no
+        // capability condition.
+        .{ .json = message ++ "\"text\":" ++ value ++ "}" },
+        .{ .json = message ++ "\"text\":" ++ value ++ ",\"configuration\":{}}", .failure = error.UnexpectedField },
+        .{ .json = message ++ "\"text\":" ++ value ++ ",\"require_model\":true}", .failure = error.InvalidMessage },
+        .{ .json = message ++ "\"skill\":\"review\"}" },
+        .{ .json = message ++ "\"skill\":\"\"}", .failure = error.InvalidMessage },
+        .{ .json = message ++ "\"skill\":\"review\",\"text\":" ++ value ++ "}", .failure = error.InvalidMessage },
+        .{ .json = message ++ "\"sender_handle\":null}", .failure = error.UnexpectedField },
+        // An inspection reads from a token, or selects a profile or one
+        // failed response stream named by positive i64 identities.
+        .{ .json = inspect ++ since ++ "}" },
+        .{ .json = inspect ++ since ++ ",\"profile\":\"full\"}", .failure = error.UnexpectedField },
+        .{ .json = inspect ++ since ++ ",\"failed_response\":\"body\",\"operation\":\"1\",\"attempt\":\"1\"}", .failure = error.UnexpectedField },
+        .{ .json = inspect ++ "\"failed_response\":\"body\",\"operation\":\"9223372036854775807\",\"attempt\":\"9223372036854775807\"}" },
+        .{ .json = inspect ++ "\"failed_response\":\"body\",\"operation\":\"0\",\"attempt\":\"1\"}", .failure = error.InvalidTarget },
+        .{ .json = inspect ++ "\"failed_response\":\"body\",\"operation\":\"1\",\"attempt\":\"0\"}", .failure = error.InvalidTarget },
+        .{ .json = inspect ++ "\"failed_response\":\"body\",\"operation\":" ++ i64_past ++ ",\"attempt\":\"1\"}", .failure = error.InvalidTarget },
+        .{ .json = inspect ++ "\"failed_response\":\"body\",\"operation\":\"1\",\"attempt\":" ++ i64_past ++ "}", .failure = error.InvalidTarget },
+        .{ .json = inspect ++ "\"operation\":\"1\"}", .failure = error.UnexpectedField },
+        .{ .json = inspect ++ "\"profile\":\"full\",\"failed_response\":\"body\",\"operation\":\"1\",\"attempt\":\"1\"}", .failure = error.UnexpectedField },
+        // An activity item is at a positive i64 position.
+        .{ .json = content ++ "\"position\":\"1\",\"ordinal\":\"0\"}" },
+        .{ .json = content ++ "\"position\":\"0\",\"ordinal\":\"0\"}", .failure = error.InvalidCursor },
+        .{ .json = content ++ "\"position\":" ++ i64_past ++ ",\"ordinal\":\"0\"}", .failure = error.InvalidCursor },
+        .{ .json = content ++ "\"position\":\"1\",\"ordinal\":" ++ i64_past ++ "}", .failure = error.InvalidCursor },
+        // An envelope holds a value exactly when its state says so.
+        .{ .json = configure ++ "\"model\":{\"state\":\"value\",\"value\":\"m\"}}}" },
+        .{ .json = configure ++ "\"model\":{\"state\":\"value\"}}}", .failure = error.InvalidFieldState },
+        .{ .json = configure ++ "\"model\":{\"state\":\"omitted\",\"value\":\"m\"}}}", .failure = error.InvalidFieldState },
+        .{ .json = configure ++ "\"model\":{\"value\":\"m\"}}}", .failure = error.MissingField },
+    };
+    for (cases, 0..) |case, index| {
+        errdefer std.debug.print("case {d}: {s}\n", .{ index, case.json });
+        var source: MetadataSource = .{ .input = case.json };
+        var parser: Tested.Parser = .{ .source = &source, .expected_kind = case.route, .captured = &.{ .{}, .{} } };
+        if (case.failure) |failure| try std.testing.expectError(failure, parseForTest(&parser)) else _ = try parseForTest(&parser);
+    }
+}
+
 test "presets allow partial creating configure in either field order" {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",";
     for ([_][]const u8{
@@ -4641,14 +3810,7 @@ test "presets allow partial creating configure in either field order" {
         head ++ "\"preset\":\"review\",\"configuration\":{},\"require_model\":true}",
     }, 0..) |json, index| {
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser: Parser = .{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = json.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
+        var parser: Tested.Parser = .{ .source = &source };
         const request = try parseForTest(&parser);
         try std.testing.expectEqualStrings("review", request.configure.preset.?.slice());
         try std.testing.expectEqual(index == 2, request.configure.require_model);
@@ -4674,14 +3836,7 @@ test "Session reader since is optional nullable and rejects invalid tokens" {
         var input: [512]u8 = undefined;
         const json = try std.fmt.bufPrint(&input, "{s}{s}", .{ head, case.suffix });
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = json.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
+        var parser = Tested.Parser{ .source = &source };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
         } else {
@@ -4718,14 +3873,7 @@ test "session archive parses default intent and rejects malformed controls" {
     }) |case| {
         const bytes = prefix ++ case[0];
         var source: MetadataSource = .{ .input = bytes };
-        var retained: ?named_scratch.Owner = null;
-        var parser: Parser = .{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = bytes.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
+        var parser: Tested.Parser = .{ .source = &source };
         const request = try parseForTest(&parser);
         try std.testing.expectEqual(case[1], request.session_archive.archived);
         try std.testing.expectEqualStrings("k7m2qx", request.session_archive.session.slice());
@@ -4738,14 +3886,7 @@ test "session archive parses default intent and rejects malformed controls" {
     }) |case| {
         const bytes = prefix ++ case[0];
         var source: MetadataSource = .{ .input = bytes };
-        var retained: ?named_scratch.Owner = null;
-        var parser: Parser = .{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = bytes.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
+        var parser: Tested.Parser = .{ .source = &source };
         try std.testing.expectError(case[1], parseForTest(&parser));
     }
 }
@@ -4775,8 +3916,7 @@ test "skills native wire preserves explicit invoke and reload intent" {
         configure_prefix ++ "\"configuration\":{},\"reload_skills\":true}",
     }, 0..) |json, index| {
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser: Parser = .{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser: Tested.Parser = .{ .source = &source };
         const request = try parseForTest(&parser);
         if (index == 0) {
             try std.testing.expectEqualStrings("demo", request.message.skill.?.slice());
@@ -4798,57 +3938,7 @@ test "skills native wire preserves explicit invoke and reload intent" {
         prefix ++ "\"skill\":\"demo\",\"configuration\":{}}",
     }) |json| {
         var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser: Parser = .{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser: Tested.Parser = .{ .source = &source };
         try std.testing.expectError(error.InvalidMessage, parseForTest(&parser));
-    }
-}
-
-test "skills ingress transfers explicit invocation intent without caller text custody" {
-    const bytes = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"skills-no-text\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"skill\":\"demo\"}";
-    for ([_]usize{ 1, 17, bytes.len }) |fragment| {
-        const ingress = try std.testing.allocator.create(Ingress);
-        defer std.testing.allocator.destroy(ingress);
-        var retained: ?named_scratch.Owner = null;
-        var used: std.atomic.Value(u64) = .init(0);
-        ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = bytes.len, .scratch_path = "unused-no-capture", .request_number = 1, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 0 }, .expected_kind = .message });
-        defer ingress.deinit();
-        var offset: usize = 0;
-        while (offset < bytes.len) {
-            const end = @min(offset + fragment, bytes.len);
-            try ingress.feed(bytes[offset..end]);
-            offset = end;
-        }
-        const request = try ingress.finish();
-        defer request.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expectEqualStrings("demo", request.message.skill.?.slice());
-        try std.testing.expectEqual(@as(usize, 0), ingress.content_count);
-        try std.testing.expectEqual(FieldState.omitted, request.message.text.state);
-        try std.testing.expect(request.message.text.file == null);
-        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-        try std.testing.expect(retained == null);
-    }
-}
-
-test "skills ingress rejects both invocation and text without retaining capture custody" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try std.testing.allocator.alloc(u8, std.Io.Dir.max_path_bytes);
-    defer std.testing.allocator.free(root);
-    const path = root[0..try tmp.dir.realPath(std.testing.io, root)];
-    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"skills-both\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,";
-    for ([_][]const u8{
-        head ++ "\"skill\":\"demo\",\"text\":{\"state\":\"value\",\"value\":\"text\"}}",
-        head ++ "\"text\":{\"state\":\"value\",\"value\":\"text\"},\"skill\":\"demo\"}",
-    }) |bytes| {
-        const ingress = try std.testing.allocator.create(Ingress);
-        defer std.testing.allocator.destroy(ingress);
-        var retained: ?named_scratch.Owner = null;
-        var used: std.atomic.Value(u64) = .init(0);
-        ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = bytes.len, .scratch_path = path, .request_number = 1, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 4 }, .expected_kind = .message });
-        try std.testing.expectError(error.InvalidMessage, ingress.feed(bytes));
-        ingress.deinit();
-        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-        try std.testing.expect(retained == null);
     }
 }

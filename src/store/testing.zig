@@ -8,6 +8,7 @@ const platform = @import("../platform.zig");
 const tool_catalog = @import("../tools.zig");
 const named_scratch = @import("../named_scratch.zig");
 const protocol = @import("../protocol.zig");
+const wire_request = @import("../wire_request.zig");
 const output_format = @import("../output_format.zig");
 const output_decode = @import("../output_decode.zig");
 const store_core = @import("Store.zig");
@@ -381,8 +382,8 @@ fn bindFixtureArgs(statement: *sqlite.c.sqlite3_stmt, args: anytype) !void {
     }
 }
 
-pub fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace: []const u8, model: []const u8) !protocol.ConfigureCommand {
-    var command: protocol.ConfigureCommand = .{};
+pub fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace: []const u8, model: []const u8) !wire_request.ConfigureCommand {
+    var command: wire_request.ConfigureCommand = .{};
     try command.key.set(key);
     try command.session.set(session_ref);
     command.configuration.workspace.state = .value;
@@ -412,8 +413,8 @@ pub fn completeMessage(
     session_ref: []const u8,
     file: std.Io.File,
     text: []const u8,
-) !protocol.MessageCommand {
-    var command: protocol.MessageCommand = .{};
+) !wire_request.MessageCommand {
+    var command: wire_request.MessageCommand = .{};
     try command.key.set(key);
     try command.session.set(session_ref);
     command.text = .{

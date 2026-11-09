@@ -1,5 +1,6 @@
 const std = @import("std");
 const protocol = @import("../protocol.zig");
+const wire_request = @import("../wire_request.zig");
 const store_core = @import("Store.zig");
 const Store = store_core.Store;
 const testing = @import("testing.zig");
@@ -42,7 +43,7 @@ fn runningBash(storage: *Store, tmp: *std.testing.TmpDir, key: []const u8) !Bash
     return .{ .session = session, .binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding };
 }
 
-fn message(tmp: *std.testing.TmpDir, key: []const u8, session: []const u8) !protocol.MessageCommand {
+fn message(tmp: *std.testing.TmpDir, key: []const u8, session: []const u8) !wire_request.MessageCommand {
     const file = try tmp.dir.createFile(std.testing.io, key, .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
     return testing.completeMessage(key, session, file, "hello");

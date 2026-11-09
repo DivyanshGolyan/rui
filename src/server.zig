@@ -21,6 +21,8 @@ const platform = @import("platform.zig");
 const provider = @import("provider.zig");
 const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
+const ScratchBudget = @import("ScratchBudget.zig");
+const wire_request = @import("wire_request.zig");
 const store_module = @import("store.zig");
 const launch_frame = @import("launch_frame.zig");
 const core_tools = @import("core_tools.zig");
@@ -120,9 +122,9 @@ const Intake = struct {
         route: ?Route = null,
         header: Header = undefined,
         number: ?u64 = null,
-        ingress: ?*protocol.Ingress = null,
+        ingress: ?*wire_request.Ingress = null,
         /// The finished Request; it lives in `ingress`.
-        request: ?*protocol.Request = null,
+        request: ?*wire_request.Request = null,
         reply: ?*Reply = null,
         retained_scratch: ?named_scratch.Owner = null,
         cleanup_retry_at: i128 = 0,
@@ -352,7 +354,7 @@ const Intake = struct {
                     };
                     if (self.header.content_length > limit) return error.RequestTooLarge;
                     const request_length = try self.reserveEnvironment();
-                    const ingress = try createUnfilled(self.host.allocator, protocol.Ingress);
+                    const ingress = try createUnfilled(self.host.allocator, wire_request.Ingress);
                     ingress.init(self.host.allocator, .{
                         .io = self.host.io,
                         .content_length = request_length,
@@ -1492,7 +1494,7 @@ const Header = struct {
 /// the Turn's Bash before the environment is in place. The register keeps
 /// `offer`'s allocation or leaves it, with what it released, to be freed
 /// right after admission.
-noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, offer: *SessionEnvironments.Offer) store_module.MessageReply {
+noinline fn submitMessage(host: *Host, command: *const wire_request.MessageCommand, offer: *SessionEnvironments.Offer) store_module.MessageReply {
     std.debug.assert(offer.value() != null);
     defer offer.deinit(host.allocator);
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
@@ -1527,7 +1529,7 @@ noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, 
 /// configuration; a preset lookup/update refusal binds the original request,
 /// including its name. The Store keeps that identity for a saved refusal even
 /// if the preset later exists: the same request cannot become an acceptance.
-noinline fn submitConfigure(host: *Host, command: *const protocol.ConfigureCommand) store_module.ConfigureReply {
+noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureCommand) store_module.ConfigureReply {
     const name = command.preset orelse return configureCapturedSkills(host, command, null);
     var decision: store_module.PresetDecision = .{ .request_digest = command.presetRequestDigest() };
     if (command.session.len != 0) {
@@ -1544,7 +1546,7 @@ noinline fn submitConfigure(host: *Host, command: *const protocol.ConfigureComma
     defer memory.deinit();
     const arena = memory.allocator();
     // Configuration is kilobytes, owned by this request rather than the stack.
-    const resolved = arena.create(protocol.ConfigureCommand) catch return .infrastructure_failure;
+    const resolved = arena.create(wire_request.ConfigureCommand) catch return .infrastructure_failure;
     resolved.* = .{
         .store = command.store,
         .key = command.key,
@@ -1555,14 +1557,14 @@ noinline fn submitConfigure(host: *Host, command: *const protocol.ConfigureComma
     const checked = core_tools.parseAgentSpec(arena, preset.spec, &resolved.configuration) catch return .infrastructure_failure;
     // The immutable launch frame checked this same spec with this parser.
     std.debug.assert(checked == .accepted);
-    inline for (@typeInfo(protocol.Configuration).@"struct".field_names) |field| {
+    inline for (@typeInfo(wire_request.Configuration).@"struct".field_names) |field| {
         const override = &@field(command.configuration, field);
         if (override.state != .omitted) @field(resolved.configuration, field) = override.*;
     }
     return configureCapturedSkills(host, resolved, &decision);
 }
 
-noinline fn configureCapturedSkills(host: *Host, command: *const protocol.ConfigureCommand, preset: ?*const store_module.PresetDecision) store_module.ConfigureReply {
+noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.ConfigureCommand, preset: ?*const store_module.PresetDecision) store_module.ConfigureReply {
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
     const reload_capture: ?store_module.CapturedSkill = if (command.reload_skills and !(host.store.commandExists(command.key.slice()) catch return .infrastructure_failure))
@@ -1577,7 +1579,7 @@ noinline fn configureCapturedSkills(host: *Host, command: *const protocol.Config
 }
 
 /// `client_environment` holds a Message's checked environment.
-fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request, client_environment: ?*SessionEnvironments.Offer) !void {
+fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer) !void {
     // The first MySQL readiness probe learns the opaque id over the private
     // socket. All subsequent work must name that exact id, never the URL.
     const discovering = request.* == .host_info and request.store().len == 0 and host.store.engine == .mysql;
@@ -2053,7 +2055,7 @@ const HeaderReader = struct {
 
 fn renderConfigureReply(
     response: protocol.JsonOut,
-    command: *const protocol.ConfigureCommand,
+    command: *const wire_request.ConfigureCommand,
     result: store_module.ConfigureReply,
 ) !void {
     const shapes = protocol.configuration_reply;
@@ -2218,7 +2220,7 @@ test "mutation decoder validates all six actual producers and preserved domain a
 
 fn renderMessageReply(
     response: protocol.JsonOut,
-    command: *const protocol.MessageCommand,
+    command: *const wire_request.MessageCommand,
     result: store_module.MessageReply,
 ) !void {
     const shapes = protocol.message_reply;
@@ -2236,7 +2238,7 @@ test "initial Message reply binds its allocated Session and original input befor
     var allocated: protocol.Bounded(protocol.max_session_bytes) = .{};
     try allocated.set("k7m2qx");
     var response: protocol.ResponseBuffer = .{};
-    try response.render(renderMessageReply, .{ &protocol.MessageCommand{ .configuration = .{} }, store_module.MessageReply{ .accepted = .{
+    try response.render(renderMessageReply, .{ &wire_request.MessageCommand{ .configuration = .{} }, store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
         .content = content,
@@ -2254,7 +2256,7 @@ test "initial Message reply binds its allocated Session and original input befor
     try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", changed).answer);
     response = .{};
     try allocated.set("BAD-ID");
-    try response.render(renderMessageReply, .{ &protocol.MessageCommand{ .configuration = .{} }, store_module.MessageReply{ .accepted = .{
+    try response.render(renderMessageReply, .{ &wire_request.MessageCommand{ .configuration = .{} }, store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
         .content = content,
@@ -2653,7 +2655,7 @@ const Reply = struct {
         if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblocking) < 0) return error.WriteFailed;
         self.renew();
         while (true) {
-            protocol.pollExchange(self.io, fd, std.posix.POLL.OUT, self.deadline()) catch |err|
+            wire_request.pollExchange(self.io, fd, std.posix.POLL.OUT, self.deadline()) catch |err|
                 return if (err == error.ExchangeDeadlineExceeded and self.absolute_deadline == null) error.TransferInactive else err;
             if (try self.advance(fd)) {
                 if (self.timing) |*timing| timing.replyComplete();
@@ -2677,8 +2679,8 @@ fn httpReason(status: u16) []const u8 {
 }
 
 /// A finished Request in its Ingress, as `receive` leaves it.
-fn adoptRequestForTest(exchange: *Intake.Exchange, request: protocol.Request) !void {
-    const ingress = try exchange.host.allocator.create(protocol.Ingress);
+fn adoptRequestForTest(exchange: *Intake.Exchange, request: wire_request.Request) !void {
+    const ingress = try exchange.host.allocator.create(wire_request.Ingress);
     ingress.init(exchange.host.allocator, .{
         .io = exchange.host.io,
         .content_length = 0,
@@ -3240,7 +3242,7 @@ test "command observation full and both unchanged tiers render byte exactly with
     try std.testing.expect(observed.not_modified.generation > first.generation);
     try Expect.unchanged(&observed, session.slice(), storage.commitGeneration());
     const sibling = observed.not_modified;
-    var update: protocol.ConfigureCommand = .{};
+    var update: wire_request.ConfigureCommand = .{};
     try update.key.set("tier-update");
     try update.session.set(session.slice());
     update.configuration.label.state = .value;
@@ -3491,7 +3493,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         }
     };
 
-    var configure: protocol.ConfigureCommand = .{};
+    var configure: wire_request.ConfigureCommand = .{};
     try configure.session.set(&escaped_session);
     try std.testing.expectEqual(protocol.configuration_reply.max_bytes, try Worst.reply(renderConfigureReply, &configure, .{
         store_module.ConfigureReply{ .accepted = .{ .replayed = false, .revision = max, .created = false, .session = session, .skills = .unchanged } },
@@ -3499,7 +3501,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         store_module.ConfigureReply.conflict,
     }));
 
-    var message: protocol.MessageCommand = .{};
+    var message: wire_request.MessageCommand = .{};
     try message.session.set(&escaped_session);
     try std.testing.expectEqual(protocol.message_reply.max_bytes, try Worst.reply(renderMessageReply, &message, .{
         store_module.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = content, .session = session } },
@@ -3887,10 +3889,10 @@ test "retired ordinary capture still consumes its intake classification and reso
         }
         const retained = intake.exchanges.items[0];
         var retained_fd: ?c_int = null;
-        const budget: protocol.ScratchBudget = .{ .used = &host.scratch_used, .limit = 9000 };
+        const budget: ScratchBudget = .{ .used = &host.scratch_used, .limit = 9000 };
         switch (custody) {
             .ingress => {
-                const ingress = try host.allocator.create(protocol.Ingress);
+                const ingress = try host.allocator.create(wire_request.Ingress);
                 ingress.init(host.allocator, .{
                     .io = host.io,
                     .content_length = 4096,
@@ -4260,7 +4262,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         var storage: store_module.Store = undefined;
         try storage.open(std.testing.io, database, root);
         defer storage.close() catch unreachable;
-        var configure: protocol.ConfigureCommand = .{};
+        var configure: wire_request.ConfigureCommand = .{};
         try configure.key.set("config");
         configure.configuration.workspace.state = .value;
         try configure.configuration.workspace.value.set(root);
@@ -4571,7 +4573,7 @@ test "only a fresh Message changes its Session's environment; a replay or a reje
     var storage: store_module.Store = undefined;
     try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
     defer storage.close() catch unreachable;
-    var configure: protocol.ConfigureCommand = .{};
+    var configure: wire_request.ConfigureCommand = .{};
     try configure.key.set("config");
     configure.configuration.workspace.state = .value;
     try configure.configuration.workspace.value.set(root);
@@ -4673,7 +4675,7 @@ test "exchange retirement retains failed ingress cleanup through retry" {
         defer _ = std.c.close(sockets[1]);
         const exchange = try std.testing.allocator.create(Intake.Exchange);
         exchange.* = .{ .owner = undefined, .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 0, .state = .retired };
-        const ingress = try std.testing.allocator.create(protocol.Ingress);
+        const ingress = try std.testing.allocator.create(wire_request.Ingress);
         ingress.init(std.testing.allocator, .{
             .io = io,
             .content_length = prefix.len + payload.len + suffix.len,
@@ -4768,13 +4770,13 @@ test "presets seed configure before Store validation and idempotency" {
     , .{})).object;
     const presets = [_]core_tools.Preset{.{ .name = "review", .spec = spec }};
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .presets = &presets };
-    const create = try arena.create(protocol.ConfigureCommand);
+    const create = try arena.create(wire_request.ConfigureCommand);
     create.* = .{ .preset = .{} };
     try create.preset.?.set("review");
     try create.key.set("preset-create");
     // Native API intent survives preset resolution: reload cannot create a
     // Session, and its saved refusal cannot become a plain preset creation.
-    const reload = try arena.create(protocol.ConfigureCommand);
+    const reload = try arena.create(wire_request.ConfigureCommand);
     reload.* = .{ .preset = create.preset, .reload_skills = true };
     try reload.key.set("skills-reload-preset-empty");
     const reload_refused = submitConfigure(&host, reload);
@@ -4799,7 +4801,7 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expectEqualStrings(session.slice(), replay.accepted.session.slice());
     try std.testing.expectEqual(first.accepted.revision, replay.accepted.revision);
 
-    const override = try arena.create(protocol.ConfigureCommand);
+    const override = try arena.create(wire_request.ConfigureCommand);
     override.* = .{ .preset = create.preset };
     try override.key.set("preset-overrides");
     override.configuration.model.state = .value;
@@ -4850,7 +4852,7 @@ test "presets seed configure before Store validation and idempotency" {
     try storage.inspectSession(session.slice(), &observed);
     try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
 
-    const invalid = try arena.create(protocol.ConfigureCommand);
+    const invalid = try arena.create(wire_request.ConfigureCommand);
     invalid.* = .{ .preset = create.preset };
     try invalid.key.set("preset-invalid-resolved");
     invalid.configuration.compaction_trigger.state = .explicit_null;
@@ -4859,7 +4861,7 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_compaction_trigger, refused.rejected.code);
     host.presets = &.{};
     try std.testing.expect(submitConfigure(&host, create) == .conflict);
-    const missing = try arena.create(protocol.ConfigureCommand);
+    const missing = try arena.create(wire_request.ConfigureCommand);
     missing.* = .{ .preset = create.preset };
     try missing.key.set("preset-missing");
     const unknown = submitConfigure(&host, missing);
