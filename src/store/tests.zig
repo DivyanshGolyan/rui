@@ -12039,7 +12039,7 @@ test "skills empty initial snapshot is valid and schema rejects mismatched catal
             var reload: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
             try reload.key.set("skills-empty-reload");
             const candidate: skills_fixture_domain.Capture = .{ .reload = .{ .entries = &.{.{ .name = "nonempty", .description = "now available", .path = "/skills/nonempty/SKILL.md" }} } };
-            try std.testing.expect(storage.configureWithCapturedSkills(&reload, null, null, &candidate, .{}) == .accepted);
+            try std.testing.expect(try storage.configureWithCapturedSkills(&reload, null, null, &candidate, std.testing.allocator, .{}) == .accepted);
             // Position zero exists, so the FK alone cannot reject this: the
             // catalog instruction must certify its own conversation position.
             const constraint_error = if (case.engine == .mysql) error.MysqlFixtureFailed else error.StatementFailed;
@@ -12047,6 +12047,79 @@ test "skills empty initial snapshot is valid and schema rejects mismatched catal
             try std.testing.expect(!storage.isFenced());
             const reloaded = try storage.readSkills(arena.allocator(), session.slice());
             try std.testing.expectEqual(@as(usize, 1), reloaded.catalog.entries.len);
+        }
+    }.run);
+}
+
+test "skills reload out of memory in configure or the skill tool rolls back without fencing" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const skills = @import("../skills.zig");
+            // Enough entries that reading the saved catalog allocates
+            // inside the write, not only the candidate's encoding.
+            const entries = try arena.allocator().alloc(skills.Entry, 66);
+            for (entries, 0..) |*entry, index| entry.* = .{
+                .name = try std.fmt.allocPrint(arena.allocator(), "skill-{d:0>3}", .{index}),
+                .description = "reload pressure",
+                .path = try std.fmt.allocPrint(arena.allocator(), "/skills/skill-{d:0>3}/SKILL.md", .{index}),
+            };
+            const saved: skills.Catalog = .{ .entries = entries[0..64] };
+            const initial: skills_fixture_domain.Initial = .{ .ready = .{
+                .encoded = try skills.encodeCatalog(arena.allocator(), saved),
+                .instruction = try skills.initialInstruction(arena.allocator(), saved),
+            } };
+            var path: [protocol.max_workspace_bytes]u8 = undefined;
+            var create = try completeConfiguration("reload-oom", "", try canonicalCwd(std.testing.io, &path), "model-a");
+            create.configuration.tools = try .of(&.{"skill"});
+            const session = storage.configureWithInitialSkills(&create, null, &initial, .{}).accepted.session;
+
+            var reload: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
+            try reload.key.set("reload-oom-configure");
+            const configured: skills_fixture_domain.Capture = .{ .reload = .{ .entries = entries[0..65] } };
+            var fail_index: usize = 0;
+            while (true) : (fail_index += 1) {
+                var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+                const reply = storage.configureWithCapturedSkills(&reload, null, null, &configured, failing.allocator(), .{});
+                try std.testing.expect(!storage.isFenced());
+                if (!failing.has_induced_failure) {
+                    try std.testing.expectEqual(protocol.SkillsReloadStatus.reloaded, (try reply).accepted.skills.?);
+                    break;
+                }
+                try std.testing.expectError(error.OutOfMemory, reply);
+                try std.testing.expect(!try storage.commandExists("reload-oom-configure"));
+            }
+            try std.testing.expect(fail_index > 1);
+            try std.testing.expectEqual(@as(usize, 65), (try storage.readSkills(arena.allocator(), session.slice())).catalog.entries.len);
+
+            try submitTestMessage(&storage, &tmp, "reload-oom-input", "reload-oom-message", session.slice(), "reload skills");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{.{ .item_id = "reload-item", .name = "skill", .encoded_call_id = "reload-call", .decoded_call_id = "reload-call", .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}", .decoded_arguments = "{\"operation\":\"reload\"}" }};
+            try settleCallsForTesting(&storage, &tmp, model, "reload-oom-calls", &calls);
+            const input = (try storage.nextCoreWork()).?.action;
+            const tool: skills_fixture_domain.Capture = .{ .reload = .{ .entries = entries } };
+            fail_index = 0;
+            while (true) : (fail_index += 1) {
+                var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+                var memory: std.heap.ArenaAllocator = .init(failing.allocator());
+                defer memory.deinit();
+                const settled = storage.settleSkillTool(input.binding, memory.allocator(), &tool, .{});
+                try std.testing.expect(!storage.isFenced());
+                if (!failing.has_induced_failure) {
+                    try std.testing.expect(try settled);
+                    break;
+                }
+                try std.testing.expectError(error.OutOfMemory, settled);
+                try std.testing.expectEqual(@as(usize, 65), (try storage.readSkills(arena.allocator(), session.slice())).catalog.entries.len);
+            }
+            try std.testing.expect(fail_index > 1);
+            try std.testing.expectEqual(@as(usize, 66), (try storage.readSkills(arena.allocator(), session.slice())).catalog.entries.len);
         }
     }.run);
 }
@@ -12227,7 +12300,7 @@ test "skills reload settles catalog and result atomically across faults retry re
                 const old_catalog = try skills.decodeCatalog(arena.allocator(), skills_fixture_initial.ready.encoded);
                 const delta = try skills.diff(arena.allocator(), old_catalog, candidate.reload);
                 const delta_text = try skills.deltaInstruction(arena.allocator(), delta);
-                const refused = storage.configureWithCapturedSkills(&command, null, null, &candidate, .{
+                const refused = try storage.configureWithCapturedSkills(&command, null, null, &candidate, std.testing.allocator, .{
                     .content_import = !before_commit,
                     .before_commit = before_commit,
                 });
@@ -12247,7 +12320,7 @@ test "skills reload settles catalog and result atomically across faults retry re
                 try std.testing.expectEqual(baseline.next_position, (try store_core.readSessionForTesting(&storage, session.slice())).?.next_position);
                 try std.testing.expectError(error.ResultNotFound, storage.commandResult(command.key.slice()));
                 try expectCatalog(&storage, arena.allocator(), session.slice(), skills_fixture_initial.ready.encoded);
-                const accepted = storage.configureWithCapturedSkills(&command, null, null, &candidate, .{});
+                const accepted = try storage.configureWithCapturedSkills(&command, null, null, &candidate, std.testing.allocator, .{});
                 try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed and !accepted.accepted.created);
                 try std.testing.expectEqual(@as(u64, 1), accepted.accepted.revision);
                 try std.testing.expectEqual(protocol.SkillsReloadStatus.reloaded, accepted.accepted.skills.?);
@@ -12263,7 +12336,7 @@ test "skills reload settles catalog and result atomically across faults retry re
                     .{ .failed = .{ .code = .skills_unavailable, .bytes = "A later scan failed, but cannot replace the saved acknowledgment" } },
                 };
                 for (&other_captures) |*captured| {
-                    const replay = storage.configureWithCapturedSkills(&command, null, null, captured, .{});
+                    const replay = try storage.configureWithCapturedSkills(&command, null, null, captured, std.testing.allocator, .{});
                     try std.testing.expect(replay == .accepted and replay.accepted.replayed);
                     try std.testing.expectEqual(protocol.SkillsReloadStatus.reloaded, replay.accepted.skills.?);
                     try std.testing.expectEqual(@as(u64, 1), replay.accepted.revision);
@@ -12276,7 +12349,7 @@ test "skills reload settles catalog and result atomically across faults retry re
                 }
                 var unchanged = command;
                 try unchanged.key.set("skills-reload-atomic-unchanged");
-                const noop = storage.configureWithCapturedSkills(&unchanged, null, null, &candidate, .{});
+                const noop = try storage.configureWithCapturedSkills(&unchanged, null, null, &candidate, std.testing.allocator, .{});
                 try std.testing.expect(noop == .accepted and !noop.accepted.replayed);
                 try std.testing.expectEqual(protocol.SkillsReloadStatus.unchanged, noop.accepted.skills.?);
                 try expectResult(&storage, unchanged.key.slice(), "Skills are unchanged.");
@@ -12317,7 +12390,7 @@ test "skills preserve archive intent until a fresh invocation is admitted" {
             var reload: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
             try reload.key.set("skills-archive-reload");
             const empty: skills_fixture_domain.Capture = .{ .reload = .{ .entries = &.{} } };
-            try std.testing.expect(storage.configureWithCapturedSkills(&reload, null, null, &empty, .{}) == .accepted);
+            try std.testing.expect(try storage.configureWithCapturedSkills(&reload, null, null, &empty, std.testing.allocator, .{}) == .accepted);
             try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
             try command.key.set("skills-archive-admitted");
             const invocation: skills_fixture_domain.MessageCapture = .{ .bound = &.{.{ .name = "demo", .bytes = "Skill file: \"/skills/demo/SKILL.md\"\n\nComplete ordinary skill input" }} };
@@ -12352,7 +12425,7 @@ test "skills native reload validates targets after replay without changing ordin
                 try command.key.set(try std.fmt.bufPrint(&key, "reload-target-{d}", .{index}));
                 try command.session.set(target);
                 const expected: protocol.ConfigurationRejection = if (index < targets.len - 2) .invalid_session_reference else .unknown_session;
-                const answer = storage.configureWithCapturedSkills(&command, null, null, &candidate, .{});
+                const answer = try storage.configureWithCapturedSkills(&command, null, null, &candidate, std.testing.allocator, .{});
                 try std.testing.expect(answer == .rejected);
                 try std.testing.expectEqual(expected, answer.rejected.code);
                 try std.testing.expect(!answer.rejected.replayed);
@@ -12362,7 +12435,7 @@ test "skills native reload validates targets after replay without changing ordin
                 opened = false;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 opened = true;
-                const replay = storage.configureWithCapturedSkills(&command, null, null, null, .{});
+                const replay = try storage.configureWithCapturedSkills(&command, null, null, null, std.testing.allocator, .{});
                 try std.testing.expect(replay == .rejected and replay.rejected.replayed);
                 try std.testing.expectEqual(expected, replay.rejected.code);
                 command.reload_skills = false;
@@ -12370,7 +12443,7 @@ test "skills native reload validates targets after replay without changing ordin
             }
             var existing: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
             try existing.key.set("reload-target-existing");
-            const accepted = storage.configureWithCapturedSkills(&existing, null, null, &candidate, .{});
+            const accepted = try storage.configureWithCapturedSkills(&existing, null, null, &candidate, std.testing.allocator, .{});
             try std.testing.expect(accepted == .accepted);
             try std.testing.expectEqual(@as(u64, 1), accepted.accepted.revision);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));

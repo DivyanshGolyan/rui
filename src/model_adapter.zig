@@ -4699,7 +4699,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     var reload: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
     try reload.key.set("skills-initial-noop");
     var candidate = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .reload }, null);
-    const no_work = setup.storage.configureWithCapturedSkills(&reload, null, null, &candidate, .{});
+    const no_work = try setup.storage.configureWithCapturedSkills(&reload, null, null, &candidate, std.testing.allocator, .{});
     try std.testing.expect(no_work == .accepted);
     try std.testing.expectEqual(protocol.SkillsReloadStatus.unchanged, no_work.accepted.skills.?);
     try std.testing.expectEqual(@as(u64, 1), no_work.accepted.revision);
@@ -4746,7 +4746,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     try writeSkillForTesting(&setup, ".agents/skills/demo/SKILL.md", current_raw);
     candidate = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .reload }, null);
     try reload.key.set("skills-body-only");
-    try std.testing.expectEqual(protocol.SkillsReloadStatus.unchanged, setup.storage.configureWithCapturedSkills(&reload, null, null, &candidate, .{}).accepted.skills.?);
+    try std.testing.expectEqual(protocol.SkillsReloadStatus.unchanged, (try setup.storage.configureWithCapturedSkills(&reload, null, null, &candidate, std.testing.allocator, .{})).accepted.skills.?);
     try settleItemsForTesting(&setup, binding, "skills-invoke-call", &.{
         "{\"type\":\"function_call\",\"id\":\"skill-invoke-item\",\"call_id\":\"skill-invoke-call\",\"name\":\"skill\",\"arguments\":\"{\\\"operation\\\":\\\"invoke\\\",\\\"name\\\":\\\"demo\\\"}\"}",
     });
@@ -4773,7 +4773,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     try writeSkillForTesting(&setup, ".agents/skills/demo/SKILL.md", "---\nname: demo\ndescription: changed-demo-desc\n---\nlatest body\n");
     candidate = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .reload }, null);
     try reload.key.set("skills-description-reload");
-    const changed = setup.storage.configureWithCapturedSkills(&reload, null, null, &candidate, .{});
+    const changed = try setup.storage.configureWithCapturedSkills(&reload, null, null, &candidate, std.testing.allocator, .{});
     try std.testing.expect(changed == .accepted);
     try std.testing.expectEqual(protocol.SkillsReloadStatus.reloaded, changed.accepted.skills.?);
     try std.testing.expectEqual(@as(u64, 1), changed.accepted.revision);
@@ -4802,7 +4802,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     const reopened = try prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 1024);
     defer std.testing.allocator.free(reopened.bytes);
     try std.testing.expectEqualStrings(third.bytes, reopened.bytes);
-    const replay = setup.storage.configureWithCapturedSkills(&reload, null, null, null, .{});
+    const replay = try setup.storage.configureWithCapturedSkills(&reload, null, null, null, std.testing.allocator, .{});
     try std.testing.expect(replay == .accepted and replay.accepted.replayed);
     try std.testing.expectEqual(protocol.SkillsReloadStatus.reloaded, replay.accepted.skills.?);
     const invoke_replay = setup.storage.submitMessageCapturedSkills(&invoke, null, null, null, .{});

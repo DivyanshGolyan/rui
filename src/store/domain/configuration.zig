@@ -356,7 +356,7 @@ pub fn planConfigurationUpdate(
 /// write round (`importSealed`). The
 /// decision is `applyConfiguration`; the write round saves the Session,
 /// the command and its revision, then commits.
-pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const content_custody.ConfigureCommand, preset: ?*const PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, faults: Faults) !ConfigureReply {
+pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const content_custody.ConfigureCommand, preset: ?*const PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, allocator: std.mem.Allocator, faults: Faults) !ConfigureReply {
     // The captured creation intent has no ID. Save its original digest
     // alongside the allocated target so a lost reply never creates twice.
     const command = request;
@@ -390,7 +390,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const conten
     if (command.require_model and !servesProviderOf(served, &command.configuration, if (reads.found.get()) reads.next.provider else null)) {
         return saveConfigurationRejection(a, command, digest, .model_capability_unavailable, faults);
     }
-    if (command.reload_skills) return reloadSkills(a, command, creating, reads, reload_capture, digest, faults);
+    if (command.reload_skills) return reloadSkills(a, command, creating, reads, reload_capture, allocator, digest, faults);
     const applied = switch (try applyConfiguration(a, io, command.session.slice(), &command.configuration, initial_skills, faults, reads)) {
         .rejected => |code| return saveConfigurationRejection(a, command, digest, code, faults),
         .accepted => |value| value,
@@ -404,7 +404,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const conten
 
 // Native reload has its own atomic result/catalog settlement and scratch.
 // Keep this rare branch off ordinary Configure's deeper content-import chain.
-noinline fn reloadSkills(a: anytype, command: *const content_custody.ConfigureCommand, creating: bool, reads: *const ConfigurationReads, reload_capture: ?*const skills_domain.Capture, digest: *const [32]u8, faults: Faults) !ConfigureReply {
+noinline fn reloadSkills(a: anytype, command: *const content_custody.ConfigureCommand, creating: bool, reads: *const ConfigurationReads, reload_capture: ?*const skills_domain.Capture, allocator: std.mem.Allocator, digest: *const [32]u8, faults: Faults) !ConfigureReply {
     if (targetRejection(command.session.slice())) |code| return saveConfigurationRejection(a, command, digest, code, faults);
     if (creating or !reads.found.get()) return saveConfigurationRejection(a, command, digest, .unknown_session, faults);
     var invalid = command.preset != null or command.require_model;
@@ -415,7 +415,7 @@ noinline fn reloadSkills(a: anytype, command: *const content_custody.ConfigureCo
     const captured = reload_capture orelse return saveConfigurationRejection(a, command, digest, .skills_unavailable, faults);
     if (captured.* == .failed) return saveConfigurationRejectionWithFailure(a, command, digest, captured.failed.configurationRejection(), captured.failed, faults);
     if (captured.* != .reload) return saveConfigurationRejection(a, command, digest, .skills_unavailable, faults);
-    var memory: std.heap.ArenaAllocator = .init(std.heap.c_allocator);
+    var memory: std.heap.ArenaAllocator = .init(allocator);
     defer memory.deinit();
     const head: rsql.SessionHead = .{ .ref = command.session.slice()[0..session_id.bytes].*, .workspace_key = .of(reads.next.workspace_key), .next_position = .of(reads.next.next_position) };
     const result = try skills_domain.apply(a, memory.allocator(), head, captured, faults);
