@@ -19,6 +19,7 @@ import termios
 import time
 
 import host_process
+from terminal_process import spawn
 import os_semantics
 
 
@@ -134,7 +135,7 @@ def key_entry(binary, typed):
     master, slave = pty.openpty()
     try:
         before = termios.tcgetattr(slave)
-        process = subprocess.Popen([binary, "auth", "login", "openai"], env=env,
+        process = spawn([binary, "auth", "login", "openai"], env=env,
                                    stdin=slave, stdout=slave, stderr=slave)
         deadline = time.monotonic() + 10
         output = read_until(master, process, b"(it is not shown): ", deadline)

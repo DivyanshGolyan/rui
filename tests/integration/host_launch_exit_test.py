@@ -8,7 +8,7 @@ import io
 import json
 import os
 import pty
-from terminal_process import open_pty
+from terminal_process import open_pty, spawn
 import select
 import shutil
 import subprocess
@@ -158,7 +158,7 @@ def child_pty(source, *, close_slave=False):
     master, slave = open_pty()
     caller = None
     try:
-        caller = subprocess.Popen([sys.executable, "-c", source],
+        caller = spawn([sys.executable, "-c", source],
             stdin=subprocess.DEVNULL, stdout=slave, stderr=slave)
         if close_slave:
             os.close(slave)
@@ -319,7 +319,7 @@ termios.tcflush(0, termios.TCIFLUSH)
 os.write(ready, b'xx')
 os.read(release, 1)
 """
-        caller = subprocess.Popen([sys.executable, "-c", source,
+        caller = spawn([sys.executable, "-c", source,
             str(ready_write), str(held_write), str(release_read)],
             pass_fds=(ready_write, held_write, release_read),
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)

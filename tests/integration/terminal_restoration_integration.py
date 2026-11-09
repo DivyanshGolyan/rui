@@ -5,7 +5,7 @@ import json
 import os
 import pathlib
 import pty
-from terminal_process import open_pty
+from terminal_process import open_pty, read_output, spawn
 import resource
 import select
 import shutil
@@ -916,7 +916,7 @@ def check_forwarding(state, library):
         env = {**os.environ,
             os_semantics.PRELOAD: str(library),
             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "forwarding"}
-        caller = subprocess.Popen([str(executable)], stdin=slave, stdout=slave,
+        caller = spawn([str(executable)], stdin=slave, stdout=slave,
             stderr=subprocess.PIPE, env=env)
         output = bytearray()
         deadline = time.monotonic() + 5
@@ -924,7 +924,7 @@ def check_forwarding(state, library):
             remaining = deadline - time.monotonic()
             assert remaining > 0, "fixture forwarder did not finish"
             if select.select([master], [], [], min(remaining, 0.05))[0]:
-                output.extend(os.read(master, 65536))
+                output.extend(read_output(master, 65536))
                 assert len(output) <= 16, output
         result = caller.wait(timeout=5)
         assert result == 0, (result, caller.stderr.read())
@@ -1156,7 +1156,7 @@ def persistent_cases(state, library, home, store, host, session):
                 environment["RUI_CAPTURE_SYNC_RELEASE"] = str(release)
                 if case == "sync-handoff":
                     environment["RUI_CAPTURE_SYNC_ERROR"] = "1"
-            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", session], env=environment,
                 stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
             human.read_terminal(output_master, "› ")
@@ -1212,7 +1212,7 @@ def persistent_cases(state, library, home, store, host, session):
                     # Darwin's drain-based fixture cleanup waits for its peer;
                     # consume the probe's echo, not only its accepted input.
                     assert select.select([master], [], [], 5)[0]
-                    assert os.read(master, 4096) == b"\r\n", "canonical probe echo was not consumed"
+                    assert read_output(master, 4096) == b"\r\n", "canonical probe echo was not consumed"
             elif case == "admission-interrupt":
                 received = threading.Event()
                 def hold(response):
@@ -1381,7 +1381,7 @@ def renderer_backpressure_case(state, library, home, store):
             ready = select.select([master, output_master, *([caller.stderr] if stderr_open else [])], [], [], remaining)[0]
             assert ready, (description if not isinstance(description, tuple) else (description[0], description[1].completed), caller.poll(), bytes(output[-4096:]), bytes(errors))
             for fd in ready:
-                chunk = os.read(fd if isinstance(fd, int) else fd.fileno(), 65536)
+                chunk = read_output(fd, 65536) if isinstance(fd, int) else os.read(fd.fileno(), 65536)
                 if not chunk and fd is caller.stderr:
                     # Exit can close stderr in the same readiness batch as the
                     # final PTY bytes; the predicate still decides after them.
@@ -1406,7 +1406,7 @@ def renderer_backpressure_case(state, library, home, store):
             "RUI_TERMINAL_PROBE": str(log),
             "RUI_TERMINAL_BACKPRESSURE_ARM": str(arm),
             os_semantics.PRELOAD: str(library)}
-        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+        caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", session], env=environment,
             stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
         screen = ScreenCapture()
@@ -1461,7 +1461,7 @@ def renderer_backpressure_case(state, library, home, store):
         event("canonical-reads-complete")
         assert caller.poll() is None
         while select.select([output_master], [], [], 0)[0]:
-            append_output(os.read(output_master, 65536), "no-input-drain")
+            append_output(read_output(output_master, 65536), "no-input-drain")
         compared_output = bytes(output[screen_start:])
         event("second-snapshot", output_end=len(output))
         comparison = (shown_output, compared_output, screen_start, tuple(events), omitted_events)
@@ -1509,14 +1509,14 @@ def secret_entry_restore_case(state, library):
     env = {key: value for key, value in os.environ.items() if key != "RUI_OPENAI_KEY_FILE"}
     master, slave = open_pty()
     try:
-        caller = subprocess.Popen([str(fixture.RUI), "auth", "login", "openai"], stdin=slave, stdout=slave,
+        caller = spawn([str(fixture.RUI), "auth", "login", "openai"], stdin=slave, stdout=slave,
             stderr=subprocess.PIPE, env={**env, "HOME": str(home), os_semantics.PRELOAD: str(library),
                                          "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "restore"})
         shown, deadline = b"", time.monotonic() + 10
         while b"(it is not shown): " not in shown:
             assert time.monotonic() < deadline and caller.poll() is None, shown
             if select.select([master], [], [], 0.1)[0]:
-                shown += os.read(master, 4096)
+                shown += read_output(master, 4096)
         os.write(master, b"sk-refused\r")
         assert caller.wait(timeout=10) == 1, "a key was accepted with the terminal unrestored"
         errors = caller.stderr.read().decode()
@@ -1553,7 +1553,7 @@ def consent_boundary_cases(state, library):
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
             session = human.admit(home, "session", "configure", "--store", store,
                 "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
-            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", session], stdin=slave, stdout=slave, stderr=subprocess.PIPE,
                 env={**os.environ, "HOME": str(home), "NO_COLOR": "1",
                     os_semantics.PRELOAD: str(library),
@@ -1712,16 +1712,12 @@ def command_interruption_cases(state, library, only=None):
                         "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": case})
                     if route is None:
                         environment["RUI_CAPTURE_SYNC_RELEASE"] = str(release)
-                def caller_setup():
-                    signal.signal(signal.SIGINT, signal.SIG_DFL)
-                    signal.signal(signal.SIGTERM, signal.SIG_DFL)
-                    if case.startswith("configure-restore-"):
-                        _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-                        resource.setrlimit(resource.RLIMIT_NOFILE, (256, hard))
-                caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+                limits = ({resource.RLIMIT_NOFILE: (256, resource.getrlimit(resource.RLIMIT_NOFILE)[1])}
+                    if case.startswith("configure-restore-") else None)
+                caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
                     "--", session], env=environment, stdin=slave, stdout=slave,
                     stderr=error_slave if stopped else subprocess.PIPE, pass_fds=(ready_write,),
-                    preexec_fn=caller_setup)
+                    default_signals=(signal.SIGINT, signal.SIGTERM), rlimits=limits)
                 human.action_ready(ready_read, master)
                 if route:
                     def hold(response):
@@ -1896,7 +1892,7 @@ def fatal_reporting_cases(state):
             try:
                 if stopped:
                     termios.tcflow(error_slave, termios.TCOOFF)
-                caller = subprocess.Popen([str(fixture.RUI), *args],
+                caller = spawn([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=error_slave)
                 assert caller.wait(timeout=3) == (2 if error == b"[choice_unsupported]" else 1), "fatal diagnostic did not exit"
                 assert termios.tcgetattr(slave) == original
@@ -1920,7 +1916,7 @@ def fatal_reporting_cases(state):
             original = termios.tcgetattr(slave)
             error_flags = fcntl.fcntl(write_error, fcntl.F_GETFL)
             try:
-                caller = subprocess.Popen([str(fixture.RUI), *args],
+                caller = spawn([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=write_error)
                 assert caller.wait(timeout=3) == (2 if error == b"[choice_unsupported]" else 1), "disconnected stderr replaced the real exit"
                 assert termios.tcgetattr(slave) == original
@@ -1934,7 +1930,7 @@ def fatal_reporting_cases(state):
         master, slave = open_pty()
         original = termios.tcgetattr(slave)
         try:
-            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
+            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             human.read_terminal(master, "› ")
             proxy = canonical.ReplyProxy(host, "/v1/message",
@@ -1973,7 +1969,7 @@ def fatal_reporting_cases(state):
         error_flags = fcntl.fcntl(write_error, fcntl.F_GETFL)
         records_before = {path: path.read_bytes() for path in records.glob("*.json")}
         try:
-            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
+            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=write_error)
             human.read_terminal(master, "› ", composer=True)
             os.write(master, b"\x1b[")
@@ -2027,7 +2023,7 @@ def decision_reporting_cases(state):
             original = termios.tcgetattr(slave)
             reply_release, received = threading.Event(), threading.Event()
             try:
-                caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
+                caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(write_ready)},
                     pass_fds=(write_ready,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 human.read_terminal(master, "› ")
@@ -2135,7 +2131,7 @@ def entry_enable_cases(state, library):
                 log = root / f"{name}.log"
                 caller = None
                 try:
-                    caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
+                    caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                         env={**os.environ, "HOME": str(home),
                             os_semantics.PRELOAD: str(library),
                             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": name},
@@ -2201,7 +2197,7 @@ def detach_reporting_cases(state, library):
             original, flags = termios.tcgetattr(slave), fcntl.fcntl(slave, fcntl.F_GETFL)
             log, arm = root / f"{name}.log", root / f"{name}.arm"
             try:
-                caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
+                caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(write_ready),
                         os_semantics.PRELOAD: str(library),
                         "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": fault, "RUI_TERMINAL_DETACH_ARM": str(arm)},
@@ -2306,7 +2302,7 @@ def startup_reporting_cases(state, library):
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
             session = human.admit(home, "session", "configure", "--store", store,
                 "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
-            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
+            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                 env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write),
                     os_semantics.PRELOAD: str(library),
                     "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "startup-restore" if kind == "message-restore" else "startup",
@@ -2444,7 +2440,7 @@ def visible_stream_handoff_cases(state, library):
                     admission = human.admit(home, "session", "send", "--store", store, "--to", session, input=f"saved input {i}")
                     fixture.wait_for(lambda: fixture.completed_observation(store, admission["request"]), "saved stream content")
             if phase == "opening": arm.touch()
-            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
+            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                 env={**os.environ, "HOME": str(home), "NO_COLOR": "1",
                     os_semantics.PRELOAD: str(library),
                     "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "visible-stream", "RUI_TERMINAL_STREAM_ARM": str(arm)},

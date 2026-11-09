@@ -20,7 +20,7 @@ from contextlib import contextmanager
 INTEGRATION = pathlib.Path(__file__).resolve().parents[2] / "integration"
 sys.path.insert(0, str(INTEGRATION))
 from host_process import dispose_all, stop_process
-from terminal_process import open_pty
+from terminal_process import open_pty, read_output, spawn
 from terminal_screen import ScreenCapture
 
 LIMIT = 1024 * 1024
@@ -84,8 +84,8 @@ class DirectPty:
                 self.raw = self._open("output.bin", "wb")
                 self.errors = self._open("stderr.bin", "wb")
                 self.events = self._open("events.jsonl", "w")
-                self.process = subprocess.Popen(args, env=env, cwd=cwd, stdin=self.slave,
-                                                stdout=self.slave, stderr=subprocess.PIPE)
+                self.process = spawn(args, env=env, cwd=cwd, stdin=self.slave,
+                                     stdout=self.slave, stderr=subprocess.PIPE)
                 os.set_blocking(self.master, False)
                 self.event("launch", pid=self.process.pid, columns=columns, rows=rows)
         except BaseException:
@@ -106,7 +106,7 @@ class DirectPty:
         ready = select.select([fd for fd in descriptors if fd not in self.eof], [], [], timeout)[0]
         for fd in ready:
             try:
-                chunk = os.read(fd, 65536)
+                chunk = read_output(fd, 65536) if fd == self.master else os.read(fd, 65536)
             except OSError as error:
                 if fd != self.master or error.errno != errno.EIO:
                     raise
