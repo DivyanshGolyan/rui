@@ -39,11 +39,17 @@ def output(process, timeout=20):
     return process.communicate(timeout=timeout)
 
 
-def wait_for_socket(path, process):
+def wait_for_host(path, store, process):
+    """A launched Host is ready once it answers Host info, as managed launch
+    observes it. Its socket file appears at bind, before the Host listens, so
+    a connect in between is refused."""
     def ready():
-        assert process.poll() is None, "the Host exited before its socket appeared"
-        return path.exists()
-    host_process.wait_for(ready, "the socket in runtimeDir", timeout=20)
+        assert process.poll() is None, "the Host exited before it answered Host info"
+        try:
+            return host_info(path, str(store))
+        except (FileNotFoundError, ConnectionRefusedError):
+            return None
+    host_process.wait_for(ready, "the Host in runtimeDir to answer Host info", timeout=20)
 
 
 def refusal(process):

@@ -3,6 +3,12 @@
 const std = @import("std");
 const catalog = @import("../../skills.zig");
 const protocol = @import("../../protocol.zig");
+const workspace_path = @import("../../workspace_path.zig");
+const content_string = @import("../../content_string.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
+const mutation_answer = @import("../../mutation_answer.zig");
+const message_admission = @import("../../message_admission.zig");
+const configuration_admission = @import("../../configuration_admission.zig");
 const content = @import("content.zig");
 const rsql = @import("../rsql.zig");
 const store_core = @import("../Store.zig");
@@ -47,7 +53,7 @@ pub const latest = rsql.Read(.{
     .Args = struct { session: []const u8 },
     .Row = struct {
         session: rsql.SessionHead,
-        workspace: *protocol.Bounded(protocol.max_workspace_bytes),
+        workspace: *Bounded(workspace_path.max_bytes),
         catalog_content_id: ?rsql.Positive,
         catalog_position: ?u64 = null,
         byte_length: ?u64,
@@ -123,7 +129,7 @@ pub fn reload(a: anytype, allocator: std.mem.Allocator, session: rsql.SessionHea
 }
 
 pub fn read(a: anytype, allocator: std.mem.Allocator, session: []const u8) !catalog.Catalog {
-    const workspace = try allocator.create(protocol.Bounded(protocol.max_workspace_bytes));
+    const workspace = try allocator.create(Bounded(workspace_path.max_bytes));
     var row: latest.Row = .{ .workspace = workspace, .session = undefined, .catalog_content_id = null, .byte_length = null, .digest = null };
     const access = @import("../access.zig");
     var found: access.Found = .missing;
@@ -145,7 +151,7 @@ pub fn read(a: anytype, allocator: std.mem.Allocator, session: []const u8) !cata
         try a.readRaw(id.get(), offset, bytes[offset..end]);
         offset = end;
     }
-    if (!std.mem.eql(u8, &protocol.contentDigest(bytes), &digest)) return error.CorruptStore;
+    if (!std.mem.eql(u8, &content_string.digest(bytes), &digest)) return error.CorruptStore;
     const decoded = catalog.decodeCatalog(allocator, bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.CorruptStore,
@@ -161,7 +167,7 @@ pub const Failure = struct {
     /// The command refusal a configure's skills reload saves. A reload
     /// fails only for an unknown Session or an unreadable catalog; the
     /// other codes are the model `skill` tool's, which reads skill files.
-    pub fn configurationRejection(self: Failure) protocol.ConfigurationRejection {
+    pub fn configurationRejection(self: Failure) configuration_admission.Rejection {
         return switch (self.code) {
             .unknown_session => .unknown_session,
             .skills_unavailable => .skills_unavailable,
@@ -234,14 +240,14 @@ pub const MessageFailure = struct {
     code: enum { skill_file_unavailable, skill_file_too_large, skill_text_invalid },
     bytes: []const u8,
 
-    pub fn rejection(self: MessageFailure) protocol.MessageRejection {
+    pub fn rejection(self: MessageFailure) message_admission.Rejection {
         return switch (self.code) {
-            inline else => |code| @field(protocol.MessageRejection, @tagName(code)),
+            inline else => |code| @field(message_admission.Rejection, @tagName(code)),
         };
     }
 };
 
-pub const Result = struct { bytes: []const u8, succeeded: bool, reload_status: ?protocol.SkillsReloadStatus = null };
+pub const Result = struct { bytes: []const u8, succeeded: bool, reload_status: ?mutation_answer.SkillsReloadStatus = null };
 
 pub fn apply(a: anytype, allocator: std.mem.Allocator, session: rsql.SessionHead, captured: *const Capture, faults: store_core.Faults) !Result {
     return switch (captured.*) {

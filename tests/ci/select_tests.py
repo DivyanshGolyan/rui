@@ -350,7 +350,7 @@ RULES = (
     (("tests/integration/canonical_failure_integration.py", "build.zig"),
      ("canonical-failure-integration",), ("canonical-failure-integration",), "Canonical failure caller oracle"),
     (("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_*", "src/*.patch", ".agents/setup",
-      ".github/actions/setup/action.yml"),
+      ".github/actions/setup/action.yml", "screen-emulator/*"),
      ("check-full", "admission-debug-integration", "test-full"),
      ("check-full", "admission-debug-integration", "test-full"),
      "Build, dependency or bootstrap inputs"),
@@ -443,10 +443,19 @@ POLICY_SELF_CHECKS = (
 )
 
 
+# Steps that run the PTY screen observer, whose libghostty-vt comes from the
+# test-only package in screen-emulator: setup fetches its packages for these only.
+# A step missing here still builds, fetching them on demand.
+SCREEN_TARGETS = frozenset({"check", "check-full", "terminal-restoration-integration", "canonical-failure-integration",
+                            "host-launch-integration", "upgrade-integration", "human-cli-integration",
+                            "skills-integration", "bash-recovery-integration", "renderer-contracts-selftest",
+                            "direct-pty", "direct-pty-controls", "input-equivalence", "screen-emulator"})
+
+
 def setup_requirements(targets):
     # Every runner installs the same fixture packages (tests/integration/requirements.txt)
     # for any target, so no fixture's import depends on a hand-kept target list.
-    return {"go": bool(({"measurement-check"} | set(RESOURCES)).intersection(targets)), "node": bool({"ts-client", "launch-frame-integration", "check", "check-full"}.intersection(targets)), "python": bool(targets), "tmux": "upgrade-integration" in targets}
+    return {"go": bool(({"measurement-check"} | set(RESOURCES)).intersection(targets)), "node": bool({"ts-client", "launch-frame-integration", "check", "check-full"}.intersection(targets)), "python": bool(targets), "screen": bool(SCREEN_TARGETS.intersection(targets)), "tmux": "upgrade-integration" in targets}
 
 
 def execution_batches(targets, check_part="all"):

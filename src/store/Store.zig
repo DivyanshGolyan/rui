@@ -7,6 +7,15 @@ const command_reply = @import("../command_reply.zig");
 const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
 const protocol = @import("../protocol.zig");
+const tool_proposal = @import("../tool_proposal.zig");
+const workspace_path = @import("../workspace_path.zig");
+const store_path = @import("../store_path.zig");
+const provider_route = @import("../provider_route.zig");
+const outcome_code = @import("../outcome_code.zig");
+const content_string = @import("../content_string.zig");
+const Bounded = @import("../bounded.zig").Bounded;
+const model_capability = @import("../model_capability.zig");
+const session_id = @import("../session_id.zig");
 const wire_request = @import("../wire_request.zig");
 const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
@@ -79,7 +88,7 @@ pub const Store = struct {
     /// The connection, its prepared statements and an Entry's content
     /// read handle.
     engine: Engine,
-    selector: protocol.Bounded(protocol.max_store_bytes),
+    selector: Bounded(store_path.max_bytes),
     fenced: std.atomic.Value(bool) = .init(false),
     /// Advances before `release` of any entry point that changed rows, so
     /// after every successful COMMIT. An unchanged value proves no canonical
@@ -101,7 +110,7 @@ pub const Store = struct {
     /// change ring, so a new identity does not grow the Store.
     /// The labels of the providers whose Sessions get model Attempts, each
     /// between commas, fixed at open.
-    served: protocol.Routes = protocol.routesAll(.unserved),
+    served: provider_route.Routes = provider_route.all(.unserved),
     /// Which use holds the out-of-line scratch in this entry point.
     scratch_use: ScratchUse = .none,
     /// The batch of writes the holder is running (`Queue.Batch`). `.ready`
@@ -168,7 +177,7 @@ pub const Store = struct {
 
     pub fn setHistoricalModelForTesting(self: *Store, binding: AttemptBinding, model: []const u8) !void {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-        var bounded: protocol.Bounded(protocol.max_model_bytes) = .{};
+        var bounded: Bounded(model_capability.max_model_bytes) = .{};
         try bounded.set(model);
         if (bounded.len == 0) return error.InvalidModel;
         try self.engine.sqlite.setHistoricalModelForTesting(binding.operation_id, model);
@@ -196,7 +205,7 @@ pub const Store = struct {
         const opened = try Sqlite.open(io, database_path, selector, options);
         errdefer opened.abandon();
 
-        var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
+        var stored_selector: Bounded(store_path.max_bytes) = .{};
         try stored_selector.set(selector);
         const changes = try createRing();
         errdefer destroyRing(changes);
@@ -305,7 +314,7 @@ pub const Store = struct {
         errdefer self.* = undefined;
         var opened = try Mysql.open(io, connection, selector, options);
         errdefer opened.close() catch {};
-        var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
+        var stored_selector: Bounded(store_path.max_bytes) = .{};
         try stored_selector.set(selector);
         const changes = try createRing();
         errdefer destroyRing(changes);
@@ -431,8 +440,8 @@ pub const Store = struct {
             const schema = take(saved.texts, &used, @intCast(row.schema_length));
             try self.readCatalogText(row.description_id.get(), description);
             try self.readCatalogText(row.schema_id.get(), schema);
-            if (!std.mem.eql(u8, &protocol.contentDigest(description), &row.description_digest) or
-                !std.mem.eql(u8, &protocol.contentDigest(schema), &row.schema_digest)) return error.CorruptStore;
+            if (!std.mem.eql(u8, &content_string.digest(description), &row.description_digest) or
+                !std.mem.eql(u8, &content_string.digest(schema), &row.schema_digest)) return error.CorruptStore;
             out.* = .{ .name = name, .owner = row.owner, .server = server, .description = description, .input_schema = schema };
             digest.* = tool_catalog.recordDigest(out);
         }
@@ -587,7 +596,7 @@ pub const Store = struct {
     }
 
     pub const SkillsState = struct {
-        workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{ .len = 0 },
+        workspace: Bounded(workspace_path.max_bytes) = .{ .len = 0 },
         catalog: @import("../skills.zig").Catalog = .{ .entries = &.{} },
     };
 
@@ -855,8 +864,8 @@ pub const Store = struct {
         defer access.deinit();
         try entry.finish(Ordinary.none, command_domain.observeCommand(&access, key, &out.full.observation));
         const observation = &out.full.observation;
-        if (observation.status != .absent and protocol.validSessionId(observation.target.slice())) {
-            out.full.token = .{ .instance = self.instance, .generation = generation, .session = observation.target.slice()[0..protocol.session_id_bytes].* };
+        if (observation.status != .absent and session_id.valid(observation.target.slice())) {
+            out.full.token = .{ .instance = self.instance, .generation = generation, .session = observation.target.slice()[0..session_id.bytes].* };
         }
     }
 
@@ -945,7 +954,7 @@ pub const Store = struct {
             out.work.work.state != .retrying and out.work.work.state != .pending) out.token = .{
             .instance = self.instance,
             .generation = generation,
-            .session = request.session.slice()[0..protocol.session_id_bytes].*,
+            .session = request.session.slice()[0..session_id.bytes].*,
         };
     }
 
@@ -1055,11 +1064,11 @@ pub const Store = struct {
         return self.actionContent(session_ref, action_id, .call_id);
     }
 
-    fn actionContent(self: *Store, session_ref: []const u8, action_id: u64, field: protocol.ProposalField) !ContentReference {
+    fn actionContent(self: *Store, session_ref: []const u8, action_id: u64, field: tool_proposal.Field) !ContentReference {
         return self.queue().run(actionContentHeld, .{ self, session_ref, action_id, field });
     }
 
-    fn actionContentHeld(self: *Store, session_ref: []const u8, action_id: u64, field: protocol.ProposalField) !ContentReference {
+    fn actionContentHeld(self: *Store, session_ref: []const u8, action_id: u64, field: tool_proposal.Field) !ContentReference {
         const entry = try enter(self, .none);
         defer entry.release();
         if (action_id == 0 or action_id > std.math.maxInt(i64)) return error.ActionNotFound;
@@ -1510,7 +1519,7 @@ pub const Store = struct {
             std.debug.assert(detail.len <= 512 and std.unicode.utf8ValidateSlice(detail));
         }
         const report = failure.report();
-        std.debug.assert(report.len <= protocol.max_report_bytes and std.unicode.utf8ValidateSlice(report));
+        std.debug.assert(report.len <= outcome_code.max_report_bytes and std.unicode.utf8ValidateSlice(report));
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.attempt_binding) = .open(&entry);
@@ -1625,7 +1634,7 @@ pub const AttemptBinding = attempt.AttemptBinding;
 
 pub const OpenOptions = struct {
     /// The providers whose Sessions get model Attempts.
-    served: protocol.Routes = protocol.routesAll(.endpoint),
+    served: provider_route.Routes = provider_route.all(.endpoint),
     cache_spill: bool = true,
     cache_kib: u32 = 1024,
     found_schema_version: ?*u32 = null,
@@ -1650,7 +1659,7 @@ pub const SqliteDiagnostic = struct {
     synchronous: ?i64 = null,
     temp_store: ?i64 = null,
     busy_timeout_ms: ?u64 = null,
-    journal_mode: ?protocol.Bounded(16) = null,
+    journal_mode: ?Bounded(16) = null,
 };
 
 /// Test builds' counters on a Store. `read` and `blob` count content bytes

@@ -1,6 +1,9 @@
 //! Loading saved tools is one call-keyed command, revision and resolution.
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const content_string = @import("../../content_string.zig");
+const tool_name = @import("../../tool_name.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
 const core = @import("../../core_tools.zig");
 const tools = @import("../../tools.zig");
 const word_search = @import("../../word_search.zig");
@@ -27,12 +30,12 @@ const candidates = rsql.Read(.{
         "JOIN content description ON description.content_id=tool.description_content_id WHERE member.tool_set_id=?1 " ++
         "AND NOT EXISTS(SELECT 1 FROM tool_set_member loaded WHERE loaded.tool_set_id=?2 AND loaded.tool_record_id=member.tool_record_id) ORDER BY tool.name",
     .Args = struct { set: u64, loaded: u64 },
-    .Row = struct { name: protocol.Bounded(tools.max_name_bytes), content_id: rsql.Positive, byte_length: u64, digest: [32]u8 },
+    .Row = struct { name: Bounded(tools.max_name_bytes), content_id: rsql.Positive, byte_length: u64, digest: [32]u8 },
     .cardinality = .each,
 });
 
 const Candidates = struct {
-    rows: [protocol.max_tools]candidates.Row = undefined,
+    rows: [tool_name.max_tools]candidates.Row = undefined,
     count: usize = 0,
     invalid: bool = false,
 
@@ -50,7 +53,7 @@ const Candidates = struct {
 const loaded_names = rsql.Read(.{
     .sql = "SELECT tool.name FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=?1 ORDER BY tool.name",
     .Args = struct { set: u64 },
-    .Row = struct { name: protocol.Bounded(tools.max_name_bytes) },
+    .Row = struct { name: Bounded(tools.max_name_bytes) },
     .cardinality = .each,
 });
 
@@ -111,7 +114,7 @@ fn matchesCandidate(a: anytype, scratch: *SearchScratch, words: *const core.Find
 fn includeLoadedNames(a: anytype, arena: std.mem.Allocator, loaded_set: u64, matches: *Matches) !void {
     const loaded = try arena.create(LoadedNames);
     loaded.* = .{};
-    a.readEach(loaded_names, .{ .set = loaded_set }, protocol.max_tools + 1, loaded);
+    a.readEach(loaded_names, .{ .set = loaded_set }, tool_name.max_tools + 1, loaded);
     try a.run();
     if (loaded.invalid) return error.CorruptStore;
     var names = loaded.names.iterator();
@@ -173,7 +176,7 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
     if (refusal == null) {
         const pending = try arena.create(Candidates);
         pending.* = .{};
-        a.readEach(candidates, .{ .set = current.tool_set_id.get(), .loaded = current.loaded_set.get() }, protocol.max_tools + 1, pending);
+        a.readEach(candidates, .{ .set = current.tool_set_id.get(), .loaded = current.loaded_set.get() }, tool_name.max_tools + 1, pending);
         try a.run();
         if (pending.invalid) return error.CorruptStore;
         matches.remaining = pending.count;
@@ -216,7 +219,7 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
     var answer: command.StoredAnswer = .{ .accepted = refusal == null, .revision = revision };
     if (refusal != null) try answer.code.set("invalid_arguments");
     // The call's binding uniquely identifies its saved arguments, even on retry.
-    const digest = protocol.contentDigest(key);
+    const digest = content_string.digest(key);
     if (matches.count > 0) {
         var loaded: ?u64 = null;
         if (matches.remaining > 0) {

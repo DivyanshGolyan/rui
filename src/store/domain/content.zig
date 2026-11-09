@@ -4,6 +4,7 @@
 const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const protocol = @import("../../protocol.zig");
+const content_string = @import("../../content_string.zig");
 const wire_request = @import("../../wire_request.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
@@ -27,7 +28,7 @@ pub const ContentLocation = struct {
 /// its start: every reader of content uses it (`ContentReader`,
 /// `streamVerified`).
 pub const DigestCheck = struct {
-    hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
+    hash: @TypeOf(content_string.hasher()) = content_string.hasher(),
     /// The bytes hashed so far, in order from the value's start.
     position: u64 = 0,
     /// Whether the check is over: the digest was compared at the end, or
@@ -180,7 +181,7 @@ pub const Import = struct {
     found: lookup_content.Result = null,
 
     pub fn ofBytes(bytes: []const u8, private: bool) Import {
-        return .{ .digest = protocol.contentDigest(bytes), .length = bytes.len, .private = private };
+        return .{ .digest = content_string.digest(bytes), .length = bytes.len, .private = private };
     }
 };
 
@@ -363,7 +364,7 @@ pub fn sealedIdentity(field: *const wire_request.ContentField) Import {
 /// noinline: the digest stays off importSealed's frame, which sits on the
 /// engine thread's deepest chain.
 noinline fn importBorrowed(a: anytype, field: *const wire_request.ContentField, bytes: []const u8, value: *Import) !u64 {
-    if (!std.mem.eql(u8, &protocol.contentDigest(bytes), &field.digest)) return error.ContentChanged;
+    if (!std.mem.eql(u8, &content_string.digest(bytes), &field.digest)) return error.ContentChanged;
     return importBytes(a, value, bytes);
 }
 
@@ -380,7 +381,7 @@ pub fn importSealed(a: anytype, io: std.Io, field: *const wire_request.ContentFi
     if (field.borrowedBytes()) |bytes| return importBorrowed(a, field, bytes, value);
     if (field.file) |source| {
         if (try source.length(io) != field.length) return error.ContentChanged;
-    } else if (field.length != 0 or !std.mem.eql(u8, &protocol.contentDigest(""), &field.digest)) {
+    } else if (field.length != 0 or !std.mem.eql(u8, &content_string.digest(""), &field.digest)) {
         return error.MissingContentCustody;
     }
     const slot = try importSlot(a, value);
@@ -418,13 +419,13 @@ pub fn publicMetadata(row: *const content_metadata.Row) error{CorruptStore}!Cont
 }
 
 /// A content hash and one window of the bytes it hashes. Declared as
-/// `.{ .hash = protocol.contentHasher() }`: the runtime hash makes the
+/// `.{ .hash = content_string.hasher() }`: the runtime hash makes the
 /// literal store field by field, so the window stays unwritten until a read
 /// fills it, where `var window: [N]u8 = undefined` would first fill it with
 /// 0xAA in ReleaseSafe.
 pub fn HashedWindow(comptime window_bytes: usize) type {
     return struct {
-        hash: @TypeOf(protocol.contentHasher()),
+        hash: @TypeOf(content_string.hasher()),
         window: [window_bytes]u8 = undefined,
     };
 }
@@ -437,7 +438,7 @@ fn verifyExternalContent(
     destination: ?store_access.ContentSink,
     faults: Faults,
 ) !void {
-    var copy: HashedWindow(protocol.content_window_bytes) = .{ .hash = protocol.contentHasher() };
+    var copy: HashedWindow(protocol.content_window_bytes) = .{ .hash = content_string.hasher() };
     var offset: u64 = 0;
     while (offset < expected_length) {
         const wanted: usize = @intCast(@min(expected_length - offset, copy.window.len));

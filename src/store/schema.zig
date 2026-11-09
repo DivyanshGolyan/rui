@@ -4,6 +4,10 @@
 
 const std = @import("std");
 const protocol = @import("../protocol.zig");
+const store_path = @import("../store_path.zig");
+const tool_name = @import("../tool_name.zig");
+const Bounded = @import("../bounded.zig").Bounded;
+const wire_version = @import("../wire_version.zig").wire_version;
 const tool_catalog = @import("../tools.zig");
 const prefix_seal = @import("../prefix_seal.zig");
 const retry_policy = @import("../retry_policy.zig");
@@ -19,7 +23,7 @@ pub const application_id: u32 = 0x4c544631; // LTF1
 pub const schema_version: u32 = 60;
 
 pub const IdentityMismatch = struct {
-    saved_selector: protocol.Bounded(protocol.max_store_bytes) = .{},
+    saved_selector: Bounded(store_path.max_bytes) = .{},
 };
 
 /// `digest()` of each schema_version, oldest first. Each format PR appends
@@ -1495,7 +1499,7 @@ pub const mysql_session = [_][:0]const u8{
     "SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin",
     "SET SESSION sql_mode='ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'",
     // `@list` of a Session's tool names whole: MySQL's default cuts at 1024.
-    std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{protocol.max_tool_names_bytes}),
+    std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{tool_name.max_names_bytes}),
 };
 
 const MysqlObjects = union(enum) { refused: []const u8, objects: []const Object };
@@ -2005,7 +2009,7 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     try sqlite.exec(database, version_sql);
     const statement = try sqlite.prepare(database, store_meta_sql);
     defer _ = c.sqlite3_finalize(statement);
-    try sqlite.bindText(statement, 1, protocol.wire_version);
+    try sqlite.bindText(statement, 1, wire_version);
     try sqlite.bindText(statement, 2, selector);
     try sqlite.expectDone(statement);
     try sqlite.exec(database, "COMMIT");
@@ -2156,9 +2160,9 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'");
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreVersion;
-        var version: protocol.Bounded(16) = .{};
+        var version: Bounded(16) = .{};
         try sqlite.readText(statement, 0, &version);
-        if (!version.eql(protocol.wire_version)) return error.WrongStoreVersion;
+        if (!version.eql(wire_version)) return error.WrongStoreVersion;
     }
     {
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_id'");
@@ -2170,7 +2174,7 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_selector'");
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreIdentity;
-        var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
+        var stored_selector: Bounded(store_path.max_bytes) = .{};
         try sqlite.readText(statement, 0, &stored_selector);
         if (!stored_selector.eql(selector)) {
             if (identity_mismatch) |out| out.saved_selector = stored_selector;
@@ -2404,9 +2408,9 @@ test "schema 57 migration creates the canonical archive objects on SQLite and My
 test "schema 57 preserves Commands and stop references while adding nullable archive intent" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var path_buffer: [protocol.max_store_bytes + 32]u8 = undefined;
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
     const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/store.sqlite3", .{root}, 0);
     var raw: ?*c.sqlite3 = null;
     defer _ = c.sqlite3_close(raw);
@@ -2463,7 +2467,7 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try openExisting(std.testing.io, database, root, null);
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
-    try std.testing.expect(try metaEquals(database, "wire_version", protocol.wire_version));
+    try std.testing.expect(try metaEquals(database, "wire_version", wire_version));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT * FROM core_command)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM original_commands)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at FROM session_stop)"));

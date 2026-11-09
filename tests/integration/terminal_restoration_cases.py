@@ -7,7 +7,7 @@ import json
 import os
 import pathlib
 import pty
-from terminal_process import open_pty, read_output, spawn
+from terminal_process import answers_to, open_pty, spawn
 import resource
 import select
 import shutil
@@ -919,7 +919,7 @@ def check_forwarding(state, library):
             remaining = deadline - time.monotonic()
             assert remaining > 0, "fixture forwarder did not finish"
             if select.select([master], [], [], min(remaining, 0.05))[0]:
-                output.extend(read_output(master, 65536))
+                output.extend(os.read(master, 65536))
                 assert len(output) <= 16, output
         result = caller.wait(timeout=5)
         assert result == 0, (result, caller.stderr.read())
@@ -1091,7 +1091,7 @@ def persistent_cases(state, library, home, store, host, session):
                     # Darwin's drain-based fixture cleanup waits for its peer;
                     # consume the probe's echo, not only its accepted input.
                     assert select.select([master], [], [], 5)[0]
-                    assert read_output(master, 4096) == b"\r\n", "canonical probe echo was not consumed"
+                    assert os.read(master, 4096) == b"\r\n", "canonical probe echo was not consumed"
             elif case == "admission-interrupt":
                 received = threading.Event()
                 def hold(response):
@@ -1224,7 +1224,7 @@ def renderer_backpressure_case(state, library, home, store):
             ready = select.select([master, output_master, *([caller.stderr] if stderr_open else [])], [], [], remaining)[0]
             assert ready, (description if not isinstance(description, tuple) else (description[0], description[1].completed), caller.poll(), bytes(output[-4096:]), bytes(errors))
             for fd in ready:
-                chunk = read_output(fd, 65536) if isinstance(fd, int) else os.read(fd.fileno(), 65536)
+                chunk = os.read(fd, 65536) if isinstance(fd, int) else os.read(fd.fileno(), 65536)
                 if not chunk and fd is caller.stderr:
                     # Exit can close stderr in the same readiness batch as the
                     # final PTY bytes; the predicate still decides after them.
@@ -1252,7 +1252,7 @@ def renderer_backpressure_case(state, library, home, store):
         caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", session], env=environment,
             stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
-        screen = ScreenCapture()
+        screen = ScreenCapture(reply=answers_to(output_master))
         consumed = 0
         def composer_ready():
             nonlocal consumed
@@ -1304,7 +1304,7 @@ def renderer_backpressure_case(state, library, home, store):
         event("canonical-reads-complete")
         assert caller.poll() is None
         while select.select([output_master], [], [], 0)[0]:
-            append_output(read_output(output_master, 65536), "no-input-drain")
+            append_output(os.read(output_master, 65536), "no-input-drain")
         compared_output = bytes(output[screen_start:])
         event("second-snapshot", output_end=len(output))
         comparison = (shown_output, compared_output, screen_start, tuple(events), omitted_events)
@@ -1359,7 +1359,7 @@ def secret_entry_restore_case(state, library):
         while b"(it is not shown): " not in shown:
             assert time.monotonic() < deadline and caller.poll() is None, shown
             if select.select([master], [], [], 0.1)[0]:
-                shown += read_output(master, 4096)
+                shown += os.read(master, 4096)
         os.write(master, b"sk-refused\r")
         assert caller.wait(timeout=10) == 1, "a key was accepted with the terminal unrestored"
         errors = caller.stderr.read().decode()

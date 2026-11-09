@@ -5,6 +5,19 @@ const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const skills_domain = @import("skills.zig");
 const protocol = @import("../../protocol.zig");
+const turn_ending = @import("../../turn_ending.zig");
+const message_admission = @import("../../message_admission.zig");
+const workspace_path = @import("../../workspace_path.zig");
+const outcome_code = @import("../../outcome_code.zig");
+const content_string = @import("../../content_string.zig");
+const tool_presentation = @import("../../tool_presentation.zig");
+const idempotency_key = @import("../../idempotency_key.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
+const cli_value = @import("../../cli_value.zig");
+const mutation_answer = @import("../../mutation_answer.zig");
+const provider_name = @import("../../provider_name.zig");
+const session_archive = @import("../../session_archive.zig");
+const session_id = @import("../../session_id.zig");
 const wire_request = @import("../../wire_request.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
@@ -43,7 +56,7 @@ pub const MessageReply = command_reply.MessageReply;
 
 pub const StoredAnswer = struct {
     accepted: bool,
-    code: protocol.Bounded(protocol.max_code_bytes) = .{},
+    code: Bounded(outcome_code.max_bytes) = .{},
     revision: u64 = 0,
     created: bool = false,
 };
@@ -63,18 +76,18 @@ pub const ModelInterruptionReply = command_reply.ModelInterruptionReply;
 pub const SessionArchiveReply = command_reply.SessionArchiveReply;
 
 pub const PermissionDecisionReply = command_reply.PermissionDecisionReply;
-pub const max_permission_decision_bytes = sqlite.maxEnumTagBytes(protocol.PermissionDecision);
+pub const max_permission_decision_bytes = sqlite.maxEnumTagBytes(mutation_answer.PermissionDecision);
 
 const MessageProjection = struct {
     admission_id: u64,
-    command_key: protocol.Bounded(128),
+    command_key: Bounded(128),
     content_id: i64,
     state: union(enum) {
         pending,
-        excluded: protocol.Bounded(128),
+        excluded: Bounded(128),
         applied: struct {
             binding: AttemptBinding,
-            outcome_code: ?protocol.Bounded(protocol.max_code_bytes),
+            outcome_code: ?Bounded(outcome_code.max_bytes),
             outcome_content_id: ?i64,
         },
     },
@@ -98,7 +111,7 @@ const message_replay = rsql.Read(.{
     .sql = "SELECT m.admission_id,m.session_ref,m.content_id,content.byte_length AS length,content.digest FROM message_admission m " ++
         "JOIN content ON content.content_id=m.content_id WHERE m.command_key=?1",
     .Args = struct { key: []const u8 },
-    .Row = struct { admission_id: rsql.Positive, session_ref: protocol.Bounded(protocol.max_session_bytes), content_id: rsql.Positive, length: u64, digest: [32]u8 },
+    .Row = struct { admission_id: rsql.Positive, session_ref: Bounded(session_id.max_reference_bytes), content_id: rsql.Positive, length: u64, digest: [32]u8 },
     .cardinality = .one,
 });
 
@@ -166,7 +179,7 @@ fn readMessage(a: anytype, selector: []const u8, command: *const wire_request.Me
 /// one. An accepted replay reads its admission and text in a round of its
 /// own.
 fn replayMessage(a: anytype, command: *const wire_request.MessageCommand, reads: *const MessageReads) !?MessageReply {
-    switch (try classify(protocol.MessageRejection, &reads.saved, .message, command.session.slice(), &reads.digest)) {
+    switch (try classify(message_admission.Rejection, &reads.saved, .message, command.session.slice(), &reads.digest)) {
         .fresh => return null,
         .conflict => {
             try a.abandon(.{});
@@ -200,7 +213,7 @@ fn rejectMessage(
     command: *const wire_request.MessageCommand,
     reads: *const MessageReads,
     sender_known: bool,
-    code: protocol.MessageRejection,
+    code: message_admission.Rejection,
     faults: Faults,
 ) !MessageReply {
     return rejectMessageWithFailure(a, command, reads, sender_known, code, null, faults);
@@ -211,7 +224,7 @@ fn rejectMessageWithFailure(
     command: *const wire_request.MessageCommand,
     reads: *const MessageReads,
     sender_known: bool,
-    code: protocol.MessageRejection,
+    code: message_admission.Rejection,
     failure: ?skills_domain.MessageFailure,
     faults: Faults,
 ) !MessageReply {
@@ -237,7 +250,7 @@ fn admitMessage(
     command: *const wire_request.MessageCommand,
     reads: *MessageReads,
     head: rsql.SessionHead,
-    session: protocol.Bounded(protocol.max_session_bytes),
+    session: Bounded(session_id.max_reference_bytes),
     configured: ?*const configuration_domain.Applied,
     committed: ?MessageCommitted,
     faults: Faults,
@@ -326,7 +339,7 @@ noinline fn submitTo(
     try a.run();
     if (try replayMessage(a, command, reads)) |reply| return reply;
     const sender_valid = senderValid(command, selector, reads.sender);
-    const rejection: ?protocol.MessageRejection = if (!protocol.validSessionId(session))
+    const rejection: ?message_admission.Rejection = if (!session_id.valid(session))
         .invalid_session_reference
     else if (!sender_valid)
         .invalid_sender_handle
@@ -381,7 +394,7 @@ noinline fn submitCreating(
     try a.run();
     if (try replayMessage(a, command, reads)) |reply| return reply;
     const sender_valid = senderValid(command, selector, reads.sender);
-    var rejection: ?protocol.MessageRejection = if (command.session.len != 0)
+    var rejection: ?message_admission.Rejection = if (command.session.len != 0)
         .invalid_session_reference
     else if (!sender_valid)
         .invalid_sender_handle
@@ -392,7 +405,7 @@ noinline fn submitCreating(
     if (rejection != null) return rejectMessage(a, command, reads, command.sender != null and sender_valid, rejection.?, faults);
     const checked = try configuration_domain.validateConfiguration(a, io, "", configuration, initial_skills, creation);
     const plan = switch (checked) {
-        .rejected => |code| return rejectMessage(a, command, reads, command.sender != null and sender_valid, std.meta.stringToEnum(protocol.MessageRejection, @tagName(code)).?, faults),
+        .rejected => |code| return rejectMessage(a, command, reads, command.sender != null and sender_valid, std.meta.stringToEnum(message_admission.Rejection, @tagName(code)).?, faults),
         .ready => |value| value,
     };
     // Configuration's validation-only phase owns ordinary refusal precedence.
@@ -405,7 +418,7 @@ noinline fn submitCreating(
         }
     }
     switch (try configuration_domain.applyValidatedConfiguration(a, io, "", configuration, initial_skills, faults, creation, plan)) {
-        .rejected => |code| rejection = std.meta.stringToEnum(protocol.MessageRejection, @tagName(code)).?,
+        .rejected => |code| rejection = std.meta.stringToEnum(message_admission.Rejection, @tagName(code)).?,
         .accepted => |applied| {
             content_domain.lookup(a, &reads.text);
             try a.run();
@@ -437,7 +450,7 @@ pub const AgentDelivery = enum {
 
 /// The command key a `message_agent` call's Message is saved under. Keys a
 /// person or script sends are theirs; a taken key fails the call.
-fn agentMessageKey(buffer: *[protocol.max_key_bytes]u8, action_id: u64) []const u8 {
+fn agentMessageKey(buffer: *[idempotency_key.max_bytes]u8, action_id: u64) []const u8 {
     return std.fmt.bufPrint(buffer, "rui.core/message_agent/{d}", .{action_id}) catch unreachable;
 }
 
@@ -453,7 +466,7 @@ pub fn deliverAgentMessage(
     captured: ?*const skills_domain.MessageCapture,
     faults: Faults,
 ) !AgentDelivery {
-    var key_buffer: [protocol.max_key_bytes]u8 = undefined;
+    var key_buffer: [idempotency_key.max_bytes]u8 = undefined;
     const key = agentMessageKey(&key_buffer, binding.action_id);
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
@@ -498,7 +511,7 @@ pub fn deliverAgentMessage(
         const text_id = try content_domain.importBytes(a, &message, text);
         var digest = std.crypto.hash.sha2.Sha256.init(.{});
         digest.update("rui/core/message_agent/v1");
-        digest.update(&protocol.contentDigest(text));
+        digest.update(&content_string.digest(text));
         try queueCommand(a, key, .message, target, &digest.finalResult(), text_id, null, &.{ .accepted = true });
         const admission_id = try a.identity(.admission_id);
         a.write(admit_sent_message, .{
@@ -519,7 +532,7 @@ pub fn deliverAgentMessage(
     return if (delivered) .delivered else .failed;
 }
 
-fn childEndingKey(buffer: *[protocol.max_key_bytes]u8, turn_id: u64) []const u8 {
+fn childEndingKey(buffer: *[idempotency_key.max_bytes]u8, turn_id: u64) []const u8 {
     return std.fmt.bufPrint(buffer, "rui.core/ending/{d}", .{turn_id}) catch unreachable;
 }
 
@@ -532,8 +545,8 @@ const owed_ending_facts = rsql.Read(.{
     .Args = struct { turn_id: u64 },
     .Row = struct {
         child: rsql.SessionHead,
-        parent: protocol.Bounded(protocol.session_id_bytes),
-        outcome_code: protocol.Bounded(protocol.max_code_bytes),
+        parent: Bounded(session_id.bytes),
+        outcome_code: Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         digest: ?[32]u8,
         stopped: bool,
@@ -550,7 +563,7 @@ const settle_owed_ending = rsql.Write(.{
 
 /// What the parent of a child that ended without an answer reads, as a
 /// Message from the child (D161).
-fn endingText(buffer: []u8, ending: protocol.TurnEnding) []const u8 {
+fn endingText(buffer: []u8, ending: turn_ending.TurnEnding) []const u8 {
     return std.fmt.bufPrint(buffer, "[Rui: this agent's Turn ended without an answer: {s}.]", .{@tagName(ending)}) catch unreachable;
 }
 
@@ -562,7 +575,7 @@ fn endingText(buffer: []u8, ending: protocol.TurnEnding) []const u8 {
 /// False when nothing was owed any more. Its `rui.core/` key is free:
 /// clients cannot use one, and settling marks the row with the admission.
 pub fn deliverChildEnding(a: anytype, turn_id: u64, captured: ?*const skills_domain.MessageCapture, faults: Faults) !bool {
-    var key_buffer: [protocol.max_key_bytes]u8 = undefined;
+    var key_buffer: [idempotency_key.max_bytes]u8 = undefined;
     const key = childEndingKey(&key_buffer, turn_id);
     var owed: owed_ending_facts.Result = undefined;
     a.read(owed_ending_facts, .{ .turn_id = turn_id }, &owed);
@@ -598,7 +611,7 @@ pub fn deliverChildEnding(a: anytype, turn_id: u64, captured: ?*const skills_dom
     const head = parent.session;
     const content_id: u64, const content_digest: [32]u8 = switch (outcome) {
         .completed => |answer| .{ @intCast(answer), found.digest orelse return error.CorruptStore },
-        else => .{ try content_domain.importBytes(a, &message, text), protocol.contentDigest(text) },
+        else => .{ try content_domain.importBytes(a, &message, text), content_string.digest(text) },
     };
     var digest = std.crypto.hash.sha2.Sha256.init(.{});
     digest.update("rui/core/child_ending/v1");
@@ -639,7 +652,7 @@ pub const AgentStart = enum {
 const parent_settings = rsql.Read(.{
     .sql = "SELECT workspace,provider," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,permission_mode FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { workspace: *protocol.Bounded(protocol.max_workspace_bytes), provider: protocol.Provider, tools_mask: c_int, permission_mode: u8 },
+    .Row = struct { workspace: *Bounded(workspace_path.max_bytes), provider: provider_name.Provider, tools_mask: c_int, permission_mode: u8 },
     .cardinality = .optional,
 });
 
@@ -663,7 +676,7 @@ pub fn startAgent(
     captured: ?*const skills_domain.MessageCapture,
     faults: Faults,
 ) !AgentStart {
-    var key_buffer: [protocol.max_key_bytes]u8 = undefined;
+    var key_buffer: [idempotency_key.max_bytes]u8 = undefined;
     const key = std.fmt.bufPrint(&key_buffer, "rui.core/start_agent/{d}", .{binding.action_id}) catch unreachable;
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
@@ -731,7 +744,7 @@ pub fn startAgent(
         const text_id = try content_domain.importBytes(a, &message, task);
         var digest = std.crypto.hash.sha2.Sha256.init(.{});
         digest.update("rui/core/start_agent/v1");
-        digest.update(&protocol.contentDigest(task));
+        digest.update(&content_string.digest(task));
         const answer: StoredAnswer = .{ .accepted = true, .revision = value.revision, .created = true };
         try configuration_domain.queueConfiguredCommand(a, value, key, .message, &digest.finalResult(), text_id, null, &answer);
         admission_id = try a.identity(.admission_id);
@@ -790,13 +803,13 @@ const stop_target = rsql.Read(.{
         session: rsql.SessionHead,
         admission_cutoff: u64,
         unowed_children: u64,
-        owed_cause: ?protocol.Bounded(protocol.session_id_bytes),
+        owed_cause: ?Bounded(session_id.bytes),
         owed_position: ?u64,
 
         /// Whether `key` is the key of the stop this Session owes now.
         fn owedUnder(row: *const @This(), key: []const u8) bool {
             const cause = row.owed_cause orelse return false;
-            var buffer: [protocol.max_key_bytes]u8 = undefined;
+            var buffer: [idempotency_key.max_bytes]u8 = undefined;
             const owed = action_domain.owedStopKey(&buffer, row.session.ref[0..], cause.slice(), row.owed_position.?) catch return false;
             return std.mem.eql(u8, owed, key);
         }
@@ -943,7 +956,7 @@ pub fn stopSession(a: anytype, command: *const protocol.SessionStopCommand, faul
 }
 
 /// The stop an attached child owes (D38), under its owed key. Clients
-/// cannot use `rui.core/` keys (`protocol.reserved_key_prefix`), so the
+/// cannot use `rui.core/` keys (`idempotency_key.reserved_prefix`), so the
 /// key is free while the obligation stands. Any stop settles what the
 /// Session owes, and a newer obligation has another key: an owed stop
 /// whose key is not the one owed now runs nothing and answers conflict.
@@ -971,7 +984,7 @@ pub fn stopOwedSession(a: anytype, command: *const protocol.SessionStopCommand, 
 /// cancel, every write runs at commit.
 fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: bool, faults: Faults, archive: ?*const protocol.SessionArchiveCommand) !SessionStopReply {
     const digest = if (archive) |request| request.semanticDigest() else command.semanticDigest();
-    const kind: protocol.CommandKind = if (archive != null) .session_archive else .session_stop;
+    const kind: cli_value.CommandKind = if (archive != null) .session_archive else .session_stop;
     const key = command.key.slice();
     const session = command.session.slice();
     var saved: saved_command.Result = undefined;
@@ -980,7 +993,7 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: boo
     var turn: stop_turn.Result = null;
     var archive_existing: archive_record.Result = null;
     var archive_endings: archive_ending_count.Row = .{ .count = 0 };
-    if (protocol.validSessionId(session)) {
+    if (session_id.valid(session)) {
         a.read(stop_target, .{ .session = session }, &target);
         a.read(stop_turn, .{ .session = session }, &turn);
         if (archive != null) {
@@ -995,7 +1008,7 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: boo
         try a.abandon(.{});
         return .conflict;
     }
-    switch (try classify(protocol.SessionStopRejection, &saved, kind, session, &digest)) {
+    switch (try classify(mutation_answer.SessionStopRejection, &saved, kind, session, &digest)) {
         .fresh => {},
         .conflict => {
             try a.abandon(.{});
@@ -1022,7 +1035,7 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: boo
         },
     }
 
-    const rejection: ?protocol.SessionStopRejection = if (!protocol.validSessionId(session)) .invalid_session_reference else if (target == null) .unknown_session else null;
+    const rejection: ?mutation_answer.SessionStopRejection = if (!session_id.valid(session)) .invalid_session_reference else if (target == null) .unknown_session else null;
     if (rejection) |code| {
         var answer = StoredAnswer{ .accepted = false };
         try answer.code.set(@tagName(code));
@@ -1049,7 +1062,7 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: boo
     // now owe theirs (D38).
     if (found.owed_cause != null) a.write(settle_owed_stop, .{ .session = &head.ref });
     turn_domain.queueOwedStops(a, &head.ref, stop_position, found.unowed_children);
-    var completion: protocol.SessionStopCompletion = .completed;
+    var completion: mutation_answer.SessionStopCompletion = .completed;
     var interrupted_operation_id: ?u64 = null;
     // The cancellation text's identity: its queued row reads the digest in
     // place until commit.
@@ -1209,7 +1222,7 @@ fn restoreSession(a: anytype, command: *const protocol.SessionArchiveCommand, fa
     var target: target_session.Result = null;
     readTarget(a, session, &target);
     try a.run();
-    switch (try classify(protocol.SessionArchiveRejection, &saved, .session_archive, session, &digest)) {
+    switch (try classify(mutation_answer.SessionArchiveRejection, &saved, .session_archive, session, &digest)) {
         .fresh => {},
         .conflict => {
             try a.abandon(.{});
@@ -1224,7 +1237,7 @@ fn restoreSession(a: anytype, command: *const protocol.SessionArchiveCommand, fa
             return .{ .rejected = .{ .replayed = true, .code = code } };
         },
     }
-    const rejection: ?protocol.SessionArchiveRejection = if (!protocol.validSessionId(session)) .invalid_session_reference else if (target == null) .unknown_session else if (target.?.archive_state == .archiving) .archive_pending else null;
+    const rejection: ?mutation_answer.SessionArchiveRejection = if (!session_id.valid(session)) .invalid_session_reference else if (target == null) .unknown_session else if (target.?.archive_state == .archiving) .archive_pending else null;
     var answer: StoredAnswer = .{ .accepted = rejection == null };
     if (rejection) |code| try answer.code.set(@tagName(code));
     try queueCommand(a, key, .session_archive, session, &digest, null, null, &answer);
@@ -1244,7 +1257,7 @@ fn restoreSession(a: anytype, command: *const protocol.SessionArchiveCommand, fa
 const target_session = rsql.Read(.{
     .sql = "SELECT session_ref,workspace_key,next_position,provider," ++ archive_state_sql ++ " AS archive_state FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { session: rsql.SessionHead, provider: protocol.Provider, archive_state: protocol.SessionArchiveState },
+    .Row = struct { session: rsql.SessionHead, provider: provider_name.Provider, archive_state: session_archive.State },
     .cardinality = .optional,
 });
 
@@ -1252,7 +1265,7 @@ const target_session = rsql.Read(.{
 /// reference; otherwise `destination` is null at once.
 fn readTarget(a: anytype, session: []const u8, destination: *target_session.Result) void {
     destination.* = null;
-    if (protocol.validSessionId(session)) a.read(target_session, .{ .session = session }, destination);
+    if (session_id.valid(session)) a.read(target_session, .{ .session = session }, destination);
 }
 
 /// Whether a command's Turn, Operation or Action id can name a row.
@@ -1266,7 +1279,7 @@ const interruption_operation = rsql.Read(.{
     .sql = "SELECT o.turn_id,o.session_ref,o.resolution_code IS NULL AS unresolved,EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=o.turn_id " ++
         "AND t.session_ref=o.session_ref AND t.operation_id=o.operation_id AND t.outcome_code IS NULL) AS current FROM model_operation o WHERE o.operation_id=?1",
     .Args = struct { operation_id: u64 },
-    .Row = struct { turn_id: rsql.Positive, session_ref: protocol.Bounded(protocol.max_session_bytes), unresolved: bool, current: bool },
+    .Row = struct { turn_id: rsql.Positive, session_ref: Bounded(session_id.max_reference_bytes), unresolved: bool, current: bool },
     .cardinality = .optional,
 });
 
@@ -1285,7 +1298,7 @@ const applicable_pending = rsql.Read(.{
 const interruption_target = rsql.Read(.{
     .sql = "SELECT session_ref,turn_id,operation_id FROM model_interruption_command WHERE command_key=?1",
     .Args = struct { key: []const u8 },
-    .Row = struct { session_ref: protocol.Bounded(protocol.max_session_bytes), turn_id: protocol.Bounded(20), operation_id: protocol.Bounded(20) },
+    .Row = struct { session_ref: Bounded(session_id.max_reference_bytes), turn_id: Bounded(20), operation_id: Bounded(20) },
     .cardinality = .one,
 });
 
@@ -1317,8 +1330,8 @@ fn interruptionRejection(
     command: *const protocol.ModelInterruptionCommand,
     target: target_session.Result,
     operation: interruption_operation.Result,
-) ?protocol.ModelInterruptionRejection {
-    if (!protocol.validSessionId(command.session.slice())) return .invalid_session_reference;
+) ?mutation_answer.ModelInterruptionRejection {
+    if (!session_id.valid(command.session.slice())) return .invalid_session_reference;
     if (!validId(command.turn_id) or !validId(command.operation_id)) return .invalid_target;
     if (target == null) return .unknown_session;
     const found = operation orelse return .unknown_operation;
@@ -1344,13 +1357,13 @@ pub fn interruptModel(a: anytype, command: *const protocol.ModelInterruptionComm
     var pending: applicable_pending.Result = .{ .pending = false };
     if (validId(command.turn_id) and validId(command.operation_id)) {
         readTarget(a, session, &target);
-        if (protocol.validSessionId(session)) {
+        if (session_id.valid(session)) {
             a.read(interruption_operation, .{ .operation_id = command.operation_id }, &operation);
             a.read(applicable_pending, .{ .session = session }, &pending);
         }
     }
     try a.run();
-    const replay = try classify(protocol.ModelInterruptionRejection, &saved, .model_interruption, session, &digest);
+    const replay = try classify(mutation_answer.ModelInterruptionRejection, &saved, .model_interruption, session, &digest);
     if (replay != .fresh) {
         if (replay != .conflict) {
             var saved_target: interruption_target.Result = undefined;
@@ -1407,7 +1420,7 @@ const decision_action = rsql.Read(.{
 
 const save_decision = rsql.Write(.{
     .sql = "INSERT INTO permission_decision_command(command_key,action_id,decision) VALUES(?1,?2,?3)",
-    .Args = struct { key: []const u8, action_id: []const u8, decision: protocol.PermissionDecision },
+    .Args = struct { key: []const u8, action_id: []const u8, decision: mutation_answer.PermissionDecision },
     // A replay was classified first, so the key is free.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -1438,8 +1451,8 @@ fn decisionRejection(
     command: *const protocol.PermissionDecisionCommand,
     target: target_session.Result,
     action: decision_action.Result,
-) ?protocol.PermissionDecisionRejection {
-    if (!protocol.validSessionId(command.session.slice())) return .invalid_session_reference;
+) ?mutation_answer.PermissionDecisionRejection {
+    if (!session_id.valid(command.session.slice())) return .invalid_session_reference;
     if (!validId(command.action_id)) return .invalid_target;
     if (target == null) return .unknown_session;
     const found = action orelse return .unknown_action;
@@ -1462,11 +1475,11 @@ pub fn decidePermission(a: anytype, command: *const protocol.PermissionDecisionC
     var content = denial;
     if (validId(command.action_id)) {
         readTarget(a, session, &target);
-        if (protocol.validSessionId(session)) a.read(decision_action, .{ .action_id = command.action_id, .target = session }, &action);
+        if (session_id.valid(session)) a.read(decision_action, .{ .action_id = command.action_id, .target = session }, &action);
     }
     if (command.decision == .deny) content_domain.lookup(a, &content);
     try a.run();
-    switch (try classify(protocol.PermissionDecisionRejection, &saved, .permission_decision, session, &digest)) {
+    switch (try classify(mutation_answer.PermissionDecisionRejection, &saved, .permission_decision, session, &digest)) {
         .fresh => {},
         .conflict => {
             try a.abandon(.{});
@@ -1509,11 +1522,11 @@ pub fn decidePermission(a: anytype, command: *const protocol.PermissionDecisionC
 }
 
 const ExistingCommand = struct {
-    kind: protocol.CommandKind,
-    target: protocol.Bounded(protocol.max_session_bytes),
+    kind: cli_value.CommandKind,
+    target: Bounded(session_id.max_reference_bytes),
     digest: [32]u8,
     accepted: bool,
-    code: protocol.Bounded(protocol.max_code_bytes),
+    code: Bounded(outcome_code.max_bytes),
     revision: u64,
     created: bool,
     primary_content_id: ?i64,
@@ -1535,10 +1548,10 @@ pub const saved_command = rsql.Read(.{
     .Args = struct { key: []const u8 },
     .Row = struct {
         kind: u8,
-        target: protocol.Bounded(protocol.max_session_bytes),
+        target: Bounded(session_id.max_reference_bytes),
         input_digest: [32]u8,
         accepted: bool,
-        code: protocol.Bounded(protocol.max_code_bytes),
+        code: Bounded(outcome_code.max_bytes),
         revision: u64,
         created: bool,
         primary_content_id: ?rsql.Positive,
@@ -1553,7 +1566,7 @@ pub fn lookupCommand(a: anytype, key: []const u8, destination: *saved_command.Re
 }
 
 /// Each command kind's stored code.
-fn kindCode(kind: protocol.CommandKind) u8 {
+fn kindCode(kind: cli_value.CommandKind) u8 {
     return switch (kind) {
         .configure => 1,
         .message => 2,
@@ -1568,7 +1581,7 @@ fn kindCode(kind: protocol.CommandKind) u8 {
 fn savedAnswer(saved: *const saved_command.Result) error{CorruptStore}!?ExistingCommand {
     const row = if (saved.*) |*row| row else return null;
     return .{
-        .kind = for (std.enums.values(protocol.CommandKind)) |candidate| {
+        .kind = for (std.enums.values(cli_value.CommandKind)) |candidate| {
             if (kindCode(candidate) == row.kind) break candidate;
         } else return error.CorruptStore,
         .target = row.target,
@@ -1587,7 +1600,7 @@ fn savedAnswer(saved: *const saved_command.Result) error{CorruptStore}!?Existing
 pub fn classify(
     comptime Rejection: type,
     saved: *const saved_command.Result,
-    kind: protocol.CommandKind,
+    kind: cli_value.CommandKind,
     target: []const u8,
     digest: *const [32]u8,
 ) error{CorruptStore}!Replay(Rejection) {
@@ -1641,7 +1654,7 @@ const insert_command = rsql.Write(.{
 pub fn queueCommand(
     a: anytype,
     key: []const u8,
-    kind: protocol.CommandKind,
+    kind: cli_value.CommandKind,
     target: []const u8,
     digest: *const [32]u8,
     primary_content_id: ?u64,
@@ -1690,16 +1703,16 @@ const message_observation = rsql.Read(.{
         "WHERE m.command_key=?1",
     .Args = struct { key: []const u8 },
     .Row = struct {
-        session_ref: protocol.Bounded(protocol.max_session_bytes),
+        session_ref: Bounded(session_id.max_reference_bytes),
         content_id: rsql.Positive,
         admission_id: rsql.Positive,
-        command_key: protocol.Bounded(128),
+        command_key: Bounded(128),
         turn_id: ?rsql.Positive,
         operation_id: ?rsql.Positive,
         attempt_ordinal: ?rsql.Positive,
-        outcome_code: ?protocol.Bounded(protocol.max_code_bytes),
+        outcome_code: ?Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
-        excluding_stop: ?protocol.Bounded(128),
+        excluding_stop: ?Bounded(128),
         input_length: u64,
         input_digest: [32]u8,
         answer_length: ?u64,
@@ -1715,7 +1728,7 @@ const message_observation = rsql.Read(.{
 const permission_target = rsql.Read(.{
     .sql = "SELECT action_id,decision FROM permission_decision_command WHERE command_key=?1",
     .Args = struct { key: []const u8 },
-    .Row = struct { action_id: protocol.Bounded(20), decision: protocol.PermissionDecision },
+    .Row = struct { action_id: Bounded(20), decision: mutation_answer.PermissionDecision },
     .cardinality = .one,
 });
 
@@ -1769,7 +1782,7 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
             var request: archive_request.Row = undefined;
             a.read(archive_request, .{ .key = key }, &request);
             try a.run();
-            var completion: protocol.SessionStopCompletion = .completed;
+            var completion: mutation_answer.SessionStopCompletion = .completed;
             if (request.archived) {
                 var selection: stop_selection.Row = undefined;
                 a.read(stop_selection, .{ .key = key }, &selection);
@@ -1802,7 +1815,7 @@ fn messageQueue(row: *const message_observation.Row) !AcceptedMessageQueue {
     return switch (projection.state) {
         .pending => .{ .admission_id = projection.admission_id, .state = .queued },
         .excluded => blk: {
-            var code: protocol.Bounded(protocol.max_code_bytes) = .{};
+            var code: Bounded(outcome_code.max_bytes) = .{};
             try code.set("session_stopped");
             break :blk .{ .admission_id = projection.admission_id, .state = .{ .excluded = .{ .code = code } } };
         },
@@ -1846,7 +1859,7 @@ const recovery_actions = rsql.Read(.{
         "WHERE m.command_key=?1 AND " ++ recovery_range_sql ++ " " ++
         "ORDER BY a.parent_operation_id DESC,a.call_ordinal DESC LIMIT 5",
     .Args = struct { key: []const u8 },
-    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, call_ordinal: u64, resolved_at: rsql.Positive, description: ?protocol.Bounded(protocol.max_tool_description_bytes) },
+    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, call_ordinal: u64, resolved_at: rsql.Positive, description: ?Bounded(tool_presentation.max_description_bytes) },
     .cardinality = .{ .at_most = 5 },
 });
 
@@ -1884,7 +1897,7 @@ const message_result = rsql.Read(.{
         "(command.accepted=0 OR (command.kind=1 AND command.code IN ('skills_reloaded','skills_unchanged')))",
     .Args = struct { key: []const u8 },
     .Row = struct {
-        outcome_code: ?protocol.Bounded(protocol.max_code_bytes),
+        outcome_code: ?Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         stopped: bool,
         answer_length: ?u64,
@@ -1932,7 +1945,7 @@ pub fn projectMessage(row: anytype, excluding_stop: ?[]const u8) !MessageProject
     const turn_id = row.turn_id orelse {
         if (row.operation_id != null or row.attempt_ordinal != null or row.outcome_code != null or row.outcome_content_id != null) return error.CorruptStore;
         if (excluding_stop) |key| {
-            var stop_key: protocol.Bounded(128) = .{};
+            var stop_key: Bounded(128) = .{};
             try stop_key.set(key);
             projection.state = .{ .excluded = stop_key };
         }

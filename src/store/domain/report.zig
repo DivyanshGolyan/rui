@@ -4,6 +4,20 @@ const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const named_scratch = @import("../../named_scratch.zig");
 const protocol = @import("../../protocol.zig");
+const workspace_path = @import("../../workspace_path.zig");
+const outcome_code = @import("../../outcome_code.zig");
+const content_string = @import("../../content_string.zig");
+const tool_presentation = @import("../../tool_presentation.zig");
+const tool_name = @import("../../tool_name.zig");
+const idempotency_key = @import("../../idempotency_key.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
+const built_in_tool = @import("../../built_in_tool.zig");
+const cli_value = @import("../../cli_value.zig");
+const mutation_answer = @import("../../mutation_answer.zig");
+const provider_name = @import("../../provider_name.zig");
+const session_archive = @import("../../session_archive.zig");
+const session_id = @import("../../session_id.zig");
+const wire_version = @import("../../wire_version.zig").wire_version;
 const ScratchBudget = @import("../../ScratchBudget.zig");
 const model_capability = @import("../../model_capability.zig");
 const tool_catalog = @import("../../tools.zig");
@@ -33,8 +47,8 @@ const TurnOutcome = turn_domain.TurnOutcome;
 const max_action_resolution_code_bytes = action_domain.max_action_resolution_code_bytes;
 const max_permission_decision_bytes = command_domain.max_permission_decision_bytes;
 pub const ReadAccess = reads_domain.ReadAccess;
-const SessionText = protocol.Bounded(protocol.max_session_bytes);
-const Code = protocol.Bounded(protocol.max_code_bytes);
+const SessionText = Bounded(session_id.max_reference_bytes);
+const Code = Bounded(outcome_code.max_bytes);
 
 pub const SessionReportExecution = struct {
     dispatch_fenced: bool,
@@ -46,7 +60,7 @@ pub const SessionReportOptions = struct {
     scratch_path: []const u8,
     scratch_budget: ScratchBudget,
     request_number: u64,
-    profile: protocol.ReportProfile = .current,
+    profile: cli_value.ReportProfile = .current,
     execution: SessionReportExecution,
     fail_unlink: bool = false,
 };
@@ -318,15 +332,15 @@ pub fn failedResponseBinding(a: *ReadAccess, session: []const u8, selection: pro
 pub const archive_state = rsql.Read(.{
     .sql = "SELECT " ++ command_domain.archive_state_sql ++ " AS archive_state FROM session_archive session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { archive_state: protocol.SessionArchiveState },
+    .Row = struct { archive_state: session_archive.State },
     .cardinality = .optional,
 });
 
-fn archiveStateFromIntent(intent: archive_state.Result) protocol.SessionArchiveState {
+fn archiveStateFromIntent(intent: archive_state.Result) session_archive.State {
     return if (intent) |row| row.archive_state else .active;
 }
 
-pub fn archiveState(a: *ReadAccess, session: []const u8) !protocol.SessionArchiveState {
+pub fn archiveState(a: *ReadAccess, session: []const u8) !session_archive.State {
     var row: archive_state.Result = undefined;
     a.read(archive_state, .{ .session = session }, &row);
     try store_access.runAs(a, error.SessionReadFailed);
@@ -357,7 +371,7 @@ const list_limit = protocol.session_list_page_size + 1;
 /// archive filter; the result retains only those nine references.
 const list_page = rsql.Read(.{
     .sql = "SELECT created_seq,session_ref FROM session WHERE created_seq>?1 AND created_seq<=?2" ++ archiveFilterSql("?3") ++ " ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
-    .Args = struct { after: u64, ceiling: u64, archive: protocol.SessionArchiveFilter },
+    .Args = struct { after: u64, ceiling: u64, archive: session_archive.Filter },
     .Row = ListPage.Row,
     .cardinality = .each,
 });
@@ -366,7 +380,7 @@ const list_page = rsql.Read(.{
 const workspace_list_page = rsql.Read(.{
     .sql = "SELECT created_seq,session_ref FROM session @index(session_workspace_list) " ++
         "WHERE workspace_digest=?3 AND workspace=?4 AND created_seq>?1 AND created_seq<=?2" ++ archiveFilterSql("?5") ++ " ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
-    .Args = struct { after: u64, ceiling: u64, digest: [32]u8, workspace: []const u8, archive: protocol.SessionArchiveFilter },
+    .Args = struct { after: u64, ceiling: u64, digest: [32]u8, workspace: []const u8, archive: session_archive.Filter },
     .Row = ListPage.Row,
     .cardinality = .each,
 });
@@ -442,8 +456,8 @@ fn renderAllSessions(a: *ReadAccess, request: *const protocol.ListSessions, gene
     if (page.failure) |err| return err;
     const ceiling = if (request.after == 0) (maximum.row orelse return error.SessionReadFailed).ceiling else request.ceiling;
     try appendSessionRows(a, page.refs[0..page.count], capture);
-    var token: [protocol.SinceToken.max_bytes]u8 = undefined;
-    const since = (protocol.SinceToken{ .instance = a.store.instance, .generation = generation }).format(&token);
+    var token: [change_ring.Token.max_bytes]u8 = undefined;
+    const since = (change_ring.Token{ .instance = a.store.instance, .generation = generation }).format(&token);
     if (page.more)
         try capture.appendShape(protocol.session_list_reply.full_tail, .{ protocol.ListDelta.full, since, page.last, ceiling })
     else
@@ -472,8 +486,8 @@ fn renderChangedSessions(a: *ReadAccess, request: *const protocol.ListSessions, 
     const changed = self.changes.changed(since, through, workspace, after, &references);
     const count = @min(changed.len, protocol.session_list_page_size);
     try appendSessionRows(a, changed[0..count], capture);
-    var token: [protocol.SinceToken.max_bytes]u8 = undefined;
-    const next = (protocol.SinceToken{ .instance = self.instance, .generation = through }).format(&token);
+    var token: [change_ring.Token.max_bytes]u8 = undefined;
+    const next = (change_ring.Token{ .instance = self.instance, .generation = through }).format(&token);
     if (changed.len > count)
         try capture.appendShape(protocol.session_list_reply.changed_tail, .{ protocol.ListDelta.changed, next, through, &changed[count - 1] })
     else
@@ -564,7 +578,7 @@ fn sortedToolNames(names: ?[]const u8, sorted: *[tool_catalog.max_tools][]const 
     if (names) |joined| {
         var each = std.mem.splitScalar(u8, joined, ',');
         while (each.next()) |name| : (count += 1) {
-            if (count == sorted.len or !protocol.validToolName(name)) return error.CorruptStore;
+            if (count == sorted.len or !tool_name.valid(name)) return error.CorruptStore;
             sorted[count] = name;
         }
     }
@@ -619,17 +633,17 @@ const list_row_bare = rsql.Read(.{
 
 const ListRow = struct {
     session_ref: SessionText,
-    parent_ref: ?protocol.Bounded(protocol.session_id_bytes),
-    workspace: protocol.Bounded(protocol.max_workspace_bytes),
-    provider: protocol.Provider,
-    model: protocol.Bounded(protocol.max_model_bytes),
-    tools: ?protocol.Bounded(tool_set.max_names_bytes),
+    parent_ref: ?Bounded(session_id.bytes),
+    workspace: Bounded(workspace_path.max_bytes),
+    provider: provider_name.Provider,
+    model: Bounded(model_capability.max_model_bytes),
+    tools: ?Bounded(tool_set.max_names_bytes),
     permission_mode: u8,
-    label: ?protocol.Bounded(protocol.max_label_bytes),
+    label: ?Bounded(tool_presentation.max_label_bytes),
     created_at: rsql.Positive,
     revision: rsql.Positive,
     next_position: rsql.Positive,
-    archive_state: protocol.SessionArchiveState,
+    archive_state: session_archive.State,
     from_person_at: ?rsql.Positive,
     first_admission: ?rsql.Positive,
     first_position: ?rsql.Positive,
@@ -704,14 +718,14 @@ noinline fn renderRows(a: *ReadAccess, rows: []const ShownRow, now_ms: u64, capt
 
 /// A list row and its rendered tools, kept in the Store's report scratch
 /// and not on a Host stack frame.
-const RowScratch = struct { row: ListRow, tools_json: [protocol.max_tool_names_json_bytes]u8 };
+const RowScratch = struct { row: ListRow, tools_json: [tool_name.max_names_json_bytes]u8 };
 
 /// Renders each `list_row` as it steps, in the page's order. A row that
 /// is not the next shown Session's, or a missing one, is `CorruptStore`;
 /// after a failure it renders nothing more.
 const RowsRender = struct {
     decoded: *ListRow,
-    tools_json: *[protocol.max_tool_names_json_bytes]u8,
+    tools_json: *[tool_name.max_names_json_bytes]u8,
     rows: []const ShownRow,
     now_ms: u64,
     capture: *SessionReportCapture,
@@ -731,7 +745,7 @@ const RowsRender = struct {
     }
 };
 
-fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: usize, now_ms: u64, row: *const ListRow, tools_json: *[protocol.max_tool_names_json_bytes]u8) !void {
+fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: usize, now_ms: u64, row: *const ListRow, tools_json: *[tool_name.max_names_json_bytes]u8) !void {
     if (index == rows.len or !std.mem.eql(u8, row.session_ref.slice(), rows[index].reference)) return error.CorruptStore;
     var sorted: [tool_catalog.max_tools][]const u8 = undefined;
     const names = try sortedToolNames(if (row.tools) |*tools| tools.slice() else null, &sorted);
@@ -767,7 +781,7 @@ fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: 
 pub fn renderSessionReport(
     a: *ReadAccess,
     session_ref: []const u8,
-    profile: protocol.ReportProfile,
+    profile: cli_value.ReportProfile,
     execution: SessionReportExecution,
     capture: *SessionReportCapture,
 ) !void {
@@ -783,9 +797,9 @@ pub fn renderSessionReport(
 pub const json_shapes = struct {
     pub const conversation = @import("report_full_shape.zig").Full.Conversation.json_shape;
     const H = protocol.Hole;
-    const head = .{"{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\""};
-    const current_head = .{"{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\""};
-    const facts = .{ "\",\"session\":", H{ .json = CurrentJson.Settings }, ",\"archive_state\":\"", H{ .tag = protocol.SessionArchiveState }, "\",\"pending_messages\":\"", H.decimal, "\",\"work\":", H{ .json = CurrentJson.Work }, ",\"peers\":", H{ .json = protocol.PeerFacts }, ",\"first_message\":", H{ .optional_json = protocol.FirstMessage }, ",\"selected_message\":", H{ .optional_string = protocol.max_key_bytes }, ",\"recent_messages\":", ListOf(CurrentJson.Recent), ",\"actions\":", H{ .json = CurrentJson.Actions }, ",\"rejected_calls\":", H{ .json = CurrentJson.RejectedCalls }, ",\"actionable_permissions\":", ListOf(CurrentJson.Actionable) };
+    const head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_report\",\"profile\":\""};
+    const current_head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\""};
+    const facts = .{ "\",\"session\":", H{ .json = CurrentJson.Settings }, ",\"archive_state\":\"", H{ .tag = session_archive.State }, "\",\"pending_messages\":\"", H.decimal, "\",\"work\":", H{ .json = CurrentJson.Work }, ",\"peers\":", H{ .json = protocol.PeerFacts }, ",\"first_message\":", H{ .optional_json = protocol.FirstMessage }, ",\"selected_message\":", H{ .optional_string = idempotency_key.max_bytes }, ",\"recent_messages\":", ListOf(CurrentJson.Recent), ",\"actions\":", H{ .json = CurrentJson.Actions }, ",\"rejected_calls\":", H{ .json = CurrentJson.RejectedCalls }, ",\"actionable_permissions\":", ListOf(CurrentJson.Actionable) };
     const tail = .{ ",\"execution\":", H{ .json = ExecutionJson }, "}" };
     const missing = "\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}";
     pub const current = current_head ++ .{"current"} ++ facts ++ tail;
@@ -810,13 +824,13 @@ pub const ExecutionJson = struct {
 /// (false); the Current facts follow (`renderCurrent`). Not inlined: the
 /// saved Session lives in its frame, which returns before any history
 /// content is read.
-pub noinline fn renderHead(a: *ReadAccess, session_ref: []const u8, profile: protocol.ReportProfile, capture: *SessionReportCapture) !bool {
+pub noinline fn renderHead(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, capture: *SessionReportCapture) !bool {
     var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
     var found: store_access.Found = undefined;
     configuration_domain.readSaved(a, session_ref, &current, &found);
     try a.run();
     if (found.get()) try configuration_domain.checkSaved(&current);
-    try capture.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\"");
+    try capture.append("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_report\"");
     // Host-global execution counters and retry clocks are not Session-token facts.
     if (profile == .current) try capture.append(",\"delta\":\"full\",\"since\":null");
     try capture.append(",\"profile\":\"");
@@ -945,7 +959,7 @@ const selected_active = rsql.Read(.{
     .cardinality = .each,
 });
 
-const SelectedRow = struct { command_key: protocol.Bounded(protocol.max_key_bytes) };
+const SelectedRow = struct { command_key: Bounded(idempotency_key.max_bytes) };
 
 /// Without an active Turn, the oldest Message queued after the latest
 /// stop's cutoff ?2.
@@ -967,7 +981,7 @@ const recent_messages = rsql.Read(.{
         "WHERE t.session_ref=?1 AND t.outcome_code IS NOT NULL AND m.session_ref=t.session_ref AND m.turn_id=t.turn_id " ++
         "ORDER BY t.turn_id DESC,m.admission_id DESC LIMIT 10",
     .Args = struct { session: []const u8 },
-    .Row = struct { turn_id: rsql.Positive, command_key: protocol.Bounded(protocol.max_key_bytes), outcome_code: Code },
+    .Row = struct { turn_id: rsql.Positive, command_key: Bounded(idempotency_key.max_bytes), outcome_code: Code },
     .cardinality = .each,
 });
 
@@ -993,19 +1007,19 @@ const unresolved_actions = rsql.Read(.{
         permission_revision: rsql.Positive,
         authorized: bool,
         permission_mode: u1,
-        tool_name: protocol.Bounded(tool_catalog.max_name_bytes),
+        tool_name: Bounded(tool_catalog.max_name_bytes),
         call_id_length: u64,
         call_id_digest: [32]u8,
         arguments_length: u64,
         arguments_digest: [32]u8,
         name_digest: [32]u8,
-        server: ?protocol.Bounded(64),
+        server: ?Bounded(64),
         description: ?Description,
     },
     .cardinality = .each,
 });
 
-const Description = protocol.Bounded(protocol.max_tool_description_bytes);
+const Description = Bounded(tool_presentation.max_description_bytes);
 
 /// The CTE `publications`: each active Operation's tool group
 /// publication, as main's outcome facts gave it, its largest acceptance
@@ -1045,7 +1059,7 @@ const resolved_actions = rsql.Read(.{
         action_id: rsql.Positive,
         parent_operation_id: rsql.Positive,
         call_ordinal: u64,
-        resolution_code: protocol.Bounded(32),
+        resolution_code: Bounded(32),
         acceptance_position: rsql.Positive,
         result_length: u64,
         result_digest: [32]u8,
@@ -1076,7 +1090,7 @@ const rejected_calls = rsql.Read(.{
     .Row = struct {
         operation_id: rsql.Positive,
         call_ordinal: u64,
-        rejection_code: protocol.Bounded(32),
+        rejection_code: Bounded(32),
         acceptance_position: rsql.Positive,
         rejection_length: u64,
         rejection_digest: [32]u8,
@@ -1147,7 +1161,7 @@ const CurrentFacts = struct {
 const set_names = rsql.Read(.{
     .sql = "SELECT " ++ tool_set.namesSql("s.tool_set_id") ++ " AS names," ++ tool_set.namesSql("?2") ++ " AS loaded_names FROM tool_set s WHERE s.tool_set_id=?1",
     .Args = struct { set: u64, loaded: u64 },
-    .Row = struct { names: ?protocol.Bounded(tool_set.max_names_bytes), loaded_names: ?protocol.Bounded(tool_set.max_names_bytes) },
+    .Row = struct { names: ?Bounded(tool_set.max_names_bytes), loaded_names: ?Bounded(tool_set.max_names_bytes) },
     .cardinality = .optional,
 });
 
@@ -1298,46 +1312,46 @@ pub const CurrentJson = struct {
     };
     pub const Settings = struct {
         pub const json_shape = .{
-            "{\"reference\":",                     H{ .string = protocol.max_session_bytes },
-            ",\"parent\":",                        H{ .optional_string = protocol.session_id_bytes },
-            ",\"workspace\":",                     H{ .string = protocol.max_workspace_bytes },
-            ",\"provider\":\"",                    H{ .tag = protocol.Provider },
-            "\",\"model\":",                       H{ .string = protocol.max_model_bytes },
+            "{\"reference\":",                     H{ .string = session_id.max_reference_bytes },
+            ",\"parent\":",                        H{ .optional_string = session_id.bytes },
+            ",\"workspace\":",                     H{ .string = workspace_path.max_bytes },
+            ",\"provider\":\"",                    H{ .tag = provider_name.Provider },
+            "\",\"model\":",                       H{ .string = model_capability.max_model_bytes },
             ",\"compaction_trigger\":\"",          H.decimal,
             "\",\"context_estimate\":",            H.optional_id,
             ",\"output_reservation\":\"",          H.decimal,
             "\",\"compaction_trigger_override\":", H.optional_id,
             ",\"output_reservation_override\":",   H.optional_id,
-            ",\"reasoning_effort\":",              H{ .optional_tag = protocol.ReasoningEffort },
-            ",\"reasoning_effort_override\":",     H{ .optional_tag = protocol.ReasoningEffort },
+            ",\"reasoning_effort\":",              H{ .optional_tag = model_capability.ReasoningEffort },
+            ",\"reasoning_effort_override\":",     H{ .optional_tag = model_capability.ReasoningEffort },
             ",\"revision\":\"",                    H.decimal,
             "\",\"tools\":",                       ToolNames,
             ",\"loaded_tools\":",                  ToolNames,
-            ",\"permission_mode\":\"",             H{ .tag = protocol.PermissionMode },
+            ",\"permission_mode\":\"",             H{ .tag = cli_value.PermissionMode },
             "\",\"instructions\":",                H{ .json = Reference },
             ",\"output_schema\":",                 H{ .optional_json = Reference },
-            ",\"label\":",                         H{ .optional_string = protocol.max_label_bytes },
+            ",\"label\":",                         H{ .optional_string = tool_presentation.max_label_bytes },
             ",\"created_at\":\"",                  H.decimal,
             "\"}",
         };
     };
     pub const Outcome = struct {
-        pub const json_shape = .{ "{\"code\":", H{ .string = protocol.max_code_bytes }, ",\"content\":", H{ .optional_json = Reference }, "}" };
+        pub const json_shape = .{ "{\"code\":", H{ .string = outcome_code.max_bytes }, ",\"content\":", H{ .optional_json = Reference }, "}" };
     };
     pub const Work = struct {
         pub const json_shape = .{"{"} ++ protocol.SessionWork.fields ++ .{ ",\"latest_outcome\":", H{ .optional_json = Outcome }, "}" };
     };
     pub const Recent = struct {
-        pub const json_shape = .{ "{\"turn\":\"", H.decimal, "\",\"message\":", H{ .string = protocol.max_key_bytes }, ",\"outcome\":", H{ .string = protocol.max_code_bytes }, "}" };
+        pub const json_shape = .{ "{\"turn\":\"", H.decimal, "\",\"message\":", H{ .string = idempotency_key.max_bytes }, ",\"outcome\":", H{ .string = outcome_code.max_bytes }, "}" };
     };
     pub const Unresolved = struct {
-        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"tool\":\"", H{ .tag = protocol.BuiltInTool }, "\",\"permission_revision\":\"", H.decimal, "\",\"authorization\":\"", H{ .tag = enum { core, pending, bypass, allow_once } }, "\",\"call_id\":", H{ .json = TextReference }, ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentation }, "}" };
+        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"tool\":\"", H{ .tag = built_in_tool.BuiltInTool }, "\",\"permission_revision\":\"", H.decimal, "\",\"authorization\":\"", H{ .tag = enum { core, pending, bypass, allow_once } }, "\",\"call_id\":", H{ .json = TextReference }, ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
     };
     pub const Resolved = struct {
-        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = max_action_resolution_code_bytes }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentation }, "}" };
+        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = max_action_resolution_code_bytes }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
     };
     pub const Rejected = struct {
-        pub const json_shape = .{ "{\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = 32 }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = TextReference }, ",\"name\":", H{ .json = TextReference }, ",\"call_id\":", H{ .json = TextReference }, ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentation }, "}" };
+        pub const json_shape = .{ "{\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = 32 }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = TextReference }, ",\"name\":", H{ .json = TextReference }, ",\"call_id\":", H{ .json = TextReference }, ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
     };
     pub const Actions = struct {
         pub const json_shape = .{ "{\"count\":\"", H.decimal, "\",\"unresolved\":", ListOf(Unresolved), ",\"resolved\":", ListOf(Resolved), "}" };
@@ -1398,12 +1412,12 @@ fn renderUnresolved(capture: *SessionReportCapture, row: *const unresolved_actio
     const built_in = actionTool(&row.name_digest);
     const mcp = row.server != null;
     if (row.server) |server| {
-        if (!protocol.validToolName(server.slice()) or built_in != null) return error.CorruptStore;
+        if (!tool_name.valid(server.slice()) or built_in != null) return error.CorruptStore;
     }
     // A non-built-in Action must name an MCP member of its frozen offer.
     // Built-in checks remain strict; provider tools never create Actions.
     const name = if (mcp) row.tool_name.slice() else @tagName(built_in orelse return error.CorruptStore);
-    if (mcp and !protocol.validToolName(name)) return error.CorruptStore;
+    if (mcp and !tool_name.valid(name)) return error.CorruptStore;
     const core = !mcp and tool_catalog.Runner.of(tool_catalog.record(built_in.?)) == .core;
     // Settlement authorizes a core call at once, with no decision.
     if (core and !row.authorized) return error.CorruptStore;
@@ -1429,10 +1443,10 @@ fn renderUnresolved(capture: *SessionReportCapture, row: *const unresolved_actio
 }
 
 /// The built-in tool whose name has `digest`, among those an Action runs.
-fn actionTool(digest: *const [32]u8) ?protocol.BuiltInTool {
-    for (std.enums.values(protocol.BuiltInTool)) |tool| {
+fn actionTool(digest: *const [32]u8) ?built_in_tool.BuiltInTool {
+    for (std.enums.values(built_in_tool.BuiltInTool)) |tool| {
         const owned = tool_catalog.record(tool);
-        if (owned.owner == .rui and std.mem.eql(u8, digest, &protocol.contentDigest(owned.name))) return tool;
+        if (owned.owner == .rui and std.mem.eql(u8, digest, &content_string.digest(owned.name))) return tool;
     }
     return null;
 }
@@ -1475,14 +1489,14 @@ fn renderActionable(capture: *SessionReportCapture, row: *const actionable_permi
 
 /// A stored outcome code as a presentation's: one it does not name is
 /// `CorruptStore`, as main's decode answered.
-fn presentedCode(code: []const u8) error{CorruptStore}!protocol.ToolPresentation.Code {
-    return std.meta.stringToEnum(protocol.ToolPresentation.Code, code) orelse error.CorruptStore;
+fn presentedCode(code: []const u8) error{CorruptStore}!tool_presentation.ToolPresentation.Code {
+    return std.meta.stringToEnum(tool_presentation.ToolPresentation.Code, code) orelse error.CorruptStore;
 }
 
-fn appendPresentation(capture: *SessionReportCapture, presentation: protocol.ToolPresentation) !void {
-    var buffer: [protocol.ToolPresentation.max_json_bytes]u8 = undefined;
+fn appendPresentation(capture: *SessionReportCapture, presentation: tool_presentation.ToolPresentation) !void {
+    var buffer: [protocol.ToolPresentationJson.max_json_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try presentation.writeJson(&writer);
+    try (protocol.ToolPresentationJson{ .value = presentation }).writeJson(&writer);
     try capture.append(",\"presentation\":");
     try capture.append(writer.buffered());
 }
@@ -1562,7 +1576,7 @@ const work_oldest = rsql.Read(.{
         "JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
         "WHERE a.parent_operation_id=?1 AND a.resolution_code IS NULL AND a.attempt_ordinal=1 ORDER BY a.attempt_at,a.action_id LIMIT 1",
     .Args = struct { operation: u64 },
-    .Row = struct { attempt_at: rsql.Positive, description: ?protocol.Bounded(protocol.max_tool_description_bytes), call_ordinal: u64 },
+    .Row = struct { attempt_at: rsql.Positive, description: ?Bounded(tool_presentation.max_description_bytes), call_ordinal: u64 },
     .cardinality = .each,
 });
 
@@ -1647,7 +1661,7 @@ pub const WorkRead = struct {
     outcome_content_id: ?u64 = null,
     /// A waiting Operation's failure code.
     cause: Code = .{},
-    description: ?protocol.Bounded(protocol.max_tool_description_bytes) = null,
+    description: ?Bounded(tool_presentation.max_description_bytes) = null,
     cutoff: u64 = 0,
 
     const Stage = enum { latest, actions, oldest, cutoff, queued, excluded, stop, done };
@@ -2228,16 +2242,16 @@ pub const ContentOwner = struct {
 const RevisionRow = struct {
     revision: rsql.Positive,
     newest: rsql.Positive,
-    command_key: protocol.Bounded(128),
-    workspace: protocol.Bounded(protocol.max_workspace_bytes),
-    provider: protocol.Provider,
-    model: protocol.Bounded(protocol.max_model_bytes),
+    command_key: Bounded(128),
+    workspace: Bounded(workspace_path.max_bytes),
+    provider: provider_name.Provider,
+    model: Bounded(model_capability.max_model_bytes),
     compaction_trigger: ?rsql.Positive,
     output_reservation: ?u64,
-    reasoning_effort: ?protocol.ReasoningEffort,
-    label: ?protocol.Bounded(protocol.max_label_bytes),
-    tools: ?protocol.Bounded(tool_set.max_names_bytes),
-    loaded_tools: ?protocol.Bounded(tool_set.max_names_bytes),
+    reasoning_effort: ?model_capability.ReasoningEffort,
+    label: ?Bounded(tool_presentation.max_label_bytes),
+    tools: ?Bounded(tool_set.max_names_bytes),
+    loaded_tools: ?Bounded(tool_set.max_names_bytes),
     permission_mode: u8,
     instructions_id: rsql.Positive,
     instructions_length: u64,
@@ -2486,18 +2500,18 @@ pub const full_messages = rsql.Page(.{
     .Row = struct {
         admission_position: rsql.Positive,
         admission_id: rsql.Positive,
-        command_key: protocol.Bounded(128),
+        command_key: Bounded(128),
         content_id: rsql.Positive,
         content_length: u64,
         content_digest: [32]u8,
         turn_id: ?rsql.Positive,
         operation_id: ?rsql.Positive,
         attempt_ordinal: ?rsql.Positive,
-        outcome_code: ?protocol.Bounded(protocol.max_code_bytes),
+        outcome_code: ?Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         outcome_length: ?u64,
         outcome_digest: ?[32]u8,
-        excluding_stop: ?protocol.Bounded(128),
+        excluding_stop: ?Bounded(128),
     },
     .take = takes(Messages.kept_rows),
 });
@@ -2691,7 +2705,7 @@ const full_turns = rsql.Page(.{
         first_admission_id: rsql.Positive,
         input_cutoff: u64,
         operation_id: rsql.Positive,
-        outcome_code: ?protocol.Bounded(protocol.max_code_bytes),
+        outcome_code: ?Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         outcome_length: ?u64,
         outcome_digest: ?[32]u8,
@@ -2738,14 +2752,14 @@ const full_operations = rsql.Page(.{
     .Row = struct {
         operation_id: rsql.Positive,
         turn_id: rsql.Positive,
-        resolution_code: ?protocol.Bounded(protocol.max_code_bytes),
+        resolution_code: ?Bounded(outcome_code.max_bytes),
         resolution_content_id: ?rsql.Positive,
         resolution_length: ?u64,
         resolution_digest: ?[32]u8,
-        interrupted_by_command_key: ?protocol.Bounded(128),
+        interrupted_by_command_key: ?Bounded(128),
         settings_revision: rsql.Positive,
-        request_id: ?protocol.Bounded(256),
-        reasoning_effort: ?protocol.ReasoningEffort,
+        request_id: ?Bounded(256),
+        reasoning_effort: ?model_capability.ReasoningEffort,
     },
     .take = takes(Operations.kept_rows),
 });
@@ -2811,7 +2825,7 @@ pub const full_calls = rsql.Page(.{
         operation_id: rsql.Positive,
         call_ordinal: u64,
         item_ordinal: u64,
-        rejection_code: ?protocol.Bounded(32),
+        rejection_code: ?Bounded(32),
         acceptance_position: ?rsql.Positive,
         name_id: rsql.Positive,
         name_length: u64,
@@ -2867,8 +2881,8 @@ const full_actions = rsql.Page(.{
         parent_operation_id: rsql.Positive,
         call_ordinal: u64,
         permission_revision: rsql.Positive,
-        permission: protocol.Bounded(16),
-        resolution_code: ?protocol.Bounded(max_action_resolution_code_bytes),
+        permission: Bounded(16),
+        resolution_code: ?Bounded(max_action_resolution_code_bytes),
         resolution_content_id: ?rsql.Positive,
         result_length: ?u64,
         result_digest: ?[32]u8,
@@ -2914,11 +2928,11 @@ const full_decisions = rsql.Page(.{
     }},
     .Row = struct {
         command_seq: rsql.Positive,
-        command_key: protocol.Bounded(128),
-        action_id: protocol.Bounded(20),
-        decision: protocol.PermissionDecision,
+        command_key: Bounded(128),
+        action_id: Bounded(20),
+        decision: mutation_answer.PermissionDecision,
         accepted: bool,
-        code: protocol.Bounded(96),
+        code: Bounded(96),
     },
     .take = takes(Decisions.kept_rows),
 });
@@ -2955,9 +2969,9 @@ pub const full_stops = rsql.Page(.{
     }},
     .Row = struct {
         command_seq: rsql.Positive,
-        command_key: protocol.Bounded(128),
+        command_key: Bounded(128),
         accepted: bool,
-        code: protocol.Bounded(96),
+        code: Bounded(96),
         selected_turn_id: ?rsql.Positive,
         admission_cutoff: ?u64,
     },
@@ -2999,11 +3013,11 @@ pub const full_interruptions = rsql.Page(.{
     }},
     .Row = struct {
         command_seq: rsql.Positive,
-        command_key: protocol.Bounded(128),
+        command_key: Bounded(128),
         accepted: bool,
-        code: protocol.Bounded(96),
-        turn_id: protocol.Bounded(20),
-        operation_id: protocol.Bounded(20),
+        code: Bounded(96),
+        turn_id: Bounded(20),
+        operation_id: Bounded(20),
     },
     .take = takes(Interruptions.kept_rows),
 });
@@ -3075,7 +3089,7 @@ pub const full_results = rsql.Page(.{
         call_id: rsql.Positive,
         call_id_length: u64,
         call_id_digest: [32]u8,
-        code: protocol.Bounded(32),
+        code: Bounded(32),
         result_id: rsql.Positive,
         result_length: u64,
         result_digest: [32]u8,
@@ -3100,7 +3114,7 @@ const Results = struct {
     }
 };
 
-fn appendNullableEffort(value: ?protocol.ReasoningEffort, capture: *SessionReportCapture) !void {
+fn appendNullableEffort(value: ?model_capability.ReasoningEffort, capture: *SessionReportCapture) !void {
     if (value) |effort| return capture.appendJsonString(@tagName(effort));
     try capture.append("null");
 }
