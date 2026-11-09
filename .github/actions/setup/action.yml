@@ -98,7 +98,7 @@ runs:
       if: ${{ inputs.cold != 'true' && inputs.compiled != 'true' }}
       shell: bash
       env:
-        DEPS: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'screen-emulator/build.zig.zon', 'src/build_*', 'src/*.patch') }}-
+        DEPS: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'screen-emulator/build.zig.zon', 'src/build_*', 'src/*.patch') }}-
         SOURCES: ${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-
         CHECK_PART: ${{ inputs.check-part }}
       run: |
@@ -112,7 +112,7 @@ runs:
       if: ${{ inputs.cold != 'true' && inputs.compiled == 'true' }}
       shell: bash
       env:
-        CPU: rui-runner-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ steps.tools.outputs.cpu }}-
+        CPU: rui-runner-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ steps.tools.outputs.identity }}-${{ steps.tools.outputs.cpu }}-
         BUILD: ${{ hashFiles('build.zig', 'build.zig.zon') }}
       run: |
         {
@@ -125,12 +125,12 @@ runs:
       if: ${{ inputs.publish-caches == 'true' }}
       with:
         path: ${{ runner.temp }}/rui-zig
-        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.0
+        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.1
     - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: ${{ inputs.publish-caches != 'true' }}
       with:
         path: ${{ runner.temp }}/rui-zig
-        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.0
+        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.1
     # Build pair: build.zig marks every Zig test run side-effectful, so no
     # acceptance manifests are written/read. Output-producing build steps stay cached.
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -203,28 +203,39 @@ runs:
         set -euo pipefail
         case "$(uname -s)/$(uname -m)" in
           Linux/x86_64)
-            archive=zig-x86_64-linux-0.17.0
-            checksum=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+            archive=zig-x86_64-linux-0.17.1
+            checksum=3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a
             ;;
           Linux/aarch64)
-            archive=zig-aarch64-linux-0.17.0
-            checksum=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
+            archive=zig-aarch64-linux-0.17.1
+            checksum=a1546d5646eb184437918d6635ca6b762a0e889eac09cef720ee7a1ed3fe7795
             ;;
           Darwin/arm64)
-            archive=zig-aarch64-macos-0.17.0
-            checksum=b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a
+            archive=zig-aarch64-macos-0.17.1
+            checksum=75f1bc7a1e9852f17ec9a0c1895f767c4ec56d46bc8a834920eece1d0359dd8d
             ;;
           *) echo "Unsupported actual native architecture" >&2; exit 1 ;;
         esac
         if [ ! -x "$RUNNER_TEMP/rui-zig/zig" ]; then
-          curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
-            --retry 2 --retry-all-errors --retry-max-time 200 \
-            "https://pkg.hexops.org/zig/$archive.tar.xz" -o "$RUNNER_TEMP/zig.tar.xz"
-          echo "$checksum  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -
+          # Mirrors serve identical archives and the pinned checksum is the
+          # authority, so a stalled source falls through to the next one and
+          # the slow origin is tried last, as in .agents/setup.
+          verified=false
+          for source in https://pkg.hexops.org/zig https://zigmirror.hryx.net/zig https://ziglang.org/download/0.17.1; do
+            if curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
+                --retry 1 --retry-all-errors --retry-max-time 100 \
+                "$source/$archive.tar.xz" -o "$RUNNER_TEMP/zig.tar.xz" &&
+              echo "$checksum  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -; then
+              verified=true
+              break
+            fi
+            echo "::warning::Zig download from $source failed; trying the next source."
+          done
+          "$verified" || { echo "No source supplied a verified $archive archive" >&2; exit 1; }
           mkdir -p "$RUNNER_TEMP/rui-zig"
           tar -xJf "$RUNNER_TEMP/zig.tar.xz" --strip-components=1 -C "$RUNNER_TEMP/rui-zig"
         fi
-        test "$("$RUNNER_TEMP/rui-zig/zig" version)" = 0.17.0
+        test "$("$RUNNER_TEMP/rui-zig/zig" version)" = 0.17.1
         echo "$RUNNER_TEMP/rui-zig" >> "$GITHUB_PATH"
         echo "ZIG_GLOBAL_CACHE_DIR=$HOME/.cache/zig" >> "$GITHUB_ENV"
         mkdir -p .zig-cache/tmp "$HOME/.cache/zig/tmp"

@@ -45,10 +45,12 @@ module.exports = async function pruneCaches({github, context, core}) {
 };
 
 function mainGroup(key) {
-  const build = /^rui-build-v2-(Linux-X64|macOS-ARM64)-0\.(?:16|17)\.0-[a-f0-9]{64}-[a-f0-9]{64}-[a-f0-9]{64}-([a-z][a-z0-9-]*)$/.exec(key);
+  const build = /^rui-build-v2-(Linux-X64|macOS-ARM64)-0\.17\.[0-9]+-[a-f0-9]{64}-[a-f0-9]{64}-[a-f0-9]{64}-([a-z][a-z0-9-]*)$/.exec(key);
   if (build) return `build/${build[1]}/${build[2]}`;
   const runner = /^rui-runner-v2-(Linux-X64|macOS-ARM64)-0\.17\.[0-9]+-[a-f0-9]{64}-([a-f0-9]{16})-[a-f0-9]{64}$/.exec(key);
   if (runner) return `runner/${runner[1]}/${runner[2]}`;
+  const compiler = /^rui-compiler-(Linux-X64|macOS-ARM64)-0\.17\.[0-9]+$/.exec(key);
+  if (compiler) return `compiler/${compiler[1]}`;
   if (/^rui-packages-v1-[a-f0-9]{64}$/.test(key)) return 'packages';
   return null;
 }

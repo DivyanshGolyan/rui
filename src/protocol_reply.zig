@@ -593,7 +593,7 @@ test "upgrade Host information profiles retain the entire strict shape" {
             try std.testing.expectError(case.failure, parseHostInfoForProfile(bad, "/one", profile));
         }
     }
-    for ([_][]const u8{ "8", "11", "09", "unknown", "" }) |wire| {
+    for ([_][]const u8{ "8", protocol.next_wire_version, "09", "unknown", "" }) |wire| {
         const version = try std.fmt.allocPrint(std.testing.allocator, "\"version\":\"{s}\"", .{wire});
         defer std.testing.allocator.free(version);
         const bad = try std.mem.replaceOwned(u8, std.testing.allocator, old, legacy_field, version);
@@ -3614,4 +3614,67 @@ test "keyed observation requires valid delta since and shape-specific facts" {
     }) |fields| {
         try std.testing.expectError(error.InvalidObservation, ObservationReply.parse(.{ .status = 200, .body = prefix ++ fields ++ "}" }, "k", token));
     }
+}
+
+/// Decode a bounded metadata page into independent allocator-owned strings.
+pub fn decodeSkillSuggestions(gpa: std.mem.Allocator, bytes: []const u8) !@import("skill_suggestions.zig").Page {
+    const suggestion = @import("skill_suggestions.zig");
+    const Text = @import("json_scalar.zig").Text;
+    const Entry = struct { name: Text, description: Text };
+    const Entries = struct {
+        values: []const Entry,
+        pub fn jsonParse(a: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            if (try source.next() != .array_begin) return error.UnexpectedToken;
+            var values: std.ArrayList(Entry) = .empty;
+            while (try source.peekNextTokenType() != .array_end) {
+                if (values.items.len == suggestion.capacity) return error.LengthMismatch;
+                const entry = try std.json.innerParse(Entry, a, source, options);
+                if (entry.name.slice.len == 0 or entry.name.slice.len > 64 or entry.description.slice.len == 0 or entry.description.slice.len > 4096) return error.LengthMismatch;
+                if (!std.unicode.utf8ValidateSlice(entry.name.slice) or !std.unicode.utf8ValidateSlice(entry.description.slice)) return error.InvalidCharacter;
+                if (values.items.len != 0 and std.mem.order(u8, values.items[values.items.len - 1].name.slice, entry.name.slice) != .lt) return error.InvalidCharacter;
+                try values.append(a, entry);
+            }
+            _ = try source.next();
+            return .{ .values = values.items };
+        }
+    };
+    const Wire = struct { version: JsonString(8), type: JsonString(32), revision: JsonString(20), total: JsonString(20), entries: Entries };
+    if (bytes.len > protocol.skill_suggestions_reply.max_bytes) return error.InvalidResponse;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const wire = std.json.parseFromSliceLeaky(Wire, arena.allocator(), bytes, .{ .max_value_len = 4096 }) catch return error.InvalidResponse;
+    if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("skill_suggestions")) return error.InvalidResponse;
+    const revision = std.fmt.parseInt(u64, wire.revision.slice(), 10) catch return error.InvalidResponse;
+    const total = std.fmt.parseInt(usize, wire.total.slice(), 10) catch return error.InvalidResponse;
+    if (total > 4096 or wire.entries.values.len != @min(total, suggestion.capacity)) return error.InvalidResponse;
+    const entries = try gpa.alloc(suggestion.Entry, wire.entries.values.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (entries[0..initialized]) |entry| {
+            gpa.free(entry.name);
+            gpa.free(entry.description);
+        }
+        gpa.free(entries);
+    }
+    for (wire.entries.values, 0..) |entry, index| {
+        const name = try gpa.dupe(u8, entry.name.slice);
+        errdefer gpa.free(name);
+        const description = try gpa.dupe(u8, entry.description.slice);
+        entries[index] = .{ .name = name, .description = description };
+        initialized += 1;
+    }
+    return .{ .entries = entries, .revision = revision, .total = total };
+}
+
+test "inline skills suggestion decoder owns bounded metadata and rejects path or count forgery" {
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"skill_suggestions\",\"revision\":\"7\",\"total\":\"1\",\"entries\":[";
+    var page = try decodeSkillSuggestions(std.testing.allocator, prefix ++ "{\"name\":\"demo\",\"description\":\"A skill\"}]}");
+    defer page.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("demo", page.entries[0].name);
+    try std.testing.expectEqual(@as(u64, 7), page.revision);
+    for ([_][]const u8{
+        prefix ++ "{\"name\":\"demo\",\"description\":\"A skill\",\"path\":\"/not-public\"}]}",
+        prefix ++ "]}",
+        prefix ++ "{\"name\":3,\"description\":\"A skill\"}]}",
+    }) |wire| try std.testing.expectError(error.InvalidResponse, decodeSkillSuggestions(std.testing.allocator, wire));
 }

@@ -41,10 +41,7 @@ pub const find_tools_max_word_bytes = 64;
 pub const find_tools_max_argument_bytes = 4096;
 pub const find_tools_too_long = std.fmt.comptimePrint("words must fit arguments of at most {d} bytes", .{find_tools_max_argument_bytes});
 
-pub const FindTools = struct {
-    words: [8][]const u8 = @splat(""),
-    count: usize = 0,
-};
+pub const FindTools = @import("find_tools_words.zig").FindTools;
 
 /// Checked when the core call runs, not when its model output settles.
 pub fn checkFindTools(arena: std.mem.Allocator, bytes: []const u8, out: *FindTools) error{OutOfMemory}!StartAgentCheck {

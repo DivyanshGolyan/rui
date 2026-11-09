@@ -7,7 +7,7 @@ function cache(id, ref, platform = 'Linux-X64', part = 'all') {
   return {
     id, ref, size_in_bytes: 100,
     created_at: new Date(Date.UTC(2026, 9, 1, 0, id)).toISOString(),
-    key: `rui-build-v2-${platform}-0.16.0-${'a'.repeat(64)}-${'b'.repeat(64)}-${id.toString(16).padStart(64, '0')}-${part}`,
+    key: `rui-build-v2-${platform}-0.17.0-${'a'.repeat(64)}-${'b'.repeat(64)}-${id.toString(16).padStart(64, '0')}-${part}`,
   };
 }
 
@@ -46,21 +46,23 @@ test('prune every PR snapshot and old main snapshots without crossing platform o
     cache(4, open), cache(5, open), cache(6, open, 'macOS-ARM64'),
     cache(7, main, 'Linux-X64', 'execution'), cache(8, main, 'Linux-X64', 'callers'),
     cache(9, main, 'Linux-X64', 'baseline'), cache(10, main, 'macOS-ARM64'),
-    cache(11, closed), {...cache(12, closed), key: 'rui-compiler-Linux-X64-0.16.0'},
-    {...cache(13, open), key: 'rui-compiler-Linux-X64-0.16.0'},
+    cache(11, closed), {...cache(12, closed), key: 'rui-compiler-Linux-X64-0.17.0'},
+    {...cache(13, open), key: 'rui-compiler-Linux-X64-0.17.0'},
     cache(14, 'refs/heads/feature'), cache(15, 'refs/pull/13/head'),
     {...cache(16, closed), key: 'other-cache'},
     {...cache(17, open), key: 'rui-actionlint-1.7.7-linux-amd64'},
     cache(18, 'refs/heads/main-other'),
-    {...cache(19, main), key: 'rui-compiler-macOS-ARM64-0.16.0'},
+    // Main keeps only its newest compiler per platform, so a Zig repin retires the old one.
+    {...cache(19, main), key: 'rui-compiler-macOS-ARM64-0.17.0'},
     {...cache(20, main), key: 'rui-build-v2-lookalike'},
+    {...cache(21, main), key: 'rui-compiler-macOS-ARM64-0.17.1'},
   ];
   // Equal timestamps use IDs. Recently accessed old caches still retire.
   caches[0].created_at = caches[1].created_at;
   caches[0].last_accessed_at = '2099-01-01T00:00:00Z';
   const result = await run(caches);
   assert.ifError(result.error);
-  assert.deepEqual(result.ids, [3, 7, 8, 9, 10, 14, 15, 16, 18, 19, 20]);
+  assert.deepEqual(result.ids, [3, 7, 8, 9, 10, 14, 15, 16, 18, 20, 21]);
 });
 
 test('main keeps the newest build runner per CPU model and the newest package set', async () => {
@@ -97,9 +99,9 @@ test('current compiler and named main shard caches retain independent snapshots'
     cache(2, main, 'Linux-X64', 'test-full'),
     cache(3, main, 'Linux-X64', 'full-callers'),
     cache(4, main, 'macOS-ARM64', 'codex-h2-integration'),
-    {...cache(5, main), key: 'rui-compiler-Linux-X64-0.17.0'},
+    {...cache(5, main), key: 'rui-compiler-Linux-X64-0.17.1'},
     cache(6, 'refs/heads/feature', 'Linux-X64', 'test-full'),
-  ].map(entry => ({...entry, key: entry.key.replace('0.16.0', '0.17.0')}));
+  ].map(entry => ({...entry, key: entry.key.replace('0.17.0', '0.17.1')}));
   const result = await run(entries);
   assert.ifError(result.error);
   assert.deepEqual(result.ids, [2, 3, 4, 5, 6]);

@@ -4,6 +4,7 @@
 const std = @import("std");
 const yaml = @import("yaml");
 const json_scalar = @import("json_scalar.zig");
+const skill_reference = @import("skill_reference.zig");
 const Allocator = std.mem.Allocator;
 
 // Per scan: at most two roots, 4096 direct children each, and 4096 winners.
@@ -247,7 +248,7 @@ fn parseMetadata(allocator: Allocator, raw: []const u8) !?Metadata {
     }
     const parsed_name = name orelse return null;
     const parsed_description = description orelse return null;
-    if (!validName(parsed_name)) return null;
+    if (!skill_reference.validName(parsed_name)) return null;
     if (parsed_description.len == 0) return null;
     const description_view = std.unicode.Utf8View.init(parsed_description) catch return null;
     // A commented document separator is YAML syntax, not a Markdown closing
@@ -277,21 +278,6 @@ fn scalar(node: [*c]yaml.yaml_node_t) []const u8 {
     return node.*.data.scalar.value[0..node.*.data.scalar.length];
 }
 
-fn validName(name: []const u8) bool {
-    if (name.len == 0 or name.len > 64 or name[0] == '-' or name[name.len - 1] == '-') return false;
-    var hyphen = false;
-    for (name) |byte| {
-        if (byte == '-') {
-            if (hyphen) return false;
-            hyphen = true;
-        } else {
-            if (!(byte >= 'a' and byte <= 'z') and !(byte >= '0' and byte <= '9')) return false;
-            hyphen = false;
-        }
-    }
-    return true;
-}
-
 fn validDescription(description: []const u8) bool {
     const count = std.unicode.utf8CountCodepoints(description) catch return false;
     return count > 0 and count <= max_description_characters;
@@ -310,6 +296,8 @@ pub fn invocation(allocator: Allocator, io: std.Io, entry: Entry) ![]const u8 {
     return readSkillPrefixed(allocator, io, entry, true);
 }
 
+/// Same single-descriptor capture as invocation; exposes raw extent separately
+/// so a batch can charge body bytes without counting escaped path framing.
 fn invocationPrefix(writer: *std.Io.Writer, path: []const u8) !void {
     try writer.writeAll("Skill file: ");
     try std.json.Stringify.value(path, .{}, writer);
@@ -452,7 +440,7 @@ fn freeEntries(allocator: Allocator, entries: []const Entry) void {
 fn validateCatalog(catalog: Catalog) !void {
     if (catalog.entries.len > max_entries) return error.SkillCatalogLimit;
     for (catalog.entries) |entry| {
-        if (!validName(entry.name) or !validDescription(entry.description) or
+        if (!skill_reference.validName(entry.name) or !validDescription(entry.description) or
             !std.fs.path.isAbsolute(entry.path) or entry.path.len > std.fs.max_path_bytes or
             !std.unicode.utf8ValidateSlice(entry.path) or
             std.mem.indexOfScalar(u8, entry.path, 0) != null) return error.InvalidSkillCatalog;
@@ -592,13 +580,13 @@ test "skills libyaml ignores valid unknown nested metadata without granting auth
 
 test "skills validates name byte grammar and Unicode character description bounds" {
     const valid = [_][]const u8{ "a", "0", "a-b", "1-2-three", &@as([64]u8, @splat('a')) };
-    for (valid) |name| try std.testing.expect(validName(name));
+    for (valid) |name| try std.testing.expect(skill_reference.validName(name));
     const invalid = [_][]const u8{ "", "-a", "a-", "a--b", "A", "a_b", "a.b", "a/b", "a b", "é", &@as([65]u8, @splat('a')) };
-    for (invalid) |name| try std.testing.expect(!validName(name));
+    for (invalid) |name| try std.testing.expect(!skill_reference.validName(name));
     for (0..256) |value| {
         const name = [_]u8{ @intCast(value), 'x' };
         const allowed = (value >= 'a' and value <= 'z') or (value >= '0' and value <= '9');
-        try std.testing.expectEqual(allowed, validName(&name));
+        try std.testing.expectEqual(allowed, skill_reference.validName(&name));
     }
     const unicode_1025 = try std.testing.allocator.alloc(u8, 1025 * "😀".len);
     defer std.testing.allocator.free(unicode_1025);

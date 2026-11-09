@@ -116,10 +116,8 @@ pub const routes = [_]Route{
     .{
         .path = protocol.CommandKind.message.route(),
         .kind = .message,
-        .summary = "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
+        .summary = "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
         .variants = &.{
-            variant(protocol.message_request.head ++ protocol.message_request.skill, .{}),
-            variant(protocol.message_request.sender_head ++ protocol.message_request.skill, .{ .{ 3, "\"/s\"" }, .{ 4, "\"aaaaaa\"" } }),
             variant(protocol.message_request.head ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{}),
             // A sending Session's address: an absolute Store path and a Session id.
             variant(protocol.message_request.sender_head ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{ .{ 3, "\"/s\"" }, .{ 4, "\"aaaaaa\"" } }),
@@ -257,6 +255,13 @@ pub const routes = [_]Route{
         .reply = .bytes,
     },
     .{
+        .path = "/v1/skill-suggestions",
+        .kind = .skill_suggestions,
+        .summary = "Bounded skill metadata from a Session catalog or prospective Workspace discovery.",
+        .variants = &.{ variant(protocol.skill_suggestions_session_request, .{.{ 1, "\"k7m2qx\"" }}), variant(protocol.skill_suggestions_workspace_request, .{}) },
+        .reply = jsonReply(.{protocol.skill_suggestions_reply.head ++ .{BoundedListOf(protocol.skill_suggestions_reply.entry, 24, false)} ++ .{protocol.skill_suggestions_reply.tail}}),
+    },
+    .{
         .path = "/v1/model-list",
         .kind = .model_list,
         .summary = "The models each served provider offers.",
@@ -287,6 +292,19 @@ fn ListOf(comptime item: anytype) type {
         pub fn openapi_inline(d: *Document) !Value {
             const items = if (@TypeOf(item) == type) try d.typeRef(item) else try d.shapeSchema(item);
             return d.object(.{ .type = Value{ .string = "array" }, .items = items });
+        }
+    };
+}
+
+fn BoundedListOf(comptime item: anytype, comptime capacity: usize, comptime unique: bool) type {
+    return struct {
+        pub const is_list = true;
+        pub fn openapi_example(out: *std.Io.Writer) !void {
+            try out.writeAll("[]");
+        }
+        pub fn openapi_inline(d: *Document) !Value {
+            const items = if (@TypeOf(item) == type) try d.typeRef(item) else try d.shapeSchema(item);
+            return d.object(.{ .type = Value{ .string = "array" }, .items = items, .maxItems = Value{ .integer = capacity }, .uniqueItems = Value{ .bool = unique } });
         }
     };
 }
@@ -1467,7 +1485,7 @@ test "catalog full report schema represents turnless catalog source facts" {
     const json = try std.json.parseFromSliceLeaky(
         Value,
         arena.allocator(),
-        "{\"ordinal\":\"1\",\"position\":\"1\",\"kind\":\"settings\",\"turn\":null,\"source_admission\":null,\"source_revision\":null,\"source_catalog_position\":\"1\",\"source_operation\":null,\"content\":{\"bytes\":\"12\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"}}",
+        "{\"ordinal\":\"1\",\"position\":\"1\",\"kind\":\"settings\",\"turn\":null,\"source_admission\":null,\"source_revision\":null,\"source_catalog_position\":\"1\",\"source_skill_position\":null,\"source_operation\":null,\"content\":{\"bytes\":\"12\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"}}",
         .{},
     );
     try std.testing.expect(conforms(document.schemas, shape, json));
