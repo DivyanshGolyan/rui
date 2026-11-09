@@ -33,12 +33,9 @@ MAC_PATHS = (
     "src/*.c", "src/*.h", "src/*.inc", "src/*.patch", "src/*.sh", "tests/integration/*.c",
     ".github/workflows/qualify-macos.yml",
     "install.sh", "release/*",
-    # build.zig's Darwin-only linking and test settings, which Linux never runs.
-    # build.zig stays until they move to build/darwin.zig: typecheck-macos
-    # skips addH2's Darwin SDK and framework linking.
-    "build/darwin.zig", "build.zig",
+    "build/darwin.zig",
 )
-# Other build plumbing (build.zig.zon, the setup action, the CI qualification
+# Other build plumbing (build.zig, build.zig.zon, the setup action, the CI qualification
 # helpers) is not here: Linux runs it, typecheck-macos compiles Rui for
 # Darwin on every PR, and promotion links and runs it on a Mac.
 
@@ -68,6 +65,27 @@ TS_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
 # Zig tokens with comments and multiline string lines removed; strings stay
 # whole so `@import("builtin")` is recognizable and string contents are inert.
 ZIG_TOKEN = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|@?[A-Za-z_][A-Za-z_0-9]*|[^\s]')
+
+
+def build_violations(source):
+    """Keep Darwin-only build branches in the native Mac CI path."""
+    tokens = [m.group() for m in ZIG_TOKEN.finditer(source) if not m.group().startswith(("//", "\\\\", '"', "'"))]
+    code = " ".join(tokens)
+    # These target declarations and the portable transport predicate execute on Linux.
+    code = re.sub(r'\bos_tag = \. macos\b', 'os_tag = portable_target', code)
+    code = code.replace('target . result . os . tag = = . macos or target . result . os . tag = = . linux',
+                        'portable_transport_predicate')
+    code = code.replace('. macos = > { macos_cross_step . dependOn ( & executable . step ) ; }',
+                        'portable_cross_check_arm')
+    # A Darwin branch may only invoke helpers with simple arguments.
+    call = (r'darwin \. [A-Za-z_][\w]* \( '
+            r'(?:[A-Za-z_][\w.]*(?: [.,] [A-Za-z_][\w]*)* )?\)')
+    code = re.sub(r'\bif \( [A-Za-z_][\w]*(?: \. [A-Za-z_][\w]*)* '
+                  r'= = \. macos \) \{ (?:' + call + r' ; )+\}',
+                  'darwin_delegation', code)
+    if re.search(r'\bisDarwin\b|\. (?:macos|ios|tvos|watchos|visionos|driverkit)\b', code):
+        return ["build.zig: move Darwin-only build logic to build/darwin.zig"]
+    return []
 
 
 def zig_sites(source):
@@ -211,7 +229,7 @@ def bind_violations(found):
 
 def main():
     argparse.ArgumentParser(description=__doc__).parse_args()
-    messages = violations(sites()) + bind_violations(bind_sites())
+    messages = build_violations((ROOT / "build.zig").read_text()) + violations(sites()) + bind_violations(bind_sites())
     for message in messages:
         print(message, file=sys.stderr)
     return 1 if messages else 0

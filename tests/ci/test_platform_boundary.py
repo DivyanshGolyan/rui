@@ -11,7 +11,7 @@ import textwrap
 import unittest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from platform_boundary import (bind_sites, mac_path, python_sites, shell_sites, sites, typescript_sites,  # noqa: E402
+from platform_boundary import (bind_sites, build_violations, mac_path, python_sites, shell_sites, sites, typescript_sites,  # noqa: E402
                                unlistened_binds, violations, zig_sites)
 from select_tests import select  # noqa: E402
 from qualification import split_build  # noqa: E402
@@ -50,6 +50,27 @@ def committed_selection(path):
 class PlatformBoundaryTest(unittest.TestCase):
     def test_repository_platform_sites_are_all_under_mac_paths(self):
         self.assertEqual(violations(sites()), [])
+
+    def test_darwin_build_branches_delegate_to_mac_path(self):
+        source = (Path(__file__).parents[2] / "build.zig").read_text()
+        self.assertEqual(build_violations(source), [])
+        for inline in (
+                'if (target.result.os.tag == .macos) { module.linkFramework("Security", .{}); }',
+                'if (host.isDarwin()) "lib.dylib" else "lib.so"',
+                'if (target.result.os.tag == .macos) { darwin.linkTrust(module); sideEffect(); }',
+                'if (target.result.os.tag == .macos and enabled) { sideEffect(); }',
+                'switch (target.result.os.tag) { .macos => sideEffect(), else => {} }',
+                'if (target.result.os.tag == .ios) { sideEffect(); }'):
+            with self.subTest(inline=inline):
+                self.assertIn("build/darwin.zig", build_violations(inline)[0])
+        for portable in (
+                'if (target.result.os.tag == .linux) { linuxOnly(); }',
+                'if (target.result.os.tag == .macos) { darwin.linkTrust(module); }',
+                'if (target.result.os.tag == .macos) { darwin.one(); darwin.two(b, output.path); }',
+                '.{ .cpu_arch = .aarch64, .os_tag = .macos }',
+                '// if (host.isDarwin()) not code'):
+            with self.subTest(portable=portable):
+                self.assertEqual(build_violations(portable), [])
 
     def test_scan_reaches_files_in_subdirectories(self):
         # Before the scan recursed, src/http1 and src/mcp sockets named the
@@ -157,7 +178,7 @@ class PlatformBoundaryTest(unittest.TestCase):
     def test_mac_specific_paths(self):
         for path in ("src/os/socket.zig", "tests/integration/os_semantics.py", "src/host_launch.c",
                      "src/build_transport.sh", "tests/integration/session_list_release_probe.c",
-                     ".github/workflows/qualify-macos.yml", "install.sh", "build/darwin.zig", "build.zig",
+                     ".github/workflows/qualify-macos.yml", "install.sh", "build/darwin.zig",
                      "src/os/process.zig", "src/os/descriptor_limit.zig", "src/h2/Connection.zig",
                      "src/h2/testing/Peer.zig", "tests/integration/terminal_process.py",
                      "tests/integration/terminal_leader.py"):
@@ -165,7 +186,7 @@ class PlatformBoundaryTest(unittest.TestCase):
         for path in ("src/session_view.zig", "src/server.zig", "tests/integration/dispatch_integration.py",
                      ".github/workflows/check.yml", "README.md",
                      # Build plumbing: Linux runs it and typecheck-macos compiles for Darwin.
-                     "build.zig.zon", ".github/actions/setup/action.yml", "tests/ci/qualification.py"):
+                     "build.zig", "build.zig.zon", ".github/actions/setup/action.yml", "tests/ci/qualification.py"):
             self.assertFalse(mac_path(path), path)
 
     def test_selection_requires_mac_for_review_of_mac_specific_paths(self):
