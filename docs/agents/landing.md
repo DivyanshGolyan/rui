@@ -24,7 +24,8 @@ A PR that merely trails `main` merges as it is.
 
 ## Concurrent PRs
 
-Before splitting work across lanes, check open PRs for files the new work would touch.
+Before splitting work across lanes and again before opening a PR, compare its changed files with open PRs, including PRs opened since work began.
+Git can merge edits to the same file without a conflict even when one removes a name the other uses.
 PRs run independently only when they touch different files.
 Work sharing a file with an open PR stacks on that PR, including across lanes.
 Land a stack in order.
