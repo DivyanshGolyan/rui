@@ -8,6 +8,7 @@ probe could not decide. Each verdict carries the measured values.
 
 import errno
 import json
+import resource
 import os
 import platform
 import pty
@@ -62,7 +63,9 @@ for fd in range(4096):
         held.append(fd)
     except OSError:
         pass
-r = {"held": held, "fd37_fifo": stat.S_ISFIFO(os.fstat(37).st_mode)}
+import resource
+r = {"held": held, "fd37_fifo": stat.S_ISFIFO(os.fstat(37).st_mode),
+     "nofile_soft": resource.getrlimit(resource.RLIMIT_NOFILE)[0]}
 sys.stderr.write("err-text")
 sys.stderr.flush()
 os.write(37, json.dumps(r).encode())
@@ -323,7 +326,9 @@ def probe_status():
 def probe_descriptors():
     master, slave = openpty()
     read = reporter()
-    process = spawn(PY + [DESCRIPTORS], stdin=slave, stdout=slave, stderr=subprocess.PIPE, pass_fds=(REPORT,))
+    hard = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+    process = spawn(PY + [DESCRIPTORS], stdin=slave, stdout=slave, stderr=subprocess.PIPE, pass_fds=(REPORT,),
+                    rlimits={resource.RLIMIT_NOFILE: (256, hard)})
     close_report()
     seen = report(read)
     _, err = process.communicate(timeout=5)
@@ -345,6 +350,7 @@ def probe_descriptors():
         ("fd 37 arrives as 37", seen is not None and seen["fd37_fifo"]),
         ("stderr PIPE", err == b"err-text"),
         ("C holds only 0,1,2,37", seen is not None and seen["held"] == [0, 1, 2, 37]),
+        ("rlimits reach C (NOFILE soft 256)", seen is not None and seen["nofile_soft"] == 256),
         ("exec failures raise FileNotFoundError",
          all(v.startswith("FileNotFoundError") for v in failures.values())),
         ("leader runs commands after a failure", after == 0),

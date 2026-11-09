@@ -34,7 +34,8 @@ HEADER = struct.Struct("!I")
 # Signals a Popen child gets at their default action even when the fixture
 # ignores them, as `restore_signals=True` does.
 RESTORED = {getattr(signal, name) for name in ("SIGPIPE", "SIGXFSZ", "SIGXFZ") if hasattr(signal, name)}
-LIMITS = {name: getattr(resource, name) for name in dir(resource) if name.startswith("RLIMIT_")}
+# By number: names alias (Linux has RLIMIT_OFILE for RLIMIT_NOFILE).
+LIMITS = sorted({getattr(resource, name) for name in dir(resource) if name.startswith("RLIMIT_")})
 
 
 def frame(message):
@@ -215,9 +216,9 @@ def become(request, sources, error_write):
                 os.close(int(name))
             except OSError:
                 pass
-    for name, (soft, hard) in request["limits"].items():
+    for number, (soft, hard) in request["limits"]:
         try:
-            resource.setrlimit(LIMITS[name], (soft, hard))
+            resource.setrlimit(number, (soft, hard))
         except (ValueError, OSError):
             pass
     args, env = request["args"], request["env"]
@@ -448,14 +449,13 @@ def spawn(args, *, stdin=None, stdout=None, stderr=None, env=None, cwd=None, pas
             stream = sources[1]
         sources.append(stream)
     sources += list(pass_fds)
-    limits = {name: resource.getrlimit(number) for name, number in LIMITS.items()}
-    for number, values in (rlimits or {}).items():
-        limits[next(name for name, n in LIMITS.items() if n == number)] = values
+    limits = {number: resource.getrlimit(number) for number in LIMITS}
+    limits.update(rlimits or {})
     umask = os.umask(0)
     os.umask(umask)
     request = {
         "args": args, "env": dict(os.environ if env is None else env), "cwd": None if cwd is None else os.fspath(cwd),
-        "targets": [0, 1, 2] + list(pass_fds), "umask": umask, "limits": limits,
+        "targets": [0, 1, 2] + list(pass_fds), "umask": umask, "limits": sorted(limits.items()),
         "mask": sorted(int(s) for s in signal.pthread_sigmask(signal.SIG_BLOCK, [])),
         "ignored": [int(s) for s in signal.valid_signals() if signal.getsignal(s) == signal.SIG_IGN],
         "default_signals": [int(s) for s in default_signals],
