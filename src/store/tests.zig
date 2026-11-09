@@ -4,13 +4,14 @@ const std = @import("std");
 const named_scratch = @import("../named_scratch.zig");
 const platform = @import("../platform.zig");
 const protocol = @import("../protocol.zig");
+const wire_request = @import("../wire_request.zig");
 const protocol_reply = @import("../protocol_reply.zig");
 const tool_catalog = @import("../tools.zig");
 const tool_set_domain = @import("domain/tool_set.zig");
 
 // A stored Host catalog must contain every native tool. Keep that inventory
 // canonical while each fixture independently states its MCP schema and offer.
-fn testingCatalogRecords(comptime extras: []const tool_catalog.Record) [tool_catalog.built_in.records.len + extras.len]tool_catalog.Record {
+pub fn testingCatalogRecords(comptime extras: []const tool_catalog.Record) [tool_catalog.built_in.records.len + extras.len]tool_catalog.Record {
     var records = tool_catalog.built_in.records[0..tool_catalog.built_in.records.len].* ++ extras[0..extras.len].*;
     std.sort.heap(tool_catalog.Record, &records, {}, struct {
         fn lessThan(_: void, left: tool_catalog.Record, right: tool_catalog.Record) bool {
@@ -191,7 +192,7 @@ test "Store distinguishes noncanonical Session references from canonical unknown
             for (references, 0..) |reference, index| {
                 const canonical_unknown = index == references.len - 1;
                 var key: [64]u8 = undefined;
-                var message: protocol.MessageCommand = .{ .text = content };
+                var message: wire_request.MessageCommand = .{ .text = content };
                 try message.key.set(try std.fmt.bufPrint(&key, "reference-message-{d}", .{index}));
                 try message.session.set(reference);
                 const message_reply = storage.submitMessageWithModel(&message, null, .{});
@@ -237,7 +238,7 @@ test "Store distinguishes noncanonical Session references from canonical unknown
     }.run);
 }
 
-pub fn testingContent(tmp: *std.testing.TmpDir, name: []const u8, fill: u8, length: usize) !protocol.ContentField {
+pub fn testingContent(tmp: *std.testing.TmpDir, name: []const u8, fill: u8, length: usize) !wire_request.ContentField {
     const file = try tmp.dir.createFile(std.testing.io, name, .{ .read = true });
     errdefer file.close(std.testing.io);
     var buffer: [protocol.content_window_bytes]u8 = undefined;
@@ -259,7 +260,7 @@ pub fn testingContent(tmp: *std.testing.TmpDir, name: []const u8, fill: u8, leng
     };
 }
 
-pub fn testingBytesContent(tmp: *std.testing.TmpDir, name: []const u8, bytes: []const u8) !protocol.ContentField {
+pub fn testingBytesContent(tmp: *std.testing.TmpDir, name: []const u8, bytes: []const u8) !wire_request.ContentField {
     const file = try tmp.dir.createFile(std.testing.io, name, .{ .read = true });
     errdefer file.close(std.testing.io);
     try file.writeStreamingAll(std.testing.io, bytes);
@@ -1773,7 +1774,7 @@ test "Full revisions own repeated content once and render semantic settings" {
             try std.testing.expect(created_session_0_reply == .accepted);
             const created_session_0 = created_session_0_reply.accepted.session;
 
-            var second: protocol.ConfigureCommand = .{};
+            var second: wire_request.ConfigureCommand = .{};
             try second.key.set("revision-owner-2");
             try second.session.set(created_session_0.slice());
             second.configuration.tools.state = .value;
@@ -1785,7 +1786,7 @@ test "Full revisions own repeated content once and render semantic settings" {
             defer second.removeTemporaryContent(std.testing.io) catch unreachable;
             try std.testing.expect(storage.configure(&second, .{}) == .accepted);
 
-            var third: protocol.ConfigureCommand = .{};
+            var third: wire_request.ConfigureCommand = .{};
             try third.key.set("revision-owner-3");
             try third.session.set(created_session_0.slice());
             third.configuration.tools.state = .value;
@@ -1794,14 +1795,14 @@ test "Full revisions own repeated content once and render semantic settings" {
             defer third.removeTemporaryContent(std.testing.io) catch unreachable;
             try std.testing.expect(storage.configure(&third, .{}) == .accepted);
 
-            var fourth: protocol.ConfigureCommand = .{};
+            var fourth: wire_request.ConfigureCommand = .{};
             try fourth.key.set("revision-owner-4");
             try fourth.session.set(created_session_0.slice());
             fourth.configuration.tools.state = .value;
             fourth.configuration.tools.count = 0;
             try std.testing.expect(storage.configure(&fourth, .{}) == .accepted);
 
-            var fifth: protocol.ConfigureCommand = .{};
+            var fifth: wire_request.ConfigureCommand = .{};
             try fifth.key.set("revision-owner-5");
             try fifth.session.set(created_session_0.slice());
             fifth.configuration.instructions = try testingBytesContent(&tmp, "revision-owner-instructions-schema-a", schema_a);
@@ -1924,7 +1925,7 @@ test "allow once survives mode changes and reopen without granting another Attem
             try std.testing.expect(fresh == .rejected and !fresh.rejected.replayed);
             try std.testing.expectEqual(protocol.PermissionDecisionRejection.action_not_pending, fresh.rejected.code);
 
-            var update: protocol.ConfigureCommand = .{};
+            var update: wire_request.ConfigureCommand = .{};
             try update.key.set("allow-mode-change");
             try update.session.set(session.slice());
             update.configuration.permission_mode.state = .value;
@@ -2478,7 +2479,6 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("domain/skills.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
-        @embedFile("find_tools_tests.zig"),
         @embedFile("mysql_literal.zig"),
         @embedFile("mysql_row.zig"),
         @embedFile("rsql.zig"),
@@ -3077,7 +3077,7 @@ test "compaction pressure uses provider usage appended input and complete call r
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
                 const session = try configureTestSession(&storage, "config");
-                var patch: protocol.ConfigureCommand = .{};
+                var patch: wire_request.ConfigureCommand = .{};
                 try patch.key.set("heuristics");
                 try patch.session.set(session.slice());
                 patch.configuration.compaction_trigger.state = .value;
@@ -3284,7 +3284,7 @@ test "call classification uses the proposing Operation frozen catalog" {
             defer storage.close() catch unreachable;
 
             const session = try configureTestSession(&storage, "frozen-call-config");
-            var remove_bash: protocol.ConfigureCommand = .{};
+            var remove_bash: wire_request.ConfigureCommand = .{};
             try remove_bash.key.set("frozen-call-no-tools");
             try remove_bash.session.set(session.slice());
             remove_bash.configuration.tools.state = .value;
@@ -3293,7 +3293,7 @@ test "call classification uses the proposing Operation frozen catalog" {
             try submitTestMessage(&storage, &tmp, "frozen-call-message", "frozen-call-message", session.slice(), "classify");
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
 
-            var add_bash: protocol.ConfigureCommand = .{};
+            var add_bash: wire_request.ConfigureCommand = .{};
             try add_bash.key.set("frozen-call-add-bash");
             try add_bash.session.set(session.slice());
             add_bash.configuration.tools.state = .value;
@@ -4038,7 +4038,7 @@ test "configuration pre-Workspace decisions preserve completeness and immutable 
     existing.instructions_id = 11;
     existing.revision = 1;
     for (cases) |case| {
-        var requested: protocol.Configuration = .{};
+        var requested: wire_request.Configuration = .{};
         if (!case.has_current) {
             requested.tools = try .of(&.{"bash"});
             requested.permission_mode.state = .value;
@@ -4087,7 +4087,7 @@ test "configure refuses a tool name the catalog lacks and a provider tool its pr
         .{ .names = &.{ "bash", "edit" }, .expected = .unknown_tool },
         .{ .names = &.{"code_interpreter"}, .expected = .provider_tool_missing },
     }) |case| {
-        var requested: protocol.Configuration = .{};
+        var requested: wire_request.Configuration = .{};
         requested.tools = try .of(case.names);
         try std.testing.expectEqual(case.expected, configuration_domain.configurationBeforeWorkspace(&catalog, &existing, &requested, .codex));
     }
@@ -4134,7 +4134,7 @@ test "Store configuration requires model, Bash workspace and, on a Host serving 
             try std.testing.expectEqual(protocol.Provider.codex, observation.provider.?);
             try std.testing.expectEqualStrings("model-a", observation.model.slice());
 
-            var equal: protocol.ConfigureCommand = .{};
+            var equal: wire_request.ConfigureCommand = .{};
             try equal.key.set("binding-equal");
             equal.session = session;
             equal.configuration.provider.state = .value;
@@ -4169,7 +4169,7 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
             try std.testing.expect(created_session_0_reply == .accepted);
             const created_session_0 = created_session_0_reply.accepted.session;
 
-            var update: protocol.ConfigureCommand = .{};
+            var update: wire_request.ConfigureCommand = .{};
             try update.key.set("atomic-unsupported");
             try update.session.set(created_session_0.slice());
             update.configuration.provider.state = .value;
@@ -4195,7 +4195,7 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
             const replay = storage.configure(&update, .{});
             try std.testing.expect(replay == .rejected and replay.rejected.replayed);
 
-            var omitted: protocol.ConfigureCommand = .{};
+            var omitted: wire_request.ConfigureCommand = .{};
             try omitted.key.set("provider-shape");
             try omitted.session.set(created_session_0.slice());
             omitted.configuration.tools.state = .value;
@@ -4244,7 +4244,7 @@ test "creation requires every agent setting and accepts an unused Workspace" {
                 const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
                 try std.testing.expectEqual(@as(u8, 0), observed.tools_mask);
                 try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
-                var enable: protocol.ConfigureCommand = .{};
+                var enable: wire_request.ConfigureCommand = .{};
                 try enable.key.set(try std.fmt.bufPrint(&key, "enable-{d}", .{index}));
                 enable.session = reply.accepted.session;
                 enable.configuration.tools = try .of(&.{"bash"});
@@ -4336,7 +4336,7 @@ test "compactAt enforces only known context windows on create and update" {
             try command.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&buffer, "{d}", .{window}));
             reply = storage.configure(&command, .{});
             try std.testing.expect(reply == .accepted);
-            var patch: protocol.ConfigureCommand = .{};
+            var patch: wire_request.ConfigureCommand = .{};
             try patch.key.set("too-large-update");
             patch.session = reply.accepted.session;
             patch.configuration.compaction_trigger.state = .value;
@@ -4390,7 +4390,7 @@ test "loaded tools select saved records even after the Host catalog changes or r
             changed_digests[1] = tool_catalog.recordDigest(&changed_records[1]);
             const changed: tool_catalog.Catalog = .{ .records = &changed_records, .digests = &changed_digests };
             try storage.saveCatalog(&changed);
-            var update: protocol.ConfigureCommand = .{};
+            var update: wire_request.ConfigureCommand = .{};
             try update.key.set("loaded-records-reworded");
             update.session = first;
             update.configuration.loaded_tools = try .of(&.{ "fetch_page", "find_tools" });
@@ -4508,7 +4508,7 @@ test "configuration planning preserves sparse defaults and rejection precedence"
         existing.output_schema_id = 12;
         existing.revision = case.current_revision;
 
-        var requested: protocol.Configuration = .{};
+        var requested: wire_request.Configuration = .{};
         requested.provider.state = .value;
         try requested.provider.value.set("codex");
         if (case.workspace != .omitted) requested.workspace.state = .value;
@@ -4579,7 +4579,7 @@ test "configuration answers replay without reverting newer settings" {
             try std.testing.expect(first_reply == .accepted);
             try std.testing.expect(first_reply.accepted.created);
 
-            var update: protocol.ConfigureCommand = .{};
+            var update: wire_request.ConfigureCommand = .{};
             try update.key.set("update");
             update.session = first_reply.accepted.session;
             update.configuration.tools.state = .value;
@@ -4690,7 +4690,7 @@ test "core preserves empty and NUL keys while Session references stay canonical"
             try std.testing.expectEqualStrings(session.slice(), observation.session.slice());
             try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "")).status == .accepted);
 
-            var update: protocol.ConfigureCommand = .{};
+            var update: wire_request.ConfigureCommand = .{};
             try update.key.set("exact\x00key");
             update.session = session;
             const updated = storage.configure(&update, .{});
@@ -4719,7 +4719,7 @@ test "saved incomplete initialization stays rejected after Session creation" {
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
 
-            var incomplete: protocol.ConfigureCommand = .{};
+            var incomplete: wire_request.ConfigureCommand = .{};
             try incomplete.key.set("incomplete");
             const rejected = storage.configure(&incomplete, .{});
             try std.testing.expect(rejected == .rejected);
@@ -4868,13 +4868,13 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
 
             // A Label-only revision relabels without touching the Conversation, and
             // omission preserves the Label.
-            var relabel: protocol.ConfigureCommand = .{};
+            var relabel: wire_request.ConfigureCommand = .{};
             try relabel.key.set("label-relabel");
             try relabel.session.set(session.slice());
             relabel.configuration.label.state = .value;
             try relabel.configuration.label.value.set("Fix the flaky resize test");
             try std.testing.expectEqual(@as(u64, 2), storage.configure(&relabel, .{}).accepted.revision);
-            var effort: protocol.ConfigureCommand = .{};
+            var effort: wire_request.ConfigureCommand = .{};
             try effort.key.set("label-preserved");
             try effort.session.set(session.slice());
             effort.configuration.permission_mode.state = .value;
@@ -4889,7 +4889,7 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
             try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE label IS NOT NULL", .{}));
 
             // Explicit null clears it.
-            var clear: protocol.ConfigureCommand = .{};
+            var clear: wire_request.ConfigureCommand = .{};
             try clear.key.set("label-clear");
             try clear.session.set(session.slice());
             clear.configuration.label.state = .explicit_null;
@@ -4899,7 +4899,7 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
             // A Label obeys the saved description rule: blank and multi-line text
             // is refused and saved as such.
             for ([_][]const u8{ " ", "two\nlines", "tab\u{2028}separated" }, 0..) |text, index| {
-                var refused: protocol.ConfigureCommand = .{};
+                var refused: wire_request.ConfigureCommand = .{};
                 var key_buffer: [32]u8 = undefined;
                 try refused.key.set(try std.fmt.bufPrint(&key_buffer, "label-refused-{d}", .{index}));
                 try refused.session.set(session.slice());
@@ -4924,7 +4924,7 @@ test "a creating Message with require_model creates nothing without a model" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             const settings = try completeConfiguration("composer", "", workspace, "model-a");
-            var message: protocol.MessageCommand = .{ .configuration = settings.configuration, .require_model = true };
+            var message: wire_request.MessageCommand = .{ .configuration = settings.configuration, .require_model = true };
             try message.key.set("composer");
             message.text = try testingBytesContent(&tmp, "composer-message", "start here");
             defer message.removeTemporaryContent(std.testing.io) catch unreachable;
@@ -4958,7 +4958,7 @@ test "initial Message atomically allocates its Session and replays its original 
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             const settings = try completeConfiguration("start", "", workspace, "model-a");
-            var message: protocol.MessageCommand = .{ .configuration = settings.configuration };
+            var message: wire_request.MessageCommand = .{ .configuration = settings.configuration };
             try message.key.set("start");
             message.text = try testingBytesContent(&tmp, "initial-message", "assignment\x00雪\n\n");
             defer message.removeTemporaryContent(std.testing.io) catch unreachable;
@@ -5078,7 +5078,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             // Pages retain the complete allocated identity, not a display alias.
             _ = try configureTestSession(&storage, "configure-neighbour");
             const allocated_session_1 = try configureTestSession(&storage, "configure-receiver");
-            var tools: protocol.ConfigureCommand = .{};
+            var tools: wire_request.ConfigureCommand = .{};
             try tools.key.set("sender-tools");
             try tools.session.set(sender);
             tools.configuration.tools = try .of(&.{"bash"});
@@ -5096,7 +5096,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try own_ref.set(sender);
             const sender_end = (try store_core.activityPageForTesting(&storage, .{ .session = own_ref })).end;
             const Send = struct {
-                fn make(dir: std.Io.Dir, key: []const u8, target: []const u8, from: ?[]const u8, text: []const u8) !protocol.MessageCommand {
+                fn make(dir: std.Io.Dir, key: []const u8, target: []const u8, from: ?[]const u8, text: []const u8) !wire_request.MessageCommand {
                     const file = try dir.createFile(std.testing.io, key, .{ .read = true });
                     try file.writeStreamingAll(std.testing.io, text);
                     try file.sync(std.testing.io);
@@ -5980,7 +5980,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             for (0..20) |index| {
                 var name_buffer: [32]u8 = undefined;
                 const name = try std.fmt.bufPrint(&name_buffer, "public-{d}", .{index});
-                var command: protocol.MessageCommand = .{};
+                var command: wire_request.MessageCommand = .{};
                 try command.key.set(name);
                 try command.session.set(created_session_0.slice());
                 command.text = if (index == 19)
@@ -5991,7 +5991,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
                 try command.removeTemporaryContent(std.testing.io);
             }
             try std.testing.expectEqual(@as(usize, 0), (try store_core.publicConversationPageForTesting(&storage, request)).count);
-            var instruction: protocol.ConfigureCommand = .{};
+            var instruction: wire_request.ConfigureCommand = .{};
             try instruction.key.set("public-instruction-before-selection");
             try instruction.session.set(created_session_0.slice());
             instruction.configuration.instructions = try testingContent(&tmp, "public-instruction-before", 's', 7);
@@ -6022,7 +6022,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             try std.testing.expectEqualStrings("é中"[1..], &rest);
             unicode_reader.close();
 
-            var later: protocol.ConfigureCommand = .{};
+            var later: wire_request.ConfigureCommand = .{};
             try later.key.set("public-instructions");
             try later.session.set(created_session_0.slice());
             later.configuration.instructions = try testingContent(&tmp, "public-private-settings", 'p', 16);
@@ -6190,7 +6190,7 @@ test "definite rejections retain decisions without retaining payloads" {
             const created_session_0 = created_session_0_reply.accepted.session;
             try store_testing.exec(&storage, "UPDATE session SET revision=9223372036854775807 WHERE session_ref=?1", .{created_session_0.slice()});
 
-            var unknown_message: protocol.MessageCommand = .{};
+            var unknown_message: wire_request.MessageCommand = .{};
             try unknown_message.key.set("unknown-message");
             try unknown_message.session.set("absent");
             unknown_message.text = try testingContent(&tmp, "unknown-message", 'm', 64 * 1024);
@@ -6199,7 +6199,7 @@ test "definite rejections retain decisions without retaining payloads" {
             try std.testing.expect(unknown_reply == .rejected);
             try std.testing.expectEqual(protocol.MessageRejection.unknown_session, unknown_reply.rejected.code);
 
-            var incomplete: protocol.ConfigureCommand = .{};
+            var incomplete: wire_request.ConfigureCommand = .{};
             try incomplete.key.set("incomplete");
             incomplete.configuration.instructions = try testingContent(&tmp, "incomplete", 'i', 64 * 1024);
             defer incomplete.removeTemporaryContent(std.testing.io) catch unreachable;
@@ -6207,7 +6207,7 @@ test "definite rejections retain decisions without retaining payloads" {
             try std.testing.expect(incomplete_reply == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, incomplete_reply.rejected.code);
 
-            var exhausted: protocol.ConfigureCommand = .{};
+            var exhausted: wire_request.ConfigureCommand = .{};
             try exhausted.key.set("exhausted");
             try exhausted.session.set(created_session_0.slice());
             exhausted.configuration.instructions = try testingContent(&tmp, "exhausted", 'e', 64 * 1024);
@@ -6231,7 +6231,7 @@ test "definite rejections retain decisions without retaining payloads" {
             var retargeted = incomplete;
             try retargeted.session.set("0ther0");
             try std.testing.expect(storage.configure(&retargeted, .{}) == .conflict);
-            var changed_kind: protocol.MessageCommand = .{};
+            var changed_kind: wire_request.MessageCommand = .{};
             try changed_kind.key.set("incomplete");
             try changed_kind.session.set("absent");
             changed_kind.text = unknown_message.text;
@@ -7311,7 +7311,7 @@ test "explicit compaction thresholds and frozen retry survive reopen" {
                 try std.testing.expect(initial.compaction_trigger_override == expected and initial.output_reservation_override == null);
                 try submitTestMessage(&storage, &tmp, "one", "one", created_session_0.slice(), "original");
                 const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                var patch: protocol.ConfigureCommand = .{};
+                var patch: wire_request.ConfigureCommand = .{};
                 try patch.key.set("override");
                 try patch.session.set(created_session_0.slice());
                 patch.configuration.compaction_trigger.state = .value;
@@ -7404,7 +7404,7 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
                 const session = try configureTestSession(&storage, "config");
-                var patch: protocol.ConfigureCommand = .{};
+                var patch: wire_request.ConfigureCommand = .{};
                 try patch.key.set("heuristics");
                 try patch.session.set(session.slice());
                 patch.configuration.compaction_trigger.state = .value;
@@ -7493,7 +7493,7 @@ test "compaction pressure uses the latest accepted output even without usage" {
                     try store_testing.testingStore(store_case, &storage, &tmp, std.testing.io);
                     defer storage.close() catch unreachable;
                     const session = try configureTestSession(&storage, "config");
-                    var patch: protocol.ConfigureCommand = .{};
+                    var patch: wire_request.ConfigureCommand = .{};
                     try patch.key.set("heuristics");
                     try patch.session.set(session.slice());
                     patch.configuration.compaction_trigger.state = .value;
@@ -7531,7 +7531,7 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "config");
-            var patch: protocol.ConfigureCommand = .{};
+            var patch: wire_request.ConfigureCommand = .{};
             try patch.key.set("heuristics");
             try patch.session.set(session.slice());
             patch.configuration.compaction_trigger.state = .value;
@@ -7586,7 +7586,7 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
             try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSessionForTesting(session.slice())).pending_messages);
             const replay = storage.configure(&patch, .{});
             try std.testing.expect(replay == .accepted and replay.accepted.replayed);
-            var omitted: protocol.ConfigureCommand = .{};
+            var omitted: wire_request.ConfigureCommand = .{};
             try omitted.key.set("omitted-heuristics");
             try omitted.session.set(session.slice());
             try std.testing.expect(storage.configure(&omitted, .{}) == .accepted);
@@ -7598,7 +7598,7 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
             try std.testing.expect(std.mem.indexOf(u8, report, "\"compaction_trigger\":\"999\",\"context_estimate\":\"") != null);
             try std.testing.expect(std.mem.indexOf(u8, report, "\",\"output_reservation\":\"8\"") != null);
             for ([_][]const u8{ "0", "", "-1", "9223372036854775808", "+1", "1.5", "1_000", " 1", "١" }, 0..) |invalid, index| {
-                var invalid_patch: protocol.ConfigureCommand = .{};
+                var invalid_patch: wire_request.ConfigureCommand = .{};
                 var key: [32]u8 = undefined;
                 try invalid_patch.key.set(try std.fmt.bufPrint(&key, "invalid-heuristic-{d}", .{index}));
                 try invalid_patch.session.set(session.slice());
@@ -7748,7 +7748,7 @@ test "compaction repeated overflow consumes fixed pending prefix without a proac
                 } else {
                     try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "network" }, .ordinary, .{});
                 }
-                var patch: protocol.ConfigureCommand = .{};
+                var patch: wire_request.ConfigureCommand = .{};
                 try patch.key.set("heuristics");
                 try patch.session.set(session.slice());
                 patch.configuration.compaction_trigger.state = .value;
@@ -7793,7 +7793,7 @@ test "compaction does not repeat a soft trigger after a failed assistant with un
             try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
             const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try storage.settleModelAttemptFailure(successor, .{ .uncorrelated = "network_failure" }, .ordinary, .{});
-            var patch: protocol.ConfigureCommand = .{};
+            var patch: wire_request.ConfigureCommand = .{};
             try patch.key.set("heuristics");
             try patch.session.set(session.slice());
             patch.configuration.compaction_trigger.state = .value;
@@ -7824,7 +7824,7 @@ test "compaction missing usage estimates covered retained host input" {
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
                 const session = try configureTestSession(&storage, "config");
-                var patch: protocol.ConfigureCommand = .{};
+                var patch: wire_request.ConfigureCommand = .{};
                 try patch.key.set("heuristics");
                 try patch.session.set(session.slice());
                 patch.configuration.compaction_trigger.state = .value;
@@ -7873,7 +7873,7 @@ test "compaction new Turn evaluates pressure independently of stopped overflow r
                     try storage.close();
                     try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
 
-                    var patch: protocol.ConfigureCommand = .{};
+                    var patch: wire_request.ConfigureCommand = .{};
                     try patch.key.set("pressure");
                     try patch.session.set(session.slice());
                     patch.configuration.compaction_trigger.state = .value;
@@ -8411,7 +8411,7 @@ test "Full revision queries bound the rows MySQL must drain after a streaming st
             const session = try configureTestSessionAsk(&storage, "revision-drain");
             for (2..9) |revision| {
                 var key: [32]u8 = undefined;
-                var change: protocol.ConfigureCommand = .{};
+                var change: wire_request.ConfigureCommand = .{};
                 try change.key.set(try std.fmt.bufPrint(&key, "revision-drain-{d}", .{revision}));
                 try change.session.set(session.slice());
                 change.configuration.instructions = try testingBytesContent(&tmp, key[0..change.key.len], key[0..change.key.len]);
@@ -8479,7 +8479,7 @@ test "Full revisions show each content whole where it first occurs" {
                 for (1..11) |index| {
                     lengths[index] = (try std.fmt.bufPrint(&texts[index], "{{\"title\":\"old {d}\"}}", .{index})).len;
                     var key: [48]u8 = undefined;
-                    var reconfigure: protocol.ConfigureCommand = .{};
+                    var reconfigure: wire_request.ConfigureCommand = .{};
                     try reconfigure.key.set(try std.fmt.bufPrint(&key, "owners-other-{d}", .{index}));
                     try reconfigure.session.set(other.slice());
                     reconfigure.configuration.instructions = try testingBytesContent(&tmp, try std.fmt.bufPrint(&key, "owners-other-i-{d}", .{index}), texts[index][0..lengths[index]]);
@@ -8521,7 +8521,7 @@ test "Full revisions show each content whole where it first occurs" {
                         distinct += 1;
                     };
                     var key: [48]u8 = undefined;
-                    var reconfigure: protocol.ConfigureCommand = .{};
+                    var reconfigure: wire_request.ConfigureCommand = .{};
                     try reconfigure.key.set(try std.fmt.bufPrint(&key, "owners-revision-{d}", .{revision}));
                     try reconfigure.session.set(session.slice());
                     const i = instructions[revision].?;
@@ -8725,7 +8725,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
             deny.action_id += 1;
             try std.testing.expect(storage.decidePermission(&deny, .{}) == .conflict);
 
-            var permission_update: protocol.ConfigureCommand = .{};
+            var permission_update: wire_request.ConfigureCommand = .{};
             try permission_update.key.set("action-bypass");
             try permission_update.session.set(session.slice());
             permission_update.configuration.permission_mode.state = .value;
@@ -8858,7 +8858,7 @@ test "model admission skips Sessions of a provider the Host does not serve" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             const settings = try completeConfiguration("unserved", "", workspace, "model-a");
-            var message: protocol.MessageCommand = .{ .configuration = settings.configuration };
+            var message: wire_request.MessageCommand = .{ .configuration = settings.configuration };
             try message.key.set("unserved");
             message.text = try testingBytesContent(&tmp, "unserved-message", "wait for a Host that serves me");
             defer message.removeTemporaryContent(std.testing.io) catch unreachable;
@@ -9133,7 +9133,6 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/skills.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
-        @embedFile("find_tools_tests.zig"),
         @embedFile("mysql_literal.zig"),
         @embedFile("mysql_row.zig"),
         @embedFile("rsql.zig"),
@@ -9267,8 +9266,8 @@ test "MySQL round shape subtracts the entry baseline from every component" {
 
 /// A `start_agent` spec as the Host's check leaves it: gpt-6.1-sol at low
 /// effort, `tools`, `permission_mode` and no label.
-pub fn testingAgentSpec(tools: []const []const u8, permission_mode: []const u8) !protocol.Configuration {
-    var spec: protocol.Configuration = .{};
+pub fn testingAgentSpec(tools: []const []const u8, permission_mode: []const u8) !wire_request.Configuration {
+    var spec: wire_request.Configuration = .{};
     spec.model.state = .value;
     try spec.model.value.set("gpt-6.1-sol");
     spec.reasoning_effort.state = .value;
@@ -9708,7 +9707,7 @@ test "each Store entry point takes its round budget on its common path" {
 
             // The continuation also offers web search, so its tools stage
             // reads a provider-run member.
-            var add_search: protocol.ConfigureCommand = .{};
+            var add_search: wire_request.ConfigureCommand = .{};
             try add_search.key.set("budget-add-search");
             try add_search.session.set(session.slice());
             add_search.configuration.tools = try .of(&.{ "bash", "web_search" });
@@ -9813,7 +9812,7 @@ test "each Store entry point takes its round budget on its common path" {
         /// successor's history starts at an anchor.
         fn compactedTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             const session = try configureTestSession(storage, "budget-compacted");
-            var patch: protocol.ConfigureCommand = .{};
+            var patch: wire_request.ConfigureCommand = .{};
             try patch.key.set("budget-heuristics");
             try patch.session.set(session.slice());
             patch.configuration.compaction_trigger.state = .value;
@@ -10545,7 +10544,7 @@ test "model admission work excludes accepted compaction base history, in rounds"
                         .unchanged => unreachable,
                     });
                 }
-                var patch: protocol.ConfigureCommand = .{};
+                var patch: wire_request.ConfigureCommand = .{};
                 try patch.key.set("policy");
                 try patch.session.set(session.slice());
                 patch.configuration.compaction_trigger.state = .value;
@@ -10588,7 +10587,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                 defer storage.close() catch unreachable;
                 const session = try configureTestSession(&storage, "config");
                 if (kind == .action) {
-                    var tools: protocol.ConfigureCommand = .{};
+                    var tools: wire_request.ConfigureCommand = .{};
                     try tools.key.set("tools");
                     try tools.session.set(session.slice());
                     tools.configuration.tools.state = .value;
@@ -10602,7 +10601,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                 for (0..population + 1) |index| {
                     var key: [64]u8 = undefined;
                     if (kind == .instruction) {
-                        var patch: protocol.ConfigureCommand = .{};
+                        var patch: wire_request.ConfigureCommand = .{};
                         try patch.key.set(try std.fmt.bufPrint(&key, "instructions-{d}", .{index}));
                         try patch.session.set(session.slice());
                         patch.configuration.instructions = try testingBytesContent(&tmp, "instruction", &instructions);
@@ -10629,7 +10628,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                         }
                     }
                 }
-                var patch: protocol.ConfigureCommand = .{};
+                var patch: wire_request.ConfigureCommand = .{};
                 try patch.key.set("policy");
                 try patch.session.set(session.slice());
                 patch.configuration.compaction_trigger.state = .value;
@@ -10641,7 +10640,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                 defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
                 try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
                 if (kind == .instruction) {
-                    var clear: protocol.ConfigureCommand = .{};
+                    var clear: wire_request.ConfigureCommand = .{};
                     try clear.key.set("clear");
                     try clear.session.set(session.slice());
                     clear.configuration.instructions = try testingBytesContent(&tmp, "clear-instruction", "");
@@ -10955,7 +10954,7 @@ test "a null effort on a listed model refuses a mixed update before any changes"
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("effort-null-spec", "", workspace, "gpt-6.1-sol");
             const session = storage.configure(&create, .{}).accepted.session;
-            var patch: protocol.ConfigureCommand = .{};
+            var patch: wire_request.ConfigureCommand = .{};
             patch.session = session;
             try patch.key.set("effort-set-low");
             patch.configuration.reasoning_effort.state = .value;
@@ -10984,7 +10983,7 @@ test "a null effort on a listed model refuses a mixed update before any changes"
 }
 
 test "a null effort is refused for listed reasoning models and admitted for unlisted models" {
-    var requested: protocol.Configuration = .{};
+    var requested: wire_request.Configuration = .{};
     requested.reasoning_effort.state = .explicit_null;
     var current: CurrentConfiguration = .{ .reasoning_effort = null, .provider = .codex };
     try current.model.set("gpt-6.1-sol");
@@ -10994,7 +10993,7 @@ test "a null effort is refused for listed reasoning models and admitted for unli
 }
 
 test "null effort supports nonreasoning catalog entries but never clears assigned effort" {
-    var requested: protocol.Configuration = .{};
+    var requested: wire_request.Configuration = .{};
     requested.reasoning_effort.state = .explicit_null;
     var current: CurrentConfiguration = .{ .reasoning_effort = null, .provider = .codex };
     for ([_][]const u8{ "openai/whisper-1", "unlisted-model" }) |model| {
@@ -11016,7 +11015,7 @@ test "effective effort carries legacy history without inferring a fresh default"
     try std.testing.expect(configuration_domain.effectiveReasoningEffort(&current) == null);
     current.previous_reasoning_effort = .high;
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .high), configuration_domain.effectiveReasoningEffort(&current));
-    var requested: protocol.Configuration = .{};
+    var requested: wire_request.Configuration = .{};
     requested.reasoning_effort.state = .explicit_null;
     try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex).?);
     current.reasoning_effort = .low;
@@ -11041,7 +11040,7 @@ test "loaded tools configure defaults equality membership and reachability" {
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
 
-            var update: protocol.ConfigureCommand = .{};
+            var update: wire_request.ConfigureCommand = .{};
             try update.session.set(session.slice());
             try update.key.set("loaded-equal");
             update.configuration.tools = try .of(&.{"bash"});
@@ -11120,7 +11119,7 @@ test "loaded tools preserve and intersect a saved subset through the catalog" {
             try std.testing.expect(loaded_id > 0);
 
             // An unrelated update must preserve the saved set id.
-            var update: protocol.ConfigureCommand = .{};
+            var update: wire_request.ConfigureCommand = .{};
             try update.session.set(session.slice());
             try update.key.set("loaded-subset-label");
             update.configuration.label.state = .value;
@@ -11233,80 +11232,12 @@ test "core_tools presets retain caller narrowing after overrides resolve" {
     }.run);
 }
 
-test "launch presets resolve MCP tools through the same catalog as configure" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            const launch_frame = @import("../launch_frame.zig");
-            const core_tools = @import("../core_tools.zig");
-            var frame: launch_frame.Frame = .{};
-            defer frame.deinit();
-            var refusal: launch_frame.Refusal = undefined;
-            try launch_frame.parse(std.testing.allocator,
-                \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","mcpServers":[{"name":"pages","url":"http://127.0.0.1:3000/mcp","bearerToken":"t","callTimeoutMs":1000}],"presets":{"reader":{"model":"model-a","effort":null,"compactAt":1000,"tools":["fetch_page"],"permissionMode":"ask"}}}
-            , &frame, &refusal);
-            var records = comptime testingCatalogRecords(&.{
-                .{ .name = "fetch_page", .owner = .mcp, .server = "pages", .description = "Fetch page", .input_schema = "{\"type\":\"object\"}" },
-            });
-            var digests: [records.len][32]u8 = undefined;
-            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
-            const offered: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
-            var routes = protocol.routesAll(.unserved);
-            routes.openai = .endpoint;
-            for ([_]bool{ false, true }) |available| {
-                var tmp = std.testing.tmpDir(.{});
-                defer tmp.cleanup();
-                var storage: Store = undefined;
-                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{
-                    .served = routes,
-                    .catalog = if (available) &offered else &tool_catalog.built_in,
-                });
-                defer storage.close() catch unreachable;
-
-                var direct: protocol.ConfigureCommand = .{};
-                try direct.key.set("mcp-direct");
-                direct.configuration.model.state = .value;
-                try direct.configuration.model.value.set("model-a");
-                direct.configuration.reasoning_effort.state = .explicit_null;
-                direct.configuration.compaction_trigger.state = .value;
-                try direct.configuration.compaction_trigger.value.set("1000");
-                direct.configuration.tools = try .of(&.{"fetch_page"});
-                direct.configuration.permission_mode.state = .value;
-                try direct.configuration.permission_mode.value.set("ask");
-                const ordinary = storage.configure(&direct, .{});
-
-                var request: protocol.ConfigureCommand = .{ .preset = .{} };
-                try request.key.set("mcp-preset");
-                try request.preset.?.set("reader");
-                var resolved: protocol.ConfigureCommand = .{ .key = request.key };
-                var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
-                defer memory.deinit();
-                try std.testing.expect(try core_tools.parseAgentSpec(memory.allocator(), frame.presets[0].spec, &resolved.configuration) == .accepted);
-                const preset = storage.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{});
-                if (available) {
-                    try std.testing.expect(ordinary == .accepted);
-                    try std.testing.expect(preset == .accepted);
-                    for ([_]@TypeOf(ordinary.accepted.session){ ordinary.accepted.session, preset.accepted.session }) |session| {
-                        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=s.tool_set_id " ++
-                            "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{session.slice()}));
-                    }
-                } else {
-                    try std.testing.expect(ordinary == .rejected);
-                    try std.testing.expect(preset == .rejected);
-                    try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_tool, ordinary.rejected.code);
-                    try std.testing.expectEqual(ordinary.rejected.code, preset.rejected.code);
-                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
-                }
-            }
-        }
-    }.run);
-}
-
 test "preset unknown rejection survives reopen and later resolution" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var request: protocol.ConfigureCommand = .{ .preset = .{} };
+            var request: wire_request.ConfigureCommand = .{ .preset = .{} };
             try request.key.set("preset-unknown-replay");
             try request.preset.?.set("review");
             request.configuration.label.state = .value;
@@ -11385,7 +11316,7 @@ test "preset on update rejection is durable and replayed before applying fields"
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var request: protocol.ConfigureCommand = .{ .preset = .{} };
+            var request: wire_request.ConfigureCommand = .{ .preset = .{} };
             try request.key.set("preset-update-replay");
             try request.preset.?.set("review");
             request.configuration.label.state = .value;
@@ -11666,7 +11597,7 @@ test "observation since leaves absent and non Session targets untokened and repo
             try std.testing.expect(observed == .full);
             try std.testing.expectEqual(protocol.CommandObservationStatus.absent, observed.full.observation.status);
             try std.testing.expect(observed.full.token == null);
-            var request: protocol.ConfigureCommand = .{ .preset = .{} };
+            var request: wire_request.ConfigureCommand = .{ .preset = .{} };
             try request.key.set("observe-no-session");
             try request.preset.?.set("missing");
             const rejected = storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .unknown_preset }, .{});
@@ -12104,7 +12035,7 @@ test "skills empty initial snapshot is valid and schema rejects mismatched catal
             try std.testing.expectEqual(@as(usize, 0), state.catalog.entries.len);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog WHERE session_ref=?1 AND position=0", .{session.slice()}));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE session_ref=?1 AND source_catalog_position IS NOT NULL", .{session.slice()}));
-            var reload: protocol.ConfigureCommand = .{ .session = session, .reload_skills = true };
+            var reload: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
             try reload.key.set("skills-empty-reload");
             const candidate: skills_fixture_domain.Capture = .{ .reload = .{ .entries = &.{.{ .name = "nonempty", .description = "now available", .path = "/skills/nonempty/SKILL.md" }} } };
             try std.testing.expect(storage.configureWithCapturedSkills(&reload, null, null, &candidate, .{}) == .accepted);
@@ -12130,7 +12061,7 @@ test "skills peer refusal persists authenticated activity diagnostic and keyed r
             defer if (opened) storage.close() catch unreachable;
             const sender = try configureTestSession(&storage, "skills-peer-sender");
             const receiver = try configureTestSession(&storage, "skills-peer-receiver");
-            var update: protocol.ConfigureCommand = .{ .session = sender };
+            var update: wire_request.ConfigureCommand = .{ .session = sender };
             try update.key.set("skills-peer-bypass");
             update.configuration.tools = try .of(&.{"bash"});
             update.configuration.permission_mode.state = .value;
@@ -12142,7 +12073,7 @@ test "skills peer refusal persists authenticated activity diagnostic and keyed r
             const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
             var input: BashExecutionInput = undefined;
             try storage.readBashExecutionInput(action, &input);
-            var command: protocol.MessageCommand = .{ .session = receiver, .skill = .{}, .sender = .{}, .sender_handle = input.sender_handle };
+            var command: wire_request.MessageCommand = .{ .session = receiver, .skill = .{}, .sender = .{}, .sender_handle = input.sender_handle };
             try command.key.set("skills-peer-refusal");
             try command.skill.?.set("missing-peer-skill");
             try command.sender.?.store.set(storage.selector.slice());
@@ -12234,7 +12165,7 @@ test "skills reload settles catalog and result atomically across faults retry re
                 const original_content = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
                 const original_commands = try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command", .{});
                 const original_snapshot = try store_testing.queryU64(&storage, "SELECT position FROM session_skill_catalog WHERE session_ref=?1", .{session.slice()});
-                var command: protocol.ConfigureCommand = .{ .session = session, .reload_skills = true };
+                var command: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
                 try command.key.set("skills-reload-atomic");
                 const candidate: skills_fixture_domain.Capture = .{ .reload = .{ .entries = &.{.{
                     .name = "reloaded-only",
@@ -12326,14 +12257,14 @@ test "skills preserve archive intent until a fresh invocation is admitted" {
             try archive.key.set("skills-archive");
             try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
             try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
-            var command: protocol.MessageCommand = .{ .session = session, .skill = .{} };
+            var command: wire_request.MessageCommand = .{ .session = session, .skill = .{} };
             try command.key.set("skills-archive-refused");
             try command.skill.?.set("demo");
             const failed: skills_fixture_domain.Capture = .{ .failed = .{ .code = .unknown_skill, .bytes = "The advertised name was not found" } };
             const refused = storage.submitMessageCapturedSkills(&command, null, null, &failed, .{});
             try std.testing.expect(refused == .rejected and refused.rejected.code == .unknown_skill);
             try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
-            var reload: protocol.ConfigureCommand = .{ .session = session, .reload_skills = true };
+            var reload: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
             try reload.key.set("skills-archive-reload");
             const empty: skills_fixture_domain.Capture = .{ .reload = .{ .entries = &.{} } };
             try std.testing.expect(storage.configureWithCapturedSkills(&reload, null, null, &empty, .{}) == .accepted);
@@ -12367,7 +12298,7 @@ test "skills native reload validates targets after replay without changing ordin
             const targets = [_][]const u8{ "bad", "abcdefg", "ABCDEF", "iiiiii", "ab/cde", "ab\x00cde", "éabcd", "absent", "" };
             for (targets, 0..) |target, index| {
                 var key: [64]u8 = undefined;
-                var command: protocol.ConfigureCommand = .{ .reload_skills = true };
+                var command: wire_request.ConfigureCommand = .{ .reload_skills = true };
                 try command.key.set(try std.fmt.bufPrint(&key, "reload-target-{d}", .{index}));
                 try command.session.set(target);
                 const expected: protocol.ConfigurationRejection = if (index < targets.len - 2) .invalid_session_reference else .unknown_session;
@@ -12387,7 +12318,7 @@ test "skills native reload validates targets after replay without changing ordin
                 command.reload_skills = false;
                 try std.testing.expect(storage.configure(&command, .{}) == .conflict);
             }
-            var existing: protocol.ConfigureCommand = .{ .session = session, .reload_skills = true };
+            var existing: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
             try existing.key.set("reload-target-existing");
             const accepted = storage.configureWithCapturedSkills(&existing, null, null, &candidate, .{});
             try std.testing.expect(accepted == .accepted);

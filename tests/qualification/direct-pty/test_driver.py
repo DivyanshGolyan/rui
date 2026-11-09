@@ -53,10 +53,10 @@ finally:
         screen.feed(b"\x1b[?2026h\r\x1b[2Kready\x1b[?2026l")
         self.assertTrue(screen.reached("ready"))
 
-    def test_restoration_excludes_only_darwin_write_history(self):
+    def test_restoration_excludes_only_darwin_kernel_bits(self):
         # Exercise finish's real restoration boundary. Model the Darwin-only
-        # write-history bit even on Linux, but never excuse NONBLOCK, access
-        # mode, APPEND or an unknown bit alongside it.
+        # write-history and collector-mark bits even on Linux, but never
+        # excuse NONBLOCK, access mode, APPEND or an unknown bit alongside them.
         import fcntl
         child = "import os; os.write(1, b'\\x1b[?1049l\\x1b[?2004l\\x1b[?25h')"
         for platform, delta, accepted in (
@@ -66,6 +66,10 @@ finally:
             ("darwin", 0x10000 | os.O_RDWR, False),
             ("darwin", 0x10000 | os.O_APPEND, False),
             ("darwin", 0x10000 | 0x200000, False),
+            ("darwin", 0x1000, True),
+            ("darwin", 0x1000 | 0x10000, True),
+            ("linux", 0x1000, False),
+            ("darwin", 0x1000 | os.O_NONBLOCK, False),
         ):
             with self.subTest(platform=platform, delta=hex(delta)), tempfile.TemporaryDirectory() as directory:
                 with DirectPty([sys.executable, "-c", child], env=os.environ,

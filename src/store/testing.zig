@@ -8,6 +8,7 @@ const platform = @import("../platform.zig");
 const tool_catalog = @import("../tools.zig");
 const named_scratch = @import("../named_scratch.zig");
 const protocol = @import("../protocol.zig");
+const wire_request = @import("../wire_request.zig");
 const output_format = @import("../output_format.zig");
 const output_decode = @import("../output_decode.zig");
 const store_core = @import("Store.zig");
@@ -25,6 +26,44 @@ const OutputItemKind = historical_domain.OutputItemKind;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 
 pub const OutputMetadataWriter = output_format.OutputMetadataWriter;
+
+/// Compose fixture records with the canonical required runners.
+pub fn catalogRecordsWith(comptime extra: []const tool_catalog.Record) [tool_catalog.built_in.records.len + extra.len]tool_catalog.Record {
+    var records: [tool_catalog.built_in.records.len + extra.len]tool_catalog.Record = undefined;
+    @memcpy(records[0..tool_catalog.built_in.records.len], tool_catalog.built_in.records);
+    @memcpy(records[tool_catalog.built_in.records.len..], extra);
+    sortCatalogRecords(&records);
+    return records;
+}
+
+pub fn sortCatalogRecords(records: []tool_catalog.Record) void {
+    std.mem.sort(tool_catalog.Record, records, {}, struct {
+        fn lessThan(_: void, left: tool_catalog.Record, right: tool_catalog.Record) bool {
+            return std.mem.lessThan(u8, left.name, right.name);
+        }
+    }.lessThan);
+}
+
+pub fn testingStoreCatalog(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, catalog: ?*const tool_catalog.Catalog) !void {
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    return storage.openWithOptions(io, database, root, .{ .catalog = catalog });
+}
+
+pub fn testingSqliteStore(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io) !void {
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    return storage.open(io, database, root) catch |err| {
+        std.debug.print("testing Store open failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+}
 
 /// The engines a conformance test runs on, each in this one process.
 pub const Engine = enum { sqlite, mysql };
@@ -381,8 +420,8 @@ fn bindFixtureArgs(statement: *sqlite.c.sqlite3_stmt, args: anytype) !void {
     }
 }
 
-pub fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace: []const u8, model: []const u8) !protocol.ConfigureCommand {
-    var command: protocol.ConfigureCommand = .{};
+pub fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace: []const u8, model: []const u8) !wire_request.ConfigureCommand {
+    var command: wire_request.ConfigureCommand = .{};
     try command.key.set(key);
     try command.session.set(session_ref);
     command.configuration.workspace.state = .value;
@@ -412,8 +451,8 @@ pub fn completeMessage(
     session_ref: []const u8,
     file: std.Io.File,
     text: []const u8,
-) !protocol.MessageCommand {
-    var command: protocol.MessageCommand = .{};
+) !wire_request.MessageCommand {
+    var command: wire_request.MessageCommand = .{};
     try command.key.set(key);
     try command.session.set(session_ref);
     command.text = .{

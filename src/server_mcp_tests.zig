@@ -2,6 +2,7 @@
 const std = @import("std");
 const store = @import("store.zig");
 const protocol = @import("protocol.zig");
+const wire_request = @import("wire_request.zig");
 const tools = @import("tools.zig");
 const execution = @import("execution.zig");
 const Host = @import("server_host.zig").Host;
@@ -74,7 +75,7 @@ fn run(case: Case) !void {
     const workspace_buffer = try allocator.create([protocol.max_workspace_bytes]u8);
     defer allocator.destroy(workspace_buffer);
     const workspace = try store.testingCanonicalCwd(std.testing.io, workspace_buffer);
-    const command = try allocator.create(protocol.ConfigureCommand);
+    const command = try allocator.create(wire_request.ConfigureCommand);
     defer allocator.destroy(command);
     command.* = try store.testingCompleteConfiguration("mcp-config", "", workspace, "model-a");
     command.configuration.tools = try .of(&.{"fetch_page"});

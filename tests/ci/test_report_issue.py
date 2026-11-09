@@ -200,6 +200,27 @@ class CauseTest(unittest.TestCase):
                          ["tests/integration/human_cli_integration.py: assert caller_ok raised AssertionError",
                           "tests/integration/human_cli_integration.py: exit without a parsed traceback"])
 
+    def test_a_fixture_whose_cases_live_in_its_cases_library_keeps_their_raising_lines(self):
+        # canonical_failure_integration.py only calls canonical_failure_cases.main;
+        # the raising line is the case's, and the signature keeps the entry's path.
+        def case(statement):
+            return logged("canonical-failure failed: exit=1 elapsed=4.000s",
+                          "Traceback (most recent call last):",
+                          '  File "/w/rui/tests/integration/canonical_failure_integration.py", line 9, in <module>',
+                          '    main(sys.argv[2] if len(sys.argv) == 3 else "all")',
+                          '  File "/w/rui/tests/integration/canonical_failure_cases.py", line 80, in main',
+                          "    binding_cases(state)",
+                          '  File "/w/rui/tests/integration/canonical_failure_cases.py", line 40, in binding_cases',
+                          f"    {statement}",
+                          '  File "/w/rui/tests/integration/host_process.py", line 900, in wait_for',
+                          "    raise AssertionError(label)",
+                          "AssertionError")
+        cases = dict(self.cases, **{"canonical-failure": "tests/integration/canonical_failure_integration.py"})
+        self.assertEqual([report_issue.failure_causes(case(statement), cases)[0].signature
+                          for statement in ("wait_for(bound, 'binding')", "wait_for(fenced, 'fence')")],
+                         ["tests/integration/canonical_failure_integration.py: wait_for(bound, 'binding') raised AssertionError",
+                          "tests/integration/canonical_failure_integration.py: wait_for(fenced, 'fence') raised AssertionError"])
+
     def test_a_standalone_gate_is_named_by_its_script_and_raising_line(self):
         def gate(statement):
             return logged("Traceback (most recent call last):",

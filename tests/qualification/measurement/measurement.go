@@ -28,7 +28,7 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 )
 
-// WireVersion is the Host's src/protocol.zig wire_version; tests/ci checks they agree.
+// WireVersion is the Host's src/wire_version.zig wire_version; tests/ci checks they agree.
 const WireVersion = "10"
 
 const (

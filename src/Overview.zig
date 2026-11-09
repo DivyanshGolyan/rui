@@ -12,6 +12,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const client = @import("client.zig");
+const configure_input = @import("configure_input.zig");
 const product_defaults = @import("product_defaults.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -847,36 +848,36 @@ fn startInput(self: *const Self, start: *const view.OwnedStart, compaction_buffe
             inline for (view.start_options, 0..) |option, index| if (comptime std.mem.eql(u8, option, name)) return from.get(index);
             @compileError("not a start setting: " ++ name);
         }
-        fn given(value: ?[]const u8) client.OptionalText {
+        fn given(value: ?[]const u8) configure_input.OptionalText {
             return if (value) |present| .{ .present = true, .value = present } else .{};
         }
-        fn policy(value: ?[]const u8) client.OptionalPolicy {
-            const given_value = value orelse return .{};
-            return .{ .present = true, .value = if (std.mem.eql(u8, given_value, "default")) null else given_value };
+        fn policy(value: ?[]const u8) configure_input.OptionalPolicy {
+            return configure_input.policy(value orelse return .{});
         }
     };
-    const label: client.OptionalPolicy = if (held.at(start, "label")) |value| .{ .present = true, .value = if (value.len == 0) null else value } else .{};
+    const label: configure_input.OptionalPolicy = if (held.at(start, "label")) |value| .{ .present = true, .value = if (value.len == 0) null else value } else .{};
     const held_effort = held.at(start, "reasoning-effort");
-    const effort = held.policy(held_effort);
     const start_effort: view.StartEffort = .{ .held = held_effort, .model = start.binding().model };
     // Read at each start, so an /effort chosen in a conversation since this
     // overview opened applies.
     const saved_effort = start_effort.applied(if (start_effort.readsSaved()) try self.savedEffort() else null);
-    return .{ .store = self.options.store, .session = "", .text_path = "", .text = start.text(), .configuration = .{
+    var configuration: configure_input.ConfigureInput = .{
         .store = self.options.store,
         .session = .create,
         .require_model = true,
         .workspace = .{ .present = true, .value = held.at(start, "workspace") orelse self.options.workspace },
         .provider = held.given(start.binding().provider),
         .model = held.given(start.binding().model),
-        .tools = held.at(start, "tools") orelse product_defaults.tools,
+        .tools = held.at(start, "tools"),
         .loaded_tools = held.at(start, "loaded-tools"),
-        .permission_mode = .{ .present = true, .value = held.at(start, "permission-mode") orelse product_defaults.permission_mode },
-        .compaction_trigger = if (held.at(start, "compaction-trigger") != null and !std.mem.eql(u8, held.at(start, "compaction-trigger").?, "default")) held.policy(held.at(start, "compaction-trigger")) else .{ .present = true, .value = try std.fmt.bufPrint(compaction_buffer, "{d}", .{client.defaultCompactionTrigger(std.meta.stringToEnum(protocol.Provider, start.binding().provider orelse product_defaults.provider).?, start.binding().model orelse product_defaults.recommended_model)}) },
+        .permission_mode = held.given(held.at(start, "permission-mode")),
+        .compaction_trigger = held.policy(held.at(start, "compaction-trigger")),
         .output_reservation = held.policy(held.at(start, "output-reservation")),
-        .reasoning_effort = if (effort.present and effort.value != null) effort else client.defaultStartEffort(start.binding().model orelse product_defaults.recommended_model, if (effort.present) null else saved_effort),
+        .reasoning_effort = held.policy(held_effort),
         .label = label,
-    } };
+    };
+    configuration.completeCreation(std.meta.stringToEnum(protocol.Provider, start.binding().provider orelse product_defaults.provider).?, start.binding().model orelse product_defaults.recommended_model, saved_effort, compaction_buffer);
+    return .{ .store = self.options.store, .session = "", .text_path = "", .text = start.text(), .configuration = configuration };
 }
 
 fn listModels(self: *Self, requests: client.Requests, gpa: std.mem.Allocator) ![]u8 {

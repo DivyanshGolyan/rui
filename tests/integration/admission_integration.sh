@@ -384,7 +384,7 @@ stop_host
 python3 - "$rui" "$store" <<'PY'
 import json, pathlib, select, socket, sys, time
 sys.path.insert(0, "tests/integration")
-import control_integration as control
+import control_fixture as control
 from host_process import WIRE_VERSION, HostDiagnostics, PeerCensus, dispose_all, stop_process
 
 store = pathlib.Path(sys.argv[2])

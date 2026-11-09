@@ -10,7 +10,6 @@ import os
 import selectors
 import shutil
 import socket
-import struct
 import subprocess
 import sys
 import tempfile
@@ -19,17 +18,10 @@ import time
 
 import host_process
 import os_semantics
+from launch_frame_fixture import WIRE, frame, host_info, output, post, refusal, wait_for_host
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
-WIRE = host_process.WIRE_VERSION
-
-
-def frame(value):
-    body = json.dumps(value).encode()
-    return struct.pack(">I", len(body)) + body
-
-
 def launch(raw):
     process = subprocess.Popen([RUI, "host", "serve", "--launch-frame"], stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -38,55 +30,9 @@ def launch(raw):
     return process
 
 
-def host_info(path, store):
-    return post(path, "host-info", {"version": WIRE, "kind": "host_info", "store": store})
-
-
 def host_stop(path, store, instance):
     return post(path, "control/host-stop", {"version": WIRE, "kind": "host_stop", "store": store},
                 b"X-Rui-Host-Instance: " + instance.encode() + b"\r\n")
-
-
-def post(path, route, request, extra=b"", expected_status=200):
-    body = json.dumps(request).encode()
-    with socket.socket(socket.AF_UNIX) as connection:
-        connection.settimeout(10)
-        connection.connect(str(path))
-        connection.sendall(b"POST /v1/" + route.encode() + b" HTTP/1.1\r\nContent-Type: application/json\r\n" + extra +
-                           b"X-Rui-Wire-Version: " + WIRE.encode() + b"\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
-        reply = b""
-        while chunk := connection.recv(65536):
-            reply += chunk
-    head, _, payload = reply.partition(b"\r\n\r\n")
-    assert head.startswith(b"HTTP/1.1 " + str(expected_status).encode() + b" "), reply
-    return json.loads(payload)
-
-
-def output(process, timeout=20):
-    """What the Host wrote, within `timeout`, after its stdin closes."""
-    host_process.close_stdin(process)
-    return process.communicate(timeout=timeout)
-
-
-def wait_for_host(path, store, process):
-    """A launched Host is ready once it answers Host info, as managed launch
-    observes it. Its socket file appears at bind, before the Host listens, so
-    a connect in between is refused."""
-    def ready():
-        assert process.poll() is None, "the Host exited before it answered Host info"
-        try:
-            return host_info(path, str(store))
-        except (FileNotFoundError, ConnectionRefusedError):
-            return None
-    host_process.wait_for(ready, "the Host in runtimeDir to answer Host info", timeout=20)
-
-
-def refusal(process):
-    out, err = output(process)
-    assert process.returncode != 0, (out, err)
-    lines = out.decode().splitlines()
-    assert len(lines) == 1, (out, err)
-    return json.loads(lines[0])["rui_start_error"]
 
 
 def mcp_server(names):

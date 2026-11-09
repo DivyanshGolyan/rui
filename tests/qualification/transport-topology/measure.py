@@ -13,7 +13,7 @@ import threading
 import time
 
 import model_fixture as dispatch
-import transport_h2_integration as h2_fixture
+import h2_fixture
 
 
 class H1Endpoint(http.server.ThreadingHTTPServer):

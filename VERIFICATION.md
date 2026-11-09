@@ -28,6 +28,14 @@ Importing host_process changes nothing, so tests/ci and fixture libraries can us
 It also requires that every `measure-*` step goes through the exec entry.
 Where the shell is root, as in many containers, use an ordinary account that owns its checkout, Zig caches and Python environment.
 
+A fixture starts every process on a PTY through `spawn` in [terminal_process.py](tests/integration/terminal_process.py), never `subprocess.Popen`.
+`spawn` runs the process as the foreground job of a session leader that owns the PTY ([terminal_leader.py](tests/integration/terminal_leader.py)), as a terminal's shell runs a program: `/dev/tty` is that PTY, and the PTY keeps the job's termios after it exits.
+The process is never a session leader itself, because on macOS a session leader's exit revokes its terminal and resets the termios that restoration checks compare.
+Closing the master hangs up the job, and so does the fixture's exit.
+`spawn` takes Popen's arguments except `preexec_fn`; pass `default_signals=` and `rlimits=` instead.
+An ignored signal stays ignored in the job, as in a Popen child, so a case that sends ^C passes `default_signals=(signal.SIGINT,)`.
+`read_output` answers each DA1 request read from a master `open_pty` made, as a terminal does, on the PTY the process reads, unless the fixture answers that terminal itself.
+
 | Change class | Required gate or evidence |
 | --- | --- |
 | Documentation | Review references and consistency. The plan runs `git diff --check` on the committed candidate diff. Only nonempty, exclusively allowlisted regular nonexecutable documentation and asset changes qualify for the [documentation lane](tests/ci/docs_only.py); executable, unknown and mixed changes keep normal verification. Source sentence layout remains optional |

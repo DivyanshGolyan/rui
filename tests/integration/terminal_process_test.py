@@ -1,16 +1,24 @@
-"""Native ownership checks for ordinary terminal conversations."""
+"""Native checks for processes on test PTYs: each runs as the foreground job
+of the PTY's session leader, and its conversation owner retires it."""
 
 import errno
+import fcntl
+import json
 import os
 import pty
+import resource
 import select
+import signal
+import subprocess
 import sys
+import tempfile
+import termios
+import time
 import unittest
 from unittest.mock import patch
 
-import host_process
-from host_process import stop_process
-from terminal_process import open_pty, terminal_process
+from host_process import stop_process, wait_for
+from terminal_process import DEVICE_ANSWER, open_pty, read_output, spawn, terminal_process, unanswered
 
 
 class TerminalProcessTest(unittest.TestCase):
@@ -58,9 +66,11 @@ class TerminalProcessTest(unittest.TestCase):
             os.fstat(fd)
 
     def assert_retired(self, process):
-        # The kernel, not just Popen's returncode, must confirm reap.
-        with self.assertRaises(ChildProcessError):
-            os.waitpid(process.pid, os.WNOHANG)
+        # The leader reported the job's status after reaping it; the kernel
+        # must agree that no such process remains.
+        self.assertIsNotNone(process.returncode)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(process.pid, 0)
         self.assert_descriptors_closed()
 
     def test_scope_retires_live_child(self):
@@ -103,6 +113,286 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertIs(raised.exception, failure)
         self.assert_retired(process)
 
+    def job(self, source, slave, **options):
+        """Run Python `source` as a job on `slave`."""
+        options.setdefault("stdout", slave)
+        options.setdefault("stderr", slave)
+        process = spawn([sys.executable, "-I", "-c", source], stdin=slave, **options)
+        self.addCleanup(stop_process, process, timeout=5)
+        return process
+
+    def reporter(self):
+        """A pipe whose write end sits at a number no stdio uses; returns
+        (read end, write end). The fixture closes the write end once passed."""
+        read, write = os.pipe()
+        high = fcntl.fcntl(write, fcntl.F_DUPFD, 37)
+        os.close(write)
+        self.addCleanup(close_quietly, read)
+        return read, high
+
+    def report(self, read):
+        """What the job wrote to the reporter, once it closed its end."""
+        data = b""
+        deadline = time.monotonic() + 5
+        while True:
+            remaining = deadline - time.monotonic()
+            self.assertTrue(remaining > 0 and select.select([read], [], [], remaining)[0],
+                            ("the job never finished its report", data))
+            chunk = os.read(read, 65536)
+            if not chunk:
+                return json.loads(data)
+            data += chunk
+
+    def test_job_owns_the_terminal_in_the_foreground(self):
+        master, slave = open_pty()
+        read, write = self.reporter()
+        process = self.job(OWNER.replace("REPORT", str(write)), slave, pass_fds=(write,))
+        os.close(write)
+        seen = self.report(read)
+        self.assertEqual(seen["tty"], "opened", seen)
+        self.assertTrue(seen["same_terminal"], "/dev/tty is not the PTY on stdin")
+        self.assertTrue(seen["foreground"], seen)
+        # The three bytes it wrote stay unread: its exit must not wait for them.
+        self.assertEqual(process.wait(timeout=5), 0)
+        self.assertEqual(changed(termios.tcgetattr(slave)), (False, 7), "the PTY lost the job's termios")
+        fresh = os.open(os.ttyname(slave), os.O_RDWR | os.O_NOCTTY)
+        try:
+            self.assertEqual(changed(termios.tcgetattr(fresh)), (False, 7))
+        finally:
+            os.close(fresh)
+        self.assertEqual(read_output(master, 16), b"abc")
+        # Why the PTY survives on Darwin: the job never led the session.
+        self.assertTrue(seen["group_leader"], seen)
+        self.assertFalse(seen["session_leader"], seen)
+        self.assertEqual(seen["session"], process.leader.process.pid, seen)
+
+    def test_shell_leaves_the_terminal_usable(self):
+        # On Darwin a shell that leads its own session revokes the PTY on exit.
+        master, slave = open_pty()
+        shell = spawn(["bash", "-c", "sleep 0.2"], stdin=slave, stdout=slave, stderr=slave)
+        self.addCleanup(stop_process, shell, timeout=5)
+        self.assertEqual(shell.wait(timeout=5), 0)
+        termios.tcgetattr(slave)
+        os.write(master, b"ping\n")
+        self.assertTrue(select.select([slave], [], [], 5)[0], "input never reached the slave")
+        self.assertEqual(os.read(slave, 16), b"ping\n")
+        os.write(slave, b"pong")
+        echoed = b""
+        while b"pong" not in echoed:
+            self.assertTrue(select.select([master], [], [], 5)[0], echoed)
+            echoed += read_output(master, 64)
+        read, write = self.reporter()
+        process = self.job(OWNER.replace("REPORT", str(write)), slave, pass_fds=(write,))
+        os.close(write)
+        seen = self.report(read)
+        self.assertEqual((seen["tty"], seen["foreground"]), ("opened", True), seen)
+        self.assertEqual(process.wait(timeout=5), 0)
+
+    def test_status_relays_through_the_leader(self):
+        master, slave = open_pty()
+        self.assertEqual(self.job("import sys; sys.exit(3)", slave).wait(timeout=5), 3)
+        sleeper = self.job("import time; time.sleep(30)", slave)
+        self.assertIsNone(sleeper.poll())
+        sleeper.kill()
+        self.assertEqual(sleeper.wait(timeout=5), -signal.SIGKILL)
+        # ^C with ISIG on reaches the foreground job only.
+        interrupted = self.job("import os, time; os.write(1, b'R'); time.sleep(30)", slave,
+                               default_signals=(signal.SIGINT,))
+        self.assertEqual(read_output(master, 1), b"R")
+        os.write(master, b"\x03")
+        try:
+            interrupted.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            seen = subprocess.run(["ps", "-o", "pid,pgid,tpgid,stat,command", "-p",
+                                   f"{interrupted.pid},{interrupted.leader.process.pid}"],
+                                  capture_output=True, text=True).stdout
+            raise AssertionError(("^C did not end the foreground job",
+                                  bool(termios.tcgetattr(slave)[3] & termios.ISIG), seen)) from None
+        self.assertEqual(interrupted.returncode, -signal.SIGINT)
+        self.assertIsNone(interrupted.leader.process.poll(), "^C reached the leader")
+        self.assertEqual(self.job("pass", slave).wait(timeout=5), 0)
+
+    def test_descriptors_arrive_at_their_numbers(self):
+        master, slave = open_pty()
+        read, write = self.reporter()
+        # Below the fixture's own limit, which a job inherits (macOS starts at 256).
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        process = self.job(DESCRIPTORS.replace("REPORT", str(write)), slave, stderr=subprocess.PIPE,
+                           pass_fds=(write,), rlimits={resource.RLIMIT_NOFILE: (soft - 1, hard)})
+        os.close(write)
+        seen = self.report(read)
+        self.assertEqual(seen["held"], [0, 1, 2, write], "the job holds descriptors it was not given")
+        self.assertEqual(seen["nofile"], soft - 1)
+        self.assertEqual(process.communicate(timeout=5), (None, b"err-text"))
+        self.assertEqual(process.returncode, 0)
+        for args, cwd in ((["/nonexistent/rui-terminal-test"], None), (["rui-terminal-test-missing"], None),
+                          (["true"], "/nonexistent")):
+            with self.assertRaises(FileNotFoundError):
+                spawn(args, cwd=cwd, stdin=slave, stdout=slave, stderr=slave)
+
+    def test_closed_terminal_hangs_up_job_and_leader(self):
+        master, slave = open_pty()
+        process = self.job("import os, time; os.write(1, b'R'); time.sleep(30)", slave,
+                           default_signals=(signal.SIGHUP,))
+        self.assertEqual(read_output(master, 1), b"R")
+        os.close(master)
+        self.assertEqual(process.wait(timeout=5), -signal.SIGHUP)
+        self.assertEqual(process.leader.process.wait(timeout=5), 0)
+
+    def test_fixture_crash_leaves_no_process(self):
+        # Another process holds the master, so only the control socket tells
+        # the leader its fixture is gone.
+        master, slave = open_pty()
+        marker = os.path.join(self.enterContext(tempfile.TemporaryDirectory()), "hangup")
+        fixture = subprocess.Popen([sys.executable, "-c", CRASHING_FIXTURE, os.path.dirname(os.path.abspath(__file__)),
+                                    str(slave), marker], pass_fds=(slave,), stdout=subprocess.PIPE)
+        self.addCleanup(fixture.stdout.close)
+        pids = json.loads(fixture.stdout.readline())
+        self.assertEqual(read_output(master, 1), b"R")
+        fixture.kill()
+        fixture.wait()
+        wait_for(lambda: [pid for pid in pids if running(pid)], "the job and leader to end with their fixture",
+                 ready=lambda survivors: not survivors)
+        with open(marker) as seen:
+            self.assertEqual(seen.read(), "SIGHUP")
+
+    def converse(self, source, env=None):
+        """Run `source` on a fresh PTY; return (process, master)."""
+        master, slave = open_pty()
+        process = spawn([sys.executable, "-c", source], env=env, stdin=slave, stdout=slave,
+                        stderr=subprocess.PIPE)
+        self.addCleanup(stop_process, process, timeout=5)
+        return process, master
+
+    def output(self, process, master, until):
+        """Read the master, as fixtures do, until it holds `until`."""
+        output = b""
+        while until not in output:
+            self.assertTrue(select.select([master], [], [], 5)[0], (output, process.poll()))
+            output += read_output(master, 4096)
+        return output
+
+    def test_answers_reach_the_terminal_the_command_reads(self):
+        # stdin and stdout on different PTYs: the request is read from stdout's
+        # master and answered on stdin's, where vaxis reads.
+        input_master, input_slave = open_pty()
+        output_master, output_slave = open_pty()
+        process = spawn([sys.executable, "-c",
+                         "import os, sys, tty\n"
+                         "tty.setraw(0)\n"
+                         "os.write(1, b'\\x1b[c')\n"
+                         f"answer = os.read(0, {len(DEVICE_ANSWER)})\n"
+                         "os.write(1, b'answer=' + answer.hex().encode() + b'.')\n"],
+                        stdin=input_slave, stdout=output_slave, stderr=subprocess.PIPE)
+        self.addCleanup(stop_process, process, timeout=5)
+        self.assertIn(b"answer=" + DEVICE_ANSWER.hex().encode() + b".", self.output(process, output_master, b"."))
+        self.assertEqual(process.wait(timeout=5), 0, process.stderr.read())
+        self.assertFalse(select.select([output_slave], [], [], 0)[0], "answer went to the output PTY")
+
+    def test_reads_answer_device_attributes_until_the_fixture_answers(self):
+        # The request arrives in two reads; the answer comes once, before
+        # the next byte the fixture writes.
+        process, master = self.converse(
+            "import os, sys, tty\n"
+            "tty.setraw(0)\n"
+            "os.write(1, b'\\x1b[')\n"
+            "os.read(0, 1)\n"
+            "os.write(1, b'c')\n"
+            f"answer = os.read(0, {len(DEVICE_ANSWER)})\n"
+            "os.write(1, b'answer=' + answer.hex().encode() + b'.')\n"
+            "os.read(0, 1)\n"
+            "os.write(1, b'\\x1b[c')\n"
+            "os.write(1, b'next=' + os.read(0, 1) + b'.')\n")
+        self.output(process, master, b"\x1b[")
+        os.write(master, b"g")
+        self.assertIn(b"answer=" + DEVICE_ANSWER.hex().encode() + b".", self.output(process, master, b"."))
+        unanswered(master)
+        os.write(master, b"g")
+        self.output(process, master, b"\x1b[c")
+        os.write(master, b"z")
+        self.assertIn(b"next=z.", self.output(process, master, b"next="))
+        self.assertEqual(process.wait(timeout=5), 0, process.stderr.read())
+
+
+# Reports how the job sees its terminal, changes its termios through /dev/tty,
+# then writes three bytes nobody reads.
+OWNER = """
+import errno, json, os, termios
+seen = {"session": os.getsid(0), "session_leader": os.getsid(0) == os.getpid(),
+        "group_leader": os.getpgrp() == os.getpid()}
+try:
+    tty = os.open("/dev/tty", os.O_RDWR)
+except OSError as error:
+    seen["tty"] = errno.errorcode[error.errno]
+else:
+    seen["tty"] = "opened"
+    seen["foreground"] = os.tcgetpgrp(tty) == os.getpgrp()
+    attributes = termios.tcgetattr(tty)
+    attributes[3] &= ~termios.ECHO
+    attributes[6][termios.VMIN] = 7
+    termios.tcsetattr(tty, termios.TCSANOW, attributes)
+    stdin = termios.tcgetattr(0)
+    seen["same_terminal"] = not stdin[3] & termios.ECHO and stdin[6][termios.VMIN] in (7, b"\\x07")
+os.write(REPORT, json.dumps(seen).encode())
+os.write(1, b"abc")
+"""
+
+DESCRIPTORS = """
+import json, os, resource, sys
+held = []
+for fd in range(4096):
+    try:
+        os.fstat(fd)
+        held.append(fd)
+    except OSError:
+        pass
+sys.stderr.write("err-text")
+os.write(REPORT, json.dumps({"held": held, "nofile": resource.getrlimit(resource.RLIMIT_NOFILE)[0]}).encode())
+"""
+
+# Starts one job that records a hangup, prints both pids, then waits to be killed.
+CRASHING_FIXTURE = """
+import json, sys, time
+sys.path.insert(0, sys.argv[1])
+import signal
+from terminal_process import spawn
+slave, marker = int(sys.argv[2]), sys.argv[3]
+job = spawn([sys.executable, "-I", "-c",
+    "import os, signal, sys, time\\n"
+    "def hangup(*_):\\n"
+    "    open(sys.argv[1], 'w').write('SIGHUP')\\n"
+    "    os._exit(0)\\n"
+    "signal.signal(signal.SIGHUP, hangup)\\n"
+    "os.write(1, b'R')\\n"
+    "time.sleep(30)\\n", marker], stdin=slave, stdout=slave, stderr=slave, default_signals=(signal.SIGHUP,))
+print(json.dumps([job.leader.process.pid, job.pid]), flush=True)
+time.sleep(60)
+"""
+
+
+def changed(attributes):
+    """(ECHO, VMIN) as the OWNER job sets them."""
+    minimum = attributes[6][termios.VMIN]
+    return bool(attributes[3] & termios.ECHO), minimum if isinstance(minimum, int) else ord(minimum)
+
+
+def running(pid):
+    """Not gone and not a zombie waiting for its reaper."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return not state.startswith("Z")
+
+
+def close_quietly(fd):
+    try:
+        os.close(fd)
+    except OSError as error:
+        if error.errno != errno.EBADF:
+            raise
+
 
 def child():
     return [sys.executable, "-u", "-c", "import os, time; os.write(1, b'!'); time.sleep(60)"]
@@ -112,8 +402,3 @@ def prove_terminal_process():
     result = unittest.TextTestRunner(verbosity=2).run(
         unittest.defaultTestLoader.loadTestsFromTestCase(TerminalProcessTest))
     assert result.wasSuccessful(), "terminal process ownership failed"
-
-
-if __name__ == "__main__":
-    host_process.enter()
-    unittest.main()

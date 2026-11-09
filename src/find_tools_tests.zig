@@ -1,21 +1,18 @@
 //! Tool-loading behaviour runs through the same engine seam as core commands.
 const std = @import("std");
-const protocol = @import("../protocol.zig");
-const core = @import("../core_tools.zig");
-const loader = @import("../find_tools.zig");
-const tools = @import("../tools.zig");
-const Store = @import("Store.zig").Store;
-const action = @import("domain/action.zig");
-const content = @import("domain/content.zig");
-const historical = @import("domain/historical.zig");
-const testing = @import("testing.zig");
-const helpers = @import("tests.zig");
+const protocol = @import("protocol.zig");
+const core = @import("core_tools.zig");
+const loader = @import("find_tools.zig");
+const tools = @import("tools.zig");
+const store = @import("store.zig");
+const Store = store.Store;
+const testing = store.testing;
 
-fn call(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, arguments: []const u8, id: []const u8, arena: std.mem.Allocator) !action.CoreActionInput {
+fn call(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, arguments: []const u8, id: []const u8, arena: std.mem.Allocator) !store.CoreActionInput {
     const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const encoded = try std.json.Stringify.valueAlloc(arena, arguments, .{});
-    const calls = [_]helpers.TestingCall{.{ .item_id = id, .name = "find_tools", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments }};
-    try helpers.settleCallsForTesting(storage, tmp, model, id, &calls);
+    const calls = [_]store.TestingCall{.{ .item_id = id, .name = "find_tools", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments }};
+    try store.settleCallsForTesting(storage, tmp, model, id, &calls);
     const input = (try storage.nextCoreWork()).?.action;
     try std.testing.expect(input.tool == .find_tools);
     try std.testing.expectEqualStrings(session, input.session.slice());
@@ -51,7 +48,7 @@ fn result(storage: *Store, session: protocol.Bounded(protocol.max_session_bytes)
     const reference = for (page.items[0..page.count]) |*item| {
         if (item.ordinal == 1) break item.value.tool_result.content;
     } else return error.MissingFindToolsResult;
-    var reader: content.ContentReader = undefined;
+    var reader: store.ContentReader = undefined;
     reader.open(try storage.openContent(.{ .length = reference.length, .digest = reference.digest }));
     defer reader.close();
     const bytes = try arena.alloc(u8, @intCast(reference.length));
@@ -77,11 +74,11 @@ test "find_tools loads saved name and description matches once in one revision a
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const args = "{\"words\":\"  BASH  PUBLIC \"}";
             const encoded = try std.json.Stringify.valueAlloc(alloc, args, .{});
-            const calls = [_]helpers.TestingCall{
+            const calls = [_]store.TestingCall{
                 .{ .item_id = "find", .name = "find_tools", .encoded_call_id = "find", .decoded_call_id = "find", .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = args },
                 .{ .item_id = "hidden", .name = "bash", .encoded_call_id = "hidden", .decoded_call_id = "hidden", .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run\\\"}", .decoded_arguments = "{\"cmd\":\"true\",\"description\":\"Run\"}" },
             };
-            try helpers.settleCallsForTesting(&storage, &tmp, model, "find-first", &calls);
+            try store.settleCallsForTesting(&storage, &tmp, model, "find-first", &calls);
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE operation_id=?1 AND rejection_code='unknown_tool'", .{model.operation_id}));
             const input = (try storage.nextCoreWork()).?.action;
             try std.testing.expect(input.tool == .find_tools);
@@ -102,17 +99,17 @@ test "find_tools loads saved name and description matches once in one revision a
             try std.testing.expectEqual(revisions + 1, try count(&storage, session.slice(), "session_revision"));
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1", .{try std.fmt.allocPrint(alloc, "rui.core/find_tools/{d}", .{input.binding.action_id})}));
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            var view: historical.HistoricalView = undefined;
+            var view: store.HistoricalView = undefined;
             try storage.openHistoricalView(next, &view);
-            var settings: historical.HistoricalSettings = undefined;
+            var settings: store.HistoricalSettings = undefined;
             try view.settings(&settings);
             try std.testing.expectEqual(@as(u64, 3), settings.tool_count);
             view.close();
-            const found = [_]helpers.TestingCall{.{ .item_id = "found", .name = "read_transcript", .encoded_call_id = "found", .decoded_call_id = "found", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
-            try helpers.settleCallsForTesting(&storage, &tmp, next, "find-found", &found);
+            const found = [_]store.TestingCall{.{ .item_id = "found", .name = "read_transcript", .encoded_call_id = "found", .decoded_call_id = "found", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+            try store.settleCallsForTesting(&storage, &tmp, next, "find-found", &found);
             const read = (try storage.nextCoreWork()).?.action;
             try std.testing.expect(read.tool == .read_transcript);
-            try @import("../read_transcript.zig").run(&storage, alloc, &read, .{});
+            try @import("read_transcript.zig").run(&storage, alloc, &read, .{});
             try std.testing.expect(!storage.isFenced());
         }
     }.run);
@@ -233,7 +230,7 @@ test "find_tools searches saved descriptions across MySQL chunk boundaries with 
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             const alloc = arena.allocator();
-            const chunk_bytes = @import("schema.zig").content_chunk_bytes;
+            const chunk_bytes = @import("store.zig").testing_content_chunk_bytes;
             const description = try alloc.alloc(u8, 3 * chunk_bytes + 128);
             @memset(description, 'x');
             @memcpy(description[0..8], "Preview\n");
@@ -241,7 +238,7 @@ test "find_tools searches saved descriptions across MySQL chunk boundaries with 
             @memcpy(description[3 * chunk_bytes + 5 ..][0..7], "Late%_Z");
             // Exercise carry at the actual Host read edge as well as the
             // durable MySQL chunk edge, including a maximum-length word.
-            const read_bytes = content.ContentReader.content_window_bytes;
+            const read_bytes = store.ContentReader.content_window_bytes;
             @memset(description[read_bytes - 32 ..][0..64], 'Q');
             @memcpy(description[2 * chunk_bytes - 3 ..][0..7], "LiT%_Er");
             // A NUL and non-ASCII letters do not stop or broaden ASCII folding.

@@ -19,7 +19,7 @@ from urllib.parse import quote
 import host_process
 import live_engines
 import os_semantics
-import launch_frame_integration as frame_host
+import launch_frame_fixture as frame_host
 
 
 def main():

@@ -6,6 +6,7 @@ const std = @import("std");
 const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
 const protocol = @import("../protocol.zig");
+const wire_request = @import("../wire_request.zig");
 const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
 const action_domain = @import("domain/action.zig");
@@ -627,7 +628,7 @@ pub const Store = struct {
     /// not serve its Session's provider.
     pub fn configure(
         self: *Store,
-        command: *const protocol.ConfigureCommand,
+        command: *const wire_request.ConfigureCommand,
         faults: Faults,
     ) ConfigureReply {
         return self.configureWithInitialSkills(command, null, null, faults);
@@ -638,24 +639,24 @@ pub const Store = struct {
     /// Borrows `preset` until the synchronous queued write returns.
     pub fn configureWithPreset(
         self: *Store,
-        command: *const protocol.ConfigureCommand,
+        command: *const wire_request.ConfigureCommand,
         preset: *const configuration_domain.PresetDecision,
         faults: Faults,
     ) ConfigureReply {
         return self.configureWithInitialSkills(command, preset, null, faults);
     }
 
-    pub fn configureWithInitialSkills(self: *Store, command: *const protocol.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, faults: Faults) ConfigureReply {
+    pub fn configureWithInitialSkills(self: *Store, command: *const wire_request.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, faults: Faults) ConfigureReply {
         return self.configureWithCapturedSkills(command, preset, initial_skills, null, faults);
     }
 
-    pub fn configureWithCapturedSkills(self: *Store, command: *const protocol.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, faults: Faults) ConfigureReply {
+    pub fn configureWithCapturedSkills(self: *Store, command: *const wire_request.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, faults: Faults) ConfigureReply {
         return self.queue().write(configureHeld, .{ self, command, preset, initial_skills, reload_capture, faults });
     }
 
     fn configureHeld(
         self: *Store,
-        command: *const protocol.ConfigureCommand,
+        command: *const wire_request.ConfigureCommand,
         preset: ?*const configuration_domain.PresetDecision,
         initial_skills: ?*const skills_domain.Initial,
         reload_capture: ?*const skills_domain.Capture,
@@ -691,24 +692,24 @@ pub const Store = struct {
     /// Session's provider before creating anything.
     pub fn submitMessageWithModel(
         self: *Store,
-        command: *const protocol.MessageCommand,
+        command: *const wire_request.MessageCommand,
         committed: ?MessageCommitted,
         faults: Faults,
     ) MessageReply {
         return self.submitMessageWithInitialSkills(command, committed, null, faults);
     }
 
-    pub fn submitMessageWithInitialSkills(self: *Store, command: *const protocol.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) MessageReply {
+    pub fn submitMessageWithInitialSkills(self: *Store, command: *const wire_request.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) MessageReply {
         return self.submitMessageCapturedSkills(command, committed, initial_skills, null, faults);
     }
 
-    pub fn submitMessageCapturedSkills(self: *Store, command: *const protocol.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.Capture, faults: Faults) MessageReply {
+    pub fn submitMessageCapturedSkills(self: *Store, command: *const wire_request.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.Capture, faults: Faults) MessageReply {
         return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, faults });
     }
 
     fn submitMessageWithModelHeld(
         self: *Store,
-        command: *const protocol.MessageCommand,
+        command: *const wire_request.MessageCommand,
         committed: ?MessageCommitted,
         initial_skills: ?*const skills_domain.Initial,
         captured_skill: ?*const skills_domain.Capture,
@@ -1292,15 +1293,15 @@ pub const Store = struct {
     /// Runs the `start_agent` call `binding` names with its checked
     /// arguments, in one transaction; `configuration` is the agent's spec,
     /// which this completes. `committed` runs once the task is admitted.
-    pub fn startAgent(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *protocol.Configuration, committed: ?MessageCommitted, faults: Faults) !AgentStart {
+    pub fn startAgent(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *wire_request.Configuration, committed: ?MessageCommitted, faults: Faults) !AgentStart {
         return self.startAgentWithInitialSkills(binding, caller, task, attached, configuration, committed, null, faults);
     }
 
-    pub fn startAgentWithInitialSkills(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *protocol.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) !AgentStart {
+    pub fn startAgentWithInitialSkills(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *wire_request.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) !AgentStart {
         return self.queue().write(startAgentHeld, .{ self, binding, caller, task, attached, configuration, committed, initial_skills, faults });
     }
 
-    fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *protocol.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) !AgentStart {
+    fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *wire_request.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) !AgentStart {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.agent_start) = .open(&entry);

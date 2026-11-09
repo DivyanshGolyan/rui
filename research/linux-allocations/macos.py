@@ -14,7 +14,8 @@ import time
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests/integration"))
-import transport_h2_integration as fixture
+import h2_fixture
+import transport_h2_cases as fixture
 
 
 def cpu_seconds(text):
@@ -33,7 +34,7 @@ def main():
     result = {"status": "failed", "scope": "macOS CPU diagnostic; not memory qualification",
               "platform": platform.platform(), "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
               "source_sha256": {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
-                                for p in (Path(__file__), Path(fixture.__file__), Path(fixture.dispatch.__file__))},
+                                for p in (Path(__file__), Path(fixture.__file__), Path(h2_fixture.__file__), Path(fixture.dispatch.__file__))},
               "drains": []}
     original = fixture.round_trip
 
