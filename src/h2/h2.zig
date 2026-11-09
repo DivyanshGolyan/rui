@@ -44,18 +44,6 @@ const Record = @import("Stream.zig");
 const Engine = @import("Engine.zig");
 const tls_client = @import("tls_client");
 
-/// What the Store's Postgres TLS shares with this module: one copy of
-/// OpenSSL, its client settings, host naming and trust loading. Its
-/// `.system` trust is the bundle OpenSSL reads, never SecTrust, which
-/// verifies only this module's sessions on its job threads.
-pub const openssl_client = struct {
-    pub const c = tls_client.c;
-    pub const HostKind = tls_client.HostKind;
-    pub const newContext = tls_client.newContext;
-    pub const nameHost = tls_client.nameHost;
-    pub const loadTrust = tls_client.loadTrust;
-};
-
 /// The library versions this client is written and tested against.
 pub const nghttp2_version = "1.70.0";
 pub const openssl_version = "3.6.3";

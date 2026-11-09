@@ -193,7 +193,7 @@ pub fn build(b: *std.Build) void {
         const run_h2_tests = ci.run(h2_tests);
         run_h2_tests.has_side_effects = true;
         h2_test_step.dependOn(&run_h2_tests.step);
-        const pg_tests = b.addTest(.{ .root_module = addPg(b, target, .ReleaseSafe, h2), .filters = test_filters });
+        const pg_tests = b.addTest(.{ .root_module = addPg(b, target, .ReleaseSafe, tls_client), .filters = test_filters });
         const run_pg_tests = ci.run(pg_tests);
         run_pg_tests.has_side_effects = true;
         pg_test_step.dependOn(&run_pg_tests.step);
@@ -520,8 +520,8 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
         .link_libc = true,
     });
-    // TLS: the connection's tls.zig is on h2's OpenSSL.
-    if (addTlsClient(b, target, .ReleaseSafe, pinned_transport)) |tls_client| mysql_connection.addImport("h2", addH2(b, target, .ReleaseSafe, pinned_transport, addTestPoll(b), tls_client));
+    // TLS: the connection's tls.zig is on tls_client's OpenSSL.
+    if (addTlsClient(b, target, .ReleaseSafe, pinned_transport)) |tls_client| mysql_connection.addImport("tls_client", tls_client);
     mysql_wire_tests.root_module.addImport("mysql_connection", mysql_connection);
     const mysql_wire_integration = b.addSystemCommand(&.{"python3"});
     mysql_wire_integration.addFileArg(b.path("tests/integration/mysql_wire_integration.py"));
@@ -1271,6 +1271,7 @@ fn configureTransportWithIdentity(
     compile.root_module.addImport("test_poll", test_poll);
     const optimize = compile.root_module.optimize.?;
     const tls_client = addTlsClient(b, target, optimize, maybe_pinned) orelse return;
+    compile.root_module.addImport("tls_client", tls_client);
     compile.root_module.addImport("h2", addH2(b, target, optimize, maybe_pinned, test_poll, tls_client));
 }
 
@@ -1366,15 +1367,15 @@ fn addPinnedPaths(b: *std.Build, target: std.Build.ResolvedTarget, pinned: Pinne
     }
 }
 
-/// The Store's Postgres wire client, on h2's OpenSSL.
-fn addPg(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, h2: *std.Build.Module) *std.Build.Module {
+/// The Store's Postgres wire client, on `tls_client`'s OpenSSL.
+fn addPg(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, tls_client: *std.Build.Module) *std.Build.Module {
     const module = b.createModule(.{
         .root_source_file = b.path("src/store/wire/pg.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    module.addImport("h2", h2);
+    module.addImport("tls_client", tls_client);
     return module;
 }
 

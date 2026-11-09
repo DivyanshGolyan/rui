@@ -873,6 +873,7 @@ A write error still fails at write time, and a later read error fails the call t
 
 Model transport is Rui's own HTTP/2 client in `src/h2/`, built on pinned nghttp2 and OpenSSL.
 It is a separate build module that imports nothing from Rui.
+The TLS client settings, host naming and trust loading it shares with the Store's Postgres and MySQL wire live in their own module, `src/tls_client/`, which links OpenSSL; the Store's wire depends on it, not on HTTP/2, and SecTrust stays with h2.
 The execution owner drives it on its own thread; nothing in it runs on its own except short-lived name-lookup and SecTrust threads.
 
 Concurrent Codex Attempts to one origin share a lazily established connection pool.
