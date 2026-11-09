@@ -16,7 +16,7 @@ from textwrap import dedent
 from unittest.mock import patch
 
 from select_tests import (CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES,
-                          POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, Graph, execution_batches, matches, select,
+                          POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, Graph, execution_batches, matches, select,
                           setup_requirements, tree_graph)
 from qualification import NATIVE, RESOURCES, qualification, shards
 
@@ -874,15 +874,45 @@ class SelectionTest(unittest.TestCase):
             self.assertTrue(setup_requirements([target])["node"], target)
 
     def test_setup_installs_fixture_packages_for_any_target(self):
-        self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False, "tmux": False})
-        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "node": False, "python": True, "tmux": False})
-        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "node": False, "python": True, "tmux": False})
-        self.assertEqual(setup_requirements(["ts-client"]), {"go": False, "node": True, "python": True, "tmux": False})
+        self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False, "screen": False, "tmux": False})
+        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "node": False, "python": True, "screen": False, "tmux": False})
+        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "node": False, "python": True, "screen": False, "tmux": False})
+        self.assertEqual(setup_requirements(["ts-client"]), {"go": False, "node": True, "python": True, "screen": False, "tmux": False})
         imported = set()
         for fixture in (Path(__file__).parents[1] / "integration").glob("*.py"):
-            imported |= set(re.findall(r"(?m)^\s*(?:import|from) (h2|pyte|wcwidth)\b", fixture.read_text()))
+            imported |= set(re.findall(r"(?m)^\s*(?:import|from) (h2)\b", fixture.read_text()))
         pinned = {line.split("==")[0] for line in (Path(__file__).parents[1] / "integration/requirements.txt").read_text().split()}
         self.assertLessEqual(imported, pinned)
+
+    def test_screen_package_is_fetched_only_for_steps_that_run_the_observer(self):
+        # installer-integration runs install.sh, which must never fetch ghostty.
+        for targets in ([], ["test-logic"], ["installer-integration"], ["ts-client"]):
+            with self.subTest(targets=targets):
+                self.assertFalse(setup_requirements(targets)["screen"])
+        for targets in (["check"], ["check-full"], ["terminal-restoration-integration"], ["test-logic", "direct-pty"]):
+            with self.subTest(targets=targets):
+                self.assertTrue(setup_requirements(targets)["screen"])
+        build = (Path(__file__).parents[2] / "build.zig").read_text()
+        self.assertLessEqual(SCREEN_TARGETS, set(re.findall(r'b\.step\(\s*"([^"]+)"', build)))
+        # Every fixture that reaches the observer runs with its library named,
+        # and setup fetches the package for it.
+        observing = tree_graph().targets("tests/integration/terminal_screen.py")
+        self.assertLessEqual(observing, SCREEN_TARGETS)
+        for target in observing:
+            with self.subTest(target=target):
+                fixture = FIXTURES[target][0][0]
+                run = re.search(r'(\w+)\.addFileArg\(b\.path\("' + re.escape(fixture) + r'"\)\)', build)
+                self.assertIsNotNone(run, fixture)
+                self.assertIn(f"const {run[1]} = screenCommand(", build, fixture)
+        # install.sh fetches the graph fetch_dependencies.sh walks from the root
+        # manifest; ghostty's path dependencies would also make it exit 1.
+        root = Path(__file__).parents[2]
+        script = (root / "src/fetch_dependencies.sh").read_text()
+        self.assertEqual(re.findall(r'(?m)^prepare_dependencies "(.*)"$', script), ['$repo/build.zig.zon'])
+        self.assertNotIn("screen-emulator", script)
+        manifest = (root / "build.zig.zon").read_text()
+        for name in ("ghostty", "screen-emulator"):
+            self.assertNotIn(name, manifest)
 
     def test_tmux_requirement_only_follows_upgrade_target(self):
         for targets in ([], ["check"], ["check-full"], ["installer-integration"], ["test-logic", "check-full"]):

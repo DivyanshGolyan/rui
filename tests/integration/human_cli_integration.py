@@ -67,7 +67,7 @@ def time_limit(milliseconds):
     return f"{milliseconds} ms"
 
 
-from terminal_process import open_pty, read_output, spawn, terminal_process, unanswered
+from terminal_process import answers_to, open_pty, spawn, terminal_process
 import model_fixture as fixture
 import codex_fixture
 import os_semantics
@@ -619,7 +619,7 @@ def discard_terminal(master):
     frame's start."""
     discarded = 0
     while select.select([master], [], [], 0)[0]:
-        chunk = read_output(master, 65536)
+        chunk = os.read(master, 65536)
         if not chunk:
             break
         discarded += len(chunk)
@@ -662,7 +662,7 @@ def leave_overview(master, timeout=15):
             return plain
         remaining = deadline - time.monotonic()
         assert remaining > 0 and select.select([master], [], [], remaining)[0], ("overview notice", plain)
-        chunk = read_output(master, 65536)
+        chunk = os.read(master, 65536)
         assert chunk, ("terminal closed before the overview notice", plain)
         capture.feed(chunk)
 
@@ -919,7 +919,18 @@ def terminal_wait_oracles():
     finally:
         os.close(master)
         forget_terminal(master)
-    print("terminal wait oracles passed: committed frames only, replaced frames seen, composer cursor, bounded frames and closure", flush=True)
+    # A capture nobody holds frees its emulator: cases discard many.
+    import gc
+    import weakref
+    from terminal_screen import ScreenCapture
+    discarded = [ScreenCapture(reply=lambda data: None) for _ in range(3)]
+    for each in discarded:
+        each.feed(b"\x1b[c")
+    released = [weakref.ref(each) for each in discarded]
+    del discarded, each
+    gc.collect()
+    assert not any(ref() for ref in released), "a discarded capture stayed alive with its emulator"
+    print("terminal wait oracles passed: committed frames only, replaced frames seen, composer cursor, bounded frames and closure, released captures", flush=True)
 
 
 def shown_bash_command(master):
@@ -946,10 +957,17 @@ def shown_bash_command(master):
     return command
 
 
-# Palette index 12 as pyte reports SGR 94 or 38;5;12.
-USER_COLOUR = {"brightblue", "5c5cff"}
-# Palette index 3 (attention) as SGR 33 or 38;5;3.
-ATTENTION_COLOUR = {"brown", "cdcd00"}
+def drawn_cluster(text):
+    """`text` as a terminal draws it: libghostty-vt, like the terminals Rui
+    runs in, keeps at most 64 combining marks on one cell. The submitted
+    bytes still carry every mark."""
+    return re.sub("([\u0300-\u036f]{64})[\u0300-\u036f]+", r"\1", text)
+
+
+# Palette index 12, which SGR 94 and 38;5;12 both select.
+USER_COLOUR = {12}
+# Palette index 3 (attention), which SGR 33 and 38;5;3 both select.
+ATTENTION_COLOUR = {3}
 
 
 def scroll_until(master, key, marker, *, presses=40):
@@ -1166,7 +1184,7 @@ def raw_output(master, until, timeout=15):
     while not (until in raw if isinstance(until, bytes) else until(capture.completed)):
         remaining = deadline - time.monotonic()
         assert remaining > 0 and select.select([master], [], [], remaining)[0], ("terminal output deadline", raw[-512:])
-        chunk = read_output(master, 65536)
+        chunk = os.read(master, 65536)
         assert chunk, ("terminal closed", raw[-512:])
         capture.feed(chunk)
         raw += chunk
@@ -1180,7 +1198,7 @@ def quiet_output(master, seconds):
     while (remaining := deadline - time.monotonic()) > 0:
         if not select.select([master], [], [], remaining)[0]:
             break
-        chunk = read_output(master, 65536)
+        chunk = os.read(master, 65536)
         if not chunk:
             break
         raw += chunk
@@ -1276,7 +1294,7 @@ def notification_cases():
         # A terminal that answers the program status probe before the device
         # attributes request behind it gets one record per Session in place
         # of notifications, and leaving clears Rui's records.
-        unanswered(master)
+        terminal_capture(master, fresh=True, silent=True)  # The fixture answers.
         caller = spawn([str(fixture.RUI)], cwd=workspace, env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         raw_output(master, b"\x1b[?1004h\x1b[?2027$p\x1b[?1007$p\x1b]7501;?\x1b\\\x1b[c")
         os.write(master, b"\x1b]7501;?\x1b\\\x1b[?62;22c")
@@ -3223,11 +3241,11 @@ def provider_prompt(master, ready, command=None):
         assert remaining > 0, ("provider prompt readiness did not arrive", capture.plain)
         selected = select.select([ready, master], [], [], remaining)[0]
         if master in selected:
-            capture.feed(read_output(master, 65536))
+            capture.feed(os.read(master, 65536))
         if ready in selected:
             assert os.read(ready, 1) == b"x", "prompt caller exited before readiness"
             while select.select([master], [], [], 0)[0]:
-                chunk = read_output(master, 65536)
+                chunk = os.read(master, 65536)
                 assert chunk, "prompt terminal closed at readiness"
                 capture.feed(chunk)
             break
@@ -3560,7 +3578,7 @@ def opaque_session_commands_case():
         while "Opaque decisions complete." not in capture.completed or "Allow once" in capture.completed:
             remaining = deadline - time.monotonic()
             assert remaining > 0 and select.select([master], [], [], remaining)[0], capture.completed
-            chunk = read_output(master, 65536)
+            chunk = os.read(master, 65536)
             assert chunk, capture.completed
             capture.feed(chunk)
         terminal_step(master, "/exit", "Resume: ")
@@ -3676,7 +3694,7 @@ def long_input_case(home, store, workspace, endpoint, host):
             # Do not race Enter against redraw: the complete unsent draft
             # must remain renderable before any capture/transmission.
             caret = (3, 5, 4)[index]  # Independent display-cell expectations.
-            terminal_bulk(master, "\x1b[200~" + draft + "\x1b[201~", submit=False, draft=draft, caret=caret)
+            terminal_bulk(master, "\x1b[200~" + draft + "\x1b[201~", submit=False, draft=drawn_cluster(draft), caret=caret)
             assert entered.poll() is None and len(endpoint.requests) == before_draft
             assert len(proxy.mutations) == before_messages, "unsent draft transmitted a Message"
             assert set((home / ".config/rui/requests").glob("*.json")) == before_records, "unsent draft published a capture"
@@ -3707,7 +3725,7 @@ def long_input_case(home, store, workspace, endpoint, host):
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         endpoint.responses.append(fixture.sse_answer("encoded-delete-answer", "encoded-delete-reason",
             "encoded-delete-message", "encoded deletion intact")[0])
-        terminal_bulk(master, "\x1b[200~" + long_cluster + "\x1b[201~", submit=False, draft=long_cluster, caret=3)
+        terminal_bulk(master, "\x1b[200~" + long_cluster + "\x1b[201~", submit=False, draft=drawn_cluster(long_cluster), caret=3)
         terminal_step(master, "\x7fZ", "encoded deletion intact", composer=True)
         body = json.loads(endpoint.requests[-1])
         assert next(item["content"][0]["text"] for item in reversed(body["input"])
@@ -3874,7 +3892,7 @@ def renderer_cases():
     class Terminal:
         def __init__(self, master, slave, caller):
             self.master, self.slave, self.caller = master, slave, caller
-            self.capture = ScreenCapture()
+            self.capture = ScreenCapture(reply=answers_to(master))
 
         def resize(self, columns, rows=24):
             self.capture.resize(columns, rows)
@@ -3907,7 +3925,7 @@ def renderer_cases():
                     assert remaining > 0 and select.select([self.master], [], [], remaining)[0], (
                         "renderer screen deadline", marker, self.capture.completed,
                         self.caller.poll(), self.capture.screen.cursor)
-                    chunk = read_output(self.master, 65536)
+                    chunk = os.read(self.master, 65536)
                     assert chunk, ("renderer terminal closed", marker)
                     # Collection budget excludes observer work on long combining
                     # cells; this is not a native wall-response performance claim.
@@ -3959,12 +3977,12 @@ def renderer_cases():
                 ready = select.select([descriptor, self.master], [], [], remaining)[0]
                 assert ready, "renderer Action readiness missing"
                 if self.master in ready:
-                    self.feed(read_output(self.master, 65536))
+                    self.feed(os.read(self.master, 65536))
                 if descriptor in ready:
                     assert os.read(descriptor, 1) == b"x"
                     while select.select([self.master], [], [], 0)[0]:
                         assert time.monotonic() < deadline
-                        self.feed(read_output(self.master, 65536))
+                        self.feed(os.read(self.master, 65536))
                     if until():
                         # Spend the tokens of later offers too, with their
                         # frames (each token follows its frame), so the next
@@ -3973,7 +3991,7 @@ def renderer_cases():
                             assert os.read(descriptor, 1) == b"x"
                             while select.select([self.master], [], [], 0)[0]:
                                 assert time.monotonic() < deadline
-                                self.feed(read_output(self.master, 65536))
+                                self.feed(os.read(self.master, 65536))
                         return
 
         def finish(self, expected=0):
@@ -3991,7 +4009,7 @@ def renderer_cases():
                     break
                 for fd in ready:
                     try:
-                        chunk = read_output(fd, 65536) if fd == self.master else os.read(fd, 65536)
+                        chunk = os.read(fd, 65536) if fd == self.master else os.read(fd, 65536)
                     except OSError as error:
                         if fd != self.master or error.errno != errno.EIO:
                             raise
@@ -4155,7 +4173,7 @@ def renderer_cases():
                 before = len(endpoint.requests)
                 records = set((home / ".config/rui/requests").glob("*.json"))
                 # A draft tab shows as one cell; the submitted bytes keep it.
-                drawn = "A中é B" if index == 1 else draft
+                drawn = "A中é B" if index == 1 else drawn_cluster(draft)
                 tty.send("\x1b[200~" + draft + "\x1b[201~", predicate=lambda: tty.capture.draft(drawn, caret))
                 assert len(endpoint.requests) == before and set((home / ".config/rui/requests").glob("*.json")) == records
                 marker = answer(index)

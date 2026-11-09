@@ -8,7 +8,6 @@ import fcntl
 import json
 import os
 import pty
-import re
 import resource
 import select
 import selectors
@@ -30,17 +29,10 @@ COLUMNS, ROWS = 80, 50
 # Screen observers by master descriptor. A new PTY can reuse a closed
 # descriptor number, so opening one discards the previous terminal's screen.
 CAPTURES = {}
-# Masters whose device attributes requests this module answers, each with
-# the unread tail that may begin one.
-REQUESTS = {}
 # The master of each slave open_pty made, and the input master that answers
 # go to for an output master whose process reads another PTY.
 MASTERS = {}
 ANSWERS = {}
-# DA1, which a terminal answers at once. vaxis waits for the answer before its
-# first frame.
-DEVICE_ATTRIBUTES = re.compile(rb"\x1b\[0?c")
-DEVICE_ANSWER = b"\x1b[?62;22c"
 # Live leaders by the PTY device they own. A device number can't name another
 # PTY while its leader lives: the leader holds the slave open.
 LEADERS = {}
@@ -52,38 +44,22 @@ def open_pty(columns=COLUMNS, rows=ROWS):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
     CAPTURES.pop(master, None)
-    REQUESTS[master] = b""
     MASTERS[slave] = master
     ANSWERS.pop(master, None)
     return master, slave
 
 
-def read_output(fd, size):
-    """`os.read` that, on a master `open_pty` made, answers each DA1 the
-    bytes hold, as a terminal does, unless the fixture said it answers them.
-    The answer goes to the PTY the process reads, which `spawn` recorded."""
-    chunk = os.read(fd, size)
-    if fd not in REQUESTS:
-        return chunk
-    held = REQUESTS[fd] + chunk
-    end = 0
-    for request in DEVICE_ATTRIBUTES.finditer(held):
-        end = request.end()
+def answers_to(master):
+    """Where a screen observer of `master` sends the terminal's answers: the
+    PTY the process reads, which `spawn` recorded."""
+    def write(data):
         try:
-            os.write(ANSWERS.get(fd, fd), DEVICE_ANSWER)
+            os.write(ANSWERS.get(master, master), data)
         except OSError as error:
             # Every slave closed: no process is left to read an answer.
             if error.errno != errno.EIO:
                 raise
-    # A request split across reads completes in the next one.
-    tail = held[max(end, len(held) - 3):]
-    REQUESTS[fd] = tail[tail.index(b"\x1b"):] if b"\x1b" in tail else b""
-    return chunk
-
-
-def unanswered(master):
-    """The fixture answers this terminal's device attributes requests itself."""
-    REQUESTS.pop(master, None)
+    return write
 
 
 def spawn(args, *, stdin=None, stdout=None, stderr=None, env=None, cwd=None, pass_fds=(),

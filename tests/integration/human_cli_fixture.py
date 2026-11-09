@@ -12,8 +12,8 @@ import termios
 import time
 
 import model_fixture as fixture
-from terminal_process import read_output
 import terminal_process as terminal_process_module
+from terminal_process import answers_to
 
 
 # A waiting Action's input row while its choice is offered, and the key
@@ -66,8 +66,9 @@ def admit(home, *args, expect=0, environment=None, input=None, cwd=None):
 _captures = terminal_process_module.CAPTURES
 
 
-def terminal_capture(master, *, fresh=False):
-    """The committed-screen observer for one PTY master, at its current size."""
+def terminal_capture(master, *, fresh=False, silent=False):
+    """The committed-screen observer for one PTY master, at its current size.
+    It answers queries on that master unless `silent`."""
     from terminal_screen import ScreenCapture
     try:
         rows, columns = struct.unpack("HHHH", fcntl.ioctl(master, termios.TIOCGWINSZ, b"\0" * 8))[:2]
@@ -76,7 +77,7 @@ def terminal_capture(master, *, fresh=False):
     rows, columns = rows or 24, columns or 80
     capture = None if fresh else _captures.get(master)
     if capture is None:
-        capture = _captures[master] = ScreenCapture(columns, rows)
+        capture = _captures[master] = ScreenCapture(columns, rows, reply=None if silent else answers_to(master))
     elif (capture.screen.columns, capture.screen.lines) != (columns, rows):
         capture.resize(columns, rows)
     return capture
@@ -91,7 +92,7 @@ def draining(master, observe, feed=None):
 
     def drained():
         while select.select([master], [], [], 0)[0]:
-            chunk = read_output(master, 65536)
+            chunk = os.read(master, 65536)
             if not chunk:
                 break
             feed(chunk)
@@ -128,7 +129,7 @@ def command_frame(master, command, accept, timeout=15, *, end="\n"):
             remaining = deadline - time.monotonic()
             assert remaining > 0 and select.select([master], [], [], remaining)[0], (
                 "command result frame", command, capture.completed)
-            chunk = read_output(master, 65536)
+            chunk = os.read(master, 65536)
             assert chunk, ("terminal closed before command result", command)
             capture.feed(chunk)
     finally:
@@ -173,7 +174,7 @@ def keyed_frame(master, keys, accept, timeout=15):
             remaining = deadline - time.monotonic()
             assert remaining > 0 and select.select([master], [], [], remaining)[0], (
                 "keyed frame", keys, capture.completed)
-            chunk = read_output(master, 65536)
+            chunk = os.read(master, 65536)
             assert chunk, ("terminal closed before keyed frame", keys)
             capture.feed(chunk)
     finally:
@@ -245,7 +246,7 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
             assert remaining > 0, (marker, capture.completed, plain())
             assert select.select([master], [], [], remaining)[0], (marker, capture.completed, plain())
             try:
-                chunk = read_output(master, 65536)
+                chunk = os.read(master, 65536)
             except OSError as error:
                 if error.errno != errno.EIO:
                     raise
@@ -284,7 +285,7 @@ def terminal_exit(caller, master, timeout=5):
             return bytes(streams[master]), bytes(streams[errors_fd])
         for fd in ready:
             try:
-                chunk = read_output(fd, 65536) if fd == master else os.read(fd, 65536)
+                chunk = os.read(fd, 65536) if fd == master else os.read(fd, 65536)
             except OSError as error:
                 if fd != master or error.errno != errno.EIO:
                     raise
@@ -307,7 +308,7 @@ def terminal_gate(caller, master, reached, context, timeout=10):
         remaining = max(0, deadline - time.monotonic())
         for fd in select.select(list(pending), [], [], min(0.1, remaining))[0]:
             try:
-                data = read_output(fd, 65536) if fd == master else os.read(fd, 65536)
+                data = os.read(fd, 65536) if fd == master else os.read(fd, 65536)
             except OSError as error:
                 if fd != master or error.errno != errno.EIO:
                     raise
@@ -339,7 +340,7 @@ def next_frame(master, timeout=3):
         if remaining <= 0 or not select.select([master], [], [], remaining)[0]:
             return None
         try:
-            chunk = read_output(master, 65536)
+            chunk = os.read(master, 65536)
         except OSError as error:
             if error.errno != errno.EIO:
                 raise
@@ -461,14 +462,14 @@ def action_ready(descriptor, master, timeout=15, *, return_to_action=True, shows
             ready = select.select([descriptor, master], [], [], remaining)[0]
             assert ready, ("Action input flush did not finish", capture.completed)
             if master in ready:
-                capture.feed(read_output(master, 65536))
+                capture.feed(os.read(master, 65536))
             if descriptor in ready:
                 assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
                 # The notification follows the final write/flush. Collect its
                 # remaining queued bytes too, without waiting for another prompt.
                 while select.select([master], [], [], 0)[0]:
                     assert time.monotonic() < deadline, "Action transcript exceeded readiness deadline"
-                    chunk = read_output(master, 65536)
+                    chunk = os.read(master, 65536)
                     assert chunk, "Action terminal closed at readiness"
                     capture.feed(chunk)
                 # A notification from before a later invalidation (another
