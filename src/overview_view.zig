@@ -201,6 +201,10 @@ pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0, anchor: us
 /// sign-in choice drawn in its place.
 pub const InputMode = enum { compose, frozen, choice };
 
+/// How the shell takes one input: the composer edits with it, the frozen
+/// composer acts only on the keys the table binds, or it is `input` as is.
+pub const Route = union(enum) { edit, frozen, input: Input };
+
 /// What one input did, and the draft as that input left it.
 pub const Composed = struct { input: Input, draft: Draft };
 
@@ -409,6 +413,24 @@ pub const Ran = struct {
     /// The default saved defaults now give the next Session, after a
     /// `/setup` that ran; null leaves the one in force.
     default: ?Default = null,
+
+    /// A command that printed `printed` bytes, the first of which `kept`
+    /// holds, and ran to the end if `ok`. Its failure counts as one while
+    /// it ran only once its output went to the page (`rendering`); before
+    /// that it never started.
+    pub fn of(kept: []const u8, printed: usize, ok: bool, rendering: bool) Ran {
+        return .{
+            .output = kept[0..@min(printed, max_output_bytes)],
+            .cut = printed > max_output_bytes,
+            .outcome = if (ok) .done else if (rendering) .failed else .not_run,
+        };
+    }
+
+    /// The shell reads the default saved defaults now give only after a
+    /// `/setup` that ran.
+    pub fn readsDefault(self: Ran, name: commands.Name) bool {
+        return self.outcome == .done and name == .setup;
+    }
 };
 
 /// The most a command's output the overview keeps.
@@ -984,6 +1006,29 @@ pub const State = struct {
         if (self.starting()) return .frozen;
         if (self.shownPicker()) |picker| if (picker.step == .sign_in) return .choice;
         return .compose;
+    }
+
+    /// How the shell takes an input that `selected` names, `plain_enter`
+    /// when it is an unpasted Enter. The archive prompt's Enter is its own:
+    /// a plain one confirms, a pasted or modified one does nothing. At the
+    /// sign-in choice the arrows, Enter and the screen's keys are the
+    /// choice's, and typing or a paste goes to the composer.
+    pub fn route(self: *const State, selected: keymap.Selection(Action), plain_enter: bool) Route {
+        if (self.prompt) |prompt| if (prompt.action == .archive and selected == .enter)
+            return .{ .input = .{ .composer = if (plain_enter) .submit else .none } };
+        return switch (self.inputMode()) {
+            .compose => .edit,
+            .frozen => .frozen,
+            .choice => switch (selected) {
+                .none => .{ .input = .{ .choice = .none } },
+                .action => |action| .{ .input = .{ .choice = .{ .action = action } } },
+                .left => .{ .input = .{ .choice = .left } },
+                .right => .{ .input = .{ .choice = .right } },
+                .enter => .{ .input = .{ .choice = .enter } },
+                .refused => .{ .input = .{ .choice = .refused } },
+                .text => .edit,
+            },
+        };
     }
 
     /// The picker, while the screen shows it: keys act on nothing else.
@@ -8192,4 +8237,62 @@ test "an Upgrade holds Host intents until the overview lists again under the sel
     try std.testing.expect(state.upgrade_blocked and !state.upgrade_pending and state.next_list_ms == 0);
     state.upgraded(.compatible);
     try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending);
+}
+
+test "the archive prompt's Enter confirms only when plain; the sign-in choice takes its keys and leaves typing to the composer" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    try std.testing.expectEqual(Route.edit, state.route(.enter, true));
+    try std.testing.expectEqual(Route.edit, state.route(.{ .action = .previous }, false));
+    // A stop prompt takes Enter as ordinary input.
+    state.prompt = .{ .stop = "k7m2qx".* };
+    try std.testing.expectEqual(Route.edit, state.route(.enter, true));
+    state.prompt = .{ .stop = "k7m2qx".*, .action = .archive };
+    try std.testing.expectEqual(Route{ .input = .{ .composer = .submit } }, state.route(.enter, true));
+    try std.testing.expectEqual(Route{ .input = .{ .composer = .none } }, state.route(.enter, false));
+    try std.testing.expectEqual(Route.edit, state.route(.text, false));
+    state.prompt = null;
+    var picked = try pickerState(Default.of("openai", "gpt-6-luna"));
+    defer picked.deinit();
+    try openPicker(&picked, &both);
+    try expectEffects(&.{}, try submit(&picked, try typeText(&picked, "")));
+    try std.testing.expectEqual(Route{ .input = .{ .choice = .enter } }, picked.route(.enter, true));
+    try std.testing.expectEqual(Route{ .input = .{ .choice = .left } }, picked.route(.left, false));
+    try std.testing.expectEqual(Route{ .input = .{ .choice = .right } }, picked.route(.right, false));
+    try std.testing.expectEqual(Route{ .input = .{ .choice = .refused } }, picked.route(.refused, false));
+    try std.testing.expectEqual(Route{ .input = .{ .choice = .none } }, picked.route(.none, false));
+    try std.testing.expectEqual(Route{ .input = .{ .choice = .{ .action = .previous } } }, picked.route(.{ .action = .previous }, false));
+    try std.testing.expectEqual(Route.edit, picked.route(.text, false));
+    // At the choice the archive prompt's Enter is still the prompt's.
+    picked.prompt = .{ .stop = "k7m2qx".*, .action = .archive };
+    try std.testing.expectEqual(Route{ .input = .{ .composer = .submit } }, picked.route(.enter, true));
+}
+
+test "while a start waits the composer is frozen, and the archive prompt still takes its Enter" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    try expectEffects(&.{.{ .start = .{ .settings = &state.settings, .text = "go", .binding = state.nextBinding() } }}, try submit(&state, try typeText(&state, "go")));
+    try std.testing.expectEqual(InputMode.frozen, state.inputMode());
+    try std.testing.expectEqual(Route.frozen, state.route(.{ .action = .previous }, false));
+    try std.testing.expectEqual(Route.frozen, state.route(.text, false));
+    state.prompt = .{ .stop = "k7m2qx".*, .action = .archive };
+    try std.testing.expectEqual(Route{ .input = .{ .composer = .none } }, state.route(.enter, false));
+}
+
+test "a command's output is cut at what the overview keeps, and its failure ends the overview only once its output was kept" {
+    var kept: [max_output_bytes + 1]u8 = @splat('x');
+    const whole = Ran.of(&kept, 5, true, true);
+    try std.testing.expectEqual(@as(usize, 5), whole.output.len);
+    try std.testing.expect(!whole.cut and whole.outcome == .done and whole.default == null);
+    const full = Ran.of(&kept, max_output_bytes, true, false);
+    try std.testing.expect(full.output.len == max_output_bytes and !full.cut);
+    const cut = Ran.of(&kept, max_output_bytes + 1, true, true);
+    try std.testing.expect(cut.output.len == max_output_bytes and cut.cut);
+    try std.testing.expectEqual(.failed, Ran.of(&kept, 0, false, true).outcome);
+    try std.testing.expectEqual(.not_run, Ran.of(&kept, 0, false, false).outcome);
+    // Only a /setup that ran reads the saved defaults again.
+    try std.testing.expect(whole.readsDefault(.setup));
+    try std.testing.expect(!whole.readsDefault(.rename));
+    try std.testing.expect(!Ran.of(&kept, 0, false, true).readsDefault(.setup));
+    try std.testing.expect(!Ran.of(&kept, 0, false, false).readsDefault(.setup));
 }

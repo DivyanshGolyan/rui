@@ -804,14 +804,10 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         }),
         .command => |command| {
             const output = &self.output;
-            const ran: view.Ran = .{
-                .output = output.bytes[0..@min(output.len, view.max_output_bytes)],
-                .cut = output.len > view.max_output_bytes,
-                // As a conversation drops an inspection that could not
-                // start, the overview says only that it did not run.
-                .outcome = if (outcome) |_| .done else |_| if (output.kept) .failed else .not_run,
-                .default = if (outcome) |_| if (command.name == .setup) self.savedDefault() else null else |_| null,
-            };
+            // As a conversation drops an inspection that could not start,
+            // the overview says only that it did not run.
+            var ran: view.Ran = .of(&output.bytes, output.len, if (outcome) |_| true else |_| false, output.kept);
+            if (ran.readsDefault(command.name)) ran.default = self.savedDefault();
             const next = self.event(.{ .ran = ran });
             // As in a conversation, a command that failed while it ran ends
             // the overview, and its failure is the one reported, not one
@@ -1006,15 +1002,16 @@ fn askBackground(self: *Self) !?Next {
     return null;
 }
 
-/// Every input takes one route, the one the core's input mode names, then
+/// Every input takes the one route the core names for it, then
 /// one core step, whether or not anything changed.
 fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
-    const input = if (self.state.prompt != null and self.state.prompt.?.action == .archive and TerminalEditor.plainEnter(decoded))
-        view.Input{ .composer = .submit }
-    else if (self.state.prompt != null and self.state.prompt.?.action == .archive and TerminalEditor.select(view.keys, decoded) == .enter)
-        view.Input{ .composer = .none }
-    else
-        route(self.state.inputMode(), &self.composer, decoded);
+    // The composer edits, and while frozen only the keys the table binds
+    // act, so nothing edits the text a failed start leaves to retry.
+    const input: view.Input = switch (self.state.route(TerminalEditor.select(view.keys, decoded), TerminalEditor.plainEnter(decoded))) {
+        .edit => .{ .composer = self.composer.apply(view.keys, decoded) },
+        .frozen => .{ .composer = if (TerminalEditor.frozenAction(view.keys, decoded)) |action| .{ .action = action } else .none },
+        .input => |input| input,
+    };
     return self.event(.{ .composed = .{ .input = input, .draft = self.composerDraft() } });
 }
 
@@ -1032,28 +1029,6 @@ fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
     if (view.commands.suggest(draft, .{}) == null) return null;
     const shown = view.nextCommands(&self.state, self.composerDraft()) orelse return "";
     return shown.completion();
-}
-
-/// One input through `mode`'s route, with the overview's one key table.
-/// The composer edits. Frozen while a start waits, the keys the table binds
-/// still act, and nothing edits the text a failed start leaves to retry.
-/// At the sign-in choice, as at an Action's choice in a conversation, the
-/// arrows and Enter are the choice's; typing and a paste go to the
-/// composer, which takes a paste from its start to its end.
-fn route(mode: view.InputMode, composer: *TerminalEditor, decoded: TerminalInput.Decoded) view.Input {
-    return switch (mode) {
-        .compose => .{ .composer = composer.apply(view.keys, decoded) },
-        .frozen => .{ .composer = if (TerminalEditor.frozenAction(view.keys, decoded)) |action| .{ .action = action } else .none },
-        .choice => switch (TerminalEditor.select(view.keys, decoded)) {
-            .none => .{ .choice = .none },
-            .action => |action| .{ .choice = .{ .action = action } },
-            .left => .{ .choice = .left },
-            .right => .{ .choice = .right },
-            .enter => .{ .choice = .enter },
-            .refused => .{ .choice = .refused },
-            .text => .{ .composer = composer.apply(view.keys, decoded) },
-        },
-    };
 }
 
 /// Draws the core's screen at `frame`, writing only what the terminal does
