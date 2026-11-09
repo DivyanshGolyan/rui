@@ -2,12 +2,15 @@
 """Find the commit in a promotion batch that turned a failing check red.
 
 A promotion qualifies main HEAD against the batch since `stable`, the last
-promoted release. When a job fails, it replays its own failing command on the
-same runner: first at HEAD, to confirm the red reproduces, then by binary
-search over the batch's first-parent commits. `stable` is presumed good, since
-it passed promotion; it is replayed only when the first commit of the batch
-fails. Replay output goes to files, not the job log, so the issue filer reads
-only the original failure. The verdict never turns a promotion green.
+promoted release. When a job fails, each step it recorded as failed
+(steps.py, run_selected.py) is bisected on its own, on the same runner: its
+recorded command is replayed first at HEAD, to confirm the red reproduces,
+then by binary search over the batch's first-parent commits. `stable` is
+presumed good, since it passed promotion; it is replayed only when the first
+commit of the batch fails. A failure before any recorded step, such as setup,
+has nothing to replay. Replay output goes to files, not the job log, so the
+issue filer reads only the original failure. The verdict never turns a
+promotion green.
 """
 import argparse
 import json
@@ -15,6 +18,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+
+import steps
 
 
 def git(*args):
@@ -71,7 +76,7 @@ def describe(result, base, head):
     verdict = result["verdict"]
     if verdict == "culprit":
         subject = git("log", "-1", "--format=%s", result["culprit"])
-        return f"this job's replay first fails at {result['culprit']} ({subject})"
+        return f"first fails at {result['culprit']} ({subject})"
     return {
         "empty-batch": f"no commits between {base} and {head}",
         "not-reproduced": f"did not fail again at {head}; treat it as a flake until it recurs",
@@ -84,34 +89,43 @@ def main():
     parser.add_argument("--base", required=True, help="last promoted commit (stable)")
     parser.add_argument("--head", required=True, help="promotion candidate (main HEAD)")
     parser.add_argument("--logs", required=True, type=Path, help="directory for each replay's output")
-    parser.add_argument("command", nargs="+", help="the failing command, replayed in each commit's tree")
+    parser.add_argument("--failed", type=Path, default=steps.record_path(), help="the job's failure record")
     args = parser.parse_args()
+    failed = steps.failures(args.failed) if args.failed else []
+    if not failed:
+        print("Promotion bisect: no recorded step failed, so there is nothing to replay; read the job's failed step")
+        return
     fetch(args.base, args.head)
     commits = batch(args.base, args.head)
     args.logs.mkdir(parents=True, exist_ok=True)
-
     # Replays report only through their log files and the verdict.
     env = {key: value for key, value in os.environ.items() if key != "GITHUB_STEP_SUMMARY"}
+    results, lines = [], []
+    for index, step in enumerate(failed):
+        def passes(sha, step=step, index=index):
+            git("checkout", "--quiet", "--force", "--detach", sha)
+            name = f"{index}-{sha}"
+            # A fresh output directory per replay, as steps.py gives the original run.
+            replay_env = dict(env, STEP_OUTPUT=str(args.logs / f"{name}-output"))
+            with open(args.logs / f"{name}.log", "w") as log:
+                code = subprocess.run(step["argv"], stdout=log, stderr=subprocess.STDOUT, env=replay_env).returncode
+            print(f"{step['name']}: replay at {sha}: {'passed' if code == 0 else f'failed (exit {code})'}", flush=True)
+            return code == 0
 
-    def passes(sha):
-        git("checkout", "--quiet", "--force", "--detach", sha)
-        with open(args.logs / f"{sha}.log", "w") as log:
-            code = subprocess.run(args.command, stdout=log, stderr=subprocess.STDOUT, env=env).returncode
-        print(f"replay at {sha}: {'passed' if code == 0 else f'failed (exit {code})'}", flush=True)
-        return code == 0
-
-    try:
-        result = bisect(commits, args.base, passes)
-    finally:
-        git("checkout", "--quiet", "--force", "--detach", args.head)
-    result.update(base=args.base, head=args.head, batch=len(commits))
-    (args.logs / "verdict.json").write_text(json.dumps(result, indent=2) + "\n")
-    line = f"Promotion bisect: {describe(result, args.base, args.head)}"
-    # report_issue.py copies this line onto the issue it files for the job.
-    print(line)
+        try:
+            result = bisect(commits, args.base, passes)
+        finally:
+            git("checkout", "--quiet", "--force", "--detach", args.head)
+        result.update(step=step["name"], argv=step["argv"])
+        results.append(result)
+        lines.append(f"Promotion bisect: {step['name']}: {describe(result, args.base, args.head)}")
+    verdict = dict(base=args.base, head=args.head, batch=len(commits), steps=results)
+    (args.logs / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
+    # report_issue.py copies these lines onto each issue it files for the job.
+    print("\n".join(lines))
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary, "a") as output:
-            print(f"\n{line}\n", file=output)
+            print("\n" + "\n".join(lines) + "\n", file=output)
 
 
 if __name__ == "__main__":

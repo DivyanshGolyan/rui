@@ -29,7 +29,7 @@ A run can fail in several jobs for different reasons.
 Read each failed job's own failing step before calling it derivative.
 The required `admission` job can fail because an upstream acceptance job failed or was cancelled.
 Read that upstream failure rather than blaming the aggregate.
-A Promote failure runs the batch's bisect inside the failed job: read its `Promotion bisect:` line and the retained replay logs before diagnosing the commit it names.
+A Promote failure bisects each failed step of the job inside that job: read every `Promotion bisect: <step>:` line and the retained replay logs before diagnosing the commit each names.
 A Release failure inside a green promotion concerns publication only; rerun that promotion's failed jobs.
 
 ## 3. Decide whether the diff caused it
