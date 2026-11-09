@@ -2,11 +2,12 @@
 //! unique across generations, so committing a partial refresh would hide old facts.
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
 const catalog = @import("../../model_catalog.zig");
 const rsql = @import("../rsql.zig");
 
 pub const Source = struct {
-    etag: ?protocol.Bounded(512),
+    etag: ?Bounded(512),
     generation: u64,
     fetched_at: i64,
 };
@@ -35,14 +36,14 @@ pub const fact = rsql.Read(.{
 pub const openai_ids = rsql.Read(.{
     .sql = "SELECT fact.model_id FROM model_fact fact JOIN model_catalog_source source ON source.generation=fact.generation WHERE source.slot=1 AND fact.openai_listed=1 ORDER BY fact.model_id",
     .Args = struct {},
-    .Row = struct { model_id: protocol.Bounded(256) },
+    .Row = struct { model_id: Bounded(256) },
     .cardinality = .each,
 });
 
 const existing = rsql.Read(.{
     .sql = "SELECT model_id FROM model_fact",
     .Args = struct {},
-    .Row = struct { model_id: protocol.Bounded(256) },
+    .Row = struct { model_id: Bounded(256) },
     .cardinality = .each,
 });
 const FactArgs = struct { id: []const u8, context_window: ?u32, efforts: u8, openai_listed: bool, generation: u64 };

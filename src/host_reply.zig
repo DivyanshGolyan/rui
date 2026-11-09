@@ -69,7 +69,7 @@ pub fn renderConversationPage(response: protocol.JsonOut, page: *const command_r
         }
         switch (item.kind) {
             .user => if (item.admitted_at) |second| try response.appendShape(shapes.admission, .{ second, item.sender }),
-            .tool_result, .hosted_call => if (item.presentation) |presentation| try response.appendShape(shapes.presentation, .{presentation}),
+            .tool_result, .hosted_call => if (item.presentation) |presentation| try response.appendShape(shapes.presentation, .{protocol.ToolPresentationJson{ .value = presentation }}),
             .assistant => {},
         }
         try response.appendShape(shapes.item_end, .{});

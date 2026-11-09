@@ -12,6 +12,8 @@
 const std = @import("std");
 const Bounded = @import("../bounded.zig").Bounded;
 const protocol = @import("../protocol.zig");
+const provider_route = @import("../provider_route.zig");
+const provider_name = @import("../provider_name.zig");
 const rsql = @import("rsql.zig");
 
 const text_head = "_utf8mb4 X'";
@@ -24,7 +26,7 @@ const null_text = "NULL";
 /// second for `@now`, and the opening's served providers for `@served`.
 pub const Bound = struct {
     now: i64,
-    served: *const protocol.Routes,
+    served: *const provider_route.Routes,
 };
 
 /// An integer argument above the largest BIGINT, which SQLite also refuses
@@ -90,8 +92,8 @@ fn argument(comptime Args: type, comptime index: usize, args: *const Args) ArgTy
     return @field(args, @typeInfo(Args).@"struct".field_names[index]);
 }
 
-fn served(provider: protocol.Provider, bound: Bound) []const u8 {
-    return rsql.servedBinding(provider, protocol.routeOf(bound.served.*, provider) != .unserved);
+fn served(provider: provider_name.Provider, bound: Bound) []const u8 {
+    return rsql.servedBinding(provider, provider_route.of(bound.served.*, provider) != .unserved);
 }
 
 fn slotLength(comptime Args: type, comptime slot: rsql.Slot, args: *const Args, bound: Bound) Error!usize {
@@ -168,7 +170,7 @@ fn writeBytes(bytes: []const u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
 
 const Tag = enum { first, second_tag };
 
-const all_unserved = protocol.routesAll(.unserved);
+const all_unserved = provider_route.all(.unserved);
 
 fn expectRendered(comptime text: []const u8, comptime Args: type, args: Args, bound: Bound, expected: []const u8) !void {
     const template = comptime rsql.mysqlRendering(text).rendered;
@@ -230,7 +232,7 @@ test "empty text and bytes are empty literals, never NULL" {
 
 test "@now writes the bound second, and @served each provider's binding" {
     const Args = struct { provider: []const u8 };
-    var routes = protocol.routesAll(.unserved);
+    var routes = provider_route.all(.unserved);
     routes.codex = .endpoint;
     try expectRendered(
         "SELECT @now,@served(?1)",
