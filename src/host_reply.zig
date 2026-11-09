@@ -19,32 +19,41 @@ pub fn renderActivitySearch(out: protocol.JsonOut, page: *const protocol.Activit
     page.writeJson(out.writer) catch return error.BufferTooLarge;
 }
 
-/// `command` is the request's command; only its `session` is read.
+/// The HTTP status of a mutation reply: the same four outcomes for each.
+pub fn httpStatus(result: anytype) u16 {
+    return switch (result) {
+        .accepted, .rejected => 200,
+        .conflict => 409,
+        .infrastructure_failure => 500,
+    };
+}
+
+/// `session` is the Session the request named.
 pub fn renderConfigureReply(
     response: protocol.JsonOut,
-    command: anytype,
+    session: []const u8,
     result: command_reply.ConfigureReply,
 ) !void {
     const shapes = protocol.configuration_reply;
     try switch (result) {
         .accepted => |value| if (value.skills) |status| response.appendShape(shapes.accepted_skills, .{ value.replayed, value.session.slice(), value.revision, status }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.revision, value.created }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, command.session.slice(), value.code }),
-        .conflict => response.appendShape(shapes.conflict, .{command.session.slice()}),
+        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, value.code }),
+        .conflict => response.appendShape(shapes.conflict, .{session}),
         .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
     };
 }
 
-/// `command` is the request's command; only its `session` is read.
+/// `session` is the Session the request named.
 pub fn renderMessageReply(
     response: protocol.JsonOut,
-    command: anytype,
+    session: []const u8,
     result: command_reply.MessageReply,
 ) !void {
     const shapes = protocol.message_reply;
     try switch (result) {
         .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.admission_id, value.content.length, value.content.digest, value.admission_id }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, command.session.slice(), value.code, value.content.length, value.content.digest }),
-        .conflict => response.appendShape(shapes.conflict, .{command.session.slice()}),
+        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, value.code, value.content.length, value.content.digest }),
+        .conflict => response.appendShape(shapes.conflict, .{session}),
         .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
     };
 }
@@ -73,11 +82,10 @@ pub fn renderConversationPage(response: protocol.JsonOut, page: *const command_r
 
 pub fn renderSessionStopReply(
     response: protocol.JsonOut,
-    command: *const protocol.SessionStopCommand,
+    session: []const u8,
     result: command_reply.SessionStopReply,
 ) !void {
     const shapes = protocol.session_stop_reply;
-    const session = command.session.slice();
     try switch (result) {
         .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, value.selection.selected_turn_id, value.selection.admission_cutoff, value.completion }),
         .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, value.code }),
@@ -88,11 +96,10 @@ pub fn renderSessionStopReply(
 
 pub fn renderSessionArchiveReply(
     response: protocol.JsonOut,
-    command: *const protocol.SessionArchiveCommand,
+    session: []const u8,
     result: command_reply.SessionArchiveReply,
 ) !void {
     const shapes = protocol.session_archive_reply;
-    const session = command.session.slice();
     try switch (result) {
         .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, value.archived, value.completion }),
         .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, value.code }),
@@ -103,30 +110,37 @@ pub fn renderSessionArchiveReply(
 
 pub fn renderModelInterruptionReply(
     response: protocol.JsonOut,
-    command: *const protocol.ModelInterruptionCommand,
+    target: command_reply.ModelInterruptionTarget,
     result: command_reply.ModelInterruptionReply,
 ) !void {
     const shapes = protocol.model_interruption_reply;
-    const session = command.session.slice();
+    const session = target.session.slice();
     try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, command.turn_id, command.operation_id }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, command.turn_id, command.operation_id, value.code }),
-        .conflict => response.appendShape(shapes.conflict, .{ session, command.turn_id, command.operation_id }),
+        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, target.turn_id, target.operation_id }),
+        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, target.turn_id, target.operation_id, value.code }),
+        .conflict => response.appendShape(shapes.conflict, .{ session, target.turn_id, target.operation_id }),
         .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
     };
 }
 
+/// The decision a permission reply answers, as the request named it.
+pub const PermissionTarget = struct {
+    session: protocol.Bounded(protocol.max_session_bytes),
+    action_id: u64,
+    decision: protocol.PermissionDecision,
+};
+
 pub fn renderPermissionDecisionReply(
     response: protocol.JsonOut,
-    command: *const protocol.PermissionDecisionCommand,
+    target: PermissionTarget,
     result: command_reply.PermissionDecisionReply,
 ) !void {
     const shapes = protocol.permission_decision_reply;
-    const session = command.session.slice();
+    const session = target.session.slice();
     try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, command.action_id, command.decision }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, command.action_id, command.decision, value.code }),
-        .conflict => response.appendShape(shapes.conflict, .{ session, command.action_id, command.decision }),
+        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, target.action_id, target.decision }),
+        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, target.action_id, target.decision, value.code }),
+        .conflict => response.appendShape(shapes.conflict, .{ session, target.action_id, target.decision }),
         .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
     };
 }
@@ -200,8 +214,8 @@ pub fn renderFullCommandObservation(
     try response.appendShape(shapes.tail, .{});
 }
 
-pub fn renderHostInfo(
-    response: protocol.JsonOut,
+/// What `host info` reports, named so no two counts can trade places.
+pub const HostInfo = struct {
     store: []const u8,
     instance: protocol.InstanceId,
     active_capacity: u64,
@@ -212,13 +226,16 @@ pub fn renderHostInfo(
     paused: bool,
     routes: protocol.Routes,
     doublewrite: ?[]const u8,
-) !void {
+};
+
+pub fn renderHostInfo(response: protocol.JsonOut, info: HostInfo) !void {
     var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
-    const limit_text = if (descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
-    if (doublewrite) |value|
-        try response.appendShape(protocol.host_info_mysql_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, paused, value, routes.codex, routes.openai })
+    const limit_text = if (info.descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
+    const routes = info.routes;
+    if (info.doublewrite) |value|
+        try response.appendShape(protocol.host_info_mysql_reply, .{ info.store, info.instance, info.active_capacity, info.intake_capacity, limit_text, info.started_at, info.custody_occupied, info.paused, value, routes.codex, routes.openai })
     else
-        try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, paused, routes.codex, routes.openai });
+        try response.appendShape(protocol.host_info_reply, .{ info.store, info.instance, info.active_capacity, info.intake_capacity, limit_text, info.started_at, info.custody_occupied, info.paused, routes.codex, routes.openai });
 }
 
 pub fn renderHostPause(response: protocol.JsonOut, paused: bool) !void {
@@ -233,6 +250,13 @@ pub fn renderSessionsNotModified(response: protocol.JsonOut, since: protocol.Sin
 
 pub fn renderStatic(response: protocol.JsonOut, kind: protocol.ErrorType, code: []const u8) !void {
     try response.appendShape(protocol.error_reply, .{ kind, code });
+}
+
+test "a mutation's outcome decides its HTTP status" {
+    try std.testing.expectEqual(@as(u16, 200), httpStatus(command_reply.MessageReply{ .rejected = .{ .replayed = false, .code = .unknown_session, .content = .{ .length = 0, .digest = @splat(0) } } }));
+    try std.testing.expectEqual(@as(u16, 200), httpStatus(command_reply.PermissionDecisionReply{ .accepted = .{ .replayed = true } }));
+    try std.testing.expectEqual(@as(u16, 409), httpStatus(command_reply.SessionStopReply.conflict));
+    try std.testing.expectEqual(@as(u16, 500), httpStatus(command_reply.ConfigureReply.infrastructure_failure));
 }
 
 test "every reply renders its exact worst-case bound from the shape it writes" {
@@ -259,11 +283,11 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
             return longest;
         }
 
-        fn reply(render: anytype, command: anytype, results: anytype) !usize {
+        fn reply(render: anytype, subject: anytype, results: anytype) !usize {
             var bytes: usize = 0;
             inline for (results) |result| {
                 var response: protocol.ResponseBuffer = .{};
-                try response.render(render, .{ command, result });
+                try response.render(render, .{ subject, result });
                 bytes = @max(bytes, response.len);
             }
             return bytes;
@@ -276,51 +300,39 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         }
     };
 
-    // The configure and Message renderers read only the command's Session.
-    const Addressed = struct { session: protocol.Bounded(protocol.max_session_bytes) = .{} };
-    var configure: Addressed = .{};
-    try configure.session.set(&escaped_session);
-    try std.testing.expectEqual(protocol.configuration_reply.max_bytes, try Worst.reply(renderConfigureReply, &configure, .{
+    try std.testing.expectEqual(protocol.configuration_reply.max_bytes, try Worst.reply(renderConfigureReply, @as([]const u8, &escaped_session), .{
         command_reply.ConfigureReply{ .accepted = .{ .replayed = false, .revision = max, .created = false, .session = session, .skills = .unchanged } },
         command_reply.ConfigureReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.ConfigurationRejection) } },
         command_reply.ConfigureReply.conflict,
     }));
 
-    var message: Addressed = .{};
-    try message.session.set(&escaped_session);
-    try std.testing.expectEqual(protocol.message_reply.max_bytes, try Worst.reply(renderMessageReply, &message, .{
+    try std.testing.expectEqual(protocol.message_reply.max_bytes, try Worst.reply(renderMessageReply, @as([]const u8, &escaped_session), .{
         command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = content, .session = session } },
         command_reply.MessageReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.MessageRejection), .content = content } },
         command_reply.MessageReply.conflict,
     }));
 
-    var stop: protocol.SessionStopCommand = .{};
-    try stop.session.set(&escaped_session);
-    try std.testing.expectEqual(protocol.session_stop_reply.max_bytes, try Worst.reply(renderSessionStopReply, &stop, .{
+    try std.testing.expectEqual(protocol.session_stop_reply.max_bytes, try Worst.reply(renderSessionStopReply, @as([]const u8, &escaped_session), .{
         command_reply.SessionStopReply{ .accepted = .{ .replayed = false, .selection = .{ .selected_turn_id = max, .admission_cutoff = max }, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         command_reply.SessionStopReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.SessionStopRejection) } },
         command_reply.SessionStopReply.conflict,
     }));
 
-    var archive: protocol.SessionArchiveCommand = .{};
-    try archive.session.set(&escaped_session);
-    try std.testing.expectEqual(protocol.session_archive_reply.max_bytes, try Worst.reply(renderSessionArchiveReply, &archive, .{
+    try std.testing.expectEqual(protocol.session_archive_reply.max_bytes, try Worst.reply(renderSessionArchiveReply, @as([]const u8, &escaped_session), .{
         command_reply.SessionArchiveReply{ .accepted = .{ .replayed = false, .archived = false, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         command_reply.SessionArchiveReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.SessionArchiveRejection) } },
         command_reply.SessionArchiveReply.conflict,
     }));
 
-    var interruption: protocol.ModelInterruptionCommand = .{ .turn_id = max, .operation_id = max };
-    try interruption.session.set(&escaped_session);
-    try std.testing.expectEqual(protocol.model_interruption_reply.max_bytes, try Worst.reply(renderModelInterruptionReply, &interruption, .{
+    const interruption: command_reply.ModelInterruptionTarget = .{ .session = session, .turn_id = max, .operation_id = max };
+    try std.testing.expectEqual(protocol.model_interruption_reply.max_bytes, try Worst.reply(renderModelInterruptionReply, interruption, .{
         command_reply.ModelInterruptionReply{ .accepted = .{ .replayed = false } },
         command_reply.ModelInterruptionReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.ModelInterruptionRejection) } },
         command_reply.ModelInterruptionReply.conflict,
     }));
 
-    var decision: protocol.PermissionDecisionCommand = .{ .action_id = max, .decision = Worst.tag(protocol.PermissionDecision) };
-    try decision.session.set(&escaped_session);
-    try std.testing.expectEqual(protocol.permission_decision_reply.max_bytes, try Worst.reply(renderPermissionDecisionReply, &decision, .{
+    const decision: PermissionTarget = .{ .session = session, .action_id = max, .decision = Worst.tag(protocol.PermissionDecision) };
+    try std.testing.expectEqual(protocol.permission_decision_reply.max_bytes, try Worst.reply(renderPermissionDecisionReply, decision, .{
         command_reply.PermissionDecisionReply{ .accepted = .{ .replayed = false } },
         command_reply.PermissionDecisionReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.PermissionDecisionRejection) } },
         command_reply.PermissionDecisionReply.conflict,
@@ -331,10 +343,14 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
 
     var host_info: protocol.ResponseBuffer = .{};
-    try host_info.render(renderHostInfo, .{ &escaped_store, @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, false, protocol.routesAll(.chatgpt_device), null });
+    const worst_info: HostInfo = .{ .store = &escaped_store, .instance = @splat(0xff), .active_capacity = max, .intake_capacity = max, .descriptor_soft_limit = max, .started_at = max, .custody_occupied = max, .paused = false, .routes = protocol.routesAll(.chatgpt_device), .doublewrite = null };
+    try host_info.render(renderHostInfo, .{worst_info});
     try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_reply), host_info.len);
     host_info.len = 0;
-    try host_info.render(renderHostInfo, .{ &@as([32]u8, @splat(0x01)), @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, false, protocol.routesAll(.chatgpt_device), &@as([32]u8, @splat(0x01)) });
+    var mysql_info = worst_info;
+    mysql_info.store = &@as([32]u8, @splat(0x01));
+    mysql_info.doublewrite = &@as([32]u8, @splat(0x01));
+    try host_info.render(renderHostInfo, .{mysql_info});
     try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_mysql_reply), host_info.len);
 
     const observations = protocol.command_observation_reply;
