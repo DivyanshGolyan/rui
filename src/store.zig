@@ -20,6 +20,8 @@ pub const ModelCatalogSource = @import("store/domain/model_facts.zig").Source;
 pub const Store = store_core.Store;
 pub const CapturedSkill = @import("store/domain/skills.zig").Capture;
 pub const CapturedMessageSkills = @import("store/domain/skills.zig").MessageCapture;
+pub const MessageSkillFailure = @import("store/domain/skills.zig").MessageFailure;
+pub const BoundSkill = @import("store/domain/skills.zig").BoundSkill;
 pub const InitialSkills = @import("store/domain/skills.zig").Initial;
 pub const MysqlStartError = @import("store/engine/mysql_refusal.zig").StartError;
 

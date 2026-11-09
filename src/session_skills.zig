@@ -50,7 +50,7 @@ pub fn capture(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocato
             } else return .{ .failed = .{ .code = .unknown_skill, .bytes = "No advertised skill has that name. Reload skills to refresh the catalog." } };
             const bytes = catalog.invocation(allocator, io, selected) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                else => return .{ .failed = try readFailure(allocator, name, err) },
+                else => return .{ .failed = try readFailure(@FieldType(Capture, "failed"), allocator, name, err) },
             };
             return .{ .invocation = bytes };
         },
@@ -61,9 +61,7 @@ pub fn capture(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocato
     }
 }
 
-/// One request owner, borrowed by the Store through synchronous settlement.
-/// Its expanded descriptor shares the Ingress scratch budget and cleanup home.
-fn readFailure(allocator: std.mem.Allocator, name: []const u8, err: anyerror) !@FieldType(Capture, "failed") {
+fn readFailure(comptime Failure: type, allocator: std.mem.Allocator, name: []const u8, err: anyerror) !Failure {
     return .{ .code = switch (err) {
         error.SkillFileTooLarge, error.SkillBatchTooLarge => .skill_file_too_large,
         error.InvalidUtf8 => .skill_text_invalid,
@@ -74,92 +72,153 @@ fn readFailure(allocator: std.mem.Allocator, name: []const u8, err: anyerror) !@
 pub const PreparedMessage = struct {
     initial: ?*const storage.InitialSkills = null,
     captured: ?storage.CapturedMessageSkills = null,
-    payload: protocol.ContentField = .{},
-
-    pub fn deinit(self: *PreparedMessage, io: std.Io) void {
-        protocol.removeContent(&self.payload, io) catch unreachable;
-    }
 };
 
-pub fn prepareMessage(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, command: *const protocol.MessageCommand, home: ?[]const u8, options: protocol.ParseOptions) !*PreparedMessage {
+/// Message text as a door holds it: a wire field, bytes the Host made, or
+/// content the Store saved.
+pub const Text = union(enum) {
+    field: *const protocol.ContentField,
+    bytes: []const u8,
+    stored: struct { store: *storage.Store, reference: storage.ContentReference },
+};
+
+/// The wire Message door: a creation binds against the catalog it creates,
+/// any other Message against its Session's. Replays prepare nothing.
+pub fn prepareMessage(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, command: *const protocol.MessageCommand, home: ?[]const u8) !*PreparedMessage {
     const prepared = try allocator.create(PreparedMessage);
     prepared.* = .{};
     // This includes accepted, rejected and conflicting keys: no metadata or
     // file discovery precedes the Store's authoritative replay classification.
     if (try store.commandExists(command.key.slice())) return prepared;
-    const invokes = command.skills.len != 0;
-    var found: catalog.Catalog = .{ .entries = &.{} };
     if (command.configuration) |*configuration| {
-        const initial_value = try allocator.create(storage.InitialSkills);
-        prepared.initial = initial_value;
-        initial_value.* = try prepareInitial(allocator, scratch_allocator, io, if (configuration.workspace.state == .value) configuration.workspace.value.slice() else "/", home, &found);
-        if (initial_value.* == .unavailable) return prepared;
-    } else if (invokes) {
-        const state = store.readSkills(allocator, command.session.slice()) catch |err| switch (err) {
-            error.SessionNotFound => {
-                prepared.captured = .{ .failed = .{ .code = .unknown_session, .bytes = "Rui could not use skills: unknown Session." } };
-                return prepared;
-            },
-            else => return err,
-        };
-        found = state.catalog;
-    }
-    if (!invokes) return prepared;
-    preparePayload(prepared, allocator, scratch_allocator, io, command, found, options) catch |err| switch (err) {
-        error.OutOfMemory, error.ScratchCapacityExhausted => return err,
-        else => prepared.captured = .{ .failed = .{ .code = switch (err) {
-            error.SkillBatchTooLarge => .skill_file_too_large,
-            error.InvalidUtf8 => .skill_text_invalid,
-            else => .skill_file_unavailable,
-        }, .bytes = try std.fmt.allocPrint(allocator, "Rui could not prepare skills: {s}. No Message was admitted.", .{@errorName(err)}) } },
-    };
+        prepared.* = try prepareCreation(allocator, scratch_allocator, io, if (configuration.workspace.state == .value) configuration.workspace.value.slice() else "/", home, .{ .field = &command.text });
+    } else prepared.captured = try bindTo(allocator, io, store, command.session.slice(), .{ .field = &command.text });
     return prepared;
 }
 
-const max_batch_body_bytes = 1024 * 1024;
+/// A Message that creates its Session, from a client or `start_agent`:
+/// the new Session's initial catalog, and the text bound against it.
+pub fn prepareCreation(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, workspace: []const u8, home: ?[]const u8, text: Text) !PreparedMessage {
+    var found: catalog.Catalog = .{ .entries = &.{} };
+    const initial_value = try allocator.create(storage.InitialSkills);
+    initial_value.* = try prepareInitial(allocator, scratch_allocator, io, workspace, home, &found);
+    if (initial_value.* == .unavailable) return .{ .initial = initial_value };
+    return .{ .initial = initial_value, .captured = try bind(allocator, io, text, found) };
+}
 
-fn preparePayload(prepared: *PreparedMessage, result_allocator: std.mem.Allocator, allocator: std.mem.Allocator, io: std.Io, command: *const protocol.MessageCommand, found: catalog.Catalog, options: protocol.ParseOptions) !void {
-    const names = command.skills;
-    // Resolve the complete intent before prompt copying, scratch acquisition or
-    // skill I/O. Entries borrow this request's one authoritative snapshot.
-    const selected = try allocator.alloc(catalog.Entry, names.len);
-    defer allocator.free(selected);
-    for (names, selected) |name, *selected_entry| {
-        selected_entry.* = for (found.entries) |entry| {
-            if (std.mem.eql(u8, entry.name, name.slice())) break entry;
-        } else {
-            prepared.captured = .{ .failed = .{ .code = .unknown_skill, .bytes = "No advertised skill has that name. Reload skills to refresh the catalog." } };
-            return;
-        };
-    }
-    // Capture is >1KiB; one heap home, never copied on a Host stack.
-    const destination = try allocator.create(protocol.ContentCapture);
-    defer allocator.destroy(destination);
-    try destination.init(options, 3); // Ingress owns ordinals 1 and 2.
-    defer destination.deinit();
-    try destination.copy(&command.text);
+/// A Message to an existing Session: binds `text` against that Session's
+/// catalog. Null when no word names a skill there; an unknown Session
+/// binds nothing and is the Store's refusal.
+pub fn bindTo(allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, session: []const u8, text: Text) !?storage.CapturedMessageSkills {
+    // Only text with a `/name` word needs the recipient's catalog.
+    var any: AnyReference = .{};
+    try eachReference(io, text, &any);
+    if (!any.found) return null;
+    const state = store.readSkills(allocator, session) catch |err| switch (err) {
+        error.SessionNotFound => return null,
+        else => return err,
+    };
+    return bind(allocator, io, text, state.catalog);
+}
+
+/// The one binding step every Message passes: each `/name` word that names
+/// a skill in `found` binds it, once, in the order the text first names it,
+/// with the skill's whole current file read now. Other words are prose.
+/// Null when nothing binds. The bodies are owned by `allocator`.
+pub fn bind(allocator: std.mem.Allocator, io: std.Io, text: Text, found: catalog.Catalog) !?storage.CapturedMessageSkills {
+    var binder: Binder = .{ .allocator = allocator, .found = found };
+    defer binder.selected.deinit(allocator);
+    try eachReference(io, text, &binder);
+    if (binder.selected.items.len == 0) return null;
+    const bound = try allocator.alloc(storage.BoundSkill, binder.selected.items.len);
     var total: usize = 0;
-    for (selected, names, 0..) |entry, name, index| {
-        // The per-file allocation is released before the next file is read.
+    for (binder.selected.items, bound) |entry, *skill| {
         const invocation = catalog.invocationWithLength(allocator, io, entry) catch |err| switch (err) {
             error.OutOfMemory => return err,
-            else => {
-                prepared.captured = .{ .failed = try readFailure(result_allocator, name.slice(), err) };
-                return;
-            },
+            else => return .{ .failed = try bindFailure(allocator, entry.name, err) },
         };
-        defer allocator.free(invocation.bytes);
-        total = std.math.add(usize, total, invocation.raw_length) catch return error.SkillBatchTooLarge;
-        if (total > max_batch_body_bytes) {
-            prepared.captured = .{ .failed = try readFailure(result_allocator, name.slice(), error.SkillBatchTooLarge) };
-            return;
-        }
-        if (command.text.length != 0 or index != 0) try destination.write("\n\n");
-        try destination.write(invocation.bytes);
+        total = std.math.add(usize, total, invocation.raw_length) catch std.math.maxInt(usize);
+        if (total > max_batch_body_bytes) return .{ .failed = try bindFailure(allocator, entry.name, error.SkillBatchTooLarge) };
+        skill.* = .{ .name = entry.name, .bytes = invocation.bytes };
     }
-    prepared.payload = try destination.seal();
-    prepared.captured = .{ .payload = &prepared.payload };
+    return .{ .bound = bound };
 }
+
+/// Why a bound skill could not be read; each door says what it then did.
+fn bindFailure(allocator: std.mem.Allocator, name: []const u8, err: anyerror) !storage.MessageSkillFailure {
+    const failure = try readFailure(storage.MessageSkillFailure, allocator, name, err);
+    return .{ .code = failure.code, .bytes = try std.fmt.allocPrint(allocator, "Rui could not read skill {s}: {s}.", .{ name, @errorName(err) }) };
+}
+
+const AnyReference = struct {
+    found: bool = false,
+    fn visit(self: *AnyReference, _: []const u8) !bool {
+        self.found = true;
+        return false;
+    }
+};
+
+/// The catalog entries a Message's `/name` words name, each once, in the
+/// order the text first names them. Other words stay prose.
+const Binder = struct {
+    allocator: std.mem.Allocator,
+    found: catalog.Catalog,
+    selected: std.ArrayList(catalog.Entry) = .empty,
+
+    fn visit(self: *Binder, name: []const u8) !bool {
+        // Full catalogs are lexical by name.
+        const index = std.sort.binarySearch(catalog.Entry, self.found.entries, name, struct {
+            fn order(key: []const u8, entry: catalog.Entry) std.math.Order {
+                return std.mem.order(u8, key, entry.name);
+            }
+        }.order) orelse return true;
+        const entry = self.found.entries[index];
+        for (self.selected.items) |bound| if (std.mem.eql(u8, bound.name, entry.name)) return true;
+        try self.selected.append(self.allocator, entry);
+        return true;
+    }
+};
+
+/// Streams the text's `/name` words to `visitor` in order, until its `visit`
+/// returns false. Sealed and saved text is read in bounded windows.
+fn eachReference(io: std.Io, text: Text, visitor: anytype) !void {
+    var scanner: catalog.References = .{};
+    switch (text) {
+        .bytes => |bytes| for (bytes) |byte| if (scanner.feed(byte)) |name| if (!try visitor.visit(name)) return,
+        .field => |field| if (field.borrowedBytes()) |bytes| {
+            for (bytes) |byte| if (scanner.feed(byte)) |name| if (!try visitor.visit(name)) return;
+        } else if (field.length != 0) {
+            const file = field.file orelse return error.MissingContentCapture;
+            var buffer: [protocol.content_window_bytes]u8 = undefined;
+            var offset: u64 = 0;
+            while (offset < field.length) {
+                const size: usize = @intCast(@min(buffer.len, field.length - offset));
+                const count = try file.readPositionalAll(io, buffer[0..size], offset);
+                if (count != size) return error.ContentLengthMismatch;
+                for (buffer[0..count]) |byte| if (scanner.feed(byte)) |name| if (!try visitor.visit(name)) return;
+                offset += count;
+            }
+        },
+        .stored => |stored| {
+            var reader: storage.ContentReader = undefined;
+            reader.open(try stored.store.openContent(stored.reference));
+            defer reader.close();
+            // A small window: this runs on execution threads' stacks too.
+            var buffer: [protocol.content_window_bytes]u8 = undefined;
+            var offset: u64 = 0;
+            while (offset < stored.reference.length) {
+                const count = try reader.read(offset, buffer[0..@intCast(@min(buffer.len, stored.reference.length - offset))]);
+                if (count == 0) return error.ShortCanonicalRead;
+                for (buffer[0..count]) |byte| if (scanner.feed(byte)) |name| if (!try visitor.visit(name)) return;
+                offset += count;
+            }
+        },
+    }
+    if (scanner.finish()) |name| _ = try visitor.visit(name);
+}
+
+/// Every skill one Message binds, raw file bytes together.
+const max_batch_body_bytes = 1024 * 1024;
 
 pub fn suggestions(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, scope: @import("skill_suggestions.zig").Scope, prefix: []const u8, home: ?[]const u8) !@import("skill_suggestions.zig").Page {
     if (prefix.len > 64 or !std.unicode.utf8ValidateSlice(prefix)) return error.InvalidPrefix;
@@ -223,22 +282,40 @@ test "inline skills suggestions bound pages and retain prefix-independent revisi
     try std.testing.expectEqualStrings("beta", filtered.entries[0].name);
 }
 
-test "inline skills resolve complete snapshot before prompt scratch or any selected file I/O" {
-    var prepared: PreparedMessage = .{};
-    defer prepared.deinit(std.testing.io);
-    var first: protocol.Bounded(64) = .{};
-    var missing: protocol.Bounded(64) = .{};
-    try first.set("known");
-    try missing.set("missing");
-    const command: protocol.MessageCommand = .{ .skills = &.{ first, missing }, .text = .{ .state = .value, .length = 100, .digest = protocol.contentDigest("unavailable source") } };
-    var retained: ?@import("named_scratch.zig").Owner = null;
-    try preparePayload(&prepared, std.testing.allocator, std.testing.allocator, std.testing.io, &command, .{ .entries = &.{.{ .name = "known", .description = "Metadata", .path = "/must-not-open/SKILL.md" }} }, .{ .io = std.testing.io, .content_length = 0, .scratch_path = "/must-not-create", .request_number = 0, .retained_scratch = &retained });
-    try std.testing.expect(prepared.captured.? == .failed);
-    try std.testing.expectEqual(.unknown_skill, prepared.captured.?.failed.code);
-    try std.testing.expect(retained == null);
+fn expectBound(text: *const protocol.ContentField, found: catalog.Catalog, expected: []const []const u8) !void {
+    var binder: Binder = .{ .allocator = std.testing.allocator, .found = found };
+    defer binder.selected.deinit(std.testing.allocator);
+    try eachReference(std.testing.io, .{ .field = text }, &binder);
+    try std.testing.expectEqual(expected.len, binder.selected.items.len);
+    for (expected, binder.selected.items) |name, entry| try std.testing.expectEqualStrings(name, entry.name);
 }
 
-test "inline skills aggregate raw body cap reclaims all sequential capture custody" {
+test "inline skills bind each catalog name a /name word names, once, in text order" {
+    const entries = [_]catalog.Entry{
+        .{ .name = "alpha", .description = "Metadata", .path = "/never-read" },
+        .{ .name = "beta", .description = "Metadata", .path = "/never-read" },
+        .{ .name = "tmp", .description = "Metadata", .path = "/never-read" },
+    };
+    const text = "use /beta, not /tmp/etc or /gamma; then /alpha and /beta again /tmp";
+    const borrowed: protocol.ContentField = .{ .state = .value, .borrowed = text.ptr, .length = text.len };
+    try expectBound(&borrowed, .{ .entries = &entries }, &.{ "beta", "alpha", "tmp" });
+    // Sealed text streams in windows; a word may straddle one.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const padding = protocol.content_window_bytes - 3;
+    const file = try tmp.dir.createFile(std.testing.io, "text", .{ .read = true });
+    defer file.close(std.testing.io);
+    var bytes: [padding + " /alpha".len]u8 = undefined;
+    @memset(bytes[0..padding], 'x');
+    @memcpy(bytes[padding..], " /alpha");
+    try file.writeStreamingAll(std.testing.io, &bytes);
+    const sealed: protocol.ContentField = .{ .state = .value, .file = file, .length = bytes.len };
+    try expectBound(&sealed, .{ .entries = &entries }, &.{"alpha"});
+    const empty: protocol.ContentField = .{ .state = .value };
+    try expectBound(&empty, .{ .entries = &entries }, &.{});
+}
+
+test "inline skills refuse a Message whose bound files together exceed the body cap" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -257,23 +334,24 @@ test "inline skills aggregate raw body cap reclaims all sequential capture custo
         .{ .name = "first", .description = "Metadata", .path = try std.fmt.bufPrint(&first_path, "{s}/first.md", .{root}) },
         .{ .name = "second", .description = "Metadata", .path = try std.fmt.bufPrint(&second_path, "{s}/second.md", .{root}) },
     };
-    var first: protocol.Bounded(64) = .{};
-    var second: protocol.Bounded(64) = .{};
-    try first.set("first");
-    try second.set("second");
     var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer memory.deinit();
-    var prepared: PreparedMessage = .{};
-    defer prepared.deinit(std.testing.io);
-    var retained: ?@import("named_scratch.zig").Owner = null;
-    var used: std.atomic.Value(u64) = .init(0);
-    const command: protocol.MessageCommand = .{ .skills = &.{ first, second }, .text = .{ .state = .value, .digest = protocol.contentDigest("") } };
-    try preparePayload(&prepared, memory.allocator(), std.testing.allocator, std.testing.io, &command, .{ .entries = &entries }, .{ .io = std.testing.io, .content_length = 0, .scratch_path = root, .request_number = 0, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 4 * 1024 * 1024 } });
-    try std.testing.expect(prepared.captured.? == .failed);
-    try std.testing.expectEqual(.skill_file_too_large, prepared.captured.?.failed.code);
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-    try std.testing.expect(prepared.payload.file == null and retained == null);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "request-0-3.tmp", .{}));
+    // Each file alone fits; the second one's bytes cross the cap.
+    for ([_]struct { text: []const u8, bound: usize }{ .{ .text = "/first", .bound = 1 }, .{ .text = "/second and /first", .bound = 0 } }) |case| {
+        const text: protocol.ContentField = .{ .state = .value, .borrowed = case.text.ptr, .length = case.text.len };
+        const captured = (try bind(memory.allocator(), std.testing.io, .{ .field = &text }, .{ .entries = &entries })).?;
+        if (case.bound == 0) {
+            try std.testing.expectEqual(.skill_file_too_large, captured.failed.code);
+            try std.testing.expect(std.mem.indexOf(u8, captured.failed.bytes, "first") != null);
+        } else {
+            try std.testing.expectEqual(case.bound, captured.bound.len);
+            try std.testing.expectEqualStrings("first", captured.bound[0].name);
+            try std.testing.expect(std.mem.endsWith(u8, captured.bound[0].bytes, raw));
+        }
+    }
+    // A word that names no skill binds nothing and reads no file.
+    const prose: protocol.ContentField = .{ .state = .value, .borrowed = "/tmp/etc /month".ptr, .length = "/tmp/etc /month".len };
+    try std.testing.expect(try bind(memory.allocator(), std.testing.io, .{ .field = &prose }, .{ .entries = &entries }) == null);
 }
 
 test "inline skills initial render limits remain keyed refusals with ordinary configuration precedence" {

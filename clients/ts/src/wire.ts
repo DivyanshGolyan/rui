@@ -81,7 +81,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON. */
+        /** Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON. */
         post: operations["message"];
         delete?: never;
         options?: never;
@@ -391,17 +391,6 @@ export interface components {
             session: string;
             position: components["schemas"]["Decimal"];
             ordinal: components["schemas"]["Decimal"];
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "activity_content";
-            store: string;
-            session: string;
-            position: components["schemas"]["Decimal"];
-            ordinal: components["schemas"]["Decimal"];
-            /** @constant */
-            selector: "authored";
         };
         ActivityItem: {
             position: components["schemas"]["Decimal"];
@@ -417,7 +406,6 @@ export interface components {
                     admitted_at: components["schemas"]["Decimal"];
                     sender: components["schemas"]["NamedPeer"] | null;
                     content: components["schemas"]["ActivityItemContent"];
-                    authored: components["schemas"]["ActivityItemContent"];
                 };
             };
         } | {
@@ -434,7 +422,6 @@ export interface components {
                     admitted_at: components["schemas"]["Decimal"];
                     sender: components["schemas"]["NamedPeer"] | null;
                     content: components["schemas"]["ActivityItemContent"];
-                    authored: components["schemas"]["ActivityItemContent"];
                 };
             };
         } | {
@@ -550,7 +537,6 @@ export interface components {
                     admitted_at: components["schemas"]["Decimal"];
                     sender: components["schemas"]["NamedPeer"] | null;
                     content: components["schemas"]["ActivityItemContent"];
-                    authored: components["schemas"]["ActivityItemContent"];
                 };
             };
         } | {
@@ -1660,7 +1646,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "unknown_skill" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
+                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
             };
             input: {
                 /** @constant */
@@ -1736,81 +1722,6 @@ export interface components {
             sender: null;
             sender_handle: string | null;
             configuration: components["schemas"]["MessageConfiguration"];
-            text: {
-                /** @constant */
-                state: "value";
-                /** @description Text of any length, saved as content. */
-                value: string;
-            };
-            /** @constant */
-            require_model: true;
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "message";
-            store: string;
-            key: string;
-            session: string;
-            sender: null;
-            sender_handle: string | null;
-            skills: string[];
-            text: {
-                /** @constant */
-                state: "value";
-                /** @description Text of any length, saved as content. */
-                value: string;
-            };
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "message";
-            store: string;
-            key: string;
-            session: string;
-            sender: {
-                store: string;
-                session: string;
-            };
-            sender_handle: string | null;
-            skills: string[];
-            text: {
-                /** @constant */
-                state: "value";
-                /** @description Text of any length, saved as content. */
-                value: string;
-            };
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "message";
-            store: string;
-            key: string;
-            session: string;
-            sender: null;
-            sender_handle: string | null;
-            configuration: components["schemas"]["MessageConfiguration"];
-            skills: string[];
-            text: {
-                /** @constant */
-                state: "value";
-                /** @description Text of any length, saved as content. */
-                value: string;
-            };
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "message";
-            store: string;
-            key: string;
-            session: string;
-            sender: null;
-            sender_handle: string | null;
-            configuration: components["schemas"]["MessageConfiguration"];
-            skills: string[];
             text: {
                 /** @constant */
                 state: "value";
@@ -3479,11 +3390,12 @@ export interface components {
             ordinal: components["schemas"]["Decimal"];
             position: components["schemas"]["Decimal"];
             /** @enum {string} */
-            kind: "message" | "settings" | "assistant";
+            kind: "message" | "settings" | "assistant" | "skill";
             turn: components["schemas"]["Decimal"] | null;
             source_admission: components["schemas"]["Decimal"] | null;
             source_revision: components["schemas"]["Decimal"] | null;
             source_catalog_position: components["schemas"]["Decimal"] | null;
+            source_skill_position: components["schemas"]["Decimal"] | null;
             source_operation: components["schemas"]["Decimal"] | null;
             content: components["schemas"]["ActivityItemContent"];
         };

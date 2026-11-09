@@ -233,7 +233,7 @@ A repository skill wins a same-name home skill; other roots, including `.claude`
 Each skill directory contains a `SKILL.md` with required YAML `name` and `description`.
 Optional metadata cannot grant permissions or tools; `disable-model-invocation` is ignored.
 
-`rui session send --skill NAME` sends the full current `SKILL.md` and its absolute path as ordinary conversation input; see [scripting](scripting.md#invoke-and-reload-skills).
+Write `/NAME` anywhere in a Message to invoke that skill: the model reads its full current `SKILL.md` and absolute path right after your text, which stays as you typed it. A `/word` that names no skill, such as a path, stays text; see [scripting](scripting.md#invoke-and-reload-skills).
 The model can invoke the `skill` tool when your chosen tool set includes it.
 Skills run nothing on load and do not bypass approvals.
 Use `/reload-skills` to refresh this Session's advertised names, descriptions and paths without starting a model turn.

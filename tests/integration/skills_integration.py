@@ -22,7 +22,8 @@ from host_process import canonical_fixture_root, dispose_all, retain_failure_sta
 
 PARENT_INSTRUCTIONS = "Authored parent instructions; never replace with skill metadata."
 CHILD_INSTRUCTIONS = "Unique child instructions for the six-content creation transaction."
-CHILD_TASK = "Unique child task for the six-content creation transaction."
+# Its `/child-only` binds the child's own skill, which its parent lacks.
+CHILD_TASK = "Unique child task for the six-content creation transaction, with /child-only."
 CHILD_SCHEMA = {"type": "object", "properties": {"child": {"type": "string"}},
                 "required": ["child"], "additionalProperties": False}
 
@@ -71,8 +72,8 @@ class SkillsEndpoint(host_process.TestHTTPServer):
             return fixture.sse_tool_calls("spawn-child", [("start_agent", "child-call", json.dumps(arguments))])
         allowed = {"initial probe", "restricted initial message", "invoke with the skill tool", "invoke a FIFO with the skill tool",
                    "after metadata reload", "start the unique child", CHILD_TASK}
-        assert text in allowed or text.startswith(("Skill file: ", "inline authored prose")), text
-        answer = '{"child":"ok"}' if text == CHILD_TASK else "skills checked"
+        assert text in allowed or text.startswith(("Skill file: ", "inline prose")), text
+        answer = '{"child":"ok"}' if CHILD_TASK in messages(request, "user") else "skills checked"
         return fixture.sse_answer(f"answer-{number}", f"reason-{number}", f"message-{number}", answer)[0]
 
     def decoded(self):
@@ -328,11 +329,9 @@ def main():
                          "direction": "backward", "kinds": ["admission"], "limit": "16"})
             return next(row for row in page["items"] if row["value"]["admission"]["key"] == key)
 
-        def activity_bytes(session, position, selector=None):
+        def activity_bytes(session, position):
             request = {"version": host_process.WIRE_VERSION, "kind": "activity_content", "store": str(store),
                        "session": session, "position": position, "ordinal": "0"}
-            if selector is not None:
-                request["selector"] = selector
             head, body = raw_request(host.rui_ready_fields["socket"], "/v1/activity-content", json.dumps(request).encode())
             assert head.startswith(b"HTTP/1.1 200 "), (head, body)
             return body
@@ -352,42 +351,33 @@ def main():
         def invocation(entry):
             return f'Skill file: {json.dumps(entry["path"], ensure_ascii=False, separators=(",", ":"))}\n\n' + pathlib.Path(entry["path"]).read_text()
 
-        authored = "inline authored prose /demo remains literal, with 雪\n"
-        expected_mixed = authored + "\n\n" + invocation(demo) + "\n\n" + invocation(shared)
+        # A Message's `/name` words bind the recipient's skills, once each, in
+        # the text's order; other slash words stay text. The model reads the
+        # typed text, then each skill as its own user message.
+        typed = "inline prose /demo then /shared, /tmp/x and /month stay text, /demo once, 雪\n"
         inline_record = state / "inline-mixed.json"
-        mixed = invoke("session", "send", "--store", store, "--to", parent,
-                       "--skill", "demo", "--skill", "shared", "--record", inline_record,
-                       "--key", "inline-mixed", text=authored)
+        mixed = invoke("session", "send", "--store", store, "--to", parent, "--record", inline_record,
+                       "--key", "inline-mixed", text=typed)
         assert mixed["answer"]["status"] == "accepted", mixed
         complete("inline-mixed")
-        assert user_text(endpoint.decoded()[-1]) == expected_mixed
+        assert messages(endpoint.decoded()[-1], "user")[-3:] == [typed, invocation(demo), invocation(shared)]
         inline_capture = inline_record.read_bytes()
         intent = json.loads(inline_capture)
-        assert intent["skills"] == ["demo", "shared"] and intent["text"]["value"] == authored, intent
+        assert "skills" not in intent and intent["text"]["value"] == typed, intent
         assert "BODY_NOT_METADATA" not in inline_capture.decode(), "canonical record copied skill bodies"
         row = activity_message(parent, "inline-mixed")
-        value = row["value"]["admission"]
-        assert value["content"] == content_reference(expected_mixed.encode()), value
-        assert value["authored"] == content_reference(authored.encode()), value
-        assert activity_bytes(parent, row["position"]) == expected_mixed.encode()
-        assert activity_bytes(parent, row["position"], "authored") == authored.encode()
+        assert row["value"]["admission"]["content"] == content_reference(typed.encode()), row
+        assert activity_bytes(parent, row["position"]) == typed.encode()
 
+        # A creating Message binds against the catalog it creates.
         initial_inline = invoke("session", "start", "--store", store, "--workspace", workspace,
-                                "--provider", "codex", "--model", "gpt-6-sol", "--skill", "demo",
-                                "--skill", "shared", "--record", state / "inline-first.json",
-                                "--key", "inline-first", text="")
+                                "--provider", "codex", "--model", "gpt-6-sol", "--record", state / "inline-first.json",
+                                "--key", "inline-first", text="/shared /demo")
         initial_inline_session = initial_inline["context"]["session"]
         complete("inline-first")
-        assert user_text(endpoint.decoded()[-1]) == invocation(demo) + "\n\n" + invocation(shared)
+        assert messages(endpoint.decoded()[-1], "user")[-3:] == ["/shared /demo", invocation(shared), invocation(demo)]
         first_row = activity_message(initial_inline_session, "inline-first")
-        assert first_row["value"]["admission"]["authored"] == content_reference(b"")
-        assert activity_bytes(initial_inline_session, first_row["position"], "authored") == b""
-        sessions_before = invoke("session", "list", "--store", store, "--all")["sessions"]
-        requests_before = len(endpoint.decoded())
-        refused_first = post({**json.loads((state / "inline-first.json").read_bytes()), "key": "inline-first-refused", "skills": ["shared", "not-advertised"]})
-        assert refused_first["answer"]["status"] == "rejected" and refused_first["answer"]["code"] == "unknown_skill", refused_first
-        assert invoke("session", "list", "--store", store, "--all")["sessions"] == sessions_before
-        assert len(endpoint.decoded()) == requests_before, "failed initial batch created model work"
+        assert first_row["value"]["admission"]["content"] == content_reference(b"/shared /demo")
 
         # Body-only edits are deliberately NOT a catalog delta. Invocation must
         # nevertheless read the full current raw bytes, including frontmatter.
@@ -399,17 +389,19 @@ def main():
         assert len(endpoint.decoded()) == count, "idle reload scheduled a model turn"
         native = {"version": host_process.WIRE_VERSION, "kind": "message", "store": str(store),
                   "key": "native-invoke", "session": parent, "sender": None, "sender_handle": None,
-                  "skills": ["demo"], "text": {"state": "value", "value": ""}}
+                  "text": {"state": "value", "value": "/demo"}}
         expected_invocation = f'Skill file: {json.dumps(demo["path"], ensure_ascii=False, separators=(",", ":"))}\n\n' + raw.decode()
         admitted = post(native)["answer"]
         assert admitted["status"] == "accepted" and not admitted["replayed"], admitted
         complete("native-invoke")
         invoked = endpoint.decoded()[-1]
-        assert user_text(invoked) == expected_invocation, invoked
+        assert messages(invoked, "user")[-2:] == ["/demo", expected_invocation], invoked
         assert raw.decode() not in "\n".join(messages(invoked, "developer")), invoked
         pathlib.Path(demo["path"]).unlink()
         before_replay = conversation(parent)
-        assert expected_invocation.encode() in [content for item, content in before_replay if item["kind"] == "user"], before_replay
+        # The public Conversation shows the Message as typed, not the skill.
+        users = [content for item, content in before_replay if item["kind"] == "user"]
+        assert b"/demo" in users and expected_invocation.encode() not in users, before_replay
         restricted_before = conversation(restricted_session)
         stop_process(host)
         host = None
@@ -435,26 +427,22 @@ def main():
         assert conversation(restricted_session) == restricted_before
 
         recovered_inline = invoke("request", "recover", "--store", store, "--record", inline_record, "--kind", "message")
-        assert recovered_inline["answer"]["replayed"] is True and recovered_inline["input"] == {"type": "text", **content_reference(expected_mixed.encode())}, recovered_inline
-        assert inline_record.read_bytes() == inline_capture, "recovery rewrote original vector intent"
-        assert activity_bytes(parent, row["position"], "authored") == authored.encode()
-        failed_second = post({**intent, "key": "inline-second-failed", "skills": ["shared", "demo"]})
+        assert recovered_inline["answer"]["replayed"] is True and recovered_inline["input"] == {"type": "text", **content_reference(typed.encode())}, recovered_inline
+        assert inline_record.read_bytes() == inline_capture, "recovery rewrote the original record"
+        failed_second = post({**intent, "key": "inline-second-failed", "text": {"state": "value", "value": "/shared /demo"}})
         assert failed_second["answer"]["status"] == "rejected" and failed_second["answer"]["code"] == "skill_file_unavailable", failed_second
         assert conversation(parent) == before_replay, "second file failure partially admitted its first file"
         assert len(endpoint.decoded()) == count, "second file failure or recovery scheduled model work"
 
-        # Native refusals bind the caller's own empty text, fresh and on
-        # recovery: each is a saved refusal (exit 3), never an unconfirmed
-        # binding mismatch (exit 4). demo's file is gone; zzzzzz names no Session.
-        for label, to, names, code in (("unknown-skill", parent, ["shared", "not-advertised"], "unknown_skill"),
-                                       ("unreadable-skill", parent, ["demo"], "skill_file_unavailable"),
-                                       ("unknown-session", "zzzzzz", ["demo"], "unknown_session")):
+        # Native refusals bind the caller's own text, fresh and on recovery:
+        # each is a saved refusal (exit 3), never an unconfirmed binding
+        # mismatch (exit 4). demo's file is gone; zzzzzz names no Session.
+        for label, to, code in (("unreadable-skill", parent, "skill_file_unavailable"),
+                                ("unknown-session", "zzzzzz", "unknown_session")):
             key = f"inline-refused-{label}"
             record = state / f"{key}.json"
             arguments = ["session", "send", "--store", store, "--to", to, "--record", record, "--key", key]
-            for name in names:
-                arguments += ["--skill", name]
-            fresh = subprocess.run([str(fixture.RUI), *map(str, arguments)], input="", text=True,
+            fresh = subprocess.run([str(fixture.RUI), *map(str, arguments)], input="/shared and /demo", text=True,
                                    capture_output=True, timeout=15, env=environment)
             assert fresh.returncode == 3, (label, fresh.returncode, fresh.stdout, fresh.stderr)
             answer = json.loads(fresh.stdout)["answer"]
@@ -503,7 +491,9 @@ def main():
             fifo_tool_request = endpoint.decoded()[-1]
             fifo_output = next(item["output"] for item in fifo_tool_request["input"]
                                if item.get("type") == "function_call_output" and item.get("call_id") == "skill-fifo-call")
-            assert fifo_output.encode() == fifo_result, fifo_output
+            # Both doors name the same read failure; the tool adds that it kept the catalog.
+            assert fifo_result == b"Rui could not read skill demo: InvalidSkillFile.", fifo_result
+            assert fifo_output.encode().startswith(fifo_result), fifo_output
             assert metadata(fifo_tool_request, "Available skills") == [initial_catalog]
             assert not metadata(fifo_tool_request, "Skill catalog changes")
             assert invoke("session", "inspect", "--store", store, "--session", parent)["session"] == fifo_settings
@@ -557,8 +547,10 @@ def main():
                             "--record", state / "parent-tools.json")
         assert configured["answer"]["status"] == "accepted", configured
         send("spawn", "start the unique child")
-        wait_for(lambda: any(user_text(request) == CHILD_TASK for request in endpoint.decoded()), "child provider request")
-        child_request = next(request for request in endpoint.decoded() if user_text(request) == CHILD_TASK)
+        wait_for(lambda: any(CHILD_TASK in messages(request, "user") for request in endpoint.decoded()), "child provider request")
+        child_request = next(request for request in endpoint.decoded() if CHILD_TASK in messages(request, "user"))
+        # start_agent binds the task against the catalog the child starts with.
+        assert messages(child_request, "user")[-2:] == [CHILD_TASK, invocation(child_only)], child_request
         child = fixture.instructions_session(child_request["instructions"])
         assert child not in (parent, restricted_session), child
         assert metadata(child_request, "Available skills") == [catalog(*updated_catalog["entries"], child_only)], child_request

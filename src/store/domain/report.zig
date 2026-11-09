@@ -2591,8 +2591,11 @@ const full_conversation = rsql.Page(.{
     .arms = &.{.{
         .on = .{ .primary_key = "conversation_entry" },
         .alias = "e",
-        .columns = "e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,e.source_revision,e.source_catalog_position,e.source_operation_id," ++
-            "c.byte_length AS content_length,c.digest AS content_digest," ++ reads_domain.publicEntryColumns("(e.entry_kind=2 AND (e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ")) OR "),
+        .columns = "e.session_position,e.entry_kind,e.turn_id,coalesce(e.source_admission_id,e.source_skill_admission_id) AS source_admission_id,e.source_revision,e.source_catalog_position,e.source_skill_position,e.source_operation_id," ++
+            "c.byte_length AS content_length,c.digest AS content_digest," ++ reads_domain.publicEntryColumns("(e.entry_kind=2 AND (e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ")) OR " ++
+            "(e.entry_kind=4 AND t.session_ref=e.session_ref AND EXISTS(SELECT 1 FROM message_skill skill JOIN message_admission owner ON owner.admission_id=skill.admission_id " ++
+            "WHERE skill.admission_id=e.source_skill_admission_id AND skill.position=e.source_skill_position AND skill.content_id=e.content_id " ++
+            "AND owner.session_ref=e.session_ref AND owner.turn_id=e.turn_id)) OR "),
         .joins = reads_domain.public_entry_joins,
     }},
     .Row = struct {
@@ -2603,6 +2606,7 @@ const full_conversation = rsql.Page(.{
         source_admission_id: ?rsql.Positive,
         source_revision: ?rsql.Positive,
         source_catalog_position: ?rsql.Positive,
+        source_skill_position: ?rsql.Positive,
         source_operation_id: ?rsql.Positive,
         content_length: u64,
         content_digest: [32]u8,
@@ -2638,7 +2642,7 @@ pub const Conversation = struct {
     }
 
     pub fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
-        if (row.entry_kind < 1 or row.entry_kind > 3 or !row.consistent) return error.CorruptStore;
+        if (row.entry_kind < 1 or row.entry_kind > 4 or !row.consistent) return error.CorruptStore;
         try capture.appendFmt("{{\"ordinal\":\"{d}\",\"position\":\"{d}\",\"kind\":\"{s}\",\"turn\":", .{
             row.entry_ordinal.get(),
             row.session_position.get(),
@@ -2646,6 +2650,7 @@ pub const Conversation = struct {
                 1 => "message",
                 2 => "settings",
                 3 => "assistant",
+                4 => "skill",
                 else => unreachable,
             },
         });
@@ -2656,6 +2661,8 @@ pub const Conversation = struct {
         try appendOptionalPositive(row.source_revision, capture);
         try capture.append(",\"source_catalog_position\":");
         try appendOptionalPositive(row.source_catalog_position, capture);
+        try capture.append(",\"source_skill_position\":");
+        try appendOptionalPositive(row.source_skill_position, capture);
         try capture.append(",\"source_operation\":");
         try appendOptionalPositive(row.source_operation_id, capture);
         try capture.append(",\"content\":");

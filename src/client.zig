@@ -340,25 +340,14 @@ pub const Requests = struct {
         return page;
     }
 
-    /// Complete scoped bytes once. The default remains the exact admitted payload.
+    /// Complete scoped bytes once.
     pub fn readActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
-        return self.readSelectedActivityContent(store_path, session, position, ordinal, .admitted, expected, sink);
-    }
-
-    pub fn readAuthoredActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
-        return self.readSelectedActivityContent(store_path, session, position, ordinal, .authored, expected, sink);
-    }
-
-    fn readSelectedActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, selector: protocol.ActivityContentSelector, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
-        if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64) or (selector == .authored and ordinal != 0)) return error.InvalidTarget;
+        if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        switch (selector) {
-            .admitted => try body.appendShape(protocol.activity_content_request, .{ paths.store.slice(), session, position, ordinal }),
-            .authored => try body.appendShape(protocol.activity_authored_content_request, .{ paths.store.slice(), session, position, ordinal }),
-        }
+        try body.appendShape(protocol.activity_content_request, .{ paths.store.slice(), session, position, ordinal });
         const fd = try openRead(self, &paths, "/v1/activity-content", body.slice());
         defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
@@ -515,7 +504,6 @@ pub const MessageInput = struct {
     session: []const u8,
     text_path: []const u8,
     text: ?[]const u8 = null,
-    skills: []const []const u8 = &.{},
     configuration: ?ConfigureInput = null,
     // The full sending address from the tool process, retained for recovery.
     sender: ?Address = null,
@@ -1443,27 +1431,6 @@ const CapturedConfiguration = struct {
     }
 };
 
-/// A Message record's listed skills, held in place: the list is bounded, so
-/// reading a record needs no allocation beyond its escaped strings.
-const CapturedSkills = struct {
-    values: [protocol.max_message_skills]protocol_reply.JsonString(64) = undefined,
-    count: usize = 0,
-    pub fn jsonParse(a: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !CapturedSkills {
-        if (try source.next() != .array_begin) return error.UnexpectedToken;
-        var result: CapturedSkills = .{};
-        while (try source.peekNextTokenType() != .array_end) {
-            if (result.count == result.values.len) return error.ValueTooLong;
-            const name = try std.json.innerParse(protocol_reply.JsonString(64), a, source, options);
-            if (name.slice().len == 0) return error.InvalidCharacter;
-            for (result.values[0..result.count]) |other| if (other.eql(name.slice())) return error.InvalidCharacter;
-            result.values[result.count] = name;
-            result.count += 1;
-        }
-        _ = try source.next();
-        return result;
-    }
-};
-
 fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol_reply.MutationIdentity, target: protocol_reply.MutationTarget } {
     const Fields = struct {
         version: protocol_reply.JsonString(8),
@@ -1475,7 +1442,6 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         require_model: ?bool = null,
         archived: bool = true,
         reload_skills: ?bool = null,
-        skills: ?CapturedSkills = null,
         sender: ?protocol_reply.JsonAddress = null,
         sender_handle: ?protocol_reply.JsonString(32) = null,
         text: ?struct { state: protocol_reply.JsonString(8), value: CapturedText } = null,
@@ -1510,7 +1476,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
             const text = fields.text orelse return error.InvalidRequestRecord;
             if (!text.state.eql("value")) return error.InvalidRequestRecord;
             if (fields.configuration != null and saved.session.len != 0) return error.InvalidRequestRecord;
-            break :blk .{ .message = .{ .bytes = text.value.bytes, .digest = text.value.digest, .creates_session = fields.configuration != null, .invokes_skill = if (fields.skills) |names| names.count != 0 else false } };
+            break :blk .{ .message = .{ .bytes = text.value.bytes, .digest = text.value.digest, .creates_session = fields.configuration != null } };
         },
         .session_stop => .session_stop,
         .session_archive => .{ .session_archive = .{ .archived = fields.archived } },
@@ -1528,7 +1494,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     if ((kind != .configure and kind != .message and fields.configuration != null) or
         (fields.require_model != null and !(kind == .configure or kind == .message and fields.configuration != null)) or
         (kind != .configure and fields.reload_skills != null) or
-        (kind != .message and (fields.skills != null or fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
+        (kind != .message and (fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
         (kind != .permission_decision and (fields.action != null or fields.decision != null))) return error.InvalidRequestRecord;
     return .{ .saved = saved, .target = target };
 }
@@ -1541,7 +1507,6 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !pro
     const count = try file.readPositionalAll(io, &buffer, 0);
     const prefix = buffer[0..count];
     const kind_marker = std.mem.indexOf(u8, prefix, ",\"configuration\"") orelse
-        std.mem.indexOf(u8, prefix, ",\"skills\"") orelse
         std.mem.indexOf(u8, prefix, ",\"text\"") orelse
         std.mem.indexOf(u8, prefix, ",\"decision\"") orelse
         // Stop/interruption records contain only bounded identities. There is
@@ -1662,23 +1627,12 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
         try capture.writeRequest(protocol.message_request.configuration, .{});
         try capture.writeConfiguration(configuration);
     }
-    if (input.skills.len != 0) {
-        if (input.skills.len > protocol.max_message_skills) return error.InvalidRequestRecord;
-        try capture.writeRequest(.{",\"skills\":["}, .{});
-        for (input.skills, 0..) |name, i| {
-            if (name.len == 0 or name.len > 64 or !std.unicode.utf8ValidateSlice(name)) return error.InvalidRequestRecord;
-            for (input.skills[0..i]) |previous| if (std.mem.eql(u8, previous, name)) return error.InvalidRequestRecord;
-            if (i != 0) try capture.writeRequest(.{","}, .{});
-            try capture.writeJsonString(name);
-        }
-        try capture.writeRequest(.{"]"}, .{});
-    }
     try capture.writeRequest(protocol.message_request.text, .{});
     if (input.text) |value| {
         if (value.len > protocol.max_sqlite_content_bytes) return error.ContentTooLarge;
         try capture.writeJsonString(value);
     } else if (std.mem.eql(u8, input.text_path, "-")) {
-        try capture.writeJsonFileBounded(input.text_path, protocol.max_sqlite_content_bytes, input.skills.len == 0);
+        try capture.writeJsonFileBounded(input.text_path, protocol.max_sqlite_content_bytes, true);
     } else try capture.writeJsonFile(input.text_path);
     if (input.configuration != null and input.configuration.?.require_model)
         try capture.writeRequest(protocol.message_request.require_model_tail, .{})
@@ -3900,8 +3854,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.conversation_page_request, .{ &store, &session, id, id, id }, protocol.max_conversation_page_request_bytes },
         .{ protocol.activity_page_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id }, comptime protocol.shapeBytes(protocol.activity_page_request) },
         .{ protocol.activity_page_since_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id, @as(?[]const u8, &observation_token) }, protocol.max_activity_page_request_bytes },
-        .{ protocol.activity_content_request, .{ &store, &session, id, id }, comptime protocol.shapeBytes(protocol.activity_content_request) },
-        .{ protocol.activity_authored_content_request, .{ &store, &session, id, id }, protocol.max_activity_content_request_bytes },
+        .{ protocol.activity_content_request, .{ &store, &session, id, id }, protocol.max_activity_content_request_bytes },
         .{ protocol.skill_suggestions_session_request, .{ &store, &session, &skill_prefix }, comptime protocol.shapeBytes(protocol.skill_suggestions_session_request) },
         .{ protocol.skill_suggestions_workspace_request, .{ &store, &workspace, &skill_prefix }, comptime protocol.shapeBytes(protocol.skill_suggestions_workspace_request) },
         .{ protocol.model_list_request, .{&store}, protocol.max_model_list_request_bytes },
@@ -4860,86 +4813,22 @@ test "inline skills native suggestion read rejects invalid scope before Store di
     try std.testing.expectError(error.InvalidPrefix, requests.skillSuggestions(std.testing.allocator, "/never-open", .{ .session = "k7m2qx" }, &@as([65]u8, @splat('x'))));
 }
 
-test "inline skills native vector canonical capture retains authored bytes and supports empty text" {
+test "inline skills Message records keep /name words as exact text and refuse a skills field" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.setPermissions(std.testing.io, .fromMode(0o700));
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    for ([_][]const u8{ "", "literal /demo 雪" }) |text| {
-        var captured = try captureMessage(std.testing.io, .{ .store = root, .session = "k7m2qx", .text_path = "unused", .text = text, .skills = &.{ "demo", "other" } }, .{ .generated = root }).get();
-        defer captured.close(std.testing.io);
-        const binding = try readCapturedBinding(std.testing.io, &captured.file);
-        try std.testing.expect(binding.target.message.invokes_skill);
-        try std.testing.expectEqual(text.len, binding.target.message.bytes);
-        try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &binding.target.message.digest);
-        var bytes: [2048]u8 = undefined;
-        const count = try captured.file.readPositionalAll(std.testing.io, &bytes, 0);
-        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..count], .{});
-        defer parsed.deinit();
-        try std.testing.expectEqualStrings(text, parsed.value.object.get("text").?.object.get("value").?.string);
-        try std.testing.expectEqualStrings("demo", parsed.value.object.get("skills").?.array.items[0].string);
-    }
-}
-
-test "inline skills native capture permits empty stdin only with explicit references" {
-    const Stdin = struct {
-        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-            if (operation == .file_read_streaming and operation.file_read_streaming.file.handle == std.Io.File.stdin().handle) return .{ .file_read_streaming = error.EndOfStream };
-            return std.testing.io.vtable.operate(userdata, operation);
-        }
-    };
-    var vtable = std.testing.io.vtable.*;
-    vtable.operate = Stdin.operate;
-    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    try tmp.dir.setPermissions(io, .fromMode(0o700));
-    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
-    var captured = try captureMessage(io, .{ .store = root, .session = "k7m2qx", .text_path = "-", .skills = &.{"demo"} }, .{ .generated = root }).get();
-    defer captured.close(io);
-    try std.testing.expect(captured.target.message.invokes_skill);
-    try std.testing.expectEqual(@as(u64, 0), captured.target.message.bytes);
-    try std.testing.expectError(error.EmptyMessageInput, captureMessage(io, .{ .store = root, .session = "k7m2qx", .text_path = "-" }, .{ .generated = root }).get());
-}
-
-test "inline skills canonical binding reads the most escaped skills a Message may list, and no more" {
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    try tmp.dir.setPermissions(std.testing.io, .fromMode(0o700));
-    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    // Quotes double in the record, so its names cross read windows and each
-    // escaped name is decoded through the reader's fixed scratch.
-    var storage: [protocol.max_message_skills + 1][64]u8 = undefined;
-    var names: [protocol.max_message_skills + 1][]const u8 = undefined;
-    for (&storage, &names, 0..) |*name, *slice, index| {
-        @memset(name, '"');
-        _ = try std.fmt.bufPrint(name[62..], "{d:0>2}", .{index});
-        slice.* = name;
-    }
-    var captured = try captureMessage(std.testing.io, .{ .store = root, .session = "k7m2qx", .text_path = "unused", .text = "authored", .skills = names[0..protocol.max_message_skills] }, .{ .generated = root }).get();
+    const text = "/demo look at /tmp/etc 雪";
+    var captured = try captureMessage(std.testing.io, .{ .store = root, .session = "k7m2qx", .text_path = "unused", .text = text }, .{ .generated = root }).get();
     defer captured.close(std.testing.io);
     const binding = try readCapturedBinding(std.testing.io, &captured.file);
-    try std.testing.expect(binding.target.message.invokes_skill);
-    try std.testing.expectEqual(@as(u64, 8), binding.target.message.bytes);
-    try std.testing.expect(captured.length > protocol.max_message_skills * 2 * 62);
-    const identity = try readCapturedIdentity(std.testing.io, &captured.file, captured.saved.key.slice());
-    try std.testing.expect(identity.session.eql("k7m2qx"));
-    try std.testing.expectError(error.InvalidRequestRecord, captureMessage(std.testing.io, .{ .store = root, .session = "k7m2qx", .text_path = "unused", .text = "authored", .skills = &names }, .{ .generated = root }).get());
-    // Records written by hand: the most names read, one more is refused.
-    for ([_]usize{ protocol.max_message_skills, protocol.max_message_skills + 1 }) |count| {
-        var record: std.Io.Writer.Allocating = .init(std.testing.allocator);
-        defer record.deinit();
-        try record.writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"/s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"skills\":[");
-        for (0..count) |index| try record.writer.print("{s}\"s{d}\"", .{ if (index == 0) "" else ",", index });
-        try record.writer.writeAll("],\"text\":{\"state\":\"value\",\"value\":\"x\"}}");
-        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "hand.json", .data = record.written() });
-        var file = try tmp.dir.openFile(std.testing.io, "hand.json", .{});
-        defer file.close(std.testing.io);
-        if (count > protocol.max_message_skills) {
-            try std.testing.expectError(error.InvalidRequestRecord, readCapturedBinding(std.testing.io, &file));
-        } else try std.testing.expect((try readCapturedBinding(std.testing.io, &file)).target.message.invokes_skill);
-    }
+    try std.testing.expectEqual(@as(u64, text.len), binding.target.message.bytes);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &binding.target.message.digest);
+    // A hand-written record listing skills beside the text is not a Message.
+    const listed = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"/s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"skills\":[\"demo\"],\"text\":{\"state\":\"value\",\"value\":\"x\"}}";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "listed.json", .data = listed });
+    var file = try tmp.dir.openFile(std.testing.io, "listed.json", .{});
+    defer file.close(std.testing.io);
+    try std.testing.expectError(error.InvalidRequestRecord, readCapturedBinding(std.testing.io, &file));
 }

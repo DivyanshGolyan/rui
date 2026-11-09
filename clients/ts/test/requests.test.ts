@@ -179,37 +179,3 @@ function presetTypeContract(sessions: Sessions): void {
 	void update;
 }
 void presetTypeContract;
-
-test("send snapshots ordered skills and key across deferred exchanges without changing text", async () => {
-	const requests: unknown[] = [];
-	let resume!: () => void;
-	const gate = new Promise<void>((resolve) => { resume = resolve; });
-	const link: Link = {
-		async exchange(path, build) {
-			assert.equal(path, "/v1/message");
-			await gate;
-			requests.push(JSON.parse(build("store")), JSON.parse(build("store")));
-			return Buffer.from(JSON.stringify({ answer: { status: "accepted", admission: "42" } }));
-		},
-	};
-	const skills = ["second", "first"];
-	const options = { idempotencyKey: "original", skills };
-	const pending = new Session(link, "session").send("literal /reload-skills first\n", options);
-	skills.reverse(); skills.push("later"); options.idempotencyKey = "changed";
-	resume();
-	assert.deepEqual(await pending, { messageId: "42" });
-	assert.deepEqual(requests, Array(2).fill({
-		version: WIRE_VERSION, kind: "message", store: "store", key: "original", session: "session",
-		sender: null, sender_handle: null, text: { state: "value", value: "literal /reload-skills first\n" }, skills: ["second", "first"],
-	}));
-});
-
-test("ordinary send omits skills and preserves literal text", async () => {
-	const link: Link = { async exchange(_path, build) {
-		const body = JSON.parse(build("store"));
-		assert.equal(Object.hasOwn(body, "skills"), false);
-		assert.deepEqual(body.text, { state: "value", value: "/reload-skills untouched\n" });
-		return Buffer.from(JSON.stringify({ answer: { status: "accepted", admission: "1" } }));
-	} };
-	await new Session(link, "session").send("/reload-skills untouched\n", { idempotencyKey: "k" });
-});

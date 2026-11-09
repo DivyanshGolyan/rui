@@ -175,12 +175,12 @@ Exact Session reads remain available in every archive state.
 ## Invoke and reload skills
 
 ```sh
-rui session send --store "$STORE" --to "$SESSION" --skill NAME
+printf 'Use /NAME on the failing test\n' | rui session send --store "$STORE" --to "$SESSION"
 rui session configure --store "$STORE" --session "$SESSION" --reload-skills
 ```
 
-Invocation uses the Session's advertised skill path and admits the complete current UTF-8 `SKILL.md` plus its absolute path as ordinary Message content.
-Repeat `--skill NAME` to include up to 64 distinct skills in order alongside stdin text; terminal stdin may be omitted for a skill-only invocation.
+Each `/NAME` word in a Message's text that names a skill in the receiving Session's catalog invokes it, once, in the order the text names them; other `/words` stay text.
+The Message keeps its text as sent, and the model reads each skill's complete current UTF-8 `SKILL.md` plus its absolute path, read at send, as its own input right after it.
 Reload is an idle-safe mutation: it rescans repository and Host-home `.agents/skills`, appends only catalog changes and returns `answer.skills` as `reloaded` or `unchanged` without scheduling model work.
 Do not mix reload with configuration settings or a preset.
 Both operations use normal capture keys and `request recover`; replay preserves the original captured result even after files change or disappear.

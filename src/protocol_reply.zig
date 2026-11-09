@@ -144,7 +144,7 @@ pub const ActivityPage = struct {
         if (bytes.len > protocol.max_activity_page_response_bytes) return error.InvalidActivityPage;
         const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
         const Fact = protocol.ActivityItem;
-        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, content: Ref, authored: Ref };
+        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, content: Ref };
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonNamedPeer, content: Ref };
         const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: ?JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref };
@@ -226,7 +226,7 @@ pub const ActivityPage = struct {
                 }) or !cursor.kinds.contains(std.meta.stringToEnum(protocol.ActivityItem.Kind, @tagName(item.value)).?)) return error.InvalidActivityPage;
             switch (item.value) {
                 inline .admission, .user, .received => |message, kind| {
-                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .authored = try content(message.authored), .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null };
+                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null };
                     if ((value.state == .applied) != (value.turn != null) or (kind == .user and value.state != .applied)) return error.InvalidActivityPage;
                     // An admission row is dated by the admission itself, and
                     // names its sender exactly when another Session sent it.
@@ -1700,7 +1700,7 @@ pub const CommandObservation = struct {
 /// observation spelling; `rui request recover --kind` uses the hyphenated spelling.
 pub const MutationTarget = union(protocol.CommandKind) {
     configure,
-    message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false, invokes_skill: bool = false },
+    message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false },
     session_stop,
     session_archive: struct { archived: bool },
     model_interruption: struct { turn: u64, operation: u64 },
@@ -2481,7 +2481,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
                 _ = std.fmt.hexToBytes(&digest, input.sha256.slice()) catch return error.InvalidResponse;
                 const input_bytes = try mutationId(input.bytes, true);
                 confirmed_input = .{ .bytes = input_bytes, .digest = digest };
-                if ((!expected.invokes_skill or !accepted) and (input_bytes != expected.bytes or !std.mem.eql(u8, &digest, &expected.digest))) return error.RequestBindingMismatch;
+                if (input_bytes != expected.bytes or !std.mem.eql(u8, &digest, &expected.digest)) return error.RequestBindingMismatch;
                 if (accepted) {
                     const admission = try mutationId(answer.admission.value orelse return error.InvalidResponse, false);
                     const queue = wire.queue.value orelse return error.InvalidResponse;
@@ -2542,9 +2542,6 @@ test "mutation decoder checks binding queue ambiguity and fixed reply bounds" {
     const valid = try std.fmt.bufPrint(&body, "{s}{s}", .{ prefix, suffix });
     const reply: CommandReply = .{ .status = 200, .body = valid };
     try std.testing.expectEqual(@as(u64, 7), (try decodeMutationReply(reply, "k7m2qx", target).answer).result.accepted.message.admission);
-    const captured = try decodeMutationReply(reply, "k7m2qx", .{ .message = .{ .bytes = 0, .digest = protocol.contentDigest(""), .invokes_skill = true } }).answer;
-    try std.testing.expectEqual(@as(u64, 4), captured.input.?.bytes);
-    try std.testing.expectEqualSlices(u8, &digest, &captured.input.?.digest);
     try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(reply, "09azvw", target).answer);
     var changed = target;
     changed.message.bytes = 5;

@@ -1249,7 +1249,21 @@ noinline fn runOwedStop(host: *Host, owed: *const store_module.OwedStop) executi
 /// Delivers an attached child's Turn ending to its parent, or settles one
 /// its parent's stop caused (D39, D139). One Store command does it all.
 noinline fn runOwedEnding(host: *Host, owed: *const store_module.OwedEnding) execution_turn.Admission {
-    _ = host.store.deliverChildEnding(owed.turn_id, host.hooks.storeFaults(.action_result)) catch |err| {
+    var arena_state: std.heap.ArenaAllocator = .init(host.allocator);
+    defer arena_state.deinit();
+    // A done Turn's answer is the Message; its `/name` words bind the
+    // parent's skills as any Message's do. Other endings are Rui's line.
+    const captured: ?store_module.CapturedMessageSkills = if (owed.answer != null and !owed.quiet)
+        @import("session_skills.zig").bindTo(arena_state.allocator(), host.io, host.store, owed.parent.slice(), .{ .stored = .{ .store = host.store, .reference = owed.answer.? } }) catch |err| switch (err) {
+            error.OutOfMemory => return .retry_later,
+            else => {
+                fenceDispatch(host, "child ending", err);
+                return .retry_later;
+            },
+        }
+    else
+        null;
+    _ = host.store.deliverChildEndingBound(owed.turn_id, if (captured) |*value| value else null, host.hooks.storeFaults(.action_result)) catch |err| {
         fenceDispatch(host, "child ending", err);
         return .retry_later;
     };
@@ -1298,7 +1312,16 @@ noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionIn
             return .retry_later;
         },
     };
-    _ = host.store.deliverAgentMessage(input.binding, arguments.id.slice(), text.list.items, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    var arena_state: std.heap.ArenaAllocator = .init(host.allocator);
+    defer arena_state.deinit();
+    const captured = @import("session_skills.zig").bindTo(arena_state.allocator(), host.io, host.store, arguments.id.slice(), .{ .bytes = text.list.items }) catch |err| switch (err) {
+        error.OutOfMemory => return .retry_later,
+        else => {
+            fenceDispatch(host, "core tool command", err);
+            return .retry_later;
+        },
+    };
+    _ = host.store.deliverAgentMessageBound(input.binding, arguments.id.slice(), text.list.items, if (captured) |*value| value else null, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         // A stop resolved the call first.
         error.StaleActionAttemptBinding => return .admitted,
         else => {
@@ -1426,8 +1449,9 @@ noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInpu
         break :committed .{ .context = &install, .call = Install.call };
     } else null;
     const parent_skills = host.store.readSkills(arena, input.session.slice()) catch return .retry_later;
-    const initial_skills = @import("session_skills.zig").captureInitial(arena, host.allocator, host.io, parent_skills.workspace.slice(), host.bash_facts.home) catch return .retry_later;
-    _ = host.store.startAgentWithInitialSkills(input.binding, input.session.slice(), start.task, start.attached, &start.configuration, committed, initial_skills, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    // The task binds against the catalog the new Session starts with.
+    const prepared = @import("session_skills.zig").prepareCreation(arena, host.allocator, host.io, parent_skills.workspace.slice(), host.bash_facts.home, .{ .bytes = start.task }) catch return .retry_later;
+    _ = host.store.startAgentWithInitialSkills(input.binding, input.session.slice(), start.task, start.attached, &start.configuration, committed, prepared.initial, if (prepared.captured) |*value| value else null, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         // A stop resolved the call first.
         error.StaleActionAttemptBinding => return .admitted,
         else => {

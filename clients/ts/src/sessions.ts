@@ -55,8 +55,6 @@ export interface WriteOptions {
 
 export interface SendOptions {
 	idempotencyKey: string;
-	/** Ordered, distinct catalog names to include with the literal text. */
-	skills?: readonly string[];
 	/** The environment Bash runs in. Defaults to empty: the caller's own never reaches Bash (D121). */
 	env?: Record<string, string>;
 }
@@ -237,19 +235,16 @@ export class Session {
 
 	/** Sends a Message. The receipt is its admission number; the answer arrives in the feed (D8). */
 	async send(text: string, options: SendOptions): Promise<{ messageId: string }> {
-		const idempotencyKey = options.idempotencyKey;
-		const skills = options.skills === undefined ? undefined : [...options.skills];
 		const body = (store: string) =>
 			JSON.stringify({
 				version: WIRE_VERSION,
 				kind: "message",
 				store,
-				key: idempotencyKey,
+				key: options.idempotencyKey,
 				session: this.id,
 				sender: null,
 				sender_handle: null,
 				text: { state: "value", value: text },
-				...(skills === undefined ? {} : { skills }),
 			} satisfies Schemas["MessageRequest"]);
 		const reply = parse<Schemas["MessageReply"]>(await this.#link.exchange("/v1/message", body, environmentBytes(options.env)));
 		const messageId = accepted(reply.answer).admission;

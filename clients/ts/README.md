@@ -139,7 +139,3 @@ A later Message to an archived Session restores it transactionally before admitt
 `unarchive()` restores only organization and never resumes stopped work.
 Replaying an archive request with its original key does not archive again after a later restore.
 Both methods notify local activity followers without submitting a Message or starting work.
-
-## Sending skills
-
-`session.send("literal text", { idempotencyKey: "message:1", skills: ["first", "second"] })` includes up to 64 distinct catalog names in order with the text. Names and the key are copied before the asynchronous exchange, including retries. Omit `skills` for an ordinary Message; slash text is not interpreted by this API.

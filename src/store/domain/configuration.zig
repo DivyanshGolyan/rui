@@ -1052,7 +1052,7 @@ fn saveConfigurationRejectionWithFailure(
     failure: ?skills_domain.Failure,
     faults: Faults,
 ) !ConfigureReply {
-    const outcome_id = if (failure) |diagnostic| try skills_domain.importFailure(a, diagnostic, faults) else null;
+    const outcome_id = if (failure) |diagnostic| try skills_domain.importFailure(a, diagnostic.bytes, faults) else null;
     var answer = StoredAnswer{ .accepted = false };
     try answer.code.set(@tagName(code));
     try command_domain.queueCommand(a, command.key.slice(), .configure, command.session.slice(), digest, outcome_id, null, &answer);

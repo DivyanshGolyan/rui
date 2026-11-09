@@ -210,7 +210,7 @@
     "/v1/message": {
       "post": {
         "operationId": "message",
-        "summary": "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
+        "summary": "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
         "parameters": [
           {
             "$ref": "#/components/parameters/WireVersion"
@@ -1135,84 +1135,40 @@
   "components": {
     "schemas": {
       "ActivityContentRequest": {
-        "anyOf": [
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "activity_content"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "position": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "ordinal": {
-                "$ref": "#/components/schemas/Decimal"
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "session",
-              "position",
-              "ordinal"
-            ],
-            "additionalProperties": false
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "11"
           },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "activity_content"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "position": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "ordinal": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "selector": {
-                "const": "authored"
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "session",
-              "position",
-              "ordinal",
-              "selector"
-            ],
-            "additionalProperties": false
+          "kind": {
+            "const": "activity_content"
+          },
+          "store": {
+            "type": "string",
+            "maxLength": 492,
+            "x-rui-max-bytes": 492
+          },
+          "session": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "position": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "ordinal": {
+            "$ref": "#/components/schemas/Decimal"
           }
-        ]
+        },
+        "required": [
+          "version",
+          "kind",
+          "store",
+          "session",
+          "position",
+          "ordinal"
+        ],
+        "additionalProperties": false
       },
       "ActivityItem": {
         "anyOf": [
@@ -1275,9 +1231,6 @@
                       },
                       "content": {
                         "$ref": "#/components/schemas/ActivityItemContent"
-                      },
-                      "authored": {
-                        "$ref": "#/components/schemas/ActivityItemContent"
                       }
                     },
                     "required": [
@@ -1287,8 +1240,7 @@
                       "state",
                       "admitted_at",
                       "sender",
-                      "content",
-                      "authored"
+                      "content"
                     ],
                     "additionalProperties": false
                   }
@@ -1366,9 +1318,6 @@
                       },
                       "content": {
                         "$ref": "#/components/schemas/ActivityItemContent"
-                      },
-                      "authored": {
-                        "$ref": "#/components/schemas/ActivityItemContent"
                       }
                     },
                     "required": [
@@ -1378,8 +1327,7 @@
                       "state",
                       "admitted_at",
                       "sender",
-                      "content",
-                      "authored"
+                      "content"
                     ],
                     "additionalProperties": false
                   }
@@ -1941,9 +1889,6 @@
                       },
                       "content": {
                         "$ref": "#/components/schemas/ActivityItemContent"
-                      },
-                      "authored": {
-                        "$ref": "#/components/schemas/ActivityItemContent"
                       }
                     },
                     "required": [
@@ -1953,8 +1898,7 @@
                       "state",
                       "admitted_at",
                       "sender",
-                      "content",
-                      "authored"
+                      "content"
                     ],
                     "additionalProperties": false
                   }
@@ -6516,7 +6460,6 @@
                       "model_is_immutable",
                       "revision_exhausted",
                       "skills_unavailable",
-                      "unknown_skill",
                       "skill_file_unavailable",
                       "skill_file_too_large",
                       "skill_text_invalid"
@@ -6878,355 +6821,6 @@
               "sender",
               "sender_handle",
               "configuration",
-              "text",
-              "require_model"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "message"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "sender": {
-                "type": "null"
-              },
-              "sender_handle": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 32,
-                    "x-rui-max-bytes": 32
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "skills": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 64
-                },
-                "maxItems": 64,
-                "uniqueItems": true
-              },
-              "text": {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "description": "Text of any length, saved as content."
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "sender",
-              "sender_handle",
-              "skills",
-              "text"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "message"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "sender": {
-                "type": "object",
-                "properties": {
-                  "store": {
-                    "type": "string",
-                    "maxLength": 492,
-                    "x-rui-max-bytes": 492
-                  },
-                  "session": {
-                    "type": "string",
-                    "maxLength": 128,
-                    "x-rui-max-bytes": 128
-                  }
-                },
-                "required": [
-                  "store",
-                  "session"
-                ],
-                "additionalProperties": false
-              },
-              "sender_handle": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 32,
-                    "x-rui-max-bytes": 32
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "skills": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 64
-                },
-                "maxItems": 64,
-                "uniqueItems": true
-              },
-              "text": {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "description": "Text of any length, saved as content."
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "sender",
-              "sender_handle",
-              "skills",
-              "text"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "message"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "sender": {
-                "type": "null"
-              },
-              "sender_handle": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 32,
-                    "x-rui-max-bytes": 32
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "configuration": {
-                "$ref": "#/components/schemas/MessageConfiguration"
-              },
-              "skills": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 64
-                },
-                "maxItems": 64,
-                "uniqueItems": true
-              },
-              "text": {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "description": "Text of any length, saved as content."
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "sender",
-              "sender_handle",
-              "configuration",
-              "skills",
-              "text"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "message"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "sender": {
-                "type": "null"
-              },
-              "sender_handle": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 32,
-                    "x-rui-max-bytes": 32
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "configuration": {
-                "$ref": "#/components/schemas/MessageConfiguration"
-              },
-              "skills": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 64
-                },
-                "maxItems": 64,
-                "uniqueItems": true
-              },
-              "text": {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "description": "Text of any length, saved as content."
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              },
-              "require_model": {
-                "const": true
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "sender",
-              "sender_handle",
-              "configuration",
-              "skills",
               "text",
               "require_model"
             ],
@@ -14300,7 +13894,8 @@
             "enum": [
               "message",
               "settings",
-              "assistant"
+              "assistant",
+              "skill"
             ]
           },
           "turn": {
@@ -14343,6 +13938,16 @@
               }
             ]
           },
+          "source_skill_position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "source_operation": {
             "anyOf": [
               {
@@ -14365,6 +13970,7 @@
           "source_admission",
           "source_revision",
           "source_catalog_position",
+          "source_skill_position",
           "source_operation",
           "content"
         ],

@@ -469,7 +469,7 @@ const Intake = struct {
             const reply = try self.ensureReply();
             // Admission spends the environment; nothing of it outlives this.
             defer self.releaseEnvironment();
-            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, &self.retained_scratch, if (self.environment) |*offer| offer else null);
+            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, if (self.environment) |*offer| offer else null);
         }
 
         fn work(self: *Exchange) !State {
@@ -1493,22 +1493,17 @@ const Header = struct {
 /// the Turn's Bash before the environment is in place. The register keeps
 /// `offer`'s allocation or leaves it, with what it released, to be freed
 /// right after admission.
-noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, offer: *SessionEnvironments.Offer, capture_options: protocol.ParseOptions) error{ ScratchCapacityExhausted, OutOfMemory }!store_module.MessageReply {
+noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, offer: *SessionEnvironments.Offer) error{OutOfMemory}!store_module.MessageReply {
     std.debug.assert(offer.value() != null);
     defer offer.deinit(host.allocator);
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
-    const prepared = @import("session_skills.zig").prepareMessage(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home, capture_options) catch |err| {
+    const prepared = @import("session_skills.zig").prepareMessage(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home) catch |err| {
         // The Store owns canonical fault classification. An allocation outside
-        // held access (including batch preparation) cannot corrupt that Store.
+        // held access (binding included) cannot corrupt that Store.
         if (host.store.isFenced()) return .infrastructure_failure;
-        return switch (err) {
-            error.ScratchCapacityExhausted => error.ScratchCapacityExhausted,
-            error.OutOfMemory => error.OutOfMemory,
-            else => .infrastructure_failure,
-        };
+        return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
     };
-    defer prepared.deinit(host.io);
     const initial_skills = prepared.initial;
     const captured_skill = prepared.captured;
     const faults = host.hooks.storeFaults(.command);
@@ -1583,7 +1578,7 @@ noinline fn configureCapturedSkills(host: *Host, command: *const protocol.Config
 }
 
 /// `client_environment` holds a Message's checked environment.
-fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request, retained_scratch: *?named_scratch.Owner, client_environment: ?*SessionEnvironments.Offer) !void {
+fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request, client_environment: ?*SessionEnvironments.Offer) !void {
     // The first MySQL readiness probe learns the opaque id over the private
     // socket. All subsequent work must name that exact id, never the URL.
     const discovering = request.* == .host_info and request.store().len == 0 and host.store.engine == .mysql;
@@ -1633,7 +1628,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.json(status, protocol.max_response_bytes, renderConfigureReply, .{ command, result });
         },
         .message => |*command| {
-            const result = try submitMessage(host, command, client_environment.?, .{ .io = host.io, .content_length = 0, .scratch_path = host.lease.paths.scratch.slice(), .request_number = request_number, .retained_scratch = retained_scratch, .scratch_budget = host.retention.sharedBudget() });
+            const result = try submitMessage(host, command, client_environment.?);
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "message save", error.CanonicalStoreFailure);
             }
@@ -4919,7 +4914,7 @@ test "session archive renders accepted intent and completion for both archive an
     }
 }
 
-test "inline skills overlapping capture pressure returns 507 without key admission or Host fencing" {
+test "inline skills binding under heap exhaustion answers 503 without key admission or Host fencing" {
     const skills = @import("skills.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4946,43 +4941,24 @@ test "inline skills overlapping capture pressure returns 507 without key admissi
     try lease.paths.store.set(root);
     try lease.paths.scratch.set(root);
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
-    var retention = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &host.scratch_used, .limit = 128 }, &.{});
-    host.retention = &retention;
-    var retained: ?named_scratch.Owner = null;
-    const options: protocol.ParseOptions = .{ .io = std.testing.io, .content_length = 0, .scratch_path = root, .request_number = 1, .retained_scratch = &retained, .scratch_budget = retention.sharedBudget() };
-    var input_capture: protocol.ContentCapture = undefined;
-    try input_capture.init(options, 1);
-    defer input_capture.deinit();
-    try input_capture.write("prompt");
-    var command: protocol.MessageCommand = .{ .session = configured.accepted.session, .text = try input_capture.seal() };
-    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+    const text = "prompt /demo";
+    var command: protocol.MessageCommand = .{ .session = configured.accepted.session, .text = .{ .state = .value, .borrowed = text.ptr, .length = text.len, .digest = protocol.contentDigest(text) } };
     try command.key.set("pressure-key");
-    var name: protocol.Bounded(64) = .{};
-    try name.set("demo");
-    command.skills = &.{name};
-    var offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
-    try std.testing.expectError(error.ScratchCapacityExhausted, submitMessage(&host, &command, &offer, options));
-    try std.testing.expect(!try storage.commandExists(command.key.slice()));
+    // Binding allocates before the Store's held access, so heap pressure
+    // is the Host being busy, never canonical corruption.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var oom_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
+    host.allocator = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, submitMessage(&host, &command, &oom_offer));
+    host.allocator = std.testing.allocator;
     try std.testing.expect(!storage.isFenced() and host.launchAllowed());
-    try std.testing.expectEqual(@as(u64, 6), host.scratch_used.load(.acquire));
-    try std.testing.expect(retained == null);
+    try std.testing.expect(!try storage.commandExists(command.key.slice()));
     var intake: Intake = .{ .host = &host };
     var exchange: Intake.Exchange = .{ .owner = &intake, .host = &host, .fd = -1, .accepted_at_ns = 0, .deadline = 0 };
     defer if (exchange.reply) |reply| {
         reply.deinit();
         host.allocator.destroy(reply);
     };
-    exchange.fail(error.ScratchCapacityExhausted);
-    try std.testing.expect(std.mem.startsWith(u8, exchange.reply.?.header[0..exchange.reply.?.header_length], "HTTP/1.1 507 "));
-    // Pre-Store heap pressure must not claim canonical corruption either.
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    var oom_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
-    host.allocator = failing.allocator();
-    defer host.allocator = std.testing.allocator;
-    try std.testing.expectError(error.OutOfMemory, submitMessage(&host, &command, &oom_offer, options));
-    host.allocator = std.testing.allocator;
-    try std.testing.expect(!storage.isFenced() and host.launchAllowed());
-    try std.testing.expect(!try storage.commandExists(command.key.slice()));
     exchange.fail(error.OutOfMemory);
     try std.testing.expect(std.mem.startsWith(u8, exchange.reply.?.header[0..exchange.reply.?.header_length], "HTTP/1.1 503 "));
     // readSkills' initial allocation is also before its canonical held access.
@@ -4996,11 +4972,11 @@ test "inline skills overlapping capture pressure returns 507 without key admissi
     var preview = try readSkillSuggestions(&host, std.testing.allocator, .{ .session = configured.accepted.session.slice() }, "");
     defer preview.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), preview.entries.len);
-    // Ordinary work remains admissible under the same key after reclamation.
-    command.skills = &.{};
+    // The same key is admitted once memory is back, with the skill bound.
     var retry_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
-    const accepted = try submitMessage(&host, &command, &retry_offer, options);
+    const accepted = try submitMessage(&host, &command, &retry_offer);
     try std.testing.expect(accepted == .accepted);
+    try std.testing.expectEqual(@as(u64, text.len), accepted.accepted.content.length);
     try std.testing.expect(host.launchAllowed() and !storage.isFenced());
     try store_module.testingFailReadsOf(&storage, "session_skill_catalog");
     try std.testing.expectError(error.CanonicalStoreFailure, readSkillSuggestions(&host, std.testing.allocator, .{ .session = configured.accepted.session.slice() }, ""));

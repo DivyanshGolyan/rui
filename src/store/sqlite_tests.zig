@@ -9208,7 +9208,10 @@ test "a message_agent call runs as one core command: the Message is admitted fro
 
     const first = (try storage.nextCoreWork()).?.action;
     try std.testing.expectEqualStrings(caller.slice(), first.session.slice());
-    try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(first.binding, receiver.slice(), "report back", .{}));
+    // The Host bound a skill of the receiver's; it is saved after the Message.
+    const bound: @import("domain/skills.zig").MessageCapture = .{ .bound = &.{.{ .name = "demo", .bytes = "demo body" }} };
+    try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessageBound(first.binding, receiver.slice(), "report back", &bound, .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_skill k JOIN message_admission m ON m.admission_id=k.admission_id WHERE m.session_ref=?1 AND k.position=1 AND k.name='demo'", .{receiver.slice()}));
     const second = (try storage.nextCoreWork()).?.action;
     try std.testing.expect(second.binding.action_id != first.binding.action_id);
     try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(second.binding, "zzzzzz", "hi", .{}));

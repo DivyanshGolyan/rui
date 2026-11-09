@@ -292,6 +292,56 @@ fn validName(name: []const u8) bool {
     return true;
 }
 
+/// Finds `/name` skill references in Message text, one byte at a time, so
+/// text of any size streams through it. A reference starts the text or
+/// follows whitespace or `(`, and ends at the text's end, whitespace or one
+/// of `.,;:!?)`; anything else (`/tmp/etc`, `//name`) is prose. Whether a
+/// reference binds is the recipient catalog's decision, not the scanner's.
+pub const References = struct {
+    state: enum { boundary, slash, name, prose } = .boundary,
+    name: [64]u8 = undefined,
+    len: usize = 0,
+
+    /// The name this byte ended, borrowed until the next call.
+    pub fn feed(self: *References, byte: u8) ?[]const u8 {
+        switch (self.state) {
+            .boundary => {
+                if (byte == '/') self.state = .slash else self.follow(byte);
+            },
+            .slash => if (nameByte(byte)) {
+                self.name[0] = byte;
+                self.len = 1;
+                self.state = .name;
+            } else self.follow(byte),
+            .name => if (nameByte(byte)) {
+                if (self.len == self.name.len) self.state = .prose else {
+                    self.name[self.len] = byte;
+                    self.len += 1;
+                }
+            } else {
+                self.follow(byte);
+                const ends = std.ascii.isWhitespace(byte) or std.mem.indexOfScalar(u8, ".,;:!?)", byte) != null;
+                if (ends and validName(self.name[0..self.len])) return self.name[0..self.len];
+            },
+            .prose => self.follow(byte),
+        }
+        return null;
+    }
+
+    /// The name the text's end completes.
+    pub fn finish(self: *const References) ?[]const u8 {
+        return if (self.state == .name and validName(self.name[0..self.len])) self.name[0..self.len] else null;
+    }
+
+    fn follow(self: *References, byte: u8) void {
+        self.state = if (std.ascii.isWhitespace(byte) or byte == '(') .boundary else .prose;
+    }
+
+    fn nameByte(byte: u8) bool {
+        return (byte >= 'a' and byte <= 'z') or (byte >= '0' and byte <= '9') or byte == '-';
+    }
+};
+
 fn validDescription(description: []const u8) bool {
     const count = std.unicode.utf8CountCodepoints(description) catch return false;
     return count > 0 and count <= max_description_characters;
@@ -555,6 +605,42 @@ test "skills libyaml ignores valid unknown nested metadata without granting auth
         "---\nname: demo\ndescription: valid\n--- # extra document\nvendor: valid\n---\n",
     };
     for (invalid) |raw| try std.testing.expectEqual(@as(?Metadata, null), try parseMetadata(std.testing.allocator, raw));
+}
+
+fn expectReferences(text: []const u8, expected: []const []const u8) !void {
+    var found: std.ArrayList(u8) = .empty;
+    defer found.deinit(std.testing.allocator);
+    var scanner: References = .{};
+    for (text) |byte| if (scanner.feed(byte)) |name| {
+        try found.appendSlice(std.testing.allocator, name);
+        try found.append(std.testing.allocator, ' ');
+    };
+    if (scanner.finish()) |name| {
+        try found.appendSlice(std.testing.allocator, name);
+        try found.append(std.testing.allocator, ' ');
+    }
+    var want: std.ArrayList(u8) = .empty;
+    defer want.deinit(std.testing.allocator);
+    for (expected) |name| {
+        try want.appendSlice(std.testing.allocator, name);
+        try want.append(std.testing.allocator, ' ');
+    }
+    try std.testing.expectEqualStrings(want.items, found.items);
+}
+
+test "skills references are /name words at word boundaries, in text order" {
+    try expectReferences("/review", &.{"review"});
+    try expectReferences("look at /review then /tests.", &.{ "review", "tests" });
+    try expectReferences("(/a-b) /c, /d; /e: /f! /g? /h\n/i\t/j", &.{ "a-b", "c", "d", "e", "f", "g", "h", "i", "j" });
+    // Repeats are reported; binding decides that a skill is bound once.
+    try expectReferences("/x /x", &.{ "x", "x" });
+    // Paths, escapes, and words glued to other text are prose.
+    try expectReferences("/tmp/etc a/b x/review //review /review/ /review_x /Review /review- /a--b /-a", &.{});
+    try expectReferences("costs 5 /month", &.{"month"});
+    try expectReferences("\"/review\" /review\"", &.{});
+    try expectReferences("/ / /雪 é/x", &.{});
+    try expectReferences("/" ++ @as([64]u8, @splat('a')) ++ " /" ++ @as([65]u8, @splat('b')), &.{&@as([64]u8, @splat('a'))});
+    try expectReferences("", &.{});
 }
 
 test "skills validates name byte grammar and Unicode character description bounds" {

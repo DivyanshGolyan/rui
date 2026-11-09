@@ -115,7 +115,7 @@ pub const routes = [_]Route{
     .{
         .path = protocol.CommandKind.message.route(),
         .kind = .message,
-        .summary = "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
+        .summary = "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
         .variants = &.{
             variant(protocol.message_request.head ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{}),
             // A sending Session's address: an absolute Store path and a Session id.
@@ -123,10 +123,6 @@ pub const routes = [_]Route{
             // A creating Message names no Session.
             variant(protocol.message_request.head ++ protocol.message_request.configuration ++ .{MessageConfiguration} ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{.{ 2, "\"\"" }}),
             variant(protocol.message_request.head ++ protocol.message_request.configuration ++ .{MessageConfiguration} ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.require_model_tail, .{.{ 2, "\"\"" }}),
-            variant(protocol.message_request.head ++ .{ ",\"skills\":", SkillNames } ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{}),
-            variant(protocol.message_request.sender_head ++ .{ ",\"skills\":", SkillNames } ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{ .{ 3, "\"/s\"" }, .{ 4, "\"aaaaaa\"" } }),
-            variant(protocol.message_request.head ++ protocol.message_request.configuration ++ .{MessageConfiguration} ++ .{ ",\"skills\":", SkillNames } ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{.{ 2, "\"\"" }}),
-            variant(protocol.message_request.head ++ protocol.message_request.configuration ++ .{MessageConfiguration} ++ .{ ",\"skills\":", SkillNames } ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.require_model_tail, .{.{ 2, "\"\"" }}),
         },
         .reply = jsonReply(.{ protocol.message_reply.accepted, protocol.message_reply.rejected }),
         .conflict = jsonReply(.{protocol.message_reply.conflict}),
@@ -254,7 +250,7 @@ pub const routes = [_]Route{
         .path = "/v1/activity-content",
         .kind = .activity_content,
         .summary = "The content of one activity row.",
-        .variants = &.{ variant(protocol.activity_content_request, .{}), variant(protocol.activity_authored_content_request, .{}) },
+        .variants = &.{variant(protocol.activity_content_request, .{})},
         .reply = .bytes,
     },
     .{
@@ -311,12 +307,6 @@ fn BoundedListOf(comptime item: anytype, comptime capacity: usize, comptime uniq
         }
     };
 }
-const SkillName = struct {
-    pub fn openapi_inline(d: *Document) !Value {
-        return d.object(.{ .type = Value{ .string = "string" }, .minLength = Value{ .integer = 1 }, .maxLength = Value{ .integer = 64 } });
-    }
-};
-const SkillNames = BoundedListOf(SkillName, protocol.max_message_skills, true);
 
 /// A string of any length, which the Host saves as content.
 const Content = struct {
@@ -1494,7 +1484,7 @@ test "catalog full report schema represents turnless catalog source facts" {
     const json = try std.json.parseFromSliceLeaky(
         Value,
         arena.allocator(),
-        "{\"ordinal\":\"1\",\"position\":\"1\",\"kind\":\"settings\",\"turn\":null,\"source_admission\":null,\"source_revision\":null,\"source_catalog_position\":\"1\",\"source_operation\":null,\"content\":{\"bytes\":\"12\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"}}",
+        "{\"ordinal\":\"1\",\"position\":\"1\",\"kind\":\"settings\",\"turn\":null,\"source_admission\":null,\"source_revision\":null,\"source_catalog_position\":\"1\",\"source_skill_position\":null,\"source_operation\":null,\"content\":{\"bytes\":\"12\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"}}",
         .{},
     );
     try std.testing.expect(conforms(document.schemas, shape, json));
