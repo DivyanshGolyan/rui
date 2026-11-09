@@ -166,6 +166,16 @@ def start(request, sources):
     return {"pid": pid}
 
 
+def step(name, call, *args):
+    """One pre-exec call. Its error names the call when it names no file, so
+    a failed spawn says which step refused (#1147)."""
+    try:
+        return call(*args)
+    except OSError as error:
+        error.filename = error.filename or name
+        raise
+
+
 def become(request, sources, error_write):
     """In the forked job, with every signal blocked: take the fixture's
     snapshot, the terminal's foreground and the descriptors, then exec."""
@@ -176,10 +186,10 @@ def become(request, sources, error_write):
             signal.signal(number, signal.SIG_IGN if number in ignored else signal.SIG_DFL)
         except (OSError, ValueError):
             pass  # SIGKILL, SIGSTOP and signals the C library reserves.
-    os.setpgid(0, 0)
+    step("setpgid", os.setpgid, 0, 0)
     # A shell's job takes the foreground before it runs; SIGTTOU is blocked.
-    terminal = os.open("/dev/tty", os.O_RDWR)
-    os.tcsetpgrp(terminal, os.getpid())
+    terminal = step("open /dev/tty", os.open, "/dev/tty", os.O_RDWR)
+    step("tcsetpgrp", os.tcsetpgrp, terminal, os.getpid())
     os.close(terminal)
     os.umask(request["umask"])
     if request["cwd"] is not None:
