@@ -242,6 +242,18 @@ class SelectionTest(unittest.TestCase):
             with self.subTest(core=core):
                 self.assertIn("test-logic", select([f"src/{core}"], "review", AVAILABLE)["targets"])
 
+    def test_store_tests_reach_no_store_caller(self):
+        # The Store's tests cross only the Store's interface. A file that
+        # imports store.zig tests its own behavior over a Store in its own
+        # file; a Store test importing it would make every change to its
+        # callers rerun the Store's tests.
+        graph = tree_graph()
+        store = [name for name in graph.every if name.startswith("src/store/")]
+        callers = sorted(name for name in graph.closure(graph.every, store)
+                         if not name.startswith("src/store/") and "src/store.zig" in graph.every.get(name, ()))
+        self.assertEqual(callers, [], "Store tests reach these Store callers; move the tests that "
+                         "import them into the callers")
+
     def test_registered_cores_reach_only_unit_roots_unless_a_fixture_names_them(self):
         # A core's value tests own its decisions. A fixture that asserts one
         # names it as an owner, and keeps it.
