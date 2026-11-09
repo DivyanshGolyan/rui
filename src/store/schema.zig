@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 59;
+pub const schema_version: u32 = 60;
 
 pub const IdentityMismatch = struct {
     saved_selector: protocol.Bounded(protocol.max_store_bytes) = .{},
@@ -42,6 +42,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 57, .digest = 0x75359f28a14f23a9 },
     .{ .schema_version = 58, .digest = 0x4cd0a6b38d4904ed },
     .{ .schema_version = 59, .digest = 0xa3ebc37622ed945b },
+    .{ .schema_version = 60, .digest = 0x26cc4d3d120b308f },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -289,6 +290,13 @@ pub const migrations = [_]Migration{
             "CREATE TABLE session_skill_catalog(\n session_ref VARCHAR(6) NOT NULL,\n position BIGINT NOT NULL,\n catalog_content_id BIGINT NOT NULL,\n PRIMARY KEY(session_ref,position),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(catalog_content_id) REFERENCES content(content_id),\n CHECK(position>=0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "ALTER TABLE conversation_entry MODIFY turn_id BIGINT NULL, ADD COLUMN source_catalog_position BIGINT AFTER source_revision, ADD UNIQUE(session_ref,source_catalog_position), ADD FOREIGN KEY(session_ref,source_catalog_position) REFERENCES session_skill_catalog(session_ref,position), DROP CHECK conversation_entry_chk_7, ADD CHECK((turn_id IS NULL)=(source_catalog_position IS NOT NULL)), ADD CHECK(source_catalog_position IS NULL OR source_catalog_position=session_position), ADD CHECK((entry_kind=1 AND source_admission_id IS NOT NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL) OR (entry_kind=2 AND source_admission_id IS NULL AND ((source_revision IS NOT NULL AND source_catalog_position IS NULL) OR (source_revision IS NULL AND source_catalog_position IS NOT NULL)) AND source_operation_id IS NULL) OR (entry_kind=3 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NOT NULL))",
         },
+    },
+    // Semantic format: accepted Messages require authored provenance. Historical
+    // inputs cannot be reconstructed, so their admitted bytes are the baseline.
+    .{
+        .from = 59,
+        .sqlite = &.{ "UPDATE core_command SET secondary_content_id=primary_content_id WHERE kind=2 AND accepted=1 AND secondary_content_id IS NULL", "UPDATE store_meta SET meta_value='11' WHERE meta_key='wire_version' AND meta_value='10'" },
+        .mysql = &.{ "UPDATE core_command SET secondary_content_id=primary_content_id WHERE kind=2 AND accepted=1 AND secondary_content_id IS NULL", "UPDATE store_meta SET meta_value='11' WHERE meta_key='wire_version' AND meta_value='10'" },
     },
 };
 
@@ -2404,7 +2412,10 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     }
     try sqlite.exec(database, "UPDATE session_stop SET position=NULL WHERE command_key='rui.core/stop0'");
     try sqlite.exec(database, "CREATE TEMP TABLE original_stops AS SELECT * FROM session_stop");
-    try sqlite.exec(database, "CREATE TEMP TABLE original_commands AS SELECT * FROM core_command");
+    try sqlite.exec(database, "CREATE TEMP TABLE expected_commands AS SELECT * FROM core_command");
+    // Schema 60 adds best-available authored references to these legacy Messages.
+    try sqlite.exec(database, "UPDATE expected_commands SET secondary_content_id=2 WHERE command_key='fixture-answer-key'");
+    try sqlite.exec(database, "UPDATE expected_commands SET secondary_content_id=6 WHERE command_key='fixture-ask-message'");
     try sqlite.exec(database, "INSERT INTO session_ending_owed(turn_id,delivered) VALUES(1,0),(2,1)");
     try sqlite.exec(database, "CREATE TEMP TABLE original_endings AS SELECT * FROM session_ending_owed");
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE core_command SET kind=6 WHERE command_key='fixture-stop'"));
@@ -2412,8 +2423,8 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
     try std.testing.expect(try metaEquals(database, "wire_version", protocol.wire_version));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT * FROM core_command)"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM original_commands)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM expected_commands EXCEPT SELECT * FROM core_command)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM expected_commands)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at FROM session_stop)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at FROM session_stop EXCEPT SELECT * FROM original_stops)"));
     for (legacy_stops) |each| {

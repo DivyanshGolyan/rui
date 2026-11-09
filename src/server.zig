@@ -249,7 +249,7 @@ const Intake = struct {
             // No successful header has left while preparation is fallible.
             reply.deinit();
             const status: u16 = switch (err) {
-                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity => 503,
+                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity, error.OutOfMemory => 503,
                 error.ScratchCapacityExhausted => 507,
                 error.UnsupportedControl => 501,
                 error.RequestIdentityExhausted => 500,
@@ -270,7 +270,7 @@ const Intake = struct {
                 else => @errorName(err),
             };
             const kind: protocol.ErrorType = switch (err) {
-                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity => .busy,
+                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity, error.OutOfMemory => .busy,
                 error.UnsupportedControl => .unsupported,
                 else => .invocation_error,
             };
@@ -469,7 +469,7 @@ const Intake = struct {
             const reply = try self.ensureReply();
             // Admission spends the environment; nothing of it outlives this.
             defer self.releaseEnvironment();
-            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, if (self.environment) |*offer| offer else null);
+            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, &self.retained_scratch, if (self.environment) |*offer| offer else null);
         }
 
         fn work(self: *Exchange) !State {
@@ -1454,6 +1454,7 @@ const Route = enum {
     activity_page,
     activity_search,
     activity_content,
+    skill_suggestions,
     model_list,
     unsupported_control,
 
@@ -1492,19 +1493,24 @@ const Header = struct {
 /// the Turn's Bash before the environment is in place. The register keeps
 /// `offer`'s allocation or leaves it, with what it released, to be freed
 /// right after admission.
-noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, offer: *SessionEnvironments.Offer) store_module.MessageReply {
+noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, offer: *SessionEnvironments.Offer, capture_options: protocol.ParseOptions) error{ ScratchCapacityExhausted, OutOfMemory }!store_module.MessageReply {
     std.debug.assert(offer.value() != null);
     defer offer.deinit(host.allocator);
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
-    const initial_skills = if (command.configuration) |*configuration|
-        @import("session_skills.zig").initial(memory.allocator(), host.allocator, host.io, host.store, command.key.slice(), configuration, host.bash_facts.home) catch return .infrastructure_failure
-    else
-        null;
-    const captured_skill: ?store_module.CapturedSkill = if (command.skill != null and !(host.store.commandExists(command.key.slice()) catch return .infrastructure_failure))
-        @import("session_skills.zig").capture(memory.allocator(), host.allocator, host.io, host.store, command.session.slice(), &.{ .operation = .invoke, .name = command.skill }, host.bash_facts.home) catch return .infrastructure_failure
-    else
-        null;
+    const prepared = @import("session_skills.zig").prepareMessage(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home, capture_options) catch |err| {
+        // The Store owns canonical fault classification. An allocation outside
+        // held access (including batch preparation) cannot corrupt that Store.
+        if (host.store.isFenced()) return .infrastructure_failure;
+        return switch (err) {
+            error.ScratchCapacityExhausted => error.ScratchCapacityExhausted,
+            error.OutOfMemory => error.OutOfMemory,
+            else => .infrastructure_failure,
+        };
+    };
+    defer prepared.deinit(host.io);
+    const initial_skills = prepared.initial;
+    const captured_skill = prepared.captured;
     const faults = host.hooks.storeFaults(.command);
     const environments = host.environments orelse return host.store.submitMessageCapturedSkills(command, null, initial_skills, if (captured_skill) |*value| value else null, faults);
     const Install = struct {
@@ -1577,7 +1583,7 @@ noinline fn configureCapturedSkills(host: *Host, command: *const protocol.Config
 }
 
 /// `client_environment` holds a Message's checked environment.
-fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request, client_environment: ?*SessionEnvironments.Offer) !void {
+fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request, retained_scratch: *?named_scratch.Owner, client_environment: ?*SessionEnvironments.Offer) !void {
     // The first MySQL readiness probe learns the opaque id over the private
     // socket. All subsequent work must name that exact id, never the URL.
     const discovering = request.* == .host_info and request.store().len == 0 and host.store.engine == .mysql;
@@ -1627,7 +1633,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.json(status, protocol.max_response_bytes, renderConfigureReply, .{ command, result });
         },
         .message => |*command| {
-            const result = submitMessage(host, command, client_environment.?);
+            const result = try submitMessage(host, command, client_environment.?, .{ .io = host.io, .content_length = 0, .scratch_path = host.lease.paths.scratch.slice(), .request_number = request_number, .retained_scratch = retained_scratch, .scratch_budget = host.retention.sharedBudget() });
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "message save", error.CanonicalStoreFailure);
             }
@@ -1857,6 +1863,15 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try deliverPublicContent(host, fd, location, 0, true);
         },
+        .skill_suggestions => |*command| {
+            const scope: @import("skill_suggestions.zig").Scope = if (command.session) |*session| .{ .session = session.slice() } else .{ .workspace = command.workspace.?.slice() };
+            var page = readSkillSuggestions(host, host.allocator, scope, command.prefix.slice()) catch |err| {
+                if (err == error.CanonicalStoreFailure) return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+                return respondStatic(fd, 409, .activity_unavailable, if (err == error.SessionNotFound) "SessionNotFound" else "skills_unavailable");
+            };
+            defer page.deinit(host.allocator);
+            try fd.jsonGrowing(200, protocol.skill_suggestions_reply.max_bytes, renderSkillSuggestions, .{&page});
+        },
         // Host memory only: never SQLite or the network.
         // Sized as written: the bound is tens of KiB, a reply mostly far less.
         .model_list => {
@@ -1864,6 +1879,26 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.jsonGrowing(200, protocol.model_list_reply.max_bytes, renderModelList, .{host});
         },
     }
+}
+
+/// Materialization uses caller-owned memory after the canonical catalog read.
+fn readSkillSuggestions(host: *Host, allocator: std.mem.Allocator, scope: @import("skill_suggestions.zig").Scope, prefix: []const u8) !@import("skill_suggestions.zig").Page {
+    return @import("session_skills.zig").suggestions(allocator, host.allocator, host.io, host.store, scope, prefix, host.bash_facts.home) catch |err| {
+        if (scope == .session and host.store.isFenced()) {
+            fenceDispatch(host, "skill suggestions", err);
+            return error.CanonicalStoreFailure;
+        }
+        return err;
+    };
+}
+
+fn renderSkillSuggestions(out: protocol.JsonOut, page: *const @import("skill_suggestions.zig").Page) !void {
+    try out.appendShape(protocol.skill_suggestions_reply.head, .{ page.revision, page.total });
+    for (page.entries, 0..) |entry, index| {
+        if (index != 0) try out.append(",");
+        try out.appendShape(protocol.skill_suggestions_reply.entry, .{ entry.name, entry.description });
+    }
+    try out.append(protocol.skill_suggestions_reply.tail);
 }
 
 fn renderModelList(out: protocol.JsonOut, host: *Host) error{BufferTooLarge}!void {
@@ -1991,6 +2026,8 @@ const HeaderReader = struct {
             .activity_page
         else if (std.mem.eql(u8, path, "/v1/activity-content"))
             .activity_content
+        else if (std.mem.eql(u8, path, "/v1/skill-suggestions"))
+            .skill_suggestions
         else if (std.mem.eql(u8, path, "/v1/model-list"))
             .model_list
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
@@ -4878,4 +4915,92 @@ test "session archive renders accepted intent and completion for both archive an
         const decoded = try protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "k7m2qx", .{ .session_archive = .{ .archived = true } }).answer;
         try std.testing.expectEqualStrings(@tagName(code), decoded.result.rejected.slice());
     }
+}
+
+test "inline skills overlapping capture pressure returns 507 without key admission or Host fencing" {
+    const skills = @import("skills.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    const file = try tmp.dir.createFile(std.testing.io, "SKILL.md", .{});
+    try file.writeStreamingAll(std.testing.io, &@as([512]u8, @splat('x')));
+    file.close(std.testing.io);
+    var path_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/SKILL.md", .{root});
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const initial = try skills.initialCatalog(arena.allocator(), .{ .entries = &.{.{ .name = "demo", .description = "Metadata", .path = path }} });
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/pressure.sqlite", .{root});
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, database, root);
+    defer storage.close() catch unreachable;
+    const configure = try store_module.testingCompleteConfiguration("pressure-config", "", root, "model-a");
+    const configured = storage.configureWithInitialSkills(&configure, null, &.{ .ready = .{ .encoded = initial.encoded, .instruction = initial.instruction } }, .{});
+    try std.testing.expect(configured == .accepted);
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.store.set(root);
+    try lease.paths.scratch.set(root);
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var retention = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &host.scratch_used, .limit = 128 }, &.{});
+    host.retention = &retention;
+    var retained: ?named_scratch.Owner = null;
+    const options: protocol.ParseOptions = .{ .io = std.testing.io, .content_length = 0, .scratch_path = root, .request_number = 1, .retained_scratch = &retained, .scratch_budget = retention.sharedBudget() };
+    var input_capture: protocol.ContentCapture = undefined;
+    try input_capture.init(options, 1);
+    defer input_capture.deinit();
+    try input_capture.write("prompt");
+    var command: protocol.MessageCommand = .{ .session = configured.accepted.session, .text = try input_capture.seal() };
+    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+    try command.key.set("pressure-key");
+    var name: protocol.Bounded(64) = .{};
+    try name.set("demo");
+    command.skills = &.{name};
+    var offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
+    try std.testing.expectError(error.ScratchCapacityExhausted, submitMessage(&host, &command, &offer, options));
+    try std.testing.expect(!try storage.commandExists(command.key.slice()));
+    try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+    try std.testing.expectEqual(@as(u64, 6), host.scratch_used.load(.acquire));
+    try std.testing.expect(retained == null);
+    var intake: Intake = .{ .host = &host };
+    var exchange: Intake.Exchange = .{ .owner = &intake, .host = &host, .fd = -1, .accepted_at_ns = 0, .deadline = 0 };
+    defer if (exchange.reply) |reply| {
+        reply.deinit();
+        host.allocator.destroy(reply);
+    };
+    exchange.fail(error.ScratchCapacityExhausted);
+    try std.testing.expect(std.mem.startsWith(u8, exchange.reply.?.header[0..exchange.reply.?.header_length], "HTTP/1.1 507 "));
+    // Pre-Store heap pressure must not claim canonical corruption either.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var oom_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
+    host.allocator = failing.allocator();
+    defer host.allocator = std.testing.allocator;
+    try std.testing.expectError(error.OutOfMemory, submitMessage(&host, &command, &oom_offer, options));
+    host.allocator = std.testing.allocator;
+    try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+    try std.testing.expect(!try storage.commandExists(command.key.slice()));
+    exchange.fail(error.OutOfMemory);
+    try std.testing.expect(std.mem.startsWith(u8, exchange.reply.?.header[0..exchange.reply.?.header_length], "HTTP/1.1 503 "));
+    // readSkills' initial allocation is also before its canonical held access.
+    host.allocator = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, readSkillSuggestions(&host, std.testing.allocator, .{ .session = configured.accepted.session.slice() }, ""));
+    host.allocator = std.testing.allocator;
+    try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+    // Page allocation follows a successful durable read, outside Store access.
+    try std.testing.expectError(error.OutOfMemory, readSkillSuggestions(&host, failing.allocator(), .{ .session = configured.accepted.session.slice() }, ""));
+    try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+    var preview = try readSkillSuggestions(&host, std.testing.allocator, .{ .session = configured.accepted.session.slice() }, "");
+    defer preview.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), preview.entries.len);
+    // Ordinary work remains admissible under the same key after reclamation.
+    command.skills = &.{};
+    var retry_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
+    const accepted = try submitMessage(&host, &command, &retry_offer, options);
+    try std.testing.expect(accepted == .accepted);
+    try std.testing.expect(host.launchAllowed() and !storage.isFenced());
+    try store_module.testingFailReadsOf(&storage, "session_skill_catalog");
+    try std.testing.expectError(error.CanonicalStoreFailure, readSkillSuggestions(&host, std.testing.allocator, .{ .session = configured.accepted.session.slice() }, ""));
+    try std.testing.expect(storage.isFenced() and !host.launchAllowed());
 }

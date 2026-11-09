@@ -506,7 +506,11 @@ It does not change authored instructions, their content identity, the revision-o
 Normal defaults offer/load `skill` even with no skills; an explicit restricted tool set remains authoritative, and routing hints are conditional on availability.
 
 The model `skill` tool accepts `invoke` with a name or `reload` without one.
-User `/skill NAME` and native `session send --skill NAME` use the same capture operation and admit its captured text as an ordinary User Message; the explicit native `skill` field is not hidden command text.
+Native `session send` accepts repeatable `--skill NAME` alongside stdin text.
+The wire keeps the exclusive `skill` form that `/skill NAME` sends and adds an ordered `skills` vector alongside literal text; both are explicit intent, not slash-text parsing.
+The Host resolves the distinct names against one catalog snapshot, in their order, and captures the batch before atomic admission; the captured text is admitted as an ordinary User Message.
+The admitted Message keeps the caller's authored text beside it, which `activity_content` reads with the `authored` selector and Ctrl-P recall uses.
+Catalog suggestions (`skill_suggestions`) are bounded metadata-only reads with copied query scope, not a frontend filesystem reader or persistent active-skill registry.
 Invocation reads the selected advertised absolute path anew, returning the complete raw UTF-8 `SKILL.md`, including frontmatter and trailing bytes, with its absolute path.
 The result is ordinary immutable conversation content, with no added authority, tools or permissions.
 Sibling resources remain accessible through the Session's existing tools and permission rules.
@@ -1395,6 +1399,7 @@ The step to 56 adds the bounded outcome-unknown Message recovery index and moves
 The step to 57 adds archive intents and requested archive values, extends the command kind set, while retaining the unreleased wire 9.
 The step to 58 moves saved wire 9 metadata to wire 10 for nullable failed-send peers; it changes no saved command or refusal rows.
 The step to 59 adds immutable skill catalog metadata and its ordinary turnless instruction provenance, retaining unreleased wire 10 without rewriting earlier Conversation content.
+The step to 60 adds authored Message provenance, taking each earlier accepted Message's admitted content as its authored content, and moves Store wire metadata to 11.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -2703,6 +2708,8 @@ It is the first row dropped when rows run short, before any draft row, and the f
 A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
+
+Wire version 11 adds ordered skill names with text, authored Message content metadata and selection, and bounded skill suggestions; different versions, including saved request records, refuse each other.
 
 Wire version 10 adds explicit native skill invocation and idle catalog reload intent, typed capture refusals and reload acknowledgements; different versions refuse each other rather than silently discarding the new intent.
 Wire version 8 later gained the `activity_search` request; a Host built before it answers that request as unknown.

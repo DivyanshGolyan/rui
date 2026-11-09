@@ -72,7 +72,7 @@ class SkillsEndpoint(host_process.TestHTTPServer):
             return fixture.sse_tool_calls("spawn-child", [("start_agent", "child-call", json.dumps(arguments))])
         allowed = {"initial probe", "restricted initial message", "invoke with the skill tool", "invoke a FIFO with the skill tool",
                    "after metadata reload", "start the unique child", CHILD_TASK}
-        assert text in allowed or text.startswith("Skill file: "), text
+        assert text in allowed or text.startswith(("Skill file: ", "inline authored prose")), text
         answer = '{"child":"ok"}' if text == CHILD_TASK else "skills checked"
         return fixture.sse_answer(f"answer-{number}", f"reason-{number}", f"message-{number}", answer)[0]
 
@@ -177,7 +177,7 @@ def main():
 
         def post(request):
             body = request if isinstance(request, bytes) else json.dumps(request, separators=(",", ":")).encode()
-            route = "/v1/" + json.loads(body)["kind"]
+            route = "/v1/" + json.loads(body)["kind"].replace("_", "-")
             head, payload = raw_request(host.rui_ready_fields["socket"], route, body)
             if not head.startswith(b"HTTP/1.1 200 "):
                 status = host.poll()
@@ -323,6 +323,73 @@ def main():
         limited_saved = invoke("session", "inspect", "--store", store, "--session", restricted_session)["session"]
         assert limited_saved["tools"] == ["bash"], limited_saved
 
+        def activity_message(session, key):
+            page = post({"version": host_process.WIRE_VERSION, "kind": "activity_page", "store": str(store),
+                         "session": session, "end": None, "position": "0", "ordinal": None,
+                         "direction": "backward", "kinds": ["admission"], "limit": "16"})
+            return next(row for row in page["items"] if row["value"]["admission"]["key"] == key)
+
+        def activity_bytes(session, position, selector=None):
+            request = {"version": host_process.WIRE_VERSION, "kind": "activity_content", "store": str(store),
+                       "session": session, "position": position, "ordinal": "0"}
+            if selector is not None:
+                request["selector"] = selector
+            head, body = raw_request(host.rui_ready_fields["socket"], "/v1/activity-content", json.dumps(request).encode())
+            assert head.startswith(b"HTTP/1.1 200 "), (head, body)
+            return body
+
+        # One semantic metadata page works before creation and for the durable
+        # Session catalog. Prefix filtering never changes its revision hint.
+        suggestion_base = {"version": host_process.WIRE_VERSION, "kind": "skill_suggestions", "store": str(store), "prefix": ""}
+        prospective = post({**suggestion_base, "workspace": str(workspace)})
+        existing = post({**suggestion_base, "session": parent})
+        assert prospective == existing, (prospective, existing)
+        assert existing["total"] == str(len(initial_catalog["entries"]))
+        assert all(set(entry) == {"name", "description"} for entry in existing["entries"])
+        filtered = post({**suggestion_base, "session": parent, "prefix": "sh"})
+        assert filtered["revision"] == existing["revision"] and filtered["total"] == "1", filtered
+        assert [entry["name"] for entry in filtered["entries"]] == ["shared"], filtered
+
+        def invocation(entry):
+            return f'Skill file: {json.dumps(entry["path"], ensure_ascii=False, separators=(",", ":"))}\n\n' + pathlib.Path(entry["path"]).read_text()
+
+        authored = "inline authored prose /demo remains literal, with 雪\n"
+        expected_mixed = authored + "\n\n" + invocation(demo) + "\n\n" + invocation(shared)
+        inline_record = state / "inline-mixed.json"
+        mixed = invoke("session", "send", "--store", store, "--to", parent,
+                       "--skill", "demo", "--skill", "shared", "--record", inline_record,
+                       "--key", "inline-mixed", text=authored)
+        assert mixed["answer"]["status"] == "accepted", mixed
+        complete("inline-mixed")
+        assert user_text(endpoint.decoded()[-1]) == expected_mixed
+        inline_capture = inline_record.read_bytes()
+        intent = json.loads(inline_capture)
+        assert intent["skills"] == ["demo", "shared"] and intent["text"]["value"] == authored, intent
+        assert "BODY_NOT_METADATA" not in inline_capture.decode(), "canonical record copied skill bodies"
+        row = activity_message(parent, "inline-mixed")
+        value = row["value"]["admission"]
+        assert value["content"] == content_reference(expected_mixed.encode()), value
+        assert value["authored"] == content_reference(authored.encode()), value
+        assert activity_bytes(parent, row["position"]) == expected_mixed.encode()
+        assert activity_bytes(parent, row["position"], "authored") == authored.encode()
+
+        initial_inline = invoke("session", "start", "--store", store, "--workspace", workspace,
+                                "--provider", "codex", "--model", "gpt-6-sol", "--skill", "demo",
+                                "--skill", "shared", "--record", state / "inline-first.json",
+                                "--key", "inline-first", text="")
+        initial_inline_session = initial_inline["context"]["session"]
+        complete("inline-first")
+        assert user_text(endpoint.decoded()[-1]) == invocation(demo) + "\n\n" + invocation(shared)
+        first_row = activity_message(initial_inline_session, "inline-first")
+        assert first_row["value"]["admission"]["authored"] == content_reference(b"")
+        assert activity_bytes(initial_inline_session, first_row["position"], "authored") == b""
+        sessions_before = invoke("session", "list", "--store", store, "--all")["sessions"]
+        requests_before = len(endpoint.decoded())
+        refused_first = post({**json.loads((state / "inline-first.json").read_bytes()), "key": "inline-first-refused", "skills": ["shared", "not-advertised"]})
+        assert refused_first["answer"]["status"] == "rejected" and refused_first["answer"]["code"] == "unknown_skill", refused_first
+        assert invoke("session", "list", "--store", store, "--all")["sessions"] == sessions_before
+        assert len(endpoint.decoded()) == requests_before, "failed initial batch created model work"
+
         # Body-only edits are deliberately NOT a catalog delta. Invocation must
         # nevertheless read the full current raw bytes, including frontmatter.
         raw = b'---\r\nname: demo\r\ndescription: Demo metadata\r\n---\r\n# Current body\r\n' + '雪 "quoted" \\ end\r\n\r\n'.encode()
@@ -353,7 +420,7 @@ def main():
         count = len(endpoint.decoded())
         for request, expected in target_refusals:
             assert post(request)["answer"] == {**expected, "replayed": True}
-        for original in (native, create_capture, initial_capture, reload("body-only")):
+        for original in (native, create_capture, initial_capture, inline_capture, reload("body-only")):
             replayed = post(original)["answer"]
             assert replayed["status"] == "accepted" and replayed["replayed"] is True, replayed
         missing = post(dict(native, key="missing-file"))["answer"]
@@ -366,6 +433,15 @@ def main():
         assert len(endpoint.decoded()) == count, "replay or missing file scheduled a model turn"
         assert conversation(parent) == before_replay
         assert conversation(restricted_session) == restricted_before
+
+        recovered_inline = invoke("request", "recover", "--store", store, "--record", inline_record, "--kind", "message")
+        assert recovered_inline["answer"]["replayed"] is True and recovered_inline["input"] == {"type": "text", **content_reference(expected_mixed.encode())}, recovered_inline
+        assert inline_record.read_bytes() == inline_capture, "recovery rewrote original vector intent"
+        assert activity_bytes(parent, row["position"], "authored") == authored.encode()
+        failed_second = post({**intent, "key": "inline-second-failed", "skills": ["shared", "demo"]})
+        assert failed_second["answer"]["status"] == "rejected" and failed_second["answer"]["code"] == "skill_file_unavailable", failed_second
+        assert conversation(parent) == before_replay, "second file failure partially admitted its first file"
+        assert len(endpoint.decoded()) == count, "second file failure or recovery scheduled model work"
 
         pathlib.Path(demo["path"]).write_bytes(raw)
         send("tool-invoke", "invoke with the skill tool")
