@@ -37,21 +37,40 @@ pub const State = struct {
     column_count: usize = 0,
     statement_done: bool = false,
     long_query: bool = false,
-    transaction: bool = false,
-    write_transaction: bool = false,
-    pending_begin: bool = false,
-    pending_savepoint: bool = false,
-    savepoint_sent: bool = false,
+    begin: Begin = .none,
+    replacement: Replacement = .none,
     prefix_results: u8 = 0,
     committing: bool = false,
     sink: content.SinkState = .{},
     doublewrite: protocol.Bounded(32) = .{},
     store_id: [32]u8 = undefined,
     testing_database: if (is_test) [40]u8 else void = if (is_test) @splat(0) else {},
-    begin_sent: bool = false,
-    savepoint_queued: bool = false,
     fence_result: u8 = 0,
+
+    /// Commit, rollback or a server abort ends the transaction, and with
+    /// it every savepoint and any control not yet sent.
+    fn endTransaction(s: *State) void {
+        s.begin = .none;
+        s.replacement = .none;
+    }
 };
+
+/// The open transaction's BEGIN, which is the transaction itself: none
+/// once it commits, rolls back or the server aborts it.
+const Begin = union(enum) {
+    none,
+    /// Requested; appended ahead of the next statement or control.
+    pending,
+    /// In the unsent batch. A discard returns it to pending.
+    buffered,
+    /// Sent, so ROLLBACK needs the server. `savepoint` records that a
+    /// SAVEPOINT rui_write was sent after it too.
+    sent: struct { savepoint: bool = false },
+};
+
+/// A new SAVEPOINT rui_write not yet sent. An older one already sent
+/// stays independent of it (`Begin.sent.savepoint`).
+const Replacement = enum { none, pending, buffered };
 const unserved = protocol.routesAll(.unserved);
 pub const ContentSink = content.ContentSink;
 pub const insert_chunk = rsql.Write(.{
@@ -110,10 +129,8 @@ pub fn next(self: *Mysql) Failure!wire.mysql.Event {
 }
 
 fn serverError(self: *Mysql, code: u16) Failure {
-    if (code == 1213 or code == 1305) {
-        self.state.transaction = false;
-        self.state.write_transaction = false;
-    }
+    // The server rolled the transaction back whole: nothing is left to roll back.
+    if (code == 1213 or code == 1305) self.state.endTransaction();
     return switch (code) {
         1114, 1021 => error.CanonicalStorageFull,
         else => error.StatementFailed,
@@ -178,17 +195,16 @@ pub fn bind(self: *Mysql, comptime S: type, args: *const S.Args, now: i64) Failu
 
 fn appendControls(self: *Mysql) Failure!void {
     const s = self.state;
-    if (s.pending_begin) {
+    if (s.begin == .pending) {
         s.connection.batch().print("START TRANSACTION;UPDATE store_owner SET commit_seq=commit_seq+1 WHERE owner_key=1 AND epoch={d} AND commit_seq={d};", .{ s.epoch, s.commit_seq }) catch return error.BindFailed;
         s.prefix_results += 2;
         s.fence_result = 2;
-        s.pending_begin = false;
+        s.begin = .buffered;
     }
-    if (s.pending_savepoint) {
+    if (s.replacement == .pending) {
         s.connection.batch().writeAll("SAVEPOINT rui_write;") catch return error.BindFailed;
         s.prefix_results += 1;
-        s.pending_savepoint = false;
-        s.savepoint_queued = true;
+        s.replacement = .buffered;
     }
 }
 
@@ -196,10 +212,10 @@ pub fn startPass(self: *Mysql) Failure!void {
     try self.check();
     if (!self.state.long_query and self.state.connection.batchLen() != 0) {
         self.state.connection.sendBatch() catch return self.lost();
-        if (self.state.fence_result != 0) self.state.begin_sent = true;
-        if (self.state.savepoint_queued) {
-            self.state.savepoint_sent = true;
-            self.state.savepoint_queued = false;
+        if (self.state.begin == .buffered) self.state.begin = .{ .sent = .{} };
+        if (self.state.replacement == .buffered) {
+            self.state.replacement = .none;
+            self.state.begin.sent.savepoint = true;
         }
     }
     while (self.state.prefix_results != 0) {
@@ -247,13 +263,12 @@ pub fn discardBatch(self: *Mysql) Failure!void {
     };
     // Revert only controls appended but never sent. In particular, an older
     // server-side savepoint must not be mistaken for the dropped new one.
-    if (self.state.savepoint_queued) self.state.pending_savepoint = true;
-    if (self.state.fence_result != 0 and !self.state.begin_sent) self.state.pending_begin = true;
+    if (self.state.replacement == .buffered) self.state.replacement = .pending;
+    if (self.state.begin == .buffered) self.state.begin = .pending;
     self.state.connection.writer.end = 0;
     self.state.long_query = false;
     self.state.prefix_results = 0;
     self.state.fence_result = 0;
-    self.state.savepoint_queued = false;
 }
 pub fn discard(_: *Mysql, _: ?engine.Statement) void {}
 
@@ -333,26 +348,25 @@ pub fn control(self: *Mysql, comptime which: engine.Control) Failure!void {
     } else try self.check();
     switch (which) {
         .begin => {
-            self.state.pending_begin = true;
-            self.state.transaction = true;
-            self.state.write_transaction = true;
+            self.state.begin = .pending;
             return;
         },
         .savepoint => {
-            self.state.pending_savepoint = true;
+            self.state.replacement = .pending;
             return;
         },
         .release => return,
-        .rollback => if (!self.state.begin_sent) {
-            self.state.pending_begin = false;
-            self.state.pending_savepoint = false;
-            self.state.transaction = false;
-            self.state.write_transaction = false;
+        // discardBatch returned anything buffered to pending.
+        .rollback => if (self.state.begin != .sent) {
+            self.state.endTransaction();
             return;
         },
-        .rollback_to => if (!self.state.savepoint_sent or self.state.pending_savepoint or self.state.savepoint_queued) {
-            self.state.pending_savepoint = false;
-            return;
+        .rollback_to => {
+            const sent = self.state.begin == .sent and self.state.begin.sent.savepoint;
+            if (self.state.replacement != .none or !sent) {
+                self.state.replacement = .none;
+                return;
+            }
         },
         else => {},
     }
@@ -376,18 +390,16 @@ pub fn control(self: *Mysql, comptime which: engine.Control) Failure!void {
         return err;
     };
     if (which == .commit or which == .rollback) {
-        self.state.transaction = false;
-        self.state.write_transaction = false;
-        self.state.savepoint_sent = false;
-        self.state.begin_sent = false;
+        self.state.endTransaction();
         if (which == .commit) self.state.commit_seq += 1;
     }
 }
 pub fn inTransaction(self: *const Mysql) bool {
-    return self.state.transaction;
+    return self.state.begin != .none;
 }
+/// Every MySQL transaction is a write transaction.
 pub fn inWriteTransaction(self: *const Mysql) bool {
-    return self.state.write_transaction;
+    return self.inTransaction();
 }
 pub fn totalChanges(self: *const Mysql) i64 {
     return self.state.changes;
@@ -428,7 +440,8 @@ pub fn diagnostic(self: *const Mysql) Diagnostic {
 test "MySQL error mapping clears only lost transactions" {
     const state = try std.testing.allocator.create(State);
     defer std.testing.allocator.destroy(state);
-    state.* = .{ .connection = undefined, .transaction = true, .write_transaction = true };
+    state.* = .{ .connection = undefined, .begin = .{ .sent = .{ .savepoint = true } } };
+    state.connection.writer.end = 0;
     var mysql: Mysql = .{ .state = state };
     try std.testing.expectEqual(error.StatementFailed, mysql.serverError(1062));
     try std.testing.expect(mysql.inTransaction());
@@ -436,7 +449,13 @@ test "MySQL error mapping clears only lost transactions" {
     try std.testing.expectEqual(error.CanonicalStorageFull, mysql.serverError(1021));
     try std.testing.expectEqual(error.StatementFailed, mysql.serverError(1213));
     try std.testing.expect(!mysql.inTransaction());
-    state.transaction = true;
+    // The aborted transaction leaves no sent BEGIN behind: the next
+    // transaction's unsent BEGIN still rolls back without the server.
+    try mysql.control(.begin);
+    try mysql.control(.rollback);
+    try std.testing.expect(!mysql.inTransaction());
+    try std.testing.expectEqual(@as(u64, 0), state.testing_shape.controls);
+    state.begin = .{ .sent = .{} };
     try std.testing.expectEqual(error.StatementFailed, mysql.serverError(1305));
     try std.testing.expect(!mysql.inTransaction());
 }
@@ -449,15 +468,14 @@ test "MySQL unsent transaction and savepoint rollbacks do not contact server" {
     var mysql: Mysql = .{ .state = state };
     try mysql.control(.begin);
     try std.testing.expect(mysql.inTransaction());
-    try std.testing.expect(state.pending_begin);
+    try std.testing.expect(state.begin == .pending);
     try mysql.control(.rollback);
     try std.testing.expect(!mysql.inTransaction());
-    state.transaction = true;
-    state.begin_sent = true;
+    state.begin = .{ .sent = .{} };
     try mysql.control(.savepoint);
     try mysql.control(.rollback_to);
     try std.testing.expect(mysql.inTransaction());
-    try std.testing.expect(!state.pending_savepoint);
+    try std.testing.expect(state.replacement == .none);
     try mysql.control(.release);
 }
 
@@ -493,11 +511,11 @@ test "MySQL ordinary deferred failures report once and never block rollback" {
 test "MySQL discarding an unsent replacement savepoint does not rollback an older one" {
     const state = try std.testing.allocator.create(State);
     defer std.testing.allocator.destroy(state);
-    state.* = .{ .connection = undefined, .transaction = true, .begin_sent = true, .savepoint_sent = true, .savepoint_queued = true };
+    state.* = .{ .connection = undefined, .begin = .{ .sent = .{ .savepoint = true } }, .replacement = .buffered };
     state.connection.writer.end = 20;
     var mysql: Mysql = .{ .state = state };
     try mysql.discardBatch();
-    try std.testing.expect(state.pending_savepoint);
+    try std.testing.expect(state.replacement == .pending);
     try mysql.control(.rollback_to);
     try std.testing.expect(mysql.inTransaction());
     try std.testing.expectEqual(@as(usize, 0), state.connection.writer.end);
@@ -517,7 +535,7 @@ test "MySQL discarding a sent long query propagates and latches connection loss"
 test "MySQL content observer shares transaction error transitions" {
     const state = try std.testing.allocator.create(State);
     defer std.testing.allocator.destroy(state);
-    state.* = .{ .connection = undefined, .transaction = true, .write_transaction = true };
+    state.* = .{ .connection = undefined, .begin = .{ .sent = .{} } };
     var mysql: Mysql = .{ .state = state };
     const observer = mysql.contentObserver();
     observer.server_error(observer.context, 1062);

@@ -598,6 +598,70 @@ test "store.mysql live commit sequence backup fence works while GET_LOCK remains
     try liveBackupFence("commit_seq");
 }
 
+const live_touch = rsql.Write(.{
+    .sql = "UPDATE content SET private=private WHERE content_id=?1",
+    .Args = struct { id: u64 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.LiveGuard } },
+});
+
+test "store.mysql live deadlock victim keeps no sent transaction evidence for the next write" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const a: u64 = 9000040;
+    const b: u64 = 9000041;
+    _ = try liveWrite(&storage, live_insert, .{ .id = a, .digest = protocol.contentDigest("deadlock-a") });
+    _ = try liveWrite(&storage, live_insert, .{ .id = b, .digest = protocol.contentDigest("deadlock-b") });
+
+    // A second login takes row a after 32 inserts, so InnoDB picks the
+    // lighter Store transaction as the deadlock victim.
+    const config = (try dialect.rootConfig()).?;
+    const peer = try std.testing.allocator.create(wire.Connection);
+    defer std.testing.allocator.destroy(peer);
+    var refusal: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer refusal.deinit();
+    try peer.open(.{ .address = .{ .unix_socket = config.socket }, .user = "root", .password = config.password, .database = database(&storage) }, &refusal.writer);
+    defer peer.close();
+    try peer.query("START TRANSACTION;INSERT INTO content(content_id,digest,byte_length,private) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<32) SELECT 9000100+i,UNHEX(SHA2(i,256)),0,0 FROM n;UPDATE content SET private=private WHERE content_id=9000040");
+    try drain(peer, null);
+    {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+        defer access.deinit();
+        access.write(live_touch, .{ .id = b });
+        try access.run();
+        // The peer waits on row b, then the Store waits on row a.
+        try peer.query("UPDATE content SET private=private WHERE content_id=9000041");
+        access.write(live_touch, .{ .id = a });
+        try std.testing.expectError(error.StatementFailed, access.run());
+        // Only a deadlock (1213) or lost savepoint (1305) ends it here.
+        try std.testing.expect(!storage.engine.inTransaction());
+        try access.abandon(.{});
+    }
+    try drain(peer, null);
+    try peer.query("ROLLBACK");
+    try drain(peer, null);
+
+    // The server ended the victim's transaction, so the next write's
+    // BEGIN is unsent until its pass. Abandoning it first contacts no one.
+    const before = storage.engine.mysql.state.connection.queries;
+    {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+        defer access.deinit();
+        access.write(live_touch, .{ .id = a });
+        try access.abandon(.{});
+    }
+    try std.testing.expectEqual(@as(u64, 0), storage.engine.mysql.state.connection.queries - before);
+    try std.testing.expect(!storage.engine.inTransaction());
+    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
+    try std.testing.expect(!storage.isFenced());
+}
+
 test "store.mysql live unchanged UPDATE reports observed latency rounds and fixed buffer sizes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
