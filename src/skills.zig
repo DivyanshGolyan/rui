@@ -363,18 +363,43 @@ pub fn diff(allocator: Allocator, before: Catalog, after: Catalog) !Delta {
     defer removed.deinit(allocator);
     var changed: std.ArrayList(Entry) = .empty;
     defer changed.deinit(allocator);
-    for (after.entries) |entry| {
-        if (findEntry(before.entries, entry.name)) |old| {
-            if (!std.mem.eql(u8, old.description, entry.description) or !std.mem.eql(u8, old.path, entry.path))
-                try changed.append(allocator, entry);
-        } else try added.append(allocator, entry);
+    // One merge of both catalogs in name order; each list comes out sorted.
+    const old_order = try byName(allocator, before.entries);
+    defer allocator.free(old_order);
+    const new_order = try byName(allocator, after.entries);
+    defer allocator.free(new_order);
+    var old_index: usize = 0;
+    var new_index: usize = 0;
+    while (old_index < old_order.len or new_index < new_order.len) {
+        if (new_index == new_order.len) {
+            try removed.append(allocator, before.entries[old_order[old_index]]);
+            old_index += 1;
+            continue;
+        }
+        const entry = after.entries[new_order[new_index]];
+        if (old_index == old_order.len) {
+            try added.append(allocator, entry);
+            new_index += 1;
+            continue;
+        }
+        const old = before.entries[old_order[old_index]];
+        switch (std.mem.order(u8, old.name, entry.name)) {
+            .lt => {
+                try removed.append(allocator, old);
+                old_index += 1;
+            },
+            .gt => {
+                try added.append(allocator, entry);
+                new_index += 1;
+            },
+            .eq => {
+                if (!std.mem.eql(u8, old.description, entry.description) or !std.mem.eql(u8, old.path, entry.path))
+                    try changed.append(allocator, entry);
+                old_index += 1;
+                new_index += 1;
+            },
+        }
     }
-    for (before.entries) |entry| {
-        if (findEntry(after.entries, entry.name) == null) try removed.append(allocator, entry);
-    }
-    std.sort.heap(Entry, added.items, {}, entryLessThan);
-    std.sort.heap(Entry, removed.items, {}, entryLessThan);
-    std.sort.heap(Entry, changed.items, {}, entryLessThan);
     const owned_added = try copyEntries(allocator, added.items);
     errdefer freeEntries(allocator, owned_added);
     const owned_removed = try copyEntries(allocator, removed.items);
@@ -426,15 +451,32 @@ fn freeEntries(allocator: Allocator, entries: []const Entry) void {
 
 fn validateCatalog(catalog: Catalog) !void {
     if (catalog.entries.len > max_entries) return error.SkillCatalogLimit;
-    for (catalog.entries, 0..) |entry, index| {
+    for (catalog.entries) |entry| {
         if (!validName(entry.name) or !validDescription(entry.description) or
             !std.fs.path.isAbsolute(entry.path) or entry.path.len > std.fs.max_path_bytes or
             !std.unicode.utf8ValidateSlice(entry.path) or
             std.mem.indexOfScalar(u8, entry.path, 0) != null) return error.InvalidSkillCatalog;
-        for (catalog.entries[0..index]) |other| {
-            if (std.mem.eql(u8, entry.name, other.name)) return error.InvalidSkillCatalog;
-        }
     }
+    // Names are unique when no two neighbours in name order are equal. The
+    // order is scratch, so it never lands in a caller's request arena.
+    const order = try byName(std.heap.c_allocator, catalog.entries);
+    defer std.heap.c_allocator.free(order);
+    for (1..@max(order.len, 1)) |index| {
+        if (std.mem.eql(u8, catalog.entries[order[index - 1]].name, catalog.entries[order[index]].name))
+            return error.InvalidSkillCatalog;
+    }
+}
+
+/// Indices of `entries`, at most `max_entries`, in name order.
+fn byName(allocator: Allocator, entries: []const Entry) ![]u16 {
+    const order = try allocator.alloc(u16, entries.len);
+    for (order, 0..) |*slot, index| slot.* = @intCast(index);
+    std.sort.pdq(u16, order, entries, struct {
+        fn lessThan(context: []const Entry, a: u16, b: u16) bool {
+            return std.mem.lessThan(u8, context[a].name, context[b].name);
+        }
+    }.lessThan);
+    return order;
 }
 
 /// Persist only names, descriptions and canonical paths, never raw skill text.
@@ -1395,6 +1437,22 @@ test "skills catalog wire rejects byte arrays and numeric coercions for every te
     const roundtrip = try decodeCatalog(allocator, encoded);
     defer roundtrip.deinit(allocator);
     try std.testing.expectEqualDeep(decoded.entries, roundtrip.entries);
+}
+
+test "skills catalog rejects a repeated name wherever it appears" {
+    // The repeats are not neighbours in input order, only in name order.
+    const encoded =
+        \\{"entries":[{"name":"b","description":"one","path":"/b/SKILL.md"},
+        \\{"name":"a","description":"two","path":"/a/SKILL.md"},
+        \\{"name":"b","description":"three","path":"/c/SKILL.md"}]}
+    ;
+    try std.testing.expectError(error.InvalidSkillCatalog, decodeCatalog(std.testing.allocator, encoded));
+    const distinct = try decodeCatalog(std.testing.allocator,
+        \\{"entries":[{"name":"b","description":"one","path":"/b/SKILL.md"},
+        \\{"name":"a","description":"two","path":"/a/SKILL.md"}]}
+    );
+    defer freeEntries(std.testing.allocator, distinct.entries);
+    try std.testing.expectEqual(@as(usize, 2), distinct.entries.len);
 }
 
 test "skills catalog full bounded population has deterministic unique-name order" {
