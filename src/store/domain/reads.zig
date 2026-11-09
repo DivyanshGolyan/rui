@@ -9,6 +9,7 @@ const command_reply = @import("../../command_reply.zig");
 const word_search = @import("../../word_search.zig");
 const pages = @import("../../os/pages.zig");
 const protocol = @import("../../protocol.zig");
+const tool_proposal = @import("../../tool_proposal.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
@@ -1159,10 +1160,10 @@ pub fn searchActivity(a: *ReadAccess, request: *const protocol.ActivitySearch, o
                 const fields = scratch.item.value.call.fields;
                 // Same virtual text as read_transcript's full window: tool
                 // name, newline, then arguments in their stored JSON form.
-                try searchField(a, scratch, fields[@backingInt(protocol.ProposalField.name)], &budget);
+                try searchField(a, scratch, fields[@backingInt(tool_proposal.Field.name)], &budget);
                 if (budget != 0) {
                     scratch.matcher.feed("\n");
-                    try searchField(a, scratch, fields[@backingInt(protocol.ProposalField.arguments)], &budget);
+                    try searchField(a, scratch, fields[@backingInt(tool_proposal.Field.arguments)], &budget);
                 }
             }
             scratch.matcher.finish();
@@ -2066,7 +2067,7 @@ pub fn activityTool(a: *ReadAccess, request: *const protocol.ReadActivityContent
     read.queueProposal(a);
     try runRows(a);
     try read.finish();
-    return .{ .name = metadata.fields[@backingInt(protocol.ProposalField.name)], .presentation = presentation };
+    return .{ .name = metadata.fields[@backingInt(tool_proposal.Field.name)], .presentation = presentation };
 }
 
 /// The content columns of a Proposal's three fields, in ProposalField order.
@@ -2110,7 +2111,7 @@ pub const proposal_row = rsql.Read(.{
         turn_id: rsql.Positive,
         call_ordinal: u64,
         action_id: ?rsql.Positive,
-        rejection_code: ?protocol.ProposalRejection,
+        rejection_code: ?tool_proposal.Rejection,
         name_content_id: rsql.Positive,
         call_id_content_id: rsql.Positive,
         arguments_content_id: rsql.Positive,
@@ -2234,7 +2235,7 @@ pub const ToolOutcomeRow = struct {
     turn_id: ?rsql.Positive,
     call_ordinal: ?u64,
     action_id: ?rsql.Positive,
-    rejection_code: ?protocol.ProposalRejection,
+    rejection_code: ?tool_proposal.Rejection,
     name_content_id: ?rsql.Positive,
     call_id_content_id: ?rsql.Positive,
     arguments_content_id: ?rsql.Positive,

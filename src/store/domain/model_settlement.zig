@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const tool_proposal = @import("../../tool_proposal.zig");
 const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -753,7 +754,7 @@ const insert_call = rsql.Write(.{
         name_content_id: u64,
         call_id_content_id: u64,
         arguments_content_id: u64,
-        rejection_code: ?protocol.ProposalRejection,
+        rejection_code: ?tool_proposal.Rejection,
         rejection_content_id: ?u64,
         acceptance_position: ?u64,
         action_kind: ?u64,
@@ -1240,7 +1241,7 @@ noinline fn collectFinalRejections(batch: *Batch, output: *const ValidatedOutput
 }
 
 /// A rejected call's result text, from its name in the source.
-fn rejectionText(io: std.Io, output: *const ValidatedOutput, code: protocol.ProposalRejection, facts: *const tool_catalog.CallFacts, name: OutputMetadataRecord, buffer: *[192]u8) ![]const u8 {
+fn rejectionText(io: std.Io, output: *const ValidatedOutput, code: tool_proposal.Rejection, facts: *const tool_catalog.CallFacts, name: OutputMetadataRecord, buffer: *[192]u8) ![]const u8 {
     var rejected_name: output_format.NameReader = .{ .io = io, .file = output.source, .position = name.start, .end = try name.end() };
     return tool_catalog.rejectionResult(code, facts, &rejected_name, name.decoded_length, name.content_digest, buffer);
 }

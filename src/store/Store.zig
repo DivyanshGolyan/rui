@@ -7,6 +7,7 @@ const command_reply = @import("../command_reply.zig");
 const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
 const protocol = @import("../protocol.zig");
+const tool_proposal = @import("../tool_proposal.zig");
 const workspace_path = @import("../workspace_path.zig");
 const store_path = @import("../store_path.zig");
 const provider_route = @import("../provider_route.zig");
@@ -1061,11 +1062,11 @@ pub const Store = struct {
         return self.actionContent(session_ref, action_id, .call_id);
     }
 
-    fn actionContent(self: *Store, session_ref: []const u8, action_id: u64, field: protocol.ProposalField) !ContentReference {
+    fn actionContent(self: *Store, session_ref: []const u8, action_id: u64, field: tool_proposal.Field) !ContentReference {
         return self.queue().run(actionContentHeld, .{ self, session_ref, action_id, field });
     }
 
-    fn actionContentHeld(self: *Store, session_ref: []const u8, action_id: u64, field: protocol.ProposalField) !ContentReference {
+    fn actionContentHeld(self: *Store, session_ref: []const u8, action_id: u64, field: tool_proposal.Field) !ContentReference {
         const entry = try enter(self, .none);
         defer entry.release();
         if (action_id == 0 or action_id > std.math.maxInt(i64)) return error.ActionNotFound;

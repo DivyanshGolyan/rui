@@ -6,6 +6,7 @@ const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
 const store_id = @import("store_id.zig");
 const mutation_answer = @import("mutation_answer.zig");
+const tool_proposal = @import("tool_proposal.zig");
 const message_admission = @import("message_admission.zig");
 const configuration_admission = @import("configuration_admission.zig");
 const workspace_path = @import("workspace_path.zig");
@@ -629,10 +630,10 @@ pub const ConversationContent = struct {
     stream: bool = false,
 };
 
-pub const ProposalField = enum { name, call_id, arguments };
+pub const ProposalField = tool_proposal.Field;
 /// One certified call field: its decoded length and content digest.
 pub const ProposalFieldReference = struct { length: u64, digest: [32]u8 };
-pub const ProposalRejection = enum { unknown_tool, invalid_arguments };
+pub const ProposalRejection = tool_proposal.Rejection;
 pub const ProposalMetadata = struct {
     position: u64,
     operation: u64,

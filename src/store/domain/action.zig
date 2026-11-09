@@ -3,6 +3,7 @@
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const protocol = @import("../../protocol.zig");
+const tool_proposal = @import("../../tool_proposal.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
@@ -341,7 +342,7 @@ const action_call_position = rsql.Read(.{
 
 /// A field of the Proposal the Action carries out, checked as every
 /// Proposal read checks it. Round 2 depends on round 1's position.
-pub fn actionContent(a: anytype, session_ref: []const u8, action_id: u64, field: protocol.ProposalField) !ContentReference {
+pub fn actionContent(a: anytype, session_ref: []const u8, action_id: u64, field: tool_proposal.Field) !ContentReference {
     var found: action_call_position.Result = undefined;
     a.read(action_call_position, .{ .action_id = action_id, .session = session_ref }, &found);
     try a.run();
@@ -419,7 +420,7 @@ pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *B
     try a.run();
     if (!found.get()) return error.StaleActionAttemptBinding;
     const position = (row.position orelse return error.CorruptStore).get();
-    const reference = (try reads_domain.proposal(a, out.session.slice(), position)).fields[@backingInt(protocol.ProposalField.arguments)];
+    const reference = (try reads_domain.proposal(a, out.session.slice(), position)).fields[@backingInt(tool_proposal.Field.arguments)];
     out.arguments = .{ .length = reference.length, .digest = reference.digest };
     out.timeout_ms = row.timeout_ms.get();
 }
@@ -822,7 +823,7 @@ pub fn readMcpExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *Mc
     out.input_schema = .{ .length = row.length, .digest = row.digest };
     out.timeout_ms = row.timeout_ms.get();
     const position = (row.position orelse return error.CorruptStore).get();
-    const reference = (try reads_domain.proposal(a, out.session.slice(), position)).fields[@backingInt(protocol.ProposalField.arguments)];
+    const reference = (try reads_domain.proposal(a, out.session.slice(), position)).fields[@backingInt(tool_proposal.Field.arguments)];
     out.arguments = .{ .length = reference.length, .digest = reference.digest };
     out.root = out.session;
     out.parent = null;
