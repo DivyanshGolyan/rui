@@ -225,6 +225,14 @@ class SelectionTest(unittest.TestCase):
             for family in ("targets", "native_targets"):
                 self.assertEqual(result[family], owners[family], path)
 
+    def test_cli_configuration_surface_runs_the_measurement_configure_contract(self):
+        for path in ("src/cli_args.zig", "src/client.zig", "src/product_defaults.zig", "src/protocol.zig",
+                     "src/store/domain/configuration.zig", "openapi.json"):
+            result = select([path], "review", AVAILABLE)
+            for family in ("targets", "native_targets"):
+                with self.subTest(path=path, family=family):
+                    self.assertIn("measurement-check", result[family])
+
     def test_every_functional_core_selects_the_boundary_check(self):
         source = (Path(__file__).resolve().parents[2] / "src" / "logic_tests.zig").read_text()
         listed = source.split("const cores = .{", 1)[1].split("\n};", 1)[0]
@@ -374,7 +382,7 @@ class SelectionTest(unittest.TestCase):
         job = re.search(r'(?ms)^  linux:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow)[1]
         expression = re.search(r'if: \$\{\{ (.*?) \}\}', job)[1]
         expression = re.sub(r'!(?!=)', 'not ', expression.replace('&&', 'and').replace('||', 'or'))
-        script = dedent(job.split('run: |\n', 1)[1])
+        script = dedent(job.split('run: |\n', 1)[1].split('\n      - ', 1)[0])
         cases = []
         for targets in ('[]', ''):  # Documentation and duplicate-push suppression.
             cases.append((targets, 'success', 'success', 'skipped', 'skipped', False, 'success'))
@@ -493,7 +501,7 @@ class SelectionTest(unittest.TestCase):
         self.assertIn('!cancelled()', expression)
         expression = re.sub(r'!(?!=)', 'not ', expression.replace('&&', 'and').replace('||', 'or'))
         self.assertIn('always()', gate)
-        script = dedent(gate.split('run: |\n', 1)[1])
+        script = dedent(gate.split('run: |\n', 1)[1].split('\n      - ', 1)[0])
         for split in ('true', 'false'):
             for unit in ('success', 'skipped', 'failure', 'cancelled'):
                 for build, native in (('success', 'success'), ('failure', 'skipped'),
@@ -773,8 +781,8 @@ class SelectionTest(unittest.TestCase):
             self.assertEqual(result["targets"], ["preference-policy-integration"])
             self.assertEqual(result["native_targets"], ["preference-policy-integration"])
             combined = select([path, "src/protocol.zig"], "review", AVAILABLE)
-            self.assertEqual(combined["targets"], ["check"])
-            self.assertEqual(combined["native_targets"], ["check"])
+            self.assertEqual(combined["targets"], ["check", "measurement-check"])
+            self.assertEqual(combined["native_targets"], ["check", "measurement-check"])
 
     def test_installer_report_runs_the_fixture_that_pins_its_json_reader(self):
         result = select(["release/publish.sh"], "review", AVAILABLE)
@@ -801,8 +809,8 @@ class SelectionTest(unittest.TestCase):
                 self.assertEqual(result["targets"], [f"{owner}-integration"])
                 self.assertEqual(result["native_targets"], [f"{owner}-integration"])
                 combined = select([path, "src/protocol.zig"], "review", AVAILABLE)
-                self.assertEqual(combined["targets"], ["check"])
-                self.assertEqual(combined["native_targets"], ["check"])
+                self.assertEqual(combined["targets"], ["check", "measurement-check"])
+                self.assertEqual(combined["native_targets"], ["check", "measurement-check"])
 
     def test_admission_owners_keep_complete_debug_matrix(self):
         for path in ("src/server.zig", "src/server_execution.zig", "src/server_host.zig",

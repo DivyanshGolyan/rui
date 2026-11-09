@@ -31,7 +31,7 @@ MAC_PATHS = (
     "install.sh", "release/*",
 )
 
-SCANNED = ("src/*.zig", "tests/integration/*.zig", "tests/integration/*.py")
+SCANNED = ("src/*.zig", "tests/integration/*.zig", "tests/integration/*.py", "clients/ts/test/*.ts")
 
 # Darwin differs on these: shutdown of a closed or listening socket returns
 # ENOTCONN, a full backlog refuses connect, kill(-pgid) of a zombie group is
@@ -40,6 +40,16 @@ SCANNED = ("src/*.zig", "tests/integration/*.zig", "tests/integration/*.py")
 DIVERGENT_SYSCALLS = ("shutdown", "kill", "listen", "setrlimit")
 SYSCALL_NAMESPACES = ("c", "posix", "system")
 PYTHON_PLATFORM = (("sys", "platform"), ("platform", "system"), ("os", "uname"))
+
+# A Host trusts OpenSSL's store on Linux, which these variables extend, and
+# Apple SecTrust on Darwin, which ignores them (#990, #997). A fixture that
+# trusts its CA through them passes only on Linux, so outside Mac paths a
+# fixture names neither: it hands the CA over explicitly (--provider-ca-file,
+# the launch frame's caFile), or asks os_semantics for system trust.
+TRUST_VARIABLE = re.compile(r"\bSSL_CERT_(?:FILE|DIR)\b")
+# Python 3.12 splits f-strings into parts; earlier versions keep them whole.
+STRING_TOKENS = (tokenize.NAME, tokenize.STRING, getattr(tokenize, "FSTRING_MIDDLE", tokenize.STRING))
+TS_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
 
 # Zig tokens with comments and multiline string lines removed; strings stay
 # whole so `@import("builtin")` is recognizable and string contents are inert.
@@ -63,11 +73,49 @@ def zig_sites(source):
 
 
 def python_sites(source):
-    tokens = [t.string for t in tokenize.generate_tokens(io.StringIO(source).readline)
-              if t.type in (tokenize.NAME, tokenize.OP)]
-    return sum(1 for i in range(len(tokens) - 2)
-               if (tokens[i], tokens[i + 2]) in PYTHON_PLATFORM and tokens[i + 1] == "."
-               and (i == 0 or tokens[i - 1] != "."))
+    generated = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    trust = sum(len(TRUST_VARIABLE.findall(t.string)) for t in generated
+                if t.type in STRING_TOKENS)
+    tokens = [t.string for t in generated if t.type in (tokenize.NAME, tokenize.OP)]
+    return trust + sum(1 for i in range(len(tokens) - 2)
+                       if (tokens[i], tokens[i + 2]) in PYTHON_PLATFORM and tokens[i + 1] == "."
+                       and (i == 0 or tokens[i - 1] != "."))
+
+
+def typescript_sites(source):
+    return len(TRUST_VARIABLE.findall(TS_COMMENT.sub("", source)))
+
+
+def unlistened_binds(source):
+    """Zig functions and tests that bind a socket but never listen on it.
+
+    Linux refuses a connection to such a port; Darwin drops its SYN without a
+    reset, so a connect waits out its deadline (#999). A test that wants a
+    refusing port takes socket_fixture.refusedPort().
+    """
+    tokens = [m.group() for m in ZIG_TOKEN.finditer(source) if not m.group().startswith(("//", "\\\\"))]
+    found = []
+    for start, token in enumerate(tokens):
+        if token not in ("fn", "test"):
+            continue
+        name = next((tokens[i] for i in range(start + 1, min(start + 3, len(tokens)))
+                     if tokens[i] != "("), "")
+        try:
+            body = tokens.index("{", start)
+        except ValueError:
+            continue
+        depth, end = 0, body
+        for end in range(body, len(tokens)):
+            depth += {"{": 1, "}": -1}.get(tokens[end], 0)
+            if depth == 0:
+                break
+        inside = tokens[body:end]
+        binds = any(inside[i] in SYSCALL_NAMESPACES and inside[i + 1:i + 4] == [".", "bind", "("]
+                    for i in range(len(inside) - 3))
+        listens = any(inside[i] == "listen" and inside[i + 1] == "(" for i in range(len(inside) - 1))
+        if binds and not listens:
+            found.append(name)
+    return found
 
 
 def mac_path(path):
@@ -83,7 +131,7 @@ def sites(root=ROOT):
             if mac_path(path):
                 continue
             source = file.read_text()
-            count = python_sites(source) if file.suffix == ".py" else zig_sites(source)
+            count = {".py": python_sites, ".ts": typescript_sites}.get(file.suffix, zig_sites)(source)
             if count:
                 found[path] = count
     return found
@@ -94,9 +142,26 @@ def violations(found):
             "Move them there; see tests/ci/platform_boundary.py" for path, count in sorted(found.items())]
 
 
+def bind_sites(root=ROOT):
+    """Each Zig file's functions and tests that bind a socket without listening on it."""
+    found = {}
+    for pattern in ("src/**/*.zig", "tests/integration/*.zig"):
+        for file in sorted(root.glob(pattern)):
+            names = unlistened_binds(file.read_text())
+            if names:
+                found[file.relative_to(root).as_posix()] = names
+    return found
+
+
+def bind_violations(found):
+    return [f"{path}: {name} binds a socket it never listens on; Darwin drops connections to it "
+            "instead of refusing them. Take socket_fixture.refusedPort() for a refusing port"
+            for path, names in sorted(found.items()) for name in names]
+
+
 def main():
     argparse.ArgumentParser(description=__doc__).parse_args()
-    messages = violations(sites())
+    messages = violations(sites()) + bind_violations(bind_sites())
     for message in messages:
         print(message, file=sys.stderr)
     return 1 if messages else 0

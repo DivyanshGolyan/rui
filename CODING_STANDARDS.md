@@ -165,6 +165,8 @@ Before every push, including review-fix rounds and after merging main, run only 
 - `python3 tests/ci/prepush.py`, which selects local feedback from the committed diff against the merge base.
   Use `--plan` to inspect its commands without executing them.
   It checks whitespace, formatting for changed Zig files, undefined names in changed Python files, and caller-error coverage for changed CLI owners.
+  Whitespace errors in committed lines, a stale `openapi.json` and a stale `clients/ts/src/wire.ts` are fixed in the working tree and still fail the run until the fix is committed.
+  A `src/store/schema.zig` change runs `tests/ci/schema_number.py --check`, which takes the next Store schema number from `origin/main` as it is now, not from the merge base.
   Source changes run their applicable import, provider, wire, fixture, platform and Store policy tests.
   CI Python owners run their corresponding test file when one exists; shared or unmapped policy inputs run the policy suite.
   Client changes run the existing TypeScript check instead of an unrelated Zig build.
@@ -172,6 +174,7 @@ Before every push, including review-fix rounds and after merging main, run only 
   Zig and manifest changes select the macOS type check only when those inputs have build targets of their own.
   Deleted files still select owner checks, and mixed changes union checks without repeating them.
   Commands read working-tree contents; unstaged and untracked-only changes do not select checks.
+  Orb setup installs it as a git pre-push hook that runs `--quick`, everything above except the Zig builds; elsewhere install it once with `python3 tests/ci/prepush.py --install-hook`.
 - the touched owners' focused tests (`-Dtest-filter`)
 - a mutation that reverts each fix and shows its new test fails
 
@@ -187,9 +190,13 @@ A concurrent test peer records what it observed before it replies or exits, so c
 Order test actors with a gate or event, never a sleep.
 Tests wait for a condition only through `wait_for` in `tests/integration/host_process.py` or `waitUntil` in `src/testing/poll.zig`, which accept only a check that finishes before the deadline; `tests/ci/test_harness_contracts.py` counts every other sleep in a fixture, a Zig `test` block or a test-only Zig file against a shrink-only allowlist.
 
+Shared fixture owners hold the I/O and platform cases that broke fixtures before, and `tests/ci` lints name the owner when a fixture bypasses one: Store fixture SQL passes the Store's own statement grammar (`rsql.fixtureError`), a child's stdin closes through `host_process.close_stdin`, a refusing TCP port comes from `socket_fixture.refusedPort`, a `std.testing.tmpDir` a test chmods or lists opens with `.iterate = true`, and trust in a fixture CA goes explicitly through `--provider-ca-file` or the launch frame's `caFile`, or through `os_semantics.system_trust` on Linux only.
+
 Fixtures and qualification harnesses observe the Host only through its boundaries.
 Read native evidence from the lossless test observation channel; stderr phase traces drop records under contention and are never evidence (`tests/ci/test_harness_contracts.py` rejects them in qualification).
 Take Host-decided values such as the canonical Store, capacities and descriptor requirements from readiness rather than recomputing them; pass each Host option once through the shared launcher; and let synthesized durable populations pass a production read before measuring them.
+A value another file owns is pinned only by that owner's tests: other tests read the Store format, wire version, product defaults, catalog windows and efforts, and built-in tools from their owners (`host_process`, `product_defaults` and `tools.built_in`), and match a caller error by its exit status, the invocation's context and its `[code]`, not the catalog's prose.
+`test_store_schema_fixtures.py`, `test_wire_version.py` and `test_fixture_literals.py` in `tests/ci` take the forbidden values from the owners and reject restated ones.
 Code that runs only on scheduled or one-platform jobs gets no other drift check.
 
 For each new owner-boundary regression on a [strict path](tests/ci/strict_paths.py), demonstrate that its counterexample goes red on the unfixed path or a targeted mutation at the intended assertion, not fixture setup.
@@ -206,7 +213,7 @@ A signature that already fails on main is not permission to bypass admission.
 Assertions, unexplained timeouts and unknown results require diagnosis, not replay.
 Pause the affected outcome, not independent work; a publication failure does not create another main admission gate.
 Diagnostic reruns need no routine grant; state the hypothesis or correction and preserve every failure.
-An unexplained fail-then-pass is not reliable green.
+An unexplained fail-then-pass is not reliable green; only a [listed flake](VERIFICATION.md#listed-flakes)'s signature may fail then pass.
 
 Required checks execute on the gated tip; build caches accelerate compilation and never cache test acceptance.
 Keep results in PR checks and existing artifacts rather than growing coordination records.

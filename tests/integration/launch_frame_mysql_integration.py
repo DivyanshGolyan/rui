@@ -92,7 +92,7 @@ def main():
                 assert url.encode() not in data and password.encode() not in data, f"login reached {name}"
 
     def close(child):
-        child.stdin.close()
+        host_process.close_stdin(child)
         assert child.wait(timeout=20) == 0, "stdin close did not cleanly stop the Host"
         assert not sock.exists(), "the stopped Host retained its socket"
 

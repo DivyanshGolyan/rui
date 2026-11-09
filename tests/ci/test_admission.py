@@ -515,6 +515,8 @@ class CandidatePlanTest(unittest.TestCase):
                         env[key] = output[expression.removeprefix('needs.plan.outputs.')]
                     elif expression == 'github.event.pull_request.draft':
                         env[key] = 'false'
+                    elif expression == 'github.token':
+                        continue  # only the failure explanation reads it
                     else:
                         env[key] = results[expression.split('.')[1]]
                 self.assertTrue(env)

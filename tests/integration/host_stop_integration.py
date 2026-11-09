@@ -133,7 +133,7 @@ def mixed_effect_drain(provider_first):
         proposal = fixture.sse_tool_calls("bash-proposal", [
             ("bash", "bash-call", json.dumps({"cmd": command, "timeout_ms": None, "description": "Write Host stop lifecycle events"}))
         ])
-        large = fixture.sse_answer("held-provider", "private-reason", "answer", "x" * 128000)[0]
+        large = fixture.sse_answer("held-provider", "private-reason", "answer", "x" * (125 * 1024))[0]
         provider_release = threading.Event()
         endpoint = fixture.SuccessEndpoint([], responses_by_input={
             "bash": proposal, "provider": (fixture.ResponseSpec(large, {}), provider_release)})

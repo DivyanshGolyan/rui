@@ -54,6 +54,7 @@ jobs:
       contents: read
       pull-requests: read
       actions: read
+      checks: read
     uses: ./.github/workflows/check.yml
     with:
       base: ${{ needs.batch.outputs.base }}

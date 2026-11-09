@@ -20,7 +20,7 @@ import control_integration as control
 import model_fixture as model
 import host_process
 from host_process import HostDiagnostics, PeerCensus, canonical_fixture_root, dispose_all, stop_process
-from product_defaults import DEFAULTS
+from product_defaults import DEFAULTS, context_window
 
 
 def exchange(sock, store, route, kind, **fields):
@@ -85,7 +85,7 @@ def checkpoint_readers(repetitions=12_000, *, chunk_sizes=None):
             policy = peers.call("configure", lambda: model.command(
                 "session", "configure", "--store", store, "--session", session,
                 "--record", state / "checkpoint-policy.json", "--key", "checkpoint-policy",
-                "--compaction-trigger", "272000"))
+                "--compaction-trigger", str(context_window("gpt-6-sol"))))
             assert policy["answer"]["status"] == "accepted", policy
             peers.call("message", lambda: model.message(state, store, "message", session, user_text))
             model.wait_for(lambda: peers.call("observe", lambda: model.observe(store, "message"))

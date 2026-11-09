@@ -344,14 +344,7 @@ pub fn frozenAction(comptime keys: anytype, decoded: Input.Decoded) ?@TypeOf(key
     };
 }
 
-/// What one input means at a choice drawn in place of the draft, through the
-/// draft's own classification: a typed `Key` means what `keys` says, the
-/// arrows and Enter are the choice's own, typed text and a marked paste begin
-/// typing, a chord, control or malformed input is refused, and the draft's
-/// other unmodified edit keys do nothing. Nothing here edits.
-pub fn Selection(comptime A: type) type {
-    return union(enum) { none, action: A, left, right, enter, text, refused };
-}
+const Selection = keymap.Selection;
 
 /// Unpasted Enter uses the composer's key semantics, including LF under ICRNL.
 pub fn plainEnter(decoded: Input.Decoded) bool {

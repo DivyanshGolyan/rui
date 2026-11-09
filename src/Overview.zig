@@ -516,13 +516,7 @@ fn turn(self: *Self) !?Next {
         if (try self.quiesceUpgrade()) {
             const outcome = try UpgradePanel.run(self.init, self.options.store, self.terminal, &self.input, self.interrupted);
             self.upgrade_requested = false;
-            switch (outcome) {
-                .unchanged => {},
-                .compatible => self.state.upgrade_blocked = false,
-                .incompatible => self.state.upgrade_blocked = true,
-            }
-            self.state.upgrade_pending = !self.state.upgrade_blocked;
-            self.state.next_list_ms = 0;
+            self.state.upgraded(outcome);
             self.forget();
         }
     } else if (!self.state.upgrade_blocked) {
@@ -535,7 +529,7 @@ fn turn(self: *Self) !?Next {
     const awake_ms: u64 = @intCast(@max(@divFloor(awake_ns, std.time.ns_per_ms), 0));
     if (try self.draw(awake_ms / view.spin_interval_ms)) |next| return next;
     const spins = if (self.shown) |*held| held.spins else false;
-    const timeout = switch (self.input.wait(awake_ns, self.budget(now_ms, awake_ms, spins))) {
+    const timeout = switch (self.input.wait(awake_ns, self.state.waitMs(self.upgrade_requested, now_ms, awake_ms, spins))) {
         .expire => 0,
         .poll => |milliseconds| milliseconds,
     };
@@ -794,14 +788,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }),
         .archive => |request| return self.event(.{ .archive = self.reply.archive(request) }),
         .models => {
-            outcome catch |err| return self.event(.{
-                .models = switch (err) {
-                    error.InvalidModelList, error.InvalidResponse, error.ResponseTooLarge => .invalid,
-                    // Any other failure leaves the person nothing to do but
-                    // try /model again, as when the Host is gone.
-                    else => .unanswered,
-                },
-            });
+            outcome catch |err| return self.event(.{ .models = .failed(err) });
             const menu = self.menu;
             self.menu = .{};
             return self.event(.{ .models = .{ .menu = menu } });
@@ -817,14 +804,10 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         }),
         .command => |command| {
             const output = &self.output;
-            const ran: view.Ran = .{
-                .output = output.bytes[0..@min(output.len, view.max_output_bytes)],
-                .cut = output.len > view.max_output_bytes,
-                // As a conversation drops an inspection that could not
-                // start, the overview says only that it did not run.
-                .outcome = if (outcome) |_| .done else |_| if (output.kept) .failed else .not_run,
-                .default = if (outcome) |_| if (command.name == .setup) self.savedDefault() else null else |_| null,
-            };
+            // As a conversation drops an inspection that could not start,
+            // the overview says only that it did not run.
+            var ran: view.Ran = .of(&output.bytes, output.len, if (outcome) |_| true else |_| false, output.kept);
+            if (ran.readsDefault(command.name)) ran.default = self.savedDefault();
             const next = self.event(.{ .ran = ran });
             // As in a conversation, a command that failed while it ran ends
             // the overview, and its failure is the one reported, not one
@@ -1019,15 +1002,16 @@ fn askBackground(self: *Self) !?Next {
     return null;
 }
 
-/// Every input takes one route, the one the core's input mode names, then
+/// Every input takes the one route the core names for it, then
 /// one core step, whether or not anything changed.
 fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
-    const input = if (self.state.prompt != null and self.state.prompt.?.action == .archive and TerminalEditor.plainEnter(decoded))
-        view.Input{ .composer = .submit }
-    else if (self.state.prompt != null and self.state.prompt.?.action == .archive and TerminalEditor.select(view.keys, decoded) == .enter)
-        view.Input{ .composer = .none }
-    else
-        route(self.state.inputMode(), &self.composer, decoded);
+    // The composer edits, and while frozen only the keys the table binds
+    // act, so nothing edits the text a failed start leaves to retry.
+    const input: view.Input = switch (self.state.route(TerminalEditor.select(view.keys, decoded), TerminalEditor.plainEnter(decoded))) {
+        .edit => .{ .composer = self.composer.apply(view.keys, decoded) },
+        .frozen => .{ .composer = if (TerminalEditor.frozenAction(view.keys, decoded)) |action| .{ .action = action } else .none },
+        .input => |input| input,
+    };
     return self.event(.{ .composed = .{ .input = input, .draft = self.composerDraft() } });
 }
 
@@ -1045,28 +1029,6 @@ fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
     if (view.commands.suggest(draft, .{}) == null) return null;
     const shown = view.nextCommands(&self.state, self.composerDraft()) orelse return "";
     return shown.completion();
-}
-
-/// One input through `mode`'s route, with the overview's one key table.
-/// The composer edits. Frozen while a start waits, the keys the table binds
-/// still act, and nothing edits the text a failed start leaves to retry.
-/// At the sign-in choice, as at an Action's choice in a conversation, the
-/// arrows and Enter are the choice's; typing and a paste go to the
-/// composer, which takes a paste from its start to its end.
-fn route(mode: view.InputMode, composer: *TerminalEditor, decoded: TerminalInput.Decoded) view.Input {
-    return switch (mode) {
-        .compose => .{ .composer = composer.apply(view.keys, decoded) },
-        .frozen => .{ .composer = if (TerminalEditor.frozenAction(view.keys, decoded)) |action| .{ .action = action } else .none },
-        .choice => switch (TerminalEditor.select(view.keys, decoded)) {
-            .none => .{ .choice = .none },
-            .action => |action| .{ .choice = .{ .action = action } },
-            .left => .{ .choice = .left },
-            .right => .{ .choice = .right },
-            .enter => .{ .choice = .enter },
-            .refused => .{ .choice = .refused },
-            .text => .{ .composer = composer.apply(view.keys, decoded) },
-        },
-    };
 }
 
 /// Draws the core's screen at `frame`, writing only what the terminal does
@@ -1118,16 +1080,6 @@ fn resize(self: *Self) !?Next {
 fn forget(self: *Self) void {
     if (self.shown) |*held| held.deinit();
     self.shown = null;
-}
-
-/// How long the loop may wait, in milliseconds, -1 for ever: until the
-/// core's next tick, and while the screen spins, no later than its next
-/// frame. Until then only input, the worker or a signal wakes it.
-fn budget(self: *const Self, now_ms: u64, awake_ms: u64, spins: bool) i32 {
-    const tick: i32 = if (self.state.upgrade_blocked or self.upgrade_requested) 16 else if (self.state.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
-    if (!spins) return tick;
-    const frame: i32 = @intCast(view.spin_interval_ms - awake_ms % view.spin_interval_ms);
-    return if (tick < 0) frame else @min(tick, frame);
 }
 
 /// While the terminal takes no output, reads input as the loop does, as the
@@ -1255,9 +1207,7 @@ fn upgradeHandoff(raw: *anyopaque, handoff: SessionFrontend.UpgradeHandoff) !boo
             return self.quiesceUpgrade();
         },
         .ready, .incompatible => {
-            self.state.upgrade_pending = handoff == .ready;
-            self.state.upgrade_blocked = handoff == .incompatible;
-            self.state.next_list_ms = 0;
+            self.state.upgraded(if (handoff == .ready) .compatible else .incompatible);
             return true;
         },
     }
@@ -2142,24 +2092,6 @@ test "each frame rewrites your working Session's spinner alone, and without colo
     try std.testing.expect(std.mem.indexOf(u8, turned, "\x1b[2K") == null);
     overview.caps = .{ .depth = .none };
     try std.testing.expect(try overview.draw(4) == null and !overview.shown.?.spins);
-}
-
-test "the loop waits for the core's next tick, and while the screen spins no later than its next frame" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
-    defer rig.close();
-    const overview = rig.overview;
-    const start = test_now_s * 1000;
-    // While a listing is in flight the core needs no tick.
-    try std.testing.expect(try overview.event(.{ .tick = start }) == null);
-    try std.testing.expectEqual(@as(i32, -1), overview.budget(start, 280, false));
-    try std.testing.expectEqual(@as(i32, 120), overview.budget(start, 280, true));
-    try std.testing.expectEqual(@as(i32, 1), overview.budget(start, 399, true));
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(i32, 100), overview.budget(start + 900, 40, false));
-    try std.testing.expectEqual(@as(i32, 100), overview.budget(start + 900, 40, true));
-    try std.testing.expectEqual(@as(i32, 10), overview.budget(start + 990, 40, true));
-    try std.testing.expectEqual(@as(i32, 0), overview.budget(start + 1000, 40, true));
 }
 
 test "a signal wakes the waiting loop and ends it" {

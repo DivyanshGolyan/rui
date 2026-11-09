@@ -712,6 +712,9 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
                     (codex_h2, "retain_failure_state", lambda label, state: retained.append(state)),
                     (codex_h2.shutil, "rmtree", lambda path: removed.append(path))):
                 stack.enter_context(patch.object(owner, name, value))
+            # The real run is Linux-only (SSL_CERT_FILE_TRUST); the mocked Host
+            # reads no trust, so its cleanup order is checked on every platform.
+            stack.enter_context(os_semantics.simulate("linux"))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             expected = primary if fail_body or fail_start else secondary if fail_shutdown else None
             if expected is None:

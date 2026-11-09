@@ -27,6 +27,8 @@ permissions:
   contents: read
   pull-requests: read
   actions: read
+  # Aggregates read GitHub's annotations to name a lost or never-acquired runner.
+  checks: read
 
 concurrency:
   group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}${{ inputs.promotion && '-promotion' || '' }}
@@ -45,6 +47,7 @@ jobs:
       native: ${{ steps.select.outputs.native }}
       upgrade: ${{ steps.select.outputs.upgrade }}
       retry: ${{ steps.select.outputs.retry }}
+      quarantine: ${{ steps.select.outputs.quarantine }}
       linux_memory: ${{ steps.select.outputs.linux_memory }}
       cache_execution: ${{ steps.select.outputs.cache_execution }}
       linux_matrix: ${{ steps.select.outputs.linux_matrix }}
@@ -88,6 +91,10 @@ jobs:
               kind = ChangeKind.NORMAL
           p['change_kind'] = kind.value
           ready_pr = os.environ['EVENT_NAME'] == 'pull_request' and p['phase'] == 'review'
+          # Listed flakes (quarantine.json) never excuse a strict change; promotion
+          # still blocks on a listed flake's second consecutive failure.
+          quarantine = ('promotion' if os.environ['PROMOTION'] == 'true'
+                        else 'admission' if p['retry'] else 'off')
           if kind == ChangeKind.DOCUMENTATION:
               p['targets'] = []
               p['native_targets'] = []
@@ -132,6 +139,7 @@ jobs:
               print('native=' + str(p['native_required']).lower(), file=f)
               print('upgrade=' + str(p['upgrade_required']).lower(), file=f)
               print('retry=' + str(p['retry']).lower(), file=f)
+              print('quarantine=' + quarantine, file=f)
               print('linux_memory=' + str(p['linux_memory_checks']).lower(), file=f)
               print('cache_execution=' + str(p['cache_execution_checks']).lower(), file=f)
               print('policy_skips=' + json.dumps(p['policy_skips']), file=f)
@@ -187,9 +195,8 @@ jobs:
           sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())
           PY
       - name: Reject undefined fixture names before native builds
-        run: |
-          python3 -m pip install --disable-pip-version-check ruff==0.17.0
-          python3 -m ruff check --select F821 tests
+        # ruff is pinned in tests/ci/requirements.txt, which the pre-push hook installs too.
+        run: python3 -m ruff check --select F821 tests
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
@@ -480,13 +487,14 @@ jobs:
           TARGETS: ${{ toJSON(matrix.targets) }}
           CHECK_PART: ${{ matrix.part }}
           RETRY: ${{ needs.plan.outputs.retry == 'true' && '--retry' || '' }}
+          QUARANTINE: ${{ needs.plan.outputs.quarantine }}
           RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
           echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           zig fmt --check --ast-check build.zig src
-          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled $RETRY
+          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --quarantine "$QUARANTINE" $RETRY
       - name: Require that the live MySQL dialect check ran
         # Fails when the unit binary left no record or PREPAREd nothing, so
         # any path that keeps the check from running (selection, launcher
@@ -571,6 +579,17 @@ jobs:
             test "$NATIVE_RESULT" = skipped
             test "$TYPECHECK_RESULT" = skipped
           fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ failure() }}
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
+          sparse-checkout: tests/ci
+          persist-credentials: false
+      - name: Name each failed job and its cause
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tests/ci/failure_cause.py explain
   macos_suites:
     name: macos suites (${{ matrix.name }})
     needs: [plan, macos_build, macos_build_unit]
@@ -604,12 +623,13 @@ jobs:
           TARGETS: ${{ toJSON(matrix.targets) }}
           CHECK_PART: ${{ matrix.part }}
           RETRY: ${{ needs.plan.outputs.retry == 'true' && '--retry' || '' }}
+          QUARANTINE: ${{ needs.plan.outputs.quarantine }}
           RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
           echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
-          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled $RETRY
+          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --quarantine "$QUARANTINE" $RETRY
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -653,6 +673,17 @@ jobs:
           if [ "$SPLIT" = true ]; then test "$UNIT_RESULT" = success; else test "$UNIT_RESULT" = skipped; fi
           test "$BUILD_RESULT" = success
           test "$NATIVE_RESULT" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ failure() }}
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
+          sparse-checkout: tests/ci
+          persist-credentials: false
+      - name: Name each failed job and its cause
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tests/ci/failure_cause.py explain
   previous_release_upgrade:
     needs: plan
     # Upgrade, installer and Store-format paths only; promotion runs it for every batch.
@@ -690,7 +721,7 @@ jobs:
           CACHE_RESULT: ${{ needs.cache_execution.result }}
         run: |
           set -euo pipefail
-          test "$DRAFT" = false
+          if [ "$DRAFT" != false ]; then echo '::error::A draft never admits: mark the PR ready for review.'; exit 1; fi
           test "$PLAN_RESULT" = success
           test "$LINUX_RESULT" = success
           case "$CHANGE_KIND" in
@@ -729,3 +760,14 @@ jobs:
             false) test "$CACHE_RESULT" = skipped ;;
             *) echo 'Missing or invalid cache selection' >&2; exit 1 ;;
           esac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ failure() }}
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
+          sparse-checkout: tests/ci
+          persist-credentials: false
+      - name: Name each failed job and its cause
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tests/ci/failure_cause.py explain

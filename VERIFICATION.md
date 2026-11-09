@@ -84,6 +84,7 @@ Normal changes retain policy and the Linux aggregate even for a narrow diff.
 Only the explicit documentation classification can omit them; an empty target list alone cannot.
 
 Qualification Go changes select `measurement-check`.
+Changes to the CLI configuration surface (CLI grammar and client, creation defaults, the wire protocol and `openapi.json`, and Host configuration admission) select it too: its configure contract runs the measurement runners' `session configure` call and a replay of its saved record against the current Rui, so drift fails in the PR that causes it rather than in the next campaign.
 Linux-memory Python or C changes also run the collector unittests and compile the diagnostic probe on Linux.
 Other qualification changes state manual syntax or compilation requirements.
 Stored historical results select no product suites.
@@ -97,7 +98,7 @@ GitHub must require pull requests and the GitHub Actions `admission` check on `m
 Use squash merges under linear history.
 A PR's checks qualify its merge with the base they ran on, so a green PR merges without rerunning after `main` moves.
 Two PRs that pass alone but break together are caught by promotion, which qualifies main HEAD and bisects to the commit that broke it.
-A changed head or base requires current candidate checks before merge.
+A changed head requires current candidate checks before merge.
 
 [Selected checks](.github/workflows/check.yml) qualify each ready PR's immutable merge candidate.
 For normal changes, Linux runs the affected targets from [select_tests.py](tests/ci/select_tests.py), `typecheck-macos` and, when selected, the `stack-frames` oracle.
@@ -135,7 +136,7 @@ There is no automatic promotion trigger.
 Record recurring failures by fixture and assertion, preserve their counterexamples, and close them through the fixing commit.
 An unrelated issue does not freeze publication of qualified main commits.
 Report native architecture, skips and unrun cases; cross-compilation and skips are not native passes.
-Keep cleanup and resource bounds, and do not retry failed required acceptance to obtain a pass.
+Keep cleanup and resource bounds, and do not retry failed required acceptance to obtain a pass; only a [listed flake](#listed-flakes) reruns, and only its listed signature may fail then pass.
 
 ### Composed gates
 
@@ -159,10 +160,12 @@ Both must pass.
 The execution partition overlaps native tests with its serial process fixtures; the unsplit gate remains serial.
 Their disjoint fixtures cover the full gate once; callers run Host-process, allocator, launch and Debug smoke cases serially after the parallel batch.
 [qualification.py](tests/ci/qualification.py) packs other Linux targets so a Selected run never exceeds ten shards.
-Only when the diff touches no strict path does a shard rerun a failed batch once and report both results; a pass after the rerun is a flake to fix.
+Only draft and manually dispatched runs whose diff touches no strict path rerun a failed batch once and report both results; a pass after the rerun is a flake to fix.
+Ready PRs, promotions and the documentation lane never rerun, except a batch that failed only on [listed flakes](#listed-flakes).
 Qualification keeps one job per target. macOS packs native work into at most three workers: execution plus portable logic, callers, and remaining native targets.
 Composed gates, long witnesses, launch, Debug admission, reply delivery and H2 stay isolated from other target batches.
 The `linux` and `macos` statuses fail if any selected job fails or is cancelled.
+A failing aggregate names each failed job of its run and whether infrastructure or a check failed it ([failure_cause.py](tests/ci/failure_cause.py)), so a red never reads only as an exit code.
 Use unsplit `zig build check-full` for single-machine isolated-latency or release evidence.
 
 Driver `fixture passed: exit=0 elapsed=1.234s` records (`failed` on nonzero exit) attribute fixture cost, not CPU time, isolated latency or speedup.
@@ -244,9 +247,22 @@ Warm baselines are not test acceptance.
 Maintenance also builds the pinned previous release per platform for the read-only upgrade check.
 The API-only cleanup job runs trusted main code with cache-deletion permission and consumes no producer code, caches or artifacts.
 
-CI uses only standard `ubuntu-24.04` and Apple Silicon `macos-15` runners in this public repository, with no paid host or storage expansion.
+CI uses only standard `ubuntu-24.04` and Apple Silicon `macos-15` runners, plus `ubuntu-24.04-arm` for the Linux arm64 release build, in this public repository, with no paid host or storage expansion.
 Free eligibility does not prove capacity; report the actual runner outcome and do not raise paid spend silently.
-Apart from the shard rerun above, test execution has no automatic retry.
+Apart from the shard rerun above and a [listed flake](#listed-flakes)'s rerun, test execution has no automatic retry.
+Infrastructure failures are not test execution: [Retry infrastructure failures](.github/workflows/infra-retry.yml) reruns a PR run's failed jobs once when every failure was infrastructure (no runner took or kept the job, or a step that only fetches, installs or starts services failed with a network error such as GitHub's 504) and the run still tests the PR's head.
+A build or test step's failure, a later attempt or any check failure in the run never reruns, and a rerun job's tests had not run.
+
+### Listed flakes
+
+[quarantine.json](tests/ci/quarantine.json) lists intermittent failures by their fixture-and-assertion signature, as [report_issue.py](tests/ci/report_issue.py) names them, with the file, an open `ci-red` issue, an owner and an expiry at most 14 days after the entry was added.
+A listed test still runs and reports.
+When every failure of a suite batch is a listed, unexpired signature, [run_selected.py](tests/ci/run_selected.py) reruns the batch once.
+In PR admission a second failure that is again only listed signatures passes with a warning; promotion fails on it, so promotion blocks on two consecutive failures.
+Any other failure in the batch, a failed step that names no listed fixture or an unparsed failure keeps it red, and a PR touching a [strict path](tests/ci/strict_paths.py) gets no quarantine.
+Store, recovery and upgrade tests are never listed ([quarantine.py](tests/ci/quarantine.py) checks each entry, and `test_quarantine.py` runs in the policy job).
+For a listed signature, and only for it, a fail-then-pass is green; every other fail-then-pass stays unexplained.
+An expired entry blocks again: fix the race and remove the entry in the commit that says `Fixes #N`, or renew it in a reviewed PR with a new 14-day window.
 
 ### Hosted qualification
 

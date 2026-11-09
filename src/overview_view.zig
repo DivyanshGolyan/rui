@@ -27,6 +27,7 @@ const model_list = @import("model_list.zig");
 const model_picker = @import("model_picker.zig");
 const provider_name = @import("provider_name.zig");
 const session_work = @import("session_work.zig");
+const session_upgrade = @import("session_upgrade.zig");
 const slash_commands = @import("slash_commands.zig");
 pub const commands = slash_commands.overview;
 const TerminalText = @import("TerminalText.zig");
@@ -70,6 +71,8 @@ pub const max_requests = 8;
 pub const list_interval_ms = 1000;
 /// How long each frame of the spinner shows: one turn in two seconds.
 pub const spin_interval_ms = 200;
+/// How often the shell polls while an Upgrade holds the overview.
+pub const upgrade_poll_ms = 16;
 /// A generated request handle, as `rui request recover` takes it.
 pub const max_handle_bytes = 36;
 
@@ -197,6 +200,10 @@ pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0, anchor: us
 /// read: the composer, the composer frozen while a start waits, or the
 /// sign-in choice drawn in its place.
 pub const InputMode = enum { compose, frozen, choice };
+
+/// How the shell takes one input: the composer edits with it, the frozen
+/// composer acts only on the keys the table binds, or it is `input` as is.
+pub const Route = union(enum) { edit, frozen, input: Input };
 
 /// What one input did, and the draft as that input left it.
 pub const Composed = struct { input: Input, draft: Draft };
@@ -406,6 +413,24 @@ pub const Ran = struct {
     /// The default saved defaults now give the next Session, after a
     /// `/setup` that ran; null leaves the one in force.
     default: ?Default = null,
+
+    /// A command that printed `printed` bytes, the first of which `kept`
+    /// holds, and ran to the end if `ok`. Its failure counts as one while
+    /// it ran only once its output went to the page (`rendering`); before
+    /// that it never started.
+    pub fn of(kept: []const u8, printed: usize, ok: bool, rendering: bool) Ran {
+        return .{
+            .output = kept[0..@min(printed, max_output_bytes)],
+            .cut = printed > max_output_bytes,
+            .outcome = if (ok) .done else if (rendering) .failed else .not_run,
+        };
+    }
+
+    /// The shell reads the default saved defaults now give only after a
+    /// `/setup` that ran.
+    pub fn readsDefault(self: Ran, name: commands.Name) bool {
+        return self.outcome == .done and name == .setup;
+    }
 };
 
 /// The most a command's output the overview keeps.
@@ -460,6 +485,16 @@ pub const ModelsRead = union(enum) {
     unanswered,
     /// The Host answered with a list Rui cannot read.
     invalid,
+
+    /// How a failed read ended: a list Rui cannot read, else no answer,
+    /// which leaves the person nothing to do but try /model again, as when
+    /// the Host is gone.
+    pub fn failed(err: anyerror) ModelsRead {
+        return switch (err) {
+            error.InvalidModelList, error.InvalidResponse, error.ResponseTooLarge => .invalid,
+            else => .unanswered,
+        };
+    }
 };
 
 /// A save of `binding` as the default ended as `outcome`.
@@ -854,7 +889,11 @@ pub const State = struct {
     /// The Workspace the composer starts Sessions in, as an index in `workspaces`.
     cwd: u32,
     now_ms: u64 = 0,
+    /// The selected Rui does not speak this Host's protocol: Host intents
+    /// wait for /upgrade or a new terminal.
     upgrade_blocked: bool = false,
+    /// An Upgrade is under way or the listing has not yet been read again
+    /// under the selected Rui: Host intents wait.
     upgrade_pending: bool = false,
     /// The terminal's own last successful `rui auth login`, Unix seconds.
     login_at: ?u64 = null,
@@ -969,6 +1008,29 @@ pub const State = struct {
         return .compose;
     }
 
+    /// How the shell takes an input that `selected` names, `plain_enter`
+    /// when it is an unpasted Enter. The archive prompt's Enter is its own:
+    /// a plain one confirms, a pasted or modified one does nothing. At the
+    /// sign-in choice the arrows, Enter and the screen's keys are the
+    /// choice's, and typing or a paste goes to the composer.
+    pub fn route(self: *const State, selected: keymap.Selection(Action), plain_enter: bool) Route {
+        if (self.prompt) |prompt| if (prompt.action == .archive and selected == .enter)
+            return .{ .input = .{ .composer = if (plain_enter) .submit else .none } };
+        return switch (self.inputMode()) {
+            .compose => .edit,
+            .frozen => .frozen,
+            .choice => switch (selected) {
+                .none => .{ .input = .{ .choice = .none } },
+                .action => |action| .{ .input = .{ .choice = .{ .action = action } } },
+                .left => .{ .input = .{ .choice = .left } },
+                .right => .{ .input = .{ .choice = .right } },
+                .enter => .{ .input = .{ .choice = .enter } },
+                .refused => .{ .input = .{ .choice = .refused } },
+                .text => .edit,
+            },
+        };
+    }
+
     /// The picker, while the screen shows it: keys act on nothing else.
     /// The picker shows only over an empty draft, one row.
     pub fn shownPicker(self: *const State) ?*const Picker {
@@ -1054,6 +1116,31 @@ pub const State = struct {
             at = @min(at orelse resets *| 1000, resets *| 1000);
         };
         return at;
+    }
+
+    /// An Upgrade ended with `outcome`: an unchanged panel leaves the block
+    /// as it was, and unless blocked the overview lists again before Host
+    /// intents resume.
+    pub fn upgraded(self: *State, outcome: session_upgrade.Outcome) void {
+        switch (outcome) {
+            .unchanged => {},
+            .compatible => self.upgrade_blocked = false,
+            .incompatible => self.upgrade_blocked = true,
+        }
+        self.upgrade_pending = !self.upgrade_blocked;
+        self.next_list_ms = 0;
+    }
+
+    /// How long the shell may wait for input, in milliseconds, -1 for ever:
+    /// until the next `tick`, every `upgrade_poll_ms` while an Upgrade holds
+    /// the overview or is asked for, and while the screen spins no later than
+    /// its next frame. `now_ms` is wall-clock time, as ticks are; `awake_ms`
+    /// is the monotonic clock frames count on.
+    pub fn waitMs(self: *const State, upgrading: bool, now_ms: u64, awake_ms: u64, spins: bool) i32 {
+        const next: i32 = if (self.upgrade_blocked or upgrading) upgrade_poll_ms else if (self.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
+        if (!spins) return next;
+        const frame: i32 = @intCast(spin_interval_ms - awake_ms % spin_interval_ms);
+        return if (next < 0) frame else @min(next, frame);
     }
 
     fn selectedRow(self: *const State) ?*const Row {
@@ -8100,4 +8187,112 @@ test "upgrade holds settle accepted archive restore and stop completions without
             }
         }
     };
+}
+
+test "the overview waits until its next tick, polls while an Upgrade holds it, and wakes for the spinner's next frame" {
+    var state: State = undefined;
+    try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
+    defer state.deinit();
+    state.listing = false;
+    state.next_list_ms = 10_000;
+    try std.testing.expectEqual(@as(i32, 2_500), state.waitMs(false, 7_500, 0, false));
+    // A tick already due waits nothing; one far off is capped, not wrapped.
+    try std.testing.expectEqual(@as(i32, 0), state.waitMs(false, 12_000, 0, false));
+    state.next_list_ms = std.math.maxInt(u64);
+    try std.testing.expectEqual(@as(i32, std.math.maxInt(i32)), state.waitMs(false, 0, 0, false));
+    // A listing in flight wakes the loop only through its answer.
+    state.listing = true;
+    try std.testing.expectEqual(@as(i32, -1), state.waitMs(false, 0, 0, false));
+    // The spinner's next frame on the monotonic clock comes first.
+    try std.testing.expectEqual(@as(i32, spin_interval_ms - 30), state.waitMs(false, 0, 1_030, true));
+    state.listing = false;
+    state.next_list_ms = 10_010;
+    try std.testing.expectEqual(@as(i32, 10), state.waitMs(false, 10_000, 1_030, true));
+    // An Upgrade asked for, or one that left the overview blocked, polls.
+    try std.testing.expectEqual(@as(i32, upgrade_poll_ms), state.waitMs(true, 0, 0, false));
+    state.upgrade_blocked = true;
+    try std.testing.expectEqual(@as(i32, upgrade_poll_ms), state.waitMs(false, 0, 0, false));
+    try std.testing.expectEqual(@as(i32, 10), state.waitMs(false, 0, 190, true));
+}
+
+test "a model list Rui cannot read says so; any other failure is no answer" {
+    try std.testing.expectEqual(ModelsRead.invalid, ModelsRead.failed(error.InvalidModelList));
+    try std.testing.expectEqual(ModelsRead.invalid, ModelsRead.failed(error.ResponseTooLarge));
+    try std.testing.expectEqual(ModelsRead.invalid, ModelsRead.failed(error.InvalidResponse));
+    try std.testing.expectEqual(ModelsRead.unanswered, ModelsRead.failed(error.ConnectionResetByPeer));
+}
+
+test "an Upgrade holds Host intents until the overview lists again under the selected Rui, or blocks them" {
+    var state: State = undefined;
+    try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
+    defer state.deinit();
+    state.next_list_ms = 10_000;
+    state.upgraded(.unchanged);
+    try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending and state.next_list_ms == 0);
+    state.upgraded(.incompatible);
+    try std.testing.expect(state.upgrade_blocked and !state.upgrade_pending);
+    // An unchanged panel keeps the block; a compatible one lifts it.
+    state.next_list_ms = 10_000;
+    state.upgraded(.unchanged);
+    try std.testing.expect(state.upgrade_blocked and !state.upgrade_pending and state.next_list_ms == 0);
+    state.upgraded(.compatible);
+    try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending);
+}
+
+test "the archive prompt's Enter confirms only when plain; the sign-in choice takes its keys and leaves typing to the composer" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    try std.testing.expectEqual(Route.edit, state.route(.enter, true));
+    try std.testing.expectEqual(Route.edit, state.route(.{ .action = .previous }, false));
+    // A stop prompt takes Enter as ordinary input.
+    state.prompt = .{ .stop = "k7m2qx".* };
+    try std.testing.expectEqual(Route.edit, state.route(.enter, true));
+    state.prompt = .{ .stop = "k7m2qx".*, .action = .archive };
+    try std.testing.expectEqual(Route{ .input = .{ .composer = .submit } }, state.route(.enter, true));
+    try std.testing.expectEqual(Route{ .input = .{ .composer = .none } }, state.route(.enter, false));
+    try std.testing.expectEqual(Route.edit, state.route(.text, false));
+    state.prompt = null;
+    var picked = try pickerState(Default.of("openai", "gpt-6-luna"));
+    defer picked.deinit();
+    try openPicker(&picked, &both);
+    try expectEffects(&.{}, try submit(&picked, try typeText(&picked, "")));
+    try std.testing.expectEqual(Route{ .input = .{ .choice = .enter } }, picked.route(.enter, true));
+    try std.testing.expectEqual(Route{ .input = .{ .choice = .left } }, picked.route(.left, false));
+    try std.testing.expectEqual(Route{ .input = .{ .choice = .right } }, picked.route(.right, false));
+    try std.testing.expectEqual(Route{ .input = .{ .choice = .refused } }, picked.route(.refused, false));
+    try std.testing.expectEqual(Route{ .input = .{ .choice = .none } }, picked.route(.none, false));
+    try std.testing.expectEqual(Route{ .input = .{ .choice = .{ .action = .previous } } }, picked.route(.{ .action = .previous }, false));
+    try std.testing.expectEqual(Route.edit, picked.route(.text, false));
+    // At the choice the archive prompt's Enter is still the prompt's.
+    picked.prompt = .{ .stop = "k7m2qx".*, .action = .archive };
+    try std.testing.expectEqual(Route{ .input = .{ .composer = .submit } }, picked.route(.enter, true));
+}
+
+test "while a start waits the composer is frozen, and the archive prompt still takes its Enter" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    try expectEffects(&.{.{ .start = .{ .settings = &state.settings, .text = "go", .binding = state.nextBinding() } }}, try submit(&state, try typeText(&state, "go")));
+    try std.testing.expectEqual(InputMode.frozen, state.inputMode());
+    try std.testing.expectEqual(Route.frozen, state.route(.{ .action = .previous }, false));
+    try std.testing.expectEqual(Route.frozen, state.route(.text, false));
+    state.prompt = .{ .stop = "k7m2qx".*, .action = .archive };
+    try std.testing.expectEqual(Route{ .input = .{ .composer = .none } }, state.route(.enter, false));
+}
+
+test "a command's output is cut at what the overview keeps, and its failure ends the overview only once its output was kept" {
+    var kept: [max_output_bytes + 1]u8 = @splat('x');
+    const whole = Ran.of(&kept, 5, true, true);
+    try std.testing.expectEqual(@as(usize, 5), whole.output.len);
+    try std.testing.expect(!whole.cut and whole.outcome == .done and whole.default == null);
+    const full = Ran.of(&kept, max_output_bytes, true, false);
+    try std.testing.expect(full.output.len == max_output_bytes and !full.cut);
+    const cut = Ran.of(&kept, max_output_bytes + 1, true, true);
+    try std.testing.expect(cut.output.len == max_output_bytes and cut.cut);
+    try std.testing.expectEqual(.failed, Ran.of(&kept, 0, false, true).outcome);
+    try std.testing.expectEqual(.not_run, Ran.of(&kept, 0, false, false).outcome);
+    // Only a /setup that ran reads the saved defaults again.
+    try std.testing.expect(whole.readsDefault(.setup));
+    try std.testing.expect(!whole.readsDefault(.rename));
+    try std.testing.expect(!Ran.of(&kept, 0, false, true).readsDefault(.setup));
+    try std.testing.expect(!Ran.of(&kept, 0, false, false).readsDefault(.setup));
 }

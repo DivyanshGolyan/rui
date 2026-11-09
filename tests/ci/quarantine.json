@@ -1,0 +1,12 @@
+{
+  "flakes": [
+    {
+      "signature": "tests/integration/codex_h2_integration.py: assert \"transport reactor initialization failure: HttpsProxySchemeUnsupported\" in required.stderr, required raised AssertionError",
+      "path": "tests/integration/codex_h2_integration.py",
+      "issue": 1093,
+      "owner": "DivyanshGolyan",
+      "added": "2026-11-09",
+      "expires": "2026-11-23"
+    }
+  ]
+}

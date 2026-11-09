@@ -202,18 +202,7 @@ test "Running reports nothing listening as not run and expired unsent calls as n
     const gpa = std.testing.allocator;
     const running = try gpa.create(Running);
     defer gpa.destroy(running);
-    // Bind without listening: the port is reserved but cannot accept a call.
-    const socket = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
-    try std.testing.expect(socket >= 0);
-    defer _ = std.c.close(socket);
-    var address: std.c.sockaddr.in = std.mem.zeroes(std.c.sockaddr.in);
-    address.family = std.c.AF.INET;
-    address.addr = @bitCast([4]u8{ 127, 0, 0, 1 });
-    if (@hasField(std.c.sockaddr.in, "len")) address.len = @sizeOf(std.c.sockaddr.in);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.bind(socket, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)));
-    var length: std.c.socklen_t = @sizeOf(std.c.sockaddr.in);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.getsockname(socket, @ptrCast(&address), &length));
-    const port = std.mem.bigToNative(u16, address.port);
+    const port = try @import("../socket_fixture.zig").refusedPort();
     try running.start(gpa, testInput(port), 0);
     defer running.deinit();
     var buffer: [512]u8 = undefined;
