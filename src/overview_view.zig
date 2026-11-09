@@ -32,6 +32,7 @@ const slash_commands = @import("slash_commands.zig");
 const submission = @import("submission_state.zig");
 pub const commands = slash_commands.overview;
 const TerminalText = @import("TerminalText.zig");
+const theme = @import("theme.zig");
 const work_line = @import("work_line.zig");
 const unicode = @import("terminal_unicode");
 const gwidth = @import("terminal_width");
@@ -2877,27 +2878,6 @@ pub const palettes = std.enums.EnumArray(Skin, Palette).init(.{
     },
 });
 
-/// The 256-colour entry nearest `rgb`, from the 6x6x6 cube and the grey
-/// ramp. Entries 0-15 are left out: each terminal themes its own.
-pub fn nearestIndex(rgb: Rgb) u8 {
-    const levels = [_]u8{ 0, 95, 135, 175, 215, 255 };
-    var best: u8 = 16;
-    var best_distance: u32 = std.math.maxInt(u32);
-    for (16..256) |index| {
-        const candidate: Rgb = if (index < 232) .{ levels[(index - 16) / 36], levels[(index - 16) / 6 % 6], levels[(index - 16) % 6] } else @splat(@intCast(8 + 10 * (index - 232)));
-        var distance: u32 = 0;
-        for (rgb, candidate) |want, have| {
-            const delta = @as(i32, want) - have;
-            distance += @intCast(delta * delta);
-        }
-        if (distance < best_distance) {
-            best = @intCast(index);
-            best_distance = distance;
-        }
-    }
-    return best;
-}
-
 /// The same tables as 256-colour entries.
 pub const indexed = blk: {
     @setEvalBranchQuota(400_000);
@@ -2905,8 +2885,8 @@ pub const indexed = blk: {
     for (std.enums.values(Skin)) |skin| {
         const palette = palettes.get(skin);
         var table = tables.getPtr(skin);
-        for (std.enums.values(Colour)) |role| table.colours.set(role, nearestIndex(palette.colours.get(role)));
-        for (std.enums.values(Background)) |role| table.backgrounds.set(role, nearestIndex(palette.backgrounds.get(role)));
+        for (std.enums.values(Colour)) |role| table.colours.set(role, theme.nearestIndex(palette.colours.get(role)));
+        for (std.enums.values(Background)) |role| table.backgrounds.set(role, theme.nearestIndex(palette.backgrounds.get(role)));
     }
     break :blk tables;
 };
@@ -6462,19 +6442,15 @@ test "your Sessions keep a bright title once they end" {
     try std.testing.expectEqual(Style{ .colour = .quiet }, screen.styleAt(5, 4).?);
 }
 
-test "every role has an entry in both skins, and its 256-colour entry is the nearest" {
-    for (std.enums.values(Skin)) |skin| {
-        const palette = palettes.get(skin);
-        for (std.enums.values(Colour)) |role| {
-            const index = indexed.get(skin).colours.get(role);
-            try std.testing.expect(index >= 16);
-            try std.testing.expectEqual(nearestIndex(palette.colours.get(role)), index);
-        }
-        for (std.enums.values(Background)) |role| try std.testing.expectEqual(nearestIndex(palette.backgrounds.get(role)), indexed.get(skin).backgrounds.get(role));
+test "the overview indexed palettes retain every colour" {
+    const expected = [_]struct { skin: Skin, colours: [9]u8, backgrounds: [4]u8 }{
+        .{ .skin = .day, .colours = .{ 235, 17, 239, 60, 103, 187, 94, 124, 233 }, .backgrounds = .{ 255, 253, 254, 214 } },
+        .{ .skin = .night, .colours = .{ 255, 188, 249, 247, 60, 237, 214, 210, 233 }, .backgrounds = .{ 234, 235, 238, 214 } },
+    };
+    for (expected) |case| {
+        for (std.enums.values(Colour), case.colours) |role, value| try std.testing.expectEqual(value, indexed.get(case.skin).colours.get(role));
+        for (std.enums.values(Background), case.backgrounds) |role, value| try std.testing.expectEqual(value, indexed.get(case.skin).backgrounds.get(role));
     }
-    try std.testing.expectEqual(@as(u8, 16), nearestIndex(.{ 0, 0, 0 }));
-    try std.testing.expectEqual(@as(u8, 231), nearestIndex(.{ 255, 255, 255 }));
-    try std.testing.expectEqual(@as(u8, 214), nearestIndex(hex("#f2c200")));
 }
 
 test "numbers group the Indian way" {
