@@ -5,6 +5,7 @@
 //! only what an earlier round's rows name.
 
 const std = @import("std");
+const command_reply = @import("../../command_reply.zig");
 const word_search = @import("../../word_search.zig");
 const pages = @import("../../os/pages.zig");
 const protocol = @import("../../protocol.zig");
@@ -332,64 +333,17 @@ pub const queued = rsql.Read(.{
     .cardinality = .each,
 });
 
-pub const PublicConversationItem = struct {
-    position: u64,
-    ordinal: u64, // Zero for User/Assistant; one-based call ordinal in a completed Tool Result group.
-    kind: protocol.ConversationItemKind,
-    content: ContentReference,
-    presentation: ?protocol.ToolPresentation = null,
-    admitted_at: ?u64 = null, // The Host wall-clock second a User item was admitted.
-    sender: ?protocol.NamedPeer = null, // A User item's sending peer Session.
-};
+pub const PublicConversationItem = command_reply.PublicConversationItem;
 
-pub const PublicConversationPage = struct {
-    pub const capacity = protocol.public_conversation_page_items;
-    end: u64,
-    items: [capacity]PublicConversationItem = undefined,
-    count: usize = 0,
-    more: bool = false,
-};
+pub const PublicConversationPage = command_reply.PublicConversationPage;
 
-pub const MessageObservation = struct {
-    content: ContentReference,
-    queue: ?AcceptedMessageQueue = null,
-    admitted_at: u64 = 0,
-    /// The Session's complete work, only while this admission can advance.
-    work: ?session_work.Work = null,
-    recovery: Recovery = .{},
-};
+pub const MessageObservation = command_reply.MessageObservation;
 
-pub const Recovery = struct {
-    pub const capacity = protocol.message_recovery_limit;
-    calls: [capacity]UnknownOutcome = undefined,
-    count: u8 = 0,
-    more: bool = false,
-};
+pub const Recovery = command_reply.Recovery;
 
-pub const UnknownOutcome = protocol.MessageUnknownOutcome;
+pub const UnknownOutcome = command_reply.UnknownOutcome;
 
-pub const AcceptedMessageQueue = struct {
-    admission_id: u64,
-    state: State,
-
-    pub const State = union(enum) {
-        queued,
-        excluded: struct { code: protocol.Bounded(protocol.max_code_bytes) },
-        processing: AttemptBinding,
-        completed: struct {
-            binding: AttemptBinding,
-            answer: ContentReference,
-        },
-        cancelled: struct {
-            binding: AttemptBinding,
-            code: protocol.Bounded(protocol.max_code_bytes),
-        },
-        failed: struct {
-            binding: AttemptBinding,
-            code: protocol.Bounded(protocol.max_code_bytes),
-        },
-    };
-};
+pub const AcceptedMessageQueue = command_reply.AcceptedMessageQueue;
 
 pub const SessionObservation = struct {
     found: bool = false,
