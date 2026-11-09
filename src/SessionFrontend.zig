@@ -21,6 +21,7 @@ const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const reader_policy = @import("session_reading.zig");
 const session_notice = @import("session_notice.zig");
+const session_keys = @import("session_keys.zig");
 const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
 const UpgradePanel = @import("UpgradePanel.zig");
@@ -1298,65 +1299,8 @@ fn commandActive(self: *const Self) bool {
 }
 
 /// What a key does in a conversation, beside the draft or an Action's choice.
-const ConversationAction = enum {
-    page_up,
-    page_down,
-    /// Up and Down: the shown list's highlight, the /status page's row,
-    /// else a line of scrolling.
-    previous,
-    next,
-    /// Shift-Up and Shift-Down: the shown list's highlight, else a line of
-    /// scrolling, also on the /status page.
-    scroll_up,
-    scroll_down,
-    /// On an empty or recalled draft, the Message sent before the one it
-    /// shows.
-    older,
-    /// On a recalled draft, the Message sent after it, or past the newest
-    /// an empty draft.
-    newer,
-    /// The latest view, which is the pending Action if there is one.
-    latest,
-    /// Out of a Message page, else to the latest view. It never leaves the
-    /// conversation.
-    back,
-    /// As `back`, and from the settled latest view, once nothing would be
-    /// lost, to the overview.
-    close,
-    /// Opens the lowest collapsed Message, or leaves a Message page.
-    expand,
-    /// Leaves the conversation; Host work continues.
-    detach,
-    /// Retries the uncertain original.
-    recover,
-    /// Asks to stop the Session, and stops it at a second press.
-    stop,
-    archive,
-};
-
-/// The conversation's one key table.
-const conversation_keys: keymap.Keymap(ConversationAction) = .init(.{
-    .escape = .close,
-    // A lone ESC acts only once it expires; Ctrl-G acts at once.
-    .ctrl_g = .close,
-    .ctrl_c = .detach,
-    .ctrl_d = .detach,
-    .ctrl_n = .newer,
-    .ctrl_o = .expand,
-    .ctrl_p = .older,
-    .ctrl_r = .recover,
-    .ctrl_x = .stop,
-    .alt_a = .archive,
-    .up = .previous,
-    .down = .next,
-    .shift_up = .scroll_up,
-    .shift_down = .scroll_down,
-    .page_up = .page_up,
-    .page_down = .page_down,
-    .home = null,
-    .end = .back,
-    .ctrl_end = .latest,
-});
+const ConversationAction = session_keys.Action;
+const conversation_keys = session_keys.keys;
 
 fn perform(self: *Self, action: ConversationAction) !void {
     if (self.upgradeHeld() and (action == .recover or action == .expand)) {
@@ -1619,24 +1563,15 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
 fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     const screen = self.terminal.screen;
     const offer = screen.spendOffer();
-    const selected = Editor.select(conversation_keys, decoded);
-    const asked = self.overviewSays().asking;
-    if (asked == .archive and selected == .enter) {
-        try self.converse(if (Editor.plainEnter(decoded)) .confirm_archive else .other);
-        self.dirty = true;
-        return;
+    switch (session_keys.route(self.overviewSays().asking, Editor.select(conversation_keys, decoded), Editor.plainEnter(decoded), self.reading.opening)) {
+        .ask => |input| {
+            try self.converse(input);
+            self.dirty = true;
+            return;
+        },
+        // Cancel the old ask before ordinary input can open a new one.
+        .conversation => |conversation| if (conversation.cancel_ask) try self.converse(.other),
     }
-    if (asked != null and selected == .action and selected.action == .close) {
-        try self.converse(.other);
-        self.dirty = true;
-        return;
-    }
-    const controls_prompt = !self.reading.opening and switch (selected) {
-        .action => |action| action == .stop or action == .archive,
-        else => false,
-    };
-    // Cancel the old context before ordinary input can create a new prompt.
-    if (!controls_prompt) try self.converse(.other);
     if (screen.inputRow() == .selector) try self.choiceEvent(decoded, offer) else try self.draftEvent(decoded, offer);
     if (self.leaving != null) screen.interruptConsent();
 }
@@ -1645,28 +1580,17 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
 /// act on it, and only with the offer this input spent.
 fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer) !void {
     const screen = self.terminal.screen;
-    switch (Editor.select(conversation_keys, decoded)) {
-        .none => {},
-        // While an Action waits there is no original to retry.
-        .action => |action| switch (action) {
-            .recover => self.notice = "! Action needs a decision; nothing to retry.",
-            // The draft is not the choice's; its sent Messages wait.
-            .older, .newer => {},
-            else => try self.perform(action),
-        },
-        .left => try self.choose(.{ .pick = .allow_once }, offer),
-        .right => try self.choose(.{ .pick = .deny }, offer),
-        .enter => try self.choose(.enter, offer),
-        // The draft takes this key and those after it, beside the Action;
-        // while a command runs, neither a Message nor a command could go.
-        .text => if (screen.selected.approval == .held) {
-            self.notice = "! Command still running. Input ignored.";
-        } else {
+    switch (session_keys.atChoice(Editor.select(conversation_keys, decoded), screen.selected.approval == .held)) {
+        .nothing => {},
+        .say => |text| self.notice = text,
+        .perform => |action| try self.perform(action),
+        .pick => |choice| try self.choose(.{ .pick = choice }, offer),
+        .confirm => try self.choose(.enter, offer),
+        .draft => {
             screen.moveRow(.draft);
             // No frame has shown this draft yet: the key offers nothing.
             try self.draftEvent(decoded, null);
         },
-        .refused => self.notice = "! Key combination not recognized; nothing authorized.",
     }
 }
 
