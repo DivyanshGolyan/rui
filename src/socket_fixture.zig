@@ -10,6 +10,20 @@ comptime {
 // Darwin. Reserve the pathname terminator as well; do not change product limits.
 pub const max_path_bytes = @min(std.Io.net.UnixAddress.max_len, @sizeOf(@FieldType(std.posix.sockaddr.un, "path")) - 1);
 
+/// A loopback TCP port that refuses a connection at once on Linux and on
+/// Darwin: one whose listener just closed. A port bound but never listened
+/// on refuses only on Linux; Darwin's tcp_input drops a SYN to it without a
+/// reset, so a connect waits out its deadline (#999).
+/// tests/ci/platform_boundary.py rejects a test that binds without
+/// listening. The port is free again, so another process could bind it
+/// before the test connects.
+pub fn refusedPort() !u16 {
+    const io = std.testing.io;
+    var listener = try (try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0")).listen(io, .{});
+    defer listener.deinit(io);
+    return listener.socket.address.getPort();
+}
+
 pub const Directory = struct {
     dir: std.Io.Dir,
     parent: std.Io.Dir,

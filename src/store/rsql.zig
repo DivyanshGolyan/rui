@@ -587,10 +587,15 @@ fn check(comptime kind: StatementKind, comptime sql: []const u8, comptime Args: 
 }
 
 fn parse(comptime sql: []const u8) Checked {
+    return parseAs(sql, false);
+}
+
+fn parseAs(comptime sql: []const u8, comptime fixture: bool) Checked {
     comptime {
         @setEvalBranchQuota(1000 * sql.len + 20_000);
-        var p: Parser = .{ .tokens = tokenize(sql) };
+        var p: Parser = .{ .tokens = tokenize(sql), .fixture = fixture };
         const statement = p.statement() catch return .{ .refused = p.message };
+        if (readsWrittenTable(statement, p.queries)) return .{ .refused = written_read_message };
         return .{ .accepted = .{
             .statement = statement,
             .uses = p.uses,
@@ -599,6 +604,62 @@ fn parse(comptime sql: []const u8) Checked {
             .compounds = p.compounds,
             .queries = p.queries,
         } };
+    }
+}
+
+const written_read_message = "rsql: MySQL refuses a write whose subquery reads the table it writes (error 1093); read the value first and bind it";
+
+/// Whether `statement` writes a table that another of its `queries` reads,
+/// which MySQL 8.4 refuses ("Restrictions on Subqueries"): an UPDATE or
+/// DELETE whose subquery reads its table, or an INSERT ... VALUES whose
+/// row does. An INSERT ... SELECT may read its own table: MySQL buffers
+/// the SELECT first.
+fn readsWrittenTable(comptime statement: Statement, comptime queries: []const Query) bool {
+    const table: []const u8, const own: ?usize = switch (statement) {
+        .select => return false,
+        .insert => |insert| switch (insert.values) {
+            .row => .{ insert.table, null },
+            .select => return false,
+        },
+        .update => |update| .{ update.table, update.query },
+        .delete => |delete| .{ delete.table, delete.query },
+    };
+    for (queries) |query| {
+        if (own != null and query.id == own.?) continue;
+        for (query.sources) |read| if (!read.defined and std.ascii.eqlIgnoreCase(read.table, table)) return true;
+    }
+    return false;
+}
+
+/// Why `text`, a test fixture's SQL, is not Rui SQL, or null: each of
+/// its statements, split at `;`, is held to the grammar and rules
+/// product statements are (`parse`), without their typed Args, Row and
+/// Session rules. So a fixture the build takes is one MySQL takes as the
+/// Store's own statements are. Two allowances are not about dialects: an
+/// UPDATE or DELETE may write every row, and an UPDATE may take
+/// `length` of its table's `.bytes` columns.
+pub fn fixtureError(comptime text: []const u8) ?[]const u8 {
+    comptime {
+        @setEvalBranchQuota(1000 * text.len + 20_000);
+        if (portabilityError(text, reserved_names_checked)) |message| return message;
+        var start: usize = 0;
+        var index: usize = 0;
+        while (index <= text.len) {
+            if (index < text.len and text[index] == '\'') {
+                index = literalEnd(text, index);
+                continue;
+            }
+            if (index == text.len or text[index] == ';') {
+                const statement = std.mem.trim(u8, text[start..index], &std.ascii.whitespace);
+                if (statement.len != 0) switch (parseAs(statement, true)) {
+                    .refused => |message| return message,
+                    .accepted => {},
+                };
+                start = index + 1;
+            }
+            index += 1;
+        }
+        return null;
     }
 }
 
@@ -770,6 +831,17 @@ fn isGrammarWord(text: []const u8) bool {
     return false;
 }
 
+/// The `.bytes` columns of schema table `name`.
+fn bytesColumns(comptime name: []const u8) []const []const u8 {
+    var bytes: []const []const u8 = &.{};
+    for (schema.tables) |table| if (std.mem.eql(u8, table.name, name)) {
+        for (table.columns) |column| if (column.type == .bytes) {
+            bytes = bytes ++ .{column.name};
+        };
+    };
+    return bytes;
+}
+
 fn isTable(name: []const u8) bool {
     for (schema.tables) |table| if (std.mem.eql(u8, table.name, name)) return true;
     return false;
@@ -828,8 +900,11 @@ const Parser = struct {
     /// Every column the text names as an operand, in order.
     columns: []const Column = &.{},
     /// The columns `length` may count: a schema table's `.bytes` columns
-    /// (`expressionError`), and none in a typed statement.
+    /// (`expressionError`), the table a fixture's UPDATE writes, and none
+    /// in a typed statement.
     bytes_columns: []const []const u8 = &.{},
+    /// Parsing a test fixture's text (`fixtureError`).
+    fixture: bool = false,
 
     const Opened = struct { id: usize, parent: ?usize };
 
@@ -926,6 +1001,7 @@ const Parser = struct {
             try p.insert()
         else if (p.accept("UPDATE")) update: {
             const target = try p.tableName();
+            if (p.fixture) p.bytes_columns = bytesColumns(target);
             const opened = p.open();
             try p.expect("SET");
             var assigned: []const []const u8 = &.{};
@@ -939,21 +1015,28 @@ const Parser = struct {
                 assigned = assigned ++ .{column};
                 if (!p.acceptSymbol(",")) break;
             }
-            try p.expect("WHERE");
-            const where = try p.expr();
+            const where = try p.writtenWhere();
             p.close(opened, writtenTable(target), where);
             break :update .{ .update = .{ .table = target, .assigned = assigned, .where = where, .query = opened.id } };
         } else if (p.accept("DELETE")) delete: {
             try p.expect("FROM");
             const target = try p.tableName();
             const opened = p.open();
-            try p.expect("WHERE");
-            const where = try p.expr();
+            const where = try p.writtenWhere();
             p.close(opened, writtenTable(target), where);
             break :delete .{ .delete = .{ .table = target, .where = where, .query = opened.id } };
         } else return p.refuse("SELECT, WITH, INSERT, UPDATE or DELETE");
         if (p.peek().kind != .end) return p.refuse("the end");
         return parsed;
+    }
+
+    /// An UPDATE's or DELETE's WHERE. A fixture may write every row of
+    /// its table, which every engine runs alike; its missing WHERE stands
+    /// as `.other`, which no rule a fixture meets reads.
+    fn writtenWhere(p: *Parser) Refused!Expr {
+        if (p.fixture and p.peek().kind == .end) return .other;
+        try p.expect("WHERE");
+        return p.expr();
     }
 
     fn tableName(p: *Parser) Refused![]const u8 {
@@ -1226,6 +1309,15 @@ const Parser = struct {
             return .other;
         }
         if (p.peek().is("CAST")) return p.refuseWith(cast_message);
+        // X'hex' is a blob on every engine: an even count of hex digits.
+        const quoted = p.peekAt(1);
+        if (token.is("X") and quoted.kind == .literal and quoted.start == token.start + 1) {
+            const digits = quoted.text[1 .. quoted.text.len - 1];
+            for (digits) |digit| if (!std.ascii.isHex(digit)) return p.refuseWith("rsql: X'...' holds only hex digits");
+            if (digits.len % 2 != 0) return p.refuseWith("rsql: X'...' holds an even count of hex digits");
+            p.at += 2;
+            return .other;
+        }
         const first = try p.name();
         if (p.acceptSymbol("(")) {
             var values: []const Expr = &.{};
@@ -2950,6 +3042,29 @@ test "a statement calls only the functions every engine spells, by argument coun
     // Neither a WITH name's column list nor an INSERT's table is a call.
     const text = "INSERT INTO turn(turn_id) WITH recent(turn_id) AS (SELECT count(*) AS n FROM turn) SELECT turn_id FROM recent";
     try std.testing.expectEqualStrings(text, comptime mysqlRendering(text).rendered.parts[0]);
+}
+
+test "fixture SQL meets the Store's own grammar, so MySQL takes what the build takes" {
+    // Fixture texts MySQL 8.4 refused in CI before they were rewritten.
+    const written_read = "rsql: MySQL refuses a write whose subquery reads the table it writes (error 1093); read the value first and bind it";
+    try std.testing.expectEqualStrings(written_read, comptime fixtureError("UPDATE session SET loaded_tool_set_id=(SELECT tool_set_id FROM session WHERE session_ref=?1) WHERE session_ref=?2").?);
+    try std.testing.expectEqualStrings(written_read, comptime fixtureError("UPDATE message_admission SET admitted_at=2000 WHERE admission_id=(SELECT max(admission_id) FROM message_admission)").?);
+    try std.testing.expectEqualStrings(written_read, comptime fixtureError("INSERT INTO core_command(command_key,command_seq) VALUES(?1,(SELECT coalesce(max(command_seq),0)+1 FROM core_command))").?);
+    try std.testing.expectEqualStrings(written_read, comptime fixtureError("DELETE FROM turn WHERE turn_id IN (SELECT turn_id FROM turn)").?);
+    try std.testing.expectEqualStrings(
+        "rsql: MySQL takes WITH only after INSERT INTO t(columns); write INSERT INTO t(columns) WITH ... SELECT",
+        comptime fixtureError("WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<2) INSERT INTO turn(turn_id) SELECT value FROM sequence").?,
+    );
+    try std.testing.expectEqualStrings("rsql: CAST converts differently on each engine", comptime fixtureError("SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'").?);
+    try std.testing.expectEqualStrings("rsql: expected SELECT at 'VALUES'", comptime fixtureError("WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<2) SELECT value FROM sequence").?);
+    try std.testing.expectEqualStrings("rsql: X'...' holds an even count of hex digits", comptime fixtureError("SELECT count(*) FROM content WHERE payload=X'ABC'").?);
+    // Their rewrites, and what a fixture may do that a product statement may not.
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime fixtureError("INSERT INTO turn(turn_id) WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<2) SELECT value FROM sequence"));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime fixtureError("INSERT INTO model_operation(operation_id,turn_id) SELECT 100+operation_id,turn_id FROM model_operation WHERE operation_id=?1"));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime fixtureError("UPDATE session SET next_position=next_position+1; DELETE FROM action_operation"));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime fixtureError("UPDATE content_chunk SET bytes=zeroblob(length(bytes)) WHERE content_id=1"));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime fixtureError("SELECT count(*) FROM content WHERE payload=X'0A0b'"));
+    try std.testing.expectEqualStrings(length_message, comptime fixtureError("UPDATE session SET workspace=zeroblob(length(workspace))").?);
 }
 
 test "a served slot never binds NULL, so NOT @served(x) agrees with rui_served" {

@@ -23,7 +23,8 @@ import threading
 import time
 
 import host_process
-from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, screen_fixture_root, stop_process
+from host_process import assert_caller_error, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, screen_fixture_root, stop_process
+from product_defaults import CATALOG, DEFAULTS, compaction_trigger, start_effort
 
 
 # From 60 columns a user Message's first row ends with its admission time.
@@ -242,7 +243,8 @@ def help_case():
             [str(fixture.RUI), "--not-an-option"], env={**os.environ, "HOME": str(home)},
             capture_output=True, text=True, timeout=10,
         )
-        assert result.returncode != 0 and "--not-an-option: That option is not supported" in result.stderr, result
+        assert result.returncode != 0, result
+        assert_caller_error(result.stderr, "rui: --not-an-option: ", "option_unknown")
         assert list(home.iterdir()) == [], "invalid arguments created runtime state"
         send_help = run(home, "session", "send", "--help")
         assert "\nRequires: --to ID.\n" in send_help and "stdin" in send_help, send_help
@@ -260,35 +262,34 @@ def help_case():
                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
             operation = " ".join(args[:2])
             assert result.returncode == 2 and result.stdout == "", (args, result)
-            assert result.stderr == (f"rui {operation}: {accepted}: A required option or selector is missing. "
-                f"Accepted: {accepted}. Next: Supply one of the accepted alternatives. "
-                "Nothing was captured or sent. [option_required]\n"), (args, result.stderr)
+            assert_caller_error(result.stderr, f"rui {operation}: {accepted}: ", "option_required")
+            assert f" Accepted: {accepted}. " in result.stderr, (args, result.stderr)
             assert "usage:" not in result.stderr and "rui [PROMPT]" not in result.stderr, (args, result.stderr)
             assert "request:" not in result.stderr, ("missing requirement printed a capture notice", result.stderr)
             assert list(home.iterdir()) == [], ("missing requirement created capture or record state", args)
         # Rejected input forms must name a usable correction, without reading
         # even available stdin or creating a recovery record.
-        for args, correction in (
+        for args, (context, code) in (
                 (("session", "send", "k7m2qx"),
-                 "k7m2qx: A positional Session ID is not a destination selector. Accepted: --to ID, with Message text on stdin. Next: Move the Session ID to --to ID and pipe or redirect the Message into stdin. Nothing was captured or sent. [session_id_needs_to]"),
+                 ("k7m2qx", "session_id_needs_to")),
                 (("session", "send", "--", "k7m2qx"),
-                 "k7m2qx: A positional Session ID is not a destination selector. Accepted: --to ID, with Message text on stdin. Next: Move the Session ID to --to ID and pipe or redirect the Message into stdin. Nothing was captured or sent. [session_id_needs_to]"),
+                 ("k7m2qx", "session_id_needs_to")),
                 (("session", "configure", "k7m2qx"),
-                 "k7m2qx: A positional Session ID is not a Session selector for this command. Accepted: --session ID. Next: Move the Session ID to --session ID. Nothing was captured or sent. [session_id_needs_session]"),
+                 ("k7m2qx", "session_id_needs_session")),
                 (("session", "inspect", "--", "k7m2qx"),
-                 "k7m2qx: A positional Session ID is not a Session selector for this command. Accepted: --session ID. Next: Move the Session ID to --session ID. Nothing was captured or sent. [session_id_needs_session]"),
+                 ("k7m2qx", "session_id_needs_session")),
                 (("session", "send", "--to", "k7m2qx", "literal"),
-                 "literal: Message text must come from stdin, not positional arguments. Accepted: Message text on stdin, not in argv. Next: Pipe or redirect the Message into this command. Nothing was captured or sent. [message_not_stdin]"),
+                 ("literal", "message_not_stdin")),
                 (("session", "send", "--to", "k7m2qx", "--", "literal"),
-                 "literal: Message text must come from stdin, not positional arguments. Accepted: Message text on stdin, not in argv. Next: Pipe or redirect the Message into this command. Nothing was captured or sent. [message_not_stdin]"),
+                 ("literal", "message_not_stdin")),
                 (("session", "start", "literal"),
-                 "literal: Message text must come from stdin, not positional arguments. Accepted: Message text on stdin, not in argv. Next: Pipe or redirect the Message into this command. Nothing was captured or sent. [message_not_stdin]"),
+                 ("literal", "message_not_stdin")),
                 (("session", "start", "--", "literal"),
-                 "literal: Message text must come from stdin, not positional arguments. Accepted: Message text on stdin, not in argv. Next: Pipe or redirect the Message into this command. Nothing was captured or sent. [message_not_stdin]"),
+                 ("literal", "message_not_stdin")),
                 (("session", "configure", "--instructions", "instructions.txt"),
-                 "--instructions instructions.txt: Instructions must be read from stdin. Accepted: -. Next: Use --instructions - and pipe or redirect the instructions into this command. Nothing was captured or sent. [instructions_source]"),
+                 ("--instructions instructions.txt", "instructions_source")),
                 (("session", "list", "literal"),
-                 "literal: That positional argument is not supported here. Accepted: options and values listed by rui session list --help. Next: Remove it and use this command's declared options and selectors. Nothing was captured or sent. [positional_unexpected]")):
+                 ("literal", "positional_unexpected"))):
             input_read, input_write = os.pipe()
             try:
                 untouched = b"held stdin must not be consumed\n"
@@ -296,27 +297,30 @@ def help_case():
                 result = subprocess.run([str(fixture.RUI), *args], env={**os.environ, "HOME": str(home)},
                     stdin=input_read, capture_output=True, text=True, timeout=5)
                 assert result.returncode == 2 and result.stdout == "", (args, result)
-                assert result.stderr == f"rui {args[0]} {args[1]}: {correction}\n", (args, result.stderr)
+                assert_caller_error(result.stderr, f"rui {args[0]} {args[1]}: {context}: ", code)
                 assert select.select([input_read], [], [], 0)[0] and os.read(input_read, len(untouched)) == untouched
                 assert list(home.iterdir()) == [], ("invalid input created runtime state", args)
             finally:
                 dispose_all(lambda: os.close(input_read), lambda: os.close(input_write))
         # Fresh typed choices, saved-HANDLE conflicts and malformed IDs must
         # refuse before reading stdin or publishing a capture.
-        for args, expected in (
+        # The permission mode's choices come from the option, not the catalog.
+        for args, context, code, accepted in (
                 (("session", "start", "--permission-mode", "auto"),
-                 "rui session start: --permission-mode auto: That value is not supported. Accepted: ask, bypass. Next: Use one of the accepted values. Nothing was captured or sent. [choice_unsupported]\n"),
+                 "rui session start: --permission-mode auto: ", "choice_unsupported", " Accepted: ask, bypass. "),
                 (("request", "inspect", "HANDLE", "--store", "P"),
-                 "rui request inspect: --store with HANDLE: A saved HANDLE already names its Store and key. Accepted: HANDLE alone, or (--store PATH or --store-hex HEX) with (--key KEY or --key-hex HEX). Next: Keep one of the two. Nothing was captured or sent. [handle_names_store_and_key]\n"),
+                 "rui request inspect: --store with HANDLE: ", "handle_names_store_and_key", ""),
                 (("session", "interrupt-model", "--session", "k7m2qx", "--turn", "12x", "--operation", "3"),
-                 "rui session interrupt-model: --turn 12x: That is not an ID. Accepted: a decimal from 1 to 9223372036854775807. Next: Copy the ID from rui session inspect. Nothing was captured or sent. [id_malformed]\n")):
+                 "rui session interrupt-model: --turn 12x: ", "id_malformed", "")):
             input_read, input_write = os.pipe()
             try:
                 untouched = b"unread grammar input\n"
                 os.write(input_write, untouched)
                 result = subprocess.run([str(fixture.RUI), *args], env={**os.environ, "HOME": str(home)},
                     stdin=input_read, capture_output=True, text=True, timeout=5)
-                assert result.returncode == 2 and result.stdout == "" and result.stderr == expected, (args, result)
+                assert result.returncode == 2 and result.stdout == "", (args, result)
+                assert_caller_error(result.stderr, context, code)
+                assert accepted in result.stderr, (args, result.stderr)
                 assert select.select([input_read], [], [], 0)[0] and os.read(input_read, len(untouched)) == untouched
                 assert list(home.iterdir()) == [], (args, "rejected invocation created runtime state")
             finally:
@@ -349,11 +353,9 @@ def compiled_model_cases():
     """One release list owns help; any ID with valid syntax is admitted, an unlisted one with default limits."""
     import host_launch_integration as launch
     # The generated shipped snapshot is the source, not a second hand list.
-    snapshot = (fixture.ROOT / "src/model_catalog_snapshot.zig").read_text()
-    facts = re.findall(r'\.id = "([^"\n]+)"[^\n]*\.context_window = (null|\d+)[^\n]*\.openai_listed = true', snapshot)
-    models = tuple(model for model, _ in facts)
-    windows = {model: None if window == "null" else int(window) for model, window in facts}
-    assert models and "gpt-6.1-sol" in models
+    models = tuple(model for model, row in CATALOG.items() if row.openai_listed)
+    windows = {model: CATALOG[model].context_window for model in models}
+    assert DEFAULTS.recommended_model in models
     listing = "Supported model IDs: " + ", ".join(models) + "\n"
     unlisted_note = "it uses default limits"
     root = canonical_fixture_root(pathlib.Path(tempfile.mkdtemp(prefix="rui-compiled-models.")))
@@ -466,9 +468,11 @@ def compaction_settings_case(home, store, workspace, socket_path):
     # Fresh defaults and named resets must both fit the smaller catalog window.
     small = create_session(home, "--store", store, "--workspace", workspace,
         "--provider", "codex", "--model", "gpt-5.3-codex-spark")
-    for flags, expected in (((), "115200"),
+    small_default = str(compaction_trigger("codex", "gpt-5.3-codex-spark"))
+    assert int(small_default) < DEFAULTS.provider_compaction_triggers["codex"], "the case needs a window below the provider cap"
+    for flags, expected in (((), small_default),
                             (("--compaction-trigger", "12345"), "12345"),
-                            (("--compaction-trigger", "default"), "115200")):
+                            (("--compaction-trigger", "default"), small_default)):
         if flags:
             reply = json.loads(run(home, "session", "configure", "--store", store,
                 "--session", small, *flags))
@@ -487,17 +491,19 @@ def compaction_settings_case(home, store, workspace, socket_path):
         read_terminal(master, "› ")
         status = status_frame(master, session)
         compact = status_row(status, "Compact at", "Headroom")
-        assert compact.startswith("244,800 tokens") and compact.endswith(" model default"), status
-        assert status_row(status, "Headroom", "Model") == "0 tokens model default", status
-        assert status_row(status, "Effort", "Permissions") == "low model default", status
+        luna_trigger, luna_effort = f"{compaction_trigger('codex', 'gpt-6-luna'):,} tokens", start_effort("gpt-6-luna")
+        assert compact.startswith(luna_trigger) and compact.endswith(" model default"), status
+        assert status_row(status, "Headroom", "Model") == f"{DEFAULTS.output_reservation} tokens model default", status
+        assert status_row(status, "Effort", "Permissions") == f"{luna_effort} model default", status
         usage = flat(terminal_step(master, "/configure --bogus", "Omission preserves", composer=True))
-        assert "A model Rui does not list is assumed to have a 128000-token context." in usage, usage
+        assert f"A model Rui does not list is assumed to have a {DEFAULTS.unlisted_context_window}-token context." in usage, usage
         assert "Changes apply to new model requests." in usage, usage
         assert "Requests already accepted keep their original settings, even when retried." in usage, usage
         for flags, trigger, origin, headroom, effort in (
             ("--compaction-trigger 12345 --output-reservation 234 --reasoning-effort high", "12,345 tokens", "Session override", "234 tokens Session override", "high Session override"),
             ("--permission-mode ask", "12,345 tokens", "Session override", "234 tokens Session override", "high Session override"),
-            ("--compaction-trigger default --output-reservation default --reasoning-effort default", "244,800 tokens", "model default", "0 tokens model default", "low model default"),
+            ("--compaction-trigger default --output-reservation default --reasoning-effort default", luna_trigger, "model default",
+             f"{DEFAULTS.output_reservation} tokens model default", f"{luna_effort} model default"),
         ):
             configured = configured_frame(master, "/configure " + flags)
             assert "revision:" not in configured and "request:" not in configured, configured
@@ -512,14 +518,14 @@ def compaction_settings_case(home, store, workspace, socket_path):
         efforts = command_frame(master, "/effort ", lambda frame: "current" in frame, end="")
         levels = [row.split()[0] for row in efforts.split("\n") if row.split() and row.split()[0] in ("none", "low", "medium", "high", "xhigh", "max")]
         assert levels == ["none", "low", "medium", "high", "xhigh", "max"], efforts
-        assert any(row.split() == ["low", "current"] for row in efforts.split("\n")), efforts
+        assert any(row.split() == [luna_effort, "current"] for row in efforts.split("\n")), efforts
         command_frame(master, "\x15", lambda frame: "current" not in frame, end="")
         configured_frame(master, "/effort high")
         configured_frame(master, "/rename lane five")
         status = status_frame(master, session)
         assert status_row(status, "Effort", "Permissions") == "high Session override" and status_row(status, "Name", "Folder") == "lane five", status
         configured_frame(master, "/effort default")
-        assert status_row(status_frame(master, session), "Effort", "Permissions") == "low model default"
+        assert status_row(status_frame(master, session), "Effort", "Permissions") == f"{luna_effort} model default"
         configured_frame(master, '/rename "lane four"')
         assert status_row(status_frame(master, session), "Name", "Folder") == "lane four"
         terminal_step(master, '/effort "high', "Usage: /effort LEVEL", composer=True)
@@ -552,12 +558,12 @@ def compaction_settings_case(home, store, workspace, socket_path):
     report = json.loads(run(home, "session", "inspect", "--store", store, "--session", session))
     assert report["session"]["model"] == "gpt-6-luna", report
     # An unlisted binding still admits a complete spec, with no inferred effort.
-    # Supply the fixed legacy threshold explicitly (D111).
+    # Supply the fixed legacy threshold, the unlisted model's default, explicitly (D111).
     body = {"version": host_process.WIRE_VERSION, "kind": "configure", "store": str(store),
             "key": "unknown-compaction-policy", "session": "", "configuration": {
                 **{name: {"state": "value", "value": value} for name, value in
                    (("workspace", str(workspace)), ("provider", "codex"), ("model", "unknown-compaction-model"),
-                    ("tools", ["bash"]), ("permission_mode", "bypass"), ("compaction_trigger", "115200"))},
+                    ("tools", ["bash"]), ("permission_mode", "bypass"), ("compaction_trigger", str(compaction_trigger("codex", None))))},
                 "reasoning_effort": {"state": "null"},
                 **{name: {"state": "omitted"} for name in
                    ("instructions", "output_schema", "output_reservation")}}}
@@ -569,9 +575,9 @@ def compaction_settings_case(home, store, workspace, socket_path):
         "--", unknown], env={**os.environ, "HOME": str(home)}) as (entered, master):
         read_terminal(master, "› ")
         status = terminal_step(master, "/status", " Work", composer=True)
-        # 90% of the 128000-token window assumed for an unlisted model.
+        # The default share of the window assumed for an unlisted model.
         compact = status_row(status, "Compact at", "Headroom")
-        assert compact.startswith("115,200 tokens") and compact.endswith(" assumed for an unlisted model"), status
+        assert compact.startswith(f"{compaction_trigger('codex', None):,} tokens") and compact.endswith(" assumed for an unlisted model"), status
         assert status_row(status, "Effort", "Permissions") == "unknown no catalog value; reasoning omitted", status
         assert "overflow recovery" not in status, status
         efforts = command_frame(master, "/effort ", lambda frame: "xhigh" in frame and "default" in frame, end="")
@@ -581,7 +587,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
         configured_frame(master, "/effort max")
         assert status_row(status_frame(master, unknown), "Effort", "Permissions") == "max Session override"
         configured_frame(master, "/effort default")
-        assert status_row(status_frame(master, unknown), "Effort", "Permissions") == "low model default"
+        assert status_row(status_frame(master, unknown), "Effort", "Permissions") == f"{start_effort('unknown-compaction-model')} model default"
         terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
 
@@ -4034,12 +4040,13 @@ def opaque_session_commands_case():
                     env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=10)
                 assert rejected.returncode != 0 and b"InteractiveTerminalRequired" not in rejected.stderr, (route, flags, rejected)
                 if "--last" in flags:
-                    assert b"rui session resume: --last: That option is not supported by this command. Accepted: options and values listed by rui session resume --help. Next: Use an option listed by this command's help. Nothing was captured or sent. [option_unknown]" in rejected.stderr, (flags, rejected)
+                    assert_caller_error(rejected.stderr, "rui session resume: --last: ", "option_unknown")
         # Retired --last rejects before selecting a Store, starting a Host
         # or capturing a request; the HOME Store stays absent below.
         retired = subprocess.run([str(fixture.RUI), "session", "resume", "--last"], cwd=state,
             env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=10)
-        assert retired.returncode != 0 and b"rui session resume: --last: That option is not supported by this command. Accepted: options and values listed by rui session resume --help. Next: Use an option listed by this command's help. Nothing was captured or sent. [option_unknown]" in retired.stderr, retired
+        assert retired.returncode != 0, retired
+        assert_caller_error(retired.stderr, "rui session resume: --last: ", "option_unknown")
         assert {path: path.read_bytes() for path in before} == before
         assert set((home / ".config/rui/requests").glob("*.json")) == set(before)
         absent = "000000" if reference != "000000" else "111111"

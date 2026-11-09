@@ -237,12 +237,8 @@ test "refresh transport requires positive evidence that no request was sent" {
     try std.testing.expectError(error.TransportFailed, post(io, request, &answer, null));
     try std.testing.expect(answer.request_not_sent);
 
-    // A port whose listener just closed refuses the connection.
-    var listener = try (try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0")).listen(io, .{});
-    const port = listener.socket.address.getPort();
-    listener.deinit(io);
     var url: [64]u8 = undefined;
-    request.url = try testUrl(&url, port);
+    request.url = try testUrl(&url, try @import("socket_fixture.zig").refusedPort());
     answer.request_not_sent = false;
     try std.testing.expectError(error.TransportFailed, post(io, request, &answer, null));
     try std.testing.expect(answer.request_not_sent);

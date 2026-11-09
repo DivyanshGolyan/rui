@@ -390,18 +390,7 @@ test "a request gets its framed response over loopback" {
 }
 
 test "a refused connection sends nothing" {
-    // A port bound but not listening refuses, and stays ours meanwhile.
-    const fd = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
-    try std.testing.expect(fd >= 0);
-    defer _ = std.c.close(fd);
-    var address: std.c.sockaddr.in = std.mem.zeroes(std.c.sockaddr.in);
-    address.family = std.c.AF.INET;
-    address.addr = @bitCast([4]u8{ 127, 0, 0, 1 });
-    if (@hasField(std.c.sockaddr.in, "len")) address.len = @sizeOf(std.c.sockaddr.in);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.bind(fd, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)));
-    var length: std.c.socklen_t = @sizeOf(std.c.sockaddr.in);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.getsockname(fd, @ptrCast(&address), &length));
-    var server: TestServer = .{ .listener = -1, .port = std.mem.bigToNative(u16, address.port), .reply = null };
+    var server: TestServer = .{ .listener = -1, .port = try @import("../socket_fixture.zig").refusedPort(), .reply = null };
     var out: Outcome = .{};
     try std.testing.expectError(error.ConnectFailed, post(&server, "{}", &out));
     try std.testing.expect(!out.sent);

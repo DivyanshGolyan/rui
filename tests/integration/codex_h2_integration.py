@@ -236,7 +236,7 @@ def openai_base_url_run(*, catalog_available=False):
         # A served provider uses system trust, which this certificate joins.
         host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--provider", "openai", "--active-capacity", "1",
             "--test-models-dev-url", catalog_url], env={
-            **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), "SSL_CERT_FILE": str(root / "cert.pem"),
+            **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), **os_semantics.system_trust(root / "cert.pem"),
             "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/custom/v1/",
         })
         def model_list():
@@ -297,7 +297,7 @@ def openai_base_url_run(*, catalog_available=False):
         host = None
         endpoint.models = b'{"error":"model list unavailable"}'
         host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--provider", "openai", "--active-capacity", "1"], env={
-            **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), "SSL_CERT_FILE": str(root / "cert.pem"),
+            **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), **os_semantics.system_trust(root / "cert.pem"),
             "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/custom/v1/",
         })
         fallback = fixture.wait_for(
@@ -391,7 +391,7 @@ def catalog_unusable_trust_run():
         host, ready = start_ready_process([
             "sh", "-c", 'log=$1; shift; exec "$@" 2>"$log"', "rui-catalog-offline", log,
             *fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
-        ], env={**os.environ, "SSL_CERT_FILE": str(root / "missing-ca.pem")})
+        ], env={**os.environ, **os_semantics.system_trust(root / "missing-ca.pem")})
         for _ in range(3):
             listed = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
             assert listed and listed[0]["provider"] == "codex", listed
@@ -403,7 +403,7 @@ def catalog_unusable_trust_run():
             "sh", "-c", 'log=$1; shift; exec "$@" 2>"$log"', "rui-catalog-trust", log,
             *fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
             "--test-models-dev-url", "https://127.0.0.1:1/api.json",
-        ], env={**os.environ, "SSL_CERT_FILE": str(root / "missing-ca.pem")},
+        ], env={**os.environ, **os_semantics.system_trust(root / "missing-ca.pem")},
             required_fields={"execution": "enabled", "nghttp2": "1.70.0"})
         diagnostic = b"rui: models.dev catalog unavailable (InvalidSslCertFile); the saved catalog stands\n"
         for _ in range(3):
@@ -452,7 +452,7 @@ if __name__ == "__main__":
         openai_base_url_run()
         openai_base_url_run(catalog_available=True)
     else:
-        print("openai base URL TLS case not run: Darwin system trust ignores SSL_CERT_FILE; unit tests cover the URL rules")
+        print("openai base URL TLS case not run: Darwin system trust takes no fixture CA; unit tests cover the URL rules")
     run()
     run(observed=True)
     run(intake=10)
