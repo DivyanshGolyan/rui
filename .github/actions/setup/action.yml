@@ -234,6 +234,9 @@ runs:
     - name: Fetch the existing pinned dependency graph
       if: ${{ inputs.compiled != 'true' && (inputs.cold == 'true' || (steps.build-cache.outputs.cache-hit || steps.build-cache-restore.outputs.cache-hit) != 'true') }}
       shell: bash
+      env:
+        # GitHub-hosted archives come through the API, which anonymous load shedding spares.
+        GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
