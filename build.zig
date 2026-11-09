@@ -1440,32 +1440,11 @@ fn configureVaxis(b: *std.Build, module: *std.Build.Module) void {
         .target = module.resolved_target.?,
         .optimize = module.optimize.?,
     });
-    const upstream = dependency.module("vaxis");
-    const prepare = b.addSystemCommand(&.{"bash"});
-    prepare.addFileArg(b.path("src/prepare_vaxis.sh"));
-    prepare.addDirectoryArg(dependency.path("."));
-    prepare.addFileArg(b.path("src/vaxis-parser.patch"));
-    const patched = prepare.addOutputDirectoryArg("vaxis");
-    const vaxis = b.createModule(.{
-        .root_source_file = patched.path(b, "src/main.zig"),
-        .target = module.resolved_target.?,
-        .optimize = module.optimize.?,
-    });
-    var imports = upstream.import_table.iterator();
-    while (imports.next()) |entry| vaxis.addImport(entry.key_ptr.*, entry.value_ptr.*);
     // Layout can import only the dependency's value-only Unicode modules,
     // without acquiring its TTY, process or event-loop capabilities.
-    for ([_][]const u8{ "unicode", "gwidth" }, [_][]const u8{ "terminal_unicode", "terminal_width" }) |source, name| {
-        const pure = b.createModule(.{
-            .root_source_file = patched.path(b, b.fmt("src/{s}.zig", .{source})),
-            .target = module.resolved_target.?,
-            .optimize = module.optimize.?,
-        });
-        pure.addImport("uucode", upstream.import_table.get("uucode").?);
-        module.addImport(name, pure);
-        vaxis.addImport(name, pure);
-    }
-    module.addImport("vaxis", vaxis);
+    module.addImport("terminal_unicode", dependency.module("unicode"));
+    module.addImport("terminal_width", dependency.module("gwidth"));
+    module.addImport("vaxis", dependency.module("vaxis"));
 }
 
 fn addBindings(b: *std.Build, module: *std.Build.Module, name: []const u8, header: []const u8) Translator {
