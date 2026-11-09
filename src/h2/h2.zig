@@ -56,6 +56,13 @@ pub const openssl_client = struct {
     pub const loadTrust = tls.loadTrust;
 };
 
+/// Socket setup and send flags for the Store's wire clients, which cannot
+/// reach src/os, so Darwin's SIGPIPE and Linux's MSG_NOSIGNAL stay here.
+pub const socket = struct {
+    pub const send_flags = tls.send_flags;
+    pub const configure = @import("Connection.zig").configureSocket;
+};
+
 /// The library versions this client is written and tested against.
 pub const nghttp2_version = "1.70.0";
 pub const openssl_version = "3.6.3";

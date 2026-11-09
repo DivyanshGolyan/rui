@@ -34,7 +34,7 @@ MAC_PATHS = (
     "install.sh", "release/*",
 )
 
-SCANNED = ("src/*.zig", "tests/integration/*.zig", "tests/integration/*.py", "clients/ts/test/*.ts")
+SCANNED = ("src/**/*.zig", "tests/integration/**/*.zig", "tests/integration/**/*.py", "clients/ts/test/**/*.ts")
 
 # Darwin differs on these: shutdown of a closed or listening socket returns
 # ENOTCONN, a full backlog refuses connect, kill(-pgid) of a zombie group is

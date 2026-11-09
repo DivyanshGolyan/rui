@@ -309,7 +309,7 @@ fn attempt(self: *Connection, time: u64) enum { connected, in_flight, refused, l
     if (fd < 0) return .local_failure;
     self.earlier = self.socket;
     self.socket = fd;
-    if (!configureSocket(fd)) return .local_failure;
+    if (!configureSocket(fd, true)) return .local_failure;
     while (true) {
         switch (std.posix.errno(std.c.connect(fd, @ptrCast(&address.storage), address.length))) {
             .SUCCESS => return .connected,
@@ -346,13 +346,15 @@ fn closeSocket(fd: std.posix.fd_t) void {
     _ = std.c.close(fd);
 }
 
-fn configureSocket(fd: std.posix.fd_t) bool {
+/// Close-on-exec, non-blocking, over TCP no Nagle delay, and on Darwin no
+/// SIGPIPE when the peer went away.
+pub fn configureSocket(fd: std.posix.fd_t, tcp: bool) bool {
     if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return false;
     const flags = std.c.fcntl(fd, std.c.F.GETFL);
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
     if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) < 0) return false;
     const one: c_int = 1;
-    if (std.c.setsockopt(fd, std.c.IPPROTO.TCP, std.c.TCP.NODELAY, &one, @sizeOf(c_int)) != 0) return false;
+    if (tcp and std.c.setsockopt(fd, std.c.IPPROTO.TCP, std.c.TCP.NODELAY, &one, @sizeOf(c_int)) != 0) return false;
     if (builtin.os.tag.isDarwin()) {
         if (std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.NOSIGPIPE, &one, @sizeOf(c_int)) != 0) return false;
     }

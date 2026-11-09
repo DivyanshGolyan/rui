@@ -17,7 +17,7 @@
 //!
 //! Session settings (`schema.mysql_session`) are the owner's to send.
 const std = @import("std");
-const builtin = @import("builtin");
+const h2 = @import("h2");
 pub const mysql = @import("mysql.zig");
 pub const tls = @import("tls.zig");
 
@@ -333,7 +333,7 @@ pub const Connection = struct {
             self.fd = -1;
         }
         self.fd = fd;
-        if (!configure(fd, family != std.c.AF.UNIX)) return error.SystemResources;
+        if (!h2.socket.configure(fd, family != std.c.AF.UNIX)) return error.SystemResources;
         while (true) switch (std.posix.errno(std.c.connect(fd, address, len))) {
             .SUCCESS => return,
             .INTR => continue,
@@ -365,7 +365,7 @@ pub const Connection = struct {
     fn sendRaw(self: *Connection, bytes: []const u8) Error!void {
         var sent: usize = 0;
         while (sent < bytes.len) {
-            const count = std.c.send(self.fd, bytes[sent..].ptr, bytes.len - sent, send_flags);
+            const count = std.c.send(self.fd, bytes[sent..].ptr, bytes.len - sent, h2.socket.send_flags);
             switch (std.posix.errno(count)) {
                 .SUCCESS => sent += @intCast(count),
                 .INTR => {},
@@ -471,23 +471,6 @@ pub const Connection = struct {
     }
 };
 
-const send_flags: c_int = if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL else 0;
-
-/// Close-on-exec, non-blocking, and over TCP no Nagle delay; on Darwin, no
-/// SIGPIPE when the peer went away.
-fn configure(fd: std.c.fd_t, tcp: bool) bool {
-    if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return false;
-    const flags = std.c.fcntl(fd, std.c.F.GETFL);
-    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
-    if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) < 0) return false;
-    const one: c_int = 1;
-    if (tcp and std.c.setsockopt(fd, std.c.IPPROTO.TCP, std.c.TCP.NODELAY, &one, @sizeOf(c_int)) != 0) return false;
-    if (builtin.os.tag.isDarwin()) {
-        if (std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.NOSIGPIPE, &one, @sizeOf(c_int)) != 0) return false;
-    }
-    return true;
-}
-
 // Tests replay the client's captured exchanges (`mysql.Capture`) through a
 // peer thread on a real socket. The peer checks every byte the connection
 // sends against the capture and records what went wrong before it closes,
@@ -508,31 +491,18 @@ const Peer = struct {
         close,
     };
 
+    // std's listen leaves an ample backlog: Darwin refuses a connect beyond
+    // a full backlog, where Linux queues it.
     fn unix(path: [:0]const u8, steps: []const Step) !Peer {
-        const fd = std.c.socket(std.c.AF.UNIX, std.c.SOCK.STREAM, 0);
-        if (fd < 0) return error.Socket;
-        errdefer _ = std.c.close(fd);
-        var address: std.c.sockaddr.un = std.mem.zeroes(std.c.sockaddr.un);
-        address.family = std.c.AF.UNIX;
-        @memcpy(address.path[0..path.len], path);
-        if (@hasField(std.c.sockaddr.un, "len")) address.len = @sizeOf(std.c.sockaddr.un);
-        if (std.c.bind(fd, @ptrCast(&address), @sizeOf(std.c.sockaddr.un)) != 0) return error.Bind;
-        if (std.c.listen(fd, 1) != 0) return error.Listen;
-        return .{ .listener = fd, .steps = steps };
+        const server = try (try std.Io.net.UnixAddress.init(path)).listen(std.testing.io, .{});
+        return .{ .listener = server.socket.handle, .steps = steps };
     }
 
     /// A loopback TCP listener; `port` receives its port.
     fn tcp(port: *u16, steps: []const Step) !Peer {
-        const fd = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
-        if (fd < 0) return error.Socket;
-        errdefer _ = std.c.close(fd);
-        var address: std.c.sockaddr.in = .{ .port = 0, .addr = std.mem.nativeToBig(u32, 0x7f000001) };
-        if (std.c.bind(fd, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)) != 0) return error.Bind;
-        if (std.c.listen(fd, 1) != 0) return error.Listen;
-        var len: std.c.socklen_t = @sizeOf(std.c.sockaddr.in);
-        if (std.c.getsockname(fd, @ptrCast(&address), &len) != 0) return error.Bind;
-        port.* = std.mem.bigToNative(u16, address.port);
-        return .{ .listener = fd, .steps = steps };
+        const server = try (try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0")).listen(std.testing.io, .{});
+        port.* = server.socket.address.getPort();
+        return .{ .listener = server.socket.handle, .steps = steps };
     }
 
     fn start(self: *Peer) !void {
@@ -568,7 +538,7 @@ const Peer = struct {
                 .send => |bytes| {
                     var sent: usize = 0;
                     while (sent < bytes.len) {
-                        const count = std.c.send(fd, bytes[sent..].ptr, bytes.len - sent, send_flags);
+                        const count = std.c.send(fd, bytes[sent..].ptr, bytes.len - sent, h2.socket.send_flags);
                         if (count <= 0) return "send failed";
                         sent += @intCast(count);
                     }
