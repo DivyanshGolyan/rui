@@ -298,13 +298,6 @@ pub fn invocation(allocator: Allocator, io: std.Io, entry: Entry) ![]const u8 {
 
 /// Same single-descriptor capture as invocation; exposes raw extent separately
 /// so a batch can charge body bytes without counting escaped path framing.
-pub fn invocationWithLength(allocator: Allocator, io: std.Io, entry: Entry) !struct { bytes: []const u8, raw_length: usize } {
-    var count: std.Io.Writer.Discarding = .init(&.{});
-    try invocationPrefix(&count.writer, entry.path);
-    const bytes = try invocation(allocator, io, entry);
-    return .{ .bytes = bytes, .raw_length = bytes.len - @as(usize, @intCast(count.fullCount())) };
-}
-
 fn invocationPrefix(writer: *std.Io.Writer, path: []const u8) !void {
     try writer.writeAll("Skill file: ");
     try std.json.Stringify.value(path, .{}, writer);

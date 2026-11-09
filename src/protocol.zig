@@ -517,7 +517,6 @@ pub const ConfigurationRejection = enum {
     model_is_immutable,
     revision_exhausted,
     skills_unavailable,
-    unknown_skill,
     skill_file_unavailable,
     skill_file_too_large,
     skill_text_invalid,

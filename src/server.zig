@@ -4512,7 +4512,17 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     const path = try std.fmt.bufPrint(&path_buffer, "{s}/SKILL.md", .{root});
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const initial = try skills.initialCatalog(arena.allocator(), .{ .entries = &.{.{ .name = "demo", .description = "Metadata", .path = path }} });
+    // Enough unbound entries that decoding the catalog grows the request
+    // arena, so the sweep fails allocations inside the Store's held read.
+    var entries: [65]skills.Entry = undefined;
+    entries[0] = .{ .name = "demo", .description = "Metadata", .path = path };
+    var names: [64][6]u8 = undefined;
+    const description = @as([1024]u8, @splat('d'));
+    for (entries[1..], &names, 0..) |*entry, *name, index| {
+        _ = try std.fmt.bufPrint(name, "pad-{d:0>2}", .{index});
+        entry.* = .{ .name = name, .description = &description, .path = "/never-read" };
+    }
+    const initial = try skills.initialCatalog(arena.allocator(), .{ .entries = &entries });
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/pressure.sqlite", .{root});
     var storage: store_module.Store = undefined;
@@ -4529,15 +4539,26 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     const text = "prompt /demo";
     var command: wire_request.MessageCommand = .{ .session = configured.accepted.session, .text = .{ .state = .value, .borrowed = text.ptr, .length = text.len, .digest = protocol.contentDigest(text) } };
     try command.key.set("pressure-key");
-    // Binding allocates before the Store's held access, so heap pressure
-    // is the Host being busy, never canonical corruption.
+    // Heap pressure anywhere in binding, the recipient catalog's held read
+    // included, is the Host being busy, never canonical corruption: each
+    // allocation in turn fails, until the Message is admitted.
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    var oom_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
-    host.allocator = failing.allocator();
-    try std.testing.expectError(error.OutOfMemory, submitMessage(&host, &command, &oom_offer));
-    host.allocator = std.testing.allocator;
-    try std.testing.expect(!storage.isFenced() and host.launchAllowed());
-    try std.testing.expect(!try storage.commandExists(command.key.slice()));
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        // Admission takes its offer whether or not it admits.
+        var oom_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
+        failing = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        host.allocator = failing.allocator();
+        const result = submitMessage(&host, &command, &oom_offer);
+        host.allocator = std.testing.allocator;
+        try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+        if (!failing.has_induced_failure) break;
+        try std.testing.expectError(error.OutOfMemory, result);
+        try std.testing.expect(!try storage.commandExists(command.key.slice()));
+    }
+    // Readings past the catalog's held read are the ones the sweep reached.
+    try std.testing.expect(fail_index > 2);
+    try std.testing.expect(try storage.commandExists(command.key.slice()));
     var intake: Intake = .{ .host = &host };
     var exchange: Intake.Exchange = .{ .owner = &intake, .host = &host, .fd = -1, .accepted_at_ns = 0, .deadline = 0 };
     defer if (exchange.reply) |reply| {
@@ -4556,11 +4577,12 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     try std.testing.expect(!storage.isFenced() and host.launchAllowed());
     var preview = try readSkillSuggestions(&host, std.testing.allocator, .{ .session = configured.accepted.session.slice() }, "");
     defer preview.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), preview.entries.len);
-    // The same key is admitted once memory is back, with the skill bound.
+    try std.testing.expectEqual(@import("skill_suggestions.zig").capacity, preview.entries.len);
+    try std.testing.expectEqual(entries.len, preview.total);
+    // The key the sweep admitted replays, with the typed text its content.
     var retry_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
     const accepted = try submitMessage(&host, &command, &retry_offer);
-    try std.testing.expect(accepted == .accepted);
+    try std.testing.expect(accepted == .accepted and accepted.accepted.replayed);
     try std.testing.expectEqual(@as(u64, text.len), accepted.accepted.content.length);
     try std.testing.expect(host.launchAllowed() and !storage.isFenced());
     try store_module.testingFailReadsOf(&storage, "session_skill_catalog");
@@ -4586,24 +4608,34 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
     host.retention = &retention;
     var request_buffer: [512]u8 = undefined;
     const request = try std.fmt.bufPrint(&request_buffer, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"skill_suggestions\",\"store\":\"s\",\"workspace\":\"{s}\",\"prefix\":\"\"}}", .{root});
-    var sockets: [2]c_int = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
-    defer _ = std.c.close(sockets[1]);
-    try setNonblocking(sockets[0]);
-    var header_buffer: [256]u8 = undefined;
-    try writeAll(std.testing.io, sockets[1], try std.fmt.bufPrint(&header_buffer, "POST /v1/skill-suggestions HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nContent-Length: {d}\r\n\r\n", .{request.len}));
-    try writeAll(std.testing.io, sockets[1], request);
-    const exchange = try std.testing.allocator.create(Intake.Exchange);
-    exchange.* = .{ .owner = undefined, .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = std.math.maxInt(i128) };
-    defer std.debug.assert(exchange.destroy());
-    try exchange.read();
-    try std.testing.expectEqual(.ready, exchange.state);
-    const reply = try exchange.ensureReply();
-    // Discovery and the page allocate from the Host's allocator; none is left.
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    host.allocator = failing.allocator();
-    exchange.prepare() catch |err| exchange.fail(err);
-    host.allocator = std.testing.allocator;
-    try std.testing.expect(std.mem.startsWith(u8, reply.header[0..reply.header_length], "HTTP/1.1 503 "));
-    try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+    // Each allocation in turn fails, until the page is served: every
+    // failure is a 503, and none fences the Store or the Host.
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var sockets: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+        defer _ = std.c.close(sockets[1]);
+        try setNonblocking(sockets[0]);
+        var header_buffer: [256]u8 = undefined;
+        try writeAll(std.testing.io, sockets[1], try std.fmt.bufPrint(&header_buffer, "POST /v1/skill-suggestions HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nContent-Length: {d}\r\n\r\n", .{request.len}));
+        try writeAll(std.testing.io, sockets[1], request);
+        const exchange = try std.testing.allocator.create(Intake.Exchange);
+        exchange.* = .{ .owner = undefined, .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = std.math.maxInt(i128) };
+        defer std.debug.assert(exchange.destroy());
+        try exchange.read();
+        try std.testing.expectEqual(.ready, exchange.state);
+        const reply = try exchange.ensureReply();
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        host.allocator = failing.allocator();
+        exchange.prepare() catch |err| exchange.fail(err);
+        host.allocator = std.testing.allocator;
+        try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+        const status = reply.header[0..reply.header_length];
+        if (!failing.has_induced_failure) {
+            try std.testing.expect(std.mem.startsWith(u8, status, "HTTP/1.1 200 "));
+            break;
+        }
+        try std.testing.expect(std.mem.startsWith(u8, status, "HTTP/1.1 503 "));
+    }
+    try std.testing.expect(fail_index > 0);
 }
