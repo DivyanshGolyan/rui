@@ -3,6 +3,7 @@
 //! not import the frontend, so no worker can read or write it.
 
 const std = @import("std");
+const socket_os = @import("os/socket.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
@@ -1319,7 +1320,7 @@ const FakeHost = struct {
         for ([_][]const u8{ head, body }) |bytes| {
             var sent: usize = 0;
             while (sent < bytes.len) {
-                const count = std.c.send(fd, bytes[sent..].ptr, bytes.len - sent, std.c.MSG.NOSIGNAL);
+                const count = std.c.send(fd, bytes[sent..].ptr, bytes.len - sent, socket_os.send_flags);
                 if (count <= 0) return;
                 sent += @intCast(count);
             }
@@ -1372,6 +1373,7 @@ const FakeHost = struct {
             const peer = listener.accept(std.testing.io) catch return;
             defer peer.close(std.testing.io);
             if (self.stopping.load(.acquire)) return;
+            if (!socket_os.suppressSigpipe(peer.socket.handle)) return;
             self.answer(peer.socket.handle) catch {};
         }
     }

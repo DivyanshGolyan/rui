@@ -232,7 +232,7 @@ All Zig unit Run steps bypass Zig acceptance caching, and Go tests use `-count=1
 Cache-policy changes run [the fixed-seed execution regression](tests/ci/cache_execution.py) on Linux before main, and on macOS in promotion when the batch changed cache policy.
 The required `admission` aggregate includes this job when selected.
 Build-cache keys separate native tools, Apple SDK, architecture, dependency pins, scripts, source inputs and shard.
-PR caches never feed a privileged workflow.
+Only `main` saves caches; PR jobs restore main's snapshots and save none, so PR caches never feed a privileged workflow or evict main's.
 
 Each platform builds its target closure once with `ci-build -Dci-targets=...`.
 On Linux and macOS, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.
@@ -259,7 +259,8 @@ Successful gates do not capture.
 Native observation failure metadata is copied after reap and before temporary-root deletion.
 
 [Cache maintenance](.github/workflows/cache-maintenance.yml) warms production compilation after trusted main pushes that change build, dependency or maintenance inputs.
-Cleanup keeps the newest snapshot per platform and partition for open PRs and two for main, and removes closed PR caches; these are targets, not a quota.
+It also compiles the build runner on six Linux slots and one Mac, so test shards on the CPU models those slots drew restore it from main.
+Cleanup keeps main's newest snapshot per platform and partition, per build-runner CPU model, of each platform's compiler and of the package set, and removes every PR cache; these are targets, not a quota.
 Warm baselines are not test acceptance.
 Maintenance also builds the pinned previous release per platform for the read-only upgrade check.
 The API-only cleanup job runs trusted main code with cache-deletion permission and consumes no producer code, caches or artifacts.

@@ -14,8 +14,11 @@ inputs:
     description: A verified same-run artifact supplies emitted executables and pinned package sources
     default: 'false'
   publish-caches:
+    # Only main publishes. PR jobs compile about as fast from main's snapshots
+    # as from their own, whose 0.1-0.7 GB saves per job overflowed the shared
+    # quota and evicted main's.
     description: Save caches after the job; read-only cache workflows pass 'false' to restore only
-    default: 'true'
+    default: ${{ github.ref == 'refs/heads/main' }}
 runs:
   using: composite
   steps:

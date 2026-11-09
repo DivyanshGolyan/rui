@@ -49,8 +49,9 @@ SCANNED = ("src/*.zig", "tests/integration/*.zig", "tests/integration/*.py", "cl
 # Darwin differs on these: shutdown of a closed or listening socket returns
 # ENOTCONN, a full backlog refuses connect, kill(-pgid) of a zombie group is
 # EPERM (so only a negative pid counts), and descriptor limits have a
-# separate kernel ceiling.
-DIVERGENT_SYSCALLS = ("shutdown", "kill", "listen", "setrlimit")
+# separate kernel ceiling. getpeername can return EINVAL after a reset on
+# Darwin; the socket owner rereads SO_ERROR (#1106).
+DIVERGENT_SYSCALLS = ("shutdown", "kill", "listen", "setrlimit", "getpeername")
 SYSCALL_NAMESPACES = ("c", "posix", "system")
 PYTHON_PLATFORM = (("sys", "platform"), ("platform", "system"), ("os", "uname"))
 
@@ -77,6 +78,9 @@ def zig_sites(source):
         if token == "builtin" and following == [".", "os"]:
             sites += 1
         elif token == "@import" and tokens[i + 1:i + 6] == ["(", '"builtin"', ")", ".", "os"]:
+            sites += 1
+        # Linux uses MSG_NOSIGNAL; Darwin configures SO_NOSIGPIPE on the socket.
+        elif (token, *following) in (("MSG", ".", "NOSIGNAL"), ("SO", ".", "NOSIGPIPE")):
             sites += 1
         elif (token in SYSCALL_NAMESPACES and following[:1] == ["."] and following[1:] and following[1] in DIVERGENT_SYSCALLS
               and (following[1] != "kill" or tokens[i + 3:i + 5] == ["(", "-"])

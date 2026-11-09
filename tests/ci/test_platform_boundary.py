@@ -64,7 +64,8 @@ class PlatformBoundaryTest(unittest.TestCase):
     def test_zig_scan_reads_platform_names_and_divergent_syscalls(self):
         for source in ('const os = builtin.os.tag;', 'if (@import("builtin").os.tag == .macos) {}',
                        '_ = std.c.shutdown(fd, std.c.SHUT.WR);', 'std.posix.kill(-pgid, .KILL) catch {};',
-                       'const r = c.setrlimit(c.RLIMIT_NOFILE, &l);', '_ = std.c.listen(fd, 0);', '_ = c.kill(-group, c.SIGKILL);'):
+                       'const r = c.setrlimit(c.RLIMIT_NOFILE, &l);', '_ = std.c.listen(fd, 0);', '_ = c.kill(-group, c.SIGKILL);',
+                       '_ = std.c.getpeername(fd, addr, len);'):
             self.assertEqual(zig_sites(source), 1, source)
         for source in ('// builtin.os in a comment', 'const s = "std.c.shutdown";', '\\\\builtin.os.tag',
                        'fn f(os: std.Target.Os.Tag) void {}', 'const a = builtin.mode;',
@@ -76,6 +77,12 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertEqual(python_sites('if sys.platform == "darwin":\n    pass\n'), 1)
         self.assertEqual(python_sites('name = platform.system()\nos.uname()\n'), 2)
         self.assertEqual(python_sites('# sys.platform\ntext = "sys.platform"\nx.sys.platform\n'), 0)
+
+    def test_sigpipe_constants_belong_to_socket_owner(self):
+        for source in ('std.c.MSG.NOSIGNAL', 'c.SO.NOSIGPIPE', 'MSG . NOSIGNAL'):
+            self.assertEqual(zig_sites(source), 1, source)
+        for source in ('// MSG.NOSIGNAL', '"SO.NOSIGPIPE"', 'socket_os.send_flags', 'MSG.OTHER'):
+            self.assertEqual(zig_sites(source), 0, source)
 
     def test_fixture_trust_through_ssl_cert_variables_is_a_platform_site(self):
         # The feed-host test before #997 trusted its CA this way and failed only on Darwin.
