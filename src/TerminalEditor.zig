@@ -380,12 +380,13 @@ pub fn select(comptime keys: anytype, decoded: Input.Decoded) Selection(@TypeOf(
     return switch (classify(pressed)) {
         .key => |key_name| if (keys.get(key_name)) |action| .{ .action = action } else .none,
         .enter => .enter,
-        // The draft's other edit keys have no use at a choice; a Ctrl or
-        // Alt chord among them is refused like any other chord.
-        .edit => |command| switch (command) {
+        // Only the bare arrows move a choice: Ctrl-B and Ctrl-F move the
+        // draft's caret alone. The draft's other edit keys have no use at a
+        // choice; a Ctrl or Alt chord among them is refused like any other.
+        .edit => |command| if (pressed.mods.ctrl or pressed.mods.alt or pressed.mods.super or pressed.mods.hyper or pressed.mods.meta) .refused else switch (command) {
             .left => .left,
             .right => .right,
-            else => if (pressed.mods.ctrl or pressed.mods.alt or pressed.mods.super or pressed.mods.hyper or pressed.mods.meta) .refused else .none,
+            else => .none,
         },
         .chord, .control => .refused,
         .text => |text| if (text.len != 0) .text else .none,
@@ -418,6 +419,14 @@ test "a choice takes its arrows and Enter, the screen's keys and typing, and ref
         // among them is refused.
         .{ .bytes = "\x01", .expected = .refused },
         .{ .bytes = "\x1b[1;3D", .expected = .refused },
+        // Ctrl-B and Ctrl-F move the draft's caret, never the choice, in
+        // raw, Kitty and modifyOtherKeys form.
+        .{ .bytes = "\x02", .expected = .refused },
+        .{ .bytes = "\x06", .expected = .refused },
+        .{ .bytes = "\x1b[98;5u", .expected = .refused },
+        .{ .bytes = "\x1b[102;5u", .expected = .refused },
+        .{ .bytes = "\x1b[27;5;98~", .expected = .refused },
+        .{ .bytes = "\x1b[27;5;102~", .expected = .refused },
         .{ .bytes = "\x1b\x7f", .expected = .refused },
         .{ .bytes = "\x7f", .expected = .none },
         .{ .bytes = "\t", .expected = .none },
