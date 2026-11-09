@@ -1,7 +1,7 @@
 //! Shared output projections and scratch metadata codec. No Store or provider parser.
 const std = @import("std");
 const named_scratch = @import("named_scratch.zig");
-const protocol = @import("protocol.zig");
+const conversation_read = @import("conversation_read.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const ModelOperationKind = @import("turn_policy.zig").Purpose;
@@ -354,7 +354,7 @@ pub fn readHexScalar(source: anytype) !u21 {
 }
 
 /// Streams a value's decoded bytes through a whole content window.
-pub const EncodedStringReader = EncodedStringWindow(protocol.content_window_bytes);
+pub const EncodedStringReader = EncodedStringWindow(conversation_read.content_window_bytes);
 
 /// Reads a call name, which the Host only compares with a catalog name or
 /// quotes as a 32-byte prefix, so a short window serves it.

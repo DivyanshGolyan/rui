@@ -3,302 +3,30 @@ const protocol = @import("protocol.zig");
 const codec_abi = @import("codec_abi.zig");
 pub const core_tools = @import("core_tools.zig");
 
-/// Bash receives the command as one `-c` argument. Linux rejects an
-/// argument of 128 KiB including its NUL (MAX_ARG_STRLEN with 4 KiB pages),
-/// and with a small stack rlimit the whole argv+environment shares a 128 KiB
-/// floor; 8 KiB stays for the shell path, environment and pointers.
-pub const bash_max_command_bytes: usize = 120 * 1024;
-/// Reuse the command ceiling for optional decoded stdin in charged scratch.
-pub const bash_max_stdin_bytes: usize = bash_max_command_bytes;
-
-/// Who supplied a tool: D48's "owning server". Who runs it is derived
-/// from this (D46): Rui runs its own tools and an MCP server's, which it
-/// calls over HTTP; the provider runs its own.
-pub const Owner = enum { rui, provider, mcp };
-
-/// The longest MCP server name a record carries, in the tool-name grammar.
-pub const max_server_bytes = protocol.max_tool_name_bytes;
-
-/// One tool, as the model is told about it (D48). Request rendering and
-/// call checking work from a list of these. A provider-run tool's
-/// description and schema are the provider's own, so each codec names it
-/// and its record carries neither.
-pub const Record = struct {
-    name: []const u8,
-    description: []const u8 = "",
-    /// A JSON Schema object, as JSON text.
-    input_schema: []const u8 = "",
-    owner: Owner,
-    /// The MCP server that serves the tool, for an `.mcp` record only.
-    server: []const u8 = "",
-
-    pub fn runner(self: *const Record) Runner {
-        return Runner.of(self);
-    }
-};
-
-/// The longest function name a provider accepts (OpenAI: 64 characters);
-/// a longer call name cannot match any record.
-pub const max_name_bytes = protocol.max_tool_name_bytes;
-
-/// The most tools one set offers.
-pub const max_tools = protocol.max_tools;
-
-/// A record's identity: its name, owner, server and the content digests
-/// of its description and input schema. A tool that moves to another
-/// server is another record.
-pub fn recordDigest(member: *const Record) [32]u8 {
-    return (RecordIdentity{
-        .name = member.name,
-        .owner = member.owner,
-        .server = member.server,
-        .description = protocol.contentDigest(member.description),
-        .input_schema = protocol.contentDigest(member.input_schema),
-    }).digest();
-}
-
-/// A record's identity without its texts: a saved record already holds
-/// their digests, so selecting it never reads or copies those texts.
-pub const RecordIdentity = struct {
-    name: []const u8,
-    owner: Owner,
-    server: []const u8,
-    description: [32]u8,
-    input_schema: [32]u8,
-
-    pub fn digest(self: *const RecordIdentity) [32]u8 {
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hashField(&hash, "rui/tool-record/v1");
-        hashField(&hash, self.name);
-        hashField(&hash, @tagName(self.owner));
-        hashField(&hash, self.server);
-        hash.update(&self.description);
-        hash.update(&self.input_schema);
-        return hash.finalResult();
-    }
-};
-
-/// The identity of an ordered set of records, which the Store saves once:
-/// its members' `recordDigest`s, in order.
-pub const SetDigest = struct {
-    hash: std.crypto.hash.sha2.Sha256,
-
-    pub fn init() SetDigest {
-        var out: SetDigest = .{ .hash = .init(.{}) };
-        hashField(&out.hash, "rui/tool-set/v2");
-        return out;
-    }
-
-    pub fn add(self: *SetDigest, member: *const [32]u8) void {
-        self.hash.update(member);
-    }
-
-    pub fn final(self: *SetDigest) [32]u8 {
-        return self.hash.finalResult();
-    }
-};
-
-fn hashField(hash: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
-    var length: [8]u8 = undefined;
-    std.mem.writeInt(u64, &length, value.len, .big);
-    hash.update(&length);
-    hash.update(value);
-}
-
-/// The tools a Host offers, sorted by name with no name twice: what a
-/// Session's tool names resolve against. The Store saves it as one set
-/// when it opens, and a Session's set takes its members from that one.
-/// Today the built-ins; MCP tools join it at Host start (M3a).
-pub const Catalog = struct {
-    records: []const Record,
-    /// Each record's `recordDigest`, in the same order.
-    digests: []const [32]u8,
-
-    /// The index of the record named `name`.
-    pub fn find(self: *const Catalog, name: []const u8) ?usize {
-        var low: usize = 0;
-        var high = self.records.len;
-        while (low < high) {
-            const middle = low + (high - low) / 2;
-            switch (std.mem.order(u8, self.records[middle].name, name)) {
-                .eq => return middle,
-                .lt => low = middle + 1,
-                .gt => high = middle,
-            }
-        }
-        return null;
-    }
-
-    /// Whether the records are sorted by name, each named once, and each
-    /// digest is its record's.
-    pub fn valid(self: *const Catalog) bool {
-        if (self.records.len != self.digests.len or self.records.len > max_catalog_records) return false;
-        for (self.records, self.digests, 0..) |*each, digest, index| {
-            if (!protocol.validToolName(each.name) or !validServer(each)) return false;
-            if (index != 0 and std.mem.order(u8, self.records[index - 1].name, each.name) != .lt) return false;
-            if (!std.mem.eql(u8, &digest, &recordDigest(each))) return false;
-        }
-        return true;
-    }
-};
-
-/// An MCP record names its server, in the tool-name grammar; any other
-/// record names none.
-pub fn validServer(each: *const Record) bool {
-    return if (each.owner == .mcp) protocol.validToolName(each.server) else each.server.len == 0;
-}
-
-/// The most records a Host's catalog holds; its saved set holds as many.
-pub const max_catalog_records = 1024;
-
-pub const bash_record: Record = .{
-    .name = "bash",
-    .owner = .rui,
-    .description = "Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed. Put text payloads in stdin, never inside cmd. Bash has no terminal: no one can type into a running call, so password prompts (sudo, including installers that run it) and interactive programs fail. When flags or stdin cannot answer a prompt, give the command to the user to run in their own terminal: before running it when you can tell it will prompt, otherwise after its first such failure. Do not retry it here.",
-    .input_schema = "{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}," ++
-        std.fmt.comptimePrint("\"stdin\":{{\"type\":\"string\",\"description\":\"Optional. Literal UTF-8 text, at most {d} decoded bytes, read exactly then EOF. Omitted, stdin is /dev/null.\"}},", .{bash_max_stdin_bytes}) ++
-        "\"description\":{\"type\":\"string\",\"description\":\"A short human-facing activity label: base verb + concrete target + useful scope, in sentence case with no trailing punctuation. Describe the intended work, not its status, success or safety. Required, nonblank, single-line valid UTF-8, at most 100 decoded UTF-8 bytes. Aim for 40–60 characters; use more only for useful scope. Example: Run parser regression tests\"}," ++
-        "\"timeout_ms\":{\"type\":\"integer\",\"description\":\"Optional. Omit it for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.\",\"minimum\":1,\"maximum\":9223372036854775807}}," ++
-        "\"required\":[\"cmd\",\"description\"],\"additionalProperties\":false}",
-};
-
-pub const find_tools_record: Record = .{
-    .name = "find_tools",
-    .owner = .rui,
-    .description = core_tools.find_tools_description,
-    .input_schema = core_tools.find_tools_schema,
-};
-
-pub const message_agent_record: Record = .{
-    .name = "message_agent",
-    .owner = .rui,
-    .description = core_tools.message_agent_description,
-    .input_schema = core_tools.message_agent_schema,
-};
-
-pub const read_transcript_record: Record = .{
-    .name = "read_transcript",
-    .owner = .rui,
-    .description = core_tools.read_transcript_description,
-    .input_schema = core_tools.read_transcript_schema,
-};
-
-pub const skill_record: Record = .{
-    .name = "skill",
-    .owner = .rui,
-    .description = core_tools.skill_description,
-    .input_schema = core_tools.skill_schema,
-};
-
-pub const start_agent_record: Record = .{
-    .name = "start_agent",
-    .owner = .rui,
-    .description = core_tools.start_agent_description,
-    .input_schema = core_tools.start_agent_schema,
-};
-
-pub const web_search_record: Record = .{ .name = "web_search", .owner = .provider };
-
-/// Who carries out an accepted call to a tool Rui owns, derived from its
-/// name and never stored (D46): Bash runs as an Action process; a core tool
-/// runs as a core command (D24).
-pub const Runner = enum {
-    bash,
-    core,
-    mcp,
-    provider,
-
-    pub fn of(tool: *const Record) Runner {
-        if (tool.owner == .mcp) return .mcp;
-        if (tool.owner == .provider) return .provider;
-        const core = std.mem.eql(u8, tool.name, find_tools_record.name) or std.mem.eql(u8, tool.name, message_agent_record.name) or std.mem.eql(u8, tool.name, read_transcript_record.name) or std.mem.eql(u8, tool.name, start_agent_record.name) or std.mem.eql(u8, tool.name, skill_record.name);
-        return if (core) .core else .bash;
-    }
-};
-
-/// The record of each tool `Tool` names: the text a new tool set saves.
-/// Until the wire names tools by name, a Session's tools are a `ToolSet`
-/// and this maps it.
-pub fn record(tool: Tool) *const Record {
-    return switch (tool) {
-        .bash => &bash_record,
-        .find_tools => &find_tools_record,
-        .message_agent => &message_agent_record,
-        .read_transcript => &read_transcript_record,
-        .start_agent => &start_agent_record,
-        .skill => &skill_record,
-        .web_search => &web_search_record,
-    };
-}
-
-/// The built-ins, as the catalog of a Host with no other tools.
-pub const built_in: Catalog = .{ .records = &built_in_records, .digests = &built_in_digests };
-
-const built_in_records = blk: {
-    var out: [std.enums.values(Tool).len]Record = undefined;
-    for (std.enums.values(Tool), &out) |tool, *each| each.* = record(tool).*;
-    break :blk out;
-};
-
-const built_in_digests = blk: {
-    @setEvalBranchQuota(1_000_000);
-    var out: [built_in_records.len][32]u8 = undefined;
-    for (&built_in_records, &out) |*each, *digest| digest.* = recordDigest(each);
-    break :blk out;
-};
-
-test "the built-in catalog is valid and finds each built-in by name" {
-    try std.testing.expect(built_in.valid());
-    for (std.enums.values(Tool), 0..) |tool, index| try std.testing.expectEqual(@as(?usize, index), built_in.find(@tagName(tool)));
-    try std.testing.expectEqual(@as(?usize, null), built_in.find("bas"));
-    try std.testing.expectEqual(@as(?usize, null), built_in.find("edit"));
-}
-
-comptime {
-    for (std.enums.values(Tool)) |tool| {
-        const r = record(tool);
-        if (!std.mem.eql(u8, r.name, @tagName(tool)) or r.name.len > max_name_bytes) @compileError("tool record name");
-    }
-}
-
-/// The records a request offers, in a fixed order.
-pub const Offered = struct {
-    /// Borrowed batch names and membership flags, filled by the Store lookup.
-    mcp_names: []const protocol.Bounded(max_name_bytes) = &.{},
-    mcp_offered: []const bool = &.{},
-    records: [std.enums.values(Tool).len]*const Record = undefined,
-    len: usize = 0,
-    /// The tools the Session offered at an earlier revision and this
-    /// request does not: a call to one gets "This tool was removed." (D54).
-    withdrawn: ToolSet = .empty,
-
-    pub fn of(set: ToolSet) Offered {
-        var out: Offered = .{};
-        for (std.enums.values(Tool)) |tool| if (set.contains(tool)) {
-            out.records[out.len] = record(tool);
-            out.len += 1;
-        };
-        return out;
-    }
-
-    /// From a tools_mask the Store already checked.
-    pub fn ofMask(mask: u8) Offered {
-        var set: ToolSet = .empty;
-        for (std.enums.values(Tool)) |tool| if (mask & toolBit(tool) != 0) set.insert(tool);
-        return of(set);
-    }
-
-    pub fn slice(self: *const Offered) []const *const Record {
-        return self.records[0..self.len];
-    }
-
-    /// `set`, with the tools of `ever` it lacks withdrawn.
-    pub fn since(set: ToolSet, ever: ToolSet) Offered {
-        var out = of(set);
-        out.withdrawn = ever.differenceWith(set);
-        return out;
-    }
-};
+pub const bash_max_command_bytes = @import("tool_record.zig").bash_max_command_bytes;
+pub const bash_max_stdin_bytes = @import("tool_record.zig").bash_max_stdin_bytes;
+pub const Owner = @import("tool_record.zig").Owner;
+pub const max_server_bytes = @import("tool_record.zig").max_server_bytes;
+pub const Record = @import("tool_record.zig").Record;
+pub const max_name_bytes = @import("tool_record.zig").max_name_bytes;
+pub const max_tools = @import("tool_record.zig").max_tools;
+pub const recordDigest = @import("tool_record.zig").recordDigest;
+pub const RecordIdentity = @import("tool_record.zig").RecordIdentity;
+pub const SetDigest = @import("tool_record.zig").SetDigest;
+pub const Catalog = @import("tool_record.zig").Catalog;
+pub const validServer = @import("tool_record.zig").validServer;
+pub const max_catalog_records = @import("tool_record.zig").max_catalog_records;
+pub const bash_record = @import("tool_record.zig").bash_record;
+pub const find_tools_record = @import("tool_record.zig").find_tools_record;
+pub const message_agent_record = @import("tool_record.zig").message_agent_record;
+pub const read_transcript_record = @import("tool_record.zig").read_transcript_record;
+pub const skill_record = @import("tool_record.zig").skill_record;
+pub const start_agent_record = @import("tool_record.zig").start_agent_record;
+pub const web_search_record = @import("tool_record.zig").web_search_record;
+pub const Runner = @import("tool_record.zig").Runner;
+pub const record = @import("tool_record.zig").record;
+pub const built_in = @import("tool_record.zig").built_in;
+pub const Offered = @import("tool_record.zig").Offered;
 
 /// Every tool call is shown as one line, its description: what the call
 /// set out to do, in the base-verb form of "Run parser tests". `describe`
@@ -307,7 +35,7 @@ pub const Offered = struct {
 /// asks the model for it (Bash's required `description` argument); a tool
 /// the provider hosts takes no arguments of ours, so its line is written
 /// from what the provider reports the call did.
-pub const Description = protocol.Bounded(protocol.max_tool_description_bytes);
+pub const Description = @import("tool_record.zig").Description;
 
 /// One call, as `describe` needs it.
 pub const Call = union(Tool) {
@@ -538,31 +266,11 @@ pub const BashArguments = struct {
     stdin_present: bool = false,
 };
 
-/// The built-in tools; the wire owns their names.
-pub const Tool = protocol.BuiltInTool;
-pub const builtIn = protocol.builtInTool;
-
-pub const ToolSet = std.EnumSet(Tool);
-
-/// Persisted tools_mask bit shared by Store encoding and model preparation.
-pub fn toolBit(tool: Tool) u8 {
-    return switch (tool) {
-        .bash => 1,
-        .web_search => 2,
-        .message_agent => 4,
-        .start_agent => 8,
-        .read_transcript => 16,
-        .find_tools => 32,
-        .skill => 64,
-    };
-}
-
-/// Every tool's bit: the largest valid tools_mask.
-pub const all_tools_mask: u8 = blk: {
-    var mask: u8 = 0;
-    for (std.enums.values(Tool)) |tool| mask |= toolBit(tool);
-    break :blk mask;
-};
+pub const Tool = @import("tool_record.zig").Tool;
+pub const builtIn = @import("tool_record.zig").builtIn;
+pub const ToolSet = @import("tool_record.zig").ToolSet;
+pub const toolBit = @import("tool_record.zig").toolBit;
+pub const all_tools_mask = @import("tool_record.zig").all_tools_mask;
 
 pub const CallFacts = struct {
     /// The offered record the call names; null when it names none that

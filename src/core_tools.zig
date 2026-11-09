@@ -21,19 +21,11 @@ pub fn validPresetName(name: []const u8) bool {
     return true;
 }
 
-/// The most decoded bytes a `message_agent` text carries.
-pub const message_agent_max_text_bytes = 64 * 1024;
-
-// Prompt text: written here, and given no tests (D141).
-pub const message_agent_description = "Send a Message to another Rui Session by its ID. It returns once the Message is delivered, before any answer. A reply, if the receiver sends one, arrives later as a Message that starts your next turn.";
-pub const message_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
-    "\"id\":{\"type\":\"string\",\"description\":\"The receiving Session's six-character ID.\"}," ++
-    std.fmt.comptimePrint("\"text\":{{\"type\":\"string\",\"description\":\"The Message: nonempty UTF-8, at most {d} bytes.\"}}", .{message_agent_max_text_bytes}) ++
-    "},\"required\":[\"id\",\"text\"],\"additionalProperties\":false}";
-
-// Prompt text: written here, and given no tests (D141).
-pub const find_tools_description = "Find and load tools available to this Session but not yet loaded. Give one to eight space-separated search words, at most 64 bytes each; a tool matches any word in its name or description, ignoring ASCII case. Loads at most eight matches in name order. Loaded tools become available on your next request.";
-pub const find_tools_schema = "{\"type\":\"object\",\"properties\":{\"words\":{\"type\":\"string\",\"description\":\"One to eight search words separated by ASCII spaces; each word is at most 64 bytes.\"}},\"required\":[\"words\"],\"additionalProperties\":false}";
+pub const message_agent_max_text_bytes = @import("tool_record.zig").message_agent_max_text_bytes;
+pub const message_agent_description = @import("tool_record.zig").message_agent_description;
+pub const message_agent_schema = @import("tool_record.zig").message_agent_schema;
+pub const find_tools_description = @import("tool_record.zig").find_tools_description;
+pub const find_tools_schema = @import("tool_record.zig").find_tools_schema;
 
 pub const find_tools_max_word_bytes = 64;
 /// Eight words of 64 bytes fit with room for JSON escapes and spacing; a
@@ -70,24 +62,8 @@ pub fn checkFindTools(arena: std.mem.Allocator, bytes: []const u8, out: *FindToo
 /// Read arguments are deliberately small; content is read in bounded windows.
 pub const read_transcript_max_argument_bytes = 4096;
 
-// Prompt text: written here, and given no tests (D141).
-pub const read_transcript_description = "Read any Rui Session's public transcript, newest first. Omit id to read your own. Outline lines give entry addresses, kinds, people or tools, call notes, result codes, byte sizes and quoted first-line previews (at most 100 bytes). Use before to page older entries. Open an entry with full and continue its 16 KiB text windows with offset; call entries show the tool name and arguments JSON. Use query for ASCII-case-insensitive word search with quoted snippets; query cannot be combined with full. Private content is never shown.";
-const transcript_kind_schema = blk: {
-    var names: []const u8 = "";
-    for (std.enums.values(protocol.ActivityItem.Kind), 0..) |kind, index| {
-        names = names ++ (if (index == 0) "" else ",") ++ "\"" ++ @tagName(kind) ++ "\"";
-    }
-    break :blk "{\"type\":\"string\",\"enum\":[" ++ names ++ "]}";
-};
-pub const read_transcript_schema = "{\"type\":\"object\",\"properties\":{" ++
-    "\"id\":{\"type\":\"string\",\"description\":\"Session ID; omitted means your own Session.\"}," ++
-    "\"query\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"Search public text (1 to 256 UTF-8 bytes); not with full.\"}," ++
-    "\"kinds\":{\"type\":\"array\",\"items\":" ++ transcript_kind_schema ++ ",\"minItems\":1,\"description\":\"Public feed kind names, exactly as on the wire. Omitted means all kinds.\"}," ++
-    "\"before\":{\"type\":\"string\",\"description\":\"List entries strictly older than this P or P.O address.\"}," ++
-    "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":16}," ++
-    "\"full\":{\"type\":\"string\",\"description\":\"Open entry P.O instead of listing; omit kinds, before and limit.\"}," ++
-    "\"offset\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"Byte offset, only with full.\"}" ++
-    "},\"additionalProperties\":false}";
+pub const read_transcript_description = @import("tool_record.zig").read_transcript_description;
+pub const read_transcript_schema = @import("tool_record.zig").read_transcript_schema;
 
 pub const TranscriptAddress = struct { position: u64, ordinal: ?u64 = null };
 pub const ReadTranscriptCheck = StartAgentCheck;
@@ -178,25 +154,8 @@ pub fn checkReadTranscript(arena: std.mem.Allocator, bytes: []const u8, out: *Re
 /// (`\u0001` for each byte), and its spec.
 pub const start_agent_max_argument_bytes = 6 * message_agent_max_text_bytes + 16 * 1024;
 
-// Prompt text: written here, and given no tests (D141).
-pub const start_agent_description = "Start another Rui agent on a task. It creates the agent's Session, gives it the task as its first Message and returns the agent's ID at once, before any answer. " ++
-    "An attached agent is your child: it works in your Workspace with your provider and Bash environment, and stops when you are stopped or run out of context. A standalone agent has its own lifetime. " ++
-    "The spec may only narrow your own tools and permission mode.";
-pub const start_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
-    std.fmt.comptimePrint("\"task\":{{\"type\":\"string\",\"description\":\"The agent's first Message: nonempty UTF-8, at most {d} bytes.\"}},", .{message_agent_max_text_bytes}) ++
-    "\"attached\":{\"type\":\"boolean\",\"description\":\"true starts your child, which stops with you; false starts a standalone agent.\"}," ++
-    "\"preset\":{\"type\":\"string\",\"description\":\"A connect-time preset; spec fields override it.\"}," ++
-    "\"spec\":{\"type\":\"object\",\"properties\":{" ++
-    "\"model\":{\"type\":\"string\"}," ++
-    "\"effort\":{\"type\":[\"string\",\"null\"],\"enum\":[null,\"none\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]}," ++
-    "\"compactAt\":{\"type\":\"integer\",\"description\":\"Tokens of context at which the agent compacts.\"}," ++
-    "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Tool names, each one of yours.\"}," ++
-    "\"permissionMode\":{\"type\":\"string\",\"enum\":[\"ask\",\"bypass\"]}," ++
-    "\"instructions\":{\"type\":\"string\",\"description\":\"Optional agent instructions.\"}," ++
-    "\"outputSchema\":{\"type\":[\"object\",\"null\"],\"description\":\"Optional JSON output schema.\"}," ++
-    "\"label\":{\"type\":[\"string\",\"null\"],\"description\":\"A few words naming the agent's task.\"}" ++
-    "},\"additionalProperties\":false}" ++
-    "},\"required\":[\"task\",\"attached\"],\"anyOf\":[{\"required\":[\"spec\"]},{\"required\":[\"preset\"]}],\"additionalProperties\":false}";
+pub const start_agent_description = @import("tool_record.zig").start_agent_description;
+pub const start_agent_schema = @import("tool_record.zig").start_agent_schema;
 
 /// A `start_agent` call's checked arguments: the task, whether the agent
 /// is attached, and its spec as a creating Configuration without the
@@ -1060,8 +1019,9 @@ test "start_agent presets cannot supply provider or workspace even with override
     }
 }
 
-pub const skill_description = "Invoke an advertised skill by name to read its complete raw SKILL.md and absolute path. Reload rescans this Session's repository and Host-home .agents/skills roots, appending only changed catalog entries. Skills are ordinary conversation content, grant no tools or permissions, and execute nothing on load.";
-pub const skill_schema = "{\"type\":\"object\",\"properties\":{\"operation\":{\"type\":\"string\",\"enum\":[\"invoke\",\"reload\"]},\"name\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64}},\"required\":[\"operation\"],\"additionalProperties\":false}";
+pub const skill_description = @import("tool_record.zig").skill_description;
+pub const skill_schema = @import("tool_record.zig").skill_schema;
+
 pub const skill_max_argument_bytes = 4096;
 
 pub fn checkSkill(arena: std.mem.Allocator, bytes: []const u8, out: *protocol.SkillRequest) error{OutOfMemory}!StartAgentCheck {
