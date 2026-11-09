@@ -9,6 +9,7 @@ const std = @import("std");
 const test_poll = @import("test_poll");
 const builtin = @import("builtin");
 const c = @import("h2_c");
+const openssl = @import("tls_client").c;
 const tls = @import("../tls.zig");
 const Peer = @This();
 
@@ -25,8 +26,8 @@ seen: Seen,
 url_buffer: [96]u8,
 url_len: usize,
 /// For a TLS peer.
-ssl_ctx: ?*c.SSL_CTX,
-bio_method: ?*c.BIO_METHOD,
+ssl_ctx: ?*openssl.SSL_CTX,
+bio_method: ?*openssl.BIO_METHOD,
 tmp: ?std.testing.TmpDir,
 ca_path_buffer: [96]u8,
 ca_path_len: usize,
@@ -70,7 +71,7 @@ pub const Connection = struct {
     session: ?*c.nghttp2_session,
     closed: bool,
     received_any: bool,
-    ssl: ?*c.SSL,
+    ssl: ?*openssl.SSL,
 };
 
 pub const Stream = struct {
@@ -157,32 +158,32 @@ pub fn caDirectory(self: *const Peer, buffer: []u8) ![:0]const u8 {
 
 // --------------------------------------------------------------------- TLS
 
-fn writeCertificate(path: [:0]const u8, cert: *c.X509) !void {
-    const file = c.BIO_new_file(path.ptr, "w") orelse return error.TlsSetupFailed;
-    defer _ = c.BIO_free(file);
-    if (c.PEM_write_bio_X509(file, cert) != 1) return error.TlsSetupFailed;
+fn writeCertificate(path: [:0]const u8, cert: *openssl.X509) !void {
+    const file = openssl.BIO_new_file(path.ptr, "w") orelse return error.TlsSetupFailed;
+    defer _ = openssl.BIO_free(file);
+    if (openssl.PEM_write_bio_X509(file, cert) != 1) return error.TlsSetupFailed;
 }
 
 fn setUpTls(self: *Peer) !void {
     const ca_key = try generateKey();
-    defer c.EVP_PKEY_free(ca_key);
+    defer openssl.EVP_PKEY_free(ca_key);
     const ca = try certificate(ca_key, null, ca_key, "h2 test CA", &ca_extensions);
-    defer c.X509_free(ca);
+    defer openssl.X509_free(ca);
     // An untrusted leaf has an issuer of the same name but another key.
     const issuer_key = if (self.options.untrusted_issuer) try generateKey() else ca_key;
-    defer if (issuer_key != ca_key) c.EVP_PKEY_free(issuer_key);
+    defer if (issuer_key != ca_key) openssl.EVP_PKEY_free(issuer_key);
     const issuer = if (self.options.untrusted_issuer) try certificate(issuer_key, null, issuer_key, "h2 test CA", &ca_extensions) else ca;
-    defer if (issuer != ca) c.X509_free(issuer);
+    defer if (issuer != ca) openssl.X509_free(issuer);
     const leaf_key = try generateKey();
-    defer c.EVP_PKEY_free(leaf_key);
+    defer openssl.EVP_PKEY_free(leaf_key);
     const leaf = try certificate(leaf_key, issuer, issuer_key, "h2 test peer", &.{
-        .{ c.NID_subject_alt_name, self.options.leaf_names },
-        .{ c.NID_basic_constraints, "critical,CA:FALSE" },
-        .{ c.NID_key_usage, "critical,digitalSignature" },
-        .{ c.NID_ext_key_usage, "serverAuth" },
-        .{ c.NID_authority_key_identifier, "keyid:always" },
+        .{ openssl.NID_subject_alt_name, self.options.leaf_names },
+        .{ openssl.NID_basic_constraints, "critical,CA:FALSE" },
+        .{ openssl.NID_key_usage, "critical,digitalSignature" },
+        .{ openssl.NID_ext_key_usage, "serverAuth" },
+        .{ openssl.NID_authority_key_identifier, "keyid:always" },
     });
-    defer c.X509_free(leaf);
+    defer openssl.X509_free(leaf);
 
     var tmp = std.testing.tmpDir(.{});
     errdefer tmp.cleanup();
@@ -193,67 +194,67 @@ fn setUpTls(self: *Peer) !void {
     try tmp.dir.createDir(std.testing.io, "certs", .default_dir);
     var directory_z: [std.posix.PATH_MAX]u8 = undefined;
     const directory = try self.caDirectory(&directory_z);
-    try writeCertificate(try std.fmt.bufPrintSentinel(&path_z, "{s}/{x:0>8}.0", .{ directory, c.X509_subject_name_hash(ca) }, 0), ca);
+    try writeCertificate(try std.fmt.bufPrintSentinel(&path_z, "{s}/{x:0>8}.0", .{ directory, openssl.X509_subject_name_hash(ca) }, 0), ca);
     self.tmp = tmp;
 
-    const ctx = c.SSL_CTX_new(c.TLS_server_method()) orelse return error.TlsSetupFailed;
+    const ctx = openssl.SSL_CTX_new(openssl.TLS_server_method()) orelse return error.TlsSetupFailed;
     self.ssl_ctx = ctx;
-    if (c.SSL_CTX_use_certificate(ctx, leaf) != 1 or c.SSL_CTX_use_PrivateKey(ctx, leaf_key) != 1) return error.TlsSetupFailed;
-    c.SSL_CTX_set_alpn_select_cb(ctx, selectProtocol, self);
+    if (openssl.SSL_CTX_use_certificate(ctx, leaf) != 1 or openssl.SSL_CTX_use_PrivateKey(ctx, leaf_key) != 1) return error.TlsSetupFailed;
+    openssl.SSL_CTX_set_alpn_select_cb(ctx, selectProtocol, self);
     self.bio_method = tls.newBioMethod() orelse return error.TlsSetupFailed;
 }
 
 const Extension = struct { c_int, [:0]const u8 };
 
 const ca_extensions = [_]Extension{
-    .{ c.NID_basic_constraints, "critical,CA:TRUE" },
-    .{ c.NID_key_usage, "critical,keyCertSign,cRLSign" },
-    .{ c.NID_subject_key_identifier, "hash" },
+    .{ openssl.NID_basic_constraints, "critical,CA:TRUE" },
+    .{ openssl.NID_key_usage, "critical,keyCertSign,cRLSign" },
+    .{ openssl.NID_subject_key_identifier, "hash" },
 };
 
-fn generateKey() !*c.EVP_PKEY {
-    const context = c.EVP_PKEY_CTX_new_from_name(null, "EC", null) orelse return error.TlsSetupFailed;
-    defer c.EVP_PKEY_CTX_free(context);
-    if (c.EVP_PKEY_keygen_init(context) != 1 or c.EVP_PKEY_CTX_set_group_name(context, "P-256") != 1) return error.TlsSetupFailed;
-    var key: ?*c.EVP_PKEY = null;
-    if (c.EVP_PKEY_generate(context, &key) != 1) return error.TlsSetupFailed;
+fn generateKey() !*openssl.EVP_PKEY {
+    const context = openssl.EVP_PKEY_CTX_new_from_name(null, "EC", null) orelse return error.TlsSetupFailed;
+    defer openssl.EVP_PKEY_CTX_free(context);
+    if (openssl.EVP_PKEY_keygen_init(context) != 1 or openssl.EVP_PKEY_CTX_set_group_name(context, "P-256") != 1) return error.TlsSetupFailed;
+    var key: ?*openssl.EVP_PKEY = null;
+    if (openssl.EVP_PKEY_generate(context, &key) != 1) return error.TlsSetupFailed;
     return key.?;
 }
 
 var next_serial: i64 = 1;
 
 /// Self-signed when `issuer` is null.
-fn certificate(key: *c.EVP_PKEY, issuer: ?*c.X509, issuer_key: *c.EVP_PKEY, common_name: [:0]const u8, extensions: []const Extension) !*c.X509 {
-    const x509 = c.X509_new() orelse return error.TlsSetupFailed;
-    errdefer c.X509_free(x509);
+fn certificate(key: *openssl.EVP_PKEY, issuer: ?*openssl.X509, issuer_key: *openssl.EVP_PKEY, common_name: [:0]const u8, extensions: []const Extension) !*openssl.X509 {
+    const x509 = openssl.X509_new() orelse return error.TlsSetupFailed;
+    errdefer openssl.X509_free(x509);
     next_serial += 1;
-    if (c.X509_set_version(x509, 2) != 1 or c.ASN1_INTEGER_set_int64(c.X509_get_serialNumber(x509), next_serial) != 1) return error.TlsSetupFailed;
-    if (c.X509_time_adj_ex(c.X509_getm_notBefore(x509), -1, 0, null) == null) return error.TlsSetupFailed;
-    if (c.X509_time_adj_ex(c.X509_getm_notAfter(x509), 1, 0, null) == null) return error.TlsSetupFailed;
-    if (c.X509_set_pubkey(x509, key) != 1) return error.TlsSetupFailed;
-    const name = c.X509_get_subject_name(x509);
-    if (c.X509_NAME_add_entry_by_txt(name, "CN", c.MBSTRING_ASC, common_name.ptr, -1, -1, 0) != 1) return error.TlsSetupFailed;
-    if (c.X509_set_issuer_name(x509, if (issuer) |parent| c.X509_get_subject_name(parent) else name) != 1) return error.TlsSetupFailed;
-    var v3 = std.mem.zeroes(c.X509V3_CTX);
-    c.X509V3_set_ctx(&v3, issuer orelse x509, x509, null, null, 0);
+    if (openssl.X509_set_version(x509, 2) != 1 or openssl.ASN1_INTEGER_set_int64(openssl.X509_get_serialNumber(x509), next_serial) != 1) return error.TlsSetupFailed;
+    if (openssl.X509_time_adj_ex(openssl.X509_getm_notBefore(x509), -1, 0, null) == null) return error.TlsSetupFailed;
+    if (openssl.X509_time_adj_ex(openssl.X509_getm_notAfter(x509), 1, 0, null) == null) return error.TlsSetupFailed;
+    if (openssl.X509_set_pubkey(x509, key) != 1) return error.TlsSetupFailed;
+    const name = openssl.X509_get_subject_name(x509);
+    if (openssl.X509_NAME_add_entry_by_txt(name, "CN", openssl.MBSTRING_ASC, common_name.ptr, -1, -1, 0) != 1) return error.TlsSetupFailed;
+    if (openssl.X509_set_issuer_name(x509, if (issuer) |parent| openssl.X509_get_subject_name(parent) else name) != 1) return error.TlsSetupFailed;
+    var v3 = std.mem.zeroes(openssl.X509V3_CTX);
+    openssl.X509V3_set_ctx(&v3, issuer orelse x509, x509, null, null, 0);
     for (extensions) |extension| {
-        const value = c.X509V3_EXT_conf_nid(null, &v3, extension[0], extension[1].ptr) orelse return error.TlsSetupFailed;
-        defer c.X509_EXTENSION_free(value);
-        if (c.X509_add_ext(x509, value, -1) != 1) return error.TlsSetupFailed;
+        const value = openssl.X509V3_EXT_conf_nid(null, &v3, extension[0], extension[1].ptr) orelse return error.TlsSetupFailed;
+        defer openssl.X509_EXTENSION_free(value);
+        if (openssl.X509_add_ext(x509, value, -1) != 1) return error.TlsSetupFailed;
     }
-    if (c.X509_sign(x509, issuer_key, c.EVP_sha256()) <= 0) return error.TlsSetupFailed;
+    if (openssl.X509_sign(x509, issuer_key, openssl.EVP_sha256()) <= 0) return error.TlsSetupFailed;
     return x509;
 }
 
-fn selectProtocol(_: ?*c.SSL, out: [*c][*c]const u8, out_len: [*c]u8, offered: [*c]const u8, offered_len: c_uint, argument: ?*anyopaque) callconv(.c) c_int {
+fn selectProtocol(_: ?*openssl.SSL, out: [*c][*c]const u8, out_len: [*c]u8, offered: [*c]const u8, offered_len: c_uint, argument: ?*anyopaque) callconv(.c) c_int {
     const self: *Peer = @ptrCast(@alignCast(argument.?));
-    if (self.options.tls == .no_alpn) return c.SSL_TLSEXT_ERR_NOACK;
+    if (self.options.tls == .no_alpn) return openssl.SSL_TLSEXT_ERR_NOACK;
     const ours = "\x02h2";
     var selected: [*c]u8 = null;
-    if (c.SSL_select_next_proto(&selected, out_len, ours, ours.len, offered, offered_len) != c.OPENSSL_NPN_NEGOTIATED)
-        return c.SSL_TLSEXT_ERR_NOACK;
+    if (openssl.SSL_select_next_proto(&selected, out_len, ours, ours.len, offered, offered_len) != openssl.OPENSSL_NPN_NEGOTIATED)
+        return openssl.SSL_TLSEXT_ERR_NOACK;
     out.* = selected;
-    return c.SSL_TLSEXT_ERR_OK;
+    return openssl.SSL_TLSEXT_ERR_OK;
 }
 
 pub fn url(self: *const Peer) []const u8 {
@@ -278,8 +279,8 @@ pub fn stop(self: *Peer) void {
     self.streams.deinit(self.allocator);
     c.nghttp2_option_del(self.session_options);
     c.nghttp2_session_callbacks_del(self.callbacks);
-    if (self.ssl_ctx) |ctx| c.SSL_CTX_free(ctx);
-    if (self.bio_method) |method| c.BIO_meth_free(method);
+    if (self.ssl_ctx) |ctx| openssl.SSL_CTX_free(ctx);
+    if (self.bio_method) |method| openssl.BIO_meth_free(method);
     if (self.tmp) |*tmp| tmp.cleanup();
     _ = std.c.close(self.listener);
     self.allocator.destroy(self);
@@ -299,10 +300,10 @@ pub fn pump(self: *Peer) !void {
         const connection = try self.allocator.create(Connection);
         connection.* = .{ .peer = self, .socket = fd, .session = null, .closed = false, .received_any = false, .ssl = null };
         if (self.ssl_ctx) |ctx| {
-            const ssl = c.SSL_new(ctx) orelse return error.OutOfMemory;
+            const ssl = openssl.SSL_new(ctx) orelse return error.OutOfMemory;
             connection.ssl = ssl;
             if (!tls.attachSocket(ssl, self.bio_method.?, fd)) return error.OutOfMemory;
-            c.SSL_set_accept_state(ssl);
+            openssl.SSL_set_accept_state(ssl);
         }
         try self.connections.append(self.allocator, connection);
         self.seen.connections += 1;
@@ -400,7 +401,7 @@ fn sendSome(connection: *Connection, bytes: []const u8) Transfer {
 
 fn flush(self: *Peer, connection: *Connection) void {
     // Frames wait for the handshake, which the reads drive.
-    if (connection.ssl) |ssl| if (c.SSL_is_init_finished(ssl) != 1) return;
+    if (connection.ssl) |ssl| if (openssl.SSL_is_init_finished(ssl) != 1) return;
     // nghttp2 hands out one frame at a time. Batched into one send, frames
     // flushed together reach the client in one read: Darwin delivers
     // loopback segments asynchronously, so a send per frame lets a read land
@@ -456,7 +457,7 @@ pub fn closeConnection(self: *Peer, connection: *Connection) void {
     connection.closed = true;
     if (connection.session) |session| c.nghttp2_session_del(session);
     connection.session = null;
-    if (connection.ssl) |ssl| c.SSL_free(ssl);
+    if (connection.ssl) |ssl| openssl.SSL_free(ssl);
     connection.ssl = null;
     _ = std.c.close(connection.socket);
 }

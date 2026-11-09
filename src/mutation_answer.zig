@@ -19,6 +19,27 @@ pub const PermissionDecision = enum { allow_once, deny };
 pub const SkillsReloadStatus = enum { reloaded, unchanged };
 pub const SessionStopCompletion = enum { pending, completed };
 pub const SessionArchiveObservation = struct { archived: bool, completion: SessionStopCompletion };
+
+// Why the Host refuses each mutation. The Store saves the code and the Host
+// renders its tag name.
+pub const SessionStopRejection = enum { invalid_session_reference, unknown_session };
+pub const SessionArchiveRejection = enum { invalid_session_reference, unknown_session, archive_pending };
+pub const ModelInterruptionRejection = enum {
+    invalid_session_reference,
+    invalid_target,
+    unknown_session,
+    unknown_operation,
+    target_mismatch,
+    operation_resolved,
+};
+pub const PermissionDecisionRejection = enum {
+    invalid_session_reference,
+    invalid_target,
+    unknown_session,
+    unknown_action,
+    target_mismatch,
+    action_not_pending,
+};
 pub const ContentReference = struct { bytes: u64, digest: [32]u8 };
 
 /// The durable mutations. Tag names are the captured-record and

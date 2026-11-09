@@ -21,6 +21,7 @@
 const std = @import("std");
 const model_capability = @import("../../model_capability.zig");
 const protocol = @import("../../protocol.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
 const store_schema = @import("../schema.zig");
@@ -119,7 +120,7 @@ const floor_facts = rsql.Read(.{
         frontier: u64,
         first_message: u64,
         output_reservation: u64,
-        model: protocol.Bounded(protocol.max_model_bytes),
+        model: Bounded(model_capability.max_model_bytes),
     },
     .cardinality = .one,
 });

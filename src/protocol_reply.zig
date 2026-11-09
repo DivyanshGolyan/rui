@@ -1954,9 +1954,9 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     const maximum = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, escaped, .{});
     defer maximum.deinit();
     try std.testing.expectEqual(@as(usize, 100), maximum.value.value.description.?.slice().len);
-    var buffer: [protocol.ToolPresentation.max_json_bytes]u8 = undefined;
+    var buffer: [protocol.ToolPresentationJson.max_json_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try maximum.value.value.writeJson(&writer);
+    try (protocol.ToolPresentationJson{ .value = maximum.value.value }).writeJson(&writer);
     const roundtrip = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, writer.buffered(), .{});
     defer roundtrip.deinit();
     try std.testing.expectEqualDeep(maximum.value.value, roundtrip.value.value);

@@ -31,18 +31,19 @@ STACK_FRAMES_GATE = "tests/ci/stack_frames.json"
 # build.zig's named modules that are repository files. Every other named
 # import must be a package or generated module, or the graph refuses it.
 MODULES = {
-    "test_poll": "src/testing/poll.zig", "h2": "src/h2/h2.zig", "rui_client": CALLER, "client": CALLER,
+    "test_poll": "src/testing/poll.zig", "h2": "src/h2/h2.zig", "tls_client": "src/tls_client/tls_client.zig", "rui_client": CALLER, "client": CALLER,
     "mysql_connection": "src/store/wire/mysql_connection.zig", "preferences": "src/preferences.zig",
     "codex_credentials": "src/codex_credentials.zig", "AnswerRenderer": "src/AnswerRenderer.zig",
     "openapi.json": "openapi.json",
 }
-PACKAGES = {"std", "builtin", "vaxis", "terminal_width", "terminal_unicode", "h2_c", "posix",
+PACKAGES = {"std", "builtin", "vaxis", "terminal_width", "terminal_unicode", "h2_c", "openssl_c", "posix",
             "transport_options", "yaml", "sqlite", "unit_test_options", "unit_test_partition"}
 
 # Unit test executables: a change runs each one whose build compiles it.
 UNIT_ROOTS = {
-    "test": ("src/tests.zig", "src/unit_test_partition.zig", "src/signal_stack_probe.zig",
-             "tests/integration/answer_renderer_allocation.zig"),
+    "test-native": ("src/tests.zig", "src/unit_test_partition.zig", "src/signal_stack_probe.zig",
+                    "tests/integration/answer_renderer_allocation.zig"),
+    "test-store": ("src/store.zig", "src/unit_test_partition.zig"),
     "test-logic": (FUNCTIONAL_CORES, "tests/integration/answer_renderer_allocation.zig"),
     "test-h2": ("src/h2/h2.zig",),
     "test-pg": ("src/store/wire/pg.zig",),
@@ -184,6 +185,13 @@ class Graph:
         # use or read, and those it reaches only through the code it runs (the
         # owners it drives and its test executables), which cores do not reach.
         self.reached = {target: self.closure(self.every, roots) for target, roots in UNIT_ROOTS.items()}
+        # Native tests outside Store can exercise every Store engine too. A
+        # change they reach must retain the composed run and its live MySQL.
+        conformance = [name for name in self.reached["test-native"]
+                       if name.startswith("src/") and not name.startswith("src/store/")
+                       and name.endswith(".zig") and name in names
+                       and re.search(r'\b\w+\.forEachEngine\s*\(', read(name))]
+        self.live_conformance = self.closure(self.every, conformance)
         self.driven, self.owners = {}, {}
         for target, (scripts, executables, owners) in FIXTURES.items():
             self.owners[target] = set(owners)
@@ -350,7 +358,7 @@ RULES = (
     (("tests/integration/canonical_failure_integration.py", "build.zig"),
      ("canonical-failure-integration",), ("canonical-failure-integration",), "Canonical failure caller oracle"),
     (("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_*", "src/*.patch", ".agents/setup",
-      ".github/actions/setup/action.yml"),
+      ".github/actions/setup/action.yml", "screen-emulator/*"),
      ("check-full", "admission-debug-integration", "test-full"),
      ("check-full", "admission-debug-integration", "test-full"),
      "Build, dependency or bootstrap inputs"),
@@ -364,7 +372,7 @@ RULES = (
 
 # check.yml's LIVE_MYSQL: Linux shards for the unit dialect check
 # (src/store/mysql_dialect_check.zig) and the launch-frame Host fixture.
-LIVE_MYSQL_DIALECT_TARGETS = frozenset({"test", "check", "check-full"})
+LIVE_MYSQL_DIALECT_TARGETS = frozenset({"test", "test-store", "check", "check-full"})
 LIVE_MYSQL_TARGETS = LIVE_MYSQL_DIALECT_TARGETS | {"launch-frame-integration"}
 # check.yml's Postgres step condition: the Linux targets whose shards start
 # postgres:15 for test-pg's live rounds.
@@ -379,7 +387,7 @@ LIVE_RULES = (
      ("test", "launch-frame-integration"), ("launch-frame-integration",),
      "The launch-frame Host opens a live MySQL Store on Linux; macOS skips the live server",
      frozenset({"launch-frame-integration", "check", "check-full"})),
-    (("src/store/wire/pg*.zig", "src/store/wire/scram.zig", "src/store/wire/tls.zig", "src/h2/h2.zig", "src/h2/tls.zig",
+    (("src/store/wire/pg*.zig", "src/store/wire/scram.zig", "src/store/wire/tls.zig", "src/tls_client/*",
       "tests/integration/live_engines.py", "tests/ci/live_engine_step.py"),
      ("test-pg",), ("test-pg",), "The Postgres wire client's own tests, live against postgres:15 on Linux",
      LIVE_POSTGRES_TARGETS),
@@ -393,7 +401,7 @@ LIVE_RULES = (
     (("src/store.zig", "src/store/*", "!src/store/wire/pg*.zig", "!src/store/wire/scram.zig",
       "!src/store/wire/tls.zig", "tests/integration/mysql_server.py",
       "tests/integration/live_engines.py", "tests/ci/live_engine_step.py"),
-     ("test",), (),
+     ("test-store",), (),
      "The Store's live MySQL dialect check drives MySQL 8.4 through the wire client; macOS skips it",
      LIVE_MYSQL_DIALECT_TARGETS),
 )
@@ -406,7 +414,7 @@ RULES += tuple(rule[:4] for rule in LIVE_RULES)
 STACK_FRAMES = ("src/*", "build.zig", "build.zig.zon", "tests/ci/stack_frames.py", "tests/ci/stack_frames.json")
 
 CHECK_COVERS = {
-    "test", "test-h2", "test-pg", "admission-integration", "dispatch-integration",
+    "test", "test-native", "test-store", "test-h2", "test-pg", "admission-integration", "dispatch-integration",
     "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
     "bash-integration", "bash-environment-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
@@ -443,10 +451,19 @@ POLICY_SELF_CHECKS = (
 )
 
 
+# Steps that run the PTY screen observer, whose libghostty-vt comes from the
+# test-only package in screen-emulator: setup fetches its packages for these only.
+# A step missing here still builds, fetching them on demand.
+SCREEN_TARGETS = frozenset({"check", "check-full", "terminal-restoration-integration", "canonical-failure-integration",
+                            "host-launch-integration", "upgrade-integration", "human-cli-integration",
+                            "skills-integration", "bash-recovery-integration", "renderer-contracts-selftest",
+                            "direct-pty", "direct-pty-controls", "input-equivalence", "screen-emulator"})
+
+
 def setup_requirements(targets):
     # Every runner installs the same fixture packages (tests/integration/requirements.txt)
     # for any target, so no fixture's import depends on a hand-kept target list.
-    return {"go": bool(({"measurement-check"} | set(RESOURCES)).intersection(targets)), "node": bool({"ts-client", "launch-frame-integration", "check", "check-full"}.intersection(targets)), "python": bool(targets), "tmux": "upgrade-integration" in targets}
+    return {"go": bool(({"measurement-check"} | set(RESOURCES)).intersection(targets)), "node": bool({"ts-client", "launch-frame-integration", "check", "check-full"}.intersection(targets)), "python": bool(targets), "screen": bool(SCREEN_TARGETS.intersection(targets)), "tmux": "upgrade-integration" in targets}
 
 
 def execution_batches(targets, check_part="all"):
@@ -507,6 +524,13 @@ def select(paths, phase, available, graph=None):
             if matches(path, patterns):
                 live_targets.update(set(checks) & served_by)
                 live_reasons.add((reason, served_by))
+        if path in graph.live_conformance and path not in graph.reached["test-store"]:
+            targets.add("test")
+            native_targets.add("test")
+            live_targets.add("test")
+            live_reasons.add(("Native Store conformance tests require live MySQL", LIVE_MYSQL_DIALECT_TARGETS))
+            reasons.add("Native Store conformance tests require live MySQL")
+            matched = True
         if shortcut:
             continue
         if reached:
@@ -539,10 +563,13 @@ def select(paths, phase, available, graph=None):
             targets.add("test-full")  # Response wait/inactivity owner.
             native_targets.add("test-full")
     for checks in (targets, native_targets):
+        if "test" in checks or {"test-native", "test-store"} <= checks:
+            checks.difference_update({"test-native", "test-store"})
+            checks.add("test")
         covered = {case for broad, cases in FIXTURE_COVERS.items() if broad in checks for case in cases}
         checks -= covered
         # Every case check runs is selected: run them as one gate.
-        if CHECK_COVERS - UNIT_ROOTS.keys() <= checks | covered:
+        if CHECK_COVERS - UNIT_ROOTS.keys() - {"test"} <= checks | covered:
             checks.add("check")
         if "check-full" in checks:
             checks.discard("check")
@@ -565,6 +592,8 @@ def select(paths, phase, available, graph=None):
                    ({"installer-integration"} if any(matches(path, INSTALLER_PATHS) for path in paths) else set())
                    if targets else set())
         native_targets = set()
+    if "test" in targets:
+        targets.difference_update({"test-native", "test-store"})
     for reason, served_by in live_reasons:
         if not targets & served_by:
             raise ValueError(f"{reason!r} selected none of the targets that start its server: {sorted(served_by)}")
@@ -574,7 +603,7 @@ def select(paths, phase, available, graph=None):
         raise ValueError(f"Selected targets absent from build.zig: {sorted(missing)}")
     return {"phase": phase, "targets": sorted(targets),
             # The selected targets that start a live server in CI (`LIVE_RULES`).
-            "server_targets": sorted(targets & live_targets),
+            "server_targets": sorted((targets & live_targets) | ({"test"} if "test" in targets and "test-store" in live_targets else set())),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
             "mac_required": mac_required, "upgrade_required": upgrade_required,
             # Store, recovery and upgrade changes fail for real; never rerun them.

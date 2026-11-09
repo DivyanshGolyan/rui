@@ -3,6 +3,16 @@
 //! and their tests need no Store.
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const conversation_read = @import("conversation_read.zig");
+const message_observation = @import("message_observation.zig");
+const message_admission = @import("message_admission.zig");
+const configuration_admission = @import("configuration_admission.zig");
+const outcome_code = @import("outcome_code.zig");
+const tool_presentation = @import("tool_presentation.zig");
+const session_id = @import("session_id.zig");
+const Bounded = @import("bounded.zig").Bounded;
+const cli_value = @import("cli_value.zig");
+const mutation_answer = @import("mutation_answer.zig");
 const session_work = @import("session_work.zig");
 const change_ring = @import("change_ring.zig");
 const AttemptBinding = @import("attempt.zig").AttemptBinding;
@@ -16,13 +26,13 @@ pub const AcceptedConfiguration = struct {
     replayed: bool,
     revision: u64 = 0,
     created: bool = false,
-    skills: ?protocol.SkillsReloadStatus = null,
-    session: protocol.Bounded(protocol.max_session_bytes) = .{},
+    skills: ?mutation_answer.SkillsReloadStatus = null,
+    session: Bounded(session_id.max_reference_bytes) = .{},
 };
 
 pub const RejectedConfiguration = struct {
     replayed: bool,
-    code: protocol.ConfigurationRejection,
+    code: configuration_admission.Rejection,
 };
 
 pub const ConfigureReply = union(enum) {
@@ -36,12 +46,12 @@ pub const AcceptedMessage = struct {
     replayed: bool,
     admission_id: u64,
     content: ContentReference,
-    session: protocol.Bounded(protocol.max_session_bytes),
+    session: Bounded(session_id.max_reference_bytes),
 };
 
 pub const RejectedMessage = struct {
     replayed: bool,
-    code: protocol.MessageRejection,
+    code: message_admission.Rejection,
     content: ContentReference,
 };
 
@@ -53,20 +63,20 @@ pub const MessageReply = union(enum) {
 };
 
 pub const CommandObservation = struct {
-    status: protocol.CommandObservationStatus,
-    target: protocol.Bounded(protocol.max_session_bytes) = .{},
-    code: protocol.Bounded(protocol.max_code_bytes) = .{},
-    kind: union(protocol.CommandKind) {
+    status: message_observation.CommandObservationStatus,
+    target: Bounded(session_id.max_reference_bytes) = .{},
+    code: Bounded(outcome_code.max_bytes) = .{},
+    kind: union(cli_value.CommandKind) {
         configure: struct { revision: u64 = 0, created: bool = false },
         message: ?MessageObservation,
         session_stop: ?SessionStopObservation,
-        session_archive: ?protocol.SessionArchiveObservation,
+        session_archive: ?mutation_answer.SessionArchiveObservation,
         model_interruption: ModelInterruptionTarget,
-        permission_decision: struct { action_id: u64, decision: protocol.PermissionDecision },
+        permission_decision: struct { action_id: u64, decision: mutation_answer.PermissionDecision },
     } = .{ .configure = .{} },
 
     /// The Host's one ordered Message-state rule. Clients consume this value.
-    pub fn requestState(self: *const CommandObservation) ?protocol.MessageRequestState {
+    pub fn requestState(self: *const CommandObservation) ?message_observation.MessageRequestState {
         if (self.kind != .message or self.status == .absent) return null;
         if (self.status == .rejected) return .rejected;
         const message = if (self.kind.message) |*value| value else return null;
@@ -91,11 +101,11 @@ pub const SessionStopSelection = struct {
 
 pub const SessionStopObservation = struct {
     selection: SessionStopSelection,
-    completion: protocol.SessionStopCompletion,
+    completion: mutation_answer.SessionStopCompletion,
 };
 
 pub const ModelInterruptionTarget = struct {
-    session: protocol.Bounded(protocol.max_session_bytes),
+    session: Bounded(session_id.max_reference_bytes),
     turn_id: u64,
     operation_id: u64,
 };
@@ -104,17 +114,17 @@ pub const SessionStopReply = union(enum) {
     accepted: struct {
         replayed: bool,
         selection: SessionStopSelection,
-        completion: protocol.SessionStopCompletion,
+        completion: mutation_answer.SessionStopCompletion,
         interrupted_operation_id: ?u64 = null,
     },
-    rejected: struct { replayed: bool, code: protocol.SessionStopRejection },
+    rejected: struct { replayed: bool, code: mutation_answer.SessionStopRejection },
     conflict,
     infrastructure_failure,
 };
 
 pub const ModelInterruptionReply = union(enum) {
     accepted: struct { replayed: bool },
-    rejected: struct { replayed: bool, code: protocol.ModelInterruptionRejection },
+    rejected: struct { replayed: bool, code: mutation_answer.ModelInterruptionRejection },
     conflict,
     infrastructure_failure,
 };
@@ -123,17 +133,17 @@ pub const SessionArchiveReply = union(enum) {
     accepted: struct {
         replayed: bool,
         archived: bool,
-        completion: protocol.SessionStopCompletion,
+        completion: mutation_answer.SessionStopCompletion,
         interrupted_operation_id: ?u64 = null,
     },
-    rejected: struct { replayed: bool, code: protocol.SessionArchiveRejection },
+    rejected: struct { replayed: bool, code: mutation_answer.SessionArchiveRejection },
     conflict,
     infrastructure_failure,
 };
 
 pub const PermissionDecisionReply = union(enum) {
     accepted: struct { replayed: bool },
-    rejected: struct { replayed: bool, code: protocol.PermissionDecisionRejection },
+    rejected: struct { replayed: bool, code: mutation_answer.PermissionDecisionRejection },
     conflict,
     infrastructure_failure,
 };
@@ -141,15 +151,15 @@ pub const PermissionDecisionReply = union(enum) {
 pub const PublicConversationItem = struct {
     position: u64,
     ordinal: u64, // Zero for User/Assistant; one-based call ordinal in a completed Tool Result group.
-    kind: protocol.ConversationItemKind,
+    kind: conversation_read.ConversationItemKind,
     content: ContentReference,
-    presentation: ?protocol.ToolPresentation = null,
+    presentation: ?tool_presentation.ToolPresentation = null,
     admitted_at: ?u64 = null, // The Host wall-clock second a User item was admitted.
     sender: ?protocol.NamedPeer = null, // A User item's sending peer Session.
 };
 
 pub const PublicConversationPage = struct {
-    pub const capacity = protocol.public_conversation_page_items;
+    pub const capacity = conversation_read.public_conversation_page_items;
     end: u64,
     items: [capacity]PublicConversationItem = undefined,
     count: usize = 0,
@@ -166,13 +176,13 @@ pub const MessageObservation = struct {
 };
 
 pub const Recovery = struct {
-    pub const capacity = protocol.message_recovery_limit;
+    pub const capacity = message_observation.message_recovery_limit;
     calls: [capacity]UnknownOutcome = undefined,
     count: u8 = 0,
     more: bool = false,
 };
 
-pub const UnknownOutcome = protocol.MessageUnknownOutcome;
+pub const UnknownOutcome = message_observation.MessageUnknownOutcome;
 
 pub const AcceptedMessageQueue = struct {
     admission_id: u64,
@@ -180,7 +190,7 @@ pub const AcceptedMessageQueue = struct {
 
     pub const State = union(enum) {
         queued,
-        excluded: struct { code: protocol.Bounded(protocol.max_code_bytes) },
+        excluded: struct { code: Bounded(outcome_code.max_bytes) },
         processing: AttemptBinding,
         completed: struct {
             binding: AttemptBinding,
@@ -188,11 +198,11 @@ pub const AcceptedMessageQueue = struct {
         },
         cancelled: struct {
             binding: AttemptBinding,
-            code: protocol.Bounded(protocol.max_code_bytes),
+            code: Bounded(outcome_code.max_bytes),
         },
         failed: struct {
             binding: AttemptBinding,
-            code: protocol.Bounded(protocol.max_code_bytes),
+            code: Bounded(outcome_code.max_bytes),
         },
     };
 };

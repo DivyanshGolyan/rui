@@ -4297,6 +4297,165 @@ test "CLI boundary preserves Store selector provenance for Host administration" 
     try std.testing.expectError(error.StoreUnavailable, rememberStore(init, path, false));
 }
 
+test "host status and start classify a Host's reply however late it comes" {
+    // The clock never advances, so no Host-info deadline expires and a reply
+    // counts however late a loaded runner schedules the peer (#967). The
+    // deadline itself is client.zig's to test.
+    const Frozen = struct {
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            return .fromNanoseconds(0);
+        }
+    };
+    const Peer = struct {
+        listener: *std.Io.net.Server,
+        replies: []const []const u8,
+        answered: usize = 0,
+        failure: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            // Closing the listener drops any connection still queued on it and
+            // refuses later ones, so after a failure the CLI fails fast instead
+            // of waiting for a reply on a clock that never reaches its deadline.
+            defer self.listener.deinit(std.testing.io);
+            for (self.replies) |reply| self.answer(reply) catch |err| {
+                self.failure = err;
+                return;
+            };
+        }
+
+        fn answer(self: *@This(), reply: []const u8) !void {
+            const io = std.testing.io;
+            // Bounded so a broken test fails instead of hanging.
+            try readable(self.listener.socket.handle);
+            const connection = try self.listener.accept(io);
+            defer connection.close(io);
+            const fd = connection.socket.handle;
+            // Read the whole request: closing over unread bytes can reset
+            // the connection before the client reads the reply.
+            var request: [4096]u8 = undefined;
+            var used: usize = 0;
+            const body_start = while (true) {
+                if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| break end + 4;
+                used += try receive(fd, request[used..]);
+            };
+            const field = "\r\nContent-Length: ";
+            const at = (std.mem.indexOf(u8, request[0..body_start], field) orelse return error.TestRequestLengthMissing) + field.len;
+            const length = try std.fmt.parseInt(usize, request[at .. at + std.mem.indexOfScalar(u8, request[at..body_start], '\r').?], 10);
+            while (used < body_start + length) used += try receive(fd, request[used..]);
+            var sent: usize = 0;
+            while (sent < reply.len) {
+                const n = std.c.send(fd, reply[sent..].ptr, reply.len - sent, 0);
+                if (n <= 0) return error.TestReplyFailed;
+                sent += @intCast(n);
+            }
+            self.answered += 1;
+        }
+
+        fn readable(fd: std.posix.fd_t) !void {
+            var poll_fd = [_]std.c.pollfd{.{ .fd = fd, .events = std.c.POLL.IN, .revents = 0 }};
+            if (std.c.poll(&poll_fd, 1, 10_000) <= 0) return error.TestPeerWaitFailed;
+        }
+
+        fn receive(fd: std.posix.fd_t, buffer: []u8) !usize {
+            try readable(fd);
+            const n = std.c.recv(fd, buffer.ptr, buffer.len, 0);
+            if (n <= 0) return error.TestRequestTruncated;
+            return @intCast(n);
+        }
+    };
+    const newer = comptime std.fmt.comptimePrint("{d}", .{(std.fmt.parseInt(u32, protocol.wire_version, 10) catch unreachable) + 1});
+    const incompatible = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: " ++ newer ++ "\r\n\r\n{}";
+    const fenced_body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_unavailable\",\"code\":\"dispatch_fenced\"}";
+    const fenced = std.fmt.comptimePrint("HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{fenced_body.len}) ++ fenced_body;
+
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_bytes: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_bytes);
+    var store_bytes: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = try std.fmt.bufPrint(&store_bytes, "{s}/store", .{root_bytes[0..root_len]});
+    // The lease holds host.lock, so the Store reads as owned.
+    var lease = try platform.StoreLease.acquire(io, store);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    var listener = try (try std.Io.net.UnixAddress.init(lease.paths.socket.slice())).listen(io, .{});
+    defer std.Io.Dir.cwd().deleteFile(io, lease.paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    // The peer closes the listener when it stops.
+    var peer: Peer = .{ .listener = &listener, .replies = &.{ incompatible, incompatible, fenced } };
+    const thread = std.Thread.spawn(.{}, Peer.run, .{&peer}) catch |err| {
+        listener.deinit(io);
+        return err;
+    };
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var vtable = io.vtable.*;
+    vtable.now = Frozen.now;
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = [_][*:0]const u8{"rui"};
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &argv }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = .{ .userdata = io.userdata, .vtable = &vtable }, .environ_map = &environment, .preopens = .empty };
+    const args = [_][]const u8{ "--store", store };
+    var problem: cli_args.Refusal = undefined;
+    const parsed = try cli_args.Command.host_status.definition().parse(&args, arena.allocator(), &problem);
+    const previous = failure_held;
+    defer failure_held = previous;
+
+    const output = try tmp.dir.createFile(io, "stdout", .{ .read = true });
+    defer output.close(io);
+    const diagnostics = try testPipe();
+    defer closeDescriptor(diagnostics[0]);
+    var newer_status: anyerror!void = undefined;
+    var newer_start: anyerror!void = undefined;
+    var fenced_status: anyerror!void = undefined;
+    {
+        defer closeDescriptor(diagnostics[1]);
+        // stdout carries the test runner protocol, so capture it.
+        const saved_stdout = std.c.dup(1);
+        if (saved_stdout < 0) return error.TestDupFailed;
+        defer closeDescriptor(saved_stdout);
+        const saved_stderr = std.c.dup(2);
+        if (saved_stderr < 0) return error.TestDupFailed;
+        defer closeDescriptor(saved_stderr);
+        if (std.c.dup2(output.handle, 1) != 1) return error.TestRedirectFailed;
+        defer std.debug.assert(std.c.dup2(saved_stdout, 1) == 1);
+        if (std.c.dup2(diagnostics[1], 2) != 2) return error.TestRedirectFailed;
+        defer std.debug.assert(std.c.dup2(saved_stderr, 2) == 2);
+        failure_held = .{ .resource = "host", .operation = "status", .not_sent = false };
+        newer_status = host(init, .host_status, &parsed);
+        failure_held = .{ .resource = "host", .operation = "start", .not_sent = false };
+        newer_start = startHost(init, store, false, null, null);
+        failure_held = .{ .resource = "host", .operation = "status", .not_sent = false };
+        fenced_status = host(init, .host_status, &parsed);
+    }
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(@as(?anyerror, null), peer.failure);
+    try std.testing.expectEqual(@as(usize, 3), peer.answered);
+
+    // Status reports an incompatible Host and exits nonzero; start refuses it
+    // and names the way out; a fenced Host is owned but unavailable.
+    try std.testing.expectError(error.IncompatibleHost, newer_status);
+    try std.testing.expectError(error.IncompatibleHost, newer_start);
+    try fenced_status;
+    var stdout_bytes: [1024]u8 = undefined;
+    const stdout_len = try output.readPositionalAll(io, &stdout_bytes, 0);
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_status\",\"status\":";
+    try std.testing.expectEqualStrings(prefix ++ "\"incompatible\"}\n" ++ prefix ++ "\"owned_unavailable\"}\n", stdout_bytes[0..stdout_len]);
+    var stderr_bytes: [4096]u8 = undefined;
+    var stderr_len: usize = 0;
+    while (true) {
+        const n = std.c.read(diagnostics[0], stderr_bytes[stderr_len..].ptr, stderr_bytes.len - stderr_len);
+        if (n < 0) return error.TestReadFailed;
+        if (n == 0) break;
+        stderr_len += @intCast(n);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, stderr_bytes[0..stderr_len], "does not speak this rui's protocol") != null);
+}
+
 test "archive mutation presentation preserves requested intent and pending settlement" {
     inline for (.{ true, false }) |archived| {
         const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_archive_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"archived\":" ++ (if (archived) "true" else "false") ++ "},\"completion\":{\"status\":\"" ++ (if (archived) "pending" else "completed") ++ "\"}}";

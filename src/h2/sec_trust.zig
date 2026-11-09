@@ -13,7 +13,7 @@
 //! both platforms.
 const std = @import("std");
 const builtin = @import("builtin");
-const c = @import("h2_c");
+const c = @import("tls_client").c;
 const h2 = @import("h2.zig");
 const Waker = @import("Waker.zig");
 const job = @import("job.zig");

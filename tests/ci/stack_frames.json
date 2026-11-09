@@ -17,7 +17,7 @@
     "output_retention", "platform", "preference_values", "preferences", "protocol", "provider",
     "server", "server_execution", "server_host", "session_work", "signal_stack",
     "stderr", "store", "tools", "transport_policy", "h2", "Connection", "Engine", "Resolver",
-    "Stream", "proxy", "tls", "job"
+    "Stream", "proxy", "tls", "job", "tls_client"
   ],
   "exceptions": [
     {"function": "posix.openat", "frame_bytes": 16384, "cause": "std toPosixPath [4095:0]u8 path buffers"},

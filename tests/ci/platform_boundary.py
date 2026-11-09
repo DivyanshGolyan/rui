@@ -27,6 +27,8 @@ MAC_PATHS = (
     # The self-contained HTTP/2 client cannot import src/os, so its sockets,
     # waker and trust paths name the platform themselves.
     "src/h2/*",
+    # Trust loading reads the host's bundles, which differ on macOS.
+    "src/tls_client/*",
     "src/*.c", "src/*.h", "src/*.inc", "src/*.patch", "src/*.sh", "tests/integration/*.c",
     "build.zig", "build.zig.zon",
     ".github/actions/setup/*", ".github/workflows/qualify-macos.yml",
@@ -34,6 +36,8 @@ MAC_PATHS = (
     "install.sh", "release/*",
 )
 
+# fnmatch patterns, as prepush.py and the selector read them: `*` spans
+# directories, so src/*.zig covers src/http1/Exchange.zig too.
 SCANNED = ("src/*.zig", "tests/integration/*.zig", "tests/integration/*.py", "clients/ts/test/*.ts")
 
 # Darwin differs on these: shutdown of a closed or listening socket returns
@@ -126,17 +130,23 @@ def mac_path(path):
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in MAC_PATHS)
 
 
+def scanned(root=ROOT):
+    """Every file under SCANNED, at any depth."""
+    tops = sorted({pattern.split("/*", 1)[0] for pattern in SCANNED})
+    for file in sorted(f for top in tops for f in (root / top).rglob("*") if f.is_file()):
+        path = file.relative_to(root).as_posix()
+        if any(fnmatch.fnmatchcase(path, pattern) for pattern in SCANNED):
+            yield file, path
+
+
 def sites(root=ROOT):
     found = {}
-    for pattern in SCANNED:
-        for file in sorted(root.glob(pattern)):
-            path = file.relative_to(root).as_posix()
-            if mac_path(path):
-                continue
-            source = file.read_text()
-            count = {".py": python_sites, ".ts": typescript_sites}.get(file.suffix, zig_sites)(source)
-            if count:
-                found[path] = count
+    for file, path in scanned(root):
+        if mac_path(path):
+            continue
+        count = {".py": python_sites, ".ts": typescript_sites}.get(file.suffix, zig_sites)(file.read_text())
+        if count:
+            found[path] = count
     return found
 
 
