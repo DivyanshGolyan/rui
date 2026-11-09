@@ -113,7 +113,7 @@ pub fn prepareCreation(allocator: std.mem.Allocator, scratch_allocator: std.mem.
 pub fn bindTo(allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, session: []const u8, text: Text) !?storage.CapturedMessageSkills {
     // Only text with a `/name` word needs the recipient's catalog.
     var any: AnyReference = .{};
-    try eachReference(io, text, &any);
+    try eachReference(allocator, io, text, &any);
     if (!any.found) return null;
     const state = store.readSkills(allocator, session) catch |err| switch (err) {
         error.SessionNotFound => return null,
@@ -129,7 +129,7 @@ pub fn bindTo(allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, s
 pub fn bind(allocator: std.mem.Allocator, io: std.Io, text: Text, found: catalog.Catalog) !?storage.CapturedMessageSkills {
     var binder: Binder = .{ .allocator = allocator, .found = found };
     defer binder.selected.deinit(allocator);
-    try eachReference(io, text, &binder);
+    try eachReference(allocator, io, text, &binder);
     if (binder.selected.items.len == 0) return null;
     const bound = try allocator.alloc(storage.BoundSkill, binder.selected.items.len);
     var total: usize = 0;
@@ -181,8 +181,9 @@ const Binder = struct {
 };
 
 /// Streams the text's `/name` words to `visitor` in order, until its `visit`
-/// returns false. Sealed and saved text is read in bounded windows.
-fn eachReference(io: std.Io, text: Text, visitor: anytype) !void {
+/// returns false. Sealed and saved text is read in bounded windows from
+/// `allocator`, not the stack: every door runs this on a Host thread's stack.
+fn eachReference(allocator: std.mem.Allocator, io: std.Io, text: Text, visitor: anytype) !void {
     var scanner: catalog.References = .{};
     switch (text) {
         .bytes => |bytes| for (bytes) |byte| if (scanner.feed(byte)) |name| if (!try visitor.visit(name)) return,
@@ -190,7 +191,8 @@ fn eachReference(io: std.Io, text: Text, visitor: anytype) !void {
             for (bytes) |byte| if (scanner.feed(byte)) |name| if (!try visitor.visit(name)) return;
         } else if (field.length != 0) {
             const file = field.file orelse return error.MissingContentCapture;
-            var buffer: [protocol.content_window_bytes]u8 = undefined;
+            const buffer = try allocator.alloc(u8, protocol.content_window_bytes);
+            defer allocator.free(buffer);
             var offset: u64 = 0;
             while (offset < field.length) {
                 const size: usize = @intCast(@min(buffer.len, field.length - offset));
@@ -204,8 +206,8 @@ fn eachReference(io: std.Io, text: Text, visitor: anytype) !void {
             var reader: storage.ContentReader = undefined;
             reader.open(try stored.store.openContent(stored.reference));
             defer reader.close();
-            // A small window: this runs on execution threads' stacks too.
-            var buffer: [protocol.content_window_bytes]u8 = undefined;
+            const buffer = try allocator.alloc(u8, protocol.content_window_bytes);
+            defer allocator.free(buffer);
             var offset: u64 = 0;
             while (offset < stored.reference.length) {
                 const count = try reader.read(offset, buffer[0..@intCast(@min(buffer.len, stored.reference.length - offset))]);
@@ -286,7 +288,7 @@ test "inline skills suggestions bound pages and retain prefix-independent revisi
 fn expectBound(text: *const wire_request.ContentField, found: catalog.Catalog, expected: []const []const u8) !void {
     var binder: Binder = .{ .allocator = std.testing.allocator, .found = found };
     defer binder.selected.deinit(std.testing.allocator);
-    try eachReference(std.testing.io, .{ .field = text }, &binder);
+    try eachReference(std.testing.allocator, std.testing.io, .{ .field = text }, &binder);
     try std.testing.expectEqual(expected.len, binder.selected.items.len);
     for (expected, binder.selected.items) |name, entry| try std.testing.expectEqualStrings(name, entry.name);
 }
