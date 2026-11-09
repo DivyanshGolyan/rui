@@ -37,6 +37,7 @@ const cores = .{
     .{ "draft_layout.zig", @import("draft_layout.zig") },
     .{ "environment.zig", @import("environment.zig") },
     .{ "failure_class.zig", @import("failure_class.zig") },
+    .{ "find_tools_words.zig", @import("find_tools_words.zig") },
     .{ "home_path.zig", @import("home_path.zig") },
     .{ "host_reply.zig", @import("host_reply.zig") },
     .{ "http1/Parser.zig", @import("http1/Parser.zig") },

@@ -79,6 +79,7 @@ pub const PublicConversationPage = reads_domain.PublicConversationPage;
 pub const schema_version = store_schema.schema_version;
 pub const minimum_schema_version = store_schema.migration_baseline;
 pub const SessionReport = report_domain.SessionReport;
+pub const SessionReportCapture = report_domain.SessionReportCapture;
 pub const session_report_shapes = report_domain.json_shapes;
 pub const checkSessionReportsForTesting = @import("store/tests.zig").checkSessionReportsForTesting;
 pub const SessionReportExecution = report_domain.SessionReportExecution;
