@@ -2,7 +2,7 @@
     .name = .rui_screen,
     .version = "0.1.0",
     .fingerprint = 0xdfb55914f3048ad9,
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig_version = "0.17.1",
     .dependencies = .{
         // libghostty-vt 1.0.0 builds only with Zig 0.17.x; moving Rui to
         // Zig 0.18 needs a newer libghostty-vt release.
