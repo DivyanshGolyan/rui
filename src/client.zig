@@ -2,6 +2,7 @@ const std = @import("std");
 const socket_os = @import("os/socket.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const native_ledger = @import("NativeRequestLedger.zig");
 const client_defaults = @import("client_defaults.zig");
 const environment_rule = @import("environment.zig");
 const TerminalText = @import("TerminalText.zig");
@@ -99,10 +100,13 @@ pub const Requests = struct {
     pub fn sendCaptured(self: Requests, captured: *CapturedRecord, environment: Environment, reply_buffer: *ReplyBuffer) Stepped(MutationSendError, protocol_reply.MutationReply) {
         reply_buffer.len = 0;
         self.check() catch |err| return .fail(null, err);
+        // Native envelopes require their persisted fence and continuation to
+        // be handled by the ledger owner, never by generic v1 recovery.
+        if (captured.native != null) return .fail(null, error.NativeRecoveryRequired);
         const carried: ?Environment = if (captured.target == .message) environment else null;
         if (carried) |value| if (value.bytes() > protocol.max_environment_bytes) return .fail(null, error.EnvironmentTooLarge);
         const paths = platform.resolveClientPaths(self.io, captured.saved.store.slice()) catch |err| return .fail(.store, err);
-        const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), ResponseTiming.mutation, captured.length, &captured.file, null, self.host_instance, carried, reply_buffer, null)) {
+        const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), ResponseTiming.mutation, captured.length, &captured.file, captured.wire_offset, null, self.host_instance, carried, reply_buffer, null)) {
             .done => |reply| reply,
             .failed => |failure| return .fail(failure.step, failure.err),
         };
@@ -125,7 +129,7 @@ pub const Requests = struct {
         var body: protocol.RequestBuffer = .{};
         var token_buffer: [protocol_reply.SessionToken.max_bytes]u8 = undefined;
         try body.appendShape(protocol.observe_command_request, .{ paths.store.slice(), key, if (since) |token| token.format(&token_buffer) else null });
-        const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, null, reply_buffer, until).get();
+        const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, 0, body.slice(), null, null, reply_buffer, until).get();
         return protocol_reply.ObservationReply.parse(reply, key, since);
     }
 
@@ -798,7 +802,7 @@ pub fn stopHost(io: std.Io, input: HostStopInput, reply_buffer: *ReplyBuffer) !H
     const paths = try platform.resolveClientPaths(io, input.store);
     var body: protocol.RequestBuffer = .{};
     try body.appendShape(protocol.host_stop_request, .{paths.store.slice()});
-    const reply = sendSource(.{ .io = io, .drop_reply = input.drop_reply }, &paths, "/v1/control/host-stop", ResponseTiming.mutation, body.len, null, body.slice(), &input.instance, null, reply_buffer, null).get();
+    const reply = sendSource(.{ .io = io, .drop_reply = input.drop_reply }, &paths, "/v1/control/host-stop", ResponseTiming.mutation, body.len, null, 0, body.slice(), &input.instance, null, reply_buffer, null).get();
     const result = reply catch |err| return if (err == error.FileNotFound or err == error.ConnectionRefused)
         .unavailable
     else
@@ -1190,7 +1194,7 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) proto
     var reply_buffer: ReplyBuffer = .{};
     const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
     const until = @min(probe_end, deadline orelse probe_end);
-    const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", .{}, body.len, null, body.slice(), null, null, &reply_buffer, until).get() catch |err| return switch (err) {
+    const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", .{}, body.len, null, 0, body.slice(), null, null, &reply_buffer, until).get() catch |err| return switch (err) {
         error.AccessDenied, error.PermissionDenied => .access_failure,
         error.WrongWireVersion, error.InvalidResponse, error.ResponseHeaderTooLarge, error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,
         else => .owned_unavailable,
@@ -1537,6 +1541,8 @@ pub const Replay = union(enum) {
 pub const CapturedRecord = struct {
     file: std.Io.File,
     length: u64,
+    wire_offset: u64 = 0,
+    native: ?native_ledger.Header = null,
     saved: protocol_reply.MutationIdentity,
     target: protocol_reply.MutationTarget,
     replay: Replay,
@@ -1594,7 +1600,10 @@ pub fn openCaptured(io: std.Io, saved: SavedRecord) !CapturedRecord {
     };
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     errdefer file.close(io);
-    const binding = try readCapturedBinding(io, &file);
+    const native = try readNativeEnvelope(io, &file);
+    const offset: u64 = if (native != null) native_ledger.header_bytes else 0;
+    const binding = try readCapturedBindingAt(io, &file, offset);
+    if (native) |header| try checkNativeBinding(header, binding.target);
     if (!expected.matches(&binding.saved, binding.target)) return switch (saved) {
         .generated => error.InvalidRequestRecord,
         .explicit => error.RequestBindingMismatch,
@@ -1603,7 +1612,39 @@ pub fn openCaptured(io: std.Io, saved: SavedRecord) !CapturedRecord {
         .generated => .generated,
         .explicit => |explicit| .{ .explicit = explicit.record },
     };
-    return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target, .replay = replay };
+    return .{ .file = file, .length = if (native) |header| header.wire_bytes else try file.length(io), .wire_offset = offset, .native = native, .saved = binding.saved, .target = binding.target, .replay = replay };
+}
+
+fn readNativeEnvelope(io: std.Io, file: *std.Io.File) !?native_ledger.Header {
+    var bytes: [native_ledger.header_bytes]u8 = undefined;
+    const count = try file.readPositionalAll(io, bytes[0..8], 0);
+    if (count != 8 or !std.mem.eql(u8, bytes[0..8], native_ledger.magic)) return null;
+    if (try file.readPositionalAll(io, bytes[8..], 8) != bytes.len - 8) return error.InvalidRequestRecord;
+    const header = try native_ledger.Header.decode(&bytes);
+    const expected_length = std.math.add(u64, native_ledger.header_bytes, header.wire_bytes) catch return error.InvalidRequestRecord;
+    if (try file.length(io) != expected_length) return error.InvalidRequestRecord;
+    var hash = try header.hasher();
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < header.wire_bytes) {
+        const wanted: usize = @intCast(@min(header.wire_bytes - offset, buffer.len));
+        if (try file.readPositionalAll(io, buffer[0..wanted], native_ledger.header_bytes + offset) != wanted) return error.InvalidRequestRecord;
+        hash.update(buffer[0..wanted]);
+        offset += wanted;
+    }
+    var digest: [32]u8 = undefined;
+    hash.final(&digest);
+    if (!std.mem.eql(u8, &digest, &header.digest)) return error.InvalidRequestRecord;
+    return header;
+}
+
+fn checkNativeBinding(header: native_ledger.Header, target: protocol_reply.MutationTarget) !void {
+    switch (header.original) {
+        .message, .reason_then_deny => if (target != .message) return error.InvalidRequestRecord,
+        .decision => |decision| {
+            if (target != .permission_decision or target.permission_decision.action != decision.action) return error.InvalidRequestRecord;
+        },
+    }
 }
 
 /// Metadata-only projection for listing/inspection; cannot authorize a send or
@@ -1657,6 +1698,10 @@ const CapturedConfiguration = struct {
 };
 
 fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol_reply.MutationIdentity, target: protocol_reply.MutationTarget } {
+    return readCapturedBindingAt(io, file, 0);
+}
+
+fn readCapturedBindingAt(io: std.Io, file: *std.Io.File, offset: u64) !struct { saved: protocol_reply.MutationIdentity, target: protocol_reply.MutationTarget } {
     const Fields = struct {
         version: protocol_reply.JsonString(8),
         kind: protocol_reply.JsonString(32),
@@ -1677,6 +1722,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     };
     var input: [protocol.content_window_bytes]u8 = undefined;
     var file_reader = file.reader(io, &input);
+    try file_reader.seekTo(offset);
     // Producer grammar nests at most four levels. Bounded metadata/name scratch
     // also covers escaped names; exhaustion rejects the record, never truncates.
     var storage: [2048]u8 = undefined;
@@ -1684,6 +1730,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     var reader = std.json.Reader.init(fixed.allocator(), &file_reader.interface);
     defer reader.deinit();
     const fields = std.json.parseFromTokenSourceLeaky(Fields, fixed.allocator(), &reader, .{ .allocate = .alloc_if_needed, .max_value_len = protocol.max_store_bytes }) catch return file_reader.err orelse error.InvalidRequestRecord;
+    if (offset != 0 and (reader.next() catch return error.InvalidRequestRecord) != .end_of_document) return error.InvalidRequestRecord;
     if (!fields.version.eql(protocol.wire_version)) return error.InvalidRequestRecord;
     const kind = std.meta.stringToEnum(protocol.CommandKind, fields.kind.slice()) orelse return error.InvalidRequestRecord;
     var saved: protocol_reply.MutationIdentity = .{ .store = fields.store.value, .key = fields.key.value, .kind = kind };
@@ -2233,7 +2280,7 @@ fn openRead(requests: Requests, paths: *const platform.Paths, comptime route: []
 }
 
 pub const SendError = ErrorOf(std.Io.net.UnixAddress.init) || ErrorOf(connectRequest) || ErrorOf(uploadRequest) || ErrorOf(readCommandResponse);
-pub const MutationSendError = SendError || ErrorOf(platform.resolveClientPaths) || error{ Cancelled, EnvironmentTooLarge };
+pub const MutationSendError = SendError || ErrorOf(platform.resolveClientPaths) || error{ Cancelled, EnvironmentTooLarge, NativeRecoveryRequired };
 
 /// The client environment a Message carries for its Session's Bash: the
 /// process's variables in order as `NAME=VALUE\0` entries. Names starting
@@ -2322,6 +2369,7 @@ fn sendSource(
     timing: ResponseTiming,
     length: u64,
     file: ?*std.Io.File,
+    source_offset: u64,
     bytes: ?[]const u8,
     instance: ?*const protocol.InstanceId,
     environment: ?Environment,
@@ -2331,7 +2379,7 @@ fn sendSource(
     const address = std.Io.net.UnixAddress.init(paths.socket.slice()) catch |err| return .fail(.endpoint, err);
     const fd = connectRequest(requests, address, until) catch |err| return .fail(.connect, err);
     defer closeSocket(requests.io, fd);
-    uploadRequest(requests, fd, route, timing, length, file, bytes, instance, environment, until) catch |err| return .fail(.upload, err);
+    uploadRequest(requests, fd, route, timing, length, file, source_offset, bytes, instance, environment, until) catch |err| return .fail(.upload, err);
     const reply = readCommandResponseRequest(requests, fd, reply_buffer, timing, until) catch |err| return .fail(.admission_response, err);
     return .{ .done = reply };
 }
@@ -2343,6 +2391,7 @@ fn uploadRequest(
     timing: ResponseTiming,
     length: u64,
     file: ?*std.Io.File,
+    source_offset: u64,
     bytes: ?[]const u8,
     instance: ?*const protocol.InstanceId,
     environment: ?Environment,
@@ -2370,7 +2419,7 @@ fn uploadRequest(
     while (sent < length) {
         try requests.check();
         const wanted: usize = @intCast(@min(length - sent, buffer.len));
-        const count = try source.readPositionalAll(requests.io, buffer[0..wanted], sent);
+        const count = try source.readPositionalAll(requests.io, buffer[0..wanted], source_offset + sent);
         if (count != wanted) return error.RecordChangedDuringSend;
         try writeAllRequest(requests, fd, buffer[0..count], until);
         sent += count;
