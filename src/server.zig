@@ -1870,7 +1870,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 return respondStatic(fd, 409, .activity_unavailable, if (err == error.SessionNotFound) "SessionNotFound" else "skills_unavailable");
             };
             defer page.deinit(host.allocator);
-            try fd.jsonGrowing(200, protocol.skill_suggestions_reply.max_bytes, renderSkillSuggestions, .{&page});
+            try fd.jsonGrowing(200, protocol.skill_suggestions_reply.max_bytes, host_reply.renderSkillSuggestions, .{&page});
         },
         // Host memory only: never SQLite or the network.
         // Sized as written: the bound is tens of KiB, a reply mostly far less.
@@ -1890,15 +1890,6 @@ fn readSkillSuggestions(host: *Host, allocator: std.mem.Allocator, scope: @impor
         }
         return err;
     };
-}
-
-fn renderSkillSuggestions(out: protocol.JsonOut, page: *const @import("skill_suggestions.zig").Page) !void {
-    try out.appendShape(protocol.skill_suggestions_reply.head, .{ page.revision, page.total });
-    for (page.entries, 0..) |entry, index| {
-        if (index != 0) try out.append(",");
-        try out.appendShape(protocol.skill_suggestions_reply.entry, .{ entry.name, entry.description });
-    }
-    try out.append(protocol.skill_suggestions_reply.tail);
 }
 
 fn renderModelList(out: protocol.JsonOut, host: *Host) error{BufferTooLarge}!void {

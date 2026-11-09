@@ -6,6 +6,7 @@ const protocol = @import("protocol.zig");
 const change_ring = @import("change_ring.zig");
 const command_reply = @import("command_reply.zig");
 const AttemptBinding = @import("attempt.zig").AttemptBinding;
+const skill_suggestions = @import("skill_suggestions.zig");
 
 pub fn activityPageBytes(page: *const protocol.ActivityFacts) usize {
     return if (page.not_modified) protocol.shapeBytes(protocol.ActivityFacts.unchanged) else protocol.max_activity_page_response_bytes;
@@ -229,6 +230,15 @@ pub fn renderHostPause(response: protocol.JsonOut, paused: bool) !void {
 pub fn renderSessionsNotModified(response: protocol.JsonOut, since: protocol.SinceToken) !void {
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
     try response.appendShape(protocol.session_list_reply.head ++ protocol.session_list_reply.last_tail, .{ protocol.ListDelta.not_modified, since.format(&token) });
+}
+
+pub fn renderSkillSuggestions(out: protocol.JsonOut, page: *const skill_suggestions.Page) error{BufferTooLarge}!void {
+    try out.appendShape(protocol.skill_suggestions_reply.head, .{ page.revision, page.total });
+    for (page.entries, 0..) |entry, index| {
+        if (index != 0) try out.append(",");
+        try out.appendShape(protocol.skill_suggestions_reply.entry, .{ entry.name, entry.description });
+    }
+    try out.append(protocol.skill_suggestions_reply.tail);
 }
 
 pub fn renderStatic(response: protocol.JsonOut, kind: protocol.ErrorType, code: []const u8) !void {
@@ -459,4 +469,15 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var page_writer = std.Io.Writer.fixed(&page_buffer);
     try facts.writeFullJson(&page_writer, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)));
     try std.testing.expectEqual(protocol.max_activity_page_response_bytes, page_writer.end);
+
+    const longest_name = @as([64]u8, @splat(1));
+    const longest_description = @as([4096]u8, @splat(1));
+    const suggestions: skill_suggestions.Page = .{
+        .entries = &@as([skill_suggestions.capacity]skill_suggestions.Entry, @splat(.{ .name = &longest_name, .description = &longest_description })),
+        .revision = max,
+        .total = max,
+    };
+    var suggestions_response: protocol.FixedJsonBuffer(protocol.skill_suggestions_reply.max_bytes) = .{};
+    try suggestions_response.render(renderSkillSuggestions, .{&suggestions});
+    try std.testing.expectEqual(protocol.skill_suggestions_reply.max_bytes, suggestions_response.len);
 }
