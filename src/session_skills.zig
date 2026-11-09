@@ -129,19 +129,20 @@ pub fn bindTo(allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, s
 /// Null when nothing binds. The bodies are owned by `allocator`.
 pub fn bind(allocator: std.mem.Allocator, io: std.Io, text: Text, found: catalog.Catalog) !?storage.CapturedMessageSkills {
     var binder: Binder = .{ .allocator = allocator, .found = found };
-    defer binder.selected.deinit(allocator);
+    defer binder.deinit();
     try eachReference(allocator, io, text, &binder);
     if (binder.selected.items.len == 0) return null;
     const bound = try allocator.alloc(storage.BoundSkill, binder.selected.items.len);
     var total: usize = 0;
     for (binder.selected.items, bound) |entry, *skill| {
-        const invocation = catalog.invocationWithLength(allocator, io, entry) catch |err| switch (err) {
+        const bytes = catalog.invocation(allocator, io, entry) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => return .{ .failed = try bindFailure(allocator, entry.name, err) },
         };
-        total = std.math.add(usize, total, invocation.raw_length) catch std.math.maxInt(usize);
+        // What the Message saves, each file's framing included.
+        total += bytes.len;
         if (total > max_batch_body_bytes) return .{ .failed = try bindFailure(allocator, entry.name, error.SkillBatchTooLarge) };
-        skill.* = .{ .name = entry.name, .bytes = invocation.bytes };
+        skill.* = .{ .name = entry.name, .bytes = bytes };
     }
     return .{ .bound = bound };
 }
@@ -166,6 +167,13 @@ const Binder = struct {
     allocator: std.mem.Allocator,
     found: catalog.Catalog,
     selected: std.ArrayList(catalog.Entry) = .empty,
+    /// One bit per catalog entry: whether it is already selected.
+    seen: std.DynamicBitSetUnmanaged = .{},
+
+    fn deinit(self: *Binder) void {
+        self.selected.deinit(self.allocator);
+        self.seen.deinit(self.allocator);
+    }
 
     fn visit(self: *Binder, name: []const u8) !bool {
         // Full catalogs are lexical by name.
@@ -174,9 +182,10 @@ const Binder = struct {
                 return std.mem.order(u8, key, entry.name);
             }
         }.order) orelse return true;
-        const entry = self.found.entries[index];
-        for (self.selected.items) |bound| if (std.mem.eql(u8, bound.name, entry.name)) return true;
-        try self.selected.append(self.allocator, entry);
+        if (self.seen.bit_length == 0) self.seen = try .initEmpty(self.allocator, self.found.entries.len);
+        if (self.seen.isSet(index)) return true;
+        self.seen.set(index);
+        try self.selected.append(self.allocator, self.found.entries[index]);
         return true;
     }
 };
@@ -288,7 +297,7 @@ test "inline skills suggestions bound pages and retain prefix-independent revisi
 
 fn expectBound(text: *const wire_request.ContentField, found: catalog.Catalog, expected: []const []const u8) !void {
     var binder: Binder = .{ .allocator = std.testing.allocator, .found = found };
-    defer binder.selected.deinit(std.testing.allocator);
+    defer binder.deinit();
     try eachReference(std.testing.allocator, std.testing.io, .{ .field = text }, &binder);
     try std.testing.expectEqual(expected.len, binder.selected.items.len);
     for (expected, binder.selected.items) |name, entry| try std.testing.expectEqualStrings(name, entry.name);
@@ -356,6 +365,71 @@ test "inline skills refuse a Message whose bound files together exceed the body 
     // A word that names no skill binds nothing and reads no file.
     const prose: wire_request.ContentField = .{ .state = .value, .borrowed = "/tmp/etc /month".ptr, .length = "/tmp/etc /month".len };
     try std.testing.expect(try bind(memory.allocator(), std.testing.io, .{ .field = &prose }, .{ .entries = &entries }) == null);
+}
+
+test "inline skills cap the bytes a Message saves, each file's framing included" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    // The raw files together are 16 bytes under the cap; their saved
+    // `Skill file: "<path>"` framing takes the Message over it.
+    const raw = try std.testing.allocator.alloc(u8, max_batch_body_bytes / 2);
+    defer std.testing.allocator.free(raw);
+    @memset(raw, 'x');
+    var paths: [2][protocol.max_workspace_bytes]u8 = undefined;
+    var entries: [2]catalog.Entry = undefined;
+    for ([_][]const u8{ "first", "second" }, &paths, &entries, [_]usize{ raw.len, raw.len - 16 }) |name, *path, *entry, size| {
+        const file_name = try std.fmt.bufPrint(path, "{s}.md", .{name});
+        const file = try tmp.dir.createFile(std.testing.io, file_name, .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, raw[0..size]);
+        entry.* = .{ .name = name, .description = "Metadata", .path = try std.fmt.bufPrint(path, "{s}/{s}.md", .{ root, name }) };
+    }
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    const text = "/first /second";
+    const field: wire_request.ContentField = .{ .state = .value, .borrowed = text.ptr, .length = text.len };
+    const captured = (try bind(memory.allocator(), std.testing.io, .{ .field = &field }, .{ .entries = &entries })).?;
+    try std.testing.expectEqual(.skill_file_too_large, captured.failed.code);
+    try std.testing.expect(std.mem.indexOf(u8, captured.failed.bytes, "second") != null);
+    // Either file alone, framing and all, fits.
+    for ([_][]const u8{ "/first", "/second" }) |one| {
+        const alone: wire_request.ContentField = .{ .state = .value, .borrowed = one.ptr, .length = one.len };
+        const bound = (try bind(memory.allocator(), std.testing.io, .{ .field = &alone }, .{ .entries = &entries })).?.bound;
+        try std.testing.expectEqual(@as(usize, 1), bound.len);
+        try std.testing.expect(bound[0].bytes.len <= max_batch_body_bytes);
+    }
+}
+
+test "inline skills bind in time linear in the text's references" {
+    // A catalog at its 4096-skill size, and 4 MiB of text naming every
+    // skill again and again: comparing each reference with every skill
+    // already bound took about 42 s here; one bit per catalog entry does not.
+    var names: [4096][6]u8 = undefined;
+    var entries: [names.len]catalog.Entry = undefined;
+    for (&names, &entries, 0..) |*name, *entry, index| {
+        _ = try std.fmt.bufPrint(name, "s{d:0>5}", .{index});
+        entry.* = .{ .name = name, .description = "Metadata", .path = "/never-read" };
+    }
+    const text = try std.testing.allocator.alloc(u8, 4 * 1024 * 1024);
+    defer std.testing.allocator.free(text);
+    var used: usize = 0;
+    var next: usize = 0;
+    while (used + " /s00000".len <= text.len) : (next = (next + 1) % names.len) {
+        @memcpy(text[used..][0.." /s00000".len], " /" ++ names[next]);
+        used += " /s00000".len;
+    }
+    @memset(text[used..], ' ');
+    var binder: Binder = .{ .allocator = std.testing.allocator, .found = .{ .entries = &entries } };
+    defer binder.deinit();
+    const started = std.Io.Clock.awake.now(std.testing.io);
+    try eachReference(std.testing.allocator, std.testing.io, .{ .bytes = text }, &binder);
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(std.testing.io)).toNanoseconds();
+    std.debug.print("bind references={d} skills={d} ns={d}\n", .{ used / " /s00000".len, names.len, elapsed });
+    try std.testing.expectEqual(names.len, binder.selected.items.len);
+    for (binder.selected.items, &names) |entry, *name| try std.testing.expectEqualStrings(name, entry.name);
+    try std.testing.expect(elapsed < 5 * std.time.ns_per_s);
 }
 
 test "inline skills initial render limits remain keyed refusals with ordinary configuration precedence" {

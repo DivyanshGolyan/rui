@@ -146,7 +146,10 @@ pub fn read(a: anytype, allocator: std.mem.Allocator, session: []const u8) !cata
         offset = end;
     }
     if (!std.mem.eql(u8, &protocol.contentDigest(bytes), &digest)) return error.CorruptStore;
-    const decoded = catalog.decodeCatalog(allocator, bytes) catch return error.CorruptStore;
+    const decoded = catalog.decodeCatalog(allocator, bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.CorruptStore,
+    };
     if (position == 0 and decoded.entries.len != 0) return error.CorruptStore;
     return decoded;
 }
@@ -155,8 +158,11 @@ pub const Failure = struct {
     code: enum { unknown_session, unknown_skill, skill_file_unavailable, skill_file_too_large, skill_text_invalid, skills_unavailable },
     bytes: []const u8,
 
+    /// The command refusal a configure's skills reload saves. Only the
+    /// model's `skill` tool names a skill, so only it has `unknown_skill`.
     pub fn rejection(self: Failure, comptime Rejection: type) Rejection {
         return switch (self.code) {
+            .unknown_skill => unreachable,
             inline else => |code| @field(Rejection, @tagName(code)),
         };
     }

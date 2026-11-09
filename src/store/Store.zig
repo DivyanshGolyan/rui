@@ -603,9 +603,11 @@ pub const Store = struct {
     fn readSkillsHeld(self: *Store, allocator: std.mem.Allocator, session: []const u8, out: *SkillsState) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        var access: Access(.read, error{SessionNotFound}) = .open(&entry);
+        // Decoding the catalog allocates from the caller's memory; running
+        // out of it is the caller's to answer, not canonical corruption.
+        var access: Access(.read, error{ SessionNotFound, OutOfMemory }) = .open(&entry);
         defer access.deinit();
-        return entry.finish(error{SessionNotFound}, readSkillsOn(&access, allocator, session, out));
+        return entry.finish(error{ SessionNotFound, OutOfMemory }, readSkillsOn(&access, allocator, session, out));
     }
 
     fn readSkillsOn(a: anytype, allocator: std.mem.Allocator, session: []const u8, out: *SkillsState) !void {
