@@ -160,6 +160,67 @@ fn readFirstLine(requests: client.Requests, job: *const Job, position: u64, refu
     };
 }
 
+/// Queue membership and the Activity boundary that produced it travel
+/// together; filtered pages do not carry queue facts.
+pub const QueueSnapshot = struct {
+    boundary: u64,
+    queued: protocol.Queued,
+
+    pub fn fromActivity(page: *const protocol_reply.ActivityPage) QueueSnapshot {
+        std.debug.assert(page.kinds.eql(.full));
+        const facts = &page.facts;
+        const boundary = if (facts.direction == .forward and facts.more) facts.items[facts.count - 1].position else facts.end;
+        return .{ .boundary = boundary, .queued = facts.queued };
+    }
+};
+
+/// A bounded window into the person/script queue at one Activity boundary.
+/// Text is a display hint; admission IDs and positions are the identity.
+pub const QueuePage = struct {
+    pub const capacity = protocol.ActivityPage.items;
+    pub const Entry = struct { admission: u64, position: u64, line: queued_line.Line };
+    entries: [capacity]Entry = undefined,
+    len: usize = 0,
+    older: bool = false,
+    newer: bool = false,
+};
+
+/// Reads one page of the same queue observed by a full Activity page. The
+/// caller pins `boundary` to that page's queue boundary, not necessarily its
+/// end. `position` is the exclusive position at the edge of the current
+/// window, or zero to start at the appropriate end.
+pub fn readQueuePage(requests: client.Requests, job: *const Job, snapshot: QueueSnapshot, position: u64, direction: @FieldType(protocol.ActivityPage, "direction")) !QueuePage {
+    var result: QueuePage = .{};
+    const boundary = snapshot.boundary;
+    const queue = snapshot.queued;
+    if (queue.count == 0) return result;
+    const start = if (position != 0) position else if (direction == .forward) queue.oldest_position - 1 else 0;
+    const cursor: protocol_reply.ActivityCursor = .{
+        .end = boundary,
+        .position = start,
+        .direction = direction,
+        .kinds = .initOne(.admission),
+    };
+    const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
+        .page => |value| value,
+        .failure => |failure| return requests.failRead(failure),
+    };
+    if (page.facts.end != boundary) return error.InvalidActivityPage;
+    for (page.facts.items[0..page.facts.count]) |item| {
+        if (item.position < queue.oldest_position or item.position > queue.newest_position) continue;
+        const message = switch (item.value) { .admission => |value| value, else => return error.InvalidActivityPage };
+        if (message.state != .queued or message.sender != null) return error.InvalidActivityPage;
+        result.entries[result.len] = .{ .admission = message.admission, .position = item.position, .line = (try readFirstLine(requests, job, item.position, .fails)).? };
+        result.len += 1;
+    }
+    if (direction == .backward) std.mem.reverse(QueuePage.Entry, result.entries[0..result.len]);
+    if (result.len != 0) {
+        result.older = result.entries[0].position > queue.oldest_position;
+        result.newer = result.entries[result.len - 1].position < queue.newest_position;
+    }
+    return result;
+}
+
 /// Text the Host holds, without terminal controls and with its tabs and line
 /// ends as spaces, within `limit` bytes: cut at a code point and ended with
 /// an ellipsis when longer. One pass, straight into the value.
@@ -280,6 +341,7 @@ pub const Job = struct {
         // The Messages waiting at this read's cursor, and the newest one's
         // first line when the row shows it and does not hold it yet.
         queued: protocol.Queued = .{},
+        queue_snapshot: ?QueueSnapshot = null,
         queued_line: ?queued_line.Shown = null,
         live: View.Live = .{},
         cursor: protocol_reply.ActivityCursor = .{},
@@ -571,6 +633,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     if (output.lowest) |lowest| job.result.lowest = lowest;
     const queued = page.facts.queued;
     job.result.queued = queued;
+    job.result.queue_snapshot = QueueSnapshot.fromActivity(&page);
     if (queued_line.unshown(queued.count, queued.oldest_position, job.drawn) != 0 and queued.newest_admission != job.queued_line) {
         job.result.queued_line = .{ .admission = queued.newest_admission, .line = (try readFirstLine(requests, job, queued.newest_position, .fails)).? };
     }
@@ -1892,6 +1955,8 @@ const FakeHost = struct {
     held: bool = false,
     payload: []const u8 = text,
     listing: bool = false,
+    queue_read: ?struct { boundary: u64, queue: protocol.Queued, position: u64 = 0, direction: @FieldType(protocol.ActivityPage, "direction") = .forward } = null,
+    queue_result: QueuePage = .{},
     refuse_content: bool = false,
     pages: usize = 0,
     contents: usize = 0,
@@ -2064,10 +2129,79 @@ const FakeHost = struct {
         job.store = root;
         job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
         var task: Task = .{ .io = io };
-        if (self.listing) try list(job, &task, job.target.listing) else try scan(job, &task);
+        if (self.queue_read) |step| {
+            self.queue_result = try readQueuePage(task.requests(), job, .{ .boundary = step.boundary, .queued = step.queue }, step.position, step.direction);
+        } else if (self.listing) try list(job, &task, job.target.listing) else try scan(job, &task);
         self.shown = self.output[0..try inspection.readPositionalAll(io, &self.output, 0)];
     }
 };
+
+test "queue snapshot uses the activity page boundary" {
+    var page: protocol_reply.ActivityPage = .{ .facts = .{ .end = 100, .count = 1, .direction = .forward, .more = true } };
+    page.facts.items[0] = .{ .position = 23, .at = 1, .value = FakeHost.message(1) };
+    page.facts.queued = .{ .count = 1, .oldest_position = 20, .newest_admission = 1, .newest_position = 20 };
+    try std.testing.expectEqual(@as(u64, 23), QueueSnapshot.fromActivity(&page).boundary);
+    page.facts.direction = .backward;
+    try std.testing.expectEqual(@as(u64, 100), QueueSnapshot.fromActivity(&page).boundary);
+    page.facts.direction = .forward;
+    page.facts.more = false;
+    try std.testing.expectEqualDeep(QueueSnapshot{ .boundary = 100, .queued = page.facts.queued }, QueueSnapshot.fromActivity(&page));
+}
+
+test "an empty queue does not ask the Host for rows or content" {
+    var host: FakeHost = .{ .history = 0, .tail = &.{}, .end = 0, .queue_read = .{ .boundary = 0, .queue = .{} } };
+    var job: Job = .{ .session = "k7m2qx" };
+    try host.read(&job);
+    try std.testing.expectEqual(@as(usize, 0), host.queue_result.len);
+    try std.testing.expect(!host.queue_result.older and !host.queue_result.newer);
+    try std.testing.expectEqual(@as(usize, 0), host.pages);
+    try std.testing.expectEqual(@as(usize, 0), host.contents);
+}
+
+test "bounded queue windows retain equal admissions across a later stop" {
+    var tail: [67]FakeHost.Tail = undefined;
+    for (tail[0..66], 1..) |*row, id| row.* = .{ .value = FakeHost.message(id), .excluded_at = 67 };
+    tail[66] = .{ .value = FakeHost.message(67) };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 67 };
+    const queue: protocol.Queued = .{ .count = 66, .oldest_position = 1, .newest_admission = 66, .newest_position = 66 };
+    var job: Job = .{ .session = "k7m2qx" };
+    var position: u64 = 0;
+    var seen: u64 = 0;
+    while (true) {
+        host.queue_read = .{ .boundary = 66, .queue = queue, .position = position };
+        try host.read(&job);
+        const page = &host.queue_result;
+        try std.testing.expect(page.len > 0 and page.len <= QueuePage.capacity);
+        for (page.entries[0..page.len]) |entry| {
+            seen += 1;
+            try std.testing.expectEqual(seen, entry.admission);
+            try std.testing.expectEqual(seen, entry.position);
+            try std.testing.expectEqualStrings("please wait", entry.line.slice());
+        }
+        if (!page.newer) break;
+        position = page.entries[page.len - 1].position;
+    }
+    try std.testing.expectEqual(@as(u64, 66), seen);
+    // Walk backwards from the same frozen snapshot even though the Host has
+    // advanced past the stop. Each window is still in admission order.
+    position = 0;
+    seen = 67;
+    while (true) {
+        host.queue_read = .{ .boundary = 66, .queue = queue, .position = position, .direction = .backward };
+        try host.read(&job);
+        const page = &host.queue_result;
+        try std.testing.expect(page.len > 0);
+        var index = page.len;
+        while (index != 0) {
+            index -= 1;
+            seen -= 1;
+            try std.testing.expectEqual(seen, page.entries[index].admission);
+        }
+        if (!page.older) break;
+        position = page.entries[0].position;
+    }
+    try std.testing.expectEqual(@as(u64, 1), seen);
+}
 
 test "opening reads one Activity page whatever the history before it" {
     // A Store with 10 or 10,000 earlier rows and the same newest page: the
