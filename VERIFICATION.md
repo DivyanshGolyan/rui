@@ -118,7 +118,8 @@ A changed head requires current candidate checks before merge.
 [Selected checks](.github/workflows/check.yml) qualify each ready PR's immutable merge candidate.
 For normal changes, Linux runs the affected targets from [select_tests.py](tests/ci/select_tests.py), `typecheck-macos` and, when selected, the `stack-frames` oracle.
 Native macOS runs the affected targets, or `check`, only when the change touches a [Mac path](tests/ci/platform_boundary.py): Darwin branches, C and shell sources, the PTY launcher, the HTTP/2 client, release and install scripts, and the Mac workflow.
-Build plumbing (`build.zig`, `build.zig.zon`, the setup action, `tests/ci/qualification.py`) is not a Mac path: Linux runs it, `typecheck-macos` compiles Rui for Darwin, and promotion links and runs it on a Mac.
+`build.zig` stays a Mac path until its Darwin linking moves to `build/darwin.zig`, because `typecheck-macos` skips that linking.
+Other build plumbing (`build.zig.zon`, the setup action, `tests/ci/qualification.py`) is not a Mac path: Linux runs it, `typecheck-macos` compiles Rui for Darwin, and promotion links and runs it on a Mac.
 The [previous installed-release upgrade](.github/workflows/previous-release-upgrade.yml) runs on Linux against that same candidate only for upgrade, installer and Store-format paths and the check itself; promotion runs it on both systems.
 Renderer contracts run nonblocking only for renderer and frontend owners.
 The documentation lane skips heavyweight policy, product builds and suites, and prior-release upgrades.
