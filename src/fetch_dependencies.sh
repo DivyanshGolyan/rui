@@ -18,6 +18,33 @@ cleanup() {
 trap cleanup EXIT
 cp "$repo/build.zig" "$scratch/build.zig"
 
+# Anonymous github.com downloads time out when GitHub sheds anonymous load; the
+# API serves the same release asset or archive to a token. CI sets GH_TOKEN;
+# installs without one keep the anonymous URL. The pinned hash checks either.
+download() {
+    local url=$1 archive=$2 path owner name rest tag
+    if [[ -n ${GH_TOKEN:-} && $url == https://github.com/* ]]; then
+        path=${url#https://github.com/}
+        owner=${path%%/*}; rest=${path#*/}
+        name=${rest%%/*}; rest=${rest#*/}
+        case "$rest" in
+            releases/download/*)
+                tag=${rest#releases/download/}
+                gh release download "${tag%/*}" --repo "$owner/$name" --pattern "${tag##*/}" --output "$archive"
+                return ;;
+            archive/*.tar.gz)
+                rest=${rest#archive/}
+                url="https://api.github.com/repos/$owner/$name/tarball/${rest%.tar.gz}"
+                curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
+                    --retry 2 --retry-all-errors --retry-max-time 200 \
+                    --header "Authorization: Bearer $GH_TOKEN" "$url" -o "$archive"
+                return ;;
+        esac
+    fi
+    curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
+        --retry 2 --retry-all-errors --retry-max-time 200 "$url" -o "$archive"
+}
+
 # Stock Zig 0.17 no-save fetch caches the archive's outer directory and ignores
 # --pkg-dir. Save into a disposable manifest to install correctly rooted trees.
 # Prepare transitive packages too: Zig's resolver cannot parse some orb DNS configs.
@@ -47,8 +74,7 @@ prepare_dependencies() {
         if [[ ! -d "$packages/$expected" ]]; then
             archive="$scratch/${url##*/}"
             printf 'Preparing pinned %s dependency ...\n' "$name"
-            curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
-                --retry 2 --retry-all-errors --retry-max-time 200 "$url" -o "$archive"
+            download "$url" "$archive"
             cp "$manifest" "$scratch/build.zig.zon"
             (cd -- "$scratch" && zig fetch --pkg-dir "$packages" "--save=$name" "$archive")
             actual=$(sed -n "/\.$name = /,/},/s/.*\.hash = \"\([^\"]*\)\".*/\1/p" "$scratch/build.zig.zon")
