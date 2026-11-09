@@ -4165,7 +4165,9 @@ def long_input_case(home, store, workspace, endpoint, host):
         assert next(item["content"][0]["text"] for item in reversed(body["input"])
             if item.get("role") == "user") == "shorter replacement", body
         accepted_count += 1
-        rejected = terminal_step(master, "invalid\xc3(x", "Input rejected; nothing sent.")
+        # Raw bytes: a str would encode U+00C3 as valid UTF-8.
+        os.write(master, b"invalid\xc3(x\n")
+        rejected = read_terminal(master, "Input rejected; nothing sent.")
         assert "Input rejected; nothing sent." in rejected and "--text FILE" not in rejected, rejected
         assert len(endpoint.requests) == accepted_count, "invalid input reached Host"
         assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
