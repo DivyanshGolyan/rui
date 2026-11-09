@@ -7,6 +7,11 @@ pub const SessionToken = @import("change_ring.zig").SessionToken;
 const model_list = @import("model_list.zig");
 const model_picker = @import("model_picker.zig");
 const transport_policy = @import("transport_policy.zig");
+const wire_field = @import("wire_field.zig");
+pub const JsonString = wire_field.JsonString;
+pub const JsonEnum = wire_field.JsonEnum;
+pub const OmittableJson = wire_field.OmittableJson;
+pub const decimalId = wire_field.decimalId;
 
 pub const ConversationCursor = struct {
     end: u64,
@@ -78,23 +83,23 @@ pub const ConversationPage = struct {
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{ .ignore_unknown_fields = true }) catch return error.InvalidConversationPage;
         if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("conversation_page") or !wire.direction.eql("newest_first")) return error.InvalidConversationPage;
-        var page: ConversationPage = .{ .end = try mutationId(wire.end, true), .count = wire.items.count, .more = wire.more };
+        var page: ConversationPage = .{ .end = try decimalId(wire.end, true), .count = wire.items.count, .more = wire.more };
         if (page.end > std.math.maxInt(i64) or (cursor.end != 0 and page.end != cursor.end) or (page.more and page.count != page.items.len)) return error.InvalidConversationPage;
         var position = cursor.before_position;
         var ordinal = cursor.before_ordinal;
         for (wire.items.values[0..page.count], page.items[0..page.count]) |row, *item| {
             const hosted = row.kind.value == .hosted_call;
             if (hosted == (row.content != null)) return error.InvalidConversationPage;
-            item.* = .{ .position = try mutationId(row.position, false), .ordinal = try mutationId(row.ordinal, true), .kind = row.kind.value, .content = .{ .bytes = 0, .digest = protocol.contentDigest("") } };
+            item.* = .{ .position = try decimalId(row.position, false), .ordinal = try decimalId(row.ordinal, true), .kind = row.kind.value, .content = .{ .bytes = 0, .digest = protocol.contentDigest("") } };
             item.presentation = if (row.presentation) |p| p.value else null;
-            item.admitted_at = if (row.admitted_at) |second| try mutationId(second, false) else null;
+            item.admitted_at = if (row.admitted_at) |second| try decimalId(second, false) else null;
             item.sender = if (row.sender) |sender| sender.peer() catch return error.InvalidConversationPage else null;
             if ((item.kind == .tool_result or hosted) != (item.presentation != null) or (item.kind == .user) != (item.admitted_at != null) or
                 (item.kind != .user and item.sender != null) or
                 (item.admitted_at orelse 0) > std.math.maxInt(i64)) return error.InvalidConversationPage;
             if (item.presentation) |p| if (p.publication_position != item.position or (hosted and p.description == null)) return error.InvalidConversationPage;
             if (row.content) |reference| {
-                item.content.bytes = try mutationId(reference.bytes, true);
+                item.content.bytes = try decimalId(reference.bytes, true);
                 if (!reference.display.eql("omitted") or reference.sha256.slice().len != 64) return error.InvalidConversationPage;
                 _ = std.fmt.hexToBytes(&item.content.digest, reference.sha256.slice()) catch return error.InvalidConversationPage;
             }
@@ -106,7 +111,7 @@ pub const ConversationPage = struct {
         }
         if (page.more) {
             if (wire.before_position == null or wire.before_ordinal == null or
-                try mutationId(wire.before_position.?, false) != position or try mutationId(wire.before_ordinal.?, true) != ordinal) return error.InvalidConversationPage;
+                try decimalId(wire.before_position.?, false) != position or try decimalId(wire.before_ordinal.?, true) != ordinal) return error.InvalidConversationPage;
         } else if (wire.before_position != null or wire.before_ordinal != null) return error.InvalidConversationPage;
         return page;
     }
@@ -325,7 +330,7 @@ pub const ActivityPage = struct {
     }
 
     fn id(value: anytype, zero: bool) !u64 {
-        const result = try mutationId(value, zero);
+        const result = try decimalId(value, zero);
         if (result > std.math.maxInt(i64)) return error.InvalidActivityPage;
         return result;
     }
@@ -1026,7 +1031,7 @@ fn ReportNumber(comptime allow_zero: bool) type {
         value: u64,
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
             const text = try JsonString(20).jsonParse(allocator, source, options);
-            const value = try mutationId(text, allow_zero);
+            const value = try decimalId(text, allow_zero);
             if (value > std.math.maxInt(i64)) return error.InvalidObservation;
             return .{ .value = value };
         }
@@ -1351,7 +1356,7 @@ pub const SessionListPage = struct {
                 }
                 if (wire.next) |next| {
                     if (next.after != null or next.ceiling != null or result.count != protocol.session_list_page_size) return error.InvalidSessionPage;
-                    const through = mutationId(next.through orelse return error.InvalidSessionPage, true) catch return error.InvalidSessionPage;
+                    const through = decimalId(next.through orelse return error.InvalidSessionPage, true) catch return error.InvalidSessionPage;
                     const reference = next.after_reference orelse return error.InvalidSessionPage;
                     if (through != result.since.generation or !reference.eql(result.rows[result.count - 1].reference.slice())) return error.InvalidSessionPage;
                     result.next = .{ .since = since, .changed = .{ .through = through, .after_reference = reference.value.bytes[0..protocol.session_id_bytes].* } };
@@ -1364,8 +1369,8 @@ pub const SessionListPage = struct {
                 if (keyset.after != 0 and keyset.after == keyset.ceiling and result.count != 0) return error.InvalidSessionPage;
                 if (wire.next) |next| {
                     if (next.through != null or next.after_reference != null) return error.InvalidSessionPage;
-                    const after = mutationId(next.after orelse return error.InvalidSessionPage, false) catch return error.InvalidSessionPage;
-                    const ceiling = mutationId(next.ceiling orelse return error.InvalidSessionPage, false) catch return error.InvalidSessionPage;
+                    const after = decimalId(next.after orelse return error.InvalidSessionPage, false) catch return error.InvalidSessionPage;
+                    const ceiling = decimalId(next.ceiling orelse return error.InvalidSessionPage, false) catch return error.InvalidSessionPage;
                     if (result.count != protocol.session_list_page_size or after <= keyset.after or after >= ceiling or
                         ceiling > std.math.maxInt(i64) or (keyset.after != 0 and ceiling != keyset.ceiling)) return error.InvalidSessionPage;
                     result.next = .{ .after = after, .ceiling = ceiling };
@@ -1600,32 +1605,32 @@ pub const CommandObservation = struct {
         inline for (.{ "target", "code" }) |name| if (@field(facts, name).value) |value| {
             @field(observed, name) = value.value;
         };
-        if (facts.revision.value) |value| observed.revision = try mutationId(value, false);
+        if (facts.revision.value) |value| observed.revision = try decimalId(value, false);
         if (facts.input.value) |value| observed.input = try decodeReference(value);
         if (facts.state.value) |value| observed.state = value.value;
-        if (facts.queue.value) |value| observed.queue = .{ .admission = try mutationId(value.admission, false), .admitted_at = try mutationId(value.admitted_at, false) };
-        if (facts.binding.value) |value| observed.binding = .{ .turn = try mutationId(value.turn, false), .operation = try mutationId(value.operation, false), .attempt = try mutationId(value.attempt, true) };
+        if (facts.queue.value) |value| observed.queue = .{ .admission = try decimalId(value.admission, false), .admitted_at = try decimalId(value.admitted_at, false) };
+        if (facts.binding.value) |value| observed.binding = .{ .turn = try decimalId(value.turn, false), .operation = try decimalId(value.operation, false), .attempt = try decimalId(value.attempt, true) };
         if (facts.result.value) |value| observed.result = .{ .status = value.status.value, .code = if (value.code.value) |code| code.value else null, .text = if (value.text.value) |text| try decodeReference(text) else null };
-        if (facts.work.value) |value| observed.work = .{ .state = value.state.value, .first_action = if (value.first_action) |action| try mutationId(action, false) else null };
+        if (facts.work.value) |value| observed.work = .{ .state = value.state.value, .first_action = if (value.first_action) |action| try decimalId(action, false) else null };
         if (facts.recovery.value) |value| {
             var recovery: Recovery = .{ .more = value.more };
             for (value.unknown_outcomes.rows[0..value.unknown_outcomes.count]) |row| {
                 if (row.description) |description| if (!protocol.ToolPresentation.validDescription(description.slice())) return error.InvalidObservation;
                 recovery.unknown_outcomes[recovery.count] = .{
-                    .action_id = try mutationId(row.action, false),
-                    .operation_id = try mutationId(row.operation, false),
-                    .call = try mutationId(row.call, true),
+                    .action_id = try decimalId(row.action, false),
+                    .operation_id = try decimalId(row.operation, false),
+                    .call = try decimalId(row.call, true),
                     .description = if (row.description) |description| description.value else null,
-                    .at = try mutationId(row.at, false),
+                    .at = try decimalId(row.at, false),
                 };
                 recovery.count += 1;
             }
             observed.recovery = recovery;
         }
-        if (facts.selection.value) |value| observed.selection = .{ .turn = if (value.turn) |turn| try mutationId(turn, false) else null, .admission_cutoff = try mutationId(value.admission_cutoff, true) };
+        if (facts.selection.value) |value| observed.selection = .{ .turn = if (value.turn) |turn| try decimalId(turn, false) else null, .admission_cutoff = try decimalId(value.admission_cutoff, true) };
         if (facts.completion.value) |value| observed.completion = value.status.value;
-        if (facts.interruption_target.value) |value| observed.interruption_target = .{ .session = value.session.value, .turn = try mutationId(value.turn, true), .operation = try mutationId(value.operation, true) };
-        if (facts.permission_target.value) |value| observed.permission_target = .{ .action = try mutationId(value.action, true), .decision = value.decision.value };
+        if (facts.interruption_target.value) |value| observed.interruption_target = .{ .session = value.session.value, .turn = try decimalId(value.turn, true), .operation = try decimalId(value.operation, true) };
+        if (facts.permission_target.value) |value| observed.permission_target = .{ .action = try decimalId(value.action, true), .decision = value.decision.value };
         try observed.validate();
         if (since) |token| {
             const target = observed.target orelse return error.InvalidObservation;
@@ -1635,7 +1640,7 @@ pub const CommandObservation = struct {
     }
 
     fn decodeReference(value: anytype) !ContentReference {
-        var result: ContentReference = .{ .bytes = try mutationId(value.bytes, true), .digest = undefined };
+        var result: ContentReference = .{ .bytes = try decimalId(value.bytes, true), .digest = undefined };
         if (value.sha256.slice().len != 64) return error.InvalidObservation;
         _ = std.fmt.hexToBytes(&result.digest, value.sha256.slice()) catch return error.InvalidObservation;
         return result;
@@ -1755,36 +1760,6 @@ pub const MutationReply = struct {
         return answer.result == .accepted;
     }
 };
-
-pub fn JsonString(comptime limit: usize) type {
-    return struct {
-        value: protocol.Bounded(limit) = .{},
-
-        pub fn slice(self: *const @This()) []const u8 {
-            return self.value.slice();
-        }
-
-        pub fn eql(self: *const @This(), value: []const u8) bool {
-            return self.value.eql(value);
-        }
-
-        pub fn jsonStringify(self: @This(), jw: anytype) !void {
-            try jw.write(self.value.slice());
-        }
-
-        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, _: std.json.ParseOptions) !@This() {
-            if (try source.peekNextTokenType() != .string) return error.UnexpectedToken;
-            const token = try source.nextAllocMax(allocator, .alloc_if_needed, limit);
-            defer if (token == .allocated_string) allocator.free(token.allocated_string);
-            var result: @This() = .{};
-            result.value.set(switch (token) {
-                .string, .allocated_string => |value| value,
-                else => unreachable,
-            }) catch return error.InvalidCharacter;
-            return result;
-        }
-    };
-}
 
 pub const JsonAddress = struct {
     store: JsonString(protocol.max_store_bytes),
@@ -1923,7 +1898,7 @@ pub const JsonWorkState = struct {
     }
 
     fn number(text: JsonString(20), zero: bool) !u64 {
-        const value = try mutationId(text, zero);
+        const value = try decimalId(text, zero);
         if (value > std.math.maxInt(i64)) return error.InvalidResponse;
         return value;
     }
@@ -1942,7 +1917,7 @@ pub const JsonToolPresentation = struct {
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
         const Wire = struct { description: ?JsonString(protocol.max_tool_description_bytes), code: JsonEnum(protocol.ToolPresentation.Code), publication_position: ?JsonString(20) };
         const wire = try std.json.innerParse(Wire, allocator, source, options);
-        const position = if (wire.publication_position) |p| mutationId(p, false) catch return error.InvalidCharacter else null;
+        const position = if (wire.publication_position) |p| decimalId(p, false) catch return error.InvalidCharacter else null;
         if (position) |p| if (p > std.math.maxInt(i64)) return error.InvalidCharacter;
         if (wire.description) |d| if (!protocol.ToolPresentation.validDescription(d.slice())) return error.InvalidCharacter;
         if (wire.description == null) switch (wire.code.value) {
@@ -2294,54 +2269,6 @@ test "canonical presentation releases allocations on acceptance and late rejecti
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{true});
 }
 
-pub fn JsonEnum(comptime T: type) type {
-    const limit = comptime blk: {
-        var longest: usize = 0;
-        for (@typeInfo(T).@"enum".field_names) |name| longest = @max(longest, name.len);
-        break :blk longest;
-    };
-    return struct {
-        value: T,
-
-        pub fn jsonStringify(self: @This(), jw: anytype) !void {
-            try jw.write(@tagName(self.value));
-        }
-
-        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-            const string = try JsonString(limit).jsonParse(allocator, source, options);
-            return .{ .value = std.meta.stringToEnum(T, string.slice()) orelse return error.InvalidEnumTag };
-        }
-    };
-}
-
-// The containing field's default represents omission. A present field must
-// parse as T, not ?T: JSON null cannot stand in for an absent outcome/diagnostic.
-pub fn OmittableJson(comptime T: type) type {
-    return struct {
-        value: ?T = null,
-
-        pub fn isPresent(self: @This()) bool {
-            return self.value != null;
-        }
-        pub fn jsonStringify(self: @This(), jw: anytype) !void {
-            try jw.write(self.value);
-        }
-
-        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-            return .{ .value = try std.json.innerParse(T, allocator, source, options) };
-        }
-    };
-}
-
-pub fn mutationId(value: JsonString(20), allow_zero: bool) !u64 {
-    const bytes = value.slice();
-    if (bytes.len == 0 or (bytes.len > 1 and bytes[0] == '0')) return error.InvalidResponse;
-    for (bytes) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidResponse;
-    const id = std.fmt.parseInt(u64, bytes, 10) catch return error.InvalidResponse;
-    if (!allow_zero and id == 0) return error.InvalidResponse;
-    return id;
-}
-
 pub fn decodeReadFailure(reply: CommandReply, result_read: bool) !ReadFailure {
     if (reply.body.len > protocol.max_response_bytes) return error.InvalidResponse;
     const Wire = struct {
@@ -2433,8 +2360,8 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
     const answer = wire.answer.value orelse return error.InvalidResponse;
     if (target == .model_interruption) {
         const echoed = answer.target.value orelse return error.InvalidResponse;
-        if (answer.session.value != null or !echoed.session.eql(session) or try mutationId(echoed.turn, true) != target.model_interruption.turn or
-            try mutationId(echoed.operation, true) != target.model_interruption.operation) return error.RequestBindingMismatch;
+        if (answer.session.value != null or !echoed.session.eql(session) or try decimalId(echoed.turn, true) != target.model_interruption.turn or
+            try decimalId(echoed.operation, true) != target.model_interruption.operation) return error.RequestBindingMismatch;
     } else {
         const echoed = answer.session.value orelse return error.InvalidResponse;
         if (answer.target.value != null) return error.RequestBindingMismatch;
@@ -2447,7 +2374,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
         } else if (!echoed.eql(session)) return error.RequestBindingMismatch;
     }
     if (target == .permission_decision) {
-        if (try mutationId(answer.action.value orelse return error.InvalidResponse, true) != target.permission_decision.action or
+        if (try decimalId(answer.action.value orelse return error.InvalidResponse, true) != target.permission_decision.action or
             !(answer.decision.value orelse return error.InvalidResponse).eql(@tagName(target.permission_decision.decision))) return error.RequestBindingMismatch;
     } else if (answer.action.value != null or answer.decision.value != null) return error.InvalidResponse;
     const accepted = answer.status.eql("accepted");
@@ -2468,7 +2395,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
         .configure => {
             const execution = wire.execution.value orelse return error.InvalidResponse;
             if (!execution.status.eql("unavailable") or !(execution.reason.value orelse return error.InvalidResponse).eql("direct_reply_does_not_wait_for_model_processing")) return error.InvalidResponse;
-            if (accepted) value = .{ .configure = .{ .revision = try mutationId(answer.revision.value orelse return error.InvalidResponse, false), .created = answer.created.value orelse return error.InvalidResponse, .skills = if (answer.skills.value) |skills_value| skills_value.value else null } };
+            if (accepted) value = .{ .configure = .{ .revision = try decimalId(answer.revision.value orelse return error.InvalidResponse, false), .created = answer.created.value orelse return error.InvalidResponse, .skills = if (answer.skills.value) |skills_value| skills_value.value else null } };
         },
         .message => |expected| {
             if (!(wire.execution.value orelse return error.InvalidResponse).status.eql("queued")) return error.InvalidResponse;
@@ -2479,13 +2406,13 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
                 var digest: [32]u8 = undefined;
                 if (!input.type.eql("text") or input.sha256.slice().len != 64) return error.InvalidResponse;
                 _ = std.fmt.hexToBytes(&digest, input.sha256.slice()) catch return error.InvalidResponse;
-                const input_bytes = try mutationId(input.bytes, true);
+                const input_bytes = try decimalId(input.bytes, true);
                 confirmed_input = .{ .bytes = input_bytes, .digest = digest };
                 if (!expected.invokes_skill and (input_bytes != expected.bytes or !std.mem.eql(u8, &digest, &expected.digest))) return error.RequestBindingMismatch;
                 if (accepted) {
-                    const admission = try mutationId(answer.admission.value orelse return error.InvalidResponse, false);
+                    const admission = try decimalId(answer.admission.value orelse return error.InvalidResponse, false);
                     const queue = wire.queue.value orelse return error.InvalidResponse;
-                    if (!queue.status.eql("queued") or try mutationId(queue.admission, false) != admission) return error.InvalidResponse;
+                    if (!queue.status.eql("queued") or try decimalId(queue.admission, false) != admission) return error.InvalidResponse;
                     value = .{ .message = .{ .admission = admission } };
                 } else if (wire.queue.value != null) return error.InvalidResponse;
             }
@@ -2495,8 +2422,8 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
             if (accepted) {
                 const selection = answer.selection.value orelse return error.InvalidResponse;
                 value = .{ .session_stop = .{
-                    .turn = if (selection.turn) |turn| try mutationId(turn, false) else null,
-                    .admission_cutoff = try mutationId(selection.admission_cutoff, true),
+                    .turn = if (selection.turn) |turn| try decimalId(turn, false) else null,
+                    .admission_cutoff = try decimalId(selection.admission_cutoff, true),
                     .completion = std.meta.stringToEnum(@FieldType(@FieldType(@TypeOf(value), "session_stop"), "completion"), completion.status.slice()) orelse return error.InvalidResponse,
                 } };
             } else if (!completion.status.eql("unavailable")) return error.InvalidResponse;
