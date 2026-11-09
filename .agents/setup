@@ -192,76 +192,35 @@ EOF
     fi
 }
 
-install_agent_skills() (
-    local temporary matt_checkout stack_checkout skills_next skills_previous
-    temporary="$(mktemp -d)"
-    matt_checkout="$temporary/mattpocock-skills"
-    stack_checkout="$temporary/gh-stack"
-    skills_next="$repo_root/.agents/skills.next"
-    skills_previous="$repo_root/.agents/skills.previous"
-    cleanup_agent_skills_install() {
-        rm -rf "$temporary" "$skills_next"
-        rm -f "$repo_root/.agents/skills-revisions.next"
-        if [[ -d "$skills_previous" && ! -e "$repo_root/.agents/skills" ]]; then
-            mv "$skills_previous" "$repo_root/.agents/skills"
-        fi
-    }
-    trap cleanup_agent_skills_install EXIT
-
-    git clone --quiet --depth 1 https://github.com/mattpocock/skills.git "$matt_checkout"
-    git clone --quiet --depth 1 https://github.com/github/gh-stack.git "$stack_checkout"
-
-    rm -rf "$skills_next" "$skills_previous"
-    mkdir -p "$skills_next"
-
-    local source
-    for source in "$matt_checkout"/skills/engineering/*; do
-        if [[ -d "$source" && -f "$source/SKILL.md" ]]; then
-            cp -R "$source" "$skills_next/"
-        fi
-    done
-    cp -R "$matt_checkout/skills/productivity/grilling" "$skills_next/"
-    cp -R "$matt_checkout/skills/productivity/writing-for-agents" "$skills_next/"
-    cp -R "$stack_checkout/skills/gh-stack" "$skills_next/"
-
-    local matt_revision stack_revision
-    matt_revision="$(git -C "$matt_checkout" rev-parse HEAD)"
-    stack_revision="$(git -C "$stack_checkout" rev-parse HEAD)"
-    cat >"$repo_root/.agents/skills-revisions.next" <<EOF
-https://github.com/mattpocock/skills $matt_revision
-https://github.com/github/gh-stack $stack_revision
-EOF
-
-    if [[ -d "$repo_root/.agents/skills" ]]; then
-        mv "$repo_root/.agents/skills" "$skills_previous"
-    fi
-    mv "$skills_next" "$repo_root/.agents/skills"
-    rm -rf "$skills_previous"
-    mv "$repo_root/.agents/skills-revisions.next" "$repo_root/.agents/skills-revisions"
-
-    printf 'Matt Pocock skills: %s\n' "$matt_revision"
-    printf 'gh-stack skill: %s\n' "$stack_revision"
-)
-
 mkdir -p "$local_bin" "$local_opt"
 
 step 'Installing system packages'
 install_system_packages
 
-step 'Installing latest agent skills'
-install_agent_skills
-
-step 'Installing pinned toolchains'
+step 'Installing pinned Zig'
 install_zig
-install_go
 persist_path
 export PATH="$local_bin:$PATH"
-
-step 'Fetching pinned Zig dependencies'
 export ZIG_GLOBAL_CACHE_DIR="$HOME/.cache/zig"
 mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
+# Zig 0.17 compiles its build runner from source on the first zig fetch or zig
+# build: about 80s on one core of a two-vCPU orb. Compile it in the background so
+# the next downloads overlap it; later zig commands wait on the cache lock and
+# reuse it. The missing build file fails only after the compile, as expected.
+zig build --build-file "$(mktemp -u)/build.zig" --help >/dev/null 2>&1 &
+runner_pid=$!
+trap 'kill "$runner_pid" 2>/dev/null || true' EXIT
+
+step 'Installing pinned Go'
+install_go
+
+step 'Fetching pinned Zig dependencies'
 started=$SECONDS
-bash "$repo_root/src/fetch_dependencies.sh"
+# Orbs authenticate gh without exporting GH_TOKEN. With a token, fetch_dependencies.sh
+# downloads GitHub-hosted archives through the API, which anonymous load shedding spares.
+GH_TOKEN="${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}" bash "$repo_root/src/fetch_dependencies.sh"
+wait "$runner_pid" || true
+trap - EXIT
 printf 'Zig dependency graph ready in %ss.\n' "$((SECONDS - started))"
 
 step 'Fetching pinned Go measurement dependencies'
