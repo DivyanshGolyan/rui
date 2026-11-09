@@ -61,6 +61,7 @@ const cores = .{
     .{ "session_departure.zig", @import("session_departure.zig") },
     .{ "session_id.zig", @import("session_id.zig") },
     .{ "session_line.zig", @import("session_line.zig") },
+    .{ "session_reading.zig", @import("session_reading.zig") },
     .{ "session_work.zig", @import("session_work.zig") },
     .{ "session_archive.zig", @import("session_archive.zig") },
     .{ "slash_commands.zig", @import("slash_commands.zig") },

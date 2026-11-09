@@ -19,6 +19,7 @@ const test_poll = @import("test_poll");
 const View = @import("session_view.zig");
 const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
+const reader_policy = @import("session_reading.zig");
 const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
 const UpgradePanel = @import("UpgradePanel.zig");
@@ -953,7 +954,7 @@ fn driveActive(self: *Self) !void {
         }
         // A joined read may hide or withdraw the Action, so a sequence the
         // choice is decoding finishes there first and keeps its meaning.
-        if (self.reader.thread != null and self.reader.completed() and !(self.terminal.screen.inputRow() == .selector and self.input.pending() != .none)) {
+        if (self.reader.thread != null and reader_policy.settles(self.reader.completed(), self.terminal.screen.inputRow() == .selector, self.input.pending() != .none)) {
             try self.settleReader();
             self.withdrawDecided();
         }
@@ -997,14 +998,14 @@ fn driveActive(self: *Self) !void {
                 job.recall = recall;
                 try self.launch(job, reads.recall);
             };
-            if (self.reader.thread != null) {} else if (self.olderWanted()) {
-                self.notice = "Loading earlier messages…";
-                try self.launch(self.freeze(.history), reads.history);
-            } else if (std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at) {
-                try self.launch(self.freeze(.activity), reads.scan);
-            } else if (self.terminal.screen.consent == null and !self.reading.opening and self.submission.view() == null and self.live.work.first_action != null and self.input.pending() == .none) {
-                try self.launch(self.freeze(.permission), reads.permission);
-            }
+            if (self.reader.thread == null) if (reader_policy.background(self.idleReader())) |read| switch (read) {
+                .history => {
+                    self.notice = "Loading earlier messages…";
+                    try self.launch(self.freeze(.history), reads.history);
+                },
+                .activity => try self.launch(self.freeze(.activity), reads.scan),
+                .permission => try self.launch(self.freeze(.permission), reads.permission),
+            };
         }
         // Input routes by the latest frame's editor. Once a transition revokes
         // that frame, draw its replacement before reading further input.
@@ -1487,7 +1488,21 @@ fn settledView(self: *const Self) bool {
         self.reading.prepared_action == null and !self.commandActive();
 }
 
-const MessageRequest = struct { target: View.Collapsed, view: Screen.ViewKind, transcript: u64, sent: u64, generation: u64 };
+const MessageRequest = struct { target: View.Collapsed, asked: reader_policy.Asked };
+
+/// Where a Message page would be asked from now.
+fn pagePlace(self: *const Self) reader_policy.Place {
+    return switch (self.terminal.screen.view) {
+        .live => .live,
+        .transcript => .{ .transcript = self.transcript.id },
+        .inspection, .action, .message => .elsewhere,
+    };
+}
+
+/// What a Message page asked for now is asked over.
+fn pageAsked(self: *const Self) reader_policy.Asked {
+    return .{ .place = self.pagePlace(), .sent = self.admission.sent, .generation = self.expansion.generation };
+}
 
 /// No Message page asked for so far opens.
 fn dropMessageRequest(self: *Self) void {
@@ -1501,7 +1516,7 @@ fn expand(self: *Self) !void {
     self.expansion.pending = false;
     self.dirty = true;
     const screen = self.terminal.screen;
-    if (screen.view != .live and screen.view != .transcript) {
+    if (self.pagePlace() == .elsewhere) {
         self.notice = "! Ctrl-O opens a collapsed message from the conversation.";
         return;
     }
@@ -1514,7 +1529,7 @@ fn expand(self: *Self) !void {
         self.notice = "! That message's full text is no longer held here; /history shows it again.";
         return;
     };
-    self.expansion.requested = .{ .target = target, .view = screen.view, .transcript = self.transcript.id, .sent = self.admission.sent, .generation = self.expansion.generation };
+    self.expansion.requested = .{ .target = target, .asked = self.pageAsked() };
     self.notice = "Opening message…";
 }
 
@@ -1551,8 +1566,20 @@ fn showOlderLabels(self: *Self) !void {
     }
 }
 
-fn olderWanted(self: *const Self) bool {
-    return (self.transcript.plan.next() != null or self.transcript.older != null) and !self.transcript.older_failed and self.terminal.screen.transcriptAtTop() and !self.reading.opening;
+/// What the idle reader may start from, read now.
+fn idleReader(self: *const Self) reader_policy.Idle {
+    return .{
+        .now_ns = std.Io.Clock.awake.now(self.init.io).nanoseconds,
+        .scan_due_ns = self.poll_at,
+        .opening = self.reading.opening,
+        .older_remain = self.transcript.plan.next() != null or self.transcript.older != null,
+        .older_failed = self.transcript.older_failed,
+        .at_top = self.terminal.screen.transcriptAtTop(),
+        .choice_open = self.terminal.screen.consent != null,
+        .action_named = self.live.work.first_action != null,
+        .submission = self.submission.view() != null,
+        .decoder_pending = self.input.pending() != .none,
+    };
 }
 
 fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
@@ -1850,14 +1877,9 @@ fn settleReader(self: *Self) !void {
             try self.showOlderLabels();
         }
     } else if (end == .complete and self.reading.phase == .message) {
-        const screen = self.terminal.screen;
         const request = self.expansion.reading.?;
         self.expansion.reading = null;
-        // Only over the unchanged view it was asked from, before any send,
-        // dismissal or newer Ctrl-O.
-        if (request.generation == self.expansion.generation and request.sent == self.admission.sent and screen.view == request.view and
-            (request.view == .live or request.transcript == self.transcript.id))
-            try screen.showMessage(self.init.io, self.files.inspection);
+        if (reader_policy.messageShows(request.asked, self.pageAsked())) try self.terminal.screen.showMessage(self.init.io, self.files.inspection);
     } else if (end == .complete and self.reading.phase == .recall) {
         try self.showRecalled();
     } else if (end == .complete and (self.reading.phase == .activity or self.reading.phase == .permission)) {
@@ -1866,7 +1888,7 @@ fn settleReader(self: *Self) !void {
         try self.showCopy();
         self.inspection.command_running = false;
     } else if (end == .complete and (self.reading.phase == .details or self.reading.phase == .inspection)) {
-        if (self.reading.phase != .details or self.admission.details_sent == self.admission.sent) try self.showInspection();
+        if (self.reading.phase != .details or reader_policy.detailsShows(self.admission.details_sent, self.admission.sent)) try self.showInspection();
         self.inspection.command_running = false; // Shown; exit no longer prints it.
         // A /setup run over the page may have changed the defaults it shows.
         if (self.reading.phase == .inspection and self.inspection.kind == .command and self.statusShown()) {
@@ -2141,7 +2163,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         }
     }
     // A /status asked for during this read is the next read's, at once.
-    self.poll_at = if (self.inspection.status_requested) 0 else std.Io.Clock.awake.now(self.init.io).nanoseconds + 250_000_000;
+    self.poll_at = reader_policy.scanDue(std.Io.Clock.awake.now(self.init.io).nanoseconds, self.inspection.status_requested);
     // News goes out first in the next frame, once the read is applied.
     if (observed) |read| try self.lender.observed(self.lender.context, read.work, if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session, read.opening);
     self.dirty = true;
