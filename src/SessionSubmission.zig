@@ -6,6 +6,7 @@ const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
 const Input = @import("SessionInput.zig");
 const Task = @import("ClientTask.zig");
+const original_state = @import("submission_state.zig");
 const Self = @This();
 
 pub const Intent = union(enum) {
@@ -33,18 +34,12 @@ pub const Intent = union(enum) {
         };
     }
 };
-pub const Kind = enum { message, decision };
-pub const State = enum { not_started, submitting, unconfirmed, rejected };
-const Publication = enum { not_sent, unknown, published };
-pub const Accepted = struct { kind: Kind, key: [36]u8 };
+pub const Kind = original_state.Kind;
+pub const State = original_state.State;
+const Publication = original_state.Publication;
+pub const Accepted = original_state.Accepted;
 pub const View = struct { kind: Kind, state: State, key: [36]u8, last_error: ?anyerror };
-pub const Recovery = union(enum) {
-    none,
-    not_sent: Kind,
-    uncertain: [36]u8,
-    saved: struct { original: Accepted, rejected: bool },
-    accepted: Accepted,
-};
+pub const Recovery = original_state.Recovery;
 pub const End = union(enum) {
     absent,
     // A Message's admission orders it among delivered ones. An accepted
@@ -88,13 +83,8 @@ pub fn view(self: *const Self) ?View {
 /// Recovery guidance is read only after both frontend borrowers have joined.
 pub fn recovery(self: *const Self) Recovery {
     std.debug.assert(self.task.thread == null);
-    if (self.intent) |intent| {
-        const kind = intent.kind();
-        if (self.state == .not_started) return .{ .not_sent = kind };
-        if (self.publication != .published) return .{ .uncertain = self.key };
-        return .{ .saved = .{ .original = .{ .kind = kind, .key = self.key }, .rejected = self.state == .rejected } };
-    }
-    return if (self.accepted) |accepted| .{ .accepted = accepted } else .none;
+    const original: ?original_state.Original = if (self.intent) |intent| .{ .kind = intent.kind(), .state = self.state, .publication = self.publication, .key = self.key } else null;
+    return original_state.recovery(original, self.accepted);
 }
 
 pub fn begin(self: *Self, intent: Intent) !void {
@@ -333,7 +323,7 @@ pub fn join(self: *Self) End {
     const result = self.task.join();
     return self.apply(result) catch |err| {
         self.last_error = err;
-        self.state = if (self.publication == .not_sent) .not_started else .unconfirmed;
+        self.state = original_state.failed(self.publication);
         return .{ .failed = .{ .err = err } };
     };
 }

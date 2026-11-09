@@ -12,7 +12,7 @@ const View = @import("session_view.zig");
 const stderr = @import("stderr.zig");
 const Self = @This();
 
-pub const Outcome = enum { unchanged, compatible, incompatible };
+pub const Outcome = @import("session_upgrade.zig").Outcome;
 const Operation = enum { check, install };
 
 init: std.process.Init,

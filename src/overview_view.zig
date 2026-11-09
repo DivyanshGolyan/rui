@@ -27,6 +27,7 @@ const model_list = @import("model_list.zig");
 const model_picker = @import("model_picker.zig");
 const provider_name = @import("provider_name.zig");
 const session_work = @import("session_work.zig");
+const session_upgrade = @import("session_upgrade.zig");
 const slash_commands = @import("slash_commands.zig");
 pub const commands = slash_commands.overview;
 const TerminalText = @import("TerminalText.zig");
@@ -70,6 +71,8 @@ pub const max_requests = 8;
 pub const list_interval_ms = 1000;
 /// How long each frame of the spinner shows: one turn in two seconds.
 pub const spin_interval_ms = 200;
+/// How often the shell polls while an Upgrade holds the overview.
+pub const upgrade_poll_ms = 16;
 /// A generated request handle, as `rui request recover` takes it.
 pub const max_handle_bytes = 36;
 
@@ -460,6 +463,16 @@ pub const ModelsRead = union(enum) {
     unanswered,
     /// The Host answered with a list Rui cannot read.
     invalid,
+
+    /// How a failed read ended: a list Rui cannot read, else no answer,
+    /// which leaves the person nothing to do but try /model again, as when
+    /// the Host is gone.
+    pub fn failed(err: anyerror) ModelsRead {
+        return switch (err) {
+            error.InvalidModelList, error.InvalidResponse, error.ResponseTooLarge => .invalid,
+            else => .unanswered,
+        };
+    }
 };
 
 /// A save of `binding` as the default ended as `outcome`.
@@ -854,7 +867,11 @@ pub const State = struct {
     /// The Workspace the composer starts Sessions in, as an index in `workspaces`.
     cwd: u32,
     now_ms: u64 = 0,
+    /// The selected Rui does not speak this Host's protocol: Host intents
+    /// wait for /upgrade or a new terminal.
     upgrade_blocked: bool = false,
+    /// An Upgrade is under way or the listing has not yet been read again
+    /// under the selected Rui: Host intents wait.
     upgrade_pending: bool = false,
     /// The terminal's own last successful `rui auth login`, Unix seconds.
     login_at: ?u64 = null,
@@ -1054,6 +1071,31 @@ pub const State = struct {
             at = @min(at orelse resets *| 1000, resets *| 1000);
         };
         return at;
+    }
+
+    /// An Upgrade ended with `outcome`: an unchanged panel leaves the block
+    /// as it was, and unless blocked the overview lists again before Host
+    /// intents resume.
+    pub fn upgraded(self: *State, outcome: session_upgrade.Outcome) void {
+        switch (outcome) {
+            .unchanged => {},
+            .compatible => self.upgrade_blocked = false,
+            .incompatible => self.upgrade_blocked = true,
+        }
+        self.upgrade_pending = !self.upgrade_blocked;
+        self.next_list_ms = 0;
+    }
+
+    /// How long the shell may wait for input, in milliseconds, -1 for ever:
+    /// until the next `tick`, every `upgrade_poll_ms` while an Upgrade holds
+    /// the overview or is asked for, and while the screen spins no later than
+    /// its next frame. `now_ms` is wall-clock time, as ticks are; `awake_ms`
+    /// is the monotonic clock frames count on.
+    pub fn waitMs(self: *const State, upgrading: bool, now_ms: u64, awake_ms: u64, spins: bool) i32 {
+        const next: i32 = if (self.upgrade_blocked or upgrading) upgrade_poll_ms else if (self.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
+        if (!spins) return next;
+        const frame: i32 = @intCast(spin_interval_ms - awake_ms % spin_interval_ms);
+        return if (next < 0) frame else @min(next, frame);
     }
 
     fn selectedRow(self: *const State) ?*const Row {
@@ -8100,4 +8142,54 @@ test "upgrade holds settle accepted archive restore and stop completions without
             }
         }
     };
+}
+
+test "the overview waits until its next tick, polls while an Upgrade holds it, and wakes for the spinner's next frame" {
+    var state: State = undefined;
+    try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
+    defer state.deinit();
+    state.listing = false;
+    state.next_list_ms = 10_000;
+    try std.testing.expectEqual(@as(i32, 2_500), state.waitMs(false, 7_500, 0, false));
+    // A tick already due waits nothing; one far off is capped, not wrapped.
+    try std.testing.expectEqual(@as(i32, 0), state.waitMs(false, 12_000, 0, false));
+    state.next_list_ms = std.math.maxInt(u64);
+    try std.testing.expectEqual(@as(i32, std.math.maxInt(i32)), state.waitMs(false, 0, 0, false));
+    // A listing in flight wakes the loop only through its answer.
+    state.listing = true;
+    try std.testing.expectEqual(@as(i32, -1), state.waitMs(false, 0, 0, false));
+    // The spinner's next frame on the monotonic clock comes first.
+    try std.testing.expectEqual(@as(i32, spin_interval_ms - 30), state.waitMs(false, 0, 1_030, true));
+    state.listing = false;
+    state.next_list_ms = 10_010;
+    try std.testing.expectEqual(@as(i32, 10), state.waitMs(false, 10_000, 1_030, true));
+    // An Upgrade asked for, or one that left the overview blocked, polls.
+    try std.testing.expectEqual(@as(i32, upgrade_poll_ms), state.waitMs(true, 0, 0, false));
+    state.upgrade_blocked = true;
+    try std.testing.expectEqual(@as(i32, upgrade_poll_ms), state.waitMs(false, 0, 0, false));
+    try std.testing.expectEqual(@as(i32, 10), state.waitMs(false, 0, 190, true));
+}
+
+test "a model list Rui cannot read says so; any other failure is no answer" {
+    try std.testing.expectEqual(ModelsRead.invalid, ModelsRead.failed(error.InvalidModelList));
+    try std.testing.expectEqual(ModelsRead.invalid, ModelsRead.failed(error.ResponseTooLarge));
+    try std.testing.expectEqual(ModelsRead.invalid, ModelsRead.failed(error.InvalidResponse));
+    try std.testing.expectEqual(ModelsRead.unanswered, ModelsRead.failed(error.ConnectionResetByPeer));
+}
+
+test "an Upgrade holds Host intents until the overview lists again under the selected Rui, or blocks them" {
+    var state: State = undefined;
+    try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
+    defer state.deinit();
+    state.next_list_ms = 10_000;
+    state.upgraded(.unchanged);
+    try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending and state.next_list_ms == 0);
+    state.upgraded(.incompatible);
+    try std.testing.expect(state.upgrade_blocked and !state.upgrade_pending);
+    // An unchanged panel keeps the block; a compatible one lifts it.
+    state.next_list_ms = 10_000;
+    state.upgraded(.unchanged);
+    try std.testing.expect(state.upgrade_blocked and !state.upgrade_pending and state.next_list_ms == 0);
+    state.upgraded(.compatible);
+    try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending);
 }
