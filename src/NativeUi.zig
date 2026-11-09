@@ -223,9 +223,13 @@ fn deinit(self: *Self) void {
     self.worker.cancel();
     self.worker.join() catch {};
     const was_pending = self.submission.view() != null;
+    const pending_reason: ?u64 = if (self.submission.intent) |intent| switch (intent) {
+        .message_then_deny => |reason| reason.action,
+        else => null,
+    } else null;
     self.submission.cancel();
-    _ = self.submission.join();
-    if (was_pending) self.recoveryGuide();
+    const end = self.submission.join();
+    if (was_pending) self.recoveryGuide(end, pending_reason);
     self.submission.close();
     if (self.export_command) |command| self.init.gpa.free(command);
     if (self.export_old_command) |command| self.init.gpa.free(command);
@@ -243,18 +247,68 @@ fn deinit(self: *Self) void {
     self.scratch.close(self.init.io);
 }
 
-fn recoveryGuide(self: *Self) void {
-    switch (self.submission.recovery()) {
-        .none => {},
-        .not_sent => stderr.diagnostic("rui: Original request was not sent.\n", .{}),
-        .uncertain => |key| stderr.diagnostic("rui: Capture not confirmed. Inspect rui request list for reserved key {s}; recover only that original, never replacement input.\n", .{key}),
-        .saved => |saved| if (saved.rejected) {
-            stderr.diagnostic("rui: Original request rejected. Use rui request inspect {s}.\n", .{saved.original.key});
-        } else {
-            stderr.diagnostic("rui: Message not confirmed. Use rui request recover {s}; do not resubmit it.\n", .{saved.original.key});
-        },
-        .accepted => |accepted| stderr.diagnostic("rui: Message accepted; do not resubmit it. Use rui request read-result {s}.\n", .{accepted.key}),
+const ShutdownReceipt = struct {
+    recovery: Submission.Recovery,
+    end: Submission.End,
+    reason_action: ?u64,
+    captured: bool,
+    reserved: bool,
+    key: [36]u8,
+    session: []const u8,
+};
+
+fn writeRecoveryGuide(out: *std.Io.Writer, receipt: ShutdownReceipt) !void {
+    if (receipt.end == .accepted) {
+        const accepted = receipt.end.accepted;
+        if (accepted.denies) |action| {
+            try out.print("rui: Reason accepted (request {s}); denial for Action {d} in Session {s} was not started during shutdown. Inspect the current Action and Host before deciding; do not resend the reason.\n", .{ receipt.key, action, receipt.session });
+            return;
+        }
     }
+    switch (receipt.recovery) {
+        .none => {},
+        .not_sent => |kind| {
+            if (receipt.captured) {
+                try out.print("rui: Original {s} was not transmitted; request {s} was captured. Inspect it; do not automatically resend it.\n", .{ @tagName(kind), receipt.key });
+            } else if (receipt.reserved) {
+                try out.print("rui: Original {s} was not transmitted; capture of reserved request {s} is not confirmed. Its in-memory intent is not retained after exit.\n", .{ @tagName(kind), receipt.key });
+            } else {
+                try out.print("rui: Original {s} was not transmitted or reserved. Its in-memory intent is not retained after exit.\n", .{@tagName(kind)});
+            }
+        },
+        .uncertain => |key| try out.print("rui: Capture or transmission of request {s} is not confirmed. Inspect the request; do not submit replacement input.\n", .{key}),
+        .saved => |saved| {
+            if (saved.rejected) {
+                try out.print("rui: Original {s} was rejected. Inspect request {s}.\n", .{ @tagName(saved.original.kind), saved.original.key });
+            } else if (saved.original.kind == .decision or receipt.reason_action != null) {
+                try out.print("rui: Original {s} is not confirmed. Inspect request {s}; do not automatically resend it.\n", .{ @tagName(saved.original.kind), saved.original.key });
+            } else {
+                try out.print("rui: Message not confirmed. Use rui request recover {s}; do not resubmit it.\n", .{saved.original.key});
+            }
+        },
+        .accepted => |accepted| try out.print("rui: {s} accepted; do not resubmit it. Use rui request read-result {s}.\n", .{ if (accepted.kind == .decision) "Action decision" else "Message", accepted.key }),
+    }
+    if (receipt.reason_action) |action| {
+        try out.print("rui: This request is a reason followed by a denial for Action {d} in Session {s}; no denial was started during shutdown. Inspect the request, current Action and Host before deciding.\n", .{ action, receipt.session });
+    }
+}
+
+fn recoveryGuide(self: *Self, end: Submission.End, reason_action: ?u64) void {
+    var storage: [2048]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&storage);
+    writeRecoveryGuide(&out, .{
+        .recovery = self.submission.recovery(),
+        .end = end,
+        .reason_action = reason_action,
+        .captured = self.submission.captured != null,
+        .reserved = self.submission.target_reserved,
+        .key = self.submission.key,
+        .session = self.submission.session,
+    }) catch {
+        stderr.diagnosticBytes("rui: Could not format the original request's shutdown guidance.\n");
+        return;
+    };
+    stderr.diagnosticBytes(out.buffered());
 }
 
 fn freeArena(self: *Self, arena: ?*std.heap.ArenaAllocator) void {
@@ -1312,4 +1366,27 @@ test "native scroll cancellation revokes matching in-flight Action read" {
     try self.completeRead(&ctx);
     try std.testing.expect(self.action.offer == null and self.action.choice == null and self.action_frame == null);
     try std.testing.expect(self.pending_page != null and self.worker.thread == null and self.read_arena == null);
+}
+
+test "native shutdown guidance distinguishes custody and compound continuation" {
+    const key: [36]u8 = @splat('a');
+    const accepted_message: Submission.Accepted = .{ .kind = .message, .key = key };
+    const accepted_decision: Submission.Accepted = .{ .kind = .decision, .key = key };
+    const cases = [_]struct { receipt: ShutdownReceipt, expected: []const u8, forbidden: []const u8 }{
+        .{ .receipt = .{ .recovery = .{ .not_sent = .message }, .end = .absent, .reason_action = 19, .captured = false, .reserved = false, .key = key, .session = "abc123" }, .expected = "not transmitted or reserved", .forbidden = "request recover" },
+        .{ .receipt = .{ .recovery = .{ .not_sent = .decision }, .end = .absent, .reason_action = null, .captured = true, .reserved = true, .key = key, .session = "abc123" }, .expected = "decision was not transmitted", .forbidden = "request recover" },
+        .{ .receipt = .{ .recovery = .{ .not_sent = .message }, .end = .absent, .reason_action = null, .captured = false, .reserved = true, .key = key, .session = "abc123" }, .expected = "capture of reserved request", .forbidden = "request recover" },
+        .{ .receipt = .{ .recovery = .{ .saved = .{ .original = accepted_message, .rejected = false } }, .end = .absent, .reason_action = 19, .captured = true, .reserved = true, .key = key, .session = "abc123" }, .expected = "reason followed by a denial", .forbidden = "request recover" },
+        .{ .receipt = .{ .recovery = .{ .uncertain = key }, .end = .absent, .reason_action = 19, .captured = false, .reserved = true, .key = key, .session = "abc123" }, .expected = "not confirmed", .forbidden = "request recover" },
+        .{ .receipt = .{ .recovery = .{ .accepted = accepted_message }, .end = .{ .accepted = .{ .kind = .message, .confirmed = false, .denies = 19 } }, .reason_action = 19, .captured = false, .reserved = true, .key = key, .session = "abc123" }, .expected = "denial for Action 19 in Session abc123 was not started", .forbidden = "request recover" },
+        .{ .receipt = .{ .recovery = .{ .accepted = accepted_decision }, .end = .{ .accepted = .{ .kind = .decision, .confirmed = false } }, .reason_action = null, .captured = false, .reserved = true, .key = key, .session = "abc123" }, .expected = "Action decision accepted", .forbidden = "Message accepted" },
+        .{ .receipt = .{ .recovery = .{ .saved = .{ .original = accepted_decision, .rejected = false } }, .end = .absent, .reason_action = null, .captured = true, .reserved = true, .key = key, .session = "abc123" }, .expected = "Original decision is not confirmed", .forbidden = "request recover" },
+    };
+    for (cases) |case| {
+        var storage: [2048]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&storage);
+        try writeRecoveryGuide(&out, case.receipt);
+        try std.testing.expect(std.mem.indexOf(u8, out.buffered(), case.expected) != null);
+        try std.testing.expect(std.mem.indexOf(u8, out.buffered(), case.forbidden) == null);
+    }
 }
