@@ -1161,7 +1161,7 @@ const ScreenEmulator = struct {
 /// `zig build` of screen-emulator builds from its pinned release tarball.
 /// A CI producer builds it for the baseline CPU, as its executables are.
 fn addScreenEmulator(b: *std.Build, ci: CiArtifacts, baseline: bool) ScreenEmulator {
-    const name = if (b.graph.host.result.os.tag.isDarwin()) "libghostty-vt.dylib" else "libghostty-vt.so";
+    const name = darwin.screenLibraryName(b.graph.host.result.os.tag);
     if (ci.directory) |directory|
         return .{ .library = .{ .cwd_relative = b.pathJoin(&.{ directory, name }) }, .name = name, .child = null };
     const child = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "install", "--summary", "none", "--build-file" });
