@@ -3183,7 +3183,7 @@ def app_terminal_cases():
 
 def app_signal_cases():
     binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
-    for sent in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    for sent in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, *([None] * 8)):
         master, slave = open_pty()
         caller = None
         original = termios.tcgetattr(slave)
@@ -3209,6 +3209,16 @@ def app_signal_cases():
                 error.add_note(f"App startup bytes: {bytes(opening)!r}; exit: {caller.poll()}")
                 raise
             assert not termios.tcgetattr(slave)[3] & termios.ICANON
+            if sent is None:
+                os.close(master)
+                master = None
+                _, diagnostic = caller.communicate(timeout=5)
+                assert caller.returncode == 0, (caller.returncode, diagnostic)
+                assert b"EndOfStream" not in diagnostic, diagnostic
+                assert b"error reading tty" not in diagnostic, diagnostic
+                assert caller.poll() == 0, "App survived terminal hangup"
+                print("App closed master: hangup exit; no terminal restoration claimed", flush=True)
+                continue
             caller.send_signal(sent)
             output, diagnostic = human.terminal_exit(caller, master)
             assert caller.returncode == 0, (sent, caller.returncode, diagnostic)
@@ -3219,7 +3229,7 @@ def app_signal_cases():
             print(f"App {sent.name}: terminal settings and enabled modes restored", flush=True)
         finally:
             dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                        lambda: os.close(master), lambda: os.close(slave))
+                        lambda: os.close(master) if master is not None else None, lambda: os.close(slave))
 
 
 def app_resize_cases():
