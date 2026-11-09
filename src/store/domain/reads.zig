@@ -9,6 +9,9 @@ const command_reply = @import("../../command_reply.zig");
 const word_search = @import("../../word_search.zig");
 const pages = @import("../../os/pages.zig");
 const protocol = @import("../../protocol.zig");
+const conversation_read = @import("../../conversation_read.zig");
+const activity_read = @import("../../activity_read.zig");
+const session_field = @import("../../session_field.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
@@ -261,7 +264,7 @@ fn activityKindCode(kind: protocol.ActivityItem.Kind) u5 {
 }
 
 /// `kinds` as the sources' integer: bit `k` for each kind code `k`.
-fn activityKinds(kinds: protocol.ActivityPage.Kinds) u64 {
+fn activityKinds(kinds: activity_read.ActivityPage.Kinds) u64 {
     var bits: u64 = 0;
     var iterator = kinds.iterator();
     while (iterator.next()) |kind| bits |= @as(u64, 1) << activityKindCode(kind);
@@ -496,7 +499,7 @@ const public_page = rsql.Read(.{
 /// when no hosted call was there. The rows' own reads follow
 /// (`readPublicRows`), each round shared by every row, and the cursor's
 /// content metadata shares their first.
-pub fn publicConversationPage(a: *ReadAccess, request: *const protocol.ConversationPage, page: *PublicConversationPage) !void {
+pub fn publicConversationPage(a: *ReadAccess, request: *const conversation_read.ConversationPage, page: *PublicConversationPage) !void {
     if (request.end > std.math.maxInt(i64) or request.before_position > std.math.maxInt(i64) or
         request.before_ordinal > std.math.maxInt(i64) or
         (request.end == 0 and request.before_position != 0) or
@@ -629,7 +632,7 @@ noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const pu
     if (missing != null) return error.CorruptStore;
 }
 
-pub fn openPublicConversationContent(a: *ReadAccess, request: *const protocol.ConversationContent) !ContentLocation {
+pub fn openPublicConversationContent(a: *ReadAccess, request: *const conversation_read.ConversationContent) !ContentLocation {
     if (request.position == 0 or request.position > std.math.maxInt(i64) or
         request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
     const content = try publicConversationContent(a, request.session.slice(), request.position, request.ordinal);
@@ -1021,7 +1024,7 @@ const page_session = rsql.Read(.{
 /// noinline: its row buffers (about 2.4 KB) stay out of the read's Queue.run
 /// frame, which also drains queued writes and so sits under the deepest
 /// write on every engine chain that reads a page (read_transcript).
-pub noinline fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page: *protocol.ActivityFacts) !void {
+pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.ActivityPage, page: *protocol.ActivityFacts) !void {
     page.* = .{ .end = 0, .direction = request.direction, .work = .{ .workspace = .{ .len = 0 } } };
     const session_ref = request.session.slice();
     var session: page_session.Row = undefined;
@@ -1111,7 +1114,7 @@ const SearchScratch = struct {
 
 /// Searches the page's public sources in one read access. SQL chooses only
 /// candidate identities; the functional matcher alone decides text matches.
-pub fn searchActivity(a: *ReadAccess, request: *const protocol.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
     out.count = 0;
     out.next = null;
     const mapped = try pages.Mapped(SearchScratch).map();
@@ -1203,7 +1206,7 @@ pub fn searchActivity(a: *ReadAccess, request: *const protocol.ActivitySearch, o
     }
 }
 
-fn searchField(a: *ReadAccess, scratch: *SearchScratch, field: protocol.ProposalFieldReference, budget: *usize) !void {
+fn searchField(a: *ReadAccess, scratch: *SearchScratch, field: activity_read.ProposalFieldReference, budget: *usize) !void {
     const reference: ContentReference = .{ .length = field.length, .digest = field.digest };
     const id = try content_domain.contentIdOf(a, reference, false);
     try searchContent(a, scratch, .{ .store = a.store, .content_id = id, .reference = reference }, budget);
@@ -1426,7 +1429,7 @@ const approval_request = rsql.Read(.{
 const session_change = rsql.Read(.{
     .sql = "SELECT revision,field,changed_at FROM session_change WHERE session_ref=?1 AND position=?2 AND ordinal=?3",
     .Args = struct { session: []const u8, position: u64, ordinal: u64 },
-    .Row = struct { revision: rsql.Positive, field: protocol.SessionField, changed_at: rsql.Positive },
+    .Row = struct { revision: rsql.Positive, field: session_field.SessionField, changed_at: rsql.Positive },
     .cardinality = .one,
 });
 
@@ -2015,7 +2018,7 @@ noinline fn readItems(comptime max: usize, a: *ReadAccess, session: []const u8, 
 /// Round 1 reads the sequence guard; the item's own reads follow
 /// (`publicConversationContent`, `readItems`), which read the content's
 /// metadata, so no read repeats it.
-pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivityContent) !ContentLocation {
+pub fn openActivityContent(a: *ReadAccess, request: *const activity_read.ReadActivityContent) !ContentLocation {
     var guard: activity_sequence_guard.Result = undefined;
     a.read(activity_sequence_guard, .{ .session = request.session.slice() }, &guard);
     a.run() catch |err| return store_core.fence(a.store, if (err == error.StatementFailed) error.CorruptStore else err);
@@ -2045,12 +2048,12 @@ pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivity
 /// the same Proposal and presentation provenance checks as activity pages;
 /// the result's group position is not the original call's position.
 pub const ActivityTool = struct {
-    name: protocol.ProposalFieldReference,
+    name: activity_read.ProposalFieldReference,
     presentation: tool_presentation.ToolPresentation,
 };
 
-pub fn activityTool(a: *ReadAccess, request: *const protocol.ReadActivityContent) !ActivityTool {
-    var metadata: protocol.ProposalMetadata = undefined;
+pub fn activityTool(a: *ReadAccess, request: *const activity_read.ReadActivityContent) !ActivityTool {
+    var metadata: activity_read.ProposalMetadata = undefined;
     var presentation: tool_presentation.ToolPresentation = undefined;
     const operation, const ordinal = if (request.ordinal == 0) call: {
         metadata = try proposal(a, request.session.slice(), request.position);
@@ -2137,7 +2140,7 @@ pub const proposal_row = rsql.Read(.{
 /// without reopening payloads.
 pub const ProposalRead = struct {
     position: u64,
-    metadata: ?*protocol.ProposalMetadata = null,
+    metadata: ?*activity_read.ProposalMetadata = null,
     count: RowCount = .{},
 
     pub fn visit(read: *ProposalRead, row: *const proposal_row.Row) bool {
@@ -2167,9 +2170,9 @@ pub const ProposalRead = struct {
 /// A Proposal's fields, once it is consistent and each field's content is
 /// public and matches the metadata admission certified, so reference
 /// substitution is detectable without reopening payloads.
-fn certifiedFields(row: *const proposal_row.Row) error{CorruptStore}![3]protocol.ProposalFieldReference {
+fn certifiedFields(row: *const proposal_row.Row) error{CorruptStore}![3]activity_read.ProposalFieldReference {
     if (!row.consistent) return error.CorruptStore;
-    var fields: [3]protocol.ProposalFieldReference = undefined;
+    var fields: [3]activity_read.ProposalFieldReference = undefined;
     inline for (0..3) |index| {
         const suffix = std.fmt.comptimePrint("{d}", .{index});
         const length: u64 = @field(row, "length" ++ suffix);
@@ -2350,8 +2353,8 @@ pub fn readProposal(a: anytype, session: []const u8, read: *ProposalRead) void {
 }
 
 /// `readProposal` in a round of its own.
-pub fn proposal(a: anytype, session: []const u8, position: u64) !protocol.ProposalMetadata {
-    var metadata: protocol.ProposalMetadata = undefined;
+pub fn proposal(a: anytype, session: []const u8, position: u64) !activity_read.ProposalMetadata {
+    var metadata: activity_read.ProposalMetadata = undefined;
     var read: ProposalRead = .{ .position = position, .metadata = &metadata };
     readProposal(a, session, &read);
     try a.run();

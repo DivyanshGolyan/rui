@@ -18,14 +18,18 @@ const content_string = @import("content_string.zig");
 const tool_presentation = @import("tool_presentation.zig");
 const tool_name = @import("tool_name.zig");
 const idempotency_key = @import("idempotency_key.zig");
+const message_observation = @import("message_observation.zig");
+const conversation_read = @import("conversation_read.zig");
+const session_list = @import("session_list.zig");
+const activity_read = @import("activity_read.zig");
 
 pub const wire_version = @import("wire_version.zig").wire_version;
 
 /// Host-owned lifecycle state of a Message request.
-pub const MessageRequestState = enum { queued, processing, waiting_for_permission, completed, failed, cancelled, rejected };
+pub const MessageRequestState = message_observation.MessageRequestState;
 
 /// Maximum recovery Actions retained in one Message observation.
-pub const message_recovery_limit = 4;
+pub const message_recovery_limit = message_observation.message_recovery_limit;
 /// Versions a newer and an older Host speak, for tests that refuse them.
 pub const next_wire_version = std.fmt.comptimePrint("{d}", .{wire_number + 1});
 pub const previous_wire_version = std.fmt.comptimePrint("{d}", .{wire_number - 1});
@@ -65,11 +69,11 @@ pub const ReasoningEffort = model_capability.ReasoningEffort;
 // can save their rejection. This is an ingress bound, not a provider registry.
 pub const max_provider_bytes = command_input.max_provider_bytes;
 pub const max_header_bytes = 16 * 1024;
-pub const content_window_bytes = 4096;
-pub const public_conversation_page_items = 16;
-pub const max_json_depth = 64;
+pub const content_window_bytes = conversation_read.content_window_bytes;
+pub const public_conversation_page_items = conversation_read.public_conversation_page_items;
+pub const max_json_depth = @import("json_limits.zig").max_depth;
 pub const max_sqlite_content_bytes = content_string.max_bytes;
-pub const session_list_page_size: usize = 8;
+pub const session_list_page_size = session_list.session_list_page_size;
 
 pub const Bounded = @import("bounded.zig").Bounded;
 
@@ -160,7 +164,7 @@ pub const PermissionDecision = mutation_answer.PermissionDecision;
 pub const ConfigurationRejection = configuration_admission.Rejection;
 pub const MessageRejection = message_admission.Rejection;
 pub const CommandKind = cli_value.CommandKind;
-pub const CommandObservationStatus = enum { absent, accepted, rejected };
+pub const CommandObservationStatus = message_observation.CommandObservationStatus;
 pub const SessionStopCompletion = mutation_answer.SessionStopCompletion;
 pub const SessionArchiveState = @import("session_archive.zig").State;
 pub const SessionArchiveFilter = @import("session_archive.zig").Filter;
@@ -173,7 +177,7 @@ pub const ModelInterruptionRejection = mutation_answer.ModelInterruptionRejectio
 pub const PermissionDecisionRejection = mutation_answer.PermissionDecisionRejection;
 pub const MessageProgressStatus = WorkState.Progress;
 /// A hosted call has no content: its presentation is the whole item.
-pub const ConversationItemKind = enum { user, assistant, tool_result, hosted_call };
+pub const ConversationItemKind = conversation_read.ConversationItemKind;
 
 pub const PermissionDecisionCommand = command_input.PermissionDecisionCommand;
 
@@ -247,116 +251,24 @@ pub const HostInfo = struct {
     },
 };
 
-pub const ListSessions = struct {
-    archive: SessionArchiveFilter = .active,
-    store: Bounded(max_store_bytes) = .{},
-    workspace: ?Bounded(max_workspace_bytes) = null,
-    // Zero/zero begins a traversal. A continuation carries both values.
-    after: u64 = 0,
-    ceiling: u64 = 0,
-    /// A token from an earlier reply: answer only what changed since it.
-    since: ?SinceToken = null,
-    /// A changed continuation: the first page's generation, and the last
-    /// Session the previous page gave.
-    changed: ?ChangedCursor = null,
-
-    pub const ChangedCursor = struct { through: u64, after_reference: change_ring.Id };
-
-    pub fn validate(self: *const ListSessions) error{InvalidCursor}!void {
-        if (self.after > std.math.maxInt(i64) or self.ceiling > std.math.maxInt(i64) or
-            (self.after == 0 and self.ceiling != 0) or
-            (self.after != 0 and self.after > self.ceiling)) return error.InvalidCursor;
-        // A full continuation needs no token; a changed one needs its own.
-        if (self.since != null and self.after != 0) return error.InvalidCursor;
-        if (self.changed) |changed| {
-            const since = self.since orelse return error.InvalidCursor;
-            if (changed.through < since.generation or !validSessionId(&changed.after_reference)) return error.InvalidCursor;
-        }
-    }
-};
+pub const ListSessions = session_list.ListSessions;
 
 /// What a list reply answers relative to its request's `since`.
-pub const ListDelta = enum { not_modified, changed, full };
+pub const ListDelta = session_list.ListDelta;
 
 // Positions are immutable within a Session. The zero end/cursor requests the
 // first (newest) page; subsequent requests carry the returned fixed end.
-pub const ConversationPage = struct {
-    store: Bounded(max_store_bytes) = .{},
-    session: Bounded(max_session_bytes) = .{},
-    end: u64 = 0,
-    before_position: u64 = 0,
-    before_ordinal: u64 = 0,
-};
-
-pub const ConversationContent = struct {
-    store: Bounded(max_store_bytes) = .{},
-    session: Bounded(max_session_bytes) = .{},
-    position: u64 = 0,
-    ordinal: u64 = 0,
-    start: u64 = 0,
-    stream: bool = false,
-};
+pub const ConversationPage = conversation_read.ConversationPage;
+pub const ConversationContent = conversation_read.ConversationContent;
 
 pub const ProposalField = tool_proposal.Field;
 /// One certified call field: its decoded length and content digest.
-pub const ProposalFieldReference = struct { length: u64, digest: [32]u8 };
+pub const ProposalFieldReference = activity_read.ProposalFieldReference;
 pub const ProposalRejection = tool_proposal.Rejection;
-pub const ProposalMetadata = struct {
-    position: u64,
-    operation: u64,
-    turn: u64,
-    call_ordinal: u64,
-    action: ?u64,
-    rejection: ?ProposalRejection,
-    fields: [3]ProposalFieldReference, // ProposalField order.
-};
+pub const ProposalMetadata = activity_read.ProposalMetadata;
 
-pub const ActivityPage = struct {
-    since: ?change_ring.SessionToken = null,
-    store: Bounded(max_store_bytes) = .{},
-    session: Bounded(max_session_bytes) = .{},
-    end: ?u64 = null,
-    position: u64 = 0,
-    // Null is a sequence boundary; a value identifies an actual public row.
-    ordinal: ?u64 = null,
-    direction: enum { forward, backward } = .forward,
-    /// The row kinds the page lists; the cursor may name a row of any kind.
-    kinds: Kinds = .full,
-    /// At most this many rows, from 1 to `items`.
-    limit: u8 = items,
-
-    pub const Kinds = std.enums.EnumSet(ActivityItem.Kind);
-    pub const items = @typeInfo(@FieldType(ActivityFacts, "items")).array.len;
-
-    /// By pointer: a by-value copy sat in the Store read frame on every
-    /// engine chain that reads a page.
-    pub fn validate(self: *const ActivityPage) !void {
-        if (self.position > std.math.maxInt(i64) or (self.ordinal != null and
-            (self.position == 0 or self.ordinal.? > std.math.maxInt(i64)))) return error.InvalidCursor;
-        if (self.end) |end| if (end > std.math.maxInt(i64) or self.position > end) return error.InvalidCursor;
-        if (self.kinds.count() == 0 or self.limit == 0 or self.limit > items) return error.InvalidCursor;
-    }
-};
-pub const ActivitySearch = struct {
-    store: Bounded(max_store_bytes) = .{},
-    session: Bounded(max_session_bytes) = .{},
-    query: Bounded(256) = .{},
-    kinds: ActivityPage.Kinds = .full,
-    before_position: ?u64 = null,
-    before_ordinal: ?u64 = null,
-    limit: u8 = ActivityPage.items,
-
-    pub fn validate(self: *const ActivitySearch) !void {
-        if (self.query.len == 0 or !std.unicode.utf8ValidateSlice(self.query.slice())) return error.InvalidCursor;
-        if (self.before_position) |position| {
-            if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidCursor;
-        }
-        if (self.before_ordinal) |ordinal| {
-            if (self.before_position == null or ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
-        }
-        if (self.kinds.count() == 0 or self.limit == 0 or self.limit > ActivityPage.items) return error.InvalidCursor;
-    }
-};
+pub const ActivityPage = activity_read.ActivityPage;
+pub const ActivitySearch = activity_read.ActivitySearch;
 
 pub const ActivitySearchFacts = struct {
     items: [ActivityPage.items]Item = undefined,
@@ -463,7 +375,7 @@ pub const NamedPeer = struct {
 
 /// A Session setting a revision can change, named on the wire as in a
 /// configuration.
-pub const SessionField = enum { provider, model, instructions, tools, loaded_tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
+pub const SessionField = @import("session_field.zig").SessionField;
 
 pub const ActivityItem = struct {
     position: u64,
@@ -473,7 +385,7 @@ pub const ActivityItem = struct {
     value: Value,
     /// `admission` is a Message a person or script sent; `received` one
     /// another Session sent, which always names it as `sender`.
-    pub const Value = union(enum) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted };
+    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted };
     pub const Kind = std.meta.Tag(Value);
     pub const Content = struct {
         length: u64,
@@ -592,7 +504,7 @@ pub const ActivityItem = struct {
         try writeShape(out, tail, .{});
     }
 };
-pub const ReadActivityContent = struct { store: Bounded(max_store_bytes) = .{}, session: Bounded(max_session_bytes) = .{}, position: u64 = 0, ordinal: u64 = 0 };
+pub const ReadActivityContent = activity_read.ReadActivityContent;
 
 pub const CallActivity = struct {
     pub const Entry = struct { operation: u64, ordinal: u64, presentation: ToolPresentation };
@@ -885,7 +797,7 @@ pub const ActivityFacts = struct {
     not_modified: bool = false,
     end: u64,
     direction: @FieldType(ActivityPage, "direction") = .forward,
-    items: [16]ActivityItem = undefined,
+    items: [ActivityPage.items]ActivityItem = undefined,
     count: usize = 0,
     more: bool = false,
     call_activity: CallActivity = .{},
@@ -2366,13 +2278,7 @@ pub const permission_decision_reply = struct {
 };
 
 /// One saved indeterminate Action, newest first within its bound Turn.
-pub const MessageUnknownOutcome = struct {
-    action_id: u64,
-    operation_id: u64,
-    call: u64,
-    description: ?Bounded(max_tool_description_bytes) = null,
-    at: u64,
-};
+pub const MessageUnknownOutcome = message_observation.MessageUnknownOutcome;
 
 /// Borrowed recovery metadata; no history-sized response storage.
 pub const MessageRecoveryJson = struct {
