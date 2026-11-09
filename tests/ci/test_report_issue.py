@@ -370,6 +370,17 @@ class ReportTest(unittest.TestCase):
             self.run_main(fake)
             self.assertEqual([call[2] for call in fake.made('reopen')], ['6'])
 
+    def test_a_promotion_bisect_verdict_rides_on_the_failure_it_located(self):
+        verdict = 'Promotion bisect: first failing commit ' + 'd' * 40 + ' (Change the bash owner)'
+        fake = FakeGitHub([dict(id=1, name='linux suites (check)', conclusion='failure')],
+                          {1: BASH + logged('replay at ' + 'd' * 40 + ': failed (exit 1)') + logged(verdict)})
+        self.run_main(fake, '--label', 'promotion-red')
+        [create] = fake.made('create')
+        self.assertIn('bash_integration.py: assert process_exists', create[create.index('--title') + 1])
+        self.assertIn(verdict, create[create.index('--body') + 1])
+        self.assertEqual(report_issue.signature_state(create[create.index('--body') + 1])['signature'],
+                         'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError')
+
     def test_only_failed_jobs_are_read(self):
         passing = (logged('::warning::check failed (exit 1); one automatic retry. A pass after this retry '
                           'is a flake to fix, not a clean pass.') + BASH)
@@ -395,6 +406,9 @@ class ReportTest(unittest.TestCase):
         steps = re.findall(r'^      - name: (Require every selected .+)$', Path('.github/workflows/check.yml').read_text(),
                            re.M)
         self.assertEqual(len(steps), 2)
+        promotion = re.findall(r'^      - name: (Require every selected .+)$', Path('.github/workflows/promote.yml').read_text(),
+                               re.M)
+        self.assertEqual(promotion, ['Require every selected promotion tier'])
         # A real gate that fails is still filed.
         gate = dict(id=3, name='mutations', conclusion='failure',
                     steps=[dict(name='Require behavioral kills in isolated source copies', conclusion='failure')])

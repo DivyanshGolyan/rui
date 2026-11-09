@@ -41,6 +41,15 @@ INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_
                    "src/cli.zig", "src/cli_args.zig", "src/store/schema.zig",
                    "src/fetch_dependencies.sh", "release/*", "install.sh", "build.zig", "build.zig.zon")
 
+# Ready PRs run the previous installed-release upgrade only when they change
+# what it exercises: installation, the upgrade and Host lifecycle owners, the
+# Store format, the build or the check itself. Promotion runs it for every batch.
+UPGRADE_CHECK_PATHS = ("src/upgrade*.zig", "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
+                       "src/HostLifecycle.zig", "src/host_identity.*", "src/host_launch.c",
+                       "src/store/schema.zig", "src/store/migration_*", "install.sh", "release/*", "build.zig", "build.zig.zon",
+                       "tests/integration/previous_release_upgrade.py", "tests/ci/test_previous_release_upgrade.py",
+                       ".github/workflows/previous-release-upgrade.yml", ".github/workflows/cache-maintenance.yml")
+
 # Paths sharing an owner select its maintained boundary checks. Unknown code
 # selects check rather than silently declaring that no tests apply.
 RULES = (
@@ -422,6 +431,9 @@ def select(paths, phase, available):
     mac_required = phase == "review" and any(mac_path(path) for path in paths)
     if mac_required:
         reasons.add("Mac-specific path: PR runs Mac Selected (tests/ci/platform_boundary.py)")
+    upgrade_required = phase == "review" and any(matches(path, UPGRADE_CHECK_PATHS) for path in paths)
+    if upgrade_required:
+        reasons.add("Upgrade, installer or Store-format path: PR runs the previous installed-release upgrade")
     if phase == "development":
         # Development does not replace final boundary/native acceptance, but
         # keeps each matched live rule's own targets (`LIVE_RULES`).
@@ -441,7 +453,7 @@ def select(paths, phase, available):
             # The selected targets that start a live server in CI (`LIVE_RULES`).
             "server_targets": sorted(targets & live_targets),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
-            "mac_required": mac_required,
+            "mac_required": mac_required, "upgrade_required": upgrade_required,
             # Store, recovery and upgrade changes fail for real; never rerun them.
             "retry": not strict(paths),
             "cache_execution_checks": cache_execution_checks,

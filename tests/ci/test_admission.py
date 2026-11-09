@@ -15,6 +15,9 @@ from strict_paths import STRICT, strict
 ROOT = Path(__file__).resolve().parents[2]
 CHECK = ROOT / '.github/workflows/check.yml'
 UPGRADE = ROOT / '.github/workflows/previous-release-upgrade.yml'
+PROMOTE = ROOT / '.github/workflows/promote.yml'
+RELEASE = ROOT / '.github/workflows/release.yml'
+RENDERER = ROOT / '.github/workflows/renderer-contracts.yml'
 
 
 def job(text, name):
@@ -37,7 +40,7 @@ def step_script(text, name):
 
 def documentation_env():
     return dict(CHANGE_KIND='documentation', POLICY_RESULT='skipped', MACOS_RESULT='skipped',
-                UPGRADE_RESULT='skipped', NATIVE='false', TARGETS='[]', NATIVE_TARGETS='[]',
+                UPGRADE_RESULT='skipped', NATIVE='false', UPGRADE='false', TARGETS='[]', NATIVE_TARGETS='[]',
                 LINUX_MATRIX='{"include": []}', MACOS_MATRIX='{"include": []}',
                 LINUX_SPLIT='false', MACOS_SPLIT='false', CODEGEN='false', LINUX_MEMORY='false')
 
@@ -74,11 +77,12 @@ class PlanFixture:
         self.git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-qm', 'fixture')
         return self.git('rev-parse', 'HEAD')
 
-    def run(self, base=None, candidate=None, event='pull_request', phase='review'):
+    def run(self, base=None, candidate=None, event='pull_request', phase='review', promotion=False):
         self.output = self.root / 'output'
         self.output.write_text('')
         script = step_script(job(CHECK.read_text(), 'plan'), 'Select existing targets')
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', BASE=base or self.base, PHASE=phase, EVENT_NAME=event,
+                   PROMOTION=str(promotion).lower(),
                    GITHUB_REF_NAME='5/merge', CANDIDATE_REF=candidate or self.git('rev-parse', 'HEAD'),
                    GITHUB_OUTPUT=str(self.output), GITHUB_STEP_SUMMARY=str(self.root / 'summary'))
         return subprocess.run(['bash', '-c', script], cwd=self.repo, env=env,
@@ -97,11 +101,21 @@ class AdmissionTest(unittest.TestCase):
         def budget(body):
             return int(re.search(r'(?m)^    timeout-minutes: (\d+)$', body)[1])
 
-        release = (ROOT / '.github/workflows/release.yml').read_text()
+        def step_budget(body, name):
+            step = body.split(f'      - name: {name}\n', 1)[1].split('\n      - ', 1)[0]
+            return int(re.search(r'(?m)^        timeout-minutes: (\d+)$', step)[1])
+
+        release = RELEASE.read_text()
         self.assertGreaterEqual(budget(job(text, 'macos_build')), budget(job(release, 'build')))
-        for name in ('linux_suites', 'macos_suites'):
-            self.assertEqual(budget(job(text, name)), 35)
-        self.assertEqual(budget(job(UPGRADE.read_text(), 'upgrade')), 45)
+        # Only a promotion's bisect extends a job; the suites keep their deadline.
+        for name, step in (('linux_suites', 'Run selected targets'), ('macos_suites', 'Run required native targets')):
+            self.assertIn('    timeout-minutes: ${{ inputs.promotion && 300 || 35 }}', job(text, name))
+            self.assertEqual(step_budget(job(text, name), step), 35)
+        upgrade = job(UPGRADE.read_text(), 'upgrade')
+        self.assertIn("    timeout-minutes: ${{ inputs.batch-base && 300 || 45 }}", upgrade)
+        for step in ('Normal detached startup under the default soft limit',
+                     'Install, save real work, reinstall and restart the same Store'):
+            self.assertEqual(step_budget(upgrade, step), 45)
         for name in ('linux_build', 'linux_build_unit', 'macos_build_unit'):
             self.assertEqual(budget(job(text, name)), 15)
 
@@ -122,7 +136,7 @@ class AdmissionTest(unittest.TestCase):
     def admission(self, **changes):
         env = dict(CHANGE_KIND='normal', DRAFT='false', PLAN_RESULT='success', POLICY_RESULT='success',
                    LINUX_RESULT='success', MACOS_RESULT='success', UPGRADE_RESULT='success',
-                   NATIVE='true', CACHE_SELECTED='false', CACHE_RESULT='skipped')
+                   NATIVE='true', UPGRADE='true', CACHE_SELECTED='false', CACHE_RESULT='skipped')
         env.update(changes)
         script = step_script(job(CHECK.read_text(), 'admission'), 'Require candidate acceptance')
         return subprocess.run(['bash', '-c', script], env=dict(os.environ, **env),
@@ -141,8 +155,24 @@ class AdmissionTest(unittest.TestCase):
     def test_draft_or_reduced_native_run_never_admits(self):
         for value in ('true', ''):
             self.assertNotEqual(self.admission(DRAFT=value).returncode, 0)
-        for value in ('false', ''):
+        for value in ('', 'unknown'):
             self.assertNotEqual(self.admission(NATIVE=value).returncode, 0)
+            self.assertNotEqual(self.admission(UPGRADE=value).returncode, 0)
+
+    def test_mac_and_upgrade_admit_only_their_exact_selection(self):
+        # Unselected Mac and upgrade jobs must be skipped, never run or pending.
+        for native, upgrade in (('false', 'false'), ('true', 'false'), ('false', 'true')):
+            env = dict(NATIVE=native, UPGRADE=upgrade,
+                       MACOS_RESULT='success' if native == 'true' else 'skipped',
+                       UPGRADE_RESULT='success' if upgrade == 'true' else 'skipped')
+            with self.subTest(native=native, upgrade=upgrade):
+                self.assertEqual(self.admission(**env).returncode, 0)
+            for key, selected in (('MACOS_RESULT', native), ('UPGRADE_RESULT', upgrade)):
+                for result in ('success', 'skipped', 'failure', 'cancelled', 'in_progress', ''):
+                    if result == env[key]:
+                        continue
+                    with self.subTest(native=native, upgrade=upgrade, key=key, result=result):
+                        self.assertNotEqual(self.admission(**dict(env, **{key: result})).returncode, 0)
 
     def test_cache_selection_has_no_unknown_or_unexpected_skips(self):
         for selected, results in (
@@ -226,7 +256,7 @@ class AdmissionTest(unittest.TestCase):
         policy = job(text, 'policy')
         self.assertIn('needs: plan', policy)
         self.assertIn("needs.plan.outputs.change_kind == 'normal'", policy)
-        self.assertIn("needs.plan.outputs.change_kind == 'normal'", job(text, 'previous_release_upgrade'))
+        self.assertIn("needs.plan.outputs.upgrade == 'true'", job(text, 'previous_release_upgrade'))
         for name in ('macos_build', 'macos_suites', 'macos'):
             self.assertIn("needs.plan.outputs.native == 'true'", job(text, name))
         for name in ('plan', 'linux', 'admission'):
@@ -381,18 +411,31 @@ class CandidatePlanTest(unittest.TestCase):
                         self.assertEqual(output['linux_memory'], str(selection['linux_memory_checks']).lower())
                         self.assertEqual(json.loads(output['policy_skips']), selection['policy_skips'])
                         required = event == 'pull_request' and phase == 'review'
-                        if required:
-                            expected = (set(selection['native_targets']) - CHECK_COVERS) | {'admission-debug-integration'}
-                            if 'check-full' not in expected:
-                                expected.add('check')
-                            self.assertEqual(json.loads(output['native_targets']), sorted(expected))
+                        self.assertEqual(output['upgrade'], str(required and selection['upgrade_required']).lower())
+                        if required and selection['mac_required']:
+                            expected = selection['native_targets'] or ['check']
+                            self.assertEqual(json.loads(output['native_targets']), expected)
                             self.assertEqual(output['native'], 'true')
                             self.assertEqual(output['retry'], 'false')
-                            self.assertEqual(json.loads(output['macos_matrix']), shards(sorted(expected), 'macos'))
-                            self.assertFalse({'check', 'check-full'} <= expected)
+                            self.assertEqual(json.loads(output['macos_matrix']), shards(expected, 'macos'))
                         else:
+                            # Linux predicts Mac for every other path; promotion runs Mac.
                             self.assertEqual(json.loads(output['native_targets']), [])
                             self.assertEqual(output['native'], 'false')
+                            if required:
+                                self.assertEqual(output['retry'], 'false')
+
+    def test_ready_prs_run_the_upgrade_only_for_what_it_exercises(self):
+        available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', (ROOT / 'build.zig').read_text()))
+        for path, required in (('src/store/schema.zig', True), ('src/upgrade_process.zig', True),
+                               ('install.sh', True), ('build.zig', True),
+                               ('.github/workflows/previous-release-upgrade.yml', True),
+                               # Owners the upgrade-integration fixture covers, not the installed-release check.
+                               ('src/cli.zig', False), ('src/Overview.zig', False), ('src/store/Store.zig', False),
+                               ('tests/ci/release.py', False), ('README.md', False)):
+            with self.subTest(path=path):
+                self.assertEqual(select([path], 'review', available)['upgrade_required'], required)
+                self.assertFalse(select([path], 'development', available)['upgrade_required'])
 
     def assert_documentation_plan(self, output):
         self.assertEqual(output['change_kind'], 'documentation')
@@ -400,7 +443,7 @@ class CandidatePlanTest(unittest.TestCase):
             self.assertEqual(output[key], '[]', key)
         for key in ('linux_matrix', 'macos_matrix'):
             self.assertEqual(output[key], '{"include": []}', key)
-        for key in ('native', 'retry', 'linux_split', 'macos_split', 'linux_codegen',
+        for key in ('native', 'upgrade', 'retry', 'linux_split', 'macos_split', 'linux_codegen',
                     'linux_memory', 'cache_execution'):
             self.assertEqual(output[key], 'false', key)
 
@@ -414,12 +457,11 @@ class CandidatePlanTest(unittest.TestCase):
             docs = fixture.plan(self, base=retarget, candidate=candidate)
             self.assert_documentation_plan(docs)
             self.assertEqual(mixed['change_kind'], 'normal')
-            self.assertEqual(mixed['native'], 'true')
+            self.assertEqual(mixed['native'], 'false')
             self.assertEqual(mixed['retry'], 'false')
-            self.assertTrue({'check', 'admission-debug-integration', 'test-logic'} <=
-                            set(json.loads(mixed['native_targets'])))
+            self.assertIn('test-logic', json.loads(mixed['targets']))
             self.assertNotEqual(mixed['targets'], docs['targets'])
-            # Retargeting from docs to a wider base restores native acceptance.
+            # Retargeting from docs to a wider base restores normal acceptance.
             self.assertEqual(fixture.plan(self, base=fixture.base, candidate=candidate), mixed)
             fixture.git('checkout', '-q', '--detach', retarget)
             self.assertNotEqual(fixture.run(candidate=candidate).returncode, 0)
@@ -437,7 +479,8 @@ class CandidatePlanTest(unittest.TestCase):
         with PlanFixture() as fixture:
             empty = fixture.plan(self)
             self.assertEqual(empty['change_kind'], 'normal')
-            self.assertEqual(empty['native'], 'true')
+            self.assertEqual(empty['native'], 'false')
+            self.assertEqual(empty['upgrade'], 'false')
             (fixture.repo / 'README.md').unlink()
             deleted = fixture.commit()
             self.assert_documentation_plan(fixture.plan(self, candidate=deleted))
@@ -478,7 +521,7 @@ class CandidatePlanTest(unittest.TestCase):
 
     def test_future_selector_obligations_veto_documentation(self):
         for key, value in (('targets', ['test-logic']), ('native_targets', ['test-logic']),
-                           ('native_required', True), ('mac_required', True),
+                           ('native_required', True), ('mac_required', True), ('upgrade_required', True),
                            ('server_targets', ['test-logic']), ('cache_execution_checks', True),
                            ('linux_memory_checks', True), ('manual_checks', ['diagnostic'])):
             with self.subTest(obligation=key), PlanFixture() as fixture:
@@ -491,7 +534,6 @@ class CandidatePlanTest(unittest.TestCase):
                 candidate = fixture.commit()
                 output = fixture.plan(self, base=baseline, candidate=candidate)
                 self.assertEqual(output['change_kind'], 'normal')
-                self.assertEqual(output['native'], 'true')
 
     def test_only_a_new_head_reopen_or_readiness_starts_a_candidate(self):
         # `edited` (title, body or base) and `converted_to_draft` cancelled a
@@ -512,16 +554,80 @@ class ReleaseFlowTest(unittest.TestCase):
             with self.subTest(workflow=path.name):
                 self.assertNotRegex(path.read_text(), r'auto_land|auto-land\.yml|stable_hold|completed_run')
 
-    def test_only_release_automatically_publishes_main(self):
-        text = (ROOT / '.github/workflows/release.yml').read_text()
-        entry = text.split('\npermissions:', 1)[0]
-        self.assertIn('  push:\n    branches: [main]', entry)
-        self.assertIn('  workflow_dispatch:', entry)
-        self.assertNotIn('workflow_run:', entry)
+    def test_only_a_manual_promotion_publishes_main(self):
+        release = RELEASE.read_text().split('\npermissions:', 1)[0]
+        self.assertIn('  workflow_call:', release)
+        for trigger in ('push:', 'workflow_dispatch:', 'workflow_run:', 'schedule:'):
+            self.assertNotIn(trigger, release)
+        promote = PROMOTE.read_text()
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', promote.split('\npermissions:', 1)[0]), ['workflow_dispatch'])
+        callers = [path.name for path in (ROOT / '.github/workflows').glob('*.yml')
+                   if 'uses: ./.github/workflows/release.yml' in path.read_text()]
+        self.assertEqual(callers, ['promote.yml'])
         selected = CHECK.read_text().split('\npermissions:', 1)[0]
         self.assertIn('  pull_request:', selected)
         self.assertNotIn('  push:', selected)
         self.assertNotIn('workflow_run:', selected)
+
+    def test_promotion_publishes_only_after_every_tier_on_the_same_sha(self):
+        text = PROMOTE.read_text()
+        self.assertIn("github.ref == 'refs/heads/main'", job(text, 'batch'))
+        selected = job(text, 'selected')
+        self.assertIn('uses: ./.github/workflows/check.yml', selected)
+        self.assertIn('promotion: true', selected)
+        for name, workflow in (('upgrade', 'previous-release-upgrade.yml'), ('renderer', 'renderer-contracts.yml')):
+            body = job(text, name)
+            self.assertIn(f'uses: ./.github/workflows/{workflow}', body)
+            self.assertIn('${{ needs.batch.outputs.head }}', body)
+            self.assertIn('batch-base: ${{ needs.batch.outputs.base }}', body)
+        qualified = job(text, 'qualified')
+        needs = re.search(r'(?m)^    needs: \[(.*?)\]$', qualified)[1].split(', ')
+        self.assertCountEqual(needs, ['batch', 'selected', 'upgrade', 'renderer'])
+        release = job(text, 'release')
+        self.assertIn('needs: [batch, qualified]', release)
+        self.assertNotIn('if:', release)
+        self.assertIn('sha: ${{ needs.batch.outputs.head }}', release)
+        script = step_script(qualified, 'Require every selected promotion tier')
+        good = dict(BATCH_RESULT='success', SELECTED_RESULT='success', UPGRADE_RESULT='success',
+                    RENDERER_RESULT='success')
+        self.assertEqual(subprocess.run(['bash', '-c', script], env=good).returncode, 0)
+        for key in good:
+            for result in ('failure', 'cancelled', 'skipped', ''):
+                with self.subTest(key=key, result=result):
+                    self.assertNotEqual(subprocess.run(['bash', '-c', script],
+                        env=dict(good, **{key: result}), capture_output=True).returncode, 0)
+
+    def test_promotion_plan_runs_the_full_tier_on_both_systems(self):
+        with PlanFixture() as fixture:
+            for path in ('src/history_memo.zig', 'tests/ci/unknown_policy.py'):
+                fixture.git('reset', '--hard', fixture.base)
+                fixture.write(path, 'changed\n')
+                candidate = fixture.commit()
+                with self.subTest(path=path):
+                    output = fixture.plan(self, candidate=candidate, event='workflow_dispatch', promotion=True)
+                    self.assertEqual(output['change_kind'], 'normal')
+                    linux, mac = json.loads(output['targets']), json.loads(output['native_targets'])
+                    self.assertTrue({'check-full', 'test-logic', 'admission-debug-integration', 'stack-frames'} <= set(linux))
+                    self.assertTrue({'check-full', 'test-logic', 'admission-debug-integration'} <= set(mac))
+                    self.assertNotIn('check', linux + mac)
+                    self.assertEqual(output['native'], 'true')
+                    self.assertEqual(output['retry'], 'false')
+                    self.assertEqual(output['upgrade'], 'false')  # promote.yml calls it directly
+                    self.assertEqual(output['linux_codegen'], 'false')
+
+    def test_failed_promotion_jobs_bisect_with_their_own_command(self):
+        check = CHECK.read_text()
+        for name, step in (('linux_suites', 'Run selected targets'), ('macos_suites', 'Run required native targets')):
+            body = job(check, name)
+            self.assertIn(f'      - name: {step}\n        id: run\n', body)
+            bisect = body.split('      - name: Bisect the promotion batch', 1)[1].split('\n      - ', 1)[0]
+            self.assertIn("failure() && inputs.promotion && steps.run.outcome == 'failure'", bisect)
+            self.assertIn('BASE: ${{ inputs.base }}', bisect)
+            self.assertIn('tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART"', bisect)
+        for path in (UPGRADE, RENDERER):
+            with self.subTest(workflow=path.name):
+                self.assertIn('python3 -B tests/ci/promotion.py --base "$BASE"', path.read_text())
+
 
     def test_candidate_jobs_are_read_only_and_cache_proof_covers_both_platforms(self):
         for path in (CHECK, UPGRADE):

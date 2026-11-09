@@ -49,6 +49,8 @@ FRAME = re.compile(r'^  File "([^"]+)", line \d+, in \S+$')
 # check.yml's linux and macos aggregates only require their needs' results; a
 # suite's failure fails them too, and the suite's own log carries the cause.
 AGGREGATE_STEP = "Require every selected "
+# promotion.py's verdict on a failed promotion job: the batch's first failing commit.
+BISECT = re.compile(r"^Promotion bisect: .+$", re.M)
 # Seconds before each repeated log download; a log can lag its job's completion.
 LOG_RETRY_DELAYS = (10, 30)
 
@@ -320,7 +322,10 @@ def main():
         if job["conclusion"] not in ("failure", "timed_out") or aggregate_only(job):
             continue
         log = job_log(repository, job["id"])
+        verdict = BISECT.search(untimed(log)) if log is not None else None
         for cause in job_causes(log, cases, args.workflow, job):
+            if verdict:
+                cause.detail = "\n".join(filter(None, (cause.detail, verdict[0])))
             print(file_cause(repository, issues, cause, args.workflow, args.sha, url, args.label))
 
 
