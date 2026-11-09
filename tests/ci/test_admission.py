@@ -465,10 +465,12 @@ class CandidatePlanTest(unittest.TestCase):
                 self.assertEqual(output['change_kind'], 'normal')
                 self.assertEqual(output['native'], 'true')
 
-    def test_pr_base_retarget_and_draft_changes_rebuild_the_candidate(self):
+    def test_only_a_new_head_reopen_or_readiness_starts_a_candidate(self):
+        # `edited` (title, body or base) and `converted_to_draft` cancelled a
+        # running candidate on an unchanged head 121 times in 14 days.
         on = CHECK.read_text().split('\npermissions:', 1)[0]
         events = re.search(r'types: \[(.*?)\]', on)[1].split(', ')
-        self.assertTrue({'edited', 'synchronize', 'ready_for_review', 'converted_to_draft'} <= set(events))
+        self.assertEqual(set(events), {'opened', 'synchronize', 'reopened', 'ready_for_review'})
         self.assertIn('BASE: ${{ github.event.pull_request.base.sha || inputs.base }}', CHECK.read_text())
 
 
