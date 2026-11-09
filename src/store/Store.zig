@@ -997,14 +997,8 @@ pub const Store = struct {
 
     /// Authenticates the Session/Operation/Attempt before reading optional
     /// diagnostics. Diagnostic faults never fence canonical state.
-    pub fn captureFailedResponse(self: *Store, request: *const protocol.InspectSession, store_dir: std.Io.Dir, options: SessionListOptions) !SessionReport {
-        const selection = request.failed_response.?;
-        const binding = try self.queue().run(captureFailedResponseHeld, .{ self, request.session.slice(), selection });
-        var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
-        try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
-        errdefer capture.deinit();
-        try @import("../failed_responses.zig").exportRecord(self.io, store_dir, binding, selection.part, &capture);
-        return capture.seal();
+    pub fn failedResponseBinding(self: *Store, request: *const protocol.InspectSession) !AttemptBinding {
+        return self.queue().run(captureFailedResponseHeld, .{ self, request.session.slice(), request.failed_response.? });
     }
 
     fn captureFailedResponseHeld(self: *Store, session_ref: []const u8, selection: protocol.FailedResponseExport) !AttemptBinding {
@@ -1312,11 +1306,11 @@ pub const Store = struct {
     }
 
     /// Loads matching saved tools and resolves the call in one transaction.
-    pub fn findTools(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../core_tools.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
+    pub fn findTools(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../find_tools_words.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
         return self.queue().write(findToolsHeld, .{ self, binding, arena, words, refusal, faults });
     }
 
-    fn findToolsHeld(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../core_tools.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
+    fn findToolsHeld(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../find_tools_words.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.action_attempt) = .open(&entry);

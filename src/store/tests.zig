@@ -8965,7 +8965,7 @@ const EntryPoint = enum {
     searchActivity,
     openActivityContent,
     activityTool,
-    captureFailedResponse,
+    failedResponseBinding,
     captureSessionReport,
     captureSessionList,
     actionContent,
@@ -9036,7 +9036,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .searchActivity = 5,
     .openActivityContent = 4,
     .activityTool = 4,
-    .captureFailedResponse = 1,
+    .failedResponseBinding = 1,
     .captureSessionReport = 5,
     .captureSessionList = 6,
     .actionContent = 2,
@@ -9801,20 +9801,12 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             std.testing.allocator.free(try testingSessionList(storage, tmp, .{}, &used, 2));
             meter.stop(.captureSessionList);
-            var root: [protocol.max_store_bytes]u8 = undefined;
-            const root_length = try tmp.dir.realPath(std.testing.io, &root);
             var inspect: protocol.InspectSession = .{ .failed_response = .{ .operation = continuation.operation_id, .attempt = continuation.attempt_ordinal, .part = .body } };
             try inspect.session.set(session.slice());
             meter.start();
-            if (storage.captureFailedResponse(&inspect, tmp.dir, .{
-                .scratch_path = root[0..root_length],
-                .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
-                .request_number = 3,
-            })) |report| {
-                var kept = report;
-                kept.deinit();
-            } else |_| {}
-            meter.stop(.captureFailedResponse);
+            const binding = try storage.failedResponseBinding(&inspect);
+            meter.stop(.failedResponseBinding);
+            try std.testing.expectEqualDeep(continuation, binding);
         }
 
         /// A Turn over the compaction trigger, compacted, so its

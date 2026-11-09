@@ -15,6 +15,7 @@ const descriptor_limit = @import("os/descriptor_limit.zig");
 const execution = @import("execution.zig");
 const execution_turn = @import("execution_turn.zig");
 const model_adapter = @import("model_adapter.zig");
+const failed_responses = @import("failed_responses.zig");
 const named_scratch = @import("named_scratch.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
@@ -55,6 +56,15 @@ const traceRequest = server_host.traceRequest;
 const executionFacts = server_host.executionFacts;
 const waitAtTestGate = server_host.waitAtTestGate;
 const traceSqliteDiagnostic = server_host.traceSqliteDiagnostic;
+
+fn captureFailedResponse(host: *Host, request: *const protocol.InspectSession, request_number: u64) !store_module.SessionReport {
+    const binding = try host.store.failedResponseBinding(request);
+    var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
+    try capture.create(host.lease.paths.scratch.slice(), request_number, host.hooks.fails(.report_unlink));
+    errdefer capture.deinit();
+    try failed_responses.exportRecord(host.io, host.lease.store_dir, binding, request.failed_response.?.part, &capture);
+    return capture.seal();
+}
 
 // The complete Debug request -> SQLite -> response path exceeds 512 KiB.
 // Only the two shared workers reserve these stacks, independent of exchanges.
@@ -1725,12 +1735,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .read_action_call_id => |*command| deliverActionContent(host, fd, command, true),
         .inspect_session => |*request_value| {
             if (request_value.failed_response != null) {
-                const capture = host.store.captureFailedResponse(request_value, host.lease.store_dir, .{
-                    .scratch_path = host.lease.paths.scratch.slice(),
-                    .scratch_budget = host.retention.sharedBudget(),
-                    .request_number = request_number,
-                    .fail_unlink = host.hooks.fails(.report_unlink),
-                }) catch |err| {
+                const capture = captureFailedResponse(host, request_value, request_number) catch |err| {
                     if (err == error.ReportScratchCleanupFailed) {
                         fenceDispatch(host, "failed response export scratch cleanup", err);
                         return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
