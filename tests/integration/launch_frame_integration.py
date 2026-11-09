@@ -68,11 +68,17 @@ def output(process, timeout=20):
     return process.communicate(timeout=timeout)
 
 
-def wait_for_socket(path, process):
+def wait_for_host(path, store, process):
+    """A launched Host is ready once it answers Host info, as managed launch
+    observes it. Its socket file appears at bind, before the Host listens, so
+    a connect in between is refused."""
     def ready():
-        assert process.poll() is None, "the Host exited before its socket appeared"
-        return path.exists()
-    host_process.wait_for(ready, "the socket in runtimeDir", timeout=20)
+        assert process.poll() is None, "the Host exited before it answered Host info"
+        try:
+            return host_info(path, str(store))
+        except (FileNotFoundError, ConnectionRefusedError):
+            return None
+    host_process.wait_for(ready, "the Host in runtimeDir to answer Host info", timeout=20)
 
 
 def refusal(process):
@@ -142,7 +148,7 @@ def sdk_catalog(root, good, network, ci):
             runtime.mkdir(mode=0o700)
             base = dict(good, runtimeDir=str(runtime), store=str(root / "sdk-store"))
             host = launch(frame(dict(base, mcpServers=[entry])))
-            wait_for_socket(runtime / "rui.sock", host)
+            wait_for_host(runtime / "rui.sock", base["store"], host)
             host_process.close_stdin(host)
             assert host.wait(timeout=30) == 0, output(host)
             for name in ("echo", "fail", "slow", "progress"):
@@ -193,7 +199,7 @@ def main(network, ci):
 
     host = launch(frame(good))
     sock = runtime / "rui.sock"
-    wait_for_socket(sock, host)
+    wait_for_host(sock, store, host)
     info = host_info(sock, str(store))
     assert info["active_capacity"] == "2", info
     assert info["capabilities"]["providers"]["openai"] == "key_file", info
@@ -240,14 +246,14 @@ def main(network, ci):
 
     # host-stop before stdin closes stops a launched Host too.
     host = launch(frame(good))
-    wait_for_socket(sock, host)
+    wait_for_host(sock, store, host)
     host_stop(sock, str(store), host_info(sock, str(store))["instance"])
     assert host.wait(timeout=30) == 0, output(host)
     assert not sock.exists()
 
     # A Host launched paused reports it, and host_pause can lift it.
     host = launch(frame(dict(good, paused=True)))
-    wait_for_socket(sock, host)
+    wait_for_host(sock, store, host)
     info = host_info(sock, str(store))
     assert info["paused"] is True, info
     lifted = post(sock, "control/host-pause", {"version": WIRE, "kind": "host_pause", "store": str(store), "paused": False},
@@ -261,7 +267,7 @@ def main(network, ci):
     preset = {"model": "gpt-6.1-sol", "effort": "low", "compactAt": 100000,
               "tools": [], "permissionMode": "ask", "label": "Review"}
     host = launch(frame(dict(good, presets={"review": preset})))
-    wait_for_socket(sock, host)
+    wait_for_host(sock, store, host)
     create = {"version": WIRE, "kind": "configure", "store": str(store), "key": "preset:create",
               "session": "", "preset": "review", "configuration": {"label": {"state": "null"}}}
     created = post(sock, "configure", create)
@@ -311,7 +317,7 @@ def main(network, ci):
     mcp_root.mkdir(mode=0o700)
     base = dict(good, store=str(root / "store5"), runtimeDir=str(mcp_root))
     host = launch(frame(dict(base, mcpServers=[mcp_entry("docs", docs)])))
-    wait_for_socket(mcp_root / "rui.sock", host)
+    wait_for_host(mcp_root / "rui.sock", base["store"], host)
     host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
     # The launcher stays connected until the refusal arrives: a closed stdin
@@ -325,7 +331,7 @@ def main(network, ci):
     docs.shutdown()
     docs.server_close()
     host = launch(frame(dict(base, mcpServers=[mcp_entry("docs", docs)])))
-    wait_for_socket(mcp_root / "rui.sock", host)
+    wait_for_host(mcp_root / "rui.sock", base["store"], host)
     host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
 
