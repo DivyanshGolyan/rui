@@ -11,7 +11,7 @@ function cache(id, ref, platform = 'Linux-X64', part = 'all') {
   };
 }
 
-async function run(caches, states, faults = {}) {
+async function run(caches, faults = {}) {
   const remaining = new Map(caches.map(c => [c.id, c]));
   let error;
   try {
@@ -24,10 +24,6 @@ async function run(caches, states, faults = {}) {
           return [caches.slice(0, 100), caches.slice(100)].flat();
         },
         rest: {
-          pulls: {get: async ({pull_number}) => {
-            if (!(pull_number in states)) throw Object.assign(new Error('PR unavailable'), {status: 404});
-            return {data: {state: states[pull_number]}};
-          }},
           actions: {
             getActionsCacheList() {},
             deleteActionsCacheById: async ({cache_id}) => {
@@ -43,62 +39,78 @@ async function run(caches, states, faults = {}) {
   return {ids: [...remaining.keys()].sort((a, b) => a - b), error};
 }
 
-test('prune closed PRs and old snapshots without crossing ref, platform or partition boundaries', async () => {
+test('prune every PR snapshot and old main snapshots without crossing platform or partition boundaries', async () => {
   const main = 'refs/heads/main', open = 'refs/pull/12/merge', closed = 'refs/pull/13/merge';
   const caches = [
     cache(1, main), cache(2, main), cache(3, main),
     cache(4, open), cache(5, open), cache(6, open, 'macOS-ARM64'),
-    cache(7, open, 'Linux-X64', 'execution'), cache(8, open, 'Linux-X64', 'callers'),
+    cache(7, main, 'Linux-X64', 'execution'), cache(8, main, 'Linux-X64', 'callers'),
     cache(9, main, 'Linux-X64', 'baseline'), cache(10, main, 'macOS-ARM64'),
     cache(11, closed), {...cache(12, closed), key: 'rui-compiler-Linux-X64-0.16.0'},
     {...cache(13, open), key: 'rui-compiler-Linux-X64-0.16.0'},
     cache(14, 'refs/heads/feature'), cache(15, 'refs/pull/13/head'),
     {...cache(16, closed), key: 'other-cache'},
-    {...cache(17, closed), key: 'rui-build-v2-lookalike'},
+    {...cache(17, open), key: 'rui-actionlint-1.7.7-linux-amd64'},
     cache(18, 'refs/heads/main-other'),
     {...cache(19, main), key: 'rui-compiler-macOS-ARM64-0.16.0'},
+    {...cache(20, main), key: 'rui-build-v2-lookalike'},
   ];
   // Equal timestamps use IDs. Recently accessed old caches still retire.
   caches[0].created_at = caches[1].created_at;
   caches[0].last_accessed_at = '2099-01-01T00:00:00Z';
-  const result = await run(caches, {12: 'open', 13: 'closed'});
+  const result = await run(caches);
   assert.ifError(result.error);
-  assert.deepEqual(result.ids, [2, 3, 5, 6, 7, 8, 9, 10, 13, 14, 15, 16, 17, 18, 19]);
+  assert.deepEqual(result.ids, [3, 7, 8, 9, 10, 14, 15, 16, 18, 19, 20]);
 });
 
-test('a late read failure cannot leave an earlier closed PR partially pruned', async () => {
+test('main keeps the newest build runner per CPU model and the newest package set', async () => {
+  const main = 'refs/heads/main';
+  const runner = (id, platform, cpu, ref = main) => ({
+    ...cache(id, ref), key: `rui-runner-v2-${platform}-0.17.0-${'a'.repeat(64)}-${cpu.repeat(16)}-${id.toString(16).padStart(64, '0')}`,
+  });
+  const packages = id => ({...cache(id, main), key: `rui-packages-v1-${id.toString(16).padStart(64, '0')}`});
+  const caches = [
+    runner(1, 'Linux-X64', 'b'), runner(2, 'Linux-X64', 'b'), runner(3, 'Linux-X64', 'c'),
+    runner(4, 'macOS-ARM64', 'b'), runner(5, 'Linux-X64', 'b', 'refs/pull/12/merge'),
+    packages(6), packages(7),
+    {...runner(8, 'Linux-X64', 'd'), key: runner(8, 'Linux-X64', 'd').key.replace('0.17.0', '0.17.1')},
+  ];
+  const result = await run(caches);
+  assert.ifError(result.error);
+  assert.deepEqual(result.ids, [2, 3, 4, 7, 8]);
+});
+
+test('an unreadable inventory deletes nothing', async () => {
   const caches = Array.from({length: 101}, (_, i) => cache(i + 1, 'refs/pull/1/merge'));
-  caches.push(cache(102, 'refs/pull/2/merge'));
-  for (const [states, faults] of [[{1: 'closed'}, {}], [{1: 'closed', 2: 'unknown'}, {}], [{}, {inventory: true}]]) {
-    const result = await run(caches, states, faults);
-    assert.ok(result.error);
-    assert.equal(result.ids.length, 102);
-  }
-  const result = await run(caches, {1: 'closed', 2: 'closed'});
-  assert.ifError(result.error);
-  assert.deepEqual(result.ids, []);
+  const result = await run(caches, {inventory: true});
+  assert.ok(result.error);
+  assert.equal(result.ids.length, 101);
+  const pruned = await run(caches);
+  assert.ifError(pruned.error);
+  assert.deepEqual(pruned.ids, []);
 });
 
-test('current compiler and named shard caches retain independent snapshots', async () => {
+test('current compiler and named main shard caches retain independent snapshots', async () => {
+  const main = 'refs/heads/main';
   const entries = [
-    cache(1, 'refs/pull/12/merge', 'Linux-X64', 'test-full'),
-    cache(2, 'refs/pull/12/merge', 'Linux-X64', 'test-full'),
-    cache(3, 'refs/pull/12/merge', 'Linux-X64', 'full-callers'),
-    cache(4, 'refs/pull/13/merge', 'macOS-ARM64', 'codex-h2-integration'),
-    {...cache(5, 'refs/pull/13/merge'), key: 'rui-compiler-Linux-X64-0.17.0'},
+    cache(1, main, 'Linux-X64', 'test-full'),
+    cache(2, main, 'Linux-X64', 'test-full'),
+    cache(3, main, 'Linux-X64', 'full-callers'),
+    cache(4, main, 'macOS-ARM64', 'codex-h2-integration'),
+    {...cache(5, main), key: 'rui-compiler-Linux-X64-0.17.0'},
     cache(6, 'refs/heads/feature', 'Linux-X64', 'test-full'),
   ].map(entry => ({...entry, key: entry.key.replace('0.16.0', '0.17.0')}));
-  const result = await run(entries, {12: 'open', 13: 'closed'});
+  const result = await run(entries);
   assert.ifError(result.error);
-  assert.deepEqual(result.ids, [2, 3, 6]);
+  assert.deepEqual(result.ids, [2, 3, 4, 5, 6]);
 });
 
 test('only already-absent deletion is recoverable', async () => {
   const caches = [cache(1, 'refs/pull/1/merge'), cache(2, 'refs/pull/1/merge')];
-  const missing = await run(caches, {1: 'closed'}, {deletion: 404});
+  const missing = await run(caches, {deletion: 404});
   assert.ifError(missing.error);
   assert.deepEqual(missing.ids, []);
-  const denied = await run(caches, {1: 'closed'}, {deletion: 403});
+  const denied = await run(caches, {deletion: 403});
   assert.equal(denied.error.status, 403);
   assert.deepEqual(denied.ids, [1, 2]);
 });
@@ -134,23 +146,22 @@ test('post-publication cleanup retains new saves and reconciles later concurrent
   // Exact hits publish nothing; fallback hits and cold builds publish new keys.
   // A failed matrix peer does not undo another peer's successful post-job save.
   for (const [ref, platform, part, limit] of [
-    ['refs/heads/main', 'Linux-X64', 'baseline', 2],
-    ['refs/heads/main', 'macOS-ARM64', 'baseline', 2],
-    ['refs/heads/main', 'macOS-ARM64', 'all', 2],
-    ['refs/pull/12/merge', 'Linux-X64', 'all', 1],
+    ['refs/heads/main', 'Linux-X64', 'baseline', 1],
+    ['refs/heads/main', 'macOS-ARM64', 'baseline', 1],
+    ['refs/heads/main', 'macOS-ARM64', 'all', 1],
   ]) {
     const original = Array.from({length: limit}, (_, i) => cache(i + 1, ref, platform, part));
     for (const saved of [false, true]) {
       const published = saved ? [...original, cache(10, ref, platform, part)] : original;
-      const result = await run(published, {12: 'open'});
+      const result = await run(published);
       assert.ifError(result.error);
-      assert.deepEqual(result.ids, saved ? (limit === 2 ? [2, 10] : [10]) : original.map(c => c.id));
+      assert.deepEqual(result.ids, saved ? [10] : original.map(c => c.id));
       // Publication after this inventory temporarily exceeds the target. Its
       // own completion requests another cleanup; this is not an atomic quota.
       const later = [...published.filter(c => result.ids.includes(c.id)), cache(20, ref, platform, part)];
-      const reconciled = await run(later, {12: 'open'});
+      const reconciled = await run(later);
       assert.ifError(reconciled.error);
-      assert.deepEqual(reconciled.ids, limit === 2 ? [saved ? 10 : 2, 20] : [20]);
+      assert.deepEqual(reconciled.ids, [20]);
     }
   }
 });
