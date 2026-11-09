@@ -208,10 +208,21 @@ runs:
           *) echo "Unsupported actual native architecture" >&2; exit 1 ;;
         esac
         if [ ! -x "$RUNNER_TEMP/rui-zig/zig" ]; then
-          curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
-            --retry 2 --retry-all-errors --retry-max-time 200 \
-            "https://pkg.hexops.org/zig/$archive.tar.xz" -o "$RUNNER_TEMP/zig.tar.xz"
-          echo "$checksum  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -
+          # Mirrors serve identical archives and the pinned checksum is the
+          # authority, so a stalled source falls through to the next one and
+          # the slow origin is tried last, as in .agents/setup.
+          verified=false
+          for source in https://pkg.hexops.org/zig https://zigmirror.hryx.net/zig https://ziglang.org/download/0.17.1; do
+            if curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
+                --retry 1 --retry-all-errors --retry-max-time 100 \
+                "$source/$archive.tar.xz" -o "$RUNNER_TEMP/zig.tar.xz" &&
+              echo "$checksum  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -; then
+              verified=true
+              break
+            fi
+            echo "::warning::Zig download from $source failed; trying the next source."
+          done
+          "$verified" || { echo "No source supplied a verified $archive archive" >&2; exit 1; }
           mkdir -p "$RUNNER_TEMP/rui-zig"
           tar -xJf "$RUNNER_TEMP/zig.tar.xz" --strip-components=1 -C "$RUNNER_TEMP/rui-zig"
         fi
