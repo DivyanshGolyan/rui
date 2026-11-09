@@ -3737,6 +3737,71 @@ test "activity search reply bounds preserve snippets and nullable continuation" 
     try std.testing.expectEqualStrings("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":[],\"next\":null}", out.buffered());
 }
 
+test "the request parser refuses what each command's grammar forbids" {
+    const v = "{\"version\":\"" ++ wire_version ++ "\",";
+    const message = v ++ "\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,";
+    const inspect = v ++ "\"kind\":\"inspect_session\",\"store\":\"s\",\"session\":\"peer\",";
+    const content = v ++ "\"kind\":\"activity_content\",\"store\":\"s\",\"session\":\"peer\",";
+    const configure = v ++ "\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{";
+    const since = "\"since\":\"abababababababababababababababab.42.k7m2qx\"";
+    // The Ingress leaves an empty placeholder where it captured content.
+    const value = "{\"state\":\"value\",\"value\":\"\"}";
+    const i64_past = "\"9223372036854775808\"";
+    // Each refusal sits beside the nearest request the grammar accepts.
+    const cases = [_]struct { json: []const u8, failure: ?anyerror = null, route: ?Kind = null }{
+        .{ .json = "{\"version\":\"" ++ previous_wire_version ++ "\",\"kind\":\"host_info\",\"store\":\"s\"}", .failure = error.WrongWireVersion },
+        .{ .json = "{\"version\":\"" ++ next_wire_version ++ "\",\"kind\":\"host_info\",\"store\":\"s\"}", .failure = error.WrongWireVersion },
+        .{ .json = v ++ "\"kind\":\"host_info\",\"store\":\"s\"}" },
+        .{ .json = v ++ "\"kind\":\"host_info\"}", .failure = error.MissingField },
+        .{ .json = "{\"kind\":\"host_info\",\"store\":\"s\"}", .failure = error.MissingField },
+        .{ .json = v ++ "\"store\":\"s\"}", .failure = error.MissingField },
+        .{ .json = v ++ "\"kind\":\"host_info\",\"store\":\"s\"}", .failure = error.RouteKindMismatch, .route = .host_stop },
+        .{ .json = v ++ "\"kind\":\"host_info\",\"store\":\"s\"}", .route = .host_info },
+        // Content strings are counted before the kind is known; a third has
+        // no capture to go to.
+        .{ .json = "{\"text\":" ++ value ++ ",\"configuration\":{\"instructions\":" ++ value ++ ",\"output_schema\":" ++ value ++ "}," ++ "\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\"}", .failure = error.UnexpectedField },
+        .{ .json = configure ++ "\"instructions\":" ++ value ++ ",\"output_schema\":" ++ value ++ "}}" },
+        .{ .json = configure ++ "\"instructions\":" ++ value ++ ",\"instructions\":" ++ value ++ "}}", .failure = error.UnexpectedField },
+        // A Message to an existing Session carries no configuration and no
+        // capability condition.
+        .{ .json = message ++ "\"text\":" ++ value ++ "}" },
+        .{ .json = message ++ "\"text\":" ++ value ++ ",\"configuration\":{}}", .failure = error.UnexpectedField },
+        .{ .json = message ++ "\"text\":" ++ value ++ ",\"require_model\":true}", .failure = error.InvalidMessage },
+        .{ .json = message ++ "\"skill\":\"review\"}" },
+        .{ .json = message ++ "\"skill\":\"\"}", .failure = error.InvalidMessage },
+        .{ .json = message ++ "\"skill\":\"review\",\"text\":" ++ value ++ "}", .failure = error.InvalidMessage },
+        .{ .json = message ++ "\"sender_handle\":null}", .failure = error.UnexpectedField },
+        // An inspection reads from a token, or selects a profile or one
+        // failed response stream named by positive i64 identities.
+        .{ .json = inspect ++ since ++ "}" },
+        .{ .json = inspect ++ since ++ ",\"profile\":\"full\"}", .failure = error.UnexpectedField },
+        .{ .json = inspect ++ since ++ ",\"failed_response\":\"body\",\"operation\":\"1\",\"attempt\":\"1\"}", .failure = error.UnexpectedField },
+        .{ .json = inspect ++ "\"failed_response\":\"body\",\"operation\":\"9223372036854775807\",\"attempt\":\"9223372036854775807\"}" },
+        .{ .json = inspect ++ "\"failed_response\":\"body\",\"operation\":\"0\",\"attempt\":\"1\"}", .failure = error.InvalidTarget },
+        .{ .json = inspect ++ "\"failed_response\":\"body\",\"operation\":\"1\",\"attempt\":\"0\"}", .failure = error.InvalidTarget },
+        .{ .json = inspect ++ "\"failed_response\":\"body\",\"operation\":" ++ i64_past ++ ",\"attempt\":\"1\"}", .failure = error.InvalidTarget },
+        .{ .json = inspect ++ "\"failed_response\":\"body\",\"operation\":\"1\",\"attempt\":" ++ i64_past ++ "}", .failure = error.InvalidTarget },
+        .{ .json = inspect ++ "\"operation\":\"1\"}", .failure = error.UnexpectedField },
+        .{ .json = inspect ++ "\"profile\":\"full\",\"failed_response\":\"body\",\"operation\":\"1\",\"attempt\":\"1\"}", .failure = error.UnexpectedField },
+        // An activity item is at a positive i64 position.
+        .{ .json = content ++ "\"position\":\"1\",\"ordinal\":\"0\"}" },
+        .{ .json = content ++ "\"position\":\"0\",\"ordinal\":\"0\"}", .failure = error.InvalidCursor },
+        .{ .json = content ++ "\"position\":" ++ i64_past ++ ",\"ordinal\":\"0\"}", .failure = error.InvalidCursor },
+        .{ .json = content ++ "\"position\":\"1\",\"ordinal\":" ++ i64_past ++ "}", .failure = error.InvalidCursor },
+        // An envelope holds a value exactly when its state says so.
+        .{ .json = configure ++ "\"model\":{\"state\":\"value\",\"value\":\"m\"}}}" },
+        .{ .json = configure ++ "\"model\":{\"state\":\"value\"}}}", .failure = error.InvalidFieldState },
+        .{ .json = configure ++ "\"model\":{\"state\":\"omitted\",\"value\":\"m\"}}}", .failure = error.InvalidFieldState },
+        .{ .json = configure ++ "\"model\":{\"value\":\"m\"}}}", .failure = error.MissingField },
+    };
+    for (cases, 0..) |case, index| {
+        errdefer std.debug.print("case {d}: {s}\n", .{ index, case.json });
+        var source: MetadataSource = .{ .input = case.json };
+        var parser: Tested.Parser = .{ .source = &source, .expected_kind = case.route, .captured = &.{ .{}, .{} } };
+        if (case.failure) |failure| try std.testing.expectError(failure, parseForTest(&parser)) else _ = try parseForTest(&parser);
+    }
+}
+
 test "presets allow partial creating configure in either field order" {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",";
     for ([_][]const u8{
