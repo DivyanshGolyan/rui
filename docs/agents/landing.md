@@ -12,16 +12,15 @@ Performance changes include A/B numbers, and TUI changes include a real-screen t
 Keep published commits unchanged so their CI evidence retains its SHA.
 
 Green means the required `admission` check completed successfully for the PR's current head; it need not be rerun after `main` moves.
-[The main ruleset](../../.github/main-ruleset.json) records the required GitHub enforcement.
-Its active remote configuration must match before the publication cutover.
+[The main ruleset](../../.github/main-ruleset.json) records the required GitHub enforcement; the live ruleset must keep matching it.
 Pending, skipped, cancelled or earlier-head success is not green.
 A green PR squash-merges without waiting for review signoff or a promotion.
 Follow [Review](../../CODING_STANDARDS.md#review) for Codex requests and findings.
 Ship later fixes as follow-up PRs.
 
-Update the PR when its base advances or GitHub reports a conflict.
-After updating it, run `python3 tests/ci/prepush.py` and wait for the current candidate's CI.
-An earlier green candidate does not qualify a stale base.
+Merge `origin/main` into a PR only when it conflicts with `main`; [Conflict alert](../../.github/workflows/conflict-alert.yml) comments on each PR a move of `main` leaves conflicting.
+After that merge, run `python3 tests/ci/prepush.py` and wait for the new head's CI.
+A PR that merely trails `main` merges as it is.
 
 ## Concurrent PRs
 
