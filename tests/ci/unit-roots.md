@@ -30,7 +30,9 @@ renderer-mutation reproduction and cache-execution probes. Their `test`,
 `test-logic` and `test-full` runners are the stock runner adapted to fail when
 the filter leaves no named test: anonymous discovery tests always compile, and
 a module imported only by excluded tests contributes none of its own, so an
-empty run would otherwise pass. `test-full` retains
+empty run would otherwise pass. Each step checks alone, so a filtered `check`
+fails unless the filter names a test in both `test` and `test-logic`: filter
+the step that owns the test, such as `zig build test-logic -Dtest-filter=X`. `test-full` retains
 its separate aggregate/default witness and `RUI_TEST_EXACT_INACTIVITY=1`; normal
 unit/check runs force `0`. The complete aggregate also remains the macOS
 semantic/type-check root.

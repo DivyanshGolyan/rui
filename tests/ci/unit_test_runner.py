@@ -48,8 +48,8 @@ fn filteredTests() []const std.builtin.TestFn {
         if (std.mem.indexOf(u8, test_fn.name, ".test.") != null or
             std.mem.indexOf(u8, test_fn.name, ".decltest.") != null) return all;
     }
-    std.debug.print("error: -Dtest-filter matched no named test in this step. Check the name, " ++
-        "or that the test's file is imported by this step's root.\n", .{});
+    std.debug.print("error: -Dtest-filter matched no named test in this step. Check the name and that this " ++
+        "step's root imports the test's file; for check, filter the one step (test or test-logic) that owns it.\n", .{});
     std.process.exit(1);
 }
 '''
