@@ -127,24 +127,11 @@ pub fn requestSent(self: *const Exchange) bool {
 pub fn advance(self: *Exchange) Error!Event {
     while (true) switch (self.state) {
         .connecting => {
-            var result: c_int = 0;
-            var result_len: std.c.socklen_t = @sizeOf(c_int);
-            if (std.c.getsockopt(self.fd, std.c.SOL.SOCKET, std.c.SO.ERROR, &result, &result_len) != 0) return error.LocalFailure;
-            if (result != 0) return error.ConnectFailed;
-            // No error yet is not success: a peer name exists only once the
-            // connection is established.
-            var peer: std.c.sockaddr.in6 = undefined;
-            var peer_len: std.c.socklen_t = @sizeOf(std.c.sockaddr.in6);
-            switch (std.posix.errno(std.c.getpeername(self.fd, @ptrCast(&peer), &peer_len))) {
-                .SUCCESS => self.state = .open,
-                .NOTCONN => return .waiting,
-                else => {
-                    // A refusal that lands between the two reads leaves the
-                    // socket disconnected (EINVAL on macOS) with its error
-                    // now pending.
-                    if (std.c.getsockopt(self.fd, std.c.SOL.SOCKET, std.c.SO.ERROR, &result, &result_len) == 0 and result != 0) return error.ConnectFailed;
-                    return error.LocalFailure;
-                },
+            switch (socket_os.connectStatus(self.fd)) {
+                .connected => self.state = .open,
+                .pending => return .waiting,
+                .refused => return error.ConnectFailed,
+                .failed => return error.LocalFailure,
             }
         },
         .open => {

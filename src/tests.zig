@@ -22,6 +22,7 @@ test {
     _ = @import("models_dev.zig");
     _ = @import("descriptor_capacity.zig");
     _ = @import("os/descriptor_limit.zig");
+    _ = @import("os/os.zig");
     _ = @import("os/pages.zig");
     _ = @import("os/process.zig");
     _ = @import("os/socket.zig");

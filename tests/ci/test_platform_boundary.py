@@ -64,7 +64,8 @@ class PlatformBoundaryTest(unittest.TestCase):
     def test_zig_scan_reads_platform_names_and_divergent_syscalls(self):
         for source in ('const os = builtin.os.tag;', 'if (@import("builtin").os.tag == .macos) {}',
                        '_ = std.c.shutdown(fd, std.c.SHUT.WR);', 'std.posix.kill(-pgid, .KILL) catch {};',
-                       'const r = c.setrlimit(c.RLIMIT_NOFILE, &l);', '_ = std.c.listen(fd, 0);', '_ = c.kill(-group, c.SIGKILL);'):
+                       'const r = c.setrlimit(c.RLIMIT_NOFILE, &l);', '_ = std.c.listen(fd, 0);', '_ = c.kill(-group, c.SIGKILL);',
+                       '_ = std.c.getpeername(fd, addr, len);'):
             self.assertEqual(zig_sites(source), 1, source)
         for source in ('// builtin.os in a comment', 'const s = "std.c.shutdown";', '\\\\builtin.os.tag',
                        'fn f(os: std.Target.Os.Tag) void {}', 'const a = builtin.mode;',
