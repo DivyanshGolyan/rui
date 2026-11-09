@@ -6,6 +6,7 @@ const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
 const store_id = @import("store_id.zig");
 const mutation_answer = @import("mutation_answer.zig");
+const configuration_admission = @import("configuration_admission.zig");
 const workspace_path = @import("workspace_path.zig");
 const store_path = @import("store_path.zig");
 const provider_route = @import("provider_route.zig");
@@ -454,37 +455,7 @@ pub const PermissionDecision = mutation_answer.PermissionDecision;
 
 // Reply and observation vocabulary. The Store produces these values and the
 // Host renders their tag names, so each reply's JSON shape can bound them.
-pub const ConfigurationRejection = enum {
-    invalid_session_reference,
-    unknown_session,
-    unsupported_permission_mode,
-    unsupported_provider,
-    invalid_model,
-    model_capability_unavailable,
-    invalid_output_schema,
-    invalid_compaction_trigger,
-    compact_at_too_large,
-    invalid_output_reservation,
-    unsupported_reasoning_effort,
-    unknown_tool,
-    provider_tool_missing,
-    loaded_tools_not_in_tools,
-    loaded_tools_unreachable,
-    invalid_label,
-    incomplete_initial_configuration,
-    unknown_preset,
-    preset_on_update,
-    invalid_workspace,
-    workspace_is_immutable,
-    provider_is_immutable,
-    model_is_immutable,
-    revision_exhausted,
-    skills_unavailable,
-    unknown_skill,
-    skill_file_unavailable,
-    skill_file_too_large,
-    skill_text_invalid,
-};
+pub const ConfigurationRejection = configuration_admission.Rejection;
 pub const MessageRejection = enum {
     session_archiving,
     invalid_session_reference,

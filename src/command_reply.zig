@@ -3,6 +3,7 @@
 //! and their tests need no Store.
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const configuration_admission = @import("configuration_admission.zig");
 const outcome_code = @import("outcome_code.zig");
 const tool_presentation = @import("tool_presentation.zig");
 const session_id = @import("session_id.zig");
@@ -28,7 +29,7 @@ pub const AcceptedConfiguration = struct {
 
 pub const RejectedConfiguration = struct {
     replayed: bool,
-    code: protocol.ConfigurationRejection,
+    code: configuration_admission.Rejection,
 };
 
 pub const ConfigureReply = union(enum) {

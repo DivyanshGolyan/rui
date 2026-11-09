@@ -4,6 +4,7 @@
 const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const protocol = @import("../../protocol.zig");
+const configuration_admission = @import("../../configuration_admission.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const provider_route = @import("../../provider_route.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
@@ -95,7 +96,7 @@ fn defaultProvider(routes: provider_route.Routes) ?provider_name.Provider {
 /// Why `tools` cannot be saved for a Session of `provider`: a name the
 /// Host's catalog lacks, or a tool some provider runs that `provider`
 /// does not.
-fn toolsRejection(catalog: *const tool_catalog.Catalog, provider: provider_name.Provider, tools: *const protocol.ToolsField) ?protocol.ConfigurationRejection {
+fn toolsRejection(catalog: *const tool_catalog.Catalog, provider: provider_name.Provider, tools: *const protocol.ToolsField) ?configuration_admission.Rejection {
     var names = tools.iterator();
     while (names.next()) |name| {
         const index = catalog.find(name) orelse return .unknown_tool;
@@ -191,7 +192,7 @@ pub const OutputSchemaAction = enum(u2) {
 };
 
 pub const ConfigurationUpdatePlan = union(enum) {
-    rejected: protocol.ConfigurationRejection,
+    rejected: configuration_admission.Rejection,
     update: struct {
         instructions: ConfigurationContentAction,
         output_schema: OutputSchemaAction,
@@ -219,7 +220,7 @@ pub fn configurationBeforeWorkspace(
     current: ?*const CurrentConfiguration,
     requested: *const wire_request.Configuration,
     default_provider: ?provider_name.Provider,
-) ?protocol.ConfigurationRejection {
+) ?configuration_admission.Rejection {
     if (requested.compaction_trigger.state == .explicit_null) return .invalid_compaction_trigger;
     const compact_at = if (requested.compaction_trigger.state == .value)
         tokenCount(requested.compaction_trigger.value.slice(), false) catch return .invalid_compaction_trigger
@@ -370,7 +371,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const wire_r
     configureDigest(command, preset, saved, &reads.command_digest);
     const digest = &reads.command_digest;
     if (saved.* != null) try a.abandon(.{});
-    switch (try command_domain.classify(protocol.ConfigurationRejection, saved, .configure, command.session.slice(), digest)) {
+    switch (try command_domain.classify(configuration_admission.Rejection, saved, .configure, command.session.slice(), digest)) {
         .fresh => {},
         .conflict => return .conflict,
         .accepted => |existing| return .{ .accepted = .{
@@ -384,7 +385,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const wire_r
     }
 
     if (preset) |decision| if (decision.rejection) |code| switch (code) {
-        inline else => |tag| return saveConfigurationRejection(a, command, digest, @field(protocol.ConfigurationRejection, @tagName(tag)), faults),
+        inline else => |tag| return saveConfigurationRejection(a, command, digest, @field(configuration_admission.Rejection, @tagName(tag)), faults),
     };
     if (command.require_model and !servesProviderOf(served, &command.configuration, if (reads.found.get()) reads.next.provider else null)) {
         return saveConfigurationRejection(a, command, digest, .model_capability_unavailable, faults);
@@ -412,7 +413,7 @@ noinline fn reloadSkills(a: anytype, command: *const wire_request.ConfigureComma
     }
     if (invalid) return saveConfigurationRejection(a, command, digest, .incomplete_initial_configuration, faults);
     const captured = reload_capture orelse return saveConfigurationRejection(a, command, digest, .skills_unavailable, faults);
-    if (captured.* == .failed) return saveConfigurationRejectionWithFailure(a, command, digest, captured.failed.rejection(protocol.ConfigurationRejection), captured.failed, faults);
+    if (captured.* == .failed) return saveConfigurationRejectionWithFailure(a, command, digest, captured.failed.rejection(configuration_admission.Rejection), captured.failed, faults);
     if (captured.* != .reload) return saveConfigurationRejection(a, command, digest, .skills_unavailable, faults);
     var memory: std.heap.ArenaAllocator = .init(std.heap.c_allocator);
     defer memory.deinit();
@@ -520,7 +521,7 @@ const Settings = struct {
 
 pub const Application = union(enum) {
     accepted: Applied,
-    rejected: protocol.ConfigurationRejection,
+    rejected: configuration_admission.Rejection,
 };
 
 /// What `prepareConfiguration` reads in a round, and where the round
@@ -772,7 +773,7 @@ const NameSelection = struct {
 
 /// A strict loaded set must retain the built-in loader, so every configured
 /// tool remains reachable. Membership always refers to the selected saved set.
-fn loadedToolsRejection(tools: *const protocol.ToolsField, loaded: *const protocol.ToolsField) ?protocol.ConfigurationRejection {
+fn loadedToolsRejection(tools: *const protocol.ToolsField, loaded: *const protocol.ToolsField) ?configuration_admission.Rejection {
     var names = loaded.iterator();
     while (names.next()) |name| if (!containsName(tools, name)) return .loaded_tools_not_in_tools;
     if (loaded.count < tools.count and !containsName(loaded, "find_tools")) return .loaded_tools_unreachable;
@@ -782,7 +783,7 @@ fn loadedToolsRejection(tools: *const protocol.ToolsField, loaded: *const protoc
 /// Resolves the loaded set before importing content or changing the Session.
 /// Omitted loaded_tools follows the entire tools set unless it was already a
 /// strict subset; that subset is intersected with a newly requested tools set.
-fn prepareLoadedTools(a: anytype, creating: bool, requested: *const wire_request.Configuration, reads: *ConfigurationReads) !?protocol.ConfigurationRejection {
+fn prepareLoadedTools(a: anytype, creating: bool, requested: *const wire_request.Configuration, reads: *ConfigurationReads) !?configuration_admission.Rejection {
     if (!creating and requested.tools.state != .value and requested.loaded_tools.state != .value) return null;
     if (requested.loaded_tools.state != .value and (creating or reads.next.loaded_tool_set_id == null)) return null;
 
@@ -835,7 +836,7 @@ noinline fn saveUnusedWorkspace(configuration: *const wire_request.Configuration
 // Both mutation branches validate after keyed replay and Configure's existing
 // preset/capability precedence. Empty targets retain creation semantics;
 // creating Messages share this check through applyConfiguration.
-fn targetRejection(session: []const u8) ?protocol.ConfigurationRejection {
+fn targetRejection(session: []const u8) ?configuration_admission.Rejection {
     return if (session.len != 0 and !session_id.valid(session)) .invalid_session_reference else null;
 }
 
@@ -1006,7 +1007,7 @@ fn saveConfigurationRejection(
     a: anytype,
     command: *const wire_request.ConfigureCommand,
     digest: *const [32]u8,
-    code: protocol.ConfigurationRejection,
+    code: configuration_admission.Rejection,
     faults: Faults,
 ) !ConfigureReply {
     return saveConfigurationRejectionWithFailure(a, command, digest, code, null, faults);
@@ -1016,7 +1017,7 @@ fn saveConfigurationRejectionWithFailure(
     a: anytype,
     command: *const wire_request.ConfigureCommand,
     digest: *const [32]u8,
-    code: protocol.ConfigurationRejection,
+    code: configuration_admission.Rejection,
     failure: ?skills_domain.Failure,
     faults: Faults,
 ) !ConfigureReply {
