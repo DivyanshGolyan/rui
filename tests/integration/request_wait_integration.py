@@ -11,9 +11,9 @@ import tempfile
 import threading
 import time
 
-import bash_integration as bash
-import bash_recovery_integration as recovery
-import canonical_failure_integration as canonical
+import bash_fixture as bash
+import bash_fixture as recovery
+import canonical_fixture as canonical
 import host_process
 import model_fixture as fixture
 from host_process import HostDiagnostics, canonical_fixture_root, dispose_all

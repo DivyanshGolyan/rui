@@ -14,32 +14,13 @@ import tempfile
 import threading
 import time
 
-import bash_integration as bash
+import bash_fixture as bash
 import model_fixture as fixture
 from product_defaults import DEFAULTS, compaction_trigger, start_effort
 import host_process
 from host_process import HostDiagnostics, retain_failure_state, start_ready_process
-from control_integration import raw_request
-
-
-ACCESS = "e30.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln"
-ID = "e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJydWktdGVzdC1hY2NvdW50In0.c2ln"
-FEDRAMP_ID = "e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoicnVpLXRlc3QtYWNjb3VudCIsImNoYXRncHRfYWNjb3VudF9pc19mZWRyYW1wIjp0cnVlfX0.c2ln"
-ACCOUNT = "rui-test-account"
-
-
-def expected_user_agent():
-    if not (fixture.ROOT / ".git").exists() or shutil.which("git") is None:
-        return "rui/unknown"
-    identity = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel", "HEAD"], cwd=fixture.ROOT,
-        capture_output=True, text=True,
-    )
-    lines = identity.stdout.splitlines()
-    revision = lines[1] if (identity.returncode == 0 and len(lines) == 2
-                           and pathlib.Path(lines[0]).resolve() == fixture.ROOT
-                           and re.fullmatch(r"[0-9a-f]{40}", lines[1])) else "unknown"
-    return "rui/" + revision
+from control_fixture import raw_request
+from codex_fixture import ACCESS, ACCOUNT, OPENAI_KEY, credentials, expected_user_agent
 
 
 class ManagedHandler(fixture.SuccessHandler):
@@ -53,16 +34,6 @@ class ManagedHandler(fixture.SuccessHandler):
             if hasattr(self.server, "turn_states"):
                 self.server.turn_states.append(self.headers.get_all("x-codex-turn-state") or [])
         super().do_POST()
-
-
-def credentials(path, *, state="ready", access=ACCESS, fedramp=False, generation=1):
-    path.write_text(
-        "version=3\ngeneration=" + str(generation) + "\naccount_id=" + ACCOUNT +
-        "\nfedramp=" + str(int(fedramp)) + "\nid_token=" + (FEDRAMP_ID if fedramp else ID) +
-        "\naccess_token=" + access + "\nrefresh_token=synthetic-not-real\n"
-        "expires_at=4102444800\nrefreshed_at=1750000000\nstate=" + state + "\n"
-    )
-    path.chmod(0o600)
 
 
 def credential_facts(path):
@@ -702,9 +673,6 @@ def forced_refresh_journey():
             retain_failure_state("Codex forced refresh failure state", state)
         if errors and incoming_error is None:
             raise errors[0]
-
-
-OPENAI_KEY = "sk-synthetic-openai-key"
 
 
 def openai_journey():

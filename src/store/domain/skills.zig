@@ -164,18 +164,73 @@ pub const Failure = struct {
 
 /// Ordinary immutable rejected-command outcome; its typed code, not wording,
 /// controls the native caller's repair guidance and survives keyed replay.
-pub fn importFailure(a: anytype, failure: Failure, faults: store_core.Faults) !u64 {
-    var outcome: content.Import = .ofBytes(failure.bytes, false);
+pub fn importFailure(a: anytype, bytes: []const u8, faults: store_core.Faults) !u64 {
+    var outcome: content.Import = .ofBytes(bytes, false);
     content.lookup(a, &outcome);
     try a.run();
     if (faults.content_import) return error.InjectedContentImportFailure;
-    return content.importBytes(a, &outcome, failure.bytes);
+    return content.importBytes(a, &outcome, bytes);
 }
 
+/// A model skill tool call's or a catalog reload's capture.
 pub const Capture = union(enum) {
     invocation: []const u8,
     reload: catalog.Catalog,
     failed: Failure,
+};
+
+/// A skill a Message's `/name` word bound: its name and the invocation
+/// the Host read for it (`catalog.invocation`), borrowed until settlement.
+pub const BoundSkill = struct { name: []const u8, bytes: []const u8 };
+
+/// What the Host's binding of a Message's text found: the skills its
+/// `/name` words bound, in order, or why a bound skill could not be read.
+/// A word that names no skill is prose; text that binds none has no capture.
+pub const MessageCapture = union(enum) {
+    bound: []const BoundSkill,
+    failed: MessageFailure,
+};
+
+const insert_message_skill = rsql.Write(.{
+    .sql = "INSERT INTO message_skill(admission_id,position,name,content_id) VALUES(?1,?2,?3,?4)",
+    .Args = struct { admission_id: u64, position: u64, name: []const u8, content_id: u64 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// The one write every Message door makes for what its text bound: each
+/// skill's body as content (shared with equal bytes), and its row after
+/// `admission_id`, in order. A Turn that takes the Message projects each
+/// one as its own entry right after the Message's (`model_admission`).
+pub fn saveBound(a: anytype, admission_id: u64, bound: []const BoundSkill, faults: store_core.Faults) !void {
+    // One lookup round per skill keeps no per-skill state on this frame;
+    // the bytes of a Message's skills are bounded together (1 MiB). A
+    // Message may bind more skills than the Access's table of imported
+    // rows holds, so new rows go in as model settlement's batches do
+    // (`content.insertRow`). Distinct skills never share bytes: each
+    // invocation starts with its own path.
+    for (bound, 1..) |skill, position| {
+        var body: content.Import = .ofBytes(skill.bytes, false);
+        content.lookup(a, &body);
+        try a.run();
+        if (faults.content_import) return error.InjectedContentImportFailure;
+        const content_id: u64 = if (body.found) |row| row.content_id.get() else a.insertedContent(&body.digest, body.length, false) orelse id: {
+            const id = try content.insertRow(a, &body);
+            a.writeContent(id, skill.bytes);
+            break :id id;
+        };
+        a.write(insert_message_skill, .{ .admission_id = admission_id, .position = position, .name = skill.name, .content_id = content_id });
+    }
+}
+
+pub const MessageFailure = struct {
+    code: enum { skill_file_unavailable, skill_file_too_large, skill_text_invalid },
+    bytes: []const u8,
+
+    pub fn rejection(self: MessageFailure) protocol.MessageRejection {
+        return switch (self.code) {
+            inline else => |code| @field(protocol.MessageRejection, @tagName(code)),
+        };
+    }
 };
 
 pub const Result = struct { bytes: []const u8, succeeded: bool, reload_status: ?protocol.SkillsReloadStatus = null };

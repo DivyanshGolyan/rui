@@ -6,6 +6,7 @@ import http.client
 import io
 import json
 import pathlib
+import socket
 import sys
 import tempfile
 import threading
@@ -13,9 +14,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import codex_h2_integration as codex_h2
+import codex_h2_cases as codex_h2
 import os_semantics
-import transport_h2_integration as transport
+import control_fixture
+import h2_fixture
+import transport_h2_cases as transport
 import host_process
 
 
@@ -63,7 +66,7 @@ class RoundTripHistoryTests(unittest.TestCase):
                 user = {"role": "user", "content": [{"type": "input_text", "text": text}]}
                 request = {"input": [*histories[index], user]}
                 self.streams.append(("connection", stream, text, json.dumps(request).encode()))
-                answer = transport.observed_shape_answer(text)
+                answer = h2_fixture.observed_shape_answer(text)
                 self.answers[text] = answer.encode()
                 _, reasoning, message = transport.dispatch.sse_answer(
                     f"response-{stream}", f"reasoning-{stream}", f"message-{stream}", answer,
@@ -105,23 +108,23 @@ class ShapedWorkTests(unittest.TestCase):
         for kind in ("configure", "message", "observe_command", "read_result", "inspect_session"):
             with self.subTest(kind=kind):
                 reply = HostReply(content_type=b"text/plain" if kind == "read_result" else b"application/json")
-                with patch.object(transport.socket, "socket", return_value=reply):
+                with patch.object(socket, "socket", return_value=reply):
                     transport.closed_host_request("/fixture/socket", pathlib.Path("/fixture"), kind)
                 self.assertTrue(reply.released, "caller returned before peer EOF")
 
     def test_per_stream_shape_rejects_compensated_event_loss(self):
-        payload, _ = transport.observed_shape_sse(1, "h2-2-0-0")
-        transport.assert_observed_shape_work(payload)
+        payload, _ = h2_fixture.observed_shape_sse(1, "h2-2-0-0")
+        h2_fixture.assert_observed_shape_work(payload)
         records = payload.split(b"\n\n")
         dropped = b"\n\n".join(records[:5] + records[6:])
         doubled = b"\n\n".join(records[:5] + [records[5]] + records[5:])
         self.assertEqual(len(dropped) + len(doubled), 2 * len(payload))
         for corrupted in (dropped, doubled):
             with self.assertRaisesRegex(AssertionError, "shape"):
-                transport.assert_observed_shape_work(corrupted)
+                h2_fixture.assert_observed_shape_work(corrupted)
         changed = payload.replace(b'"synthetic_padding":"', b'"synthetic_padding":"x', 1)
         with self.assertRaisesRegex(AssertionError, "shape lifecycle bytes"):
-            transport.assert_observed_shape_work(changed)
+            h2_fixture.assert_observed_shape_work(changed)
 
     def test_later_wave_failure_preserves_completed_evidence(self):
         endpoint = SimpleNamespace(server_address=("localhost", 1), streams=[("connection", 1, "h2-1-0-0", b"")],
@@ -205,21 +208,6 @@ class MessageObservationTests(unittest.TestCase):
             with self.subTest(state=state), patch.object(transport.dispatch, "observe", return_value=observation):
                 self.assertEqual(transport.dispatch.completed_observation("/store", "key"),
                                  observation if state == "completed" else None)
-
-    def test_upgrade_compares_bindings_in_each_installed_reply(self):
-        from previous_release_upgrade import Dialect
-        identity = {"turn": "1", "operation": "2", "attempt": "1"}
-        # CLI grammar is probed from installed help; observation shape comes
-        # from each reply, never a checkout's protocol source.
-        dialect = Dialect.__new__(Dialect)
-        self.assertEqual(dialect.binding({"state": "processing", "binding": identity}), identity)
-        self.assertEqual(dialect.binding({"state": "completed", "binding": identity}), identity)
-        self.assertTrue(dialect.terminal({"state": "completed"}))
-        self.assertFalse(dialect.terminal({"state": "processing", "result": {"status": "completed"}}))
-        self.assertEqual(dialect.binding({"processing": identity}), identity)
-        self.assertTrue(dialect.terminal({"result": {"status": "completed"}}))
-        self.assertFalse(dialect.terminal({"processing": identity}))
-        self.assertTrue(dialect.terminal({"state": "cancelled", "result": {"status": "cancelled"}}))
 
     def test_terminal_reader_uses_host_state_including_rejection(self):
         for state in ("queued", "processing", "waiting_for_permission", "completed", "failed", "cancelled", "rejected"):
@@ -406,7 +394,7 @@ class HeldResponseBoundaryTests(unittest.TestCase):
                     assert release_tail.wait(5), "post-response handler tail was not released"
 
         with patch.object(transport, "HeldHandler", HeldTail), \
-                patch.object(transport.socket, "getfqdn", side_effect=OSError("reverse DNS unavailable")):
+                patch.object(socket, "getfqdn", side_effect=OSError("reverse DNS unavailable")):
             endpoint = transport.HeldEndpoint()
         endpoint.release_first.set()
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
@@ -545,10 +533,10 @@ class HeldPopulationCleanupTests(unittest.TestCase):
                               content_type=b"text/plain" if kind == "read_result" else b"application/json")
             reply.report_released = kind != held_report
             replies.append((kind, reply))
-            with patch.object(transport.socket, "socket", return_value=reply):
+            with patch.object(socket, "socket", return_value=reply):
                 if kind == omitted_eof:
                     # Model the old Content-Length-only completion boundary.
-                    _, body = transport.control.read_http_response(reply)
+                    _, body = control_fixture.read_http_response(reply)
                     return body if kind == "read_result" else json.loads(body)
                 return real_request(socket_path, store, kind, **fields)
 
@@ -969,7 +957,7 @@ class ObservationDeadlineTests(unittest.TestCase):
                 clock = [0.0]
                 reply = TimedReply(clock, arrivals)
                 with patch.object(transport.time, "monotonic", side_effect=lambda: clock[0]), \
-                        patch.object(transport.socket, "socket", return_value=reply):
+                        patch.object(socket, "socket", return_value=reply):
                     if timely:
                         self.assertEqual(transport.closed_host_request("/fixture/socket", pathlib.Path("/fixture"),
                                                                        "read_result", deadline=deadline), b"answer")

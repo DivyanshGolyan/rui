@@ -589,7 +589,7 @@ class TerminalScreen:
 def terminal_setup(c):
     # Reuse the existing synthetic credential authority; never inspect the
     # caller's HOME, real credentials or a live provider endpoint.
-    from codex_integration import credentials
+    from codex_fixture import credentials
     directory = c.home / ".config/rui"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     credential = directory / "codex.json"

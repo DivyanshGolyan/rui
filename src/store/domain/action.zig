@@ -142,6 +142,8 @@ pub const OwedStop = struct {
 pub const OwedEnding = struct {
     turn_id: u64,
     child: protocol.Bounded(protocol.session_id_bytes),
+    /// The Session the ending is owed to, whose skills its answer binds.
+    parent: protocol.Bounded(protocol.session_id_bytes),
     ending: protocol.TurnEnding,
     answer: ?ContentReference,
     quiet: bool,
@@ -166,13 +168,15 @@ pub const ending_stop_sql = "EXISTS(SELECT 1 FROM session_stop st WHERE st.selec
 
 /// The oldest owed ending.
 const owed_ending = rsql.Read(.{
-    .sql = "SELECT e.turn_id,t.session_ref,t.outcome_code,t.outcome_content_id,c.byte_length,c.digest," ++ ending_stop_sql ++ " " ++
-        "FROM session_ending_owed e @index(session_ending_open) JOIN turn t ON t.turn_id=e.turn_id LEFT JOIN content c ON c.content_id=t.outcome_content_id " ++
+    .sql = "SELECT e.turn_id,t.session_ref,child.parent_ref,t.outcome_code,t.outcome_content_id,c.byte_length,c.digest," ++ ending_stop_sql ++ " " ++
+        "FROM session_ending_owed e @index(session_ending_open) JOIN turn t ON t.turn_id=e.turn_id JOIN session child ON child.session_ref=t.session_ref " ++
+        "LEFT JOIN content c ON c.content_id=t.outcome_content_id " ++
         "WHERE e.delivered=0 ORDER BY e.turn_id LIMIT 1",
     .Args = struct {},
     .Row = struct {
         turn_id: rsql.Positive,
         session_ref: protocol.Bounded(protocol.session_id_bytes),
+        parent_ref: ?protocol.Bounded(protocol.session_id_bytes),
         outcome_code: protocol.Bounded(protocol.max_code_bytes),
         outcome_content_id: ?rsql.Positive,
         byte_length: ?u64,
@@ -221,6 +225,7 @@ pub fn nextCoreWork(a: anytype, include_mcp: bool) !?CoreWork {
         return .{ .ending = .{
             .turn_id = owed.turn_id.get(),
             .child = owed.session_ref,
+            .parent = owed.parent_ref orelse return error.CorruptStore,
             .ending = outcome.ending(owed.stopped),
             .answer = if (outcome == .completed) .{ .length = owed.byte_length orelse return error.CorruptStore, .digest = owed.digest orelse return error.CorruptStore } else null,
             .quiet = owed.quiet,

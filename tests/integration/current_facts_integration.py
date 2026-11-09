@@ -4,7 +4,7 @@ import json
 import re
 import tempfile
 
-import canonical_failure_integration as canonical
+import canonical_fixture as canonical
 import model_fixture as fixture
 from host_process import canonical_fixture_root
 

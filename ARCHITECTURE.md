@@ -506,7 +506,14 @@ It does not change authored instructions, their content identity, the revision-o
 Normal defaults offer/load `skill` even with no skills; an explicit restricted tool set remains authoritative, and routing hints are conditional on availability.
 
 The model `skill` tool accepts `invoke` with a name or `reload` without one.
-User `/skill NAME` and native `session send --skill NAME` use the same capture operation and admit its captured text as an ordinary User Message; the explicit native `skill` field is not hidden command text.
+A Message invokes skills by naming them in its text: each `/name` word at a word boundary that names a skill in the recipient Session's catalog binds it, once, at its first use, in the order the text names them; any other `/word`, such as `/tmp/x` or `/month`, stays prose.
+Every Message door binds the same way, through one Host step (`session_skills.bind`) before its one Store transaction: a client's `message` request, a peer Session's, `message_agent`, `start_agent` (against the new Session's initial catalog) and an attached child's ending answer.
+There is no `skills` wire field, `--skill` option or `/skill` command.
+The Message keeps its text once, exactly as typed, and each bound skill is saved after it (`message_skill`) with its complete current raw `SKILL.md` read at send, its content shared with equal bytes.
+The Turn that takes the Message projects each skill as its own Conversation entry (kind `skill`) right after the Message's entry, and the model reads it as its own user message there; Ctrl-P recall and Activity read the typed text.
+A bound skill that cannot be read refuses a client's or peer's Message (`skill_file_unavailable`, `skill_file_too_large`, `skill_text_invalid`; together a Message's skills hold at most 1 MiB of raw files), fails a `message_agent` or `start_agent` call with nothing sent or started, and leaves an owed child ending, which cannot be refused, delivered with no skills.
+Skill entries are host inputs: compaction keeps them verbatim like the Message, a history floor (D217) drops each with its Message's drop unit and counts its bytes there, and their frozen bytes keep later requests' prefixes stable.
+Catalog suggestions (`skill_suggestions`) are bounded metadata-only reads with copied query scope, not a frontend filesystem reader or persistent active-skill registry.
 Invocation reads the selected advertised absolute path anew, returning the complete raw UTF-8 `SKILL.md`, including frontmatter and trailing bytes, with its absolute path.
 The result is ordinary immutable conversation content, with no added authority, tools or permissions.
 Sibling resources remain accessible through the Session's existing tools and permission rules.
@@ -1395,6 +1402,7 @@ The step to 56 adds the bounded outcome-unknown Message recovery index and moves
 The step to 57 adds archive intents and requested archive values, extends the command kind set, while retaining the unreleased wire 9.
 The step to 58 moves saved wire 9 metadata to wire 10 for nullable failed-send peers; it changes no saved command or refusal rows.
 The step to 59 adds immutable skill catalog metadata and its ordinary turnless instruction provenance, retaining unreleased wire 10 without rewriting earlier Conversation content.
+The step to 60 adds `message_skill` and the Conversation's skill entries (kind 4, naming their `message_skill` row), rebuilding `conversation_entry` on both engines, and moves Store wire metadata to 11; earlier rows are unchanged.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -2699,6 +2707,8 @@ It is the first row dropped when rows run short, before any draft row, and the f
 A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
+
+Wire version 11 drops wire 10's exclusive `skill` field: a Message's `/name` words bind skills instead. It adds the full report's `skill` Conversation entries with `source_skill_position`, and bounded skill suggestions; different versions, including saved request records, refuse each other.
 
 Wire version 10 adds explicit native skill invocation and idle catalog reload intent, typed capture refusals and reload acknowledgements; different versions refuse each other rather than silently discarding the new intent.
 Wire version 8 later gained the `activity_search` request; a Host built before it answers that request as unknown.

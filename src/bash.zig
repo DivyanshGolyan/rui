@@ -2001,3 +2001,75 @@ test "Host facts carry this executable's directory, the system PATH and an absol
     defer freeHostFacts(std.testing.allocator, relative);
     try std.testing.expectEqual(null, relative.home);
 }
+
+test "yielded Bash preparation leaves checkpoints free while retaining its descriptor" {
+    const Store = store.Store;
+    const testingStore = store.testing.testingSqliteStore;
+    const configureTestSession = store.testing.configureTestSession;
+    const testingPublicProjection = store.testingPublicProjection;
+    const BashExecutionInput = store.BashExecutionInput;
+    const c = store.testingSqlite.c;
+    const bash = @import("bash.zig");
+    for ([_]usize{ 0, 1024 * 1024 }) |padding_length| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var database: Store = undefined;
+        try testingStore(&database, &tmp, std.testing.io);
+        defer database.close() catch unreachable;
+        const command = "printf " ++ @as([16384]u8, @splat('x'));
+        const padding = try std.testing.allocator.alloc(u8, padding_length);
+        defer std.testing.allocator.free(padding);
+        @memset(padding, ' ');
+        const descriptor = try std.testing.allocator.print("{{\"cmd\":\"{s}\",{s}\"timeout_ms\":null,\"description\":\"Print marker\"}}", .{ command, padding });
+        defer std.testing.allocator.free(descriptor);
+        const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, descriptor, .{});
+        defer std.testing.allocator.free(encoded);
+        const request = try testingPublicProjection(&database, &tmp, &.{.{
+            .encoded = encoded[1 .. encoded.len - 1],
+            .decoded = descriptor,
+        }});
+        var input: BashExecutionInput = .{
+            .session = request.session,
+            .sender_handle = .{},
+            .workspace = .{},
+            .arguments = .{ .length = descriptor.len, .digest = undefined },
+            .timeout_ms = 1000,
+        };
+        try input.workspace.set(database.selector.slice());
+        var used: std.atomic.Value(u64) = .init(0);
+        const scratch: bash.Scratch = .{ .io = std.testing.io, .path = database.selector.slice(), .budget = .{ .used = &used, .limit = 4096 } };
+        var preparation: bash.Preparation = undefined;
+        if (preparation.start(scratch, std.testing.allocator, try database.openPublicConversationContent(&request), &input, database.selector.slice(), "/bin/bash", 11, .{})) |initial| {
+            var failure = initial;
+            try failure.cleanup.cleanup(scratch);
+            return failure.cause;
+        }
+        var owned = true;
+        defer if (owned) {
+            var cleanup = preparation.cancel();
+            cleanup.cleanup(scratch) catch unreachable;
+        };
+        var prepared: bash.Prepared = undefined;
+        try std.testing.expect(preparation.advance(&prepared) == .pending);
+        _ = try configureTestSession(&database, "bash-checkpoint");
+        try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_wal_checkpoint_v2(database.sqliteDatabase(), null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null));
+        while (true) {
+            var progress = preparation.advance(&prepared);
+            switch (progress) {
+                .pending => {},
+                .prepared => {
+                    owned = false;
+                    defer prepared.cleanup() catch unreachable;
+                    try std.testing.expectEqualStrings(command, prepared.command.?);
+                    break;
+                },
+                .failed => |*failure| {
+                    owned = false;
+                    try failure.cleanup.cleanup(scratch);
+                    return failure.cause;
+                },
+            }
+        }
+        try std.testing.expectEqual(@as(u64, 0), used.load(.monotonic));
+    }
+}

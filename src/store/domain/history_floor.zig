@@ -12,7 +12,8 @@
 //! context window less the output reservation, at four bytes per token as
 //! `turn_policy.comparedPressure` counts, so a catalog window larger than
 //! the one served (D207) still recovers by level 3. A unit counts the bytes
-//! the request sends for it: a Message its text, an Operation its output
+//! the request sends for it: a Message its text and the skills it bound
+//! (their entries follow it, so they drop with it), an Operation its output
 //! items (`item_bytes_sql`) and its tool results. An Operation the base
 //! covers sends neither, so it is no unit; what is always kept is not
 //! counted. The newest unit is always kept: it is the work in hand.
@@ -125,6 +126,13 @@ const floor_facts = rsql.Read(.{
 
 const page_rows = 16;
 
+/// Whether the skill entry `e` belongs to the Message at `first_message`,
+/// which every floor keeps with its skills.
+pub fn firstMessageSkillSql(comptime e: []const u8, comptime first_message: []const u8) []const u8 {
+    return "(" ++ e ++ ".entry_kind=4 AND EXISTS(SELECT 1 FROM conversation_entry owner WHERE owner.source_admission_id=" ++ e ++
+        ".source_skill_admission_id AND owner.session_position=" ++ first_message ++ "))";
+}
+
 /// The bytes output item `i` takes in a request: its bag, its parts' text
 /// and bags, and a call's three fields. A message part's text is a length
 /// of its message text. Admission's uncovered bytes count the same.
@@ -142,7 +150,8 @@ pub const item_bytes_sql = "coalesce((SELECT bag.byte_length FROM content bag WH
 /// base (?5) whose output later requests send. A failed call holds nothing,
 /// and a compaction's output is sent only while it is the base, which is kept.
 const units = rsql.Read(.{
-    .sql = "SELECT e.session_position AS start,content.byte_length AS size FROM model_operation current " ++
+    .sql = "SELECT e.session_position AS start,content.byte_length+coalesce((SELECT sum(body.byte_length) FROM message_skill skill " ++
+        "JOIN content body ON body.content_id=skill.content_id WHERE skill.admission_id=e.source_admission_id),0) AS size FROM model_operation current " ++
         "JOIN conversation_entry e @index(conversation_entry_history) ON e.session_ref=current.session_ref " ++
         "JOIN content ON content.content_id=e.content_id " ++
         "WHERE current.operation_id=?1 AND e.session_position<?2 AND e.session_position>?3 AND e.entry_kind=1 AND e.session_position!=?4 UNION ALL " ++
@@ -213,12 +222,13 @@ pub fn deeperFloor(a: anytype, operation: u64) !?Room {
 }
 
 /// The conversation entries of Operation ?1's Session above ?2 and at or
-/// below ?3, but instructions and the first Message (?4): what a floor
+/// below ?3, but instructions and the first Message (?4) with its skills: what a floor
 /// drops beyond the one before it.
 const dropped_entries = rsql.Read(.{
     .sql = "SELECT count(*) AS dropped FROM model_operation current " ++
         "JOIN conversation_entry e @index(conversation_entry_history) ON e.session_ref=current.session_ref " ++
-        "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<=?3 AND e.entry_kind!=2 AND e.session_position!=?4",
+        "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<=?3 AND e.entry_kind!=2 AND e.session_position!=?4 " ++
+        "AND NOT " ++ firstMessageSkillSql("e", "?4"),
     .Args = struct { operation: u64, above: u64, floor: u64, first_message: u64 },
     .Row = struct { dropped: u64 },
     .cardinality = .one,

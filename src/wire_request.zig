@@ -936,55 +936,6 @@ test "an order-free request still names each member once, carries every required
     try std.testing.expect(retained == null);
 }
 
-test "skills ingress transfers explicit invocation intent without caller text custody" {
-    const bytes = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"skills-no-text\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"skill\":\"demo\"}";
-    for ([_]usize{ 1, 17, bytes.len }) |fragment| {
-        const ingress = try std.testing.allocator.create(Ingress);
-        defer std.testing.allocator.destroy(ingress);
-        var retained: ?named_scratch.Owner = null;
-        var used: std.atomic.Value(u64) = .init(0);
-        ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = bytes.len, .scratch_path = "unused-no-capture", .request_number = 1, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 0 }, .expected_kind = .message });
-        defer ingress.deinit();
-        var offset: usize = 0;
-        while (offset < bytes.len) {
-            const end = @min(offset + fragment, bytes.len);
-            try ingress.feed(bytes[offset..end]);
-            offset = end;
-        }
-        const request = try ingress.finish();
-        defer request.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expectEqualStrings("demo", request.message.skill.?.slice());
-        try std.testing.expectEqual(@as(usize, 0), ingress.content_count);
-        try std.testing.expectEqual(protocol.FieldState.omitted, request.message.text.state);
-        try std.testing.expect(request.message.text.file == null);
-        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-        try std.testing.expect(retained == null);
-    }
-}
-
-test "skills ingress rejects both invocation and text without retaining capture custody" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try std.testing.allocator.alloc(u8, std.Io.Dir.max_path_bytes);
-    defer std.testing.allocator.free(root);
-    const path = root[0..try tmp.dir.realPath(std.testing.io, root)];
-    const head = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"skills-both\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,";
-    for ([_][]const u8{
-        head ++ "\"skill\":\"demo\",\"text\":{\"state\":\"value\",\"value\":\"text\"}}",
-        head ++ "\"text\":{\"state\":\"value\",\"value\":\"text\"},\"skill\":\"demo\"}",
-    }) |bytes| {
-        const ingress = try std.testing.allocator.create(Ingress);
-        defer std.testing.allocator.destroy(ingress);
-        var retained: ?named_scratch.Owner = null;
-        var used: std.atomic.Value(u64) = .init(0);
-        ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = bytes.len, .scratch_path = path, .request_number = 1, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 4 }, .expected_kind = .message });
-        try std.testing.expectError(error.InvalidMessage, ingress.feed(bytes));
-        ingress.deinit();
-        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-        try std.testing.expect(retained == null);
-    }
-}
-
 test "observation needs no scratch at a full budget" {
     const json = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"observe_command\",\"store\":\"store\",\"key\":\"key\"}";
     var used = std.atomic.Value(u64).init(3);

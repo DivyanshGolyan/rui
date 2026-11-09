@@ -16,10 +16,10 @@ import sys
 import tempfile
 import threading
 
-import human_cli_integration as cli
+import human_cli_fixture as cli
 import host_process
 from host_process import start_ready_process, stop_process
-from saved_request_resources import sample
+from proc_sample import sample
 import os_semantics
 
 

@@ -40,12 +40,6 @@ def untimed(row):
 # the conversation's last line, "• Waiting · 12s",
 # "! Rate limited · retry 2 in 18s", "Stopping…".
 LIVE_LINE = re.compile(r"^(?:[•!?] .+ · (?:\d|retry )|Stopping…)", re.M)
-# A waiting Action's input row while its choice is offered, and the key
-# that decides it: Enter confirms the highlighted option, Allow once at first.
-CHOICE = "› Allow once"
-ALLOW = b"\r"
-# The choice's input row at any width, picked or not.
-CHOICE_ROW = re.compile(r"^ *(?:› )?(?:Allow once|Allow|A) +(?:› )?(?:Deny|D) *$", re.M)
 # What the line under a draft beside an Action says once Enter there denies
 # the Action and sends the draft as the reason.
 REASON = "enter denies the call and sends this"
@@ -55,15 +49,6 @@ REASON_NOT_READY = "! Not ready; nothing denied · " + REASON
 
 def reason_shown(shown):
     return REASON in shown
-
-
-def pick_deny(master, ready):
-    """Move a ready choice to Deny; return once a delivered frame shows it ready.
-
-    An arrow spends readiness, so an Enter sent with it would decide nothing.
-    """
-    os.write(master, b"\x1b[C")
-    return read_terminal(master, "› Deny") + action_ready(ready, master)
 
 
 def send_reason(master, ready, description):
@@ -83,20 +68,10 @@ def time_limit(milliseconds):
 
 
 from terminal_process import open_pty, read_output, spawn, terminal_process, unanswered
-import terminal_process as terminal_process_module
 import model_fixture as fixture
-import codex_integration as codex_fixture
+import codex_fixture
 import os_semantics
-
-
-def run(home, *args, success=True, environment=None, input=None):
-    env = {**os.environ, "HOME": str(home), **(environment or {})}
-    result = subprocess.run([str(fixture.RUI), *map(str, args)], env=env, capture_output=True, text=True, timeout=20, input=input)
-    if success:
-        assert result.returncode == 0, (args, result.stdout, result.stderr)
-    else:
-        assert result.returncode != 0, (args, result.stdout, result.stderr)
-    return result.stdout
+from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, _captures, action_ready, admit, await_screen, command_frame, composer_ready, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
 
 
 def terminal_safe_json(text):
@@ -146,22 +121,6 @@ def status_row(page, label, following):
     `label`'s row up to the next row, `following`."""
     flat = " ".join(page.split())
     return flat.split(f" {label} ", 1)[1].split(f" {following} ", 1)[0]
-
-
-CAPTURE_NOTICE = re.compile(r"request: (\S+) \(wait: rui request wait \1; if unconfirmed: rui request recover \1\)\n")
-
-
-def admit(home, *args, expect=0, environment=None, input=None, cwd=None):
-    """Generated capture: stderr names the pre-send handle; stdout is the saved answer."""
-    env = {**os.environ, "HOME": str(home), **(environment or {})}
-    result = subprocess.run([str(fixture.RUI), *map(str, args)], env=env, capture_output=True,
-        text=True, timeout=20, input=input, cwd=cwd)
-    assert result.returncode == expect, (args, result.stdout, result.stderr)
-    notice = CAPTURE_NOTICE.match(result.stderr)
-    assert notice, (args, result.stderr)
-    admission = json.loads(result.stdout)
-    assert admission["context"]["key"] == notice.group(1), (admission, result.stderr)
-    return {"request": notice.group(1), "admission": admission, "stderr": result.stderr}
 
 
 def invoke(home, *args, expect=0, environment=None, input=None):
@@ -351,7 +310,7 @@ def help_case():
 
 def compiled_model_cases():
     """One release list owns help; any ID with valid syntax is admitted, an unlisted one with default limits."""
-    import host_launch_integration as launch
+    import host_launch_fixture as launch
     # The generated shipped snapshot is the source, not a second hand list.
     models = tuple(model for model, row in CATALOG.items() if row.openai_listed)
     windows = {model: CATALOG[model].context_window for model in models}
@@ -463,7 +422,7 @@ def compiled_model_cases():
 
 
 def compaction_settings_case(home, store, workspace, socket_path):
-    from control_integration import raw_request
+    from control_fixture import raw_request
 
     # Fresh defaults and named resets must both fit the smaller catalog window.
     small = create_session(home, "--store", store, "--workspace", workspace,
@@ -649,44 +608,8 @@ def read_pipe_output(stream, *, count=None, timeout=10):
         assert len(output) < limit, ("pipe record exceeds 16 KiB", bytes(output))
 
 
-_captures = terminal_process_module.CAPTURES
-
-
-def terminal_capture(master, *, fresh=False):
-    """The committed-screen observer for one PTY master, at its current size."""
-    from terminal_screen import ScreenCapture
-    try:
-        rows, columns = struct.unpack("HHHH", fcntl.ioctl(master, termios.TIOCGWINSZ, b"\0" * 8))[:2]
-    except OSError:
-        rows, columns = 24, 80  # Self-test pipes and sockets have no geometry.
-    rows, columns = rows or 24, columns or 80
-    capture = None if fresh else _captures.get(master)
-    if capture is None:
-        capture = _captures[master] = ScreenCapture(columns, rows)
-    elif (capture.screen.columns, capture.screen.lines) != (columns, rows):
-        capture.resize(columns, rows)
-    return capture
-
-
 def forget_terminal(master):
     _captures.pop(master, None)
-
-
-def draining(master, observe, feed=None):
-    """`observe`, after reading what the terminal holds: a fixture waiting on
-    the Host still drains the PTY as a terminal does. Darwin's holds 1 KiB, so
-    a screen that stopped being read blocks mid-frame and runs no new work.
-    `feed` takes the bytes; by default the master's registered capture."""
-    feed = feed or terminal_capture(master).feed
-
-    def drained():
-        while select.select([master], [], [], 0)[0]:
-            chunk = read_output(master, 65536)
-            if not chunk:
-                break
-            feed(chunk)
-        return observe()
-    return drained
 
 
 def discard_terminal(master):
@@ -702,43 +625,6 @@ def discard_terminal(master):
         discarded += len(chunk)
         assert discarded < 1024 * 1024, "unbounded output from a reaped writer"
     forget_terminal(master)
-
-
-def current_screen(master):
-    """The latest committed frame: what the user sees now."""
-    return terminal_capture(master).completed
-
-
-def shown(text, screen):
-    from terminal_screen import shown as wrapped
-    return wrapped(text, screen)
-
-
-def command_frame(master, command, accept, timeout=15, *, end="\n"):
-    """Send `command` and `end`; return the first committed frame after it
-    that `accept`s with the composer ready in that same frame. Page identity,
-    readiness and any absence check then describe one shown frame."""
-    capture = terminal_capture(master)
-    found = []
-
-    def observe(screen, x, y):
-        if not found and accept(screen) and composer_ready(screen, x, y):
-            found.append(screen)
-
-    capture.listener = observe
-    try:
-        os.write(master, (command + end).encode())
-        deadline = time.monotonic() + timeout
-        while not found:
-            remaining = deadline - time.monotonic()
-            assert remaining > 0 and select.select([master], [], [], remaining)[0], (
-                "command result frame", command, capture.completed)
-            chunk = read_output(master, 65536)
-            assert chunk, ("terminal closed before command result", command)
-            capture.feed(chunk)
-    finally:
-        capture.listener = None
-    return found[0]
 
 
 def status_frame(master, session, command="/status", timeout=15):
@@ -760,62 +646,6 @@ def configured_frame(master, command):
     if frame.startswith("Browsing"):
         command_frame(master, "\x1b", lambda frame: not frame.startswith("Browsing"), end="")
     return frame
-
-
-def composer_ready(screen, x, y):
-    """Input is accepted at the composer: the cursor sits on its prompt row."""
-    if "Opening…" in screen:
-        return False
-    line = screen.split("\n")[y] if y < len(screen.split("\n")) else ""
-    return x >= 2 and (line == "›" or line.startswith("› ") or line == ">" or line.startswith("> "))
-
-
-def overview_composer(screen, x, y):
-    """Input is accepted at the overview's composer: the cursor is on its row."""
-    lines = screen.split("\n")
-    line = lines[y] if y < len(lines) else ""
-    return x >= 2 and any(line == " " + mark or line.startswith(" " + mark + " ") for mark in ("›", ">"))
-
-
-def keyed_frame(master, keys, accept, timeout=15):
-    """Write `keys`; return the first committed frame after them that
-    `accept`s, given the frame and its cursor. With no keys, the frame shown
-    now counts."""
-    capture = terminal_capture(master)
-    found = []
-
-    def observe(screen, x, y):
-        if not found and accept(screen, x, y):
-            found.append(screen)
-
-    capture.listener = observe
-    try:
-        if keys:
-            os.write(master, keys)
-        elif accept(capture.completed, capture.screen.cursor.x, capture.screen.cursor.y):
-            return capture.completed
-        deadline = time.monotonic() + timeout
-        while not found:
-            remaining = deadline - time.monotonic()
-            assert remaining > 0 and select.select([master], [], [], remaining)[0], (
-                "keyed frame", keys, capture.completed)
-            chunk = read_output(master, 65536)
-            assert chunk, ("terminal closed before keyed frame", keys)
-            capture.feed(chunk)
-    finally:
-        capture.listener = None
-    return found[0]
-
-
-def overview_title(frame):
-    """The overview's title row: रुई rui, or rui alone without Unicode."""
-    return "rui" in frame.split("\n", 1)[0].split()[:2]
-
-
-def overview_frame(master, accept, keys=b"", timeout=15):
-    """The first overview frame after `keys` that `accept`s, with its
-    composer taking input."""
-    return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_composer(screen, x, y), timeout)
 
 
 def leave_overview(master, timeout=15):
@@ -842,82 +672,6 @@ def overview_store(notice):
     line = notice.split("Overview: rui --store ", 1)[1].splitlines()[0]
     assert line.startswith("$'") and line.endswith("'") and "\\" not in line, line
     return line[2:-1]
-
-
-def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, initial=b""):
-    """Wait until a committed frame shows `marker`; return the frames shown.
-
-    The renderer replaces whole frames, so each committed frame is checked as
-    it arrives, not only the last. `composer` also requires a later (or the
-    same) frame whose cursor is at the composer: the reply has been drawn and
-    input is accepted again. The "› " marker alone waits for that composer.
-    The result joins distinct frames seen during this wait, oldest first,
-    bounded to the newest MiB; use current_screen for what is shown now.
-    """
-    del preserve_colour, redraw  # Frames are cells, not a byte transcript.
-    capture = terminal_capture(master)
-    limit = 1024 * 1024
-    assert len(marker.encode()) < limit, "terminal marker exceeds retained output bound"
-    frames = []
-    state = {"marker": marker == "› ", "ready": False, "retained": 0}
-    received = 0
-    raw = bytearray()
-
-    def observe(screen, x, y):
-        if not frames or frames[-1] != screen:
-            frames.append(screen)
-            state["retained"] += len(screen.encode()) + 1
-            while state["retained"] >= limit and len(frames) > 1:
-                state["retained"] -= len(frames.pop(0).encode()) + 1
-        if not state["marker"] and marker in screen:
-            state["marker"] = True
-        if state["marker"] and composer_ready(screen, x, y):
-            state["ready"] = True
-
-    def reached():
-        return state["marker"] and (state["ready"] or (not composer and marker != "› "))
-
-    capture.listener = observe
-    plain_start = capture.plain_total
-
-    def plain():
-        return capture.plain_since(plain_start)
-
-    def reached_plain():
-        if marker != "› " and not composer and marker in plain():
-            state["marker"] = True
-        return reached()
-
-    try:
-        if initial:
-            capture.feed(initial)
-        deadline = time.monotonic() + timeout
-        while not reached_plain():
-            remaining = deadline - time.monotonic()
-            assert remaining > 0, (marker, capture.completed, plain())
-            assert select.select([master], [], [], remaining)[0], (marker, capture.completed, plain())
-            try:
-                chunk = read_output(master, 65536)
-            except OSError as error:
-                if error.errno != errno.EIO:
-                    raise
-                chunk = b""
-            assert chunk, ("terminal closed before marker", marker, capture.completed, plain())
-            received += len(chunk)
-            raw.extend(chunk[-limit:])
-            del raw[:-limit]
-            # The response budget excludes observer work on long combining
-            # cells; this is not a native wall-response performance claim.
-            before = time.monotonic()
-            capture.feed(chunk)
-            deadline += time.monotonic() - before
-    except AssertionError as error:
-        error.terminal_metadata = {"received_bytes": received, "frames": len(frames),
-            "marker_bytes": len(marker.encode()), "composer": composer, "tail": bytes(raw[-4096:])}
-        raise
-    finally:
-        capture.listener = None
-    return "\n".join(frames + ([plain()] if plain() else []))
 
 
 def permanent_tool_count(screen, heading):
@@ -1192,91 +946,10 @@ def shown_bash_command(master):
     return command
 
 
-def terminal_exit(caller, master, timeout=5):
-    """Own both output streams until exit, including a late rendering prefix."""
-    errors_fd = caller.stderr.fileno()
-    streams = {master: bytearray(), errors_fd: bytearray()}
-    pending = set(streams)
-    deadline = time.monotonic() + timeout
-    while True:
-        exited = caller.poll() is not None
-        remaining = deadline - time.monotonic()
-        assert remaining > 0, ("terminal exit timeout", bytes(streams[master]), bytes(streams[errors_fd]))
-        ready = select.select(list(pending), [], [], 0 if exited else min(remaining, 0.1))[0]
-        if exited and not ready:
-            caller.stderr.close()
-            return bytes(streams[master]), bytes(streams[errors_fd])
-        for fd in ready:
-            try:
-                chunk = read_output(fd, 65536) if fd == master else os.read(fd, 65536)
-            except OSError as error:
-                if fd != master or error.errno != errno.EIO:
-                    raise
-                chunk = b""
-            if chunk:
-                streams[fd].extend(chunk)
-                assert sum(map(len, streams.values())) < 1024 * 1024, "unexpected unbounded terminal output"
-            else:
-                pending.remove(fd)
-
-
-def terminal_gate(caller, master, reached, context, timeout=10):
-    """Own startup output until the public metadata gate, not a silent wait."""
-    capture = terminal_capture(master)
-    errors_fd = caller.stderr.fileno()
-    streams = {master: bytearray(), errors_fd: bytearray()}
-    pending = set(streams)
-    deadline = time.monotonic() + timeout
-    while not reached.is_set():
-        remaining = max(0, deadline - time.monotonic())
-        for fd in select.select(list(pending), [], [], min(0.1, remaining))[0]:
-            try:
-                data = read_output(fd, 65536) if fd == master else os.read(fd, 65536)
-            except OSError as error:
-                if fd != master or error.errno != errno.EIO:
-                    raise
-                data = b""
-            if data:
-                streams[fd].extend(data)
-                if fd == master:
-                    capture.feed(data)  # Later screen oracles continue from here.
-                assert sum(map(len, streams.values())) < 1024 * 1024, "unexpected unbounded startup output"
-            else:
-                pending.remove(fd)
-        assert reached.is_set() or (caller.poll() is None and time.monotonic() < deadline), (
-            "terminal metadata gate not reached", context, caller.poll(),
-            bytes(streams[master]), bytes(streams[errors_fd]))
-    assert not streams[errors_fd], (context, bytes(streams[errors_fd]))
-    return bytes(streams[master])
-
-
 # Palette index 12 as pyte reports SGR 94 or 38;5;12.
 USER_COLOUR = {"brightblue", "5c5cff"}
 # Palette index 3 (attention) as SGR 33 or 38;5;3.
 ATTENTION_COLOUR = {"brown", "cdcd00"}
-
-
-def next_frame(master, timeout=3):
-    """Wait for the next committed frame; return it, or None if none came.
-
-    An unchanged frame writes nothing, so a quiet wait is an answer here.
-    """
-    capture = terminal_capture(master)
-    generation = capture.generation
-    deadline = time.monotonic() + timeout
-    while capture.generation == generation or capture.synchronized:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 or not select.select([master], [], [], remaining)[0]:
-            return None
-        try:
-            chunk = read_output(master, 65536)
-        except OSError as error:
-            if error.errno != errno.EIO:
-                raise
-            chunk = b""
-        assert chunk, ("terminal closed before frame", capture.completed)
-        capture.feed(chunk)
-    return capture.completed
 
 
 def scroll_until(master, key, marker, *, presses=40):
@@ -1294,58 +967,6 @@ def scroll_until(master, key, marker, *, presses=40):
             seen.append(frame)
     assert marker in current_screen(master), ("scroll did not reach marker", key, marker, current_screen(master))
     return "\n".join(seen)
-
-
-def await_screen(master, marker, *, composer=False, timeout=15):
-    """The current frame if it already shows `marker` (at the composer when
-    asked), else the frames until one does. A frame already shown is not
-    redrawn, so a wait must not depend on seeing it again."""
-    capture = terminal_capture(master)
-    shown = capture.completed
-    if marker in shown and (not composer or composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y)):
-        return shown
-    return read_terminal(master, marker, timeout, composer=composer)
-
-
-def return_to_live(master, key=b"\x1b", timeout=15, *, input_fd=None):
-    """Leave browsing or an inspection; wait until live output is drawn.
-
-    A lone Esc completes only after the decoder's deadline, so the next
-    bytes must wait for this frame or they would join it as Alt-<key>.
-    """
-    capture = terminal_capture(master)
-    shown = capture.completed
-    if not shown.startswith("Browsing") and composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y):
-        return shown  # Already live: Esc would draw nothing to wait for.
-    os.write(master if input_fd is None else input_fd, key)
-    deadline = time.monotonic() + timeout
-    while True:
-        shown = capture.completed
-        if (not shown.startswith("Browsing")
-                and composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y)):
-            return shown
-        remaining = deadline - time.monotonic()
-        assert remaining > 0 and next_frame(master, remaining) is not None, ("did not return to live", shown)
-
-
-# The clock that ends a live line ("• Waiting · 12s") redraws every second
-# while work runs; it is not a change of what the screen says.
-LIVE_CLOCK = re.compile(r"^([•!?] .+ · )(?:retry \d+ in )?\d+[hms](?: \d+[ms])?$", re.M)
-
-
-def settle_screen(master, quiet=1.0, timeout=15):
-    """Drain frames until none but a live clock's tick arrives for `quiet`
-    seconds; return the screen. A ticking clock never goes quiet for a full
-    second, so ticks alone must not keep the screen unsettled."""
-    deadline = time.monotonic() + timeout
-    still = LIVE_CLOCK.sub(r"\1", current_screen(master))
-    quiet_until = time.monotonic() + quiet
-    while (frame := next_frame(master, max(0, quiet_until - time.monotonic()))) is not None:
-        if LIVE_CLOCK.sub(r"\1", frame) != still:
-            still = LIVE_CLOCK.sub(r"\1", frame)
-            quiet_until = time.monotonic() + quiet
-        assert time.monotonic() < deadline, ("screen never settled", current_screen(master))
-    return current_screen(master)
 
 
 def raw_export(master, screen):
@@ -1371,19 +992,6 @@ def raw_export(master, screen):
 def drawn_style(master, text, offset=0):
     """Cell style where the latest committed frame draws `text`."""
     return terminal_capture(master).style(text, offset)
-
-
-def terminal_step(master, command, marker, *, composer=False):
-    """Send one command and wait for its response boundary.
-
-    Callers choose the response marker. `composer` returns the one fresh
-    committed frame that shows the marker with input accepted again, so every
-    check on the result describes that shown frame.
-    """
-    if composer:
-        return command_frame(master, command, lambda frame: marker in frame)
-    os.write(master, (command + "\n").encode())
-    return read_terminal(master, marker)
 
 
 def overview_cases():
@@ -1702,7 +1310,7 @@ def notification_cases():
 
 def command_entry_cases():
     """Familiar entry routes use the same captured intent and conversation."""
-    import canonical_failure_integration as canonical
+    import canonical_fixture as canonical
     state = screen_fixture_root("rui-command-entry.")
     home = state / "home"
     (home / ".config/rui").mkdir(parents=True, mode=0o700)
@@ -2103,7 +1711,7 @@ def scroll_return_case():
 
 def persistent_opening_case():
     """Frozen replay uses real content once and assistant-only formatting."""
-    import canonical_failure_integration as canonical
+    import canonical_fixture as canonical
     state = screen_fixture_root("rui-persistent-opening.")
     home = state / "home"
     home.mkdir(mode=0o700)
@@ -2422,7 +2030,7 @@ def persistent_opening_case():
 
 def persistent_pending_case():
     """Opening shows the queue beyond its newest Activity page as one row."""
-    import canonical_failure_integration as canonical
+    import canonical_fixture as canonical
     state = screen_fixture_root("rui-persistent-pending.")
     home = state / "home"
     home.mkdir(mode=0o700)
@@ -2490,7 +2098,7 @@ def persistent_pending_case():
 
 def persistent_input_cases():
     """Real captured Admission, a next draft, original replay and input recovery."""
-    import canonical_failure_integration as canonical
+    import canonical_fixture as canonical
     state = screen_fixture_root("rui-persistent-input.")
     home = state / "home"
     home.mkdir(mode=0o700)
@@ -2825,7 +2433,7 @@ def persistent_copy_case():
 def persistent_permission_case(decision="deny-action", exit_code=0, signal_failure=False,
                                lost_reply=False, fragmented_paste=False, stale_target=False, timed_out=False, stdin=None):
     """Fresh inline choices retain draft custody and exact canonical targets."""
-    import canonical_failure_integration as canonical
+    import canonical_fixture as canonical
     state = screen_fixture_root("rui-persistent-permission.")
     home = state / "home"
     home.mkdir(mode=0o700)
@@ -3594,73 +3202,6 @@ def store_selection_cases(state, workspace, valid_store):
                         lambda: os.close(slave), stop_created_host)
 
 
-def drop_spent_readiness(descriptor):
-    """Discard notifications already queued: input sent next spends every
-    offer made so far. A redraw while the choice waits (a Host update the
-    screen does not show) offers that frame too, so a queued byte may be
-    from an offer the fixture never waited for; left there, the next wait
-    would take it as readiness for input the caller has not seen handled."""
-    while select.select([descriptor], [], [], 0)[0]:
-        assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
-
-
-def action_ready(descriptor, master, timeout=15, *, return_to_action=True, shows=None, send=None):
-    """Supply normal terminal credit until the actual fresh-input boundary.
-
-    Read exactly one notification, never a future choice's byte. Return the
-    distinct committed frames shown meanwhile. A selected inspection keeps
-    the Action behind it; like a user, return to it once with Ctrl-G unless
-    the caller is checking that paused state itself. Deliberately
-    withheld-credit controls must select the pipe directly. `shows` names
-    the offered frame awaited when it is not the choice, such as a reason's.
-    `send` is input written first, after dropping offers it spends, so the
-    notification read is one made after that input was handled.
-    """
-    if send is not None:
-        drop_spent_readiness(descriptor)
-        os.write(master, send)
-    capture = terminal_capture(master)
-    deadline = time.monotonic() + timeout
-    frames = []
-    returned = [not return_to_action]
-
-    def observe(screen, x, y):
-        if not frames or frames[-1] != screen:
-            frames.append(screen)
-            while sum(len(frame) for frame in frames) >= 1024 * 1024 and len(frames) > 1:
-                frames.pop(0)
-
-    capture.listener = observe
-    try:
-        while True:
-            if not returned[0] and "Approval paused · Esc returns to Action" in capture.completed:
-                returned[0] = True
-                os.write(master, b"\x07")
-            remaining = deadline - time.monotonic()
-            assert remaining > 0, ("Action input flush did not finish", capture.completed)
-            ready = select.select([descriptor, master], [], [], remaining)[0]
-            assert ready, ("Action input flush did not finish", capture.completed)
-            if master in ready:
-                capture.feed(read_output(master, 65536))
-            if descriptor in ready:
-                assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
-                # The notification follows the final write/flush. Collect its
-                # remaining queued bytes too, without waiting for another prompt.
-                while select.select([master], [], [], 0)[0]:
-                    assert time.monotonic() < deadline, "Action transcript exceeded readiness deadline"
-                    chunk = read_output(master, 65536)
-                    assert chunk, "Action terminal closed at readiness"
-                    capture.feed(chunk)
-                # A notification from before a later invalidation (another
-                # page selected, or approval readiness redrawn) is stale:
-                # readiness is the visible Action with its choice.
-                shown = capture.completed
-                if shows(shown) if shows else "Approval paused" not in shown and CHOICE_ROW.search(shown):
-                    return "\n".join(frames)
-    finally:
-        capture.listener = None
-
-
 def provider_prompt(master, ready, command=None):
     # Initial prompts use a fresh pipe. Later prompts must not consume an
     # unread notification from an earlier choice as readiness for this one.
@@ -3876,7 +3417,7 @@ int fsync(int fd) {
 
 def silent_read_edit_cases():
     """Silent observation must not hide accepted draft edits with ECHO off."""
-    import canonical_failure_integration as canonical
+    import canonical_fixture as canonical
     state = screen_fixture_root("rui-silent-edit.")
     home, store = state / "home", state / "store"
     home.mkdir(mode=0o700)
@@ -3935,7 +3476,7 @@ def silent_read_edit_cases():
 
 def opaque_session_commands_case():
     """Reject old identities and execute printed commands with the exact allocated ID."""
-    from control_integration import raw_request
+    from control_fixture import raw_request
     state = screen_fixture_root("rui-opaque-session.")
     home = state / "home"
     home.mkdir()
@@ -4090,7 +3631,7 @@ def opaque_session_commands_case():
 
 
 def long_input_case(home, store, workspace, endpoint, host):
-    import canonical_failure_integration as canonical
+    import canonical_fixture as canonical
     endpoint.responses.append(fixture.sse_answer("long-answer", "long-reason", "long-message", "long input intact")[0])
     long_session = create_session(home, "--store", store,
         "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
@@ -4210,7 +3751,7 @@ def long_input_case(home, store, workspace, endpoint, host):
 
 def incomplete_input_case(home, store, session, endpoint, host):
     """Retain terminal custody through delayed collection and restoration."""
-    import canonical_failure_integration as canonical
+    import canonical_fixture as canonical
     callers = []
     before = len(endpoint.requests)
     records = home / ".config/rui/requests"
@@ -4299,7 +3840,7 @@ def renderer_cases():
     """Full-screen geometry, input, consent and restoration through screen cells."""
     from contextlib import contextmanager, ExitStack
     from terminal_screen import ScreenCapture
-    import canonical_failure_integration as canonical
+    import canonical_fixture as canonical
     import resource
 
     listed_call_readiness_cases()
@@ -4501,7 +4042,7 @@ def renderer_cases():
             assert caller.poll() is not None, "case did not retire its renderer"
             actual, expected = termios.tcgetattr(slave), list(original)
             assert os_semantics.user_termios(actual) == os_semantics.user_termios(expected), ("renderer termios restoration", expected, actual)
-            from terminal_restoration_integration import assert_file_flags
+            from terminal_restoration_fixture import assert_file_flags
             assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL), original_flags)
         finally:
             if sys.exception() is not None:
@@ -6316,8 +5857,9 @@ def provider_line_cases():
 
 
 def main(selected="all"):
-    import canonical_failure_integration
-    import terminal_restoration_integration
+    import canonical_failure_cases
+    import canonical_fixture
+    import terminal_restoration_cases
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
     assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "persistent-opening", "incomplete-input", "session-ids", "empty-answers", "copy", "notifications", "command-entry", "provider-lines"), selected
@@ -6389,8 +5931,8 @@ def main(selected="all"):
     if selected == "persistent-permission":
         return
     if selected == "all" and not split_callers:
-        terminal_restoration_integration.main()
-        canonical_failure_integration.main()
+        terminal_restoration_cases.main()
+        canonical_failure_cases.main()
     if selected == "caller-core":
         selected = "all"
     state = screen_fixture_root("rui-human-cli.")
@@ -7829,7 +7371,7 @@ def main(selected="all"):
                 proxy.rewrite = hold_observation
                 return response
 
-            proxy = canonical_failure_integration.ReplyProxy(host, "/v1/message", after_admission)
+            proxy = canonical_fixture.ReplyProxy(host, "/v1/message", after_admission)
             os.write(master, b"observe after Host loss\n")
             terminal_gate(entered, master, observation_held, "accepted Message before activity loss", timeout=8)
             after = set(json.loads(run(home, "request", "list")))

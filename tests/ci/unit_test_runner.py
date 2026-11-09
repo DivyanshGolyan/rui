@@ -32,6 +32,31 @@ fn unitTests() []const std.builtin.TestFn {
 '''
 
 
+def generate_filtered(source):
+    # A -Dtest-filter that names no test still compiles the anonymous discovery
+    # tests, so the run passes having checked nothing. Refuse that run.
+    needle = "builtin.test_functions"
+    if needle not in source:
+        raise ValueError("Zig's test runner changed: review filtered test runs")
+    return source.replace(needle, "filteredTests()").rstrip() + r'''
+
+fn filteredTests() []const std.builtin.TestFn {
+    const all = builtin.test_functions;
+    for (all) |test_fn| {
+        // Named tests are `module.test.name` or `module.decltest.name`;
+        // anonymous discovery tests are `module.test_N`.
+        if (std.mem.indexOf(u8, test_fn.name, ".test.") != null or
+            std.mem.indexOf(u8, test_fn.name, ".decltest.") != null) return all;
+    }
+    std.debug.print("error: -Dtest-filter matched no named test in this step. Check the name and that this " ++
+        "step's root imports the test's file; for check, filter the one step (test or test-logic) that owns it.\n", .{});
+    std.process.exit(1);
+}
+'''
+
+
 if __name__ == "__main__":
-    source, output = map(Path, sys.argv[1:])
-    output.write_text(generate(source.read_text()))
+    arguments = sys.argv[1:]
+    filtered = arguments[:1] == ["--filtered"]
+    source, output = map(Path, arguments[1:] if filtered else arguments)
+    output.write_text((generate_filtered if filtered else generate)(source.read_text()))

@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 
-import codex_integration as codex
+import codex_fixture as codex
 import host_process
 
 

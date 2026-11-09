@@ -51,6 +51,14 @@ pub fn build(b: *std.Build) void {
         generate.addFileArg(std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig"));
         break :runner generate.addOutputFileArg("unit_test_runner.zig");
     } else null;
+    // A filter that names no test in a unit step fails instead of passing empty.
+    const filtered_runner: ?std.Build.Step.Compile.TestRunner = if (test_filters.len != 0) runner: {
+        const generate = b.addSystemCommand(&.{ "python3", "-B" });
+        generate.addFileArg(b.path("tests/ci/unit_test_runner.py"));
+        generate.addArg("--filtered");
+        generate.addFileArg(std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig"));
+        break :runner .{ .path = generate.addOutputFileArg("filtered_test_runner.zig"), .mode = .server };
+    } else null;
     var run_tests: *std.Build.Step.Run = undefined;
     for (tests, 0..) |*entry, index| {
         const root = unit_partition.roots[index];
@@ -69,7 +77,7 @@ pub fn build(b: *std.Build) void {
                 .strip = if (test_filters.len == 0 and target.result.os.tag == .macos) true else null,
             }),
             .filters = if (test_filters.len != 0) test_filters else unit_filters[index],
-            .test_runner = if (unit_runner) |path| .{ .path = path, .mode = .server } else null,
+            .test_runner = if (unit_runner) |path| .{ .path = path, .mode = .server } else filtered_runner,
         });
         entry.* = compile;
         if (unit_runner != null) {
@@ -114,6 +122,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSafe,
         }),
         .filters = if (test_filters.len != 0) test_filters else &.{"Host processing wait does not consume response transfer inactivity"},
+        .test_runner = filtered_runner,
     });
     configureSqlite(b, deadline_witness);
     configureYaml(b, deadline_witness);
@@ -136,6 +145,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSafe,
         }),
         .filters = test_filters,
+        .test_runner = filtered_runner,
     });
     configureTerminalEditor(b, logic_tests);
     const run_logic_tests = ci.run(logic_tests);

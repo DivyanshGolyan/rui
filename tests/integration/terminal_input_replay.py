@@ -88,7 +88,7 @@ def replay(actor, name, steps, *, error=None):
             assert output.count(control) == 1, (name, "terminal mode lifecycle", control, bytes(output))
         actual, expected_attributes = termios.tcgetattr(slave), list(original)
         assert os_semantics.user_termios(actual) == os_semantics.user_termios(expected_attributes), (name, "termios restoration", expected_attributes, actual)
-        from terminal_restoration_integration import assert_file_flags
+        from terminal_restoration_fixture import assert_file_flags
         assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL), flags)
         print(bytes(records).decode(), end="")
         print(f"input replay: {name}: decoded events, exact draft/caret and restoration passed", flush=True)

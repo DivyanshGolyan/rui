@@ -6,7 +6,6 @@ const AnswerRenderer = @import("AnswerRenderer.zig");
 const Overview = @import("Overview.zig");
 const session_reads = @import("session_reads.zig");
 const overview_view = @import("overview_view.zig");
-const TestObservation = @import("TestObservation.zig");
 const caller_error = @import("caller_error.zig");
 const caller_exit = @import("caller_exit.zig");
 const caller_rejection = @import("caller_rejection.zig");
@@ -38,7 +37,6 @@ const slash_commands = @import("slash_commands.zig").conversation;
 const session_view = @import("session_view.zig");
 const provider_selection = @import("provider_selection.zig");
 const protocol = @import("protocol.zig");
-const retry_policy = @import("retry_policy.zig");
 const server = @import("server.zig");
 const signal_stack = @import("signal_stack.zig");
 const pages = @import("os/pages.zig");
@@ -1729,87 +1727,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const bash_timeout_ms = try parsed.number(u64, "bash-timeout-ms") orelse server.default_bash_timeout_ms;
     if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
     const active_capacity = (if (launched) |frame| frame.active_capacity else try parsed.number(usize, "active-capacity")) orelse product_defaults.active_capacity;
-    var limits: server.Limits = .{};
-    var hooks: server.Hooks = .{};
-    if (try parsed.number(u64, "test-bash-scratch-limit-bytes")) |limit| limits.bash_scratch_limit_bytes = limit;
-    if (try parsed.number(usize, "test-retention-entry-capacity")) |capacity| {
-        if (capacity < 2 or capacity > server.default_retention_entry_capacity) return error.InvalidRetentionEntryCapacity;
-        limits.retention_entry_capacity = capacity;
-    }
-    if (parsed.has("test-retention-removal-failure")) hooks.retention_removal = true;
-    for (parsed.all("fault")) |fault| try hooks.inject(fault);
-    if (try parsed.number(i64, "test-provider-inactivity-seconds")) |seconds| {
-        if (seconds < 1) return error.InvalidProviderInactivity;
-        _ = std.math.mul(i64, seconds, std.time.ns_per_s) catch return error.InvalidProviderInactivity;
-        limits.provider_inactivity_seconds = seconds;
-    }
-    if (parsed.get("test-retry-waits-ms")) |waits| limits.retry_waits_ms = try parseRetryWaits(waits);
-    if (try parsed.number(i64, "test-before-launch-delay-ms")) |delay| {
-        if (delay < 0 or delay > 10_000) return error.InvalidLaunchDelay;
-        hooks.pauses.getPtr(.action_launch).delay_ms = delay;
-        hooks.pauses.getPtr(.model_launch).delay_ms = delay;
-    }
-    if (try parsed.number(i64, "test-before-result-delay-ms")) |delay| {
-        if (delay < 0 or delay > 10_000) return error.InvalidResultDelay;
-        hooks.pauses.getPtr(.action_result).delay_ms = delay;
-        hooks.pauses.getPtr(.model_result).delay_ms = delay;
-    }
-    hooks.pauses.getPtr(.model_result).gate_path = parsed.get("test-model-result-gate-path");
-    // The shared integration boundary sets an empty URL for every child,
-    // including detached Hosts. Only catalog cases explicitly opt in.
-    hooks.models_dev_url = parsed.get("test-models-dev-url") orelse init.environ_map.get("RUI_TEST_MODELS_DEV_URL");
-    hooks.retry_recovery_gate_path = parsed.get("test-retry-recovery-gate-path");
-    hooks.inspection_reply.gate_path = parsed.get("test-inspection-reply-gate-path");
-    if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| {
-        if (delay < 0 or delay > 60_000) return error.InvalidInspectionReplyDelay;
-        hooks.inspection_reply.delay_ms = delay;
-    }
-    if (try parsed.number(u32, "test-client-send-buffer-bytes")) |bytes| {
-        if (bytes == 0 or bytes > std.math.maxInt(c_int)) return error.InvalidClientSendBuffer;
-        limits.client_send_buffer_bytes = bytes;
-    }
-    if (parsed.has("test-phase-trace")) hooks.phase_trace = true;
-    if (try parsed.number(c_int, "test-observation-fd")) |fd| {
-        hooks.observation_fd = fd;
-        hooks.phase_trace = true;
-    }
-    if (try parsed.number(c_int, "test-observation-state-fd")) |fd| hooks.observation_state_fd = fd;
-    if (parsed.get("test-observation-plan")) |plan| hooks.observation_plan = std.meta.stringToEnum(TestObservation.Plan, plan) orelse
-        return error.InvalidTestObservationPlan;
-    const transition: ?server.Hooks.Transition = if (parsed.get("test-transition")) |name|
-        server.Hooks.fromOptionName(server.Hooks.Transition, name) orelse return error.UnknownTestTransition
-    else
-        null;
-    const transition_gate_path = parsed.get("test-transition-gate-path");
-    hooks.pauses.getPtr(.bash_exit_observed).gate_path = parsed.get("test-bash-observed-exit-gate-path");
-    hooks.pauses.getPtr(.shutdown_signalled).gate_path = parsed.get("test-shutdown-signalled-gate-path");
-    hooks.bash_reclaim_gate_path = parsed.get("test-bash-cleanup-gate-path");
-    const control_gate_keys = parsed.get("test-control-gate-keys");
-    const control_gate_path = parsed.get("test-control-gate-path");
-    if (parsed.has("test-suppress-first-control-hint")) hooks.suppress_first_control_hint = true;
-    if (parsed.has("test-sqlite-diagnostics")) hooks.sqlite_diagnostics = true;
-    if (parsed.has("test-sqlite-cache-spill-off")) limits.sqlite_cache_spill = false;
-    if (try parsed.number(u32, "test-sqlite-cache-kib")) |kib| {
-        if (kib == 0 or kib > 4096) return error.InvalidSqliteCacheSize;
-        limits.sqlite_cache_kib = kib;
-    }
-    if (try parsed.number(u64, "test-request-scratch-limit")) |limit| limits.request_scratch_limit_bytes = limit;
-    if (try parsed.number(usize, "test-request-preparation-byte-allowance")) |allowance| {
-        if (allowance == 0) return error.InvalidRequestPreparationAllowance;
-        limits.request_preparation_byte_allowance = allowance;
-    }
-    if (try parsed.number(usize, "test-request-preparation-item-allowance")) |allowance| {
-        if (allowance == 0) return error.InvalidRequestPreparationAllowance;
-        limits.request_preparation_item_allowance = allowance;
-    }
-    if (try parsed.number(i64, "test-request-preparation-advance-delay-ms")) |delay| {
-        if (delay < 0) return error.InvalidRequestPreparationDelay;
-        hooks.pauses.getPtr(.preparation_advanced).delay_ms = delay;
-    }
-    if ((control_gate_keys == null) != (control_gate_path == null)) return error.IncompleteControlGate;
-    if ((transition == null) != (transition_gate_path == null)) return error.IncompleteTestTransitionGate;
-    if (control_gate_keys) |keys| hooks.control_gate = .{ .keys = keys, .path = control_gate_path.? };
-    if (transition) |value| hooks.transition = .{ .transition = value, .path = transition_gate_path.? };
+    const tuning = try server.Tuning.fromOptions(parsed, init.environ_map.get("RUI_TEST_MODELS_DEV_URL"));
     if (fixture_endpoint != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null)
         return error.FixtureCredentialPathRequired;
     var credential_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1865,8 +1783,8 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         std.heap.c_allocator,
         try selectedStore(init, store_path, &selected_buffer),
         active_capacity,
-        limits,
-        hooks,
+        tuning.limits,
+        tuning.hooks,
         &served,
         bash_path,
         bash_timeout_ms,
@@ -1878,15 +1796,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     ) catch |err| {
         // A launched Host stops when its stdin closes; that is its clean end.
         if (launched != null and err == error.EffectAwareShutdown) return;
-        if (launched) |frame| if (frame.store == .mysql_url) {
-            if (launch_frame.mysqlRefusal(err)) |refusal| launch_frame.writeRefusal(io, refusal);
-        };
-        if (launched != null and err == error.StoreAlreadyOwned)
-            launch_frame.writeRefusal(io, .{ .code = .store_locked, .message = "another Host owns this Store" });
-        if (launched != null and err == error.RuntimeDirectoryInUse)
-            launch_frame.writeRefusal(io, .{ .code = .runtime_dir_unusable, .message = "another Host owns this runtimeDir" });
-        if (launched != null and err == error.RuntimeDirectoryUnusable)
-            launch_frame.writeRefusal(io, .{ .code = .runtime_dir_unusable, .message = "runtimeDir must be a private (mode 0700) directory this Host can lock" });
+        if (launched) |frame| if (launch_frame.startRefusal(frame.store, err)) |refusal| launch_frame.writeRefusal(io, refusal);
         return err;
     };
 }
@@ -1902,19 +1812,6 @@ noinline fn readLaunchFrame(init: std.process.Init) !*launch_frame.Frame {
         return err;
     };
     return frame;
-}
-
-fn parseRetryWaits(value: []const u8) !retry_policy.Waits {
-    var waits: retry_policy.Waits = undefined;
-    var parts = std.mem.splitScalar(u8, value, ',');
-    for (&waits) |*wait| {
-        const part = parts.next() orelse return error.InvalidRetryWaits;
-        wait.* = std.fmt.parseInt(u64, part, 10) catch return error.InvalidRetryWaits;
-    }
-    if (parts.next() != null) return error.InvalidRetryWaits;
-    // The Store rechecks the deadlines against its clock at startup.
-    retry_policy.validateWaits(waits, 0) catch return error.InvalidRetryWaits;
-    return waits;
 }
 
 /// The live Session addresses its own /configure.
@@ -2116,7 +2013,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     if (configuration == null and !protocol.validSessionId(destination)) {
         return error.InvalidSession;
     }
-    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .skill = parsed.get("skill"), .configuration = if (configuration) |value| value.input else null };
+    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = if (configuration) |value| value.input else null };
     // Peer context names a Session in its own Store, so it signs only sends
     // to that Store; an explicit --store naming another Store is a plain
     // caller's send there (#957). Incomplete or malformed context never falls
@@ -2481,12 +2378,6 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
                 if (err == error.CanonicalStoreFailure) return err;
                 stderr.diagnostic("rui: result: {s}\n", .{@tagName(caller_error.of(err))});
             };
-        },
-        .skill => {
-            var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            var captured = try client.captureMessage(init.io, .{ .store = destination, .session = reference, .text_path = "", .skill = argument }, .{ .generated = try requestDirectory(init, &directory_buffer) }).get();
-            var step: ?client.Step = null;
-            try sendCapturedMutation(requests_context, &captured, .{ .map = init.environ_map }, &step, .json);
         },
         .@"reload-skills" => {
             _ = try liveConfigure(init, requests_context, live, &.{"--reload-skills"}, "Usage: /reload-skills\n");
@@ -3542,19 +3433,6 @@ test "session start mutation receipt adds configuration without changing send" {
     reply.target.message.creates_session = false;
     try writeMutationJson(&writer, reply, null);
     try std.testing.expectEqualStrings(context ++ tail, writer.buffered());
-}
-
-test "skills native receipt uses Host captured input rather than the intent placeholder" {
-    const digest = protocol.contentDigest("complete skill body");
-    const wire = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"}},\"input\":{{\"type\":\"text\",\"bytes\":\"19\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"7\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{std.fmt.bytesToHex(digest, .lower)});
-    defer std.testing.allocator.free(wire);
-    const reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "k7m2qx", .{ .message = .{ .bytes = 0, .digest = protocol.contentDigest(""), .invokes_skill = true } });
-    var buffer: [2048]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    try writeMutationJson(&writer, reply, null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"bytes\":\"19\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), &std.fmt.bytesToHex(digest, .lower)) != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"bytes\":\"0\"") == null);
 }
 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {
