@@ -15,6 +15,7 @@ const cores = .{
     .{ "bounded.zig", @import("bounded.zig") },
     .{ "built_in_tool.zig", @import("built_in_tool.zig") },
     .{ "change_ring.zig", @import("change_ring.zig") },
+    .{ "call_classification.zig", @import("call_classification.zig") },
     .{ "caller_exit.zig", @import("caller_exit.zig") },
     .{ "caller_error.zig", @import("caller_error.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
@@ -55,6 +56,7 @@ const cores = .{
     .{ "mcp/reply.zig", @import("mcp/reply.zig") },
     .{ "mcp/shape.zig", @import("mcp/shape.zig") },
     .{ "message_admission.zig", @import("message_admission.zig") },
+    .{ "message_agent_arguments.zig", @import("message_agent_arguments.zig") },
     .{ "message_observation.zig", @import("message_observation.zig") },
     .{ "model_capability.zig", @import("model_capability.zig") },
     .{ "model_catalog.zig", @import("model_catalog.zig") },
@@ -101,6 +103,7 @@ const cores = .{
     .{ "tool_presentation.zig", @import("tool_presentation.zig") },
     .{ "tool_proposal.zig", @import("tool_proposal.zig") },
     .{ "tool_record.zig", @import("tool_record.zig") },
+    .{ "utf8_validation.zig", @import("utf8_validation.zig") },
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_ending.zig", @import("turn_ending.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
@@ -155,7 +158,7 @@ test "functional cores stay within the core boundary" {
 /// Every core as `importer` spells its import: relative within its own
 /// directory, else up to `src/` and down.
 fn importNames(comptime importer: []const u8) [cores.len][]const u8 {
-    @setEvalBranchQuota(20_000);
+    @setEvalBranchQuota(100_000);
     const directory = importer[0..if (std.mem.lastIndexOfScalar(u8, importer, '/')) |slash| slash + 1 else 0];
     var up: []const u8 = "";
     for (0..std.mem.count(u8, directory, "/")) |_| up = up ++ "../";
