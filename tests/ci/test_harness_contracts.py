@@ -395,13 +395,13 @@ SLEEP_ORDERED = {
         (2, "slow-body and stall peers pace bytes against the client's real deadlines"),
     ("tests/integration/model_fixture.py", "SuccessHandler.do_POST"):
         (1, "paces SSE chunks by the scenario's chunk_delay"),
-    ("tests/integration/terminal_restoration_integration.py", "persistent_cases"):
+    ("tests/integration/terminal_restoration_cases.py", "persistent_cases"):
         (1, "sleeps 0.5 s after a command so it can reach blocked output before Ctrl-C"),
-    ("tests/integration/terminal_restoration_integration.py", "renderer_backpressure_case"):
+    ("tests/integration/terminal_restoration_cases.py", "renderer_backpressure_case"):
         (1, "sleeps 0.5 s to show a command stays pending behind blocked output"),
-    ("tests/integration/terminal_restoration_integration.py", "visible_stream_handoff_cases"):
+    ("tests/integration/terminal_restoration_cases.py", "visible_stream_handoff_cases"):
         (2, "sleeps 0.5 s to show a command stays pending behind held output"),
-    ("tests/integration/transport_h2_integration.py", "held_population"):
+    ("tests/integration/transport_h2_cases.py", "held_population"):
         (2, "0.2 s settle, then a 3 s idle-CPU measurement window"),
 }
 

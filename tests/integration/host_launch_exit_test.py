@@ -178,7 +178,7 @@ def child_pty(source, *, close_slave=False):
 
 
 def check_exit_reader(wait_for_exit):
-    from human_cli_integration import action_ready
+    from human_cli_fixture import action_ready
     check_action_ready(action_ready)
     owner = sys.modules[wait_for_exit.__module__]
     # Exercise both platform EOF forms independently of this machine and

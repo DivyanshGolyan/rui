@@ -2,7 +2,6 @@
 """Native client/Host observation without a CLI status command or SQLite access."""
 
 import fcntl
-import hashlib
 import http.server
 import json
 import os
@@ -10,7 +9,6 @@ import pathlib
 import re
 import socket
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -18,9 +16,9 @@ import time
 import host_process
 from host_process import HeldReplies, HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, is_peer_disconnect, start_ready_process, stop_process, wait_for
 import os_semantics
+from host_status_fixture import ACTOR, RUI, complete_response, socket_path, status
 
 
-RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
 PUBLISH = pathlib.Path(__file__).resolve().parents[2] / "release/publish.sh"
 
 
@@ -30,12 +28,6 @@ def installer_view(home):
         env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0 and result.stderr == "", result
     return result.stdout.splitlines()
-
-
-def status(store):
-    result = subprocess.run([ACTOR, store], capture_output=True, text=True, timeout=10)
-    assert result.returncode == 0, result.stderr
-    return result.stdout.strip()
 
 
 def cli_status(home, *args):
@@ -101,11 +93,6 @@ def start(store, capacity, *options):
         observations="status" if "--test-phase-trace" in options else None,
     )
 
-def socket_path(store):
-    digest = hashlib.sha256(str(store.resolve()).encode()).hexdigest()[:32]
-    return pathlib.Path(f"/tmp/rui-{os.geteuid()}/{digest}.sock")
-
-
 def raw_info(sock, store, instance=None, *, kind="host_info", route="host-info", extra=None):
     payload = json.dumps({"version": host_process.WIRE_VERSION, "kind": kind, "store": str(store), **(extra or {})}).encode()
     header = b"X-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\n"
@@ -133,28 +120,6 @@ def wait_for_descriptors(pid, expected=None, timeout=5):
             return None
     return wait_for(snapshot, f"descriptors {expected}", timeout=timeout, interval=.01,
                     ready=lambda observed: observed is not None and (expected is None or observed == expected))
-
-
-def complete_response(stream):
-    response = bytearray()
-    while True:
-        try:
-            chunk = stream.recv(4096)
-        except OSError as error:
-            if not is_peer_disconnect(error):
-                raise
-            # Early route/kind rejection leaves hostile bytes unread. Reset
-            # can terminate a complete reply, but never certify a prefix.
-            break
-        if not chunk:
-            break
-        response.extend(chunk)
-        assert len(response) < 8192, response
-    head, body = response.split(b"\r\n\r\n", 1)
-    lengths = [line.split(b":", 1)[1].strip() for line in head.split(b"\r\n")[1:]
-               if line.lower().startswith(b"content-length:")]
-    assert len(lengths) == 1 and int(lengths[0]) == len(body), (head, body)
-    return bytes(response)
 
 
 def held_request(store, route, length=512, *, complete_headers=True):

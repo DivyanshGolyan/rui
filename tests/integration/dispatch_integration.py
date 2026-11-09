@@ -26,6 +26,7 @@ from model_fixture import (
     sse_answer, sse_many, sse_tool_calls, start_command, start_host, stop_host,
     wait_for, wait_for_result_release, wait_model_cleanup,
 )
+from model_fixture import dispose_dispatch, stop_endpoint
 
 
 def history(items):
@@ -344,45 +345,6 @@ def decode_model_evidence(value):
         offset += length
     assert offset == len(value), value
     return tuple(fields)
-
-
-def stop_endpoint(endpoint, endpoints):
-    thread = endpoints[endpoint]
-
-    def shutdown():
-        if thread.ident is not None:
-            try:
-                endpoint.shutdown()
-            except BaseException:
-                # A pre-effect refusal leaves serve_forever alive. Retry once,
-                # retaining the first failure even if retirement then succeeds.
-                dispose_all(endpoint.shutdown)
-                raise
-
-    def join():
-        if thread.ident is not None:
-            thread.join(timeout=5)
-            assert not thread.is_alive(), "Dispatch endpoint thread did not retire"
-
-    # shutdown/server_close may block; the join timeout is not a shutdown bound.
-    dispose_all(
-        shutdown,
-        endpoint.server_close,
-        join,
-    )
-    # dispose_all retains an active body error; inspect retirement rather than
-    # treating its return as proof that every disposal succeeded.
-    if endpoint.fileno() == -1 and not thread.is_alive():
-        del endpoints[endpoint]
-
-
-def dispose_dispatch(processes, endpoints, releases, *after):
-    dispose_all(
-        *(lambda process=process: stop_host(process) for process in processes),
-        *releases,
-        *(lambda endpoint=endpoint: stop_endpoint(endpoint, endpoints) for endpoint in tuple(endpoints)),
-        *after,
-    )
 
 
 def compaction_cases(state, processes, endpoints, releases):
@@ -5172,7 +5134,7 @@ def main(mode="all", correlation_case="all"):
         def empty_messages(host, store, session, prefix):
             # Empty CLI stdin sends nothing. Seed these zero-byte framing
             # cases through the Message protocol without changing their input.
-            from control_integration import raw_request
+            from control_fixture import raw_request
             for index in range(40):
                 wire = {"version": host_process.WIRE_VERSION, "kind": "message", "store": str(store),
                     "key": f"{prefix}-{index}", "session": session, "sender": None, "sender_handle": None,

@@ -8,7 +8,6 @@ import sys
 import unittest
 from unittest.mock import patch
 
-import host_process
 from host_process import stop_process
 from terminal_process import open_pty, terminal_process
 
@@ -112,8 +111,3 @@ def prove_terminal_process():
     result = unittest.TextTestRunner(verbosity=2).run(
         unittest.defaultTestLoader.loadTestsFromTestCase(TerminalProcessTest))
     assert result.wasSuccessful(), "terminal process ownership failed"
-
-
-if __name__ == "__main__":
-    host_process.enter()
-    unittest.main()
