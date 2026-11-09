@@ -3,6 +3,7 @@
 //! retained instruction layer or an authority to execute sibling resources.
 const std = @import("std");
 const catalog = @import("skills.zig");
+const skill_reference = @import("skill_reference.zig");
 const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
 const storage = @import("store.zig");
@@ -184,7 +185,7 @@ const Binder = struct {
 /// returns false. Sealed and saved text is read in bounded windows from
 /// `allocator`, not the stack: every door runs this on a Host thread's stack.
 fn eachReference(allocator: std.mem.Allocator, io: std.Io, text: Text, visitor: anytype) !void {
-    var scanner: catalog.References = .{};
+    var scanner: skill_reference.References = .{};
     switch (text) {
         .bytes => |bytes| for (bytes) |byte| if (scanner.feed(byte)) |name| if (!try visitor.visit(name)) return,
         .field => |field| if (field.borrowedBytes()) |bytes| {

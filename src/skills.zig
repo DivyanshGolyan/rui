@@ -4,6 +4,7 @@
 const std = @import("std");
 const yaml = @import("yaml");
 const json_scalar = @import("json_scalar.zig");
+const skill_reference = @import("skill_reference.zig");
 const Allocator = std.mem.Allocator;
 
 // Per scan: at most two roots, 4096 direct children each, and 4096 winners.
@@ -247,7 +248,7 @@ fn parseMetadata(allocator: Allocator, raw: []const u8) !?Metadata {
     }
     const parsed_name = name orelse return null;
     const parsed_description = description orelse return null;
-    if (!validName(parsed_name)) return null;
+    if (!skill_reference.validName(parsed_name)) return null;
     if (parsed_description.len == 0) return null;
     const description_view = std.unicode.Utf8View.init(parsed_description) catch return null;
     // A commented document separator is YAML syntax, not a Markdown closing
@@ -276,71 +277,6 @@ fn parseMetadata(allocator: Allocator, raw: []const u8) !?Metadata {
 fn scalar(node: [*c]yaml.yaml_node_t) []const u8 {
     return node.*.data.scalar.value[0..node.*.data.scalar.length];
 }
-
-fn validName(name: []const u8) bool {
-    if (name.len == 0 or name.len > 64 or name[0] == '-' or name[name.len - 1] == '-') return false;
-    var hyphen = false;
-    for (name) |byte| {
-        if (byte == '-') {
-            if (hyphen) return false;
-            hyphen = true;
-        } else {
-            if (!(byte >= 'a' and byte <= 'z') and !(byte >= '0' and byte <= '9')) return false;
-            hyphen = false;
-        }
-    }
-    return true;
-}
-
-/// Finds `/name` skill references in Message text, one byte at a time, so
-/// text of any size streams through it. A reference starts the text or
-/// follows whitespace or `(`, and ends at the text's end, whitespace or one
-/// of `.,;:!?)`; anything else (`/tmp/etc`, `//name`) is prose. Whether a
-/// reference binds is the recipient catalog's decision, not the scanner's.
-pub const References = struct {
-    state: enum { boundary, slash, name, prose } = .boundary,
-    name: [64]u8 = undefined,
-    len: usize = 0,
-
-    /// The name this byte ended, borrowed until the next call.
-    pub fn feed(self: *References, byte: u8) ?[]const u8 {
-        switch (self.state) {
-            .boundary => {
-                if (byte == '/') self.state = .slash else self.follow(byte);
-            },
-            .slash => if (nameByte(byte)) {
-                self.name[0] = byte;
-                self.len = 1;
-                self.state = .name;
-            } else self.follow(byte),
-            .name => if (nameByte(byte)) {
-                if (self.len == self.name.len) self.state = .prose else {
-                    self.name[self.len] = byte;
-                    self.len += 1;
-                }
-            } else {
-                self.follow(byte);
-                const ends = std.ascii.isWhitespace(byte) or std.mem.indexOfScalar(u8, ".,;:!?)", byte) != null;
-                if (ends and validName(self.name[0..self.len])) return self.name[0..self.len];
-            },
-            .prose => self.follow(byte),
-        }
-        return null;
-    }
-
-    /// The name the text's end completes.
-    pub fn finish(self: *const References) ?[]const u8 {
-        return if (self.state == .name and validName(self.name[0..self.len])) self.name[0..self.len] else null;
-    }
-
-    fn follow(self: *References, byte: u8) void {
-        self.state = if (std.ascii.isWhitespace(byte) or byte == '(') .boundary else .prose;
-    }
-
-    fn nameByte(byte: u8) bool {
-        return (byte >= 'a' and byte <= 'z') or (byte >= '0' and byte <= '9') or byte == '-';
-    }
-};
 
 fn validDescription(description: []const u8) bool {
     const count = std.unicode.utf8CountCodepoints(description) catch return false;
@@ -511,7 +447,7 @@ fn freeEntries(allocator: Allocator, entries: []const Entry) void {
 fn validateCatalog(catalog: Catalog) !void {
     if (catalog.entries.len > max_entries) return error.SkillCatalogLimit;
     for (catalog.entries) |entry| {
-        if (!validName(entry.name) or !validDescription(entry.description) or
+        if (!skill_reference.validName(entry.name) or !validDescription(entry.description) or
             !std.fs.path.isAbsolute(entry.path) or entry.path.len > std.fs.max_path_bytes or
             !std.unicode.utf8ValidateSlice(entry.path) or
             std.mem.indexOfScalar(u8, entry.path, 0) != null) return error.InvalidSkillCatalog;
@@ -649,51 +585,15 @@ test "skills libyaml ignores valid unknown nested metadata without granting auth
     for (invalid) |raw| try std.testing.expectEqual(@as(?Metadata, null), try parseMetadata(std.testing.allocator, raw));
 }
 
-fn expectReferences(text: []const u8, expected: []const []const u8) !void {
-    var found: std.ArrayList(u8) = .empty;
-    defer found.deinit(std.testing.allocator);
-    var scanner: References = .{};
-    for (text) |byte| if (scanner.feed(byte)) |name| {
-        try found.appendSlice(std.testing.allocator, name);
-        try found.append(std.testing.allocator, ' ');
-    };
-    if (scanner.finish()) |name| {
-        try found.appendSlice(std.testing.allocator, name);
-        try found.append(std.testing.allocator, ' ');
-    }
-    var want: std.ArrayList(u8) = .empty;
-    defer want.deinit(std.testing.allocator);
-    for (expected) |name| {
-        try want.appendSlice(std.testing.allocator, name);
-        try want.append(std.testing.allocator, ' ');
-    }
-    try std.testing.expectEqualStrings(want.items, found.items);
-}
-
-test "skills references are /name words at word boundaries, in text order" {
-    try expectReferences("/review", &.{"review"});
-    try expectReferences("look at /review then /tests.", &.{ "review", "tests" });
-    try expectReferences("(/a-b) /c, /d; /e: /f! /g? /h\n/i\t/j", &.{ "a-b", "c", "d", "e", "f", "g", "h", "i", "j" });
-    // Repeats are reported; binding decides that a skill is bound once.
-    try expectReferences("/x /x", &.{ "x", "x" });
-    // Paths, escapes, and words glued to other text are prose.
-    try expectReferences("/tmp/etc a/b x/review //review /review/ /review_x /Review /review- /a--b /-a", &.{});
-    try expectReferences("costs 5 /month", &.{"month"});
-    try expectReferences("\"/review\" /review\"", &.{});
-    try expectReferences("/ / /雪 é/x", &.{});
-    try expectReferences("/" ++ @as([64]u8, @splat('a')) ++ " /" ++ @as([65]u8, @splat('b')), &.{&@as([64]u8, @splat('a'))});
-    try expectReferences("", &.{});
-}
-
 test "skills validates name byte grammar and Unicode character description bounds" {
     const valid = [_][]const u8{ "a", "0", "a-b", "1-2-three", &@as([64]u8, @splat('a')) };
-    for (valid) |name| try std.testing.expect(validName(name));
+    for (valid) |name| try std.testing.expect(skill_reference.validName(name));
     const invalid = [_][]const u8{ "", "-a", "a-", "a--b", "A", "a_b", "a.b", "a/b", "a b", "é", &@as([65]u8, @splat('a')) };
-    for (invalid) |name| try std.testing.expect(!validName(name));
+    for (invalid) |name| try std.testing.expect(!skill_reference.validName(name));
     for (0..256) |value| {
         const name = [_]u8{ @intCast(value), 'x' };
         const allowed = (value >= 'a' and value <= 'z') or (value >= '0' and value <= '9');
-        try std.testing.expectEqual(allowed, validName(&name));
+        try std.testing.expectEqual(allowed, skill_reference.validName(&name));
     }
     const unicode_1025 = try std.testing.allocator.alloc(u8, 1025 * "😀".len);
     defer std.testing.allocator.free(unicode_1025);
