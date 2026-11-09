@@ -963,7 +963,7 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: boo
         try a.abandon(.{});
         return .conflict;
     }
-    switch (try classify(protocol.SessionStopRejection, &saved, kind, session, &digest)) {
+    switch (try classify(mutation_answer.SessionStopRejection, &saved, kind, session, &digest)) {
         .fresh => {},
         .conflict => {
             try a.abandon(.{});
@@ -990,7 +990,7 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: boo
         },
     }
 
-    const rejection: ?protocol.SessionStopRejection = if (!session_id.valid(session)) .invalid_session_reference else if (target == null) .unknown_session else null;
+    const rejection: ?mutation_answer.SessionStopRejection = if (!session_id.valid(session)) .invalid_session_reference else if (target == null) .unknown_session else null;
     if (rejection) |code| {
         var answer = StoredAnswer{ .accepted = false };
         try answer.code.set(@tagName(code));
@@ -1177,7 +1177,7 @@ fn restoreSession(a: anytype, command: *const protocol.SessionArchiveCommand, fa
     var target: target_session.Result = null;
     readTarget(a, session, &target);
     try a.run();
-    switch (try classify(protocol.SessionArchiveRejection, &saved, .session_archive, session, &digest)) {
+    switch (try classify(mutation_answer.SessionArchiveRejection, &saved, .session_archive, session, &digest)) {
         .fresh => {},
         .conflict => {
             try a.abandon(.{});
@@ -1192,7 +1192,7 @@ fn restoreSession(a: anytype, command: *const protocol.SessionArchiveCommand, fa
             return .{ .rejected = .{ .replayed = true, .code = code } };
         },
     }
-    const rejection: ?protocol.SessionArchiveRejection = if (!session_id.valid(session)) .invalid_session_reference else if (target == null) .unknown_session else if (target.?.archive_state == .archiving) .archive_pending else null;
+    const rejection: ?mutation_answer.SessionArchiveRejection = if (!session_id.valid(session)) .invalid_session_reference else if (target == null) .unknown_session else if (target.?.archive_state == .archiving) .archive_pending else null;
     var answer: StoredAnswer = .{ .accepted = rejection == null };
     if (rejection) |code| try answer.code.set(@tagName(code));
     try queueCommand(a, key, .session_archive, session, &digest, null, null, &answer);
@@ -1285,7 +1285,7 @@ fn interruptionRejection(
     command: *const protocol.ModelInterruptionCommand,
     target: target_session.Result,
     operation: interruption_operation.Result,
-) ?protocol.ModelInterruptionRejection {
+) ?mutation_answer.ModelInterruptionRejection {
     if (!session_id.valid(command.session.slice())) return .invalid_session_reference;
     if (!validId(command.turn_id) or !validId(command.operation_id)) return .invalid_target;
     if (target == null) return .unknown_session;
@@ -1318,7 +1318,7 @@ pub fn interruptModel(a: anytype, command: *const protocol.ModelInterruptionComm
         }
     }
     try a.run();
-    const replay = try classify(protocol.ModelInterruptionRejection, &saved, .model_interruption, session, &digest);
+    const replay = try classify(mutation_answer.ModelInterruptionRejection, &saved, .model_interruption, session, &digest);
     if (replay != .fresh) {
         if (replay != .conflict) {
             var saved_target: interruption_target.Result = undefined;
@@ -1406,7 +1406,7 @@ fn decisionRejection(
     command: *const protocol.PermissionDecisionCommand,
     target: target_session.Result,
     action: decision_action.Result,
-) ?protocol.PermissionDecisionRejection {
+) ?mutation_answer.PermissionDecisionRejection {
     if (!session_id.valid(command.session.slice())) return .invalid_session_reference;
     if (!validId(command.action_id)) return .invalid_target;
     if (target == null) return .unknown_session;
@@ -1434,7 +1434,7 @@ pub fn decidePermission(a: anytype, command: *const protocol.PermissionDecisionC
     }
     if (command.decision == .deny) content_domain.lookup(a, &content);
     try a.run();
-    switch (try classify(protocol.PermissionDecisionRejection, &saved, .permission_decision, session, &digest)) {
+    switch (try classify(mutation_answer.PermissionDecisionRejection, &saved, .permission_decision, session, &digest)) {
         .fresh => {},
         .conflict => {
             try a.abandon(.{});

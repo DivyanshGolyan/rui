@@ -482,24 +482,10 @@ pub const TurnEnding = enum {
     /// Any other failure, which the row's `code` names.
     failed,
 };
-pub const SessionStopRejection = enum { invalid_session_reference, unknown_session };
-pub const SessionArchiveRejection = enum { invalid_session_reference, unknown_session, archive_pending };
-pub const ModelInterruptionRejection = enum {
-    invalid_session_reference,
-    invalid_target,
-    unknown_session,
-    unknown_operation,
-    target_mismatch,
-    operation_resolved,
-};
-pub const PermissionDecisionRejection = enum {
-    invalid_session_reference,
-    invalid_target,
-    unknown_session,
-    unknown_action,
-    target_mismatch,
-    action_not_pending,
-};
+pub const SessionStopRejection = mutation_answer.SessionStopRejection;
+pub const SessionArchiveRejection = mutation_answer.SessionArchiveRejection;
+pub const ModelInterruptionRejection = mutation_answer.ModelInterruptionRejection;
+pub const PermissionDecisionRejection = mutation_answer.PermissionDecisionRejection;
 pub const MessageProgressStatus = WorkState.Progress;
 /// A hosted call has no content: its presentation is the whole item.
 pub const ConversationItemKind = enum { user, assistant, tool_result, hosted_call };

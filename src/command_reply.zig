@@ -115,14 +115,14 @@ pub const SessionStopReply = union(enum) {
         completion: mutation_answer.SessionStopCompletion,
         interrupted_operation_id: ?u64 = null,
     },
-    rejected: struct { replayed: bool, code: protocol.SessionStopRejection },
+    rejected: struct { replayed: bool, code: mutation_answer.SessionStopRejection },
     conflict,
     infrastructure_failure,
 };
 
 pub const ModelInterruptionReply = union(enum) {
     accepted: struct { replayed: bool },
-    rejected: struct { replayed: bool, code: protocol.ModelInterruptionRejection },
+    rejected: struct { replayed: bool, code: mutation_answer.ModelInterruptionRejection },
     conflict,
     infrastructure_failure,
 };
@@ -134,14 +134,14 @@ pub const SessionArchiveReply = union(enum) {
         completion: mutation_answer.SessionStopCompletion,
         interrupted_operation_id: ?u64 = null,
     },
-    rejected: struct { replayed: bool, code: protocol.SessionArchiveRejection },
+    rejected: struct { replayed: bool, code: mutation_answer.SessionArchiveRejection },
     conflict,
     infrastructure_failure,
 };
 
 pub const PermissionDecisionReply = union(enum) {
     accepted: struct { replayed: bool },
-    rejected: struct { replayed: bool, code: protocol.PermissionDecisionRejection },
+    rejected: struct { replayed: bool, code: mutation_answer.PermissionDecisionRejection },
     conflict,
     infrastructure_failure,
 };
