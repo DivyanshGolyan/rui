@@ -205,6 +205,14 @@ class SelectionTest(unittest.TestCase):
             result = select([path], "review", AVAILABLE)
             self.assertEqual(result["targets"], ["stack-frames", "test-logic"])
 
+    def test_native_unit_aggregate_selects_its_root_not_check(self):
+        alone = select(["src/tests.zig"], "review", AVAILABLE)
+        self.assertEqual((alone["targets"], alone["native_targets"]), (["stack-frames", "test"], ["test"]))
+        # What it newly lists still selects its owner's checks, or check when unmapped.
+        owned = select(["src/tests.zig", "src/mcp/Running.zig"], "review", AVAILABLE)["targets"]
+        self.assertEqual(owned, ["launch-frame-integration", "stack-frames", "test", "test-logic"])
+        self.assertIn("check", select(["src/tests.zig", "src/provider_output.zig"], "review", AVAILABLE)["targets"])
+
     def test_shared_context_text_keeps_all_request_oracle_consumers(self):
         consumers = {
             "src/model_instructions.txt": ["src/model_adapter.zig", "tests/integration/model_fixture.py",

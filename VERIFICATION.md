@@ -45,6 +45,7 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 | Subsystem | Landing-tip minimum | Exceptions and notes |
 | --- | --- | --- |
 | Portable turn, request encoding, answer rendering | `test-logic` | Value transitions do not change native adapters |
+| Native unit aggregate (`src/tests.zig`) | `test` | It is no product code; each file it newly lists selects its own owner's checks |
 | CLI, client, preferences, provider selection | `check`, `admission-debug-integration` | Covers preference publication and unnamed human CLI consumers |
 | Frontend consent, departure and submission recovery | `test-logic`, `test`, `admission-debug-integration`, `terminal-restoration-integration`, `canonical-failure-integration` | `Terminal*` owners omit `test`; the selector owns their exact mapping. Mixed strict or non-frontend code retains `check` |
 | Store SQL owners | Linux `check`, Mac `test`, `dispatch-debug-integration` on both systems, changed owning integration targets | The Debug failure-correlation subset checks saved provider bytes through reopen |

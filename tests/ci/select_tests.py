@@ -51,6 +51,9 @@ RULES = (
     (("src/logic_tests.zig", "src/request_wait.zig", "src/core_boundary.zig", "src/word_search.zig", "src/execution_turn.zig", "src/request_encoding.zig",
       "src/AnswerRenderer.zig", "src/store/engine/mysql_refusal.zig"),
      ("test-logic",), (), "Portable owner transitions and encoding"),
+    # The native unit aggregate is no product code. A file it newly imports
+    # selects its own owner's checks.
+    (("src/tests.zig",), ("test",), ("test",), "Native unit aggregate: the roots it lists"),
     (("src/ResponseTiming.zig",), ("test-logic",), ("test-logic",),
      "Response policy values alongside native timeout consumers"),
     (("src/turn_policy.zig",), ("test-logic",), ("test-logic",),
