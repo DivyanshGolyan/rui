@@ -998,10 +998,10 @@ pub const Store = struct {
     /// Authenticates the Session/Operation/Attempt before reading optional
     /// diagnostics. Diagnostic faults never fence canonical state.
     pub fn failedResponseBinding(self: *Store, request: *const protocol.InspectSession) !AttemptBinding {
-        return self.queue().run(captureFailedResponseHeld, .{ self, request.session.slice(), request.failed_response.? });
+        return self.queue().run(failedResponseBindingHeld, .{ self, request.session.slice(), request.failed_response.? });
     }
 
-    fn captureFailedResponseHeld(self: *Store, session_ref: []const u8, selection: protocol.FailedResponseExport) !AttemptBinding {
+    fn failedResponseBindingHeld(self: *Store, session_ref: []const u8, selection: protocol.FailedResponseExport) !AttemptBinding {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
