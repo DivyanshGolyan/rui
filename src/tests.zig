@@ -1,4 +1,5 @@
 test {
+    _ = @import("AppScreen.zig");
     _ = @import("PermissionCard.zig");
     _ = @import("widget_style.zig");
     _ = @import("InputArea.zig");
