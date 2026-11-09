@@ -40,7 +40,6 @@ const model_settlement_domain = @import("domain/model_settlement.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
 const store_schema = @import("schema.zig");
-const test_poll = @import("test_poll");
 const store_testing = @import("testing.zig");
 const turn_domain = @import("domain/turn.zig");
 const AcceptedMessage = command_domain.AcceptedMessage;
@@ -1237,18 +1236,27 @@ test "an Access that touches a fifth Session records everything and still commit
 test "every round of a write Access dates its rows with the transaction's second" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
+            // The Store reads the wall clock through its io; this one runs
+            // ahead by `ahead` instead of waiting for the next second.
+            const Clock = struct {
+                var ahead: std.Io.Duration = .zero;
+                var vtable: std.Io.VTable = undefined;
+                fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+                    const real = std.testing.io.vtable.now(userdata, clock);
+                    return if (clock == .real) real.addDuration(ahead) else real;
+                }
+            };
+            Clock.ahead = .zero;
+            Clock.vtable = std.testing.io.vtable.*;
+            Clock.vtable.now = Clock.now;
+            const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &Clock.vtable };
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            try store_testing.testingStore(case, &storage, &tmp, io);
             defer storage.close() catch unreachable;
             const first = try configureTestSession(&storage, "second-first");
             const second = try configureTestSession(&storage, "second-second");
-            const Clock = struct {
-                fn passed(dated: i64) !bool {
-                    return @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000) > dated;
-                }
-            };
             const entry = try store_core.enter(&storage, .none);
             defer entry.release();
             var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
@@ -1261,7 +1269,8 @@ test "every round of a write Access dates its rows with the transaction's second
             try a.run();
             const dated = try store_core.transactionSecond(&storage);
             // The clock moves on to a later second before the next round dates.
-            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), dated, Clock.passed);
+            Clock.ahead = .fromSeconds(1);
+            try std.testing.expect(@divFloor(try store_core.readUnixMilliseconds(io), 1000) > dated);
             a.write(TestingRound.date_session, .{ .session = heads[1].head, .revision = 1 });
             try a.commit();
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(DISTINCT created_at) FROM session", .{}));
