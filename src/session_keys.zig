@@ -25,13 +25,11 @@ pub const Action = enum {
     /// On a recalled draft, the Message sent after it, or past the newest
     /// an empty draft.
     newer,
-    /// The latest view, which is the pending Action if there is one.
+    /// The latest view, which is the pending Action if there is one: a
+    /// click on the `↓` marker.
     latest,
-    /// Out of a Message page, else to the latest view. It never leaves the
-    /// conversation.
-    back,
-    /// As `back`, and from the settled latest view, once nothing would be
-    /// lost, to the overview.
+    /// Out of a Message page, else to the latest view, and from the settled
+    /// latest view, once nothing would be lost, to the overview.
     close,
     /// Opens the lowest collapsed Message, or leaves a Message page.
     expand,
@@ -64,8 +62,10 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .page_up = .page_up,
     .page_down = .page_down,
     .home = null,
-    .end = .back,
-    .ctrl_end = .latest,
+    // Esc and the `↓` marker return to the latest; End and Ctrl-End are
+    // keys a MacBook lacks.
+    .end = null,
+    .ctrl_end = null,
 });
 
 /// One input as the conversation's table classifies it.

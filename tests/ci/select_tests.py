@@ -593,7 +593,8 @@ SCREEN_TARGETS = frozenset({"check", "check-full", "terminal-restoration-integra
                             "host-launch-integration", "upgrade-integration", "human-cli-integration", "overview-integration",
                             "model-picker-integration",
                             "skills-integration", "bash-recovery-integration", "renderer-contracts-selftest",
-                            "direct-pty", "direct-pty-controls", "input-equivalence", "screen-emulator"})
+                            "direct-pty", "direct-pty-controls", "input-equivalence", "screen-emulator",
+                            "peer-integration"})
 
 
 def setup_requirements(targets):

@@ -85,6 +85,7 @@ const cores = .{
     .{ "retry_policy.zig", @import("retry_policy.zig") },
     .{ "serve_grammar.zig", @import("serve_grammar.zig") },
     .{ "session_archive.zig", @import("session_archive.zig") },
+    .{ "session_chrome.zig", @import("session_chrome.zig") },
     .{ "session_consent.zig", @import("session_consent.zig") },
     .{ "session_departure.zig", @import("session_departure.zig") },
     .{ "session_field.zig", @import("session_field.zig") },
@@ -140,6 +141,8 @@ test {
     _ = @import("request_encoding.zig");
     _ = @import("ResponseTiming.zig");
     _ = @import("ConversationViewport.zig");
+    _ = @import("transcript_selection.zig");
+    _ = @import("session_follow.zig");
     _ = @import("SessionInput.zig");
     _ = @import("TerminalFrame.zig");
     _ = @import("TerminalInput.zig");
