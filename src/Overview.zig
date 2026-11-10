@@ -646,7 +646,9 @@ fn finishApp(self: *Self, ended: anyerror!void) !void {
     // the full check print with the departure.
     self.upgrade_job.settle();
     const kept = self.keepUpgrade();
-    if (self.upgrade_report) |*report| _ = stderr.write(report.written());
+    // The terminal is restored: the report names what the run published or
+    // left behind, so it is written whole, however small the terminal's buffer.
+    if (self.upgrade_report) |*report| _ = stderr.writeReceipt(report.written());
     self.worker.cancel();
     const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
     const saved = self.flushSaves();

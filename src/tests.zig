@@ -19,6 +19,7 @@ test {
     _ = @import("installation_path.zig");
     _ = @import("UpgradePanel.zig");
     _ = @import("UpgradeJob.zig");
+    _ = @import("stderr.zig");
     // These were previously discovered only while compiling another test's
     // body. Every filtered root must discover them before ownership filtering.
     _ = @import("BashLifecycle.zig");
