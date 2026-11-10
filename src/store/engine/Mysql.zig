@@ -516,9 +516,9 @@ fn reconnect(self: *Mysql) !mysql_open.Reclaimed {
         var refusal_buffer: [1024]u8 = undefined;
         var refusal = std.Io.Writer.fixed(&refusal_buffer);
         s.connection.reopen(login.options(), &refusal) catch continue;
-        const owner = mysql_open.reclaim(&s.connection, login.database.slice(), &s.store_id, s.connection_id) catch |err| switch (err) {
-            // Another server or Store, or one admission refuses: no retry helps.
-            error.WrongStoreIdentity, error.UnsupportedMysqlVersion, error.MysqlReadOnly, error.MysqlDurabilityTooWeak, error.MysqlStatementBinlog => return error.StoreConnectionLost,
+        const owner = mysql_open.reclaim(&s.connection, login.database.slice(), &s.store_id, s.epoch, s.connection_id) catch |err| switch (err) {
+            // Another server, Store or owner, or one admission refuses: no retry helps.
+            error.WrongStoreIdentity, error.OwnershipLost, error.StoreLocked, error.UnsupportedMysqlVersion, error.MysqlReadOnly, error.MysqlDurabilityTooWeak, error.MysqlStatementBinlog => return error.StoreConnectionLost,
             else => continue,
         };
         s.connection_id = owner.connection_id;

@@ -161,40 +161,54 @@ fn refusal(facts: *const FactsRow) ?policy.StartError {
 
 pub const Reclaimed = struct { epoch: u64, commit_seq: u64, connection_id: u64 };
 
-/// On a fresh connection after the last was lost: ends the session the
-/// Store's GET_LOCK was taken on, takes the lock again once that session
-/// is gone, and reads the ownership row. With the old session gone, no
-/// statement it was sent can still commit, so `commit_seq` is final. The
-/// server may be another one after a failover, so it must pass admission's
-/// checks again and hold the same Store.
-pub fn reclaim(conn: *wire.Connection, database: []const u8, store_id: *const [2 * schema.store_id_bytes]u8, old_connection_id: u64) !Reclaimed {
+/// On a fresh connection after the last was lost: checks the server and
+/// the Store first, since a failover may reach another server; ends the
+/// session the Store's GET_LOCK was taken on only when that session still
+/// holds the lock and no Host has opened the Store since (`epoch`), so a
+/// reused connection id never ends someone else's session; then takes the
+/// lock again once that session is gone and reads the ownership row. With
+/// the old session gone, no statement it was sent can still commit, so
+/// `commit_seq` is final.
+pub fn reclaim(conn: *wire.Connection, database: []const u8, store_id: *const [2 * schema.store_id_bytes]u8, epoch: u64, old_connection_id: u64) !Reclaimed {
     // The kept trust serves the next attempt.
     errdefer conn.disconnect();
     conn.useSettings(session_settings, schema.mysql_session.len);
-    // Alone: a session that already ended fails KILL, which would stop a batch.
-    try conn.batch().print("KILL {d}", .{old_connection_id});
-    try conn.sendBatch();
-    switch (try conn.next()) {
-        .ok, .err => {},
-        else => return error.ProtocolViolation,
-    }
-    const w = conn.batch();
-    // KILL returns before the session ends; the lock waits for its end.
-    try w.writeAll(facts_sql ++ ";SELECT GET_LOCK(");
+    var w = conn.batch();
+    try w.writeAll(facts_sql ++ ";SELECT IS_USED_LOCK(");
     try text(w, database);
-    try w.print(",{d});SELECT epoch,commit_seq FROM store_owner WHERE owner_key=1;SELECT meta_value FROM store_meta WHERE meta_key='store_id'", .{reclaim_lock_wait_s});
+    try w.writeAll(");SELECT epoch FROM store_owner WHERE owner_key=1;SELECT meta_value FROM store_meta WHERE meta_key='store_id'");
     try conn.sendBatch();
     const facts = try one(FactsRow, conn);
-    const lock = try one(struct { acquired: ?u64 }, conn);
-    const owner = try one(struct { epoch: u64, commit_seq: u64 }, conn);
+    const holder = try one(struct { id: ?u64 }, conn);
+    const before = try one(struct { epoch: u64 }, conn);
     const id = try one(struct { value: Bounded(2 * schema.store_id_bytes) }, conn);
     if (!facts.database.eql(database) or !std.mem.eql(u8, id.value.slice(), store_id)) return error.WrongStoreIdentity;
+    if (refusal(&facts)) |failure| return failure;
+    if (before.epoch != epoch) return error.OwnershipLost;
+    if (holder.id) |session| {
+        // Another session holds the Store's lock: never ours to end.
+        if (session != old_connection_id) return error.StoreLocked;
+        // Alone: a session that ended meanwhile fails KILL, which would stop a batch.
+        try conn.batch().print("KILL {d}", .{old_connection_id});
+        try conn.sendBatch();
+        switch (try conn.next()) {
+            .ok, .err => {},
+            else => return error.ProtocolViolation,
+        }
+    }
+    w = conn.batch();
+    // KILL returns before the session ends; the lock waits for its end.
+    try w.writeAll("SELECT @@max_allowed_packet,CONNECTION_ID(),GET_LOCK(");
+    try text(w, database);
+    try w.print(",{d});SELECT epoch,commit_seq FROM store_owner WHERE owner_key=1", .{reclaim_lock_wait_s});
+    try conn.sendBatch();
+    const lock = try one(struct { max_allowed_packet: u64, connection_id: u64, acquired: ?u64 }, conn);
+    const owner = try one(struct { epoch: u64, commit_seq: u64 }, conn);
     const acquired = lock.acquired orelse return error.StoreConnectionLost;
     if (acquired == 0) return error.StoreLocked;
     if (acquired != 1) return error.CorruptStore;
-    if (refusal(&facts)) |failure| return failure;
-    conn.limitBatch(facts.max_allowed_packet);
-    return .{ .epoch = owner.epoch, .commit_seq = owner.commit_seq, .connection_id = facts.connection_id };
+    conn.limitBatch(lock.max_allowed_packet);
+    return .{ .epoch = owner.epoch, .commit_seq = owner.commit_seq, .connection_id = lock.connection_id };
 }
 
 /// How long `reclaim` waits for the old session to end, well inside the
