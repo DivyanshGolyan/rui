@@ -5,7 +5,7 @@
 //! and a request renders the saved text, so a reworded built-in changes
 //! only the sets saved after it.
 const std = @import("std");
-const protocol = @import("../../protocol.zig");
+const command_input = @import("../../command_input.zig");
 const content_string = @import("../../content_string.zig");
 const tool_name = @import("../../tool_name.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -296,12 +296,12 @@ pub fn insertCatalog(a: anytype, catalog: *const tool_catalog.Catalog, digest: *
 /// The set a configure saves: the catalog's records `names` names, in
 /// name order, and the digest it is saved under.
 pub const Selection = struct {
-    names: *const protocol.ToolsField,
+    names: *const command_input.ToolsField,
     digest: [32]u8,
     set: lookup_set.Result = null,
 
     /// Null when the catalog lacks one of `names`.
-    pub fn of(catalog: *const tool_catalog.Catalog, names: *const protocol.ToolsField) ?Selection {
+    pub fn of(catalog: *const tool_catalog.Catalog, names: *const command_input.ToolsField) ?Selection {
         var digest: tool_catalog.SetDigest = .init();
         var each = names.iterator();
         while (each.next()) |name| digest.add(&catalog.digests[catalog.find(name) orelse return null]);
@@ -310,7 +310,7 @@ pub const Selection = struct {
 
     /// Selects from an already saved set, not today's catalog. The digest
     /// and finishSelection's inserted members must use the same source.
-    pub fn ofSaved(a: anytype, source_set: u64, names: *const protocol.ToolsField) !Selection {
+    pub fn ofSaved(a: anytype, source_set: u64, names: *const command_input.ToolsField) !Selection {
         var selected: SavedSelection = .{ .names = names };
         a.readEach(selection_records, .{ .set = source_set }, tool_name.max_tools + 1, &selected);
         try a.run();
@@ -336,7 +336,7 @@ const selection_records = rsql.Read(.{
 });
 
 const SavedSelection = struct {
-    names: *const protocol.ToolsField,
+    names: *const command_input.ToolsField,
     digest: tool_catalog.SetDigest = .init(),
     count: usize = 0,
 

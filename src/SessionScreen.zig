@@ -395,8 +395,7 @@ pub fn browse(self: *Self, down: bool, page: bool) bool {
     const end = document.atBottom(self.textLayout(), self.height);
     const moves: usize = if (page) self.height else 1;
     if (self.view == .transcript) self.overscroll = if (down) 0 else if (document.atTop(self.textLayout(), self.height)) @min(self.overscroll + moves, 4 * @as(usize, self.height)) else 0;
-    const unseen = if (self.actionVisible() and self.preview_complete and !self.actionRead()) self.action_seen else null;
-    document.browse(self.textLayout(), down, moves, self.height, unseen);
+    document.browse(self.textLayout(), down, moves, self.height, null);
     if (self.view != .transcript or !down) return false;
     // Untrimmed transcript ends where live output continues.
     return (end and self.newer_trimmed) or (!self.newer_trimmed and document.atBottom(self.textLayout(), self.height));
@@ -1627,7 +1626,7 @@ fn rowText(screen: *Self, row: u16, storage: []u8) []const u8 {
     return std.mem.trimEnd(u8, storage[0..length], " ");
 }
 
-test "line scrolling marks only drawn Action rows and older pages keep the row in view" {
+test "an older page keeps the first browsed transcript row in view" {
     const io = std.testing.io;
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
@@ -1640,38 +1639,10 @@ test "line scrolling marks only drawn Action rows and older pages keep the row i
     const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const action = try tmp.dir.createFile(io, "action", .{ .read = true });
-    defer action.close(io);
-    var text: [40 * 8]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&text);
-    for (0..40) |row| try writer.print("row {d:0>2}\n", .{row});
-    try action.writePositionalAll(io, writer.buffered(), 0);
     var storage: [160]u8 = undefined;
 
     _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
-    try screen.adopt(io, action, 3, true);
-    try screen.latest();
-    var seen: [40]bool = @splat(false);
-    var steps: usize = 0;
-    while (true) : (steps += 1) {
-        try std.testing.expect(steps < 100);
-        _ = screen.select(false);
-        _ = screen.presented(try screen.render(&out.writer, size, "", 0, .{}, &.{}));
-        for (0..12) |row| {
-            const shown = rowText(screen, @intCast(row), &storage);
-            if (std.mem.startsWith(u8, shown, "row ")) seen[try std.fmt.parseInt(usize, shown[4..6], 10)] = true;
-        }
-        if (screen.actionRead()) break;
-        // Undrawn scrolling cannot pass the first unseen row, so repeated
-        // moves between frames cannot credit rows that never reached the screen.
-        for (0..if (steps == 0) 100 else 1) |_| _ = screen.browse(true, steps % 2 == 0);
-    }
-    try std.testing.expect(steps > 3);
-    for (seen) |drawn| try std.testing.expect(drawn);
-
     // A transcript keeps its first visible row while an older page arrives.
-    screen.releaseAction();
-    screen.consent = null;
     try screen.latest();
     for (0..30) |line| {
         var buffer: [16]u8 = undefined;

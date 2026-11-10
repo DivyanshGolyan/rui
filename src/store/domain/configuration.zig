@@ -3,7 +3,8 @@
 
 const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
-const protocol = @import("../../protocol.zig");
+const command_input = @import("../../command_input.zig");
+const session_field = @import("../../session_field.zig");
 const configuration_admission = @import("../../configuration_admission.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const provider_route = @import("../../provider_route.zig");
@@ -60,7 +61,7 @@ pub fn toolSet(mask: c_int) !tool_catalog.ToolSet {
 }
 
 /// D104: the spec alone selects tools; an empty list selects none.
-fn requestedNames(requested: *const content_custody.Configuration) *const protocol.ToolsField {
+fn requestedNames(requested: *const content_custody.Configuration) *const command_input.ToolsField {
     return &requested.tools;
 }
 
@@ -96,7 +97,7 @@ fn defaultProvider(routes: provider_route.Routes) ?provider_name.Provider {
 /// Why `tools` cannot be saved for a Session of `provider`: a name the
 /// Host's catalog lacks, or a tool some provider runs that `provider`
 /// does not.
-fn toolsRejection(catalog: *const tool_catalog.Catalog, provider: provider_name.Provider, tools: *const protocol.ToolsField) ?configuration_admission.Rejection {
+fn toolsRejection(catalog: *const tool_catalog.Catalog, provider: provider_name.Provider, tools: *const command_input.ToolsField) ?configuration_admission.Rejection {
     var names = tools.iterator();
     while (names.next()) |name| {
         const index = catalog.find(name) orelse return .unknown_tool;
@@ -465,7 +466,7 @@ pub const Applied = struct {
     output_schema_id: ?u64,
     instructions_updated: bool,
     /// The settings this revision changed; empty for a creation.
-    changes: std.EnumSet(protocol.SessionField) = .empty,
+    changes: std.EnumSet(session_field.SessionField) = .empty,
 };
 
 /// The settings a revision can change, as `next` holds them before and
@@ -500,8 +501,8 @@ const Settings = struct {
     }
 
     /// Each field whose value differs, by its name in `SessionField`.
-    fn changed(before: *const Settings, after: *const CurrentConfiguration) std.EnumSet(protocol.SessionField) {
-        var fields: std.EnumSet(protocol.SessionField) = .empty;
+    fn changed(before: *const Settings, after: *const CurrentConfiguration) std.EnumSet(session_field.SessionField) {
+        var fields: std.EnumSet(session_field.SessionField) = .empty;
         fields.setPresent(.provider, before.provider != after.provider);
         fields.setPresent(.model, !before.model.eql(after.model.slice()));
         fields.setPresent(.instructions, before.instructions_id != after.instructions_id);
@@ -559,8 +560,8 @@ pub const ConfigurationReads = struct {
     loaded_tools: ?tool_set.Selection = null,
     /// Saved names used only when a tool update must preserve or narrow a
     /// previously loaded subset. Keep these in Store scratch, not a frame.
-    saved_tools: protocol.ToolsField = undefined,
-    saved_loaded: protocol.ToolsField = undefined,
+    saved_tools: command_input.ToolsField = undefined,
+    saved_loaded: command_input.ToolsField = undefined,
     /// The Session a creation starts as the child of, when it has one.
     parent: ?[session_id.bytes]u8 = null,
 
@@ -753,15 +754,15 @@ const selected_names = rsql.Read(.{
     .cardinality = .each,
 });
 
-fn containsName(names: *const protocol.ToolsField, wanted: []const u8) bool {
+fn containsName(names: *const command_input.ToolsField, wanted: []const u8) bool {
     var each = names.iterator();
     while (each.next()) |name| if (std.mem.eql(u8, name, wanted)) return true;
     return false;
 }
 
 const NameSelection = struct {
-    names: *protocol.ToolsField,
-    filter: ?*const protocol.ToolsField = null,
+    names: *command_input.ToolsField,
+    filter: ?*const command_input.ToolsField = null,
     invalid: bool = false,
 
     pub fn visit(self: *NameSelection, row: *const selected_names.Row) bool {
@@ -776,7 +777,7 @@ const NameSelection = struct {
 
 /// A strict loaded set must retain the built-in loader, so every configured
 /// tool remains reachable. Membership always refers to the selected saved set.
-fn loadedToolsRejection(tools: *const protocol.ToolsField, loaded: *const protocol.ToolsField) ?configuration_admission.Rejection {
+fn loadedToolsRejection(tools: *const command_input.ToolsField, loaded: *const command_input.ToolsField) ?configuration_admission.Rejection {
     var names = loaded.iterator();
     while (names.next()) |name| if (!containsName(tools, name)) return .loaded_tools_not_in_tools;
     if (loaded.count < tools.count and !containsName(loaded, "find_tools")) return .loaded_tools_unreachable;
@@ -790,7 +791,7 @@ fn prepareLoadedTools(a: anytype, creating: bool, requested: *const content_cust
     if (!creating and requested.tools.state != .value and requested.loaded_tools.state != .value) return null;
     if (requested.loaded_tools.state != .value and (creating or reads.next.loaded_tool_set_id == null)) return null;
 
-    const tools: *const protocol.ToolsField = if (creating or requested.tools.state == .value) requestedNames(requested) else saved: {
+    const tools: *const command_input.ToolsField = if (creating or requested.tools.state == .value) requestedNames(requested) else saved: {
         reads.saved_tools.state = .value;
         reads.saved_tools.count = 0;
         reads.saved_tools.names.len = 0;
@@ -800,7 +801,7 @@ fn prepareLoadedTools(a: anytype, creating: bool, requested: *const content_cust
         if (names.invalid) return error.CorruptStore;
         break :saved &reads.saved_tools;
     };
-    const loaded: *const protocol.ToolsField = if (requested.loaded_tools.state == .value) &requested.loaded_tools else saved: {
+    const loaded: *const command_input.ToolsField = if (requested.loaded_tools.state == .value) &requested.loaded_tools else saved: {
         reads.saved_loaded.state = .value;
         reads.saved_loaded.count = 0;
         reads.saved_loaded.names.len = 0;
@@ -852,7 +853,7 @@ pub const ValidatedConfiguration = struct {
     content_actions: @FieldType(ConfigurationUpdatePlan, "update"),
     before: ?Settings,
 };
-pub const ConfigurationValidation = union(enum) { ready: *const ValidatedConfiguration, rejected: protocol.ConfigurationRejection };
+pub const ConfigurationValidation = union(enum) { ready: *const ValidatedConfiguration, rejected: configuration_admission.Rejection };
 
 /// Validates without queuing content, tool-set or Session writes. The resulting
 /// plan borrows the same transaction's reads and is applied exactly once.

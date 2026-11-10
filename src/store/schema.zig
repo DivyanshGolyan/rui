@@ -3,7 +3,6 @@
 //! stored DDL is compared with it when it opens.
 
 const std = @import("std");
-const protocol = @import("../protocol.zig");
 const store_path = @import("../store_path.zig");
 const tool_name = @import("../tool_name.zig");
 const Bounded = @import("../bounded.zig").Bounded;

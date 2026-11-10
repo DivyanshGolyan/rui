@@ -373,7 +373,7 @@ fn status(accepted: bool) Status {
 }
 
 fn reference(content: session_report.Content) Reference {
-    return .{ .length = content.length, .digest = content.digest };
+    return .{ .value = .{ .length = content.length, .digest = content.digest } };
 }
 
 fn presentation(value: tool_presentation.ToolPresentation) protocol.ToolPresentationJson {
@@ -416,7 +416,7 @@ pub const ExecutionJson = struct {
     pub const json_shape = .{ "{\"status\":\"partial\",\"dispatch_fenced\":", H.boolean, ",\"custody_occupied\":\"", H.decimal, "\",\"scratch_used_bytes\":\"", H.decimal, "\",\"unavailable\":[\"structured_output\"]}" };
 };
 
-const Reference = protocol.ActivityItem.Content;
+const Reference = protocol.ContentJson;
 
 /// A content reference typed as text.
 pub const TextReference = struct {

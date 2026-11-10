@@ -22,6 +22,7 @@ const message_observation = @import("message_observation.zig");
 const conversation_read = @import("conversation_read.zig");
 const session_list = @import("session_list.zig");
 const activity_read = @import("activity_read.zig");
+const activity_facts = @import("activity_facts.zig");
 
 pub const wire_version = @import("wire_version.zig").wire_version;
 
@@ -271,59 +272,7 @@ pub const ProposalMetadata = activity_read.ProposalMetadata;
 pub const ActivityPage = activity_read.ActivityPage;
 pub const ActivitySearch = activity_read.ActivitySearch;
 
-pub const ActivitySearchFacts = struct {
-    items: [ActivityPage.items]Item = undefined,
-    count: usize = 0,
-    next: ?Cursor = null,
-
-    pub const Hit = struct {
-        snippet: Bounded(160) = .{},
-        offset: usize,
-        length: usize,
-        pub const json_shape = .{ "{\"snippet\":", Hole{ .string = 160 }, ",\"offset\":\"", Hole.decimal, "\",\"length\":\"", Hole.decimal, "\"}" };
-        pub const max_json_bytes = shapeBytes(json_shape);
-        pub fn writeJson(self: *const Hit, out: *std.Io.Writer) !void {
-            try writeShape(out, json_shape, .{ self.snippet.slice(), self.offset, self.length });
-        }
-    };
-    pub const Cursor = struct {
-        position: u64,
-        ordinal: u64,
-        pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
-        pub const max_json_bytes = shapeBytes(json_shape);
-        pub fn writeJson(self: *const Cursor, out: *std.Io.Writer) !void {
-            try writeShape(out, json_shape, .{ self.position, self.ordinal });
-        }
-    };
-    pub const Item = struct {
-        position: u64,
-        ordinal: u64,
-        kind: ActivityItem.Kind,
-        hits: [3]Hit = undefined,
-        count: usize = 0,
-        pub const head = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"kind\":\"", Hole{ .tag = ActivityItem.Kind }, "\",\"hits\":[" };
-        pub const max_json_bytes = shapeBytes(Item.head) + jsonListBytes(3, Hit.max_json_bytes) + 2;
-        pub fn writeJson(self: *const Item, out: *std.Io.Writer) !void {
-            try writeShape(out, Item.head, .{ self.position, self.ordinal, self.kind });
-            for (self.hits[0..self.count], 0..) |*hit, index| {
-                if (index != 0) try out.writeByte(',');
-                try hit.writeJson(out);
-            }
-            try out.writeAll("]}");
-        }
-    };
-    pub const head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":["};
-    pub const tail = .{ "],\"next\":", Hole{ .optional_json = Cursor }, "}" };
-    pub const max_json_bytes = shapeBytes(head) + jsonListBytes(ActivityPage.items, Item.max_json_bytes) + shapeBytes(tail);
-    pub fn writeJson(self: *const ActivitySearchFacts, out: *std.Io.Writer) !void {
-        try writeShape(out, head, .{});
-        for (self.items[0..self.count], 0..) |*item, index| {
-            if (index != 0) try out.writeByte(',');
-            try item.writeJson(out);
-        }
-        try writeShape(out, tail, .{self.next});
-    }
-};
+pub const ActivitySearchFacts = activity_facts.Search;
 
 pub const ToolPresentation = tool_presentation.ToolPresentation;
 
@@ -354,23 +303,23 @@ pub const Peer = struct {
     }
 };
 
-/// A peer as a Message row names it: with its label as the Store holds it
-/// when read, empty when the Session has none. Only rows a reader shows
-/// carry it; listings keep the bare `Peer`.
-pub const NamedPeer = struct {
-    session: Bounded(max_session_bytes),
-    label: Bounded(max_label_bytes) = .{},
+pub const NamedPeer = activity_facts.NamedPeer;
 
+/// A NamedPeer as JSON.
+pub const NamedPeerJson = struct {
+    value: NamedPeer,
+
+    pub const openapi_name = "NamedPeer";
     pub const json_shape = .{ "{\"session\":", Hole{ .string = max_session_bytes }, ",\"label\":", Hole{ .optional_string = max_label_bytes }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
-    pub fn writeJson(self: NamedPeer, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ self.session.slice(), if (self.label.len == 0) null else self.label.slice() });
+    pub fn optional(value: ?NamedPeer) ?NamedPeerJson {
+        return if (value) |peer| .{ .value = peer } else null;
     }
 
-    /// What a reader calls it: its label, or its ID when it has none.
-    pub fn name(self: *const NamedPeer) []const u8 {
-        return if (self.label.len == 0) self.session.slice() else self.label.slice();
+    pub fn writeJson(self: *const NamedPeerJson, out: *std.Io.Writer) !void {
+        const peer = &self.value;
+        try writeShape(out, json_shape, .{ peer.session.slice(), if (peer.label.len == 0) null else peer.label.slice() });
     }
 };
 
@@ -378,131 +327,22 @@ pub const NamedPeer = struct {
 /// configuration.
 pub const SessionField = @import("session_field.zig").SessionField;
 
-pub const ActivityItem = struct {
-    position: u64,
-    ordinal: u64 = 0,
-    /// The Host Unix second the row's owning fact committed.
-    at: u64,
-    value: Value,
-    /// `admission` is a Message a person or script sent; `received` one
-    /// another Session sent, which always names it as `sender`.
-    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted };
-    pub const Kind = std.meta.Tag(Value);
-    pub const Content = struct {
-        length: u64,
-        digest: [32]u8,
-        pub const json_shape = .{ "{\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
-        pub const max_json_bytes = shapeBytes(json_shape);
-        pub fn writeJson(self: Content, out: *std.Io.Writer) !void {
-            try writeShape(out, json_shape, .{ self.length, self.digest });
-        }
-    };
-    // `admitted_at` is the Host wall-clock second the Message was admitted.
-    // A null `sender` means a human or script sent the Message.
-    pub const Message = struct { admission: u64, key: Bounded(max_key_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: Content, admitted_at: u64, sender: ?NamedPeer = null };
-    pub const Call = ProposalMetadata;
-    /// `final` marks the Turn's answer: the assistant row a `done` Turn
-    /// ended with, once its `turn_ended` row is within the page's end.
-    pub const Assistant = struct { content: Content, final: bool = false };
-    /// `code` is the saved code the ending was judged from; `content` a
-    /// done Turn's answer or a failed one's report.
-    pub const TurnEnded = struct { session: Bounded(session_id_bytes), turn: u64, operation: u64, ending: TurnEnding, code: Bounded(max_code_bytes), content: ?Content };
-    pub const Stop = struct { key: Bounded(max_key_bytes), turn: ?u64, cutoff: u64, completion: SessionStopCompletion };
-    /// A Message this Session sent: admitted to `target`, or rejected there.
-    pub const Sent = struct { admission: u64, target: NamedPeer, content: Content, admitted_at: u64 };
-    pub const SendFailed = struct {
-        key: Bounded(max_key_bytes),
-        /// No canonical attempted reference, not evidence of creation intent.
-        /// A canonical but unknown Session still has a target.
-        target: ?NamedPeer,
-        code: Bounded(max_code_bytes),
-    };
-    /// A call that waits on a person's decision because the Session asked
-    /// for approval when it was made: `action` is the id a
-    /// `permission_decision` names. The row follows its call at ordinal 1.
-    pub const ApprovalRequested = struct { session: Bounded(session_id_bytes), action: u64, operation: u64, call_ordinal: u64 };
-    /// One setting a revision changed, at the position the revision was
-    /// accepted; a revision's changes share it, one ordinal each.
-    pub const SessionChanged = struct { revision: u64, field: SessionField };
-    /// A compaction that succeeded, at its admission: `dropped` is how many
-    /// conversation entries it left out to make room, zero for none (D217).
-    pub const Compacted = struct { operation: u64, dropped: u64 };
+pub const ActivityItem = activity_facts.Item;
 
-    /// Holes: position, ordinal, at; then the value's shape, then `tail`.
-    pub fn head(comptime kind: std.meta.Tag(Value)) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8 } {
-        return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"at\":\"", .decimal, "\",\"value\":{\"" ++ @tagName(kind) ++ "\":" };
+/// A content reference as activity rows and reports write it.
+pub const ContentJson = struct {
+    value: ActivityItem.Content,
+
+    pub const openapi_name = "ActivityItemContent";
+    pub const json_shape = .{ "{\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+
+    pub fn optional(value: ?ActivityItem.Content) ?ContentJson {
+        return if (value) |content| .{ .value = content } else null;
     }
-    pub const tail = .{"}}"};
-    /// Each value kind's JSON, named by its tag.
-    pub const value_shapes = struct {
-        /// Holes: admission, key, turn, state, admitted at, sender, content.
-        const message = .{ "{\"admission\":\"", Hole.decimal, "\",\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"state\":\"", Hole{ .tag = @FieldType(Message, "state") }, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeer }, ",\"content\":", Hole{ .json = Content }, "}" };
-        pub const admission = message;
-        pub const user = message;
-        pub const received = message;
-        /// Holes: content, final.
-        pub const assistant = .{ "{\"content\":", Hole{ .json = Content }, ",\"final\":", Hole.boolean, "}" };
-        /// Holes: operation, turn, call ordinal, Action, rejection, the three field contents.
-        pub const call = .{ "{\"operation\":\"", Hole.decimal, "\",\"turn\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\",\"action\":", Hole.optional_id, ",\"rejection\":", Hole{ .optional_tag = ProposalRejection }, ",\"fields\":[", Hole{ .json = Content }, ",", Hole{ .json = Content }, ",", Hole{ .json = Content }, "]}" };
-        /// Holes: content, presentation.
-        pub const tool_result = .{ "{\"content\":", Hole{ .json = Content }, ",\"presentation\":", Hole{ .json = ToolPresentationJson }, "}" };
-        /// A call the provider ran, shown by its line alone. Hole: presentation.
-        pub const hosted_call = .{ "{\"presentation\":", Hole{ .json = ToolPresentationJson }, "}" };
-        /// Holes: turn, operation, ending, code, content.
-        pub const turn_ended = .{ "{\"session\":", Hole{ .string = session_id_bytes }, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"ending\":\"", Hole{ .tag = TurnEnding }, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .optional_json = Content }, "}" };
-        /// Holes: key, turn, cutoff, completion.
-        pub const stop = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"cutoff\":\"", Hole.decimal, "\",\"completion\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
-        /// Holes: admission, admitted at, target, content.
-        pub const sent = .{ "{\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"target\":", Hole{ .json = NamedPeer }, ",\"content\":", Hole{ .json = Content }, "}" };
-        /// Holes: key, target, code.
-        pub const send_failed = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"target\":", Hole{ .optional_json = NamedPeer }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
-        /// Holes: action, operation, call ordinal.
-        pub const approval_requested = .{ "{\"session\":", Hole{ .string = session_id_bytes }, ",\"action\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\"}" };
-        /// Holes: revision, field.
-        pub const session_changed = .{ "{\"revision\":\"", Hole.decimal, "\",\"field\":\"", Hole{ .tag = SessionField }, "\"}" };
-        /// Holes: operation, dropped.
-        pub const compacted = .{ "{\"operation\":\"", Hole.decimal, "\",\"dropped\":\"", Hole.decimal, "\"}" };
-    };
-    pub const max_json_bytes = blk: {
-        @setEvalBranchQuota(10_000);
-        var bytes = 0;
-        for (std.meta.tags(std.meta.Tag(Value))) |kind| {
-            const name = @tagName(kind);
-            bytes = @max(bytes, shapeBytes(head(kind)) + shapeBytes(@field(value_shapes, name)));
-        }
-        break :blk bytes + shapeBytes(tail);
-    };
 
-    pub fn writeJson(self: *const ActivityItem, out: *std.Io.Writer) !void {
-        switch (self.value) {
-            inline else => |_, kind| try writeShape(out, head(kind), .{ self.position, self.ordinal, self.at }),
-        }
-        switch (self.value) {
-            inline .admission, .user, .received => |message, tag| {
-                const name = @tagName(tag);
-                try writeShape(out, @field(value_shapes, name), .{
-                    message.admission,   message.key.slice(), message.turn,    message.state,
-                    message.admitted_at, message.sender,      message.content,
-                });
-            },
-            .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, sent.target, sent.content }),
-            .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), failed.target, failed.code.slice() }),
-            .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal }),
-            .session_changed => |change| try writeShape(out, value_shapes.session_changed, .{ change.revision, change.field }),
-            .compacted => |compacted| try writeShape(out, value_shapes.compacted, .{ compacted.operation, compacted.dropped }),
-            .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ assistant.content, assistant.final }),
-            .tool_result => |result| try writeShape(out, value_shapes.tool_result, .{ result.content, ToolPresentationJson{ .value = result.presentation } }),
-            .hosted_call => |presentation| try writeShape(out, value_shapes.hosted_call, .{ToolPresentationJson{ .value = presentation }}),
-            .call => |call| {
-                comptime std.debug.assert(call.fields.len == 3);
-                var fields: [3]Content = undefined;
-                for (call.fields, &fields) |field, *content| content.* = .{ .length = field.length, .digest = field.digest };
-                try writeShape(out, value_shapes.call, .{ call.operation, call.turn, call.call_ordinal, call.action, call.rejection, fields[0], fields[1], fields[2] });
-            },
-            .turn_ended => |ended| try writeShape(out, value_shapes.turn_ended, .{ ended.session.slice(), ended.turn, ended.operation, ended.ending, ended.code.slice(), ended.content }),
-            .stop => |stop| try writeShape(out, value_shapes.stop, .{ stop.key.slice(), stop.turn, stop.cutoff, stop.completion }),
-        }
-        try writeShape(out, tail, .{});
+    pub fn writeJson(self: *const ContentJson, out: *std.Io.Writer) !void {
+        try writeShape(out, json_shape, .{ self.value.length, self.value.digest });
     }
 };
 pub const ReadActivityContent = activity_read.ReadActivityContent;
@@ -513,49 +353,8 @@ pub const ReadSkillSuggestions = struct {
     prefix: Bounded(64) = .{},
 };
 
-pub const CallActivity = struct {
-    pub const Entry = struct { operation: u64, ordinal: u64, presentation: ToolPresentation };
-    entries: [3]Entry = undefined,
-    count: usize = 0,
-    total: u64 = 0,
-
-    /// Hole: total.
-    pub const head = .{ "{\"total\":\"", Hole.decimal, "\",\"entries\":[" };
-    /// Holes: operation, ordinal, presentation.
-    pub const entry_shape = .{ "{\"operation\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"presentation\":", Hole{ .json = ToolPresentationJson }, "}" };
-    pub const tail = .{"]}"};
-    pub const max_json_bytes = shapeBytes(head) + jsonListBytes(@typeInfo(@FieldType(CallActivity, "entries")).array.len, shapeBytes(entry_shape)) + shapeBytes(tail);
-
-    pub fn writeJson(self: *const CallActivity, out: *std.Io.Writer) !void {
-        try writeShape(out, head, .{self.total});
-        for (self.entries[0..self.count], 0..) |entry, index| {
-            if (index != 0) try out.writeByte(',');
-            try writeShape(out, entry_shape, .{ entry.operation, entry.ordinal, ToolPresentationJson{ .value = entry.presentation } });
-        }
-        try writeShape(out, tail, .{});
-    }
-};
-
-/// The Messages a person or script sent that a Session admitted and had not
-/// taken at a page's boundary: not applied, and not excluded by a stop. A
-/// stop and an input boundary both take an admission-order prefix, so they
-/// are the newest such admissions. Zero when none waits.
-pub const Queued = struct {
-    count: u64 = 0,
-    /// The oldest one's Admission position.
-    oldest_position: u64 = 0,
-    /// The newest one's admission ID and Admission position.
-    newest_admission: u64 = 0,
-    newest_position: u64 = 0,
-
-    /// Holes: count, oldest position, newest admission, newest position.
-    pub const shape = .{ "{\"count\":\"", Hole.decimal, "\",\"oldest_position\":\"", Hole.decimal, "\",\"newest_admission\":\"", Hole.decimal, "\",\"newest_position\":\"", Hole.decimal, "\"}" };
-    pub const max_json_bytes = shapeBytes(shape);
-
-    pub fn writeJson(self: *const Queued, out: *std.Io.Writer) !void {
-        try writeShape(out, shape, .{ self.count, self.oldest_position, self.newest_admission, self.newest_position });
-    }
-};
+pub const CallActivity = activity_facts.CallActivity;
+pub const Queued = activity_facts.Queued;
 
 pub const session_work = @import("session_work.zig");
 pub const WorkState = session_work.WorkState;
@@ -631,22 +430,7 @@ pub const SessionWork = struct {
     }
 };
 
-/// The Session's work as of its page's own Store read: what the live footer,
-/// consent and first Action show with that page, beside the revision and
-/// Workspace a permission prompt shows.
-pub const PageWork = struct {
-    work: SessionWork = .{},
-    revision: u64 = 0,
-    workspace: Bounded(max_workspace_bytes) = .{},
-
-    /// Holes: the work's fields, revision, Workspace.
-    pub const json_shape = .{"{"} ++ SessionWork.fields ++ .{ ",\"revision\":\"", Hole.decimal, "\",\"workspace\":", Hole{ .string = max_workspace_bytes }, "}" };
-    pub const max_json_bytes = shapeBytes(json_shape);
-
-    pub fn writeJson(self: *const PageWork, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, self.work.args() ++ .{ self.revision, self.workspace.slice() });
-    }
-};
+pub const PageWork = activity_facts.PageWork;
 
 /// Who reached this Session from outside its peers: when the latest Message
 /// with no Session sender (a person or a script; Rui cannot tell them apart)
@@ -673,7 +457,7 @@ pub const FirstMessage = struct {
     content: ActivityItem.Content,
 
     /// Holes: position, admission, admitted at, sender, content.
-    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = ActivityItem.Content }, "}" };
+    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = ContentJson }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn fromCore(first: session_list.FirstMessage) FirstMessage {
@@ -687,7 +471,7 @@ pub const FirstMessage = struct {
     }
 
     pub fn writeJson(self: *const FirstMessage, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ self.position, self.admission, self.admitted_at, self.sender, self.content });
+        try writeShape(out, json_shape, .{ self.position, self.admission, self.admitted_at, self.sender, ContentJson{ .value = self.content } });
     }
 };
 
@@ -809,42 +593,7 @@ pub const session_list_reply = struct {
     pub const max_bytes = shapeBytes(head) + jsonListBytes(session_list_page_size, SessionRow.max_json_bytes) + maxShapeBytes(.{ full_tail, changed_tail, last_tail });
 };
 
-pub const ActivityFacts = struct {
-    token: ?change_ring.SessionToken = null,
-    not_modified: bool = false,
-    end: u64,
-    direction: @FieldType(ActivityPage, "direction") = .forward,
-    items: [ActivityPage.items]ActivityItem = undefined,
-    count: usize = 0,
-    more: bool = false,
-    call_activity: CallActivity = .{},
-    /// At the same boundary as `call_activity`.
-    queued: Queued = .{},
-    work: PageWork = .{},
-
-    /// Holes: end, direction; then the items, then `tail`.
-    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_page\",\"end\":\"", Hole.decimal, "\",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"items\":[" };
-    /// Holes: more, call activity, queued, work.
-    pub const tail = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"queued\":", Hole{ .json = Queued }, ",\"work\":", Hole{ .json = PageWork }, ",\"delta\":\"full\",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes }, "}" };
-    pub const unchanged = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"not_modified\",\"since\":", Hole{ .string = change_ring.SessionToken.max_bytes }, "}" };
-    pub const max_json_bytes = shapeBytes(head) + jsonListBytes(@typeInfo(@FieldType(ActivityFacts, "items")).array.len, ActivityItem.max_json_bytes) + shapeBytes(tail);
-
-    pub fn writeJson(self: *const ActivityFacts, out: *std.Io.Writer) !void {
-        var token_buffer: [change_ring.SessionToken.max_bytes]u8 = undefined;
-        const token = if (self.token) |value| value.format(&token_buffer) else null;
-        if (self.not_modified) return writeShape(out, unchanged, .{token.?});
-        try self.writeFullJson(out, token);
-    }
-
-    pub fn writeFullJson(self: *const ActivityFacts, out: *std.Io.Writer, token: ?[]const u8) !void {
-        try writeShape(out, head, .{ self.end, self.direction });
-        for (self.items[0..self.count], 0..) |*item, index| {
-            if (index != 0) try out.writeByte(',');
-            try item.writeJson(out);
-        }
-        try writeShape(out, tail, .{ self.more, &self.call_activity, &self.queued, &self.work, token });
-    }
-};
+pub const ActivityFacts = activity_facts.Page;
 
 fn RequestOf(comptime Custody: type) type {
     const ConfigureCommand = Requests(Custody).ConfigureCommand;
@@ -2145,7 +1894,6 @@ pub const conversation_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\
 /// Holes: Store, Session, end, position, ordinal, direction, kinds, limit.
 pub const activity_search_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_search\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"query\":", Hole{ .string = 256 }, ",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"before_position\":", Hole.optional_id, ",\"before_ordinal\":", Hole.optional_id, ",\"limit\":\"", Hole.decimal, "\"}" };
 pub const max_activity_search_request_bytes = shapeBytes(activity_search_request);
-pub const max_activity_search_response_bytes = ActivitySearchFacts.max_json_bytes;
 const activity_page_request_head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"limit\":\"", Hole.decimal };
 pub const activity_page_request = activity_page_request_head ++ .{"\"}"};
 /// Holes: Store, Session, position, ordinal.
@@ -2214,8 +1962,6 @@ pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
 
 /// A Message or answer's content reference in an observation. Holes: length, digest.
 pub const content_reference_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
-
-pub const max_activity_page_response_bytes = ActivityFacts.max_json_bytes;
 
 pub const configuration_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":";
@@ -2460,7 +2206,7 @@ pub const conversation_page_reply = struct {
     /// A Hosted Call item, which has no content. Holes: position, ordinal.
     pub const hosted_call = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"kind\":\"hosted_call\"" };
     /// A User item's admission. Holes: second, sending peer.
-    pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeer } };
+    pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeerJson } };
     /// A Tool Result or Hosted Call item's presentation. Hole: it.
     pub const presentation = .{ ",\"presentation\":", Hole{ .json = ToolPresentationJson } };
     pub const item_end = .{"}"};
@@ -3127,24 +2873,6 @@ test "activity search wire validates query and paired backward cursor" {
             try std.testing.expect(request == .activity_search);
         }
     }
-}
-
-test "activity search reply bounds preserve snippets and nullable continuation" {
-    var facts: ActivitySearchFacts = .{};
-    facts.count = 1;
-    facts.items[0] = .{ .position = 9, .ordinal = 2, .kind = .call, .count = 1 };
-    facts.items[0].hits[0] = .{ .offset = 1, .length = 3 };
-    try facts.items[0].hits[0].snippet.set("\"雪\n");
-    facts.next = .{ .position = 8, .ordinal = 0 };
-    var buffer: [max_activity_search_response_bytes]u8 = undefined;
-    var out = std.Io.Writer.fixed(&buffer);
-    try facts.writeJson(&out);
-    try std.testing.expectEqualStrings("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":[{\"position\":\"9\",\"ordinal\":\"2\",\"kind\":\"call\",\"hits\":[{\"snippet\":\"\\\"雪\\n\",\"offset\":\"1\",\"length\":\"3\"}]}],\"next\":{\"position\":\"8\",\"ordinal\":\"0\"}}", out.buffered());
-    facts.count = 0;
-    facts.next = null;
-    out = std.Io.Writer.fixed(&buffer);
-    try facts.writeJson(&out);
-    try std.testing.expectEqualStrings("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":[],\"next\":null}", out.buffered());
 }
 
 test "the request parser refuses what each command's grammar forbids" {

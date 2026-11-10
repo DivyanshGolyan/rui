@@ -1,5 +1,6 @@
 const std = @import("std");
 const change_ring = @import("change_ring.zig");
+const activity_reply = @import("activity_reply.zig");
 const os = @import("os/os.zig");
 const socket_os = @import("os/socket.zig");
 const pages = @import("os/pages.zig");
@@ -60,11 +61,12 @@ const waitAtTestGate = server_host.waitAtTestGate;
 const traceSqliteDiagnostic = server_host.traceSqliteDiagnostic;
 
 fn captureFailedResponse(host: *Host, request: *const protocol.InspectSession, request_number: u64) !store_module.SessionReport {
-    const binding = try host.store.failedResponseBinding(request);
+    const selection = request.failed_response.?;
+    const binding = try host.store.failedResponseBinding(request.session.slice(), selection.operation, selection.attempt);
     var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
     try capture.create(host.lease.paths.scratch.slice(), request_number, host.hooks.fails(.report_unlink));
     errdefer capture.deinit();
-    try failed_responses.exportRecord(host.io, host.lease.store_dir, binding, request.failed_response.?.part, &capture);
+    try failed_responses.exportRecord(host.io, host.lease.store_dir, binding, selection.part, &capture);
     return capture.seal();
 }
 
@@ -1833,7 +1835,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            try fd.json(200, protocol.max_activity_search_response_bytes, host_reply.renderActivitySearch, .{page});
+            try fd.json(200, activity_reply.max_search_bytes, host_reply.renderActivitySearch, .{page});
         },
         .activity_content => |*command| {
             const location = host.store.openActivityContent(command) catch |err| switch (err) {
@@ -2992,7 +2994,7 @@ test "activity page both unchanged tiers render byte exactly with independent re
     defer std.testing.allocator.destroy(page);
     try storage.activityPage(&request, page);
     try std.testing.expect(!page.not_modified);
-    try std.testing.expectEqual(protocol.max_activity_page_response_bytes, host_reply.activityPageBytes(page));
+    try std.testing.expectEqual(activity_reply.max_page_bytes, host_reply.activityPageBytes(page));
     request.position = page.end;
     request.since = page.token.?;
     for (0..2) |tier| {
@@ -3007,8 +3009,8 @@ test "activity page both unchanged tiers render byte exactly with independent re
         try host_reply.renderActivityPage(.{ .writer = &writer }, page);
         var expected: [256]u8 = undefined;
         try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.{d}.{s}\"}}", .{ storage.commitGeneration(), session.slice() }), writer.buffered());
-        try std.testing.expectEqual(protocol.shapeBytes(protocol.ActivityFacts.unchanged), host_reply.activityPageBytes(page));
-        try std.testing.expect(host_reply.activityPageBytes(page) < protocol.max_activity_page_response_bytes);
+        try std.testing.expectEqual(protocol.shapeBytes(activity_reply.page_reply.unchanged), host_reply.activityPageBytes(page));
+        try std.testing.expect(host_reply.activityPageBytes(page) < activity_reply.max_page_bytes);
     }
 }
 
@@ -3278,9 +3280,9 @@ test "failed send without a canonical target writes explicit null within activit
         .at = 1,
         .value = .{ .send_failed = .{ .key = key, .target = null, .code = code } },
     };
-    var buffer: [protocol.ActivityItem.max_json_bytes]u8 = undefined;
+    var buffer: [activity_reply.ItemJson.max_json_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try item.writeJson(&writer);
+    try (activity_reply.ItemJson{ .item = &item }).writeJson(&writer);
     try std.testing.expectEqualStrings(
         "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"refused-creation\",\"target\":null,\"code\":\"unsupported_reasoning_effort\"}}}",
         writer.buffered(),

@@ -9,6 +9,7 @@ const Self = @This();
 document: *const viewport.Document,
 first: viewport.Position = .{},
 next: viewport.Position = .end,
+size: vxfw.Size = .{},
 method: vaxis.gwidth.Method = .unicode,
 colour: bool = true,
 style: vaxis.Style = .{},
@@ -20,6 +21,8 @@ pub fn widget(self: *Self) vxfw.Widget {
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const surface = try vxfw.Surface.init(ctx.arena, self.widget(), ctx.max.size());
+    self.size = surface.size;
+    self.first = self.document.first(.{ .width = @max(1, self.size.width), .method = self.method }, self.size.height);
     @memset(surface.buffer, .{ .style = self.style });
     var screen: vaxis.Screen = .{
         .width = surface.size.width,
@@ -45,7 +48,8 @@ test "Transcript draws only the requested rows and retains the first unread row"
     defer std.testing.allocator.destroy(document);
     document.* = .{};
     try document.append("first\nsecond\nthird\nfourth");
-    var transcript: Self = .{ .document = document, .first = .{ .offset = 6 }, .style = .{ .bg = .{ .index = 19 } } };
+    document.top = .{ .offset = 6 };
+    var transcript: Self = .{ .document = document, .style = .{ .bg = .{ .index = 19 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const surface = try transcript.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = 2 }, .cell_size = .{} });
@@ -58,7 +62,7 @@ test "Transcript draws only the requested rows and retains the first unread row"
     for ([_]vxfw.Size{ .{ .width = 1, .height = 1 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 0 } }) |size| {
         const resized = try transcript.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
         try std.testing.expect(resized.size.width <= size.width and resized.size.height <= size.height);
-        try std.testing.expectEqual(viewport.Position{ .offset = 6 }, transcript.first);
+        try std.testing.expectEqual(viewport.Position{ .offset = 6 }, document.top.?);
     }
     const restored = try transcript.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = 2 }, .cell_size = .{} });
     try std.testing.expectEqualDeep(surface.buffer, restored.buffer);

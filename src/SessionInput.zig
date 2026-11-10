@@ -108,6 +108,42 @@ pub fn applySelected(self: *Self, comptime keys: anytype, decoded: TerminalInput
     const edits = editor.edits;
     const outcome = editor.apply(keys, decoded);
     if (editor.edits != edits) self.changed();
+    return self.accept(@TypeOf(keys).Action, outcome, selected);
+}
+
+pub fn appEvent(self: *Self, comptime keys: anytype, event: @import("vaxis").vxfw.Event, pasting: bool, selected: bool) Event(@TypeOf(keys).Action) {
+    const editor = &self.editors[self.active];
+    const edits = editor.edits;
+    const outcome = editor.appEvent(keys, event, pasting);
+    if (editor.edits != edits) self.changed();
+    return self.accept(@TypeOf(keys).Action, outcome, selected);
+}
+
+test "Ctrl-J inserts at the caret without submitting through either input path" {
+    const self = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(self);
+    for ([_][]const u8{ "\n", "\x1b[106;5u", "\x1b[106;5;106u", "\x1b[27;5;106~" }) |bytes| {
+        self.init();
+        _ = self.append("leftRIGHT");
+        self.editors[self.active].cursor = 4;
+        for (bytes) |byte| try std.testing.expect(self.feed(byte) == .editor);
+        try std.testing.expectEqualStrings("left\nRIGHT", self.composition().bytes);
+        try std.testing.expectEqual(@as(usize, 5), self.composition().cursor);
+        try std.testing.expectEqual(null, self.submitted);
+        try std.testing.expect(self.feed('\r') == .message);
+    }
+    self.init();
+    _ = self.append("leftRIGHT");
+    self.editors[self.active].cursor = 4;
+    const newline = self.appEvent(keymap.every, .{ .key_press = .{ .codepoint = 'j', .mods = .{ .ctrl = true } } }, false, true);
+    try std.testing.expect(newline == .editor);
+    try std.testing.expectEqualStrings("left\nRIGHT", self.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 5), self.composition().cursor);
+    try std.testing.expectEqual(null, self.submitted);
+    try std.testing.expect(self.appEvent(keymap.every, .{ .key_press = .{ .codepoint = @import("vaxis").Key.enter } }, false, true) == .message);
+}
+
+fn accept(self: *Self, comptime Action: type, outcome: keymap.Outcome(Action), selected: bool) Event(Action) {
     if (outcome == .refused and outcome.refused.endsLine()) self.clear();
     if (outcome != .submit) return .{ .editor = outcome };
     const bytes = self.composition().bytes;
