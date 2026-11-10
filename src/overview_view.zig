@@ -7569,15 +7569,20 @@ test "upgrade emits only its local effect and preserves selection settings and u
     try std.testing.expect(state.command == null);
 }
 
-test "/upgrade runs inline: Esc cancels it before the draft, until publishing, and its end sets the Host hold" {
+test "/upgrade runs inline: Esc cancels it before the draft, checking or preparing, and its end sets the Host hold" {
     var state = try opened(&.{});
     defer state.deinit();
     var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
     try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
     try std.testing.expectEqualStrings("Checking for updates…", state.upgrade.line(&buffer, .unicode).?.text);
+    // Esc cancels the check too, keeping the draft.
+    const draft = try typeText(&state, "keep me");
+    try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
+    _ = try step(&state, .{ .upgrade = .{ .ended = .cancelled } });
+    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", state.notice.?.text());
+    try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
     _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } });
     // Esc cancels the Upgrade and keeps the draft.
-    const draft = try typeText(&state, "keep me");
     try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
     try std.testing.expectEqualStrings("Cancelling…", state.upgrade.line(&buffer, .unicode).?.text);
     _ = try step(&state, .{ .upgrade = .{ .ended = .cancelled } });

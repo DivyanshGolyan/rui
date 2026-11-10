@@ -41,7 +41,7 @@ pub const Ended = union(enum) {
 
 pub const State = union(enum) {
     idle,
-    checking,
+    checking: struct { cancelling: bool = false },
     installing: struct { found: Found, step: Step = .preparing, cancelling: bool = false },
     ended: Ended,
 };
@@ -64,12 +64,13 @@ pub const Upgrade = struct {
 
     /// /upgrade: check again, replacing whatever the last run left.
     pub fn begin(self: *Upgrade) void {
-        self.state = .checking;
+        self.state = .{ .checking = .{} };
     }
 
-    /// The check found a release it may install, which starts at once.
+    /// The check found a release it may install, which starts at once,
+    /// unless Esc cancelled the check.
     pub fn found(self: *Upgrade, release: Found) void {
-        if (self.state != .checking) return;
+        if (self.state != .checking or self.state.checking.cancelling) return;
         self.state = .{ .installing = .{ .found = release } };
     }
 
@@ -90,11 +91,15 @@ pub const Upgrade = struct {
         }
     }
 
-    /// Esc: taken while the install can still roll back, which it asks
-    /// for; the shell cancels the worker when this first returns true.
-    /// Otherwise Esc is the screen's.
+    /// Esc: taken while the run can still change nothing, checking or
+    /// preparing, which it asks for; the shell cancels the worker when this
+    /// returns true. Otherwise Esc is the screen's.
     pub fn escape(self: *Upgrade) bool {
         switch (self.state) {
+            .checking => |*check| {
+                check.cancelling = true;
+                return true;
+            },
             .installing => |*install| {
                 if (install.step != .preparing) return false;
                 install.cancelling = true;
@@ -112,8 +117,8 @@ pub const Upgrade = struct {
         var writer = std.Io.Writer.fixed(buffer);
         const said: struct { Tone, Lasts } = switch (self.state) {
             .idle => return null,
-            .checking => said: {
-                writer.print("Checking for updates{s}", .{ellipsis}) catch unreachable;
+            .checking => |check| said: {
+                writer.print("{s}{s}", .{ if (check.cancelling) "Cancelling" else "Checking for updates", ellipsis }) catch unreachable;
                 break :said .{ .normal, .until_done };
             },
             .installing => |install| said: {
@@ -189,7 +194,6 @@ test "a found release installs at once, saying what the restart will do, and Esc
     var buffer: [max_line_bytes]u8 = undefined;
     run.begin();
     try expectLine(&run, &buffer, "Checking for updates…", .normal, .until_done);
-    try std.testing.expect(!run.escape());
 
     run.found(.{ .version = .{ .schema = 60, .patch = 0 }, .host = .{ .running = 2 } });
     try expectLine(&run, &buffer, "Upgrading to 0.60.0 · restarts the Host (2 Sessions working) · esc cancels", .normal, .until_done);
@@ -213,6 +217,22 @@ test "a found release installs at once, saying what the restart will do, and Esc
     try std.testing.expect(!run.escape());
     run.ended(.{ .upgraded = .{ .version = .{ .schema = 60, .patch = 1 }, .restarted = true } });
     try expectLine(&run, &buffer, "Upgraded to 0.60.1 · Host restarted", .normal, .notice);
+}
+
+test "Esc during the check cancels it: a release found after installs nothing, and it ends cancelled" {
+    var run: Upgrade = .{};
+    var buffer: [max_line_bytes]u8 = undefined;
+    run.begin();
+    try std.testing.expect(run.escape());
+    try expectLine(&run, &buffer, "Cancelling…", .normal, .until_done);
+    // A second Esc is still the Upgrade's while it winds down.
+    try std.testing.expect(run.escape());
+    // The check may finish before it hears the cancel; nothing installs.
+    run.found(.{ .version = .{ .schema = 60, .patch = 0 }, .host = .none });
+    try expectLine(&run, &buffer, "Cancelling…", .normal, .until_done);
+    run.ended(.cancelled);
+    try expectLine(&run, &buffer, "Upgrade cancelled; nothing changed", .normal, .notice);
+    try std.testing.expect(!run.escape());
 }
 
 test "with nothing working or no Host, the first line says so" {
@@ -279,7 +299,7 @@ test "a step or an end that arrives out of turn changes nothing" {
     run.begin();
     // No step before a release is found.
     run.step(.restarting);
-    try std.testing.expectEqual(Upgrade{ .state = .checking }, run);
+    try std.testing.expectEqual(Upgrade{ .state = .{ .checking = .{} } }, run);
     run.found(.{ .version = .{ .schema = 60, .patch = 0 }, .host = .none });
     run.step(.restarting);
     // Steps only move forward.

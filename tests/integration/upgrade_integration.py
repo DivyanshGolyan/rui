@@ -736,10 +736,10 @@ def signal_after_publication(root, binary, releases, artifacts):
                 (artifacts / "signal-after-publication.txt").write_text(screen.capture.plain)
 
 
-def check_holds_against_escape(root, binary, releases, artifacts):
-    """The check is read-only and Esc does not cancel it; SIGINT still reaps
-    the selected build's --version probe before discovery starts."""
-    with case(root, binary, releases, "selected-version-check") as c:
+def cancel_selected_version_check(root, binary, releases, artifacts):
+    """Esc during the check cancels it, and its --version probe is reaped
+    before release discovery starts."""
+    with case(root, binary, releases, "selected-version-cancel-escape") as c:
         c.old_selection()
         host, previous = c.start_host()
         _, credential = terminal_setup(c)
@@ -781,14 +781,10 @@ def check_holds_against_escape(root, binary, releases, artifacts):
 
                 assert alive()
                 screen.contains("Checking for updates")
-                screen.send("\x1b")
-                screen.contains("Checking for updates")
-                assert alive(), "Esc cancelled the read-only check"
-                screen.save(artifacts, "selected-version-escape")
                 assert releases.requests[start:] == [], "latest discovery ran before selected probe completed"
-                exit_on_sigint(screen, process, "SIGINT exit while selected version child is gated")
-                if artifacts is not None:
-                    (artifacts / "selected-version-sigint.txt").write_text(screen.capture.plain)
+                screen.send("\x1b")
+                screen.contains("Upgrade cancelled; nothing changed")
+                screen.save(artifacts, "selected-version-escape")
 
                 def reaped():
                     observed = subprocess.run(["ps", "-p", str(child_pid), "-o", "stat="],
@@ -955,8 +951,8 @@ def main():
         for suite in (discovery_cases, install_cases, lifecycle_cases):
             suite(root, binary, releases)
             print(f"upgrade native: {suite.__name__} passed", flush=True)
-        check_holds_against_escape(root, binary, releases, artifacts)
-        print("upgrade native: Esc left the read-only check running; SIGINT reaped the selected version probe", flush=True)
+        cancel_selected_version_check(root, binary, releases, artifacts)
+        print("upgrade native: Esc cancelled the check and reaped the selected version probe before discovery", flush=True)
         terminal_cases(root, binary, releases, artifacts)
         print("upgrade native: overview /upgrade cancelled while preparing, then installed inline", flush=True)
         escape_after_publication(root, binary, releases, artifacts)
