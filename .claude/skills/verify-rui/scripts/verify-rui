@@ -16,6 +16,7 @@ import select
 import shlex
 import shutil
 import signal
+import site
 import subprocess
 import sys
 import tarfile
@@ -23,7 +24,7 @@ import threading
 import time
 
 CACHE = pathlib.Path(os.environ.get("VERIFY_RUI_CACHE", pathlib.Path.home() / ".cache/verify-rui"))
-SCRATCH_PARENT = pathlib.Path("/private/tmp")  # short paths: Unix socket limits
+SCRATCH_PARENT = pathlib.Path("/private/tmp" if sys.platform == "darwin" else "/tmp")  # short paths: Unix socket limits
 HERE = pathlib.Path(__file__).resolve()
 REPO_URL = "https://github.com/DivyanshGolyan/rui.git"
 
@@ -98,6 +99,7 @@ class Run:
         # A minimal, explicit environment: no inherited credentials or Store.
         env = {
             "HOME": str(self.home),
+            "PYTHONUSERBASE": site.getuserbase(),
             "PATH": f"{self.rui.parent}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
             "TERM": "xterm-256color",
             "LANG": "en_US.UTF-8",
@@ -699,7 +701,7 @@ def cmd_new(args):
                              input=f"verify-rui opened {session}")
         if result.returncode != 0:
             die(f"start {session} failed: {result.stderr}")
-        meta["sessions"][session] = result.stdout.strip()
+        meta["sessions"][session] = json.loads(result.stdout)["answer"]["session"]
         handle = re.search(r"request: (\S+)", result.stderr)
         if handle:
             wait_request(run, handle.group(1))
@@ -1686,7 +1688,7 @@ def cmd_cleanup(args):
         with tarfile.open(run.evidence / "store-after.tgz", "w:gz") as archive:
             archive.add(run.store, arcname="store")
         act("archived Store into evidence", path=str(run.evidence / "store-after.tgz"))
-    if run.scratch.exists() and str(run.scratch).startswith("/private/tmp/vr."):
+    if run.scratch.exists() and str(run.scratch.resolve()).startswith(str(SCRATCH_PARENT.resolve() / "vr.")):
         shutil.rmtree(run.scratch)
         act("removed scratch (synthetic HOME, Store, project, sockets)", path=str(run.scratch))
     survivors = [r for r in run.owned() if process_start(r["pid"]) and process_start(r["pid"])[0] == r["lstart"]]
