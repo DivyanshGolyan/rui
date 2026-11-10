@@ -6,7 +6,14 @@ const submission = @import("submission_state.zig");
 const ConsentPolicy = @import("session_consent.zig");
 
 /// The original a submission holds, as the conversation shows it.
-pub const Held = struct { kind: submission.Kind, state: submission.State };
+/// `failure` is the line its last attempt's failure left (a rejection with
+/// its code, `too_large`), which says more than its state's own words.
+pub const Held = struct { kind: submission.Kind, state: submission.State, failure: ?[]const u8 = null };
+
+/// What a Message refused for its environment needs: a retry from this
+/// process fails the same way, so no Ctrl-R; /status says the size, the
+/// largest variables and the fix.
+pub const too_large = "! Environment too large; nothing sent · /status";
 
 /// The status above the input: the opening, else nothing over a waiting
 /// Action, which says how to decide it under the input, else the held
@@ -15,6 +22,7 @@ pub fn status(opening: bool, waiting: bool, held: ?Held) ?[]const u8 {
     if (opening) return "Opening…";
     if (waiting) return "";
     const original = held orelse return null;
+    if (original.failure) |line| return line;
     return switch (original.state) {
         .not_started => "Not sent · ctrl+r retries original",
         .submitting => "Sending…",
@@ -115,6 +123,9 @@ test "the status says the opening first, nothing over a waiting Action, then the
     try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries original", status(false, false, .{ .kind = .message, .state = .unconfirmed }).?);
     try std.testing.expectEqualStrings("Not sent · ctrl+r retries original", status(false, false, .{ .kind = .message, .state = .not_started }).?);
     try std.testing.expectEqualStrings("Rejected · /discard", status(false, false, .{ .kind = .decision, .state = .rejected }).?);
+    // A failure's own line replaces its state's words, under the opening.
+    try std.testing.expectEqualStrings(too_large, status(false, false, .{ .kind = .message, .state = .not_started, .failure = too_large }).?);
+    try std.testing.expectEqualStrings("Opening…", status(true, false, .{ .kind = .message, .state = .not_started, .failure = too_large }).?);
 }
 
 test "Enter in the draft says the most pressing reason it sent nothing" {

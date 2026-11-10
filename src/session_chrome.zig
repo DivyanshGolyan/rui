@@ -90,11 +90,13 @@ test "a send is progress while in flight or just accepted, and needs the person 
     try same(.{ .progress = "Sent" }, send(null, false, true));
     try same(.{}, send("", false, true));
     try same(.{}, send(null, false, false));
-    // Progress outranks a notice, quietly; what needs the person outranks both.
-    const sent = bar(.{ .progress = "Sent", .notice = "! Unknown command /x", .width = 80 });
+    // A reply to the last key outranks progress, which outranks the
+    // overview's line, quietly; what needs the person outranks all three.
+    try std.testing.expectEqualStrings("! Unknown command /x", bar(.{ .progress = "Sent", .notice = "! Unknown command /x", .width = 80 }).left);
+    const sent = bar(.{ .progress = "Sent", .overview = "! Other Session failed", .width = 80 });
     try std.testing.expectEqualStrings("Sent", sent.left);
     try std.testing.expectEqual(Tone.quiet, sent.tone);
-    try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .progress = "Sent", .width = 80 }).left);
+    try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .notice = "Copied 3 lines", .progress = "Sent", .width = 80 }).left);
 }
 
 /// Bytes `factsRow` writes at most.
@@ -220,23 +222,38 @@ pub const Facts = struct {
     /// What needs the person, with its key (`! Not confirmed · ctrl+r
     /// retries`). Persists until resolved; outranks any notice.
     needs: ?[]const u8 = null,
-    /// Where a send stands while it is under way (`Sending…`, `Sent`):
-    /// quiet, below what needs the person and above a notice, so the frame
-    /// that clears the composer already says it.
+    /// Where a send stands while it is under way (`Opening…`, `Sending…`,
+    /// `Sent`): quiet, below what needs the person and a reply to the last
+    /// key, and above the overview's line. Enter's frame says it, since
+    /// Enter dismissed any reply before it.
     progress: ?[]const u8 = null,
-    /// The notice that shows now (`Notice.current`), if any.
+    /// The reply to the person's last key that shows now
+    /// (`Notice.current`), if any. Until it goes, it outranks progress.
     notice: ?[]const u8 = null,
+    /// What the overview says while this Session shows, below progress.
+    overview: ?[]const u8 = null,
     /// `stoppable` for the Session's work.
     stoppable: bool = false,
     width: u16,
     method: Method = .unicode,
 };
 
+/// Whether a command's result is a notice: the status bar is one row, so a
+/// result of more lines opens as a page, as a long one does.
+pub fn fitsBar(result: []const u8) bool {
+    return std.mem.indexOfScalar(u8, result, '\n') == null;
+}
+
+test "a result of one line is a notice; one of two lines is a page" {
+    try std.testing.expect(fitsBar("Saved."));
+    try std.testing.expect(!fitsBar("Saved.\n! Host unavailable"));
+}
+
 /// Cells kept between the left text and the stop key.
 const gap = 2;
 
-/// The status bar. Left: what needs the person, else the notice, else
-/// nothing. Right: the stop key while work can be stopped.
+/// The status bar. Left: what needs the person, else the reply to the last
+/// key, else a send's progress, else the overview's line, else nothing. Right: the stop key while work can be stopped.
 /// When both don't fit, the left side wins and the stop key drops (Ctrl-X
 /// still works); the shell clips left text that is wider than the row.
 pub fn bar(facts: Facts) Bar {
@@ -244,11 +261,9 @@ pub fn bar(facts: Facts) Bar {
     if (facts.needs) |needs| {
         result.left = needs;
         result.tone = .attention;
-    } else if (facts.progress) |progress| {
-        result.left = progress;
-    } else if (facts.notice) |notice| {
-        result.left = notice;
-        result.tone = if (std.mem.startsWith(u8, notice, "!")) .attention else .quiet;
+    } else if (facts.notice orelse facts.progress orelse facts.overview) |left| {
+        result.left = left;
+        result.tone = if (std.mem.startsWith(u8, left, "!")) .attention else .quiet;
     }
     if (!facts.stoppable) return result;
     const stop_cells = session_line.cells(stop_key, facts.method);

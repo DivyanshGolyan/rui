@@ -555,9 +555,11 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
 }
 
 /// The submission the UI shows under a page.
-pub fn writeSubmission(view: ?Submission.View, out: *std.Io.Writer) !void {
+/// `failure` is what its last attempt's failure says the person must do,
+/// in place of the state's own words.
+pub fn writeSubmission(view: ?Submission.View, failure: ?[]const u8, out: *std.Io.Writer) !void {
     const submission = view orelse return;
-    try out.print("Original reserved request: {s}\n{s}\n", .{ submission.key, if (submission.state == .rejected) "Submission rejected; /discard releases only this original, retaining the next draft." else "Publication/admission may be incomplete; Ctrl-R retries this exact original." });
+    try out.print("Original reserved request: {s}\n{s}\n", .{ submission.key, failure orelse if (submission.state == .rejected) "Submission rejected; /discard releases only this original, retaining the next draft." else "Publication/admission may be incomplete; Ctrl-R retries this exact original." });
     if (submission.last_error) |err| try out.print("Last submission error: {s}\n", .{@errorName(err)});
 }
 
@@ -1055,7 +1057,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
     } else {
         std.debug.assert(job.inspection_kind == .requests);
         try job.requests(job.init, task.requests(), job.store, job.session, &output.interface, &job.result.requests);
-        try writeSubmission(job.inspection_submission, &output.interface);
+        try writeSubmission(job.inspection_submission, null, &output.interface);
     }
     try output.flush();
 }

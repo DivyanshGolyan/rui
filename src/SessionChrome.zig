@@ -47,9 +47,11 @@ pub const View = struct {
     stoppable: bool = false,
     /// The facts after `‹ `.
     facts: []const u8 = "",
-    /// The notice that shows now (`Notice.current`), borrowed until the
-    /// next frame.
+    /// The reply to the last key that shows now (`Notice.current`), and
+    /// what the overview says (`chrome.Facts.overview`), each borrowed
+    /// until the next frame.
     notice: ?[]const u8 = null,
+    overview: ?[]const u8 = null,
     /// The `?` shortcuts are open.
     shortcuts: bool = false,
     /// The overlay the screen would show (the palette), or null. The `?`
@@ -85,6 +87,7 @@ pub fn place(self: *Self, screen: *AppScreen.Session, view: View) void {
         .needs = view.needs,
         .progress = view.progress,
         .notice = view.notice,
+        .overview = view.overview,
         .stoppable = view.stoppable,
         .width = view.width,
         .method = self.status.method,
