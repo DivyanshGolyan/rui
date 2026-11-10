@@ -9,6 +9,7 @@ Mac does; PRs run Mac Selected only when they change one, and each promotion
 runs it before a release.
 """
 import argparse
+import ast
 import fnmatch
 import io
 from pathlib import Path
@@ -231,11 +232,68 @@ def bind_violations(found):
             for path, names in sorted(found.items()) for name in names]
 
 
+def flag_violations(root=ROOT):
+    """Reject raw F_GETFL equality comparisons outside the flag owners."""
+    messages = []
+
+    def getfl(node):
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "fcntl"
+                and node.func.attr == "fcntl" and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Attribute) and node.args[1].attr == "F_GETFL"
+                and isinstance(node.args[1].value, ast.Name) and node.args[1].value.id == "fcntl")
+
+    class FunctionScan(ast.NodeVisitor):
+        def __init__(self, path):
+            self.path = path
+            self.names = set()
+            self.comparisons = []
+
+        def visit_FunctionDef(self, node):
+            scan = FunctionScan(self.path)
+            for statement in node.body:
+                scan.visit(statement)
+            scan.report()
+
+        def report(self):
+            for comparison in self.comparisons:
+                operands = [comparison.left, *comparison.comparators]
+                if any(isinstance(op, (ast.Eq, ast.NotEq)) and
+                       any(getfl(operand) or (isinstance(operand, ast.Name) and operand.id in self.names)
+                           for operand in operands[i:i + 2])
+                       for i, op in enumerate(comparison.ops)):
+                    messages.append(f"{self.path}:{comparison.lineno}: raw F_GETFL comparison; "
+                                    "use assert_file_flags or os_semantics.user_file_flags")
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Assign(self, node):
+            if getfl(node.value):
+                self.names.update(target.id for target in node.targets if isinstance(target, ast.Name))
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node):
+            if node.value and getfl(node.value) and isinstance(node.target, ast.Name):
+                self.names.add(node.target.id)
+            self.generic_visit(node)
+
+        def visit_Compare(self, node):
+            self.comparisons.append(node)
+            self.generic_visit(node)
+
+    for file, path in scanned(root):
+        if file.suffix == ".py" and not mac_path(path) and path != "tests/integration/terminal_restoration_fixture.py":
+            scan = FunctionScan(path)
+            scan.visit(ast.parse(file.read_text(), filename=path))
+            scan.report()
+    return messages
+
+
 def main():
     argparse.ArgumentParser(description=__doc__).parse_args()
     builds = [(path.relative_to(ROOT).as_posix(), path.read_text()) for path in build_files.files()]
     messages = ([message for name, source in builds if not mac_path(name) for message in build_violations(source, name)]
-                + violations(sites()) + bind_violations(bind_sites()))
+                + violations(sites()) + bind_violations(bind_sites()) + flag_violations())
     for message in messages:
         print(message, file=sys.stderr)
     return 1 if messages else 0

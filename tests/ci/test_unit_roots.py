@@ -127,7 +127,7 @@ class BuildWiringTest(unittest.TestCase):
         self.assertTrue(gate.startswith(" if (check_part == .execution) full_check_step else &process_integrations.step;"))
         self.assertIn("if (check_part != .callers)", gate)
         self.assertEqual(re.findall(r"native_gate\.dependOn\(([^;]+)\);", gate), [
-            "&run_tests.step", "&run_renderer_allocation.step", "h2_test_step", "pg_test_step",
+            "&units.run_tests.step", "&units.run_renderer_allocation.step", "h2_test_step", "pg_test_step",
         ])
         self.assertNotIn("process_integrations.step.dependOn", gate)
         self.assertIn("full_check_step.dependOn(&process_integrations.step)", build)
