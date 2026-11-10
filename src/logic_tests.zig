@@ -107,6 +107,7 @@ const cores = .{
     .{ "store/engine/mysql_refusal.zig", @import("store/engine/mysql_refusal.zig") },
     .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
     .{ "TerminalText.zig", @import("TerminalText.zig") },
+    .{ "theme.zig", @import("theme.zig") },
     .{ "tool_name.zig", @import("tool_name.zig") },
     .{ "tool_presentation.zig", @import("tool_presentation.zig") },
     .{ "tool_proposal.zig", @import("tool_proposal.zig") },
