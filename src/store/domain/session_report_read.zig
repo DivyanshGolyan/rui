@@ -1,8 +1,8 @@
 //! A Session report as the Store reads it: the saved Session and its
 //! Current facts as plain values (`session_report.Current`), then each
 //! Current list row by row (`session_report.Row`), handed to a visitor.
-//! The Host writes the reply. The Full profile's history is still
-//! rendered here, into the visitor's capture (`report.renderFull`).
+//! The Host writes the reply. The Full profile's history follows, as
+//! plain values too (`report.readFull`).
 
 const std = @import("std");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -65,21 +65,15 @@ pub fn Watched(comptime Visitor: type) type {
 /// - else `current(profile, *const session_report.Current)`, then, for
 ///   each `session_report.List` in order, `open(list)` and its rows,
 ///   `row(*const session_report.Row)`, as they step; then `end()`;
-/// - for the Full profile, its history, written into the visitor's
-///   `capture` (a `report.SessionReportCapture`);
+/// - for the Full profile, its history (`report.readFull`): `fullOpen`,
+///   `fullRow` and `fullEnd`;
 /// - then `tail()`.
 ///
 /// All under one Entry, so one snapshot. A visitor's error stops the read
 /// and is its answer.
 pub fn readSessionReport(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, watched: anytype) !void {
     if (!try readHead(a, session_ref, profile, watched)) return;
-    if (profile == .full) {
-        const capture = watched.visitor.capture;
-        report_domain.renderFull(a, session_ref, capture) catch |err| {
-            if (capture.ordinary_failure) watched.failed = true;
-            return err;
-        };
-    }
+    if (profile == .full) try report_domain.readFull(a, session_ref, watched);
     try watched.call("tail", .{});
 }
 

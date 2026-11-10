@@ -1,12 +1,13 @@
 //! The `inspect-session` report: the Host writes the Session report the
 //! Store reads (`store/domain/session_report_read.zig`) with the shapes
-//! here, which also give the reply's schema (`openapi.zig`). The Full
-//! profile's history is still written by the Store, into the same capture.
+//! here, which also give the reply's schema (`openapi.zig`), the Full
+//! profile's history included.
 const std = @import("std");
 const built_in_tool = @import("built_in_tool.zig");
 const cli_value = @import("cli_value.zig");
 const idempotency_key = @import("idempotency_key.zig");
 const model_capability = @import("model_capability.zig");
+const mutation_answer = @import("mutation_answer.zig");
 const outcome_code = @import("outcome_code.zig");
 const protocol = @import("protocol.zig");
 const provider_name = @import("provider_name.zig");
@@ -44,7 +45,7 @@ pub fn Reply(comptime Capture: type) type {
             reply.rejected_calls = values.rejected_calls;
             try reply.envelope(profile);
             try reply.capture.append(session_text);
-            try reply.capture.appendShape(CurrentJson.Settings.head, .{
+            try appendShape(reply.capture, CurrentJson.Settings.head, .{
                 values.reference,
                 values.parent,
                 values.workspace,
@@ -62,22 +63,22 @@ pub fn Reply(comptime Capture: type) type {
             try reply.appendTools(values.tools);
             try reply.capture.append(CurrentJson.Settings.loaded_tools);
             try reply.appendTools(values.loaded_tools);
-            try reply.capture.appendShape(CurrentJson.Settings.tail, .{
+            try appendShape(reply.capture, CurrentJson.Settings.tail, .{
                 values.permission_mode,
                 reference(values.instructions),
                 if (values.output_schema) |content| reference(content) else null,
                 values.label,
                 values.created_at,
             });
-            try reply.capture.appendShape(after_settings, .{ values.archive_state, values.pending_messages });
+            try appendShape(reply.capture, after_settings, .{ values.archive_state, values.pending_messages });
             const work: protocol.SessionWork = .fromCore(values.work);
-            try reply.capture.appendShape(CurrentJson.Work.head, work.args());
+            try appendShape(reply.capture, CurrentJson.Work.head, work.args());
             if (values.latest_outcome) |outcome| {
-                try reply.capture.appendShape(CurrentJson.Outcome.json_shape, .{ outcome.code, if (outcome.content) |content| reference(content) else null });
+                try appendShape(reply.capture, CurrentJson.Outcome.json_shape, .{ outcome.code, if (outcome.content) |content| reference(content) else null });
             } else try reply.capture.append("null");
             try reply.capture.append(CurrentJson.Work.tail);
             const peers: protocol.PeerFacts = .{ .from_person_at = values.peers.from_person_at };
-            try reply.capture.appendShape(after_work, .{
+            try appendShape(reply.capture, after_work, .{
                 peers,
                 if (values.first_message) |first| protocol.FirstMessage.fromCore(first) else null,
                 values.selected_message,
@@ -89,9 +90,9 @@ pub fn Reply(comptime Capture: type) type {
             reply.first = true;
             switch (list) {
                 .recent_messages => try reply.capture.append("["),
-                .unresolved_actions => try reply.capture.appendShape(.{ "],\"actions\":{\"count\":\"", H.decimal, "\",\"unresolved\":[" }, .{reply.actions}),
+                .unresolved_actions => try appendShape(reply.capture, .{ "],\"actions\":{\"count\":\"", H.decimal, "\",\"unresolved\":[" }, .{reply.actions}),
                 .resolved_actions => try reply.capture.append("],\"resolved\":["),
-                .rejected_calls => try reply.capture.appendShape(.{ "]},\"rejected_calls\":{\"count\":\"", H.decimal, "\",\"items\":[" }, .{reply.rejected_calls}),
+                .rejected_calls => try appendShape(reply.capture, .{ "]},\"rejected_calls\":{\"count\":\"", H.decimal, "\",\"items\":[" }, .{reply.rejected_calls}),
                 .actionable_permissions => try reply.capture.append("]},\"actionable_permissions\":["),
             }
         }
@@ -101,9 +102,9 @@ pub fn Reply(comptime Capture: type) type {
             reply.first = false;
             const capture = reply.capture;
             switch (values.*) {
-                .recent_messages => |recent| try capture.appendShape(CurrentJson.Recent.json_shape, .{ recent.turn, recent.message, recent.outcome }),
+                .recent_messages => |recent| try appendShape(capture, CurrentJson.Recent.json_shape, .{ recent.turn, recent.message, recent.outcome }),
                 .unresolved_actions => |action| {
-                    try capture.appendShape(CurrentJson.Unresolved.head ++ .{H{ .json = ToolName }} ++ CurrentJson.Unresolved.authorization, .{
+                    try appendShape(capture, CurrentJson.Unresolved.head ++ .{H{ .json = ToolName }} ++ CurrentJson.Unresolved.authorization, .{
                         action.action,
                         action.parent_operation,
                         action.call_ordinal,
@@ -112,10 +113,10 @@ pub fn Reply(comptime Capture: type) type {
                         action.authorization,
                         TextReference.of(action.call_id),
                     });
-                    if (action.server) |server| try capture.appendShape(CurrentJson.Unresolved.server, .{ToolName{ .name = server }});
-                    try capture.appendShape(CurrentJson.Unresolved.tail, .{ TextReference.of(action.arguments), presentation(action.presentation) });
+                    if (action.server) |server| try appendShape(capture, CurrentJson.Unresolved.server, .{ToolName{ .name = server }});
+                    try appendShape(capture, CurrentJson.Unresolved.tail, .{ TextReference.of(action.arguments), presentation(action.presentation) });
                 },
-                .resolved_actions => |action| try capture.appendShape(CurrentJson.Resolved.json_shape, .{
+                .resolved_actions => |action| try appendShape(capture, CurrentJson.Resolved.json_shape, .{
                     action.action,
                     action.parent_operation,
                     action.call_ordinal,
@@ -124,7 +125,7 @@ pub fn Reply(comptime Capture: type) type {
                     TextReference.of(action.result),
                     presentation(action.presentation),
                 }),
-                .rejected_calls => |call| try capture.appendShape(CurrentJson.Rejected.json_shape, .{
+                .rejected_calls => |call| try appendShape(capture, CurrentJson.Rejected.json_shape, .{
                     call.parent_operation,
                     call.call_ordinal,
                     call.code,
@@ -135,7 +136,7 @@ pub fn Reply(comptime Capture: type) type {
                     TextReference.of(call.arguments),
                     presentation(call.presentation),
                 }),
-                .actionable_permissions => |action| try capture.appendShape(CurrentJson.Actionable.json_shape, .{ action.action, action.permission_revision }),
+                .actionable_permissions => |action| try appendShape(capture, CurrentJson.Actionable.json_shape, .{ action.action, action.permission_revision }),
             }
         }
 
@@ -144,10 +145,70 @@ pub fn Reply(comptime Capture: type) type {
             try reply.capture.append("]");
         }
 
+        /// Ends the list before `list`, if any, and opens `list` of the
+        /// Full profile's history.
+        pub fn fullOpen(reply: *@This(), list: session_report.FullList) !void {
+            reply.first = true;
+            try reply.capture.append(switch (list) {
+                .session_revisions => ",\"full\":{\"session_revisions\":[",
+                inline else => |tag| "],\"" ++ @tagName(tag) ++ "\":[",
+            });
+        }
+
+        /// One row of the open Full list. `text` streams the row's whole
+        /// contents (`session_report.Text`) into a sink, `text.stream(value,
+        /// sink)`, calling `sink.write(bytes)` with each window as the Store
+        /// reads and checks it; the windows are valid only during that
+        /// call.
+        pub fn fullRow(reply: *@This(), values: *const session_report.FullRow, text: anytype) !void {
+            if (values.* != .revision_contents) {
+                if (!reply.first) try reply.capture.append(",");
+                reply.first = false;
+            }
+            switch (values.*) {
+                .revision => |*revision| try reply.writeRevision(revision),
+                .revision_contents => |*contents| try writeRevisionContents(reply.capture, contents, text),
+                .message => |*message| try writeMessage(reply.capture, message, text),
+                .conversation => |*entry| try writeConversation(reply.capture, entry),
+                .turn => |*turn| try writeTurn(reply.capture, turn),
+                .operation => |*operation| try writeOperation(reply.capture, operation, text),
+                .call => |*call| try writeCall(reply.capture, call, text),
+                .action => |*action| try writeAction(reply.capture, action, text),
+                .decision => |*decision| try appendShape(reply.capture, FullJson.Decision.json_shape, .{ decision.command_key, decision.action, decision.decision, status(decision.accepted), decision.code }),
+                .stop => |*stop| try appendShape(reply.capture, FullJson.Stop.json_shape, .{ stop.command_key, status(stop.accepted), stop.code, stop.selected_turn, stop.admission_cutoff }),
+                .interruption => |*interruption| try appendShape(reply.capture, FullJson.Interruption.json_shape, .{ interruption.command_key, status(interruption.accepted), interruption.code, interruption.turn, interruption.operation }),
+                .result => |*result| try writeResult(reply.capture, result, text),
+            }
+        }
+
+        /// Ends the last Full list and the Full history.
+        pub fn fullEnd(reply: *@This()) !void {
+            try reply.capture.append("]}");
+        }
+
+        fn writeRevision(reply: *@This(), revision: *const session_report.Revision) !void {
+            const shape = FullJson.Revision;
+            try appendShape(reply.capture, shape.head, .{
+                revision.revision,
+                revision.command_key,
+                revision.workspace,
+                revision.provider,
+                revision.model,
+                revision.compaction_trigger,
+                revision.output_reservation,
+                revision.reasoning_effort,
+                revision.label,
+            });
+            try reply.appendTools(revision.tools);
+            try reply.capture.append(shape.loaded_tools);
+            try reply.appendTools(revision.loaded_tools);
+            try appendShape(reply.capture, shape.permission_mode, .{revision.permission_mode});
+        }
+
         /// The Host's execution counters, which close the report.
         pub fn tail(reply: *@This()) !void {
             const execution = reply.execution;
-            try reply.capture.appendShape(shapes.tail_text ++ ExecutionJson.json_shape ++ .{"}"}, .{ execution.dispatch_fenced, execution.custody_occupied, execution.scratch_used_bytes });
+            try appendShape(reply.capture, shapes.tail_text ++ ExecutionJson.json_shape ++ .{"}"}, .{ execution.dispatch_fenced, execution.custody_occupied, execution.scratch_used_bytes });
         }
 
         fn envelope(reply: *@This(), profile: cli_value.ReportProfile) !void {
@@ -168,6 +229,149 @@ pub fn Reply(comptime Capture: type) type {
     };
 }
 
+/// Writes `shape` straight into `capture` (`store.SessionReportCapture`),
+/// so a fact's maximum encoding never sits whole on the intake worker's
+/// stack. A failed write answers the capture's error.
+pub fn appendShape(capture: anytype, comptime shape: anytype, args: anytype) !void {
+    var buffer: [256]u8 = undefined;
+    var sink = capture.sink(&buffer);
+    protocol.writeShape(&sink.interface, shape, args) catch return sink.failure.?;
+    sink.interface.flush() catch return sink.failure.?;
+}
+
+/// A revision's contents, closing its row.
+fn writeRevisionContents(capture: anytype, contents: *const session_report.RevisionContents, text: anytype) !void {
+    try capture.append(",\"instructions\":");
+    try writeRevisionContent(capture, &contents.instructions, text);
+    try capture.append(",\"output_schema\":");
+    if (contents.output_schema) |*content| try writeRevisionContent(capture, content, text) else try capture.append("null");
+    try capture.append("}");
+}
+
+/// Inline, so streaming adds no frame between the Store's revisions and
+/// its content stream.
+inline fn writeRevisionContent(capture: anytype, content: *const session_report.RevisionContent, text: anytype) !void {
+    const owner = content.owner orelse return writeText(capture, content.text, text);
+    try writeOwnedReference(capture, content.text, owner);
+}
+
+/// Not inlined: its formatting takes no frame on the streaming chain.
+noinline fn writeOwnedReference(capture: anytype, value: session_report.Text, owner: session_report.Owner) !void {
+    try appendShape(capture, FullJson.OwnedReference.json_shape, .{ value.length, value.digest, owner.revision, owner.field });
+}
+
+/// Shows `value` whole: its metadata, then its text, which `text` streams
+/// as the Store reads and checks it.
+fn writeText(capture: anytype, value: session_report.Text, text: anytype) !void {
+    try appendShape(capture, FullJson.Inline.head, .{ value.length, value.digest });
+    try text.stream(value, TextSink(@TypeOf(capture)){ .capture = capture });
+    try capture.append(FullJson.Inline.tail);
+}
+
+fn writeOptionalText(capture: anytype, value: ?session_report.Text, text: anytype) !void {
+    if (value) |content| try writeText(capture, content, text) else try capture.append("null");
+}
+
+/// Writes a content window as JSON string characters.
+fn TextSink(comptime Capture: type) type {
+    return struct {
+        capture: Capture,
+
+        pub fn write(sink: @This(), bytes: []const u8) !void {
+            var buffer: [256]u8 = undefined;
+            var writer = sink.capture.sink(&buffer);
+            std.json.Stringify.encodeJsonStringChars(bytes, .{}, &writer.interface) catch return writer.failure.?;
+            writer.interface.flush() catch return writer.failure.?;
+        }
+    };
+}
+
+fn writeMessage(capture: anytype, message: *const session_report.Message, text: anytype) !void {
+    const shape = FullJson.Message;
+    try appendShape(capture, shape.head, .{ message.admission, message.command_key });
+    try writeText(capture, message.content, text);
+    switch (message.application) {
+        .applied => |applied| {
+            try appendShape(capture, shape.application, .{ applied.turn, session_report.Application.applied, @as(?FullJson.Exclusion, null) });
+            if (applied.outcome) |outcome| {
+                try appendShape(capture, FullJson.Outcome.json_shape, .{ outcome.code, if (outcome.content) |content| reference(content) else null });
+            } else try capture.append("null");
+        },
+        .pending => try appendShape(capture, shape.application ++ .{"null"}, .{ @as(?u64, null), session_report.Application.pending, @as(?FullJson.Exclusion, null) }),
+        .excluded => |stop| try appendShape(capture, shape.application ++ .{"null"}, .{ @as(?u64, null), session_report.Application.excluded, @as(?FullJson.Exclusion, .{ .command_key = stop }) }),
+    }
+    try capture.append("}");
+}
+
+fn writeConversation(capture: anytype, entry: *const session_report.Conversation) !void {
+    try appendShape(capture, FullJson.Conversation.json_shape, .{
+        entry.ordinal,
+        entry.position,
+        entry.kind,
+        entry.turn,
+        entry.source_admission,
+        entry.source_revision,
+        entry.source_catalog_position,
+        entry.source_skill_position,
+        entry.source_operation,
+        reference(entry.content),
+    });
+}
+
+fn writeTurn(capture: anytype, turn: *const session_report.Turn) !void {
+    try appendShape(capture, FullJson.Turn.head, .{ turn.turn, turn.first_admission, turn.input_cutoff, turn.operation });
+    if (turn.outcome) |outcome| {
+        try appendShape(capture, FullJson.Outcome.json_shape, .{ outcome.code, if (outcome.content) |content| reference(content) else null });
+    } else try capture.append("null");
+    try capture.append("}");
+}
+
+fn writeOperation(capture: anytype, operation: *const session_report.Operation, text: anytype) !void {
+    const shape = FullJson.Operation;
+    try appendShape(capture, shape.head, .{ operation.operation, operation.turn });
+    if (operation.resolution) |resolution| {
+        try appendShape(capture, FullJson.Resolution.head, .{resolution.code});
+        try writeOptionalText(capture, resolution.content, text);
+        try capture.append(FullJson.Resolution.tail);
+    } else try capture.append("null");
+    try appendShape(capture, shape.tail, .{ operation.interrupted_by, operation.settings_revision, operation.request_id, operation.reasoning_effort });
+}
+
+fn writeCall(capture: anytype, call: *const session_report.Call, text: anytype) !void {
+    const shape = FullJson.Call;
+    try appendShape(capture, shape.head, .{ call.operation, call.call_ordinal, call.item_ordinal, call.rejection, call.acceptance_position });
+    try writeText(capture, call.name, text);
+    try capture.append(shape.call_id);
+    try writeText(capture, call.call_id, text);
+    try capture.append(shape.arguments);
+    try writeText(capture, call.arguments, text);
+    try capture.append(shape.rejection_result);
+    try writeOptionalText(capture, call.rejection_result, text);
+    try capture.append("}");
+}
+
+fn writeAction(capture: anytype, action: *const session_report.Action, text: anytype) !void {
+    const shape = FullJson.Action;
+    try appendShape(capture, shape.head, .{ action.action, action.parent_operation, action.call_ordinal, action.permission_revision, action.permission, action.resolution });
+    try writeOptionalText(capture, action.result, text);
+    try appendShape(capture, shape.tail, .{action.acceptance_position});
+}
+
+fn writeResult(capture: anytype, result: *const session_report.Result, text: anytype) !void {
+    const shape = FullJson.Result;
+    try appendShape(capture, shape.head, .{ result.operation, result.call_ordinal, result.acceptance_position });
+    try writeText(capture, result.call_id, text);
+    try appendShape(capture, shape.code, .{result.code});
+    try writeText(capture, result.result, text);
+    try capture.append("}");
+}
+
+const Status = enum { accepted, rejected };
+
+fn status(accepted: bool) Status {
+    return if (accepted) .accepted else .rejected;
+}
+
 fn reference(content: session_report.Content) Reference {
     return .{ .length = content.length, .digest = content.digest };
 }
@@ -186,9 +390,7 @@ const after_settings = .{ ",\"archive_state\":\"", H{ .tag = session_archive.Sta
 const after_work = .{ ",\"peers\":", H{ .json = protocol.PeerFacts }, ",\"first_message\":", H{ .optional_json = protocol.FirstMessage }, ",\"selected_message\":", H{ .optional_string = idempotency_key.max_bytes }, ",\"recent_messages\":" };
 
 /// Wire shapes of the report envelope. Full history is present only for
-/// the full profile; its shape is the Store's (`store.SessionReportFull`)
-/// until the Host writes it, so `openapi.zig` places it between `full_head`
-/// and `tail`.
+/// the full profile.
 pub const shapes = struct {
     const head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_report\",\"profile\":\""};
     const current_head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\""};
@@ -197,7 +399,7 @@ pub const shapes = struct {
     const tail_text = .{",\"execution\":"};
     pub const tail = tail_text ++ .{ H{ .json = ExecutionJson }, "}" };
     pub const current = current_head ++ .{"current"} ++ facts ++ tail;
-    pub const full_head = head ++ .{"full"} ++ facts;
+    pub const full = head ++ .{"full"} ++ facts ++ .{ ",\"full\":", H{ .json = FullJson } } ++ tail;
     pub const missing_current = current_head ++ .{"current" ++ missing_text};
     pub const missing_full = head ++ .{"full" ++ missing_text};
 };
@@ -343,3 +545,138 @@ fn maxTagBytes(comptime T: type) usize {
     for (std.meta.tags(T)) |tag| bytes = @max(bytes, @tagName(tag).len);
     return bytes;
 }
+
+/// The Full profile's history. Its row shapes are cut where a row's
+/// content is streamed (`writeText`). The `openapi_name`s keep the schema
+/// names these had when the Store wrote them.
+pub const FullJson = struct {
+    pub const openapi_name = "domainreport_full_shapeFull";
+    pub const json_shape = .{
+        "{\"session_revisions\":",    ListOf(Revision),
+        ",\"messages\":",             ListOf(Message),
+        ",\"conversation\":",         ListOf(Conversation),
+        ",\"turns\":",                ListOf(Turn),
+        ",\"model_operations\":",     ListOf(Operation),
+        ",\"tool_calls\":",           ListOf(Call),
+        ",\"actions\":",              ListOf(Action),
+        ",\"permission_decisions\":", ListOf(Decision),
+        ",\"session_stops\":",        ListOf(Stop),
+        ",\"model_interruptions\":",  ListOf(Interruption),
+        ",\"tool_results\":",         ListOf(Result),
+        "}",
+    };
+
+    const Text = struct {
+        pub const openapi_content = true;
+    };
+    const Tools = struct {
+        pub const openapi_tools = true;
+    };
+    pub const Inline = struct {
+        pub const openapi_name = "domainreport_full_shapeFullInline";
+        const head = .{ "{\"type\":\"text\",\"bytes\":\"", H.decimal, "\",\"sha256\":\"", H{ .hex = 32 }, "\",\"text\":\"" };
+        const tail = "\"}";
+        pub const json_shape = .{ "{\"type\":\"text\",\"bytes\":\"", H.decimal, "\",\"sha256\":\"", H{ .hex = 32 }, "\",\"text\":", Text, "}" };
+    };
+    pub const OwnedReference = struct {
+        pub const json_shape = .{ "{\"bytes\":\"", H.decimal, "\",\"sha256\":\"", H{ .hex = 32 }, "\",\"owner\":{\"revision\":\"", H.decimal, "\",\"field\":\"", H{ .tag = session_report.RevisionField }, "\"}}" };
+    };
+    pub const RevisionContent = struct {
+        pub const openapi_name = "domainreport_full_shapeFullRevisionContent";
+        pub const openapi_shapes = .{ Inline.json_shape, OwnedReference.json_shape };
+    };
+    pub const Revision = struct {
+        pub const openapi_name = "domainreport_full_shapeFullRevision";
+        const head = .{
+            "{\"revision\":\"",         H.decimal,
+            "\",\"command_key\":",      H{ .string = idempotency_key.max_bytes },
+            ",\"workspace\":",          H{ .string = workspace_path.max_bytes },
+            ",\"provider\":\"",         H{ .tag = provider_name.Provider },
+            "\",\"model\":",            H{ .string = model_capability.max_model_bytes },
+            ",\"compaction_trigger\":", H.optional_id,
+            ",\"output_reservation\":", H.optional_id,
+            ",\"reasoning_effort\":",   H{ .optional_tag = model_capability.ReasoningEffort },
+            ",\"label\":",              H{ .optional_string = tool_presentation.max_label_bytes },
+            ",\"tools\":",
+        };
+        const loaded_tools = ",\"loaded_tools\":";
+        const permission_mode = .{ ",\"permission_mode\":\"", H{ .tag = cli_value.PermissionMode }, "\"" };
+        const contents = .{ ",\"instructions\":", H{ .json = RevisionContent }, ",\"output_schema\":", H{ .optional_json = RevisionContent }, "}" };
+        pub const json_shape = head ++ .{ Tools, loaded_tools, Tools } ++ permission_mode ++ contents;
+    };
+    pub const Outcome = struct {
+        pub const openapi_name = "domainreport_full_shapeFullOutcome";
+        pub const json_shape = .{ "{\"code\":", H{ .string = outcome_code.max_bytes }, ",\"content\":", H{ .optional_json = Reference }, "}" };
+    };
+    pub const Resolution = struct {
+        pub const openapi_name = "domainreport_full_shapeFullResolution";
+        const head = .{ "{\"code\":", H{ .string = outcome_code.max_bytes }, ",\"content\":" };
+        const tail = "}";
+        pub const json_shape = head ++ .{ H{ .optional_json = Inline }, tail };
+    };
+    /// A Message's exclusion: the stop that excluded it.
+    pub const Exclusion = struct {
+        command_key: []const u8,
+
+        pub const openapi_name = "domainreport_full_shapeFullExclusion";
+        pub const json_shape = .{ "{\"code\":\"session_stopped\",\"command_key\":", H{ .string = idempotency_key.max_bytes }, "}" };
+        pub const max_json_bytes = protocol.shapeBytes(Exclusion.json_shape);
+
+        pub fn writeJson(self: *const Exclusion, out: *std.Io.Writer) !void {
+            try protocol.writeShape(out, Exclusion.json_shape, .{self.command_key});
+        }
+    };
+    pub const Message = struct {
+        pub const openapi_name = "domainreport_full_shapeFullMessage";
+        const head = .{ "{\"admission\":\"", H.decimal, "\",\"command_key\":", H{ .string = idempotency_key.max_bytes }, ",\"content\":" };
+        const application = .{ ",\"turn\":", H.optional_id, ",\"application\":\"", H{ .tag = session_report.Application }, "\",\"exclusion\":", H{ .optional_json = Exclusion }, ",\"outcome\":" };
+        pub const json_shape = head ++ .{H{ .json = Inline }} ++ application ++ .{ H{ .optional_json = Outcome }, "}" };
+    };
+    pub const Conversation = struct {
+        pub const openapi_name = "domainreport_full_shapeFullConversation";
+        pub const json_shape = .{ "{\"ordinal\":\"", H.decimal, "\",\"position\":\"", H.decimal, "\",\"kind\":\"", H{ .tag = session_report.EntryKind }, "\",\"turn\":", H.optional_id, ",\"source_admission\":", H.optional_id, ",\"source_revision\":", H.optional_id, ",\"source_catalog_position\":", H.optional_id, ",\"source_skill_position\":", H.optional_id, ",\"source_operation\":", H.optional_id, ",\"content\":", H{ .json = Reference }, "}" };
+    };
+    pub const Turn = struct {
+        pub const openapi_name = "domainreport_full_shapeFullTurn";
+        const head = .{ "{\"turn\":\"", H.decimal, "\",\"first_admission\":\"", H.decimal, "\",\"input_cutoff\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"outcome\":" };
+        pub const json_shape = head ++ .{ H{ .optional_json = Outcome }, "}" };
+    };
+    pub const Operation = struct {
+        pub const openapi_name = "domainreport_full_shapeFullOperation";
+        const head = .{ "{\"operation\":\"", H.decimal, "\",\"turn\":\"", H.decimal, "\",\"resolution\":" };
+        const tail = .{ ",\"interrupted_by\":", H{ .optional_string = idempotency_key.max_bytes }, ",\"settings_revision\":\"", H.decimal, "\",\"request_id\":", H{ .optional_string = 256 }, ",\"reasoning_effort\":", H{ .optional_tag = model_capability.ReasoningEffort }, "}" };
+        pub const json_shape = head ++ .{H{ .optional_json = Resolution }} ++ tail;
+    };
+    pub const Call = struct {
+        pub const openapi_name = "domainreport_full_shapeFullCall";
+        const head = .{ "{\"operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"item_ordinal\":\"", H.decimal, "\",\"rejection\":", H{ .optional_string = 32 }, ",\"acceptance_position\":", H.optional_id, ",\"name\":" };
+        const call_id = ",\"call_id\":";
+        const arguments = ",\"arguments\":";
+        const rejection_result = ",\"rejection_result\":";
+        pub const json_shape = head ++ .{ H{ .json = Inline }, call_id, H{ .json = Inline }, arguments, H{ .json = Inline }, rejection_result, H{ .optional_json = Inline }, "}" };
+    };
+    pub const Action = struct {
+        pub const openapi_name = "domainreport_full_shapeFullAction";
+        const head = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"permission_revision\":\"", H.decimal, "\",\"permission\":\"", H{ .tag = session_report.Permission }, "\",\"resolution\":", H{ .optional_string = session_report.max_action_resolution_bytes }, ",\"result\":" };
+        const tail = .{ ",\"acceptance_position\":", H.optional_id, "}" };
+        pub const json_shape = head ++ .{H{ .optional_json = Inline }} ++ tail;
+    };
+    pub const Decision = struct {
+        pub const openapi_name = "domainreport_full_shapeFullDecision";
+        pub const json_shape = .{ "{\"command_key\":", H{ .string = idempotency_key.max_bytes }, ",\"action\":", H{ .string = 20 }, ",\"decision\":\"", H{ .tag = mutation_answer.PermissionDecision }, "\",\"status\":\"", H{ .tag = Status }, "\",\"code\":", H{ .string = 96 }, "}" };
+    };
+    pub const Stop = struct {
+        pub const openapi_name = "domainreport_full_shapeFullStop";
+        pub const json_shape = .{ "{\"command_key\":", H{ .string = idempotency_key.max_bytes }, ",\"status\":\"", H{ .tag = Status }, "\",\"code\":", H{ .string = 96 }, ",\"selected_turn\":", H.optional_id, ",\"admission_cutoff\":", H.optional_id, "}" };
+    };
+    pub const Interruption = struct {
+        pub const openapi_name = "domainreport_full_shapeFullInterruption";
+        pub const json_shape = .{ "{\"command_key\":", H{ .string = idempotency_key.max_bytes }, ",\"status\":\"", H{ .tag = Status }, "\",\"code\":", H{ .string = 96 }, ",\"turn\":", H{ .string = 20 }, ",\"operation\":", H{ .string = 20 }, "}" };
+    };
+    pub const Result = struct {
+        pub const openapi_name = "domainreport_full_shapeFullResult";
+        const head = .{ "{\"operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"acceptance_position\":\"", H.decimal, "\",\"call_id\":" };
+        const code = .{ ",\"code\":", H{ .string = 32 }, ",\"result\":" };
+        pub const json_shape = head ++ .{H{ .json = Inline }} ++ code ++ .{ H{ .json = Inline }, "}" };
+    };
+};

@@ -1,11 +1,12 @@
 //! Session report capture, the readers the Current report shares with
-//! lists and inspection, the Full profile's history rendered as JSON, and
-//! failed-response capture.
+//! lists and inspection, the Full profile's history read as plain values
+//! (`session_report.FullRow`) for the Host to write, and failed-response
+//! binding.
 
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const named_scratch = @import("../../named_scratch.zig");
-const protocol = @import("../../protocol.zig");
+const session_report = @import("../../session_report.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
@@ -37,8 +38,6 @@ const reads_domain = @import("reads.zig");
 const store_schema = @import("../schema.zig");
 const turn_domain = @import("turn.zig");
 const AttemptBinding = store_core.AttemptBinding;
-const ContentReference = content_domain.ContentReference;
-const RevisionContentField = configuration_domain.RevisionContentField;
 const TurnOutcome = turn_domain.TurnOutcome;
 const max_action_resolution_code_bytes = action_domain.max_action_resolution_code_bytes;
 const max_permission_decision_bytes = command_domain.max_permission_decision_bytes;
@@ -79,7 +78,6 @@ pub const SessionReportCapture = struct {
     buffered: usize = 0,
     length: u64 = 0,
     charged: u64 = 0,
-    ordinary_failure: bool = false,
 
     /// Creates the capture's unlinked scratch file. The capture is declared
     /// with a literal of its io, budget and null writer, which leaves its
@@ -113,154 +111,64 @@ pub const SessionReportCapture = struct {
         }
     }
 
-    fn appendFmt(self: *SessionReportCapture, comptime format: []const u8, args: anytype) !void {
-        var bytes: [512]u8 = undefined;
-        const value = std.fmt.bufPrint(&bytes, format, args) catch {
-            self.ordinary_failure = true;
-            return error.ReportEncodingFailed;
-        };
-        try self.append(value);
+    pub const AppendError = @typeInfo(@typeInfo(@TypeOf(append)).@"fn".return_type.?).error_union.error_set;
+
+    /// A `std.Io.Writer` over the capture, buffered in `buffer`, which the
+    /// Host writes its reply's shapes through. Once a write fails,
+    /// `failure` holds the capture's error.
+    pub fn sink(self: *SessionReportCapture, buffer: []u8) Sink {
+        return .{ .capture = self, .interface = .{ .vtable = &.{ .drain = Sink.drain }, .buffer = buffer } };
     }
 
-    /// Writes a protocol shape straight into the capture, so a fact's
-    /// maximum encoding never sits whole on the intake worker's stack.
-    pub fn appendShape(self: *SessionReportCapture, comptime shape: anytype, args: anytype) AppendError!void {
-        var buffer: [256]u8 = undefined;
-        var sink: ShapeSink = .{ .capture = self, .writer = .{ .vtable = &.{ .drain = ShapeSink.drain }, .buffer = &buffer } };
-        protocol.writeShape(&sink.writer, shape, args) catch return sink.failure.?;
-        sink.writer.flush() catch return sink.failure.?;
-    }
-
-    const AppendError = @typeInfo(@typeInfo(@TypeOf(append)).@"fn".return_type.?).error_union.error_set;
-
-    const ShapeSink = struct {
+    pub const Sink = struct {
         capture: *SessionReportCapture,
         failure: ?AppendError = null,
-        writer: std.Io.Writer,
+        interface: std.Io.Writer,
 
-        fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-            const sink: *ShapeSink = @alignCast(@fieldParentPtr("writer", writer));
-            try sink.put(writer.buffer[0..writer.end]);
-            writer.end = 0;
+        fn drain(interface: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const self: *Sink = @alignCast(@fieldParentPtr("interface", interface));
+            try self.put(interface.buffer[0..interface.end]);
+            interface.end = 0;
             var written: usize = 0;
             for (data[0 .. data.len - 1]) |bytes| {
-                try sink.put(bytes);
+                try self.put(bytes);
                 written += bytes.len;
             }
             for (0..splat) |_| {
-                try sink.put(data[data.len - 1]);
+                try self.put(data[data.len - 1]);
                 written += data[data.len - 1].len;
             }
             return written;
         }
 
-        fn put(sink: *ShapeSink, bytes: []const u8) std.Io.Writer.Error!void {
-            sink.capture.append(bytes) catch |err| {
-                sink.failure = err;
+        fn put(self: *Sink, bytes: []const u8) std.Io.Writer.Error!void {
+            self.capture.append(bytes) catch |err| {
+                self.failure = err;
                 return error.WriteFailed;
             };
         }
     };
 
-    fn appendJsonString(self: *SessionReportCapture, value: []const u8) !void {
-        try self.append("\"");
-        try self.appendJsonStringBytes(value);
-        try self.append("\"");
-    }
-
-    fn appendJsonStringBytes(self: *SessionReportCapture, value: []const u8) !void {
-        var run_start: usize = 0;
-        for (value, 0..) |byte, index| {
-            const escaped: ?[]const u8 = switch (byte) {
-                '"' => "\\\"",
-                '\\' => "\\\\",
-                '\n' => "\\n",
-                '\r' => "\\r",
-                '\t' => "\\t",
-                8 => "\\b",
-                12 => "\\f",
-                0...7, 11, 14...31 => null,
-                else => continue,
-            };
-            if (index != run_start) try self.append(value[run_start..index]);
-            if (escaped) |bytes| {
-                try self.append(bytes);
-            } else {
-                var control: [6]u8 = undefined;
-                _ = std.fmt.bufPrint(&control, "\\u00{x:0>2}", .{byte}) catch unreachable;
-                try self.append(&control);
-            }
-            run_start = index + 1;
-        }
-        if (run_start != value.len) try self.append(value[run_start..]);
-    }
-
-    fn appendBareContentReference(self: *SessionReportCapture, reference: ContentReference) !void {
-        try self.appendShape(protocol.ActivityItem.Content.json_shape, .{ reference.length, reference.digest });
-    }
-
-    fn appendOwnedContentReference(
-        self: *SessionReportCapture,
-        reference: ContentReference,
-        owner_revision: u64,
-        owner_field: RevisionContentField,
-    ) !void {
-        try self.appendShape(@import("report_full_shape.zig").Full.OwnedReference.json_shape, .{ reference.length, reference.digest, owner_revision, owner_field });
-    }
-
-    /// A set's names as `tool_set.namesSql` joins them, as a JSON array in
-    /// name order (`sortedToolNames`).
-    fn appendTools(self: *SessionReportCapture, names: ?[]const u8) !void {
-        var sorted: [tool_catalog.max_tools][]const u8 = undefined;
-        const tools = try sortedToolNames(names, &sorted);
-        var buffer: [256]u8 = undefined;
-        var sink: ShapeSink = .{ .capture = self, .writer = .{ .vtable = &.{ .drain = ShapeSink.drain }, .buffer = &buffer } };
-        tool_name.writeNamesJson(&sink.writer, tools) catch return sink.failure.?;
-        sink.writer.flush() catch return sink.failure.?;
-    }
-
-    fn appendPermissionMode(self: *SessionReportCapture, permission_mode: u8) !void {
-        try self.appendJsonString(@tagName(try configuration_domain.permissionMode(permission_mode)));
-    }
-
     fn flush(self: *SessionReportCapture) !void {
         if (self.buffered == 0) return;
         const amount: u64 = self.buffered;
-        const next_charged = std.math.add(u64, self.charged, amount) catch {
-            self.ordinary_failure = true;
-            return error.ReportLengthOverflow;
-        };
-        const next_length = std.math.add(u64, self.length, amount) catch {
-            self.ordinary_failure = true;
-            return error.ReportLengthOverflow;
-        };
-        if (!self.budget.allocate(amount)) {
-            self.ordinary_failure = true;
-            return error.ReportScratchExhausted;
-        }
+        const next_charged = std.math.add(u64, self.charged, amount) catch return error.ReportLengthOverflow;
+        const next_length = std.math.add(u64, self.length, amount) catch return error.ReportLengthOverflow;
+        if (!self.budget.allocate(amount)) return error.ReportScratchExhausted;
         self.charged = next_charged;
-        const writer = self.writer orelse unreachable;
-        writer.writeStreamingAll(self.io, self.buffer[0..self.buffered]) catch |err| {
-            self.ordinary_failure = true;
-            return err;
-        };
+        const file = self.writer orelse unreachable;
+        try file.writeStreamingAll(self.io, self.buffer[0..self.buffered]);
         self.length = next_length;
         self.buffered = 0;
     }
 
     pub fn seal(self: *SessionReportCapture) !SessionReport {
         try self.flush();
-        const writer = self.writer orelse unreachable;
-        if (writer.length(self.io) catch |err| {
-            self.ordinary_failure = true;
-            return err;
-        } != self.length) {
-            self.ordinary_failure = true;
-            return error.ReportSealFailed;
-        }
+        const file = self.writer orelse unreachable;
+        if (try file.length(self.io) != self.length) return error.ReportSealFailed;
         const report = SessionReport{
             .io = self.io,
-            .file = writer,
+            .file = file,
             .length = self.length,
             .charged = self.charged,
             .budget = self.budget,
@@ -287,12 +195,12 @@ const failed_response_turn = rsql.Read(.{
 
 /// One round: the failed response's Operation, which must still be in its
 /// Session at or past the Attempt asked for.
-pub fn failedResponseBinding(a: *ReadAccess, session: []const u8, selection: protocol.FailedResponseExport) !AttemptBinding {
+pub fn failedResponseBinding(a: *ReadAccess, session: []const u8, operation: u64, attempt_ordinal: u64) !AttemptBinding {
     var found: failed_response_turn.Result = undefined;
-    a.read(failed_response_turn, .{ .operation = selection.operation, .session = session, .attempt = selection.attempt }, &found);
+    a.read(failed_response_turn, .{ .operation = operation, .session = session, .attempt = attempt_ordinal }, &found);
     try store_access.runAs(a, error.OperationReadFailed);
     const row = found orelse return error.ContentNotFound;
-    return .{ .turn_id = row.turn_id.get(), .operation_id = selection.operation, .attempt_ordinal = selection.attempt };
+    return .{ .turn_id = row.turn_id.get(), .operation_id = operation, .attempt_ordinal = attempt_ordinal };
 }
 
 /// The archive request's selected Turn decides completion, exactly as a
@@ -847,17 +755,75 @@ pub fn readWorks(a: *ReadAccess, works: []WorkRead) !void {
 }
 
 /// The Full profile's history, after the Current facts, on the report's
-/// Access, in output order: the revisions (`renderRevisions`), then the
-/// other lists in runs (`renderRun`).
-pub fn renderFull(a: *ReadAccess, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    try capture.append(",\"full\":{\"session_revisions\":[");
-    try renderRevisions(a, session_ref, capture);
-    inline for (full_runs) |run| try renderRun(a, run, session_ref, capture);
-    try capture.append("]}");
+/// Access, in output order: the revisions (`readRevisions`), then the
+/// other lists in runs (`readRun`). Each row goes to `watched`'s visitor
+/// as plain values: `fullOpen(list)` before a list's rows,
+/// `fullRow(*const session_report.FullRow, *FullText)` for each row, and
+/// `fullEnd()` after the last list. A row's values and its text stream
+/// are valid only during that call.
+pub fn readFull(a: *ReadAccess, session_ref: []const u8, watched: anytype) !void {
+    try watched.call("fullOpen", .{session_report.FullList.session_revisions});
+    try readRevisions(a, session_ref, watched);
+    inline for (full_runs) |run| try readRun(a, run, session_ref, watched);
+    try watched.call("fullEnd", .{});
+}
+
+/// A Full row's text stream, handed to the visitor with the row: it reads
+/// and checks a content value the row shows whole
+/// (`content.streamVerified`) and writes each window, valid only during
+/// that write, into the visitor's `sink`. `failed` records a failure of
+/// the Store's own read, not of the sink.
+pub const FullText = struct {
+    a: *ReadAccess,
+    failed: bool = false,
+
+    pub fn stream(text: *FullText, value: session_report.Text, sink: anytype) !void {
+        var forward: Forward(@TypeOf(sink)) = .{ .sink = sink };
+        content_domain.streamVerified(text.a, value.id, .{ .length = value.length, .digest = value.digest }, &forward) catch |err| {
+            if (!forward.failed) text.failed = true;
+            return err;
+        };
+    }
+
+    fn Forward(comptime Sink: type) type {
+        return struct {
+            sink: Sink,
+            failed: bool = false,
+
+            pub fn write(forward: *@This(), bytes: []const u8) !void {
+                forward.sink.write(bytes) catch |err| {
+                    forward.failed = true;
+                    return err;
+                };
+            }
+        };
+    }
+};
+
+/// Hands `values` and a text stream to `watched`'s visitor. Its failure is
+/// its own and does not fence the Store; a failed read of the row's text
+/// is the Store's.
+fn visitRow(a: *ReadAccess, watched: anytype, values: *const session_report.FullRow) RowError(@TypeOf(watched))!void {
+    var text: FullText = .{ .a = a };
+    watched.visitor.fullRow(values, &text) catch |err| {
+        if (!text.failed) watched.failed = true;
+        return err;
+    };
+}
+
+/// What a visitor's `fullRow` answers, its text stream's reads included.
+fn RowError(comptime Watcher: type) type {
+    const Visitor = @FieldType(@typeInfo(Watcher).pointer.child, "visitor");
+    return @typeInfo(@TypeOf(@as(Visitor, undefined).fullRow(@as(*const session_report.FullRow, undefined), @as(*FullText, undefined)))).error_union.error_set;
+}
+
+/// What a visitor's `fullOpen` answers.
+fn OpenError(comptime Watcher: type) type {
+    return @typeInfo(@typeInfo(Watcher).pointer.child.Result("fullOpen")).error_union.error_set;
 }
 
 /// The Full lists after the revisions, in main's order, as runs
-/// (`renderRun`). Every list's statement is an `rsql.Page`: its keyset is
+/// (`readRun`). Every list's statement is an `rsql.Page`: its keyset is
 /// the key of the index it walks on its own table, so a chunk after the
 /// first seeks where the one before stopped and never sorts or rescans;
 /// the tests read every list's plan from here (`full_pages`).
@@ -873,24 +839,24 @@ pub const full_pages = blk: {
     break :blk statements;
 };
 
-/// The rows a Full list renders per chunk in the pass. Each list's Page
+/// The rows a Full list visits per chunk in the pass. Each list's Page
 /// reads one row more, so a list of at most this many rows without
 /// inline content takes one statement, and each further `chunk_rows`
 /// rows take one more.
 const chunk_rows = 256;
 
-/// The rows a list's chunk takes: `chunk_rows` when it renders in the
+/// The rows a list's chunk takes: `chunk_rows` when it visits them in the
 /// pass (`kept_rows` 0), else `kept_rows`, every one kept for after the
 /// round. Its Page reads one more.
 fn takes(comptime kept_rows: u8) u16 {
     return if (kept_rows == 0) chunk_rows else kept_rows;
 }
 
-/// Where a list stands in its run (`renderRun`), as the lists after it in
+/// Where a list stands in its run (`readRun`), as the lists after it in
 /// the same pass need to know.
 const ListStatus = struct {
     previous: ?*const ListStatus,
-    /// Every row rendered, in an earlier round.
+    /// Every row visited, in an earlier round.
     done: bool = false,
     /// This round read the list.
     queued: bool = false,
@@ -903,7 +869,7 @@ const ListStatus = struct {
     /// again.
     empty: bool = false,
 
-    /// Whether every row of the list is rendered once this round's pass
+    /// Whether every row of the list is visited once this round's pass
     /// reaches the list after it: done before, found empty, or read in
     /// this round after every list before it finished, with no row past
     /// its chunk and none kept.
@@ -917,27 +883,30 @@ const ListStatus = struct {
     }
 };
 
-/// A run's headers, which each list opens in order before its first row,
-/// or after its round when it has none.
-const Headers = struct {
-    capture: *SessionReportCapture,
-    texts: []const []const u8,
-    opened: usize = 0,
+/// A run's lists, which each opens in order (`fullOpen`) before its
+/// first row, or after its round when it has none.
+fn Headers(comptime Watcher: type) type {
+    return struct {
+        watched: Watcher,
+        lists: []const session_report.FullList,
+        opened: usize = 0,
 
-    fn open(headers: *Headers, list: usize) !void {
-        while (headers.opened <= list) : (headers.opened += 1) try headers.capture.append(headers.texts[headers.opened]);
-    }
-};
+        fn open(headers: *@This(), list: usize) OpenError(Watcher)!void {
+            while (headers.opened <= list) : (headers.opened += 1) try headers.watched.call("fullOpen", .{headers.lists[headers.opened]});
+        }
+    };
+}
 
 /// Holds a Full list's declarations to exactly these, all pub:
 /// - `S`, its statement, an `rsql.Page` that takes `takes(kept_rows)`
 ///   rows;
 /// - `failed`, the name main gave its statement's failed step;
-/// - `header`, the text that opens the list;
-/// - `kept_rows`: 0 for a list that renders its rows in the pass, else
+/// - `list`, its `session_report.FullList`;
+/// - `kept_rows`: 0 for a list that visits its rows in the pass, else
 ///   how many rows a chunk takes and keeps for after its round, to show
 ///   their content whole;
-/// - `render(a, capture, row)`, which streams the row's inline content;
+/// - `values(a, row)`, which checks the row and gives its plain values
+///   (`session_report.FullRow`), before the visitor writes any of it;
 /// - optionally `State` and `check(state, row)`, run for every row in
 ///   order;
 /// - optionally `First`, `FirstRead`, `queueFirst` and `checkFirst`: a
@@ -953,12 +922,12 @@ fn checkList(comptime L: type) void {
 }
 
 /// Why `L` is not a Full list, or null when it is: it declares pub
-/// `S`, `failed`, `header`, `kept_rows` and `render`, and each group of
+/// `S`, `failed`, `list`, `kept_rows` and `values`, and each group of
 /// hooks whole or not at all, and nothing else.
 pub fn listError(comptime L: type) ?[]const u8 {
     comptime {
         @setEvalBranchQuota(20_000);
-        const required = [_][]const u8{ "S", "failed", "header", "kept_rows", "render" };
+        const required = [_][]const u8{ "S", "failed", "list", "kept_rows", "values" };
         const groups = [_][]const []const u8{ &.{ "State", "check" }, &.{ "First", "FirstRead", "queueFirst", "checkFirst" } };
         for (@typeInfo(L).@"struct".decl_names) |name| {
             var known = false;
@@ -966,7 +935,7 @@ pub fn listError(comptime L: type) ?[]const u8 {
             for (groups) |group| for (group) |each| {
                 known = known or std.mem.eql(u8, each, name);
             };
-            if (!known) return "a Full list declares only its statement, failed, header, kept_rows, render and its hooks, not " ++ name ++ ": " ++ @typeName(L);
+            if (!known) return "a Full list declares only its statement, failed, list, kept_rows, values and its hooks, not " ++ name ++ ": " ++ @typeName(L);
         }
         for (required) |name| if (!declares(L, name)) return "a Full list declares pub " ++ name ++ ": " ++ @typeName(L);
         for (groups) |group| {
@@ -1006,8 +975,9 @@ fn CheckFirstError(comptime L: type) type {
     return if (@hasDecl(L, "checkFirst")) ErrorOf(L.checkFirst) else error{};
 }
 
-/// One round's chunk of a Full list `L` (`checkList`), read by `renderRun`.
-fn Chunk(comptime L: type) type {
+/// One round's chunk of a Full list `L` (`checkList`), read by `readRun`
+/// for `Watcher`'s visitor.
+fn Chunk(comptime L: type, comptime Watcher: type) type {
     comptime {
         checkList(L);
         if (!@hasDecl(L.S, "page_walk")) @compileError("a Full list's statement is an rsql.Page: " ++ @typeName(L));
@@ -1015,11 +985,11 @@ fn Chunk(comptime L: type) type {
     }
     return struct {
         const Row = L.S.Row;
-        const Failure = error{CorruptStore} || ErrorOf(L.render) || CheckError(L) || SessionReportCapture.AppendError;
+        const Failure = error{CorruptStore} || ErrorOf(L.values) || CheckError(L) || RowError(Watcher) || OpenError(Watcher);
 
         a: *ReadAccess,
-        capture: *SessionReportCapture,
-        headers: *Headers,
+        watched: Watcher,
+        headers: *Headers(Watcher),
         list: usize,
         first: *bool,
         state: *ListState(L),
@@ -1061,60 +1031,62 @@ fn Chunk(comptime L: type) type {
             return true;
         }
 
-        /// `check`, then renders `row` in the pass (`kept_rows` 0), or
+        /// `check`, then visits `row` in the pass (`kept_rows` 0), or
         /// keeps it, in order.
         fn take(chunk: *@This(), row: *const Row) Failure!void {
             if (@hasDecl(L, "check")) try L.check(chunk.state, row);
-            if (L.kept_rows == 0) return chunk.render(row);
+            if (L.kept_rows == 0) return chunk.emit(row);
             chunk.kept[chunk.count] = row.*;
             chunk.count += 1;
             chunk.status.kept = true;
         }
 
-        fn render(chunk: *@This(), row: *const Row) Failure!void {
+        /// Opens the list, then checks `row` and visits its values.
+        fn emit(chunk: *@This(), row: *const Row) Failure!void {
             try chunk.headers.open(chunk.list);
-            if (!chunk.first.*) try chunk.capture.append(",");
             chunk.first.* = false;
-            try L.render(chunk.a, chunk.capture, row);
+            const values = try L.values(chunk.a, row);
+            try visitRow(chunk.a, chunk.watched, &values);
         }
     };
 }
 
 /// A list's place in its run across rounds.
-fn ListRun(comptime L: type) type {
+fn ListRun(comptime L: type, comptime Watcher: type) type {
     return struct {
         state: ListState(L) = .{},
-        /// No row rendered yet.
+        /// No row visited yet.
         first: bool = true,
         after: L.S.Args,
         status: ListStatus,
         /// The chunk read this round, and the first read with it.
-        chunk: Chunk(L) = undefined,
+        chunk: Chunk(L, Watcher) = undefined,
         first_read: ListFirst(L) = undefined,
         first_queued: bool = false,
-        /// Whether `checkFirst` passed, in the round that rendered the
+        /// Whether `checkFirst` passed, in the round that visited the
         /// list's first rows.
         begun: bool = false,
     };
 }
 
-fn RunState(comptime Ls: anytype) type {
+fn RunState(comptime Ls: anytype, comptime Watcher: type) type {
     var types: [Ls.len]type = undefined;
-    for (Ls, 0..) |L, i| types[i] = ListRun(L);
+    for (Ls, 0..) |L, i| types[i] = ListRun(L, Watcher);
     const list = types;
     return @Tuple(&list);
 }
 
 /// What a failed round of run `Ls` can answer (`runFailure`).
-fn RunError(comptime Ls: anytype) type {
+fn RunError(comptime Ls: anytype, comptime Watcher: type) type {
     var set = @typeInfo(@typeInfo(@TypeOf(ReadAccess.run)).@"fn".return_type.?).error_union.error_set;
-    for (Ls) |L| set = set || @TypeOf(L.failed) || Chunk(L).Failure || CheckFirstError(L);
+    for (Ls) |L| set = set || @TypeOf(L.failed) || Chunk(L, Watcher).Failure || CheckFirstError(L);
     return set;
 }
 
-/// Renders lists `Ls` in order, each in keyset chunks, a round per chunk.
-/// A list's chunk renders its rows as the pass steps them, so the next
-/// list's rows can render in the same pass only once it finished: every
+/// Reads lists `Ls` in order, each in keyset chunks, a round per chunk,
+/// and visits their rows (`readFull`).
+/// A list's chunk visits its rows as the pass steps them, so the next
+/// list's rows can be visited in the same pass only once it finished: every
 /// list but the last keeps no rows (`kept_rows` 0). Each round reads the
 /// first list not done and, while that list has taken no row, the first
 /// chunk of each list after it: a list read ahead costs its read once,
@@ -1122,20 +1094,21 @@ fn RunError(comptime Ls: anytype) type {
 /// the lists ahead of it finished takes nothing from its first row, and
 /// is read again once they finished, its first read not; one with no row
 /// is not read again. After the round, each finished list's kept rows
-/// render with their content. A failed step answers the name of the list
+/// are visited with their content. A failed step answers the name of the list
 /// whose statement failed; a step failure of a list read ahead answers
 /// before the content of the lists before it.
 /// Not inlined, so each run's kept rows take only their own chain.
-pub noinline fn renderRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []const u8, capture: *SessionReportCapture) !void {
+pub noinline fn readRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []const u8, watched: anytype) !void {
     comptime for (0..Ls.len - 1) |i| std.debug.assert(Ls[i].kept_rows == 0);
-    const texts = comptime blk: {
-        var list: [Ls.len][]const u8 = undefined;
-        for (Ls, 0..) |L, i| list[i] = L.header;
+    const Watcher = @TypeOf(watched);
+    const tags = comptime blk: {
+        var list: [Ls.len]session_report.FullList = undefined;
+        for (Ls, 0..) |L, i| list[i] = L.list;
         const result = list;
         break :blk result;
     };
-    var headers: Headers = .{ .capture = capture, .texts = &texts };
-    var lists: RunState(Ls) = undefined;
+    var headers: Headers(Watcher) = .{ .watched = watched, .lists = &tags };
+    var lists: RunState(Ls, Watcher) = undefined;
     inline for (0..Ls.len) |i| lists[i] = .{
         .after = .{ .session = session_ref },
         .status = .{ .previous = if (i == 0) null else &lists[i - 1].status },
@@ -1158,11 +1131,11 @@ pub noinline fn renderRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []c
                     L.queueFirst(a, session_ref, &list.first_read);
                     list.first_queued = true;
                 }
-                list.chunk = .{ .a = a, .capture = capture, .headers = &headers, .list = i, .first = &list.first, .state = &list.state, .status = &list.status, .after = list.after };
+                list.chunk = .{ .a = a, .watched = watched, .headers = &headers, .list = i, .first = &list.first, .state = &list.state, .status = &list.status, .after = list.after };
                 a.readEach(L.S, list.after, L.S.limit, &list.chunk);
             }
         };
-        a.run() catch |err| return runFailure(a, Ls, &lists, current, err);
+        a.run() catch |err| return runFailure(a, Ls, Watcher, &lists, current, err);
         var blocked = false;
         inline for (Ls, 0..) |L, i| if (i >= current) {
             const list = &lists[i];
@@ -1182,7 +1155,7 @@ pub noinline fn renderRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []c
                 if (list.status.queued) {
                     if (list.chunk.failure) |err| return err;
                     try headers.open(i);
-                    for (list.chunk.kept[0..list.chunk.count]) |*row| try list.chunk.render(row);
+                    for (list.chunk.kept[0..list.chunk.count]) |*row| try list.chunk.emit(row);
                     list.after = list.chunk.after;
                 } else try headers.open(i);
                 if (list.status.more) {
@@ -1201,7 +1174,7 @@ pub noinline fn renderRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []c
 /// statement failed answer their first read's check and their rows'
 /// failures first, as main reached them first; the failed list answers
 /// its rows' failure, else its name.
-fn runFailure(a: *const ReadAccess, comptime Ls: anytype, lists: *RunState(Ls), current: usize, err: RunError(Ls)) RunError(Ls) {
+fn runFailure(a: *const ReadAccess, comptime Ls: anytype, comptime Watcher: type, lists: *RunState(Ls, Watcher), current: usize, err: RunError(Ls, Watcher)) RunError(Ls, Watcher) {
     if (err != error.StatementFailed) return err;
     var failed: ?usize = null;
     inline for (Ls, 0..) |L, i| if (failed == null and i >= current and lists[i].status.queued) {
@@ -1222,38 +1195,36 @@ fn failedOnFirst(a: *const ReadAccess, comptime L: type) bool {
     return if (@hasDecl(L, "FirstRead")) a.failedOn(L.FirstRead) else false;
 }
 
-/// A content value a Full row shows whole, with the metadata its row
-/// joined; `streamInline` reads it.
-const InlineValue = struct { id: u64, length: u64, digest: [32]u8 };
-
-/// A content value's id and joined metadata, as a row decodes them: no
-/// id is none, and an id without metadata names no content row.
-fn optionalValue(id: ?rsql.Positive, length: ?u64, digest: ?[32]u8) error{CorruptStore}!?InlineValue {
+/// A content value's id and joined metadata, as a row decodes them, to
+/// show whole: no id is none, and an id without metadata names no
+/// content row.
+fn optionalText(id: ?rsql.Positive, length: ?u64, digest: ?[32]u8) error{CorruptStore}!?session_report.Text {
     const content_id = id orelse return null;
     return .{ .id = content_id.get(), .length = length orelse return error.CorruptStore, .digest = digest orelse return error.CorruptStore };
 }
 
-/// Shows `value` whole: its metadata, then its text, which
-/// `content.streamVerified` reads and checks.
-fn streamInline(a: *ReadAccess, capture: *SessionReportCapture, value: InlineValue) !void {
-    try capture.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{value.length});
-    try capture.append(&std.fmt.bytesToHex(value.digest, .lower));
-    try capture.append("\",\"text\":\"");
-    const Sink = struct {
-        capture: *SessionReportCapture,
-        pub fn write(sink: @This(), bytes: []const u8) !void {
-            try sink.capture.appendJsonStringBytes(bytes);
-        }
-    };
-    try content_domain.streamVerified(a, value.id, .{ .length = value.length, .digest = value.digest }, Sink{ .capture = capture });
-    try capture.append("\"}");
+/// The same, to show by reference.
+fn optionalReference(id: ?rsql.Positive, length: ?u64, digest: ?[32]u8) error{CorruptStore}!?session_report.Content {
+    const value = try optionalText(id, length, digest) orelse return null;
+    return .{ .length = value.length, .digest = value.digest };
 }
+
+/// Reads and checks `earlier`, the contents a row shows whole before a
+/// check that failed, as main streamed them before it reached that
+/// check: a failure of their read answers first.
+fn readEarlier(a: *ReadAccess, earlier: []const session_report.Text) !void {
+    for (earlier) |value| try content_domain.streamVerified(a, value.id, .{ .length = value.length, .digest = value.digest }, Discard{});
+}
+
+const Discard = struct {
+    pub fn write(_: Discard, _: []const u8) error{}!void {}
+};
 
 /// Where a revision's content value first occurs in its Session: the
 /// revision, and the field within it, instructions before output schema.
 pub const ContentOwner = struct {
     revision: u64,
-    field: RevisionContentField,
+    field: session_report.RevisionField,
 
     /// One integer that orders owners as they occur: `full_revisions`
     /// reads each content's least.
@@ -1336,24 +1307,16 @@ fn owner_column(comptime field: []const u8) []const u8 {
 /// A revision's content, as its row shows it: whole where the revision
 /// owns it, else a reference to its owner.
 const RevisionContent = struct {
-    value: InlineValue,
+    value: session_report.Text,
     owner: ContentOwner,
     owned: bool,
 
-    fn of(value: InlineValue, owner: ContentOwner, here: ContentOwner) RevisionContent {
+    fn of(value: session_report.Text, owner: ContentOwner, here: ContentOwner) RevisionContent {
         return .{ .value = value, .owner = owner, .owned = owner.slot() == here.slot() };
     }
 
-    /// Inline, so streaming adds no frame between the revisions' and
-    /// `content.streamVerified`'s.
-    inline fn render(content: *const RevisionContent, a: *ReadAccess, capture: *SessionReportCapture) !void {
-        if (content.owned) return streamInline(a, capture, content.value);
-        try content.renderReference(capture);
-    }
-
-    /// Not inlined: its formatting takes no frame on the streaming chain.
-    noinline fn renderReference(content: *const RevisionContent, capture: *SessionReportCapture) !void {
-        try capture.appendOwnedContentReference(.{ .length = content.value.length, .digest = content.value.digest }, content.owner.revision, content.owner.field);
+    fn values(content: *const RevisionContent) session_report.RevisionContent {
+        return .{ .text = content.value, .owner = if (content.owned) null else .{ .revision = content.owner.revision, .field = content.owner.field } };
     }
 };
 
@@ -1362,12 +1325,12 @@ const RevisionTail = struct {
     instructions: RevisionContent,
     output_schema: ?RevisionContent,
 
-    fn render(tail: *const RevisionTail, a: *ReadAccess, capture: *SessionReportCapture) !void {
-        try capture.append(",\"instructions\":");
-        try tail.instructions.render(a, capture);
-        try capture.append(",\"output_schema\":");
-        if (tail.output_schema) |*content| try content.render(a, capture) else try capture.append("null");
-        try capture.append("}");
+    /// Visits the tail, its owned contents streamed whole.
+    fn visit(tail: *const RevisionTail, a: *ReadAccess, watched: anytype) !void {
+        try visitRow(a, watched, &.{ .revision_contents = .{
+            .instructions = tail.instructions.values(),
+            .output_schema = if (tail.output_schema) |*content| content.values() else null,
+        } });
     }
 
     /// Whether the tail reads content: an owned value of at least a byte.
@@ -1378,124 +1341,112 @@ const RevisionTail = struct {
     }
 };
 
-/// Renders the revisions as their chunks step: each row's settings, then
+/// Visits the revisions as their chunks step: each row's settings, then
 /// its contents, which wait for the round's end when the row reads one
 /// (`RevisionTail.streams`), so the chunk stops after that row and its
 /// next starts after it. A row holds a workspace of up to 4 KiB, so only
 /// that tail is kept.
-const RevisionChunk = struct {
-    a: *ReadAccess,
-    capture: *SessionReportCapture,
-    first: bool,
-    after: full_revisions.Args,
-    rows: u16 = 0,
-    more: bool = false,
-    tail: ?RevisionTail = null,
-    failure: ?Failure = null,
-    decoded: RevisionRow = undefined,
+fn RevisionChunk(comptime Watcher: type) type {
+    return struct {
+        a: *ReadAccess,
+        watched: Watcher,
+        after: full_revisions.Args,
+        rows: u16 = 0,
+        more: bool = false,
+        tail: ?RevisionTail = null,
+        failure: ?Failure = null,
+        decoded: RevisionRow = undefined,
+        /// The row's tool sets in name order, which its settings borrow.
+        tools: [tool_catalog.max_tools][]const u8 = undefined,
+        loaded_tools: [tool_catalog.max_tools][]const u8 = undefined,
 
-    const Failure = SessionReportCapture.AppendError || error{ ReportEncodingFailed, CorruptStore } ||
-        @typeInfo(@typeInfo(@TypeOf(RevisionTail.render)).@"fn".return_type.?).error_union.error_set;
+        const Failure = error{CorruptStore} || RowError(Watcher);
 
-    pub fn visit(chunk: *RevisionChunk, row: *const RevisionRow) bool {
-        const next = full_revisions.next(chunk.after, row) orelse {
-            chunk.failure = error.CorruptStore;
-            return false;
-        };
-        if (chunk.rows == full_revisions.take) {
-            chunk.more = true;
-            return false;
-        }
-        const tail = chunk.take(row) catch |err| {
-            chunk.failure = err;
-            return false;
-        };
-        chunk.rows += 1;
-        chunk.after = next;
-        if (!tail.streams()) {
-            tail.render(chunk.a, chunk.capture) catch |err| {
+        pub fn visit(chunk: *@This(), row: *const RevisionRow) bool {
+            const next = full_revisions.next(chunk.after, row) orelse {
+                chunk.failure = error.CorruptStore;
+                return false;
+            };
+            if (chunk.rows == full_revisions.take) {
+                chunk.more = true;
+                return false;
+            }
+            const tail = chunk.take(row) catch |err| {
                 chunk.failure = err;
                 return false;
             };
-            return true;
+            chunk.rows += 1;
+            chunk.after = next;
+            if (!tail.streams()) {
+                tail.visit(chunk.a, chunk.watched) catch |err| {
+                    chunk.failure = err;
+                    return false;
+                };
+                return true;
+            }
+            chunk.tail = tail;
+            chunk.more = row.revision.get() < row.newest.get();
+            return false;
         }
-        chunk.tail = tail;
-        chunk.more = row.revision.get() < row.newest.get();
-        return false;
-    }
 
-    /// Renders `row`'s settings and returns its tail.
-    fn take(chunk: *RevisionChunk, row: *const RevisionRow) Failure!RevisionTail {
-        const revision = row.revision.get();
-        const instructions_here: ContentOwner = .{ .revision = revision, .field = .instructions };
-        const output_schema_here: ContentOwner = .{ .revision = revision, .field = .output_schema };
-        const instructions: InlineValue = .{ .id = row.instructions_id.get(), .length = row.instructions_length, .digest = row.instructions_digest };
-        const output_schema = try optionalValue(row.output_schema_id, row.output_schema_length, row.output_schema_digest);
-        const instructions_owner = try ownerOf(row.instructions_owner, instructions_here);
-        const output_schema_content: ?RevisionContent = if (output_schema) |value|
-            .of(value, try ownerOf(row.output_schema_owner orelse return error.CorruptStore, output_schema_here), output_schema_here)
-        else
-            null;
-        try chunk.renderSettings(row);
-        return .{ .instructions = .of(instructions, instructions_owner, instructions_here), .output_schema = output_schema_content };
-    }
+        /// Visits `row`'s settings and returns its tail.
+        fn take(chunk: *@This(), row: *const RevisionRow) Failure!RevisionTail {
+            const revision = row.revision.get();
+            const instructions_here: ContentOwner = .{ .revision = revision, .field = .instructions };
+            const output_schema_here: ContentOwner = .{ .revision = revision, .field = .output_schema };
+            const instructions: session_report.Text = .{ .id = row.instructions_id.get(), .length = row.instructions_length, .digest = row.instructions_digest };
+            const output_schema = try optionalText(row.output_schema_id, row.output_schema_length, row.output_schema_digest);
+            const instructions_owner = try ownerOf(row.instructions_owner, instructions_here);
+            const output_schema_content: ?RevisionContent = if (output_schema) |value|
+                .of(value, try ownerOf(row.output_schema_owner orelse return error.CorruptStore, output_schema_here), output_schema_here)
+            else
+                null;
+            try visitRow(chunk.a, chunk.watched, &.{ .revision = try chunk.settings(row) });
+            return .{ .instructions = .of(instructions, instructions_owner, instructions_here), .output_schema = output_schema_content };
+        }
 
-    /// The owner `slot` names: `here` or a revision before it, since the
-    /// Session's revisions hold `here`'s content at `here`.
-    fn ownerOf(slot: u64, here: ContentOwner) error{CorruptStore}!ContentOwner {
-        if (slot > here.slot()) return error.CorruptStore;
-        return .ofSlot(slot);
-    }
+        /// The owner `slot` names: `here` or a revision before it, since the
+        /// Session's revisions hold `here`'s content at `here`.
+        fn ownerOf(slot: u64, here: ContentOwner) error{CorruptStore}!ContentOwner {
+            if (slot > here.slot()) return error.CorruptStore;
+            return .ofSlot(slot);
+        }
 
-    fn renderSettings(chunk: *RevisionChunk, row: *const RevisionRow) (SessionReportCapture.AppendError || error{ ReportEncodingFailed, CorruptStore })!void {
-        const capture = chunk.capture;
-        if (!chunk.first) try capture.append(",");
-        chunk.first = false;
-        try capture.appendFmt("{{\"revision\":\"{d}\",\"command_key\":", .{row.revision.get()});
-        try capture.appendJsonString(row.command_key.slice());
-        try capture.append(",\"workspace\":");
-        try capture.appendJsonString(row.workspace.slice());
-        try capture.append(",\"provider\":");
-        try capture.appendJsonString(@tagName(row.provider));
-        try capture.append(",\"model\":");
-        try capture.appendJsonString(row.model.slice());
-        try capture.append(",\"compaction_trigger\":");
-        try appendOptionalPositive(row.compaction_trigger, capture);
-        try capture.append(",\"output_reservation\":");
-        if (row.output_reservation) |value| try capture.appendFmt("\"{d}\"", .{value}) else try capture.append("null");
-        try capture.append(",\"reasoning_effort\":");
-        try appendNullableEffort(row.reasoning_effort, capture);
-        try capture.append(",\"label\":");
-        if (row.label) |*label| {
-            try configuration_domain.checkLabel(label.slice());
-            try capture.appendJsonString(label.slice());
-        } else try capture.append("null");
-        try capture.append(",\"tools\":");
-        try capture.appendTools(if (row.tools) |*names| names.slice() else null);
-        try capture.append(",\"loaded_tools\":");
-        try capture.appendTools(if (row.loaded_tools) |*names| names.slice() else null);
-        try capture.append(",\"permission_mode\":");
-        try capture.appendPermissionMode(row.permission_mode);
-    }
-};
+        fn settings(chunk: *@This(), row: *const RevisionRow) error{CorruptStore}!session_report.Revision {
+            if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
+            return .{
+                .revision = row.revision.get(),
+                .command_key = row.command_key.slice(),
+                .workspace = row.workspace.slice(),
+                .provider = row.provider,
+                .model = row.model.slice(),
+                .compaction_trigger = optional(row.compaction_trigger),
+                .output_reservation = row.output_reservation,
+                .reasoning_effort = row.reasoning_effort,
+                .label = if (row.label) |*label| label.slice() else null,
+                .tools = try sortedToolNames(if (row.tools) |*names| names.slice() else null, &chunk.tools),
+                .loaded_tools = try sortedToolNames(if (row.loaded_tools) |*names| names.slice() else null, &chunk.loaded_tools),
+                .permission_mode = try configuration_domain.permissionMode(row.permission_mode),
+            };
+        }
+    };
+}
 
 /// The revisions list (`RevisionChunk`), whose step failure is main's
 /// `SessionReadFailed`.
 /// Not inlined: its chunk holds a decoded row.
-noinline fn renderRevisions(a: *ReadAccess, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    var first = true;
+noinline fn readRevisions(a: *ReadAccess, session_ref: []const u8, watched: anytype) !void {
     var after: full_revisions.Args = .{ .session = session_ref };
     // Its row holds a set's names, over 4 KiB: in the Store's scratch.
-    const chunk = a.store.reportScratch(RevisionChunk);
+    const chunk = a.store.reportScratch(RevisionChunk(@TypeOf(watched)));
     while (true) {
-        chunk.* = .{ .a = a, .capture = capture, .first = first, .after = after };
+        chunk.* = .{ .a = a, .watched = watched, .after = after };
         a.readEach(full_revisions, after, full_revisions.limit, chunk);
         const ran = store_access.runAs(a, error.SessionReadFailed);
         if (chunk.failure) |err| return err;
         try ran;
-        if (chunk.tail) |*tail| try tail.render(a, capture);
+        if (chunk.tail) |*tail| try tail.visit(a, watched);
         if (!chunk.more) return;
-        first = chunk.first;
         after = chunk.after;
     }
 }
@@ -1558,7 +1509,7 @@ const unpositioned_message = rsql.Read(.{
 pub const Messages = struct {
     pub const S = full_messages;
     pub const failed = error.MessageReadFailed;
-    pub const header = "],\"messages\":[";
+    pub const list = session_report.FullList.messages;
     pub const kept_rows = 4;
     pub const First = unpositioned_message.Result;
     pub const FirstRead = unpositioned_message;
@@ -1581,48 +1532,32 @@ pub const Messages = struct {
         state.admission = row.admission_id.get();
     }
 
-    pub fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+    /// Its outcome's reference is checked after its content, which main
+    /// streamed first.
+    pub fn values(a: *ReadAccess, row: *const S.Row) !session_report.FullRow {
         const projection = try command_domain.projectMessage(row, if (row.excluding_stop) |*stop| stop.slice() else null);
-        try capture.appendFmt("{{\"admission\":\"{d}\",\"command_key\":", .{projection.admission_id});
-        try capture.appendJsonString(projection.command_key.slice());
-        try capture.append(",\"content\":");
-        try streamInline(a, capture, .{ .id = row.content_id.get(), .length = row.content_length, .digest = row.content_digest });
-        try capture.append(",\"turn\":");
-        switch (projection.state) {
-            .applied => |applied| try capture.appendFmt("\"{d}\"", .{applied.binding.turn_id}),
-            .pending, .excluded => try capture.append("null"),
-        }
-        try capture.append(",\"application\":");
-        try capture.appendJsonString(@tagName(projection.state));
-        try capture.append(",\"exclusion\":");
-        switch (projection.state) {
-            .excluded => |stop_key| {
-                try capture.append("{\"code\":\"session_stopped\",\"command_key\":");
-                try capture.appendJsonString(stop_key.slice());
-                try capture.append("}");
+        const content: session_report.Text = .{ .id = row.content_id.get(), .length = row.content_length, .digest = row.content_digest };
+        return .{ .message = .{
+            .admission = projection.admission_id,
+            .command_key = row.command_key.slice(),
+            .content = content,
+            .application = switch (projection.state) {
+                .applied => |applied| .{ .applied = .{
+                    .turn = applied.binding.turn_id,
+                    .outcome = if (row.outcome_code) |*code| .{
+                        .code = code.slice(),
+                        .content = optionalReference(row.outcome_content_id, row.outcome_length, row.outcome_digest) catch |err| {
+                            try readEarlier(a, &.{content});
+                            return err;
+                        },
+                    } else null,
+                } },
+                .pending => .pending,
+                .excluded => .{ .excluded = row.excluding_stop.?.slice() },
             },
-            .pending, .applied => try capture.append("null"),
-        }
-        try capture.append(",\"outcome\":");
-        switch (projection.state) {
-            .applied => |applied| if (applied.outcome_code) |code| {
-                try capture.append("{\"code\":");
-                try capture.appendJsonString(code.slice());
-                try capture.append(",\"content\":");
-                try appendReference(row.outcome_content_id, row.outcome_length, row.outcome_digest, capture);
-                try capture.append("}");
-            } else try capture.append("null"),
-            .pending, .excluded => try capture.append("null"),
-        }
-        try capture.append("}");
+        } };
     }
 };
-
-/// Content shown by reference, or null for none.
-fn appendReference(id: ?rsql.Positive, length: ?u64, digest: ?[32]u8, capture: *SessionReportCapture) !void {
-    const value = try optionalValue(id, length, digest) orelse return capture.append("null");
-    try capture.appendBareContentReference(.{ .length = value.length, .digest = value.digest });
-}
 
 /// A Turn's or Operation's outcome code, with no content when it has none.
 fn checkOutcome(code: anytype, content_id: ?rsql.Positive) error{CorruptStore}!void {
@@ -1671,7 +1606,7 @@ const conversation_sources = rsql.Read(.{
 pub const Conversation = struct {
     pub const S = full_conversation;
     pub const failed = error.ConversationReadFailed;
-    pub const header = "],\"conversation\":[";
+    pub const list = session_report.FullList.conversation;
     pub const kept_rows = 0;
     pub const First = conversation_sources.Row;
     pub const FirstRead = conversation_sources;
@@ -1686,39 +1621,22 @@ pub const Conversation = struct {
         if (!missing.catalogs_consistent or !missing.assistants_consistent) return error.CorruptStore;
     }
 
-    pub fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+    pub fn values(_: *ReadAccess, row: *const S.Row) error{CorruptStore}!session_report.FullRow {
         if (row.entry_kind < 1 or row.entry_kind > 4 or !row.consistent) return error.CorruptStore;
-        try capture.appendFmt("{{\"ordinal\":\"{d}\",\"position\":\"{d}\",\"kind\":\"{s}\",\"turn\":", .{
-            row.entry_ordinal.get(),
-            row.session_position.get(),
-            switch (row.entry_kind) {
-                1 => "message",
-                2 => "settings",
-                3 => "assistant",
-                4 => "skill",
-                else => unreachable,
-            },
-        });
-        try appendOptionalPositive(row.turn_id, capture);
-        try capture.append(",\"source_admission\":");
-        try appendOptionalPositive(row.source_admission_id, capture);
-        try capture.append(",\"source_revision\":");
-        try appendOptionalPositive(row.source_revision, capture);
-        try capture.append(",\"source_catalog_position\":");
-        try appendOptionalPositive(row.source_catalog_position, capture);
-        try capture.append(",\"source_skill_position\":");
-        try appendOptionalPositive(row.source_skill_position, capture);
-        try capture.append(",\"source_operation\":");
-        try appendOptionalPositive(row.source_operation_id, capture);
-        try capture.append(",\"content\":");
-        try capture.appendBareContentReference(.{ .length = row.content_length, .digest = row.content_digest });
-        try capture.append("}");
+        return .{ .conversation = .{
+            .ordinal = row.entry_ordinal.get(),
+            .position = row.session_position.get(),
+            .kind = @fromBackingInt(@intCast(row.entry_kind - 1)),
+            .turn = optional(row.turn_id),
+            .source_admission = optional(row.source_admission_id),
+            .source_revision = optional(row.source_revision),
+            .source_catalog_position = optional(row.source_catalog_position),
+            .source_skill_position = optional(row.source_skill_position),
+            .source_operation = optional(row.source_operation_id),
+            .content = .{ .length = row.content_length, .digest = row.content_digest },
+        } };
     }
 };
-
-fn appendOptionalPositive(value: ?rsql.Positive, capture: *SessionReportCapture) !void {
-    if (value) |positive| try capture.appendFmt("\"{d}\"", .{positive.get()}) else try capture.append("null");
-}
 
 /// The Session's Turns, by `turn_id`, with their outcomes' metadata; the
 /// index is descending, walked backward.
@@ -1746,26 +1664,22 @@ const full_turns = rsql.Page(.{
 const Turns = struct {
     pub const S = full_turns;
     pub const failed = error.TurnReadFailed;
-    pub const header = "],\"turns\":[";
+    pub const list = session_report.FullList.turns;
     pub const kept_rows = 0;
 
-    pub fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+    pub fn values(_: *ReadAccess, row: *const S.Row) error{CorruptStore}!session_report.FullRow {
         if (row.input_cutoff < row.first_admission_id.get()) return error.CorruptStore;
         try checkOutcome(&row.outcome_code, row.outcome_content_id);
-        try capture.appendFmt("{{\"turn\":\"{d}\",\"first_admission\":\"{d}\",\"input_cutoff\":\"{d}\",\"operation\":\"{d}\",\"outcome\":", .{
-            row.turn_id.get(),
-            row.first_admission_id.get(),
-            row.input_cutoff,
-            row.operation_id.get(),
-        });
-        if (row.outcome_code) |*code| {
-            try capture.append("{\"code\":");
-            try capture.appendJsonString(code.slice());
-            try capture.append(",\"content\":");
-            try appendReference(row.outcome_content_id, row.outcome_length, row.outcome_digest, capture);
-            try capture.append("}");
-        } else try capture.append("null");
-        try capture.append("}");
+        return .{ .turn = .{
+            .turn = row.turn_id.get(),
+            .first_admission = row.first_admission_id.get(),
+            .input_cutoff = row.input_cutoff,
+            .operation = row.operation_id.get(),
+            .outcome = if (row.outcome_code) |*code| .{
+                .code = code.slice(),
+                .content = try optionalReference(row.outcome_content_id, row.outcome_length, row.outcome_digest),
+            } else null,
+        } };
     }
 };
 
@@ -1797,37 +1711,28 @@ const full_operations = rsql.Page(.{
 const Operations = struct {
     pub const S = full_operations;
     pub const failed = error.OperationReadFailed;
-    pub const header = "],\"model_operations\":[";
+    pub const list = session_report.FullList.model_operations;
     pub const kept_rows = 4;
 
-    pub fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+    pub fn values(_: *ReadAccess, row: *const S.Row) error{CorruptStore}!session_report.FullRow {
         try checkOutcome(&row.resolution_code, row.resolution_content_id);
-        try capture.appendFmt("{{\"operation\":\"{d}\",\"turn\":\"{d}\",\"resolution\":", .{ row.operation_id.get(), row.turn_id.get() });
-        if (row.resolution_code) |*code| {
-            try capture.append("{\"code\":");
-            try capture.appendJsonString(code.slice());
-            try capture.append(",\"content\":");
-            try appendInline(a, row.resolution_content_id, row.resolution_length, row.resolution_digest, capture);
-            try capture.append("}");
-        } else try capture.append("null");
-        try capture.append(",\"interrupted_by\":");
-        try appendOptionalText(&row.interrupted_by_command_key, capture);
-        try capture.appendFmt(",\"settings_revision\":\"{d}\",\"request_id\":", .{row.settings_revision.get()});
-        try appendOptionalText(&row.request_id, capture);
-        try capture.append(",\"reasoning_effort\":");
-        try appendNullableEffort(row.reasoning_effort, capture);
-        try capture.append("}");
+        return .{ .operation = .{
+            .operation = row.operation_id.get(),
+            .turn = row.turn_id.get(),
+            .resolution = if (row.resolution_code) |*code| .{
+                .code = code.slice(),
+                .content = try optionalText(row.resolution_content_id, row.resolution_length, row.resolution_digest),
+            } else null,
+            .interrupted_by = optionalSlice(&row.interrupted_by_command_key),
+            .settings_revision = row.settings_revision.get(),
+            .request_id = optionalSlice(&row.request_id),
+            .reasoning_effort = row.reasoning_effort,
+        } };
     }
 };
 
-/// Content shown whole, or null for none.
-fn appendInline(a: *ReadAccess, id: ?rsql.Positive, length: ?u64, digest: ?[32]u8, capture: *SessionReportCapture) !void {
-    const value = try optionalValue(id, length, digest) orelse return capture.append("null");
-    try streamInline(a, capture, value);
-}
-
-fn appendOptionalText(text: anytype, capture: *SessionReportCapture) !void {
-    if (text.*) |*value| try capture.appendJsonString(value.slice()) else try capture.append("null");
+fn optionalSlice(text: anytype) ?[]const u8 {
+    return if (text.*) |*value| value.slice() else null;
 }
 
 const call_contents = "LEFT JOIN content name_content ON name_content.content_id=tool_call.name_content_id " ++
@@ -1876,23 +1781,29 @@ pub const full_calls = rsql.Page(.{
 const Calls = struct {
     pub const S = full_calls;
     pub const failed = error.CallReadFailed;
-    pub const header = "],\"tool_calls\":[";
+    pub const list = session_report.FullList.tool_calls;
     pub const kept_rows = 8;
 
-    pub fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
-        try capture.appendFmt("{{\"operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"item_ordinal\":\"{d}\",\"rejection\":", .{ row.operation_id.get(), row.call_ordinal, row.item_ordinal });
-        try appendOptionalText(&row.rejection_code, capture);
-        try capture.append(",\"acceptance_position\":");
-        try appendOptionalPositive(row.acceptance_position, capture);
-        try capture.append(",\"name\":");
-        try streamInline(a, capture, .{ .id = row.name_id.get(), .length = row.name_length, .digest = row.name_digest });
-        try capture.append(",\"call_id\":");
-        try streamInline(a, capture, .{ .id = row.call_id.get(), .length = row.call_id_length, .digest = row.call_id_digest });
-        try capture.append(",\"arguments\":");
-        try streamInline(a, capture, .{ .id = row.arguments_id.get(), .length = row.arguments_length, .digest = row.arguments_digest });
-        try capture.append(",\"rejection_result\":");
-        try appendInline(a, row.rejection_id, row.rejection_length, row.rejection_digest, capture);
-        try capture.append("}");
+    /// Its rejection result's metadata is checked after its other
+    /// contents, which main streamed first.
+    pub fn values(a: *ReadAccess, row: *const S.Row) !session_report.FullRow {
+        const name: session_report.Text = .{ .id = row.name_id.get(), .length = row.name_length, .digest = row.name_digest };
+        const call_id: session_report.Text = .{ .id = row.call_id.get(), .length = row.call_id_length, .digest = row.call_id_digest };
+        const arguments: session_report.Text = .{ .id = row.arguments_id.get(), .length = row.arguments_length, .digest = row.arguments_digest };
+        return .{ .call = .{
+            .operation = row.operation_id.get(),
+            .call_ordinal = row.call_ordinal,
+            .item_ordinal = row.item_ordinal,
+            .rejection = optionalSlice(&row.rejection_code),
+            .acceptance_position = optional(row.acceptance_position),
+            .name = name,
+            .call_id = call_id,
+            .arguments = arguments,
+            .rejection_result = optionalText(row.rejection_id, row.rejection_length, row.rejection_digest) catch |err| {
+                try readEarlier(a, &.{ name, call_id, arguments });
+                return err;
+            },
+        } };
     }
 };
 
@@ -1924,23 +1835,23 @@ const full_actions = rsql.Page(.{
 const Actions = struct {
     pub const S = full_actions;
     pub const failed = error.ActionReadFailed;
-    pub const header = "],\"actions\":[";
+    pub const list = session_report.FullList.actions;
     pub const kept_rows = 4;
 
-    pub fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
-        try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"permission_revision\":\"{d}\",\"permission\":\"{s}\",\"resolution\":", .{
-            row.action_id.get(),
-            row.parent_operation_id.get(),
-            row.call_ordinal,
-            row.permission_revision.get(),
-            row.permission.slice(),
-        });
-        try appendOptionalText(&row.resolution_code, capture);
-        try capture.append(",\"result\":");
-        try appendInline(a, row.resolution_content_id, row.result_length, row.result_digest, capture);
-        try capture.append(",\"acceptance_position\":");
-        try appendOptionalPositive(row.acceptance_position, capture);
-        try capture.append("}");
+    pub fn values(_: *ReadAccess, row: *const S.Row) error{CorruptStore}!session_report.FullRow {
+        return .{
+            .action = .{
+                .action = row.action_id.get(),
+                .parent_operation = row.parent_operation_id.get(),
+                .call_ordinal = row.call_ordinal,
+                .permission_revision = row.permission_revision.get(),
+                // The statement's CASE names one of the three.
+                .permission = std.meta.stringToEnum(session_report.Permission, row.permission.slice()) orelse return error.CorruptStore,
+                .resolution = optionalSlice(&row.resolution_code),
+                .result = try optionalText(row.resolution_content_id, row.result_length, row.result_digest),
+                .acceptance_position = optional(row.acceptance_position),
+            },
+        };
     }
 };
 
@@ -1970,23 +1881,19 @@ const full_decisions = rsql.Page(.{
 const Decisions = struct {
     pub const S = full_decisions;
     pub const failed = error.PermissionReadFailed;
-    pub const header = "],\"permission_decisions\":[";
+    pub const list = session_report.FullList.permission_decisions;
     pub const kept_rows = 0;
 
-    pub fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
-        try capture.append("{\"command_key\":");
-        try capture.appendJsonString(row.command_key.slice());
-        try capture.append(",\"action\":");
-        try capture.appendJsonString(row.action_id.slice());
-        try capture.appendFmt(",\"decision\":\"{s}\",\"status\":\"{s}\",\"code\":", .{ @tagName(row.decision), status(row.accepted) });
-        try capture.appendJsonString(row.code.slice());
-        try capture.append("}");
+    pub fn values(_: *ReadAccess, row: *const S.Row) error{}!session_report.FullRow {
+        return .{ .decision = .{
+            .command_key = row.command_key.slice(),
+            .action = row.action_id.slice(),
+            .decision = row.decision,
+            .accepted = row.accepted,
+            .code = row.code.slice(),
+        } };
     }
 };
-
-fn status(accepted: bool) []const u8 {
-    return if (accepted) "accepted" else "rejected";
-}
 
 /// The Session's stop commands, by command order, as main scanned them.
 pub const full_stops = rsql.Page(.{
@@ -2011,19 +1918,17 @@ pub const full_stops = rsql.Page(.{
 const Stops = struct {
     pub const S = full_stops;
     pub const failed = error.SessionStopReadFailed;
-    pub const header = "],\"session_stops\":[";
+    pub const list = session_report.FullList.session_stops;
     pub const kept_rows = 0;
 
-    pub fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
-        try capture.append("{\"command_key\":");
-        try capture.appendJsonString(row.command_key.slice());
-        try capture.appendFmt(",\"status\":\"{s}\",\"code\":", .{status(row.accepted)});
-        try capture.appendJsonString(row.code.slice());
-        try capture.append(",\"selected_turn\":");
-        try appendOptionalPositive(row.selected_turn_id, capture);
-        try capture.append(",\"admission_cutoff\":");
-        if (row.admission_cutoff) |cutoff| try capture.appendFmt("\"{d}\"", .{cutoff}) else try capture.append("null");
-        try capture.append("}");
+    pub fn values(_: *ReadAccess, row: *const S.Row) error{}!session_report.FullRow {
+        return .{ .stop = .{
+            .command_key = row.command_key.slice(),
+            .accepted = row.accepted,
+            .code = row.code.slice(),
+            .selected_turn = optional(row.selected_turn_id),
+            .admission_cutoff = row.admission_cutoff,
+        } };
     }
 };
 
@@ -2055,7 +1960,7 @@ pub const full_interruptions = rsql.Page(.{
 const Interruptions = struct {
     pub const S = full_interruptions;
     pub const failed = error.InterruptionReadFailed;
-    pub const header = "],\"model_interruptions\":[";
+    pub const list = session_report.FullList.model_interruptions;
     pub const kept_rows = 0;
     pub const State = struct {};
 
@@ -2065,16 +1970,14 @@ const Interruptions = struct {
         if (row.turn_id.slice().len == 0) return error.CorruptStore;
     }
 
-    pub fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
-        try capture.append("{\"command_key\":");
-        try capture.appendJsonString(row.command_key.slice());
-        try capture.appendFmt(",\"status\":\"{s}\",\"code\":", .{status(row.accepted)});
-        try capture.appendJsonString(row.code.slice());
-        try capture.append(",\"turn\":");
-        try capture.appendJsonString(row.turn_id.slice());
-        try capture.append(",\"operation\":");
-        try capture.appendJsonString(row.operation_id.slice());
-        try capture.append("}");
+    pub fn values(_: *ReadAccess, row: *const S.Row) error{}!session_report.FullRow {
+        return .{ .interruption = .{
+            .command_key = row.command_key.slice(),
+            .accepted = row.accepted,
+            .code = row.code.slice(),
+            .turn = row.turn_id.slice(),
+            .operation = row.operation_id.slice(),
+        } };
     }
 };
 
@@ -2130,21 +2033,17 @@ pub const full_results = rsql.Page(.{
 const Results = struct {
     pub const S = full_results;
     pub const failed = error.CallReadFailed;
-    pub const header = "],\"tool_results\":[";
+    pub const list = session_report.FullList.tool_results;
     pub const kept_rows = 8;
 
-    pub fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
-        try capture.appendFmt("{{\"operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"acceptance_position\":\"{d}\",\"call_id\":", .{ row.operation_id.get(), row.call_ordinal, row.acceptance_position.get() });
-        try streamInline(a, capture, .{ .id = row.call_id.get(), .length = row.call_id_length, .digest = row.call_id_digest });
-        try capture.append(",\"code\":");
-        try capture.appendJsonString(row.code.slice());
-        try capture.append(",\"result\":");
-        try streamInline(a, capture, .{ .id = row.result_id.get(), .length = row.result_length, .digest = row.result_digest });
-        try capture.append("}");
+    pub fn values(_: *ReadAccess, row: *const S.Row) error{}!session_report.FullRow {
+        return .{ .result = .{
+            .operation = row.operation_id.get(),
+            .call_ordinal = row.call_ordinal,
+            .acceptance_position = row.acceptance_position.get(),
+            .call_id = .{ .id = row.call_id.get(), .length = row.call_id_length, .digest = row.call_id_digest },
+            .code = row.code.slice(),
+            .result = .{ .id = row.result_id.get(), .length = row.result_length, .digest = row.result_digest },
+        } };
     }
 };
-
-fn appendNullableEffort(value: ?model_capability.ReasoningEffort, capture: *SessionReportCapture) !void {
-    if (value) |effort| return capture.appendJsonString(@tagName(effort));
-    try capture.append("null");
-}

@@ -1017,7 +1017,7 @@ pub const Store = struct {
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.content, report_domain.failedResponseBinding(&access, session_ref, selection));
+        return entry.finish(Ordinary.content, report_domain.failedResponseBinding(&access, session_ref, selection.operation, selection.attempt));
     }
 
     /// Reads the report of `session_ref` under one Entry and hands it to

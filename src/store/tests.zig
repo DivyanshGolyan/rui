@@ -2553,7 +2553,6 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
-        @embedFile("domain/report_full_shape.zig"),
         @embedFile("domain/session_list_read.zig"),
         @embedFile("domain/session_report_read.zig"),
         @embedFile("domain/skills.zig"),
@@ -8273,10 +8272,10 @@ test "a Current report takes its reads' dependency depth in rounds, not its rows
     }.run);
 }
 
-/// `session`'s Full history rendered alone, on an Access of its own, as
-/// `renderFull` follows the Current facts, inside `{"head":0...}` so it
-/// parses. The bytes are the caller's; `rounds` gets the rounds
-/// `renderFull` ran, not its `readRaw` windows.
+/// `session`'s Full history read alone, on an Access of its own, and
+/// written by the Host's reply as it follows the Current facts, inside
+/// `{"head":0...}` so it parses. The bytes are the caller's; `rounds` gets
+/// the rounds `readFull` ran, not its `readRaw` windows.
 pub fn testingFullHistory(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, rounds: ?*u32) ![]u8 {
     var root: [protocol.max_store_bytes]u8 = undefined;
     const length = try tmp.dir.realPath(std.testing.io, &root);
@@ -8290,8 +8289,10 @@ pub fn testingFullHistory(storage: *Store, tmp: *std.testing.TmpDir, session: []
         var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
         try capture.append("{\"head\":0");
+        var reply: TestingReportReply = .{ .capture = &capture, .execution = .{ .dispatch_fenced = false, .custody_occupied = 0, .scratch_used_bytes = 0 } };
+        var watched: session_report_read_domain.Watched(*TestingReportReply) = .{ .visitor = &reply };
         const before = storage.testing_content_work.rounds;
-        try report_domain.renderFull(&a, session, &capture);
+        try report_domain.readFull(&a, session, &watched);
         try capture.append("}");
         if (rounds) |out| out.* = storage.testing_content_work.rounds - before;
     }
@@ -8312,10 +8313,13 @@ const FailingList = struct {
         .take = 256,
     });
     pub const failed = error.TurnReadFailed;
-    pub const header = "],\"failing\":[";
+    pub const list = session_report.FullList.turns;
     pub const kept_rows = 0;
 
-    pub fn render(_: *reads_domain.ReadAccess, _: *report_domain.SessionReportCapture, _: *const S.Row) error{}!void {}
+    /// Its statement fails before any row is visited.
+    pub fn values(_: *reads_domain.ReadAccess, _: *const S.Row) error{}!session_report.FullRow {
+        unreachable;
+    }
 };
 
 fn expectListError(comptime L: type, comptime prefix: []const u8) !void {
@@ -8323,29 +8327,29 @@ fn expectListError(comptime L: type, comptime prefix: []const u8) !void {
     try std.testing.expectEqualStrings(prefix, message[0..@min(prefix.len, message.len)]);
 }
 
-test "a Full list declares its statement, header and render, and each group of hooks whole, and nothing else" {
+test "a Full list declares its statement, list and values, and each group of hooks whole, and nothing else" {
     const Stray = struct {
         pub const S = FailingList.S;
         pub const failed = FailingList.failed;
-        pub const header = FailingList.header;
+        pub const list = FailingList.list;
         pub const kept_rows = 0;
-        pub const render = FailingList.render;
+        pub const values = FailingList.values;
         pub const chunk_limit = 4;
     };
     const Half = struct {
         pub const S = FailingList.S;
         pub const failed = FailingList.failed;
-        pub const header = FailingList.header;
+        pub const list = FailingList.list;
         pub const kept_rows = 0;
-        pub const render = FailingList.render;
+        pub const values = FailingList.values;
         pub const State = struct {};
     };
     const Hidden = struct {
         pub const S = FailingList.S;
         pub const failed = FailingList.failed;
-        pub const header = FailingList.header;
+        pub const list = FailingList.list;
         pub const kept_rows = 0;
-        pub const render = FailingList.render;
+        pub const values = FailingList.values;
         pub const State = struct {};
         fn check(_: *State, _: *const S.Row) error{}!void {}
     };
@@ -8353,15 +8357,15 @@ test "a Full list declares its statement, header and render, and each group of h
         pub const S = FailingList.S;
         pub const failed = FailingList.failed;
         pub const kept_rows = 0;
-        pub const render = FailingList.render;
+        pub const values = FailingList.values;
     };
     try std.testing.expect(comptime report_domain.listError(FailingList) == null);
-    try expectListError(Stray, "a Full list declares only its statement, failed, header, kept_rows, render and its hooks, not chunk_limit: ");
+    try expectListError(Stray, "a Full list declares only its statement, failed, list, kept_rows, values and its hooks, not chunk_limit: ");
     try expectListError(Half, "a Full list declares all of a group of hooks or none: check in ");
     // `@hasDecl` sees a private `check` only from its own file, so here
     // the group is incomplete; report.zig's own test covers a private hook.
     try expectListError(Hidden, "a Full list declares all of a group of hooks or none: check in ");
-    try expectListError(Missing, "a Full list declares pub header: ");
+    try expectListError(Missing, "a Full list declares pub list: ");
 }
 
 test "Full history answers a list's first check before a later list's failed step in its round" {
@@ -8390,9 +8394,11 @@ test "Full history answers a list's first check before a later list's failed ste
                 defer entry.release();
                 var a: reads_domain.ReadAccess = .open(&entry);
                 defer a.deinit();
+                var reply: TestingReportReply = .{ .capture = &capture, .execution = .{ .dispatch_fenced = false, .custody_occupied = 0, .scratch_used_bytes = 0 } };
+                var watched: session_report_read_domain.Watched(*TestingReportReply) = .{ .visitor = &reply };
                 try std.testing.expectError(
                     if (check) error.CorruptStore else error.TurnReadFailed,
-                    report_domain.renderRun(&a, .{ report_domain.Conversation, FailingList }, session.slice(), &capture),
+                    report_domain.readRun(&a, .{ report_domain.Conversation, FailingList }, session.slice(), &watched),
                 );
             }
         }
@@ -8617,7 +8623,7 @@ test "Full revisions show each content whole where it first occurs" {
                 @memset(owners, null);
                 for (listed, 1..) |row, revision| {
                     try std.testing.expectEqualStrings(try std.fmt.allocPrint(parsed.arena.allocator(), "{d}", .{revision}), row.object.get("revision").?.string);
-                    for ([_]?usize{ instructions[revision], output_schema[revision] }, [_]configuration_domain.RevisionContentField{ .instructions, .output_schema }) |text, field| {
+                    for ([_]?usize{ instructions[revision], output_schema[revision] }, [_]session_report.RevisionField{ .instructions, .output_schema }) |text, field| {
                         const shown = row.object.get(@tagName(field)).?;
                         const index = text orelse {
                             try std.testing.expect(shown == .null);
@@ -9202,7 +9208,6 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
-        @embedFile("domain/report_full_shape.zig"),
         @embedFile("domain/session_list_read.zig"),
         @embedFile("domain/session_report_read.zig"),
         @embedFile("domain/skills.zig"),
