@@ -59,8 +59,16 @@ pub fn rows(self: *const Self) u16 {
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const max = ctx.max.size();
-    const total = self.rows();
-    // A short screen keeps the newest rows: the tail is what runs now.
+    const clock_call = self.clockCall();
+    // The work line and the waiting row keep their rows; the calls take
+    // what is left, newest first, with `+N more` counting every call not
+    // drawn. A screen too short even for those keeps the newest rows.
+    const fixed = @as(usize, @intFromBool(self.work != null and clock_call == null)) + @intFromBool(self.queued != null);
+    const room = max.height -| fixed;
+    const all_fit = self.live.count + @intFromBool(self.live.total > self.live.count) <= room;
+    const shown: usize = if (all_fit) self.live.count else room -| 1;
+    const more = if (all_fit) self.live.total > self.live.count else room >= 1;
+    const total: u16 = @intCast(shown + @intFromBool(more) + fixed);
     const height = @min(total, max.height);
     var surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = max.width, .height = height });
     @memset(surface.buffer, .{ .style = self.styles.normal });
@@ -69,10 +77,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const skip = total - height;
     var index: u16 = 0;
     var children: []vxfw.SubSurface = &.{};
-    const clock_call = self.clockCall();
     const clock = try ctx.arena.create([work_line.max_clock_bytes]u8);
 
-    for (0..self.live.count) |call| {
+    for (self.live.count - shown..self.live.count) |call| {
         defer index += 1;
         if (index < skip) continue;
         const buffer = try ctx.arena.create([session_view.Live.line_bytes]u8);
@@ -85,10 +92,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if (fitted.cut) column = Chip.print(surface, self.method, column, row, session_line.ellipsis, look, width);
         _ = Chip.print(surface, self.method, column, row, fitted.clock, self.styles.quiet, width);
     }
-    if (self.live.total > self.live.count) {
+    if (more) {
         defer index += 1;
         if (index >= skip) {
-            const omitted = self.live.total - self.live.count;
+            const omitted = self.live.total - shown;
             // Indented under the calls' words, as the mocks set it.
             const indent: u16 = @min(2, width - 1);
             const full = std.fmt.bufPrint(&self.more_label, "+{d} more running · /status", .{omitted}) catch unreachable;
@@ -256,11 +263,25 @@ test "a narrow or short activity tail keeps the clock and the newest rows" {
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(narrow, 3));
     _ = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 27, .height = 20 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("+28 · /status", block.more.label);
-    // Two rows of room: the newest two, the overflow and the waiting row.
+    // Two rows of room: no call fits beside the overflow and the waiting
+    // row, so the overflow counts all 30.
     const short = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 2), short.size.height);
     try std.testing.expectEqual(@as(i17, 0), short.children[0].origin.row);
+    try std.testing.expectEqualStrings("+30 more running · /status", block.more.label);
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(short, 1));
+    // Three rows: the newest call, then the 29 not drawn.
+    const three = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 3 }, .cell_size = .{} });
+    try std.testing.expect(std.mem.startsWith(u8, try rowText(three, 0), "• Run the whole store"));
+    try std.testing.expectEqualStrings("+29 more running · /status", block.more.label);
+    // Every running call retained, but not every one fits: the clipped ones
+    // still get an overflow row.
+    block.live.total = 2;
+    const clipped = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} });
+    try std.testing.expectEqual(@as(usize, 1), clipped.children.len);
+    try std.testing.expectEqualStrings("+2 more running · /status", block.more.label);
+    try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(clipped, 1));
+    block.live.total = 30;
     for ([_]vxfw.Size{ .{ .width = 0, .height = 4 }, .{ .width = 1, .height = 1 }, .{ .width = 4, .height = 0 } }) |size| {
         const tiny = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
         try std.testing.expect(tiny.size.width <= size.width and tiny.size.height <= size.height);
