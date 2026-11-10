@@ -87,6 +87,36 @@ test "a send is progress while in flight or just accepted, and needs the person 
     try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .progress = "Sent", .width = 80 }).left);
 }
 
+/// Bytes `factsRow` writes at most.
+pub const facts_bytes = session_line.capacity + " · ".len + "Stopping and archiving".len;
+
+/// The facts row after `‹ `: the Session line's facts, else the Session's
+/// name, then the archive badge (`status_page.archiveBadge`) while it has
+/// one. A standing fact, so it sits here, never in place of a notice; on a
+/// short row the facts give way and the badge stays.
+pub fn factsRow(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []const u8, badge: ?[]const u8, width: usize, method: Method) []const u8 {
+    const tail = if (badge) |text| session_line.cells(text, method) + " · ".len else 0;
+    var out = std.Io.Writer.fixed(buffer);
+    if (facts) |value| {
+        var line: [session_line.capacity]u8 = undefined;
+        out.writeAll(session_line.write(&line, value, width -| tail, method)) catch unreachable;
+    } else out.writeAll(name[0..@min(name.len, session_line.capacity)]) catch unreachable;
+    if (badge) |text| out.print(" · {s}", .{text}) catch unreachable;
+    return out.buffered();
+}
+
+test "the facts row ends with the archive badge, which stays when the row is short" {
+    var buffer: [facts_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("k7m2qx", factsRow(&buffer, null, "k7m2qx", null, 78, .unicode));
+    try std.testing.expectEqualStrings("k7m2qx · Archived · /unarchive", factsRow(&buffer, null, "k7m2qx", "Archived · /unarchive", 78, .unicode));
+    const facts: session_line.Facts = .{ .name = "Fix flaky store test", .model = "gpt-6.1-sol" };
+    const wide = factsRow(&buffer, facts, "k7m2qx", "Archived · /unarchive", 78, .unicode);
+    try std.testing.expectEqualStrings("Fix flaky store test · gpt-6.1-sol · Archived · /unarchive", wide);
+    const short = factsRow(&buffer, facts, "k7m2qx", "Archived · /unarchive", 40, .unicode);
+    try std.testing.expect(std.mem.endsWith(u8, short, " · Archived · /unarchive"));
+    try std.testing.expect(session_line.cells(short, .unicode) <= 40);
+}
+
 /// The key that ends what needs the person, which the status bar makes
 /// clickable: the part after its last ` · ` (`! Not confirmed · ctrl+r
 /// retries` → `ctrl+r retries`), or nothing when it names none.
