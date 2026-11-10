@@ -47,11 +47,11 @@ BUDGET = {
     "first_write_round_trips": 30,
     # Each later operation, exact.
     "commits": 3,
-    "write_round_trips": 22,
+    "write_round_trips": 21,
     # Any operation, upper bound: timer polls, the observe loop below and
-    # history read one round at a time make the total vary (59 to 75 over
-    # four runs once preparation stopped re-checking its Attempt).
-    "round_trips": 85,
+    # history read one round at a time make the total vary (57 to 74 over
+    # fourteen runs once admission read its context with its facts).
+    "round_trips": 80,
     # Over IDLE_SECONDS with no Session, upper bound (10 on main 59d5c7b3).
     "idle_round_trips": 10,
 }
