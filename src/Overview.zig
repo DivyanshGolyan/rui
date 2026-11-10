@@ -1368,20 +1368,24 @@ fn hostStopped(self: *Self) bool {
 }
 
 fn hostFacts(self: *Self) ?view.Host {
-    const ready = switch (client.hostStatus(self.init.io, self.options.store)) {
+    const ready: ?@FieldType(protocol_reply.HostStatus, "ready") = switch (client.hostStatus(self.init.io, self.options.store)) {
         .ready => |ready| ready,
-        else => return null,
+        else => null,
     };
-    // The counts line's memory: this TUI, the Host and its tools.
-    if (self.host_process == null or self.host_process.?.started_at != ready.started_at) {
-        self.host_process = if (client.observeHostProcess(self.init.io, self.options.store, null)) |process|
-            .{ .started_at = ready.started_at, .pid = process.pid }
-        else |_|
-            null;
-    }
+    // The counts line's memory: this TUI, the Host and its tools. With no
+    // Host ready it is this TUI alone.
+    if (ready) |host| {
+        if (self.host_process == null or self.host_process.?.started_at != host.started_at) {
+            self.host_process = if (client.observeHostProcess(self.init.io, self.options.store, null)) |process|
+                .{ .started_at = host.started_at, .pid = process.pid }
+            else |_|
+                null;
+        }
+    } else self.host_process = null;
     var processes: @import("host_identity.zig").Processes = .{};
     self.memory = @import("process_memory.zig").read(&processes, std.c.getpid(), if (self.host_process) |host| host.pid else null);
-    return .{ .started_at = ready.started_at, .slots = ready.active_capacity, .slots_in_use = ready.custody_occupied };
+    const host = ready orelse return null;
+    return .{ .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied };
 }
 
 fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
@@ -3837,6 +3841,24 @@ test "Esc while /upgrade waits for a held archive keeps the cancel: nothing chec
     }
     try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", overview.state.notice.?.text());
     try std.testing.expect(overview.upgrade_report == null);
+}
+
+test "memory counts this TUI alone while no Host runs, at open and after a Host it sampled is gone" {
+    var cancellation: client.Cancellation = .{};
+    // No Host serves this Store.
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(overview.hostFacts() == null);
+    const alone = overview.memory orelse return error.TestUnexpectedResult;
+    try std.testing.expect(alone.rui > 0 and alone.tools == null);
+    // As after one good sample of a Host and its tools, which then stopped.
+    overview.host_process = .{ .started_at = 1, .pid = std.c.getpid() };
+    overview.memory = .{ .rui = 1, .tools = 99 };
+    try std.testing.expect(overview.hostFacts() == null);
+    try std.testing.expect(overview.host_process == null);
+    const after = overview.memory orelse return error.TestUnexpectedResult;
+    try std.testing.expect(after.rui > 1 and after.tools == null);
 }
 
 test "upgrade quiescence cancels read jobs rather than granting them mutation custody" {
