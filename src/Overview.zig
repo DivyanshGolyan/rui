@@ -18,6 +18,8 @@ const AppScreen = @import("AppScreen.zig");
 const InputArea = @import("InputArea.zig");
 const GroupedList = @import("GroupedList.zig");
 const Palette = @import("Palette.zig");
+const skill_completion = @import("skill_completion.zig");
+const skill_suggestions = @import("skill_suggestions.zig");
 const client = @import("client.zig");
 const configure_input = @import("configure_input.zig");
 const product_defaults = @import("product_defaults.zig");
@@ -111,6 +113,9 @@ pub const Operations = struct {
     archive: *const fn (*Self, client.Requests, client.SessionArchiveInput, *Reply) anyerror!void,
     /// The Host's `model_list` reply, owned by the allocator.
     models: *const fn (*Self, client.Requests, std.mem.Allocator) anyerror![]u8,
+    /// The overview Workspace's skills whose names start `prefix`, owned
+    /// by the allocator.
+    skills: *const fn (*Self, client.Requests, std.mem.Allocator, []const u8) anyerror!skill_suggestions.Page,
     /// Saves the person's default for new Sessions.
     save_default: *const fn (*Self, view.Default) anyerror!void,
     /// Runs a command line for a Session, or for none when it is empty,
@@ -120,7 +125,7 @@ pub const Operations = struct {
     open: *const fn (*Self, *vxfw.EventContext) anyerror!void,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .stopped = hostStopped, .list = listPage, .first_line = firstLine, .action_command = actionCommand, .start = startSession, .stop = stopSession, .archive = archiveSession, .models = listModels, .save_default = saveDefault, .command = runCommand, .open = openSession };
+pub const client_operations: Operations = .{ .host = hostFacts, .stopped = hostStopped, .list = listPage, .first_line = firstLine, .action_command = actionCommand, .start = startSession, .stop = stopSession, .archive = archiveSession, .models = listModels, .skills = skillSuggestions, .save_default = saveDefault, .command = runCommand, .open = openSession };
 
 /// A conversation the person left from. Until the terminal is restored it
 /// holds its borrowers; `frontend` is null when it never started.
@@ -239,6 +244,9 @@ const Job = union(enum) {
     stop: view.Reference,
     archive: view.ArchiveRequest,
     models,
+    /// A skill suggestions read, numbered by the core, for its own copy of
+    /// the name.
+    skills: struct { read: u64, prefix: protocol.Bounded(skill_completion.max_prefix_bytes) },
     save: view.Default,
     /// Owns its line, as a start owns its text.
     command: struct { name: view.commands.Name, session: ?view.Reference, line: []u8 },
@@ -249,7 +257,7 @@ const Job = union(enum) {
     /// retire early. Both archive and restore are the same mutation job.
     fn quiescence(self: Job) Quiescence {
         return switch (self) {
-            .host, .list, .lines, .commands, .models => .cancel_read,
+            .host, .list, .lines, .commands, .models, .skills => .cancel_read,
             .start, .stop, .archive, .save, .command => .settle_effect,
         };
     }
@@ -266,9 +274,9 @@ const Job = union(enum) {
 };
 
 /// One host read and list page, at most one first-line batch, one
-/// command-read batch, one model-list read, one save, one command and the
-/// requests the core's ledger allows can wait at once.
-const max_jobs = 7 + view.max_requests;
+/// command-read batch, one model-list read, one skills read, one save, one
+/// command and the requests the core's ledger allows can wait at once.
+const max_jobs = 8 + view.max_requests;
 
 /// The longest the first frame waits for the terminal's background.
 const background_wait_ms = 200;
@@ -338,6 +346,8 @@ lines: [view.max_first_line_reads]Line = @splat(.{}),
 /// Each command read's leading bytes, null when it has none to show.
 commands: [view.max_first_line_reads]Command = @splat(.{}),
 reply: Reply = .{},
+/// The skills read's page, until the core takes it.
+skill_page: ?skill_suggestions.Page = null,
 /// The menu a model-list read built, until the core takes it.
 menu: model_picker.Menu = .{},
 /// Unlinked scratch for list pages.
@@ -762,6 +772,7 @@ fn destroy(self: *Self) void {
     self.closePipes();
     self.state.deinit();
     self.menu.deinit(self.init.gpa);
+    if (self.skill_page) |*page| page.deinit(self.init.gpa);
     self.init.gpa.destroy(self);
 }
 
@@ -804,7 +815,7 @@ fn event(self: *Self, value: view.Event) !?Next {
         .open => |reference| next = .{ .open = reference },
         .clear_draft => self.composer = self.emptyComposer(self.composer.edits +% 1),
         // A refused addition says so as a refused key does.
-        .append => |text| switch (self.composer.append(text)) {
+        .replace => |change| switch (self.composer.replace(.{ .start = change.start, .end = change.end, .text = change.text })) {
             .refused => |why| refused = why,
             else => {},
         },
@@ -815,6 +826,7 @@ fn event(self: *Self, value: view.Event) !?Next {
         .exit => return .leave,
     };
     if (refused) |why| if (next == null) return self.event(.{ .composed = .{ .input = .{ .composer = .{ .refused = why } }, .draft = self.composerDraft() } });
+    self.askSkills();
     self.sendStatuses();
     return next;
 }
@@ -840,6 +852,14 @@ fn sendStatuses(self: *Self) void {
     while (records.next()) |record| {
         if (out.report(&record.reference, record.name, record.status) catch return) self.state.statusTaken(record.taken());
     }
+}
+
+/// Queues the skills read the draft's caret word needs, if any.
+fn askSkills(self: *Self) void {
+    const ask = view.askSkills(&self.state, self.composerDraft()) orelse return;
+    var prefix: protocol.Bounded(skill_completion.max_prefix_bytes) = .{};
+    prefix.set(ask.prefix) catch unreachable; // The core asks for no longer name.
+    self.queue(.{ .skills = .{ .read = ask.read, .prefix = prefix } });
 }
 
 fn composerDraft(self: *const Self) view.Draft {
@@ -937,6 +957,7 @@ fn runJob(self: *Self, requests: client.Requests) !void {
             defer gpa.free(body);
             self.menu = try model_picker.read(gpa, try protocol_reply.modelListProviders(body));
         },
+        .skills => |*read| self.skill_page = try self.ops.skills(self, requests, self.init.gpa, read.prefix.slice()),
         .save => |binding| try self.ops.save_default(self, binding),
         .command => |*command| {
             self.output = .{};
@@ -997,6 +1018,13 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         },
         .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }),
         .archive => |request| return self.event(.{ .archive = self.reply.archive(request) }),
+        .skills => |read| {
+            const page = self.skill_page;
+            self.skill_page = null;
+            view.skillsRead(&self.state, read.read, if (outcome) |_| page else |_| null, self.composerDraft());
+            self.askSkills();
+            return null;
+        },
         .models => {
             outcome catch |err| return self.event(.{ .models = .failed(err) });
             const menu = self.menu;
@@ -1091,6 +1119,10 @@ fn startInput(self: *const Self, start: *const view.OwnedStart, compaction_buffe
     return .{ .store = self.options.store, .session = "", .text_path = "", .text = start.text(), .configuration = configuration };
 }
 
+fn skillSuggestions(self: *Self, requests: client.Requests, gpa: std.mem.Allocator, prefix: []const u8) !skill_suggestions.Page {
+    return requests.skillSuggestions(gpa, self.options.store, .{ .workspace = self.options.workspace }, prefix);
+}
+
 fn listModels(self: *Self, requests: client.Requests, gpa: std.mem.Allocator) ![]u8 {
     return requests.modelList(self.options.store, gpa);
 }
@@ -1144,14 +1176,17 @@ fn emptyComposer(self: *Self, edits: u32) TerminalEditor {
     return .{ .buffer = &self.draft, .completion = .{ .context = self, .add = tabCompletion }, .edits = edits };
 }
 
-/// Tab: the rest of the highlighted entry's word in the draft's list,
-/// shown, hidden or closed; null for a draft no list is for, which takes
-/// the tab.
-fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
-    const self: *const Self = @ptrCast(@alignCast(context));
-    if (view.commands.suggest(draft, .{}) == null) return null;
-    const shown = view.nextCommands(&self.state, self.composerDraft()) orelse return "";
-    return shown.completion();
+/// Tab: the highlighted entry of the draft's list, shown, hidden or
+/// closed, in place of the caret's `/word` name or after a command's word;
+/// null for a draft no list is for, which takes the tab.
+fn tabCompletion(context: *const anyopaque, draft: []const u8, caret: usize) ?TerminalEditor.Replacement {
+    // The editor lends back the overview `emptyComposer` registered, whose
+    // skill rows this writes.
+    const self: *Self = @ptrCast(@alignCast(@constCast(context)));
+    const shown = view.nextCommands(&self.state, self.composerDraft()) orelse
+        return if (view.commands.suggest(draft, .{}) != null) .append(draft, "") else null;
+    const change = skill_completion.edit(draft, caret, &shown);
+    return .{ .start = change.start, .end = change.end, .text = change.text };
 }
 
 /// An input in the opened Session's conversation, whose work shows as
@@ -1199,6 +1234,17 @@ fn service(raw: *anyopaque) !bool {
 }
 
 fn quiesceUpgrade(self: *Self) !bool {
+    // The Upgrade may change the Host: the composer reads its skills again
+    // after it. A read not yet started never runs, and a running one's
+    // answer is dropped.
+    for (self.jobs[0..self.job_count], 0..) |job, index| if (job == .skills) {
+        _ = self.take(index);
+        break;
+    };
+    if (self.state.skills.reset()) |page| {
+        var held = page;
+        held.deinit(self.init.gpa);
+    }
     if (self.worker.thread == null) try self.dispatch(.all);
     if (self.worker.thread != null) {
         switch (self.job.quiescence()) {
@@ -1403,6 +1449,7 @@ const test_now_s: u64 = 1_800_000_000;
 /// What the fake operations were asked, for the wiring tests.
 const Seen = struct {
     hosts: usize = 0,
+    skill_reads: usize = 0,
     lists: usize = 0,
     since: ?protocol.SinceToken = null,
     line: struct { session: view.Reference = @splat(0), position: u64 = 0 } = .{},
@@ -1447,7 +1494,32 @@ const Seen = struct {
 const listed_references = [_][]const u8{ "k7m2qx", "b4n8wd", "p3c6tz", "h5r9vy", "m2j7fs" };
 
 /// Operations that answer from fixed facts and record what they were asked.
+/// The skills the fake Host's Workspace catalog holds.
+const test_skills = [_]skill_suggestions.Entry{ .{ .name = "recap", .description = "Summarise" }, .{ .name = "review", .description = "Review a change" }, .{ .name = "triage", .description = "Sort issues" } };
+
 const fake_operations: Operations = .{
+    .skills = struct {
+        fn skills(_: *Self, _: client.Requests, gpa: std.mem.Allocator, prefix: []const u8) !skill_suggestions.Page {
+            Seen.now.skill_reads += 1;
+            var entries: std.ArrayList(skill_suggestions.Entry) = .empty;
+            errdefer {
+                for (entries.items) |entry| {
+                    gpa.free(entry.name);
+                    gpa.free(entry.description);
+                }
+                entries.deinit(gpa);
+            }
+            for (test_skills) |entry| if (std.mem.startsWith(u8, entry.name, prefix)) {
+                const name = try gpa.dupe(u8, entry.name);
+                errdefer gpa.free(name);
+                const description = try gpa.dupe(u8, entry.description);
+                errdefer gpa.free(description);
+                try entries.append(gpa, .{ .name = name, .description = description });
+            };
+            const owned = try entries.toOwnedSlice(gpa);
+            return .{ .entries = owned, .total = owned.len };
+        }
+    }.skills,
     .host = struct {
         fn host(_: *Self) ?view.Host {
             Seen.now.hosts += 1;
@@ -1794,6 +1866,47 @@ test "/model reads the lists on the worker, the sign-in choice takes the arrows,
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqualStrings("openai", Seen.now.start.provider.?.slice());
     try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.start.model.?.slice());
+}
+
+test "a /word reads the Workspace's skills on the worker, lists them over the draft, and Tab completes the caret's word" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try rig.press("use /re") == null);
+    try std.testing.expect(try rig.settle() == null);
+    // The read went out at the bare `/`, for every skill.
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.skill_reads);
+    {
+        var shown = try rig.shown(60, 24);
+        defer shown.deinit();
+        const text = try shown.text();
+        try std.testing.expect(std.mem.indexOf(u8, text, "/recap") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Review a change") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "/triage") == null);
+    }
+    // That page held the whole catalog: narrowing reads nothing.
+    try std.testing.expect(try rig.press("v") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.skill_reads);
+    try std.testing.expect(try rig.press("\t") == null);
+    try std.testing.expectEqualStrings("use /review ", overview.composerDraft().bytes);
+    // Mid-draft, Tab replaces the caret's name and adds no space.
+    try std.testing.expect(try rig.press("it\x1b[D\x1b[D\x1b[D\x7f\x7f\x7f") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("use /rev it", overview.composerDraft().bytes);
+    try std.testing.expect(try rig.press("\t") == null);
+    try std.testing.expectEqualStrings("use /review it", overview.composerDraft().bytes);
+    // Enter in a drawn list of skills puts the highlighted one in and sends
+    // nothing.
+    try std.testing.expect(try rig.press("\x1b[F /t") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.skill_reads);
+    var drawn = try rig.shown(60, 24);
+    drawn.deinit();
+    try std.testing.expect(try rig.press("\r") == null);
+    try std.testing.expectEqualStrings("use /review it /triage ", overview.composerDraft().bytes);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
 }
 
 test "the selected Session stays on screen above an open /model picker, at any height" {

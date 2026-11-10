@@ -42,6 +42,8 @@ const empty_app_text: vxfw.Text = .{ .text = "" };
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
 const slash_commands_shared = @import("slash_commands.zig");
+const skill_completion = @import("skill_completion.zig");
+const skill_suggestions = @import("skill_suggestions.zig");
 const slash_commands = slash_commands_shared.conversation;
 const model_capability = @import("model_capability.zig");
 const work_line = @import("work_line.zig");
@@ -97,6 +99,15 @@ saved_requests: reads.SavedRequests = .{},
 /// are listed.
 recover_line: [slash_commands_shared.recover_line_bytes]u8 = undefined,
 reader: Task = .{},
+/// The composer's skill suggestions reads and the rows they list. One read
+/// runs at a time on `skill_task`, apart from the reader, whose only
+/// context is `skill_job`.
+skills: skill_completion.Reads = .{},
+skill_rows: skill_completion.Rows = .{},
+skill_task: Task = .{},
+skill_job: SkillJob = .{},
+/// Reads the Session's skills whose names start a prefix; tests substitute it.
+skill_read: SkillRead = clientSkills,
 upgrade: session_upgrade.Upgrade = .{},
 // The reader's only context; the UI reads its result after join.
 job: Job = .{},
@@ -272,6 +283,75 @@ test "reader freezes borrowed HOME independently of process initialization" {
     }
 }
 
+pub const SkillRead = *const fn (client.Requests, std.mem.Allocator, []const u8, []const u8, []const u8) anyerror!skill_suggestions.Page;
+
+fn clientSkills(requests: client.Requests, gpa: std.mem.Allocator, store: []const u8, session: []const u8, prefix: []const u8) !skill_suggestions.Page {
+    return requests.skillSuggestions(gpa, store, .{ .session = session }, prefix);
+}
+
+/// A skills read's inputs, copied when it starts, and its page.
+const SkillJob = struct {
+    run: SkillRead = clientSkills,
+    gpa: std.mem.Allocator = undefined,
+    store: []const u8 = "",
+    session: []const u8 = "",
+    read: u64 = 0,
+    prefix: protocol.Bounded(skill_completion.max_prefix_bytes) = .{},
+    page: ?skill_suggestions.Page = null,
+
+    fn work(raw: *anyopaque, task: *Task) !void {
+        const job: *SkillJob = @ptrCast(@alignCast(raw));
+        job.page = try job.run(task.requests(), job.gpa, job.store, job.session, job.prefix.slice());
+    }
+};
+
+/// Answers a finished skills read, then starts the read the caret's
+/// `/word` needs, if any. A canonical Store failure ends the conversation,
+/// as the reader's does; any other failure only stops that name's reads.
+fn serviceSkills(self: *Self) !void {
+    if (self.skill_task.thread != null) {
+        if (!self.skill_task.completed()) return;
+        const outcome = self.skill_task.join();
+        const job = &self.skill_job;
+        if (outcome) |_| {
+            const draft = self.input.composition();
+            const word = skill_completion.atCaret(draft.bytes, draft.cursor);
+            if (self.skills.answer(job.read, job.page.?, if (word) |at| at.name(draft.bytes) else null)) |unheld| {
+                var freed = unheld;
+                freed.deinit(self.init.gpa);
+            }
+            job.page = null;
+        } else |err| {
+            self.skills.fail(job.read);
+            if (err == error.CanonicalStoreFailure) return err;
+        }
+        self.dirty = true;
+    }
+    if (self.upgrade.held()) return;
+    const draft = self.input.composition();
+    const word = skill_completion.atCaret(draft.bytes, draft.cursor) orelse return;
+    const ask = self.skills.ask(word.name(draft.bytes)) orelse return;
+    self.skill_job = .{ .run = self.skill_read, .gpa = self.init.gpa, .store = self.store, .session = self.session, .read = ask.read };
+    self.skill_job.prefix.set(ask.prefix) catch unreachable; // The core asks for no longer name.
+    self.skill_task.start(self.init.io, &self.skill_job, SkillJob.work) catch |err| {
+        self.skills.fail(ask.read);
+        return err;
+    };
+}
+
+/// Stops and joins the skills read, and lets every page go: the
+/// conversation ends, or an Upgrade may change the Host.
+fn dropSkills(self: *Self) void {
+    self.skill_task.cancel();
+    self.skill_task.join() catch {};
+    if (self.skill_job.page) |*page| page.deinit(self.init.gpa);
+    self.skill_job.page = null;
+    if (self.skills.reset()) |page| {
+        var held = page;
+        held.deinit(self.init.gpa);
+    }
+}
+
 /// Starts the job `freeze` filled.
 fn launch(self: *Self, job: *const Job, worker: Task.Run) !void {
     std.debug.assert(self.reader.thread == null and job == &self.job);
@@ -426,7 +506,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 // One submission at a time: a decision or Message in flight,
                 // or an original still held, makes Enter say so and keep the draft.
                 const allowed = !self.reading.opening and self.reading.phase != .permission and !self.commandActive() and self.submission.intent == null;
-                if (!(event == .key_press and !pasting and Editor.isEnter(event.key_press) and self.startChange())) {
+                if (!(event == .key_press and !pasting and Editor.isEnter(event.key_press) and (self.startChange() or self.takeShownRow()))) {
                     switch (self.input.appEvent(conversation_keys, event, pasting, allowed)) {
                         .message => |ticket| try self.beginMessage(.{ .message = ticket }),
                         .command => try self.commandLine(),
@@ -453,6 +533,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         },
         else => {},
     }
+    if (self.leaving == null) try self.serviceSkills();
     try self.screen.live.prepare();
     try self.screen.browsing.prepare();
     try self.screen.staging.prepare();
@@ -667,6 +748,7 @@ fn startInput(self: *Self) void {
     self.input.init();
     self.input.complete(.{ .context = self, .add = tabCompletion });
     self.screen.commands = null;
+    self.dropSkills();
 }
 
 /// Where Esc leads once the frontend stopped.
@@ -744,10 +826,12 @@ pub fn stop(self: *Self) void {
     // A running command observes exit as an interruption, exactly as a signal.
     if (self.inspection.command_running) self.interrupted.requestStop();
     self.reader.cancel();
+    self.skill_task.cancel();
     self.submission.cancel();
 }
 
 fn settle(self: *Self, restored: anyerror!void) Settled {
+    self.dropSkills();
     const reader = self.joinReader();
     var admission = self.submission.join();
     self.followAdmission(admission) catch |err| {
@@ -1013,6 +1097,70 @@ test "frontend /model shows the Session's model and sign-in within 60 columns an
     };
 }
 
+test "a Session lists the skills it saved for the caret's /word, and Tab or Enter on a drawn row replaces the name" {
+    const Fake = struct {
+        var calls: usize = 0;
+        var session: [6]u8 = undefined;
+        fn read(_: client.Requests, gpa: std.mem.Allocator, _: []const u8, reference: []const u8, prefix: []const u8) !skill_suggestions.Page {
+            calls += 1;
+            @memcpy(&session, reference);
+            const entries = try gpa.alloc(skill_suggestions.Entry, 2);
+            entries[0] = .{ .name = try gpa.dupe(u8, "recap"), .description = try gpa.dupe(u8, "Summarise") };
+            entries[1] = .{ .name = try gpa.dupe(u8, "review"), .description = try gpa.dupe(u8, "Review a change") };
+            try std.testing.expectEqualStrings("", prefix);
+            return .{ .entries = entries, .total = 2 };
+        }
+        /// App's ticks until the worker's page is in and drawn.
+        fn answered(held: *HeldFrontend) !void {
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &held.self, struct {
+                fn done(self: *Self) bool {
+                    return self.skill_task.completed();
+                }
+            }.done);
+            try held.settle();
+            try std.testing.expect(held.self.skill_task.thread == null);
+        }
+    };
+    Fake.calls = 0;
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    held.self.session = "k7m2qx";
+    held.self.skill_read = Fake.read;
+    // The draft Q2 typed in a real terminal: the caret moved back to just
+    // after `/re`, in the middle of a Message. The page comes in while the
+    // caret is in the word; one that came in after it left would be
+    // dropped and read again.
+    try held.keys("please /re");
+    try Fake.answered(held);
+    try held.keys(" now\x1b[D\x1b[D\x1b[D\x1b[D");
+    try held.settle();
+    try std.testing.expectEqual(@as(usize, 1), Fake.calls);
+    try std.testing.expectEqualStrings("k7m2qx", &Fake.session);
+    var shown = try held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, shown, "/recap") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "Review a change") != null);
+    // The page held every skill: narrowing reads nothing and lists fewer.
+    try held.keys("v");
+    try held.settle();
+    try std.testing.expectEqual(@as(usize, 1), Fake.calls);
+    shown = try held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, shown, "/recap") == null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "Review a change") != null);
+    // Mid-draft, Tab replaces the caret's name, adds no space and leaves
+    // the caret after it.
+    try held.keys("\t");
+    try std.testing.expectEqualStrings("please /review now", held.self.input.composition().bytes);
+    try std.testing.expectEqual("please /review".len, held.self.input.composition().cursor);
+    // At the draft's end, Enter on the drawn row puts the highlighted skill
+    // in with a space, and sends nothing.
+    try held.keys("\x1b[F and /");
+    try held.settle();
+    try held.keys("\r");
+    try std.testing.expectEqualStrings("please /review now and /recap ", held.self.input.composition().bytes);
+    try std.testing.expect(held.self.submission.view() == null);
+    try std.testing.expectEqual(@as(usize, 1), Fake.calls);
+}
+
 test "frontend lists the efforts of the Session's model once it is read, the one in force marked" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .colour = false };
     self.input.init();
@@ -1132,6 +1280,7 @@ fn quiesceUpgrade(self: *Self) !bool {
         if (self.reader.completed()) try self.settleReader();
     }
     if (self.reading.pending_diagnostic != null and self.reader.thread == null) try self.presentReadDiagnostic(self.screen);
+    self.dropSkills();
     try self.startQueuedCommand();
     const lender_ready = if (self.lender.upgrade) |handoff| try handoff(self.lender.context, .quiesce) else true;
     return lender_ready and self.reader.thread == null and self.submission.task.thread == null;
@@ -1409,7 +1558,7 @@ fn nextCommands(self: *Self, previous: ?slash_commands_shared.Shown) ?slash_comm
     // The Session's model offers its efforts once a read names it.
     const context: slash_commands_shared.Context = if (self.line.read != null) .{ .model = self.line.model.slice(), .effort = self.line.effort } else .{};
     const draft = self.input.composition().bytes;
-    if (draft.len != 0) return slash_commands_shared.Shown.next(previous, self.input.revision, slash_commands.suggest(draft, context));
+    if (draft.len != 0) return self.skills.shown(&self.skill_rows, draft, self.input.composition().cursor, self.input.revision, slash_commands.suggest(draft, context), previous);
     // The rows change without the draft: other rows are another list.
     const rows = self.requestList() orelse return null;
     var named = std.hash.Wyhash.init(0);
@@ -1457,17 +1606,18 @@ fn shownCommands(self: *Self) ?*slash_commands_shared.Shown {
 /// Tab: the rest of the highlighted entry's word in the draft's list,
 /// shown, hidden or closed; null for a draft no list is for, which takes
 /// the tab.
-fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
+fn tabCompletion(context: *const anyopaque, draft: []const u8, caret: usize) ?Editor.Replacement {
     // The editor lends back the frontend `startInput` registered, whose
     // rows' lines this writes.
     const self: *Self = @ptrCast(@alignCast(@constCast(context)));
     if (draft.len == 0) {
         const rows = self.nextCommands(self.screen.commands) orelse return null;
-        return rows.completion();
+        return .append(draft, rows.completion());
     }
-    if (slash_commands.suggest(draft, .{}) == null) return null;
-    const shown = self.nextCommands(self.screen.commands) orelse return "";
-    return shown.completion();
+    const shown = self.nextCommands(self.screen.commands) orelse
+        return if (slash_commands.suggest(draft, .{}) != null) .append(draft, "") else null;
+    const change = skill_completion.edit(draft, caret, &shown);
+    return .{ .start = change.start, .end = change.end, .text = change.text };
 }
 
 // A notice fits the rows under the input as the status fits above it.
@@ -1959,6 +2109,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer)
 fn commandLine(self: *Self) !void {
     if (self.shownCommands()) |shown| {
         const taken = shown.list.enter(shown.highlight);
+        if (!taken.runs) return self.takeRow(shown);
         switch (self.input.append(taken.rest)) {
             .refused => |why| self.notice = refusedNotice(why),
             else => if (taken.runs) {
@@ -1969,6 +2120,27 @@ fn commandLine(self: *Self) !void {
     } else {
         defer if (!self.upgrade.held()) self.input.clear();
         try self.slashCommand(self.input.composition().bytes);
+    }
+}
+
+/// Enter on a Message draft whose list the latest frame drew: takes its
+/// highlighted row. A command line's Enter goes to `commandLine`.
+fn takeShownRow(self: *Self) bool {
+    const draft = self.input.composition().bytes;
+    if (draft.len == 0 or (draft[0] == '/' and !std.mem.startsWith(u8, draft, "//"))) return false;
+    const shown = self.shownCommands() orelse return false;
+    self.takeRow(shown);
+    return true;
+}
+
+/// Enter on a row that runs nothing: its word in place of the caret's
+/// `/word` name, or after the command's word, for the next.
+fn takeRow(self: *Self, shown: *slash_commands_shared.Shown) void {
+    const draft = self.input.composition();
+    const change = skill_completion.edit(draft.bytes, draft.cursor, shown);
+    switch (self.input.replace(.{ .start = change.start, .end = change.end, .text = change.text })) {
+        .refused => |why| self.notice = refusedNotice(why),
+        else => {},
     }
 }
 
@@ -2675,6 +2847,7 @@ const HeldFrontend = struct {
     }
 
     fn destroy(held: *HeldFrontend) void {
+        held.self.dropSkills();
         held.self.submission.cancel();
         _ = held.self.submission.join();
         held.self.submission.close();
