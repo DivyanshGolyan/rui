@@ -2321,16 +2321,17 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             .select_previous => select(state, .previous),
             .select_next => select(state, .next),
             // Esc steps back: from the sign-in choice to the models, then
-            // out of the picker; else a shown command list closes, then a
-            // panel, each keeping the draft.
+            // out of the picker; else it cancels an Upgrade that can still
+            // change nothing, as the status row offers, even while the
+            // draft still lists `/upgrade`; else a shown command list
+            // closes, then a panel, each keeping the draft.
             .clear => if (picker) |shown| switch (shown.step) {
                 .sign_in => shown.step = .models,
                 .models => state.closePicker(),
+            } else if (state.upgrade.escape()) {
+                effects.add(.cancel_upgrade);
             } else if (shownCommands(state, value.draft)) |shown| {
                 shown.close();
-            } else if (state.upgrade.escape()) {
-                // The status bar offers it while the Upgrade can roll back.
-                effects.add(.cancel_upgrade);
             } else if (state.panel != null) state.closePanel() else if (value.draft.bytes.len != 0) effects.add(.clear_draft) else {
                 state.settings = .{};
             },
@@ -7611,9 +7612,13 @@ test "/upgrade runs inline: Esc cancels it before the draft, checking or prepari
     var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
     try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
     try std.testing.expectEqualStrings("Checking for updates…", state.upgrade.line(&buffer, .unicode).?.text);
-    // Esc cancels the check too, keeping the draft.
+    // Esc cancels the check too, keeping the draft, even while the draft
+    // is still `/upgrade` and lists its command: the status row says esc
+    // cancels.
+    const typed = try typeText(&state, "/upgrade");
+    try std.testing.expect(shownCommands(&state, typed) != null);
+    try expectEffects(&.{.cancel_upgrade}, try press(&state, typed, .clear));
     const draft = try typeText(&state, "keep me");
-    try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
     _ = try step(&state, .{ .upgrade = .{ .ended = .cancelled } });
     try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", state.notice.?.text());
     try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
