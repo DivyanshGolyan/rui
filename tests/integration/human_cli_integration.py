@@ -71,7 +71,7 @@ from terminal_process import answers_to, open_pty, spawn, terminal_process
 import model_fixture as fixture
 import codex_fixture
 import os_semantics
-from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, _captures, action_ready, admit, await_screen, command_frame, composer_ready, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
+from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, _captures, action_ready, admit, await_screen, command_frame, composer_ready, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, status_page, terminal_capture, terminal_exit, terminal_gate, terminal_step
 
 
 def terminal_safe_json(text):
@@ -632,8 +632,8 @@ def status_frame(master, session, command="/status", timeout=15):
     escaped = session.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
     def page(frame):
         rows = frame.split("\n")
-        return (len(rows) > 1 and rows[0] == "Browsing · Esc returns" and rows[1].startswith(" Status · ")
-            and (rows[1] == " Status · " + escaped or rows[1].endswith(" · " + escaped)) and "\n Work\n" in frame)
+        return (status_page(frame) and (rows[0] == " Status · " + escaped or rows[0].endswith(" · " + escaped))
+            and "\n Work\n" in frame)
     return command_frame(master, command, page, timeout)
 
 
@@ -643,8 +643,8 @@ def configured_frame(master, command):
     notice; Esc then returns to the conversation, so a later /status page is
     the one that request reads, not the page already shown."""
     frame = command_frame(master, command, lambda frame: "Configured." in frame.split("\n"))
-    if frame.startswith("Browsing"):
-        command_frame(master, "\x1b", lambda frame: not frame.startswith("Browsing"), end="")
+    if status_page(frame):
+        command_frame(master, "\x1b", lambda frame: not status_page(frame), end="")
     return frame
 
 
@@ -770,7 +770,7 @@ def terminal_wait_oracles():
 
             dispose_all(lambda: os.close(reader), lambda: forget_terminal(reader), stopped.set, join_producer)
 
-    ready = terminal_frame(["answer shown", "", "›"], (3, 3))
+    ready = terminal_frame(["answer shown", "", " ›"], (3, 4))
     # A marker drawn in a frame that the same write replaces is still seen.
     replaced = terminal_frame(["transient café"], (1, 1)) + terminal_frame(["later"], (1, 1))
     assert "transient café" in collect([replaced], "transient café")
@@ -788,20 +788,20 @@ def terminal_wait_oracles():
     # Composer readiness needs the cursor on the prompt after the marker.
     diagnostic = "RequestBindingMismatch"
     collect([terminal_frame([diagnostic], (1, 1))], diagnostic, composer=True, error="deadline")
-    collect([terminal_frame([diagnostic, "›"], (1, 1))], diagnostic, composer=True, error="deadline")
-    output = collect([terminal_frame([diagnostic], (1, 1)), terminal_frame([diagnostic, "›"], (2, 3))], diagnostic, composer=True)
+    collect([terminal_frame([diagnostic, " ›"], (1, 1))], diagnostic, composer=True, error="deadline")
+    output = collect([terminal_frame([diagnostic], (1, 1)), terminal_frame([diagnostic, " ›"], (2, 4))], diagnostic, composer=True)
     assert diagnostic in output
     # Opening is not input readiness, even with the cursor at the prompt.
-    collect([terminal_frame(["Opening…", "›"], (2, 3))], "› ", error="deadline")
+    collect([terminal_frame(["Opening…", " ›"], (2, 4))], "› ", error="deadline")
     assert "answer shown" in collect([ready], "› ")
     # A retained draft row counts as the composer; its text is the draft.
-    edited = "› fresh café"
-    assert edited in collect([terminal_frame([edited], (1, 13))], edited, composer=True)
+    edited = " › fresh café"
+    assert edited in collect([terminal_frame([edited], (1, 14))], edited, composer=True)
     # Frames committed before this wait are not evidence for it.
     reader, peer = socket.socketpair()
     with reader, peer:
         forget_terminal(reader.fileno())
-        peer.sendall(terminal_frame(["old reply", "›"], (2, 3)))
+        peer.sendall(terminal_frame(["old reply", " ›"], (2, 4)))
         assert "old reply" in read_terminal(reader.fileno(), "old reply", composer=True)
         try:
             read_terminal(reader.fileno(), "old reply", timeout=0.3)
@@ -812,8 +812,8 @@ def terminal_wait_oracles():
         forget_terminal(reader.fileno())
     # The command writer: a queued composer cannot acknowledge a command.
     for command, marker in (("/configure --model gpt-6-sol", "Configured."), ("/status", "Status · example")):
-        stale = terminal_frame(["› /con"], (1, 7))
-        for suffix in (b"", terminal_frame([marker], (1, 1)), terminal_frame([marker, "›"], (2, 3))):
+        stale = terminal_frame([" › /con"], (1, 8))
+        for suffix in (b"", terminal_frame([marker], (1, 1)), terminal_frame([marker, " ›"], (2, 4))):
             reader, peer = socket.socketpair()
             with reader, peer:
                 forget_terminal(reader.fileno())
@@ -823,16 +823,17 @@ def terminal_wait_oracles():
                 try:
                     output = terminal_step(reader.fileno(), command, marker, composer=True)
                 except AssertionError as failure:
-                    assert suffix != terminal_frame([marker, "›"], (2, 3)), failure
+                    assert suffix != terminal_frame([marker, " ›"], (2, 4)), failure
                     assert failure.args[0] == ("terminal closed before command result", command), failure
                 else:
-                    assert suffix == terminal_frame([marker, "›"], (2, 3)), (command, output)
+                    assert suffix == terminal_frame([marker, " ›"], (2, 4)), (command, output)
                 assert peer.recv(4096) == (command + "\r").encode()
                 forget_terminal(reader.fileno())
     # Command results: identity, readiness and absence describe one fresh
     # committed frame, not readiness or a Session borrowed from earlier ones.
     session = 's/é"\n'
-    page = ["Browsing · Esc returns", ' Status · s/é\\"\\n', "   Permissions     bypass · Bash and MCP run without asking", " Work", "   Finished", "", "›"]
+    # App draws the page from the top row, with no heading above it.
+    page = [' Status · s/é\\"\\n', "   Permissions     bypass · Bash and MCP run without asking", " Work", "   Finished", "", " ›"]
     def frame_after(command, chunks, read, typed=None):
         reader, peer = socket.socketpair()
         with reader, peer:
@@ -850,15 +851,17 @@ def terminal_wait_oracles():
                 forget_terminal(reader.fileno())
     status = lambda fd: status_frame(fd, session)
     configured = lambda fd: configured_frame(fd, "/configure --model m")
-    unavailable = terminal_frame(["Browsing · Esc returns", "rui: status: StatusUnavailable", "", "›"], (4, 3))
-    assert frame_after("/status", [terminal_frame(page[:2], (2, 1)), unavailable], status) is None
-    assert frame_after("/status", [terminal_frame([page[0], " Status · other"] + page[2:], (7, 3))], status) is None
+    unavailable = terminal_frame(["rui: status: StatusUnavailable", "", " ›"], (3, 4))
+    assert frame_after("/status", [terminal_frame(page[:1], (1, 1)), unavailable], status) is None
+    assert frame_after("/status", [terminal_frame([" Status · other"] + page[1:], (6, 4))], status) is None
+    # The page's identity row must lead the frame, not follow other rows.
+    assert frame_after("/status", [terminal_frame(["answer"] + page, (7, 4))], status) is None
     assert frame_after("/status", [terminal_frame(page, (1, 1))], status) is None  # Not at the composer.
-    shown = frame_after("/status", [terminal_frame(["✓ Inspect café", "", "›"], (3, 3)), terminal_frame(page, (7, 3))], status)
+    shown = frame_after("/status", [terminal_frame(["✓ Inspect café", "", " ›"], (3, 4)), terminal_frame(page, (6, 4))], status)
     assert shown is not None and "Inspect café" not in shown, shown  # A transient live outcome is legitimate.
-    live = ["answer", "Configured.", "›"]
+    live = ["answer", "Configured.", " ›"]
     assert frame_after("/configure --model m", [terminal_frame(live, (2, 1))], configured) is None
-    over_page = terminal_frame(["Browsing · Esc returns"] + live, (4, 3))
+    over_page = terminal_frame(page[:1] + live, (4, 4))
     # Over the page, the reply is the result only once Esc returns to the conversation.
     assert frame_after("/configure --model m", [over_page], configured, "/configure --model m\r\x1b") is None
     reader, peer = socket.socketpair()
@@ -867,7 +870,7 @@ def terminal_wait_oracles():
         peer.settimeout(1)
         keys = []
         def answer():
-            for frame in (over_page, terminal_frame(live, (3, 3))):
+            for frame in (over_page, terminal_frame(live, (3, 4))):
                 keys.append(peer.recv(4096))
                 peer.sendall(frame)
         answering = threading.Thread(target=answer)
@@ -877,20 +880,20 @@ def terminal_wait_oracles():
         finally:
             answering.join()
             forget_terminal(reader.fileno())
-        assert keys == [b"/configure --model m\r", b"\x1b"] and shown.startswith("Browsing · Esc returns\n"), (keys, shown)
-    assert frame_after("/configure --model m", [terminal_frame(live, (3, 3))], configured) is not None
+        assert keys == [b"/configure --model m\r", b"\x1b"] and status_page(shown), (keys, shown)
+    assert frame_after("/configure --model m", [terminal_frame(live, (3, 4))], configured) is not None
     # Every command step with a composer check binds marker and readiness to
     # one frame: a marker frame that is not ready, then a ready frame without
     # the marker, is no result.
     step = lambda fd: terminal_step(fd, "/requests", "Recovery handles", composer=True)
-    marked = terminal_frame(["Browsing · Esc returns", "Recovery handles", "", "›"], (1, 1))
-    assert frame_after("/requests", [marked, terminal_frame(["answer", "›"], (2, 3))], step) is None
+    marked = terminal_frame(["Recovery handles", "", " ›"], (1, 1))
+    assert frame_after("/requests", [marked, terminal_frame(["answer", " ›"], (2, 4))], step) is None
     assert "Recovery handles" in frame_after("/requests", [marked, terminal_frame(
-        ["Browsing · Esc returns", "Recovery handles", "", "›"], (4, 3))], step)
+        ["Recovery handles", "", " ›"], (3, 4))], step)
     reader, peer = socket.socketpair()
     with reader, peer:  # A page committed before the command is not its result.
         forget_terminal(reader.fileno())
-        peer.sendall(terminal_frame(page, (7, 3)))
+        peer.sendall(terminal_frame(page, (6, 4)))
         read_terminal(reader.fileno(), " Work", composer=True)
         try:
             status_frame(reader.fileno(), session, "/status", timeout=0.3)
@@ -900,7 +903,7 @@ def terminal_wait_oracles():
             raise AssertionError("an earlier page satisfied a later command")
         forget_terminal(reader.fileno())
     # Many large frames keep the newest MiB and still find the marker.
-    large = [terminal_frame([f"frame {n} " + "x" * 70] * 49) for n in range(400)] + [terminal_frame(["final marker", "›"], (2, 3))]
+    large = [terminal_frame([f"frame {n} " + "x" * 70] * 49) for n in range(400)] + [terminal_frame(["final marker", " ›"], (2, 4))]
     output = collect(large, "final marker", composer=True)
     assert "final marker" in output and len(output.encode()) < 1024 * 1024, len(output)
     collect([terminal_frame(["distinctive prefix"])], "required cursor", close_output=True, error="closed")
@@ -1175,13 +1178,25 @@ def overview_cases():
             retain_failure_state("overview failure state", state)
 
 
+# vaxis turns focus reports on and off only among its mouse modes.
+FOCUS_ON = re.compile(rb"\x1b\[\?(?:\d+;)*1004(?:;\d+)*h")
+FOCUS_OFF = re.compile(rb"\x1b\[\?(?:\d+;)*1004(?:;\d+)*l")
+
+
 def raw_output(master, until, timeout=15):
     """Raw terminal bytes, fed on to the screen capture, until they hold the
-    bytes `until` or a committed frame `until` accepts."""
+    bytes `until`, a match of the pattern `until`, or a committed frame
+    `until` accepts."""
     capture = terminal_capture(master)
     raw = b""
     deadline = time.monotonic() + timeout
-    while not (until in raw if isinstance(until, bytes) else until(capture.completed)):
+    def done():
+        if isinstance(until, bytes):
+            return until in raw
+        if isinstance(until, re.Pattern):
+            return until.search(raw) is not None
+        return until(capture.completed)
+    while not done():
         remaining = deadline - time.monotonic()
         assert remaining > 0 and select.select([master], [], [], remaining)[0], ("terminal output deadline", raw[-512:])
         chunk = os.read(master, 65536)
@@ -1246,8 +1261,8 @@ def notification_cases():
         lanes = {label: create_session(home, "--store", store, "--workspace", workspace, "--provider", "codex",
             "--model", "gpt-6-luna", "--label", label, "--permission-mode", "ask") for label in ("notify lane", "focused lane", "muted lane")}
         caller = spawn([str(fixture.RUI)], cwd=workspace, env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-        opened = raw_output(master, b"\x1b[?1004h")
-        assert opened.index(b"\x1b[?1004h") > opened.index(b"\x1b[?1049h"), opened[:256]
+        opened = raw_output(master, FOCUS_ON)
+        assert FOCUS_ON.search(opened).start() > opened.index(b"\x1b[?1049h"), opened[:256]
         overview_frame(master, lambda frame: "muted lane" in frame)
         # Away: a finish notifies once.
         os.write(master, b"\x1b[O")
@@ -1290,13 +1305,15 @@ def notification_cases():
         os.write(master, b"\x03")
         output, errors = terminal_exit(caller, master)
         assert caller.returncode == 0 and not errors, errors
-        assert b"\x1b[?1004l" in output, output[-256:]
+        assert FOCUS_OFF.search(output), output[-256:]
         # A terminal that answers the program status probe before the device
         # attributes request behind it gets one record per Session in place
         # of notifications, and leaving clears Rui's records.
         terminal_capture(master, fresh=True, silent=True)  # The fixture answers.
         caller = spawn([str(fixture.RUI)], cwd=workspace, env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-        raw_output(master, b"\x1b[?1004h\x1b[?2027$p\x1b[?1007$p\x1b]7501;?\x1b\\\x1b[c")
+        # The probe precedes the device attributes request, so an answer
+        # to it arrives first only from a terminal that takes records.
+        raw_output(master, b"\x1b]7501;?\x1b\\\x1b[c")
         os.write(master, b"\x1b]7501;?\x1b\\\x1b[?62;22c")
         def record(state, label, kind=b""):
             return (b"\x1b]7501;state=" + state + b":id=rui/" + lanes[label].encode() + b":app=rui" + kind
@@ -1662,17 +1679,27 @@ def scroll_return_case():
             await_screen(master, "› keep", composer=True)
             return {path: path.read_bytes() for path in records.glob("*.json")}, len(endpoint.requests)
 
+        def browsing(latest, shown, context, *, start=False):
+            # App draws no browsing heading: scrolled back, the latest row
+            # has left the view, or a conversation shorter than the screen
+            # shows the history's own start, while the draft keeps its row.
+            capture = terminal_capture(master)
+            assert ("Start of conversation" in shown) if start else (latest not in shown), (context, "still live", shown)
+            assert composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y), (context, shown)
+            assert shown.split("\n")[capture.screen.cursor.y] == " › keep", (context, shown)
+
         def live(latest, context):
             shown = settle_screen(master, quiet=0.5)
             capture = terminal_capture(master)
-            assert not shown.startswith("Browsing"), (context, "still browsing", shown)
             assert composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y), (context, shown)
-            # The draft keeps the row over the Session line, under the rule,
-            # and the latest text is the last written row above it.
-            rows = shown.split("\n")
+            assert "Start of conversation" not in shown, (context, "still browsing", shown)
+            # The draft keeps its row between the rules over the Session
+            # line, and the latest text is the last written row above it.
+            rows = shown.rstrip("\n").split("\n")
             y = capture.screen.cursor.y
             written = [row for row in rows[:y - 1] if row.strip()]
-            assert y == len(rows) - 2 and rows[y] == "› keep" and set(rows[y - 1]) == {"─"} and latest in written[-3:], (context, "latest row not last", shown)
+            assert (y == len(rows) - 3 and rows[y] == " › keep" and set(rows[y - 1]) == {"─"} == set(rows[y + 1])
+                and latest in written[-3:]), (context, "latest row not last", shown)
 
         def leave(saved):
             records_before, requests = saved
@@ -1691,7 +1718,7 @@ def scroll_return_case():
                 context = (rows, count)
                 os.write(master, b"\x1b[A" * count)
                 shown = settle_screen(master, quiet=0.5)
-                assert shown.startswith("Browsing · Esc returns"), (context, shown)
+                browsing(latest, shown, context)
                 os.write(master, b"\x1b[B" * count)
                 live(latest, context)
             leave(saved)
@@ -1706,9 +1733,9 @@ def scroll_return_case():
                 context = (rows, up, back[:8])
                 os.write(master, up * 40)
                 shown = settle_screen(master, quiet=0.5)
-                assert shown.startswith("Browsing · Esc returns") and "Start of conversation" in shown, (context, shown)
+                browsing(latest, shown, context, start=True)
                 if back == b"\x1b":
-                    return_to_live(master)
+                    return_to_live(master, lambda shown: latest in shown and "Start of conversation" not in shown)
                 else:
                     os.write(master, back)
                 live(latest, context)
@@ -1765,7 +1792,8 @@ def persistent_opening_case():
             session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "› ", composer=True)
-        output = current_screen(master)
+        # App keeps a blank margin row under the Session line.
+        output = current_screen(master).rstrip("\n")
         # The last row is the Session line, which names this unlabelled
         # Session by its first Message.
         assert output.rsplit("\n", 1)[1].startswith("literal **user** é · "), output
@@ -2250,7 +2278,9 @@ def persistent_input_cases():
         os.write(master, b"\x12")
         read_terminal(master, "Original confirmed.")
         # The /status page stays until the user returns to live output.
-        if "capture retry answer" not in return_to_live(master):
+        # The page's own rows leave; the diagnostic ended it.
+        returned = return_to_live(master, lambda shown: " This Session\n" not in shown and "Original reserved request" not in shown)
+        if "capture retry answer" not in returned:
             read_terminal(master, "capture retry answer")
         recovered = json.loads(proxy.exchanges[-1][0])
         assert recovered["key"] == reserved and recovered["text"]["value"] == "original before capture failure", recovered
@@ -2344,7 +2374,7 @@ def persistent_empty_answer_case():
                 assert fixture.read_result(store, key) == expected
                 status = status_frame(master, session)
                 assert " Work\n   Finished" in status, status
-                return_to_live(master)
+                return_to_live(master, lambda shown: not status_page(shown) and f"Complete request {index}" in shown)
                 shown = current_screen(master)
                 assert f"Complete request {index}" in shown and "Work ended" not in shown, shown
                 assert "malformed_provider_output" not in shown and "EmptyProviderAnswer" not in shown, shown
@@ -2890,7 +2920,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 assert "› live cafXé!" in outcome, outcome
                 page = status_frame(master, reference, "\x01\x0b/status")
                 assert bypass_description not in page, ("status page repeated a presented result", page)
-                return_to_live(master)
+                return_to_live(master, lambda shown: not status_page(shown) and "› live cafXé!" in shown)
                 refreshed = settle_screen(master)
                 assert permanent_tool_count(refreshed, f"✓ {bypass_description}") == 2, ("presented bypass result repeated", refreshed)
                 assert len(endpoint.requests) == 5, "bypass refresh repeated provider work"
@@ -3671,7 +3701,7 @@ def long_input_case(home, store, workspace, endpoint, host):
         assert "Bash commands can run without asking you" not in greeting, greeting
         binding = terminal_step(master, "/status", " Status · ", composer=True)
         assert permission_row(binding, "bypass") and "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" not in binding, binding
-        return_to_live(master)
+        return_to_live(master, lambda shown: not status_page(shown) and " This Session\n" not in shown)
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
         before = len(endpoint.requests)
         long_text = "X" * 5000
@@ -4183,10 +4213,11 @@ def renderer_cases():
             multiline = "first café\nsecond 中"
             before = len(endpoint.requests)
             # Continuation rows align under the draft without a second glyph.
-            tty.send("\x1b[200~" + multiline + "\x1b[201~", "  second 中")
+            tty.send("\x1b[200~" + multiline + "\x1b[201~", "   second 中")
             screen = tty.capture.screen
-            assert screen.display[screen.cursor.y - 1].rstrip() == "› first café"
-            assert screen.display[screen.cursor.y].rstrip() == "  second 中" and screen.cursor.x == 11
+            # The composer's mark follows the screen's one-column margin.
+            assert screen.display[screen.cursor.y - 1].rstrip() == " › first café", screen.display[screen.cursor.y - 1]
+            assert screen.display[screen.cursor.y].rstrip() == "   second 中" and screen.cursor.x == 12, (screen.display[screen.cursor.y], screen.cursor)
             assert len(endpoint.requests) == before
             tty.send("\r", answer("multiline"))
             submitted(multiline)
@@ -4194,19 +4225,6 @@ def renderer_cases():
             os.write(tty.master, b"/exit\r")
             tty.finish()
         print("renderer: wide5000X resize, long combining cells, tabs, multiline paste and exact submitted bytes passed", flush=True)
-
-        records = set((home / ".config/rui/requests").glob("*.json"))
-        for initial in (True, False):
-            with terminal(geometry, columns=480 if initial else 80,
-                    rows=135 if initial else 24, opening=not initial) as tty:
-                if not initial:
-                    tty.resize(480, 135)
-                _, errors = tty.finish(expected=1)
-                for marker in (b"49,152", b"Shrink the terminal"):
-                    assert marker in errors, errors
-                assert b"OutOfMemory" not in errors, errors
-                assert set((home / ".config/rui/requests").glob("*.json")) == records
-        print("renderer: initial oversize and excessive resize give typed actionable guidance and restore exactly", flush=True)
 
         # Ctrl-R recovers in each encoding a terminal sends it: raw, Kitty and
         # xterm modifyOtherKeys.

@@ -362,25 +362,33 @@ def await_screen(master, marker, *, composer=False, timeout=15):
     return read_terminal(master, marker, timeout, composer=composer)
 
 
-def return_to_live(master, key=b"\x1b", timeout=15, *, input_fd=None):
-    """Leave browsing or an inspection; wait until live output is drawn.
+def return_to_live(master, live, key=b"\x1b", timeout=15, *, input_fd=None):
+    """Leave a page or browsed history with `key`; return the first frame
+    after it that `live` accepts with the composer ready.
 
-    A lone Esc completes only after the decoder's deadline, so the next
-    bytes must wait for this frame or they would join it as Alt-<key>.
+    App draws no browsing heading, so only the caller knows what its live
+    view shows, such as its latest row. The key is always sent: Esc in the
+    live view leaves the Session, so a caller must know a page is shown. A
+    lone Esc completes only after the decoder's deadline, so the next bytes
+    must wait for this frame or they would join it as Alt-<key>.
     """
     capture = terminal_capture(master)
-    shown = capture.completed
-    if not shown.startswith("Browsing") and composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y):
-        return shown  # Already live: Esc would draw nothing to wait for.
+    generation = capture.generation
     os.write(master if input_fd is None else input_fd, key)
     deadline = time.monotonic() + timeout
     while True:
         shown = capture.completed
-        if (not shown.startswith("Browsing")
+        if (capture.generation != generation and live(shown)
                 and composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y)):
             return shown
         remaining = deadline - time.monotonic()
         assert remaining > 0 and next_frame(master, remaining) is not None, ("did not return to live", shown)
+
+
+def status_page(frame):
+    """Whether `frame` shows the /status page: App draws it from the top
+    row, which names the Session."""
+    return frame.startswith(" Status · ")
 
 
 # The clock that ends a live line ("• Waiting · 12s") redraws every second
