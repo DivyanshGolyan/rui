@@ -1045,18 +1045,18 @@ def persistent_cases(state, library, home, store, host, session):
                 os.write(master, b"\x1b[?1007;2$y")
                 fixture.wait_for(lambda: log.exists() and "scroll-enabled\n" in log.read_text(), "owned alternate scroll")
             if case.startswith("sync-"):
-                os.write(master, b"original synchronously captured\n")
+                os.write(master, b"original synchronously captured\r")
                 fixture.wait_for(lambda: log.exists() and "capture-sync-held" in log.read_text(), "real capture directory sync")
                 record, = set(records.glob("*.json")) - before
                 saved = record.read_bytes()
                 key = json.loads(saved)["key"]
                 assert fixture.command("request", "inspect", "--store", store, "--key", key)["observation"]["status"] == "absent"
                 if case == "sync-handoff":
-                    os.write(master, b"/inspect-action\nSTALE")
+                    os.write(master, b"/inspect-action\rSTALE")
                 elif case.startswith("sync-command-"):
-                    os.write(master, b"/configure --permission-mode ask\n")
+                    os.write(master, b"/configure --permission-mode ask\r")
                 else:
-                    os.write(master, b"/exit\nSTALE")
+                    os.write(master, b"/exit\rSTALE")
                 if case.startswith("sync-command-"):
                     # Commands run inside the screen; INT restores first.
                     caller.send_signal(signal.SIGINT)
@@ -1079,12 +1079,12 @@ def persistent_cases(state, library, home, store, host, session):
                     os.write(master, b"\x12")
                     human.read_terminal(output_master, "\n› original synchronously captured")
                     assert record.read_bytes() == saved, "postpublication recovery replaced original record"
-                    os.write(master, b"Y\n")
+                    os.write(master, b"Y\r")
                     human.read_terminal(output_master, "\n› next cafXYé!")
                     os.write(master, b"\x03")
                 elif not case.startswith("sync-command-"):
                     # The finished prompt's suffix must not reach the next owner.
-                    os.write(master, b"\n")
+                    os.write(master, b"\r")
                     assert select.select([slave], [], [], 5)[0]
                     assert os.read(slave, 4096) == b"\n", "persistent detach leaked queued typeahead"
                     # Canonical ECHO is restored on this separate input PTY.
@@ -1099,7 +1099,7 @@ def persistent_cases(state, library, home, store, host, session):
                     assert reply_release.wait(15)
                     return b""  # Caller is already reaped; no delivery to its closed socket.
                 proxy = canonical.ReplyProxy(host, "/v1/message", hold)
-                os.write(master, b"held real Admission\n")
+                os.write(master, b"held real Admission\r")
                 fixture.wait_for(human.draining(master, received.is_set), "Admission route reached", timeout=10)
                 caller.send_signal(signal.SIGINT)
             elif case.startswith("backpressure"):
@@ -1114,7 +1114,7 @@ def persistent_cases(state, library, home, store, host, session):
                     # cancellation trigger. Ctrl-C then retires without it.
                     with log.open("a") as marks:
                         marks.write("test-command-sent\n")
-                    os.write(master, b"/configure --permission-mode ask\n")
+                    os.write(master, b"/configure --permission-mode ask\r")
                     time.sleep(0.5)
                     with log.open("a") as marks:
                         marks.write(f"test-interrupt-sent records={len(set(records.glob('*.json')) - before)}\n")
@@ -1404,7 +1404,7 @@ def consent_boundary_cases(state, library):
                     "RUI_TERMINAL_CHOICE_RELEASE": str(release), "RUI_TERMINAL_DRAIN_RELEASE": str(drain),
                     "RUI_TEST_ACTION_READY_FD": str(write_ready)}, pass_fds=(write_ready,))
             human.read_terminal(master, "› ")
-            os.write(master, b"propose command\n")
+            os.write(master, b"propose command\r")
             presentation = human.read_terminal(master, human.CHOICE)
             assert "Time limit" not in presentation, presentation
             fixture.wait_for(lambda: log.exists() and "choice-output-complete" in log.read_text(), "final choice write")
@@ -1433,7 +1433,7 @@ def consent_boundary_cases(state, library):
                 os.write(master, b"\x03")
             else:
                 assert not select.select([read_ready], [], [], 0.2)[0], "paste prefix opened consent"
-                os.write(master, b"\n")
+                os.write(master, b"\r")
                 assert not select.select([read_ready], [], [], 0.2)[0], "unfinished paste authorized"
                 assert set(records.glob("*.json")) == before
                 # The paste went to the draft; Esc returns to the choice.
@@ -1575,7 +1575,7 @@ def command_interruption_cases(state, library, only=None):
                         before_forward=before_forward if case == "configure-inflight" else None)
                 elif case == "configure-canonical":
                     proxy = canonical.ReplyProxy(host, "/v1/configure")
-                os.write(master, command.encode() + b"\n")
+                os.write(master, command.encode() + b"\r")
                 if route is None:
                     fixture.wait_for(lambda: log.exists() and "capture-sync-held" in log.read_text(), "Configure pre-send sync")
                 elif route:
@@ -1780,10 +1780,10 @@ def fatal_reporting_cases(state):
                 lambda response: b"" if len(proxy.exchanges) == 2 else response)
             records = home / ".config/rui/requests"
             before = {path: path.read_bytes() for path in records.glob("*.json")}
-            os.write(master, b"accepted A\n")
+            os.write(master, b"accepted A\r")
             human.read_terminal(master, "ACCEPTED-A", composer=True)
             human.terminal_step(master, "/status", " Status · ", composer=True)
-            os.write(master, b"uncertain B\n")
+            os.write(master, b"uncertain B\r")
             human.read_terminal(master, "Not confirmed")
             first, second = [json.loads(body) for body, _ in proxy.exchanges]
             saved = (home / ".config/rui/requests" / f"{second['key']}.json").read_bytes()
@@ -1878,7 +1878,7 @@ def decision_reporting_cases(state):
                     proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", hold)
                 else:
                     proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
-                os.write(master, b"propose exact decision\n")
+                os.write(master, b"propose exact decision\r")
                 proposal = human.read_terminal(master, human.CHOICE)
                 proposal += human.action_ready(read_ready, master)
                 if decision != "allow_once":
@@ -2047,7 +2047,7 @@ def detach_reporting_cases(state, library):
                     pass_fds=(write_ready,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 human.read_terminal(master, "› ")
                 proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: response)
-                os.write(master, b"accepted original\n")
+                os.write(master, b"accepted original\r")
                 if kind != "message":
                     proposal = human.read_terminal(master, human.CHOICE)
                     proposal += human.action_ready(read_ready, master)
@@ -2152,12 +2152,12 @@ def startup_reporting_cases(state, library):
                     "RUI_TERMINAL_STARTUP_ARM": str(arm), "RUI_TEST_SUBMISSION_START": "1"},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             human.read_terminal(master, "› ")
-            os.write(master, b"seed accepted original\n")
+            os.write(master, b"seed accepted original\r")
             human.read_terminal(master, "SEED-ACCEPTED", composer=True)
             assert "Original reserved request:" not in human.terminal_step(master, "/status", " Status · ", composer=True)
             human.return_to_live(master)
             if kind in ("allow_once", "deny"):
-                os.write(master, b"propose exact Action\n")
+                os.write(master, b"propose exact Action\r")
                 proposal = human.read_terminal(master, human.CHOICE)
                 proposal += human.action_ready(ready_read, master)
                 proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
@@ -2167,7 +2167,7 @@ def startup_reporting_cases(state, library):
             else:
                 if kind == "retry":
                     proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: b"")
-                    os.write(master, b"retry this exact original\n")
+                    os.write(master, b"retry this exact original\r")
                     human.read_terminal(master, "Not confirmed")
                 def hold(response):
                     if held.is_set() and kind == "message-reader-first":
@@ -2292,7 +2292,7 @@ def visible_stream_handoff_cases(state, library):
                 ready = "VISIBLE-END" if phase == "details" else "OPENING-READY" if phase == "history" else "› "
                 human.read_terminal(master, ready, composer=True)
                 arm.touch()
-                os.write(master, (f"/{phase}\n" if phase in ("history", "details") else "produce content\n").encode())
+                os.write(master, (f"/{phase}\r" if phase in ("history", "details") else "produce content\r").encode())
             human.read_terminal(master, marker)
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
             if phase == "completion":
@@ -2300,7 +2300,7 @@ def visible_stream_handoff_cases(state, library):
                 # content. The typed input's own redraw is the first held
                 # write, and the command runs only once that output completes.
                 human.await_screen(master, "VISIBLE-END", composer=True)
-                os.write(master, b"/configure --permission-mode bypass\nUNREAD suffix\n")
+                os.write(master, b"/configure --permission-mode bypass\rUNREAD suffix\r")
                 fixture.wait_for(lambda: log.exists() and "visible-stream-held" in log.read_text(), "post-page output gate")
                 time.sleep(0.5)
                 assert fixture.command("session", "inspect", "--store", store,
