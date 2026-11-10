@@ -92,10 +92,16 @@ class VerifyRuiTest(unittest.TestCase):
         module = runpy.run_path(str(SCRIPT))
         cleanup = module["cmd_cleanup"]
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             scratch_parent = root / "scratch"
             scratch_parent.mkdir()
-            for scratch, removed in ((scratch_parent / "vr.owned", True), (root / "vr.outside", False)):
+            linked_parent = root / "scratch-link"
+            linked_parent.symlink_to(scratch_parent, target_is_directory=True)
+            for scratch, parent, removed in (
+                (scratch_parent / "vr.owned", scratch_parent, True),
+                (scratch_parent / "vr.linked", linked_parent, True),
+                (root / "vr.outside", linked_parent, False),
+            ):
                 scratch.mkdir()
                 evidence_root = root / ("run-" + scratch.name)
                 (evidence_root / "evidence").mkdir(parents=True)
@@ -104,7 +110,7 @@ class VerifyRuiTest(unittest.TestCase):
                     "store": str(scratch / "store"), "project": str(scratch / "project"),
                     "binary": "/unused/rui",
                 }))
-                with patch.dict(cleanup.__globals__, {"SCRATCH_PARENT": scratch_parent}), \
+                with patch.dict(cleanup.__globals__, {"SCRATCH_PARENT": parent}), \
                         contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as result:
                     cleanup(types.SimpleNamespace(run=evidence_root, no_export=True))
                 self.assertEqual(result.exception.code, 0)
