@@ -8,6 +8,10 @@
 Before publishing, run the focused checks in [Evidence](../../CODING_STANDARDS.md#evidence).
 For PR descriptions, use the `pr` skill.
 Every PR commit states its actual test commands and results.
+Open every PR with `python3 tests/ci/open_pr.py open --title TITLE --body-file FILE`, which lists open PRs sharing its files and opens it as a draft.
+A draft runs only the cheap development selection, so push freely while work continues.
+After the last planned push, run `python3 tests/ci/open_pr.py ready`; it refuses while the PR's head on GitHub differs from the committed checkout or changes are uncommitted.
+Review and CI fixes after that are ordinary pushes to the ready PR.
 Performance changes include A/B numbers, and TUI changes include a plain-PTY capture using [verify-rui](../../.claude/skills/verify-rui/SKILL.md).
 Keep published commits unchanged so their CI evidence retains its SHA.
 
@@ -25,7 +29,7 @@ A PR that merely trails `main` merges as it is.
 ## Concurrent PRs
 
 Before splitting work across lanes and again before opening a PR, compare its changed files with open PRs, including PRs opened since work began.
-Before opening a PR, run `python3 tests/ci/pr_overlap.py` on its committed branch; use `--base` for a stacked PR.
+`open_pr.py open` runs that comparison on the committed branch; pass `--base PARENT` for a stacked PR.
 The check needs GitHub access and reports shared files, not semantic dependencies or PRs opened afterward.
 Git can merge edits to the same file without a conflict even when one removes a name the other uses.
 PRs run independently only when they touch different files.
