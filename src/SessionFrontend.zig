@@ -658,13 +658,17 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     chrome.marker.style = .{ .reverse = true };
     chrome.shortcuts.method = self.app_caps.width;
     chrome.shortcuts.style = normal;
-    const needs = session_notice.status(self.reading.opening, self.app_consent.request != null, self.heldOriginal()) orelse "";
+    const held = self.heldOriginal();
+    // An accepted Message reads Sent until live output, or the waiting row, shows it.
+    const sent = if (self.admission.echo) |echo| if (self.queuedRow()) |row| echo > row.newest else true else false;
+    const send = session_chrome.send(session_notice.status(self.reading.opening, self.app_consent.request != null, held), self.reading.opening or (held != null and held.?.state == .submitting), sent);
     const facts_buffer = try ctx.arena.create([session_line.capacity]u8);
     chrome.place(&self.app_screen, .{
         .browsing = browsing,
         .new_entries = if (self.browsed_from) |from| self.live.cursor.position -| from else 0,
-        .needs = if (needs.len == 0) null else needs,
-        .needs_key = session_chrome.needsKey(needs),
+        .needs = send.needs,
+        .needs_key = if (send.needs) |needs| session_chrome.needsKey(needs) else "",
+        .progress = send.progress,
         .stoppable = said.stoppable,
         .facts = if (self.line.facts(&self.hint, self.session)) |value| session_line.write(facts_buffer, value, ctx.max.width.? -| 2, self.app_caps.width) else self.session,
         .notice = said.text orelse self.shown_notice.current(now_ms),
@@ -5276,6 +5280,44 @@ test "App Session shows the newest waiting Message as ◌ [N ·] its first line,
     try std.testing.expectEqualStrings("◌ also update docs/using-rui.md", (try fixture.rows())[row]);
     self.live.queued_line.?.admission = 8;
     try std.testing.expect(ChromeFixture.find(&(try fixture.rows()), "◌") == null);
+}
+
+test "App Session's frame after Enter shows the Message as sending, the same frame that clears the composer" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory = path[0..try fixture.tmp.dir.realPath(std.testing.io, &path)];
+    self.directory = directory;
+    self.submission.directory = directory;
+    defer {
+        self.submission.cancel();
+        _ = self.submission.join();
+        self.submission.close();
+    }
+    for ("hi") |byte| try fixture.press(.{ .codepoint = byte, .text = &.{byte} });
+    try fixture.press(.{ .codepoint = vaxis.Key.enter });
+    // No tick runs between Enter and this frame.
+    const shown = try fixture.rows();
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("Sending…", shown[23]);
+    try std.testing.expectEqual(session_chrome.Tone.quiet, self.chrome.status.bar.tone);
+}
+
+test "App Session says Sent from the Host's acceptance until the Message's own row shows, above any notice" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    // Accepted: no original is held, and live output has not reached it.
+    self.admission.echo = 4;
+    self.shown_notice.show("Copied 3 lines", ChromeFixture.now());
+    try std.testing.expectEqualStrings("Sent", (try fixture.rows())[23]);
+    try std.testing.expectEqual(session_chrome.Tone.quiet, self.chrome.status.bar.tone);
+    // Live output delivered it: its row is the feedback, so the notice shows.
+    self.admission.echo = null;
+    try std.testing.expectEqualStrings("Copied 3 lines", (try fixture.rows())[23]);
 }
 
 test "App Session's last row says the send state, which stays past a key and five seconds" {
