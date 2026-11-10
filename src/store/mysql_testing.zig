@@ -590,6 +590,55 @@ test "store.mysql live content chunks ride the round of their row, and a stop mi
     try std.testing.expect(!storage.isFenced());
 }
 
+test "store.mysql live content chunks keep each batch within a small max_allowed_packet" {
+    if (!try available()) return error.SkipZigTest;
+    const old = old: {
+        mutex.lockUncancelable(std.testing.io);
+        defer mutex.unlock(std.testing.io);
+        _ = try connection();
+        const old = try globalValue("max_allowed_packet");
+        try setGlobal("max_allowed_packet", "262144");
+        break :old old;
+    };
+    defer {
+        mutex.lockUncancelable(std.testing.io);
+        defer mutex.unlock(std.testing.io);
+        setGlobal("max_allowed_packet", old.slice()) catch @panic("cannot restore max_allowed_packet");
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    // A failed close must not skip restoring the server's packet limit.
+    defer storage.close() catch {};
+    // Each value's chunk fits a 256 KiB packet; the two together do not.
+    const length = 64 * 1024;
+    const bytes = try std.testing.allocator.alloc(u8, length);
+    defer std.testing.allocator.free(bytes);
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+    defer access.deinit();
+    errdefer access.abandon(.{}) catch {};
+    const before = storage.engine.mysql.state.connection.queries;
+    var ids: [2]u64 = undefined;
+    for (&ids, 0..) |*id, i| {
+        // Distinct values: content rows are unique by digest.
+        @memset(bytes, 'a' + @as(u8, @intCast(i)));
+        id.* = try access.identity(.content_id);
+        access.write(live_insert, .{ .id = id.*, .digest = protocol.contentDigest(bytes), .length = length });
+        access.recordContentRow(id.*);
+        const sink = try access.contentSink(id.*, length);
+        try sink.write(bytes, 0);
+        sink.close();
+    }
+    try access.commit();
+    // The first row and chunk, then the second row and chunk, then COMMIT.
+    try std.testing.expectEqual(before + 3, storage.engine.mysql.state.connection.queries);
+    for (ids) |id| try std.testing.expectEqual(@as(u64, length), try queryU64(&storage, "SELECT sum(length(bytes)) FROM content_chunk WHERE content_id=?1", .{id}));
+    try std.testing.expect(!storage.isFenced());
+}
+
 test "store.mysql live GET_LOCK excludes a second Store on the same database" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

@@ -520,7 +520,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             a.ensureOpen();
             if (a.failure != null) return error.ContentWriteFailed;
             const mysql = &a.store.engine.mysql;
-            if (!mysql.chunkFits(id, index, n)) a.pass();
+            if (!mysql.chunkFits(id, index, n)) {
+                a.pass();
+                // A server whose packets cannot hold one chunk refuses the
+                // write before any of it is sent.
+                if (a.failure == null and !mysql.chunkFits(id, index, n)) return error.ContentWriteFailed;
+            }
             const slot = a.reserve() orelse return error.ContentWriteFailed;
             const w = mysql.beginChunk(id, index) catch |err| {
                 a.failure = err;

@@ -31,10 +31,6 @@ pub const round_deadline_ms: u32 = 60_000;
 /// `max_allowed_packet` is smaller lowers it (`limitBatch`).
 pub const batch_bytes = 4 * 1024 * 1024;
 
-/// The smallest batch `limitBatch` leaves: room for a whole content
-/// chunk INSERT (`engine/mysql_content.zig`), 128 KiB as hex.
-pub const min_batch_bytes = 512 * 1024;
-
 const prefix_len = 5;
 
 pub const Address = union(enum) {
@@ -196,12 +192,10 @@ pub const Connection = struct {
     }
 
     /// Keeps every batch within the server's `max_allowed_packet`, less
-    /// room for the packet's own framing, and at least `min_batch_bytes`.
-    /// No batch may be open.
+    /// room for the packet's own framing. No batch may be open.
     pub fn limitBatch(self: *Connection, max_allowed_packet: u64) void {
         std.debug.assert(self.writer.end == 0);
-        const room = max_allowed_packet -| 1024;
-        self.batch_limit = @intCast(@max(min_batch_bytes, @min(batch_bytes, room)));
+        self.batch_limit = @intCast(@min(batch_bytes, max_allowed_packet -| 1024));
     }
 
     /// Text in the open batch.
