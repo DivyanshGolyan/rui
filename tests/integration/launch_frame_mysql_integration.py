@@ -145,13 +145,23 @@ def main():
         assert ready(host) == store_id, "the Store id changed across a Host restart"
         assert frame_host.post(sock, "inspect-session", request)["session"]["reference"] == session
         private(host)
-        connection = sql(f"SELECT ID FROM information_schema.PROCESSLIST WHERE DB='{database}'")
-        assert connection.isdecimal(), "expected one Host connection"
-        sql(f"KILL CONNECTION {connection}")
-        # Drive a canonical read so the Store observes the killed connection.
-        with contextlib.suppress(OSError, AssertionError):
-            frame_host.post(sock, "inspect-session", request)
-        code = host.wait(timeout=20)
+        # A read that finds its connection killed fences the Store. A write
+        # batch that finds it first (the Host's own, such as a saved model
+        # list) reconnects and reruns instead, by design, and the read then
+        # succeeds on the new connection: kill that one and read again.
+        code = None
+        for _ in range(5):
+            connection = sql(f"SELECT ID FROM information_schema.PROCESSLIST WHERE DB='{database}'")
+            assert connection.isdecimal(), "expected one Host connection"
+            sql(f"KILL CONNECTION {connection}")
+            # Drive a canonical read so the Store observes the killed connection.
+            with contextlib.suppress(OSError, AssertionError):
+                frame_host.post(sock, "inspect-session", request)
+            try:
+                code = host.wait(timeout=5)
+                break
+            except subprocess.TimeoutExpired:
+                continue
         assert code == 1, f"a fenced MySQL Store exited {code}, not 1: {frame_host.output(host)!r}"
         out, err = frame_host.output(host)
         # stdout holds the readiness line, then exactly one named exit (D211).
