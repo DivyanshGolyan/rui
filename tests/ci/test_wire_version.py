@@ -1,4 +1,4 @@
-"""The wire version has one owner, src/protocol.zig, and moves only past a release.
+"""The wire version has one owner, src/wire_version.zig, and moves only past a release.
 
 Every Zig test, fixture and qualification harness reads the owner, so a bump
 edits one line. A new release-gated number is spent only once per release:
@@ -6,6 +6,7 @@ concurrent PRs share main's unreleased number instead of racing to bump it.
 """
 from pathlib import Path
 import re
+import subprocess
 import sys
 import unittest
 
@@ -15,6 +16,9 @@ ROOT = Path(__file__).resolve().parents[2]
 OWNER = re.compile(r'^pub const wire_version = "(\d+)";$', re.MULTILINE)
 GO_OWNER = re.compile(r'^const WireVersion = "(\d+)"$', re.MULTILINE)
 GO_OWNER_FILE = "tests/qualification/measurement/measurement.go"
+OWNER_FILE = "src/wire_version.zig"
+# Where releases cut before the owner moved declared it.
+EARLIER_OWNER_FILE = "src/protocol.zig"
 NAME = "wire_version"
 HEADER = r'Wire-Version\\?"?\s*:\s*\\?"?\d'
 # Literal version digits, per language, in the forms the wire takes in source.
@@ -30,8 +34,17 @@ LITERALS = (
 def wire_version(source):
     match = OWNER.search(source)
     if match is None:
-        raise AssertionError("src/protocol.zig declares no wire_version")
+        raise AssertionError(f"{OWNER_FILE} declares no wire_version")
     return int(match[1])
+
+
+def wire_version_at(revision):
+    """The wire version a commit declares, from the owner file it had."""
+    for path in (OWNER_FILE, EARLIER_OWNER_FILE):
+        if subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", f"{revision}:{path}"],
+                          capture_output=True).returncode == 0:
+            return wire_version(git(ROOT, "show", f"{revision}:{path}"))
+    raise AssertionError(f"{revision} has no {OWNER_FILE}")
 
 
 def literal_findings(root):
@@ -74,10 +87,10 @@ class WireVersionTest(unittest.TestCase):
                 self.assertNotRegex(line, patterns[suffix])
 
     def test_fixtures_and_qualification_read_the_owner(self):
-        owner = wire_version((ROOT / "src/protocol.zig").read_text())
+        owner = wire_version((ROOT / OWNER_FILE).read_text())
         go = GO_OWNER.search((ROOT / GO_OWNER_FILE).read_text())
         self.assertIsNotNone(go, f"{GO_OWNER_FILE} declares no WireVersion")
-        self.assertEqual(int(go[1]), owner, f"{GO_OWNER_FILE} WireVersion must equal protocol.zig's wire_version")
+        self.assertEqual(int(go[1]), owner, f"{GO_OWNER_FILE} WireVersion must equal {OWNER_FILE}'s wire_version")
         sys.path.insert(0, str(ROOT / "tests/integration"))
         try:
             import host_process
@@ -102,9 +115,9 @@ class WireVersionTest(unittest.TestCase):
         base_commit = main_base(ROOT)
         if base_commit is None:
             self.skipTest("no origin/main in this checkout to take the merge base from")
-        released = wire_version(git(ROOT, "show", f"{tag}:src/protocol.zig"))
-        base = wire_version(git(ROOT, "show", f"{base_commit}:src/protocol.zig"))
-        candidate = wire_version((ROOT / "src/protocol.zig").read_text())
+        released = wire_version_at(tag)
+        base = wire_version_at(base_commit)
+        candidate = wire_version((ROOT / OWNER_FILE).read_text())
         error = bump_error(NAME, candidate, base, released)
         if error:
             self.fail(f"{error} (release {tag}, main at {base_commit[:12]})")

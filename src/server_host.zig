@@ -1,4 +1,5 @@
 const std = @import("std");
+const cli_args = @import("cli_args.zig");
 const core_tools = @import("core_tools.zig");
 const TestObservation = @import("TestObservation.zig");
 const trace_native = @import("posix");
@@ -16,8 +17,10 @@ const provider = @import("provider.zig");
 const providers_module = @import("providers.zig");
 const turn_states_module = @import("turn_states.zig");
 const protocol = @import("protocol.zig");
+const wire_request = @import("wire_request.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
+const session_report = @import("session_report.zig");
 const stderr = @import("stderr.zig");
 
 pub const default_bash_timeout_ms: u64 = 5 * 60 * 1000;
@@ -172,7 +175,7 @@ pub const Hooks = struct {
         self.failures.insert(fromOptionName(Failure, name) orelse return error.UnknownFault);
     }
 
-    pub fn contentFaults(self: *const Hooks) protocol.ContentFaults {
+    pub fn contentFaults(self: *const Hooks) wire_request.ContentFaults {
         return .{
             .acquire = self.fails(.content_acquire),
             .write = self.fails(.content_write),
@@ -239,6 +242,132 @@ pub const Hooks = struct {
         };
     }
 };
+
+/// What the hidden `host serve` test options narrow a Host to. Production
+/// spells none of them, so it runs on the defaults.
+pub const Tuning = struct {
+    limits: Limits = .{},
+    hooks: Hooks = .{},
+
+    /// `models_dev_env` is RUI_TEST_MODELS_DEV_URL, read when no option
+    /// names the catalog fixture. The `host serve` grammar bounds every
+    /// number, so `parsed` holds only values a Host accepts.
+    pub fn fromOptions(parsed: *const cli_args.Parsed, models_dev_env: ?[]const u8) !Tuning {
+        var tuning: Tuning = .{};
+        const limits = &tuning.limits;
+        const hooks = &tuning.hooks;
+        if (try parsed.number(u64, "test-bash-scratch-limit-bytes")) |limit| limits.bash_scratch_limit_bytes = limit;
+        limits.retention_entry_capacity = try parsed.number(usize, "test-retention-entry-capacity");
+        if (parsed.has("test-retention-removal-failure")) hooks.retention_removal = true;
+        for (parsed.all("fault")) |fault| try hooks.inject(fault);
+        if (try parsed.number(i64, "test-provider-inactivity-seconds")) |seconds| limits.provider_inactivity_seconds = seconds;
+        if (parsed.get("test-retry-waits-ms")) |waits| limits.retry_waits_ms = try parseRetryWaits(waits);
+        if (try parsed.number(i64, "test-before-launch-delay-ms")) |delay| {
+            hooks.pauses.getPtr(.action_launch).delay_ms = delay;
+            hooks.pauses.getPtr(.model_launch).delay_ms = delay;
+        }
+        if (try parsed.number(i64, "test-before-result-delay-ms")) |delay| {
+            hooks.pauses.getPtr(.action_result).delay_ms = delay;
+            hooks.pauses.getPtr(.model_result).delay_ms = delay;
+        }
+        hooks.pauses.getPtr(.model_result).gate_path = parsed.get("test-model-result-gate-path");
+        // The shared integration boundary sets an empty URL for every child,
+        // including detached Hosts. Only catalog cases explicitly opt in.
+        hooks.models_dev_url = parsed.get("test-models-dev-url") orelse models_dev_env;
+        hooks.retry_recovery_gate_path = parsed.get("test-retry-recovery-gate-path");
+        hooks.inspection_reply.gate_path = parsed.get("test-inspection-reply-gate-path");
+        if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| hooks.inspection_reply.delay_ms = delay;
+        limits.client_send_buffer_bytes = try parsed.number(u32, "test-client-send-buffer-bytes");
+        if (parsed.has("test-phase-trace")) hooks.phase_trace = true;
+        if (try parsed.number(c_int, "test-observation-fd")) |fd| {
+            hooks.observation_fd = fd;
+            hooks.phase_trace = true;
+        }
+        if (try parsed.number(c_int, "test-observation-state-fd")) |fd| hooks.observation_state_fd = fd;
+        if (parsed.get("test-observation-plan")) |plan| hooks.observation_plan = std.meta.stringToEnum(TestObservation.Plan, plan) orelse
+            return error.InvalidTestObservationPlan;
+        const transition: ?Hooks.Transition = if (parsed.get("test-transition")) |name|
+            Hooks.fromOptionName(Hooks.Transition, name) orelse return error.UnknownTestTransition
+        else
+            null;
+        const transition_gate_path = parsed.get("test-transition-gate-path");
+        hooks.pauses.getPtr(.bash_exit_observed).gate_path = parsed.get("test-bash-observed-exit-gate-path");
+        hooks.pauses.getPtr(.shutdown_signalled).gate_path = parsed.get("test-shutdown-signalled-gate-path");
+        hooks.bash_reclaim_gate_path = parsed.get("test-bash-cleanup-gate-path");
+        const control_gate_keys = parsed.get("test-control-gate-keys");
+        const control_gate_path = parsed.get("test-control-gate-path");
+        if (parsed.has("test-suppress-first-control-hint")) hooks.suppress_first_control_hint = true;
+        if (parsed.has("test-sqlite-diagnostics")) hooks.sqlite_diagnostics = true;
+        if (parsed.has("test-sqlite-cache-spill-off")) limits.sqlite_cache_spill = false;
+        if (try parsed.number(u32, "test-sqlite-cache-kib")) |kib| limits.sqlite_cache_kib = kib;
+        if (try parsed.number(u64, "test-request-scratch-limit")) |limit| limits.request_scratch_limit_bytes = limit;
+        if (try parsed.number(usize, "test-request-preparation-byte-allowance")) |allowance| limits.request_preparation_byte_allowance = allowance;
+        if (try parsed.number(usize, "test-request-preparation-item-allowance")) |allowance| limits.request_preparation_item_allowance = allowance;
+        if (try parsed.number(i64, "test-request-preparation-advance-delay-ms")) |delay| hooks.pauses.getPtr(.preparation_advanced).delay_ms = delay;
+        if ((control_gate_keys == null) != (control_gate_path == null)) return error.IncompleteControlGate;
+        if ((transition == null) != (transition_gate_path == null)) return error.IncompleteTestTransitionGate;
+        if (control_gate_keys) |keys| hooks.control_gate = .{ .keys = keys, .path = control_gate_path.? };
+        if (transition) |value| hooks.transition = .{ .transition = value, .path = transition_gate_path.? };
+        return tuning;
+    }
+};
+
+fn parseRetryWaits(value: []const u8) !retry_policy.Waits {
+    var waits: retry_policy.Waits = undefined;
+    var parts = std.mem.splitScalar(u8, value, ',');
+    for (&waits) |*wait| {
+        const part = parts.next() orelse return error.InvalidRetryWaits;
+        wait.* = std.fmt.parseInt(u64, part, 10) catch return error.InvalidRetryWaits;
+    }
+    if (parts.next() != null) return error.InvalidRetryWaits;
+    // The Store rechecks the deadlines against its clock at startup.
+    retry_policy.validateWaits(waits, 0) catch return error.InvalidRetryWaits;
+    return waits;
+}
+
+fn tuningFor(args: []const []const u8, models_dev_env: ?[]const u8) !Tuning {
+    var storage: [1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var refusal: cli_args.Refusal = undefined;
+    const parsed = try cli_args.Command.host_serve.definition().parse(args, fixed.allocator(), &refusal);
+    return Tuning.fromOptions(&parsed, models_dev_env);
+}
+
+test "the hidden serve options narrow a Host" {
+    const plain = try tuningFor(&.{}, null);
+    try std.testing.expectEqual(scratch_limit_bytes, plain.limits.bash_scratch_limit_bytes);
+    try std.testing.expectEqual(@as(?usize, null), plain.limits.retention_entry_capacity);
+    try std.testing.expect(!plain.hooks.phase_trace and plain.hooks.models_dev_url == null and plain.hooks.control_gate == null);
+
+    // The grammar bounds each number; these are its edges.
+    try std.testing.expectEqual(@as(?usize, 2), (try tuningFor(&.{ "--test-retention-entry-capacity", "2" }, null)).limits.retention_entry_capacity);
+    try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-retention-entry-capacity", "1" }, null));
+    try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-before-launch-delay-ms", "10001" }, null));
+    try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-provider-inactivity-seconds", "0" }, null));
+    try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-request-preparation-byte-allowance", "0" }, null));
+    const held = try tuningFor(&.{ "--test-before-launch-delay-ms", "10000", "--test-before-result-delay-ms", "5" }, null);
+    try std.testing.expectEqual(@as(i64, 10_000), held.hooks.pauses.get(.action_launch).delay_ms);
+    try std.testing.expectEqual(@as(i64, 10_000), held.hooks.pauses.get(.model_launch).delay_ms);
+    try std.testing.expectEqual(@as(i64, 5), held.hooks.pauses.get(.action_result).delay_ms);
+    try std.testing.expectEqual(@as(i64, 5), held.hooks.pauses.get(.model_result).delay_ms);
+    try std.testing.expectEqual(@as(i64, 0), held.hooks.pauses.get(.preparation_advanced).delay_ms);
+    try std.testing.expectError(error.InvalidRetryWaits, tuningFor(&.{ "--test-retry-waits-ms", "1,2" }, null));
+
+    // A gate needs both its subject and its path.
+    try std.testing.expectError(error.IncompleteControlGate, tuningFor(&.{ "--test-control-gate-keys", "k" }, null));
+    try std.testing.expectError(error.IncompleteControlGate, tuningFor(&.{ "--test-control-gate-path", "/g" }, null));
+    try std.testing.expectError(error.IncompleteTestTransitionGate, tuningFor(&.{ "--test-transition", "action-result-ready" }, null));
+    const gated = try tuningFor(&.{ "--test-control-gate-keys", "k", "--test-control-gate-path", "/g", "--test-transition", "action-result-ready", "--test-transition-gate-path", "/t" }, null);
+    try std.testing.expectEqualStrings("/g", gated.hooks.control_gate.?.path);
+    try std.testing.expectEqual(Hooks.Transition.action_result_ready, gated.hooks.transition.?.transition);
+    try std.testing.expectError(error.UnknownTestTransition, tuningFor(&.{ "--test-transition", "action_result_ready", "--test-transition-gate-path", "/t" }, null));
+
+    // An observation descriptor traces phases; the catalog option outranks
+    // its environment fallback.
+    try std.testing.expect((try tuningFor(&.{ "--test-observation-fd", "3" }, null)).hooks.phase_trace);
+    try std.testing.expectEqualStrings("env", (try tuningFor(&.{}, "env")).hooks.models_dev_url.?);
+    try std.testing.expectEqualStrings("flag", (try tuningFor(&.{ "--test-models-dev-url", "flag" }, "env")).hooks.models_dev_url.?);
+}
 
 /// The execution owner's progress through the fixed Hooks, so Hooks stay
 /// read-only for every thread once the Host starts.
@@ -649,7 +778,7 @@ noinline fn writeRequestTrace(host: *Host, phase: []const u8, request_number: u6
 
 /// Local execution facts for inspection, read from another thread than the
 /// execution owner's.
-pub fn executionFacts(host: *Host) store_module.SessionReportExecution {
+pub fn executionFacts(host: *Host) session_report.Execution {
     return .{
         .dispatch_fenced = !host.launchAllowed(),
         .custody_occupied = host.custody.held(),

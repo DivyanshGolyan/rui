@@ -22,7 +22,7 @@ pub const max_endpoint_bytes = h2.max_url_bytes;
 /// The linked nghttp2 and OpenSSL are exactly the pinned versions.
 pub const checkLibraries = h2.checkLibraries;
 
-pub const ScratchBudget = protocol.ScratchBudget;
+pub const ScratchBudget = @import("ScratchBudget.zig");
 
 /// A sealed request. It may sit in an execution slot, so it keeps no io or
 /// budget: its owner passes them when it releases the request.

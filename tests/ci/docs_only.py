@@ -20,7 +20,7 @@ class ChangedEntry:
 
 
 _ROOT_DOCS = {'README.md', 'ARCHITECTURE.md', 'CODING_STANDARDS.md',
-              'VERIFICATION.md', 'THIRD_PARTY_NOTICES.md'}
+              'VERIFICATION.md', 'THIRD_PARTY_NOTICES.md', 'AGENTS.md', 'CLAUDE.md'}
 _HEADER = re.compile(rb':([0-7]{6}) ([0-7]{6}) (?:[0-9a-f]{40}|[0-9a-f]{64}) (?:[0-9a-f]{40}|[0-9a-f]{64}) ([AMD])')
 _MODES = {'A': ('000000', '100644'), 'M': ('100644', '100644'),
           'D': ('100644', '000000')}
@@ -49,7 +49,15 @@ def _documentation_path(path: str) -> bool:
     if path in _ROOT_DOCS:
         return True
     parts = path.split('/')
-    if len(parts) < 2 or parts[0] != 'docs' or any(not p or p.startswith('.') for p in parts):
+    if len(parts) < 2 or any(not p or p.startswith('.') for p in parts[1:]):
+        return False
+    # Skills; .claude/ also holds hooks, settings and scripts, which run.
+    if parts[0] == '.claude':
+        return path.endswith('.md')
+    # Research evidence and prototypes: no build target, workflow or test reads them.
+    if parts[0] == 'research':
+        return True
+    if parts[0] != 'docs':
         return False
     if path.endswith('.md'):
         return True

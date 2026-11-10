@@ -14,7 +14,7 @@ import time
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "integration"))
-import transport_h2_integration as fixture
+import transport_h2_cases as fixture
 
 
 def counters(text):

@@ -10,14 +10,14 @@
     {"caller": "store.queue.Queue.drain", "callees": "store.queue.Queue.Write(", "cause": "the Store's holder runs queued writes"}
   ],
   "host_modules": [
-    "HostDiagnostics", "TerminalText", "TestObservation", "bash", "bounded", "change_ring",
+    "HostDiagnostics", "TerminalText", "TestObservation", "bash", "bounded", "call_classification", "change_ring",
     "codex_auth", "codex_credential_policy", "codex_credentials", "codex_token_wire", "execution",
-    "execution_turn", "failed_responses", "history_memo", "model_adapter", "model_capability",
+    "execution_turn", "failed_responses", "history_memo", "message_agent_arguments", "model_adapter", "model_capability",
     "named_scratch", "os.descriptor_limit", "os.pages", "output_decode", "output_format",
     "output_retention", "platform", "preference_values", "preferences", "protocol", "provider",
     "server", "server_execution", "server_host", "session_work", "signal_stack",
-    "stderr", "store", "tools", "transport_policy", "h2", "Connection", "Engine", "Resolver",
-    "Stream", "proxy", "tls", "job"
+    "stderr", "store", "transport_policy", "h2", "Connection", "Engine", "Resolver",
+    "Stream", "proxy", "tls", "job", "tls_client"
   ],
   "exceptions": [
     {"function": "posix.openat", "frame_bytes": 16384, "cause": "std toPosixPath [4095:0]u8 path buffers"},

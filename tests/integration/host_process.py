@@ -4,6 +4,7 @@ import os
 import sys
 
 import live_engines
+import os_semantics
 
 NON_ROOT_INSTRUCTION = (
     "Rui fixtures must run as a non-root user. This fixture is running as root "
@@ -21,8 +22,9 @@ INHERITED = (
     "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
     # CI's retention directory for failed fixture roots.
     "RUI_FAILURE_ARTIFACTS",
-    # The terminal notice binary that build.zig and check.sh pass.
-    "RUI_TEST_TERMINAL_NOTICE",
+    # The terminal notice binary that build.zig and check.sh pass, and the
+    # libghostty-vt that build.zig gives the PTY screen observer.
+    "RUI_TEST_TERMINAL_NOTICE", "RUI_TEST_GHOSTTY_VT",
     # Opt-in retention and measurement switches that a person or workflow sets.
     "RUI_UPGRADE_FAILURES", "RUI_RENDERER_RETAIN_COMPARISON", "RUI_ACTIVITY_MEASURE", "RUI_ACTIVITY_ITEM_BYTES",
     "RUI_MEASURE_GLIBC_TUNABLES",
@@ -34,7 +36,7 @@ INHERITED = (
     *live_engines.VARIABLES,
 )
 # Withheld from every fixture; only the opt-in live journey hands them to its Host.
-NETWORK = ("https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR")
+NETWORK = ("https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY", *os_semantics.TRUST_VARIABLES)
 
 
 def enter():
@@ -460,22 +462,31 @@ def preserve_failure_metadata(path, collect):
         return False  # Evidence is unavailable, not grounds to skip mandatory cleanup.
 
 
-def _wire_version():
-    source = pathlib.Path(__file__).parents[2] / "src/protocol.zig"
-    match = re.search(r'^pub const wire_version = "(\d+)";$', source.read_text(), re.MULTILINE)
+def _owned(path, pattern, name):
+    source = pathlib.Path(__file__).parents[2] / path
+    match = re.search(pattern, source.read_text(), re.MULTILINE)
     if match is None:
-        raise RuntimeError(f"{source} declares no wire_version")
+        raise RuntimeError(f"{source} declares no {name}")
     return match[1]
 
 
 # The wire version fixtures speak, read from its one owner.
-WIRE_VERSION = _wire_version()
+WIRE_VERSION = _owned("src/wire_version.zig", r'^pub const wire_version = "(\d+)";$', "wire_version")
 
 
-# The Store format fixtures expect, stated independently of src/store.zig so a
-# format change must update its fixtures deliberately;
-# tests/ci/test_store_schema_fixtures.py fails until it does.
-STORE_SCHEMA = 59
+# The Store format fixtures expect, read from its one owner, so a format
+# change needs no fixture edit; tests/ci/test_store_schema_fixtures.py keeps
+# fixtures from pinning the number again.
+STORE_SCHEMA = int(_owned("src/store/schema.zig", r"^pub const schema_version: u32 = (\d+);$", "schema_version"))
+
+
+def assert_caller_error(stderr, context, code, not_sent=True):
+    """One caller-error line: the invocation's own context, the catalog's prose
+    (owned and unit-tested by src/caller_error.zig, so not restated here) and
+    the stable code that names the cause."""
+    text = stderr.decode() if isinstance(stderr, bytes) else stderr
+    ending = (" Nothing was captured or sent." if not_sent else "") + f" [{code}]\n"
+    assert text.startswith(context) and text.endswith(ending) and text.count("\n") == 1, (context, code, text)
 
 
 # Job-wide totals: sixteen roots, each with an equal share of 128 files and
@@ -1300,6 +1311,19 @@ def dispose_all(*disposals):
                 pass  # Secondary reporting cannot replace the primary failure.
         if incoming_error is None:
             raise primary
+
+
+def close_stdin(process):
+    """Send `process` end of input and drop its stdin, so a later communicate() still works.
+
+    communicate() flushes the stdin it holds, and a stdin closed by hand makes
+    that fail with "flush of closed file" (#898). Fixtures close a child's
+    stdin only here; tests/ci/test_harness_contracts.py rejects any other
+    `.stdin.close()`.
+    """
+    if process.stdin is not None:
+        process.stdin.close()
+        process.stdin = None
 
 
 def stop_process(process, timeout=10, *, seal_observations=True):

@@ -24,7 +24,7 @@ pub fn main(init: std.process.Init) !void {
         var buffer: [4096]u8 = undefined;
         var out = std.Io.File.stdout().writer(init.io, &buffer);
         try out.interface.writeAll("{\"page\":");
-        try page.facts.writeJson(&out.interface);
+        try client.activity_reply.writePage(&out.interface, &page.facts);
         try out.interface.writeAll(",\"next\":");
         try std.json.Stringify.value(page.continuation(), .{}, &out.interface);
         try out.interface.writeByte('}');

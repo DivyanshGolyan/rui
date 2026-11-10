@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -77,7 +78,8 @@ else:
     if flaky.exists():
         flaky.unlink()
         sys.exit(9)
-    binary = Path('.zig-cache/o/ci-compiled/unit-native-tests')
+    root = 'unit-store-tests' if 'test-store' in sys.argv else 'unit-native-tests'
+    binary = Path('.zig-cache/o/ci-compiled') / root
     if not binary.exists():
         binary = Path('.zig-cache/o/ci-compiled/test-tests')
     sys.exit(subprocess.run([str(binary)]).returncode)
@@ -119,6 +121,14 @@ else:
         self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), 'downloaded source')
         self.assertEqual(self.receipt['runner'], ['ubuntu24', '20261012.334.1'])
         self.assertIn('Using verified producer artifact 101', (self.root / 'summary').read_text())
+
+    def test_a_rerun_of_failed_jobs_executes_the_earlier_attempts_producer_without_fetching(self):
+        self.receipt['run_attempt'] = 1
+        self.refresh_download()
+        build_artifact.restore(['101'], ['test'])
+        self.assertEqual(self.gates(), ['producer'])
+        self.assertFalse((self.root / 'compiled').exists())
+        self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), 'downloaded source')
 
     def test_stalled_download_retries_once_from_empty_then_verifies_producer(self):
         for failure in ('curl stall', 'subprocess timeout'):
@@ -199,7 +209,7 @@ else:
         mismatches = [('inputs', field, value) for field, value in [
             ('tree', 'foreign-tree'), ('targets', ['test-full']), ('system', 'Darwin'),
             ('pr_ci', True), ('machine', 'arm64'), ('compiler', 'd' * 64), ('format', 2)]]
-        mismatches += [(None, 'source_sha', 'foreign'), (None, 'run_id', 456), (None, 'run_attempt', 1)]
+        mismatches += [(None, 'source_sha', 'foreign'), (None, 'run_id', 456), (None, 'run_attempt', 3), (None, 'run_attempt', 0)]
         for scope, field, value in mismatches:
             with self.subTest(field=field):
                 self.receipt = copy.deepcopy(original)
@@ -249,7 +259,7 @@ else:
         native.chmod(0o751)
         for name in ('unit-store-tests',):
             binary = unit_root / name
-            binary.write_text('#!/bin/sh\n# ' + name + '\nexit 0\n')
+            binary.write_text('#!/bin/sh\necho store >> "$GATE_LOG"\nexit 0\n')
             binary.chmod(0o751)
         rest = build_artifact.roots()['binaries'] / 'ci-cpu.json'
         rest.write_text('{}')
@@ -275,6 +285,19 @@ else:
             self.assertEqual(restored.stat().st_mode & 0o777, 0o751)
         self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), 'downloaded source')
         self.assertTrue((build_artifact.roots()['binaries'] / 'test-logic_tests').exists())
+
+    def test_split_target_runs_its_restored_root(self):
+        for target, root in (('test-native', 'unit-native-tests'), ('test-store', 'unit-store-tests')):
+            with self.subTest(target=target):
+                self.inputs['targets'] = [target, 'test-logic']
+                self.split_downloads()
+                build_artifact.restore(['202', '201'], self.inputs['targets'])
+                self.assertTrue((build_artifact.roots()['binaries'] / root).is_file())
+                self.assertEqual(self.gates(targets=json.dumps([target])),
+                                 ['producer' if target == 'test-native' else 'store'])
+                shutil.rmtree(self.root / 'unit-bin')
+                for name in ('unit-native-tests', 'unit-store-tests'):
+                    (build_artifact.roots()['binaries'] / name).unlink()
 
     def test_split_rejects_tampered_or_missing_additional_unit_roots(self):
         self.split_downloads()
@@ -461,8 +484,7 @@ class PrModeTest(unittest.TestCase):
                 command = run.call_args.args[0]
                 self.assertEqual("-Dpr-ci=true" in command, fast)
                 self.assertEqual("-j8" in command, fast)
-                run_selected.execute(["check"], None)
-                self.assertEqual("-Dpr-ci=true" in run.call_args.args[0], fast)
+                self.assertEqual("-Dpr-ci=true" in run_selected.command(["check"]), fast)
 
 
 if __name__ == '__main__':

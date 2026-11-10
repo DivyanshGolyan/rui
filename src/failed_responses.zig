@@ -453,6 +453,30 @@ fn expectMode(dir: std.Io.Dir, name: []const u8, mode: u32) !void {
     try testing.expectEqual(mode, @as(u32, @intCast(stat.permissions.toMode() & 0o777)));
 }
 
+test "failed response export copies the selected record" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir = try open(io, tmp.dir);
+    defer dir.close(io);
+    const raw = "response\x00body";
+    const source = try testCapture(tmp.dir, "capture", raw);
+    defer source.close(io);
+    const binding: attempt.AttemptBinding = .{ .turn_id = 11, .operation_id = 22, .attempt_ordinal = 3 };
+    _ = try retain(io, dir, .{}, .{ .file = source, .length = raw.len, .transfer = .complete }, .{ .binding = binding, .code = "provider_http_400" });
+    const Sink = struct {
+        bytes: std.ArrayList(u8) = .empty,
+        pub fn append(self: *@This(), value: []const u8) !void {
+            try self.bytes.appendSlice(testing.allocator, value);
+        }
+    };
+    var sink: Sink = .{};
+    defer sink.bytes.deinit(testing.allocator);
+    try exportRecord(io, tmp.dir, binding, .body, &sink);
+    try testing.expectEqualSlices(u8, raw, sink.bytes.items);
+    try testing.expectError(error.InvalidFailedResponseRecord, exportRecord(io, tmp.dir, .{ .turn_id = 12, .operation_id = 22, .attempt_ordinal = 3 }, .body, &sink));
+}
+
 test "failed response records keep exact bytes, signal partial and omitted captures, and stay private" {
     const io = testing.io;
     var tmp = testing.tmpDir(.{});

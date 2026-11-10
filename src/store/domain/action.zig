@@ -2,8 +2,16 @@
 
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
-const protocol = @import("../../protocol.zig");
-const tool_catalog = @import("../../tools.zig");
+const turn_ending = @import("../../turn_ending.zig");
+const tool_proposal = @import("../../tool_proposal.zig");
+const workspace_path = @import("../../workspace_path.zig");
+const outcome_code = @import("../../outcome_code.zig");
+const content_string = @import("../../content_string.zig");
+const tool_name = @import("../../tool_name.zig");
+const idempotency_key = @import("../../idempotency_key.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
+const session_id = @import("../../session_id.zig");
+const tool_catalog = @import("../../tool_record.zig");
 const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
 const content_domain = @import("content.zig");
@@ -43,11 +51,11 @@ pub const CoreNames = struct {
 
     pub fn of() CoreNames {
         return .{
-            .message_agent = protocol.contentDigest(tool_catalog.message_agent_record.name),
-            .read_transcript = protocol.contentDigest(tool_catalog.read_transcript_record.name),
-            .start_agent = protocol.contentDigest(tool_catalog.start_agent_record.name),
-            .find_tools = protocol.contentDigest(tool_catalog.find_tools_record.name),
-            .skill = protocol.contentDigest(tool_catalog.skill_record.name),
+            .message_agent = content_string.digest(tool_catalog.message_agent_record.name),
+            .read_transcript = content_string.digest(tool_catalog.read_transcript_record.name),
+            .start_agent = content_string.digest(tool_catalog.start_agent_record.name),
+            .find_tools = content_string.digest(tool_catalog.find_tools_record.name),
+            .skill = content_string.digest(tool_catalog.skill_record.name),
         };
     }
 };
@@ -109,7 +117,7 @@ const next_core_action = rsql.Read(.{
         "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND " ++ coreCallSql(1) ++ " " ++
         "ORDER BY action.action_id LIMIT 1",
     .Args = struct { message_agent_name: [32]u8, read_transcript_name: [32]u8, start_agent_name: [32]u8, find_tools_name: [32]u8, skill_name: [32]u8 },
-    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: protocol.Bounded(protocol.max_session_bytes), tool: CoreTool },
+    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: Bounded(session_id.max_reference_bytes), tool: CoreTool },
     .cardinality = .optional,
 });
 
@@ -120,7 +128,7 @@ pub const CoreTool = enum { message_agent, read_transcript, start_agent, find_to
 pub const CoreActionInput = struct {
     binding: ActionAttemptBinding,
     tool: CoreTool,
-    session: protocol.Bounded(protocol.max_session_bytes),
+    session: Bounded(session_id.max_reference_bytes),
     arguments: ContentReference,
 };
 
@@ -131,8 +139,8 @@ pub const CoreActionInput = struct {
 /// own Session stop under a key its cause names, so a stop read here and
 /// never run is run again under the same key.
 pub const OwedStop = struct {
-    session: protocol.Bounded(protocol.session_id_bytes),
-    key: protocol.Bounded(protocol.max_key_bytes),
+    session: Bounded(session_id.bytes),
+    key: Bounded(idempotency_key.max_bytes),
 };
 
 /// An attached child's Turn ending its parent is owed as a Message (D39),
@@ -141,8 +149,10 @@ pub const OwedStop = struct {
 /// it, which delivers nothing (D139) and only settles the row.
 pub const OwedEnding = struct {
     turn_id: u64,
-    child: protocol.Bounded(protocol.session_id_bytes),
-    ending: protocol.TurnEnding,
+    child: Bounded(session_id.bytes),
+    /// The Session the ending is owed to, whose skills its answer binds.
+    parent: Bounded(session_id.bytes),
+    ending: turn_ending.TurnEnding,
     answer: ?ContentReference,
     quiet: bool,
 };
@@ -166,14 +176,16 @@ pub const ending_stop_sql = "EXISTS(SELECT 1 FROM session_stop st WHERE st.selec
 
 /// The oldest owed ending.
 const owed_ending = rsql.Read(.{
-    .sql = "SELECT e.turn_id,t.session_ref,t.outcome_code,t.outcome_content_id,c.byte_length,c.digest," ++ ending_stop_sql ++ " " ++
-        "FROM session_ending_owed e @index(session_ending_open) JOIN turn t ON t.turn_id=e.turn_id LEFT JOIN content c ON c.content_id=t.outcome_content_id " ++
+    .sql = "SELECT e.turn_id,t.session_ref,child.parent_ref,t.outcome_code,t.outcome_content_id,c.byte_length,c.digest," ++ ending_stop_sql ++ " " ++
+        "FROM session_ending_owed e @index(session_ending_open) JOIN turn t ON t.turn_id=e.turn_id JOIN session child ON child.session_ref=t.session_ref " ++
+        "LEFT JOIN content c ON c.content_id=t.outcome_content_id " ++
         "WHERE e.delivered=0 ORDER BY e.turn_id LIMIT 1",
     .Args = struct {},
     .Row = struct {
         turn_id: rsql.Positive,
-        session_ref: protocol.Bounded(protocol.session_id_bytes),
-        outcome_code: protocol.Bounded(protocol.max_code_bytes),
+        session_ref: Bounded(session_id.bytes),
+        parent_ref: ?Bounded(session_id.bytes),
+        outcome_code: Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         byte_length: ?u64,
         digest: ?[32]u8,
@@ -186,7 +198,7 @@ const owed_ending = rsql.Read(.{
 const owed_stop = rsql.Read(.{
     .sql = "SELECT child_ref,cause_ref,cause_position FROM session_stop_owed WHERE settled=0 ORDER BY child_ref LIMIT 1",
     .Args = struct {},
-    .Row = struct { child_ref: protocol.Bounded(protocol.session_id_bytes), cause_ref: protocol.Bounded(protocol.session_id_bytes), cause_position: u64 },
+    .Row = struct { child_ref: Bounded(session_id.bytes), cause_ref: Bounded(session_id.bytes), cause_position: u64 },
     .cardinality = .optional,
 });
 
@@ -212,7 +224,7 @@ pub fn nextCoreWork(a: anytype, include_mcp: bool) !?CoreWork {
     try a.run();
     if (stop) |owed| {
         var work: OwedStop = .{ .session = owed.child_ref, .key = .{} };
-        var buffer: [protocol.max_key_bytes]u8 = undefined;
+        var buffer: [idempotency_key.max_bytes]u8 = undefined;
         try work.key.set(try owedStopKey(&buffer, owed.child_ref.slice(), owed.cause_ref.slice(), owed.cause_position));
         return .{ .stop = work };
     }
@@ -221,6 +233,7 @@ pub fn nextCoreWork(a: anytype, include_mcp: bool) !?CoreWork {
         return .{ .ending = .{
             .turn_id = owed.turn_id.get(),
             .child = owed.session_ref,
+            .parent = owed.parent_ref orelse return error.CorruptStore,
             .ending = outcome.ending(owed.stopped),
             .answer = if (outcome == .completed) .{ .length = owed.byte_length orelse return error.CorruptStore, .digest = owed.digest orelse return error.CorruptStore } else null,
             .quiet = owed.quiet,
@@ -251,7 +264,7 @@ const attempt_action = rsql.Write(.{
 pub const ActionAttemptBinding = attempt.ActionAttemptBinding;
 
 pub const SupersedingControl = struct {
-    command_key: protocol.Bounded(protocol.max_key_bytes),
+    command_key: Bounded(idempotency_key.max_bytes),
 };
 
 pub const ActionAttemptAdmission = struct {
@@ -277,21 +290,21 @@ pub const ActionDispatchPermit = attempt.ActionDispatchPermit;
 
 /// What a Bash execution reads from its Attempt.
 pub const BashExecutionInput = struct {
-    session: protocol.Bounded(protocol.max_session_bytes),
-    sender_handle: protocol.Bounded(32),
-    workspace: protocol.Bounded(protocol.max_workspace_bytes),
+    session: Bounded(session_id.max_reference_bytes),
+    sender_handle: Bounded(32),
+    workspace: Bounded(workspace_path.max_bytes),
     arguments: ContentReference,
     timeout_ms: u64,
 };
 
 pub const McpExecutionInput = struct {
-    session: protocol.Bounded(protocol.max_session_bytes),
-    parent: ?protocol.Bounded(protocol.max_session_bytes),
-    root: protocol.Bounded(protocol.max_session_bytes),
-    name: protocol.Bounded(protocol.max_tool_name_bytes),
-    server: protocol.Bounded(tool_catalog.max_server_bytes),
+    session: Bounded(session_id.max_reference_bytes),
+    parent: ?Bounded(session_id.max_reference_bytes),
+    root: Bounded(session_id.max_reference_bytes),
+    name: Bounded(tool_name.max_bytes),
+    server: Bounded(tool_catalog.max_server_bytes),
     input_schema: ContentReference,
-    sender_handle: protocol.Bounded(32),
+    sender_handle: Bounded(32),
     arguments: ContentReference,
     timeout_ms: u64,
 };
@@ -334,7 +347,7 @@ const action_call_position = rsql.Read(.{
 
 /// A field of the Proposal the Action carries out, checked as every
 /// Proposal read checks it. Round 2 depends on round 1's position.
-pub fn actionContent(a: anytype, session_ref: []const u8, action_id: u64, field: protocol.ProposalField) !ContentReference {
+pub fn actionContent(a: anytype, session_ref: []const u8, action_id: u64, field: tool_proposal.Field) !ContentReference {
     var found: action_call_position.Result = undefined;
     a.read(action_call_position, .{ .action_id = action_id, .session = session_ref }, &found);
     try a.run();
@@ -392,9 +405,9 @@ const bash_input = rsql.Read(.{
     .Args = struct { action_id: u64, parent_operation_id: u64, turn_id: u64 },
     .Row = struct {
         position: ?rsql.Positive,
-        workspace: *protocol.Bounded(protocol.max_workspace_bytes),
-        session: *protocol.Bounded(protocol.max_session_bytes),
-        sender_handle: *protocol.Bounded(32),
+        workspace: *Bounded(workspace_path.max_bytes),
+        session: *Bounded(session_id.max_reference_bytes),
+        sender_handle: *Bounded(32),
         timeout_ms: rsql.Positive,
     },
     .cardinality = .optional,
@@ -412,7 +425,7 @@ pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *B
     try a.run();
     if (!found.get()) return error.StaleActionAttemptBinding;
     const position = (row.position orelse return error.CorruptStore).get();
-    const reference = (try reads_domain.proposal(a, out.session.slice(), position)).fields[@backingInt(protocol.ProposalField.arguments)];
+    const reference = (try reads_domain.proposal(a, out.session.slice(), position)).fields[@backingInt(tool_proposal.Field.arguments)];
     out.arguments = .{ .length = reference.length, .digest = reference.digest };
     out.timeout_ms = row.timeout_ms.get();
 }
@@ -492,7 +505,7 @@ const superseding_stop = rsql.Read(.{
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql,
     .Args = struct { action_id: u64, parent_operation_id: u64 },
-    .Row = struct { command_key: ?protocol.Bounded(protocol.max_key_bytes) },
+    .Row = struct { command_key: ?Bounded(idempotency_key.max_bytes) },
     .cardinality = .one,
 });
 
@@ -711,11 +724,11 @@ const next_mcp_action = rsql.Read(.{
         "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
         "AND " ++ mcp_serial_sql ++ " ORDER BY action.action_id LIMIT 1",
     .Args = struct {},
-    .Row = struct { action_id: rsql.Positive, server: protocol.Bounded(tool_catalog.max_server_bytes) },
+    .Row = struct { action_id: rsql.Positive, server: Bounded(tool_catalog.max_server_bytes) },
     .cardinality = .optional,
 });
 pub const next_mcp_action_sql = next_mcp_action.sql;
-pub const McpAction = struct { action_id: u64, server: protocol.Bounded(tool_catalog.max_server_bytes) };
+pub const McpAction = struct { action_id: u64, server: Bounded(tool_catalog.max_server_bytes) };
 pub fn nextMcpAction(a: anytype) !?McpAction {
     var row: next_mcp_action.Result = undefined;
     a.read(next_mcp_action, .{}, &row);
@@ -785,7 +798,7 @@ const mcp_input = rsql.Read(.{
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 AND action." ++ action_attempted_sql ++
         " AND action.resolution_code IS NULL AND " ++ mcpCallSql("action", "operation"),
     .Args = struct { action_id: u64, parent_operation_id: u64, turn_id: u64 },
-    .Row = struct { position: ?rsql.Positive, session: *protocol.Bounded(protocol.max_session_bytes), sender_handle: *protocol.Bounded(32), name: *protocol.Bounded(protocol.max_tool_name_bytes), server: *protocol.Bounded(tool_catalog.max_server_bytes), digest: [32]u8, length: u64, timeout_ms: rsql.Positive },
+    .Row = struct { position: ?rsql.Positive, session: *Bounded(session_id.max_reference_bytes), sender_handle: *Bounded(32), name: *Bounded(tool_name.max_bytes), server: *Bounded(tool_catalog.max_server_bytes), digest: [32]u8, length: u64, timeout_ms: rsql.Positive },
     .cardinality = .optional,
 });
 test "MCP execution input uses each engine's tool-name content layout" {
@@ -803,7 +816,7 @@ test "MCP execution input uses each engine's tool-name content layout" {
 const session_parent = rsql.Read(.{
     .sql = "SELECT parent_ref AS parent FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { parent: ?protocol.Bounded(protocol.max_session_bytes) },
+    .Row = struct { parent: ?Bounded(session_id.max_reference_bytes) },
     .cardinality = .optional,
 });
 pub fn readMcpExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *McpExecutionInput) !void {
@@ -815,7 +828,7 @@ pub fn readMcpExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *Mc
     out.input_schema = .{ .length = row.length, .digest = row.digest };
     out.timeout_ms = row.timeout_ms.get();
     const position = (row.position orelse return error.CorruptStore).get();
-    const reference = (try reads_domain.proposal(a, out.session.slice(), position)).fields[@backingInt(protocol.ProposalField.arguments)];
+    const reference = (try reads_domain.proposal(a, out.session.slice(), position)).fields[@backingInt(tool_proposal.Field.arguments)];
     out.arguments = .{ .length = reference.length, .digest = reference.digest };
     out.root = out.session;
     out.parent = null;

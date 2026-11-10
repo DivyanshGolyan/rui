@@ -176,12 +176,23 @@ pub const Queue = struct {
 
     /// What a write whose batch failed to commit answers: the failure its
     /// entry point reports when it finds the Store fenced. A write that
-    /// already failed keeps its own error, which says more.
+    /// already failed keeps its own error, which says more. A reply that may
+    /// also fail ordinarily, as a reload out of memory does, answers as a reply.
     fn lostAnswer(comptime T: type, answer: T) T {
         return switch (@typeInfo(T)) {
-            .error_union => if (answer) |_| error.StoreFenced else |err| err,
+            .error_union => |info| if (answer) |payload|
+                (if (comptime isReply(info.payload)) lostAnswer(info.payload, payload) else error.StoreFenced)
+            else |err|
+                err,
             .@"enum", .@"union" => .infrastructure_failure,
             else => @compileError("a write answers an error union or a reply with infrastructure_failure: " ++ @typeName(T)),
+        };
+    }
+
+    fn isReply(comptime T: type) bool {
+        return switch (@typeInfo(T)) {
+            .@"enum", .@"union" => @hasField(T, "infrastructure_failure"),
+            else => false,
         };
     }
 

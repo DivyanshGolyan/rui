@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import host_process
-import session_list_integration as fixture
+import session_list_fixture as fixture
 import os_semantics
 
 
@@ -149,7 +149,7 @@ def case(binary, client, probe, mode):
             kwargs.update(env=env, stdin=subprocess.PIPE)
             return original_popen(*args, **kwargs)
         with patch.object(host_process.subprocess, "Popen", popen):
-            process, _ = fixture.start_ready_process(
+            process, _ = host_process.start_ready_process(
                 [binary, "host", "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"],
                 required_fields={"execution": "unavailable"}, observations="list")
         diagnostics = host_process.HostDiagnostics(process)
@@ -224,8 +224,8 @@ def case(binary, client, probe, mode):
                 diagnostics._read_error = original_error
                 assert not worker.is_alive(), "proof census worker retained"
             diagnostics.close()
-            process.stdin.close()
-            fixture.stop_process(process)
+            host_process.close_stdin(process)
+            host_process.stop_process(process)
 
 
 def charge_negative(binary, client):
@@ -234,7 +234,7 @@ def charge_negative(binary, client):
     with tempfile.TemporaryDirectory(prefix="rui-list-charge-") as directory:
         store = pathlib.Path(directory) / "store"
         store.mkdir(mode=0o700)
-        process, _ = fixture.start_ready_process(
+        process, _ = host_process.start_ready_process(
             [binary, "host", "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"],
             required_fields={"execution": "unavailable"}, observations="list")
         diagnostics = host_process.HostDiagnostics(process)
@@ -249,7 +249,7 @@ def charge_negative(binary, client):
                 process.kill()
             process.wait(timeout=10)
             diagnostics.close()
-            fixture.stop_process(process)
+            host_process.stop_process(process)
 
 
 def main():

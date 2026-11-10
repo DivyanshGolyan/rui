@@ -9,12 +9,11 @@ import hashlib
 import os
 import pathlib
 import pty
-from terminal_process import COLUMNS, ROWS, open_pty, terminal_process
+from terminal_process import COLUMNS, ROWS, answers_to, open_pty, spawn, terminal_process
 from terminal_screen import ScreenCapture
 import re
 import resource
 import select
-import shlex
 import shutil
 import signal
 import socket
@@ -29,13 +28,12 @@ import host_process
 from host_process import (canonical_fixture_root, start_ready_process, stop_process,
                           dispose_all, preserve_failure_metadata, _failure_destination,
                           copy_failure_diagnostics, wait_for, STORE_SCHEMA)
-import codex_integration as codex_fixture
+import codex_fixture
 from product_defaults import DEFAULTS
 import os_semantics
+from host_launch_fixture import COMMAND_TIMEOUT, RUI, forced_crash_cleanup, matching_processes, run_start
 
 
-RUI = pathlib.Path(sys.argv[1]).resolve()
-COMMAND_TIMEOUT = 16
 # The format this build supports; older formats are refused, never migrated.
 SCHEMA = STORE_SCHEMA
 # Every unflagged start path (bare rui, host start, host serve) must resolve
@@ -161,17 +159,6 @@ def environment(home, credential):
     }
 
 
-def run_start(store, env, *arguments, **options):
-    return subprocess.run(
-        [RUI, "host", "start", "--store", store, *arguments],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=COMMAND_TIMEOUT,
-        **options,
-    )
-
-
 def status(store, env):
     result = subprocess.run(
         [RUI, "host", "status", "--store", store],
@@ -200,58 +187,9 @@ def instance(output, capacity):
     return output["instance"]
 
 
-def matching_processes(store, *, descendants=False):
-    """Test-cleanup discovery only; PIDs are never treated as Host authority."""
-    expected = str(pathlib.Path(store).resolve())
-    # A Host is owned when it executes this RUI; its argv only says which Store it serves.
-    owned = os_semantics.processes_executing(RUI)
-    matches = []
-    candidates = []
-    if pathlib.Path("/proc").is_dir():
-        for entry in pathlib.Path("/proc").iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                argv = (entry / "cmdline").read_bytes().split(b"\0")
-                candidates.append((int(entry.name), [part.decode() for part in argv if part]))
-            except (FileNotFoundError, ProcessLookupError, PermissionError, UnicodeDecodeError):
-                continue
-    else:
-        listing = subprocess.run(
-            ["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=5, check=True
-        )
-        for line in listing.stdout.splitlines():
-            try:
-                pid_text, command = line.strip().split(maxsplit=1)
-                candidates.append((int(pid_text), shlex.split(command)))
-            except (ValueError, IndexError):
-                continue
-    for pid, text in candidates:
-        if pid in owned and len(text) >= 5 and text[1:4] == ["host", "serve", "--store"]:
-            try:
-                selected = str(pathlib.Path(text[4]).resolve())
-            except OSError:
-                continue
-            if selected == expected or (descendants and pathlib.Path(selected).is_relative_to(expected)):
-                matches.append(pid)
-    return matches
-
-
 def wait_for_processes(store, count, timeout=5):
     return wait_for(lambda: matching_processes(store), f"{count} Host processes", timeout=timeout, interval=0.02,
                     ready=lambda found: len(found) == count)
-
-
-def forced_crash_cleanup(store, *, descendants=False):
-    # #329 is intentionally not part of this fixture. SIGKILL is a forced
-    # crash used only to avoid leaking detached test processes.
-    for pid in matching_processes(store, descendants=descendants):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    wait_for(lambda: matching_processes(store, descendants=descendants), "forced-crash cleanup to reap the detached Host",
-             timeout=5, interval=0.02, ready=lambda found: not found)
 
 
 def assert_diagnostics(store, credential, reported):
@@ -379,7 +317,7 @@ def startup_limits(root, env):
                 borrowers = []
                 try:
                     for _ in range(capacity):
-                        peer = socket.socket(socket.AF_UNIX)
+                        peer = os_semantics.unix_stream()
                         borrowers.append(peer)
                         peer.settimeout(3)
                         peer.connect(socket_path)
@@ -387,7 +325,7 @@ def startup_limits(root, env):
                     # Discovery is prepared by intake after reading preceding
                     # borrowers, so its reply establishes their classification.
                     assert status(store, env)["status"] == "ready"
-                    with socket.socket(socket.AF_UNIX) as peer:
+                    with os_semantics.unix_stream() as peer:
                         peer.settimeout(3)
                         peer.connect(socket_path)
                         peer.sendall(b"POST /v1/configure HTTP/1.1\r\n")
@@ -401,7 +339,7 @@ def startup_limits(root, env):
                         }, response
                     assert status(store, env)["status"] == "ready"
                     for _ in range(3):
-                        peer = socket.socket(socket.AF_UNIX)
+                        peer = os_semantics.unix_stream()
                         borrowers.append(peer)
                         peer.settimeout(3)
                         peer.connect(socket_path)
@@ -409,7 +347,7 @@ def startup_limits(root, env):
                     for _ in range(3):
                         borrowers.pop().close()
                     for _ in range(2):
-                        peer = socket.socket(socket.AF_UNIX)
+                        peer = os_semantics.unix_stream()
                         borrowers.append(peer)
                         peer.settimeout(3)
                         peer.connect(socket_path)
@@ -422,7 +360,7 @@ def startup_limits(root, env):
                             pass
                         peer.settimeout(3)
                     for route in (b"/v1/control/session-stop", b"/v1/control/unknown"):
-                        with socket.socket(socket.AF_UNIX) as excess:
+                        with os_semantics.unix_stream() as excess:
                             excess.settimeout(3)
                             excess.connect(socket_path)
                             excess.sendall(b"POST " + route + b" HTTP/1.1\r\n")
@@ -434,7 +372,7 @@ def startup_limits(root, env):
                             assert json.loads(body) == {
                                 "version": host_process.WIRE_VERSION, "type": "busy", "code": "control_capacity_exhausted",
                             }, response
-                    peer = socket.socket(socket.AF_UNIX)
+                    peer = os_semantics.unix_stream()
                     borrowers.append(peer)
                     peer.connect(socket_path)
                     assert status(store, env)["status"] == "ready", "unknown route blocked reserved discovery"
@@ -444,12 +382,12 @@ def startup_limits(root, env):
                     # place. Exercise both request-line and body stalls.
                     fields = b"Content-Type: application/json\r\nX-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\nContent-Length: 2\r\n\r\n"
                     for tail in (b"", fields + b"{"):
-                        discovery = socket.socket(socket.AF_UNIX)
+                        discovery = os_semantics.unix_stream()
                         borrowers.append(discovery)
                         discovery.settimeout(3)
                         discovery.connect(socket_path)
                         discovery.sendall(b"POST /v1/host-info HTTP/1.1\r\n" + tail)
-                        with socket.socket(socket.AF_UNIX) as excess:
+                        with os_semantics.unix_stream() as excess:
                             excess.settimeout(3)
                             excess.connect(socket_path)
                             excess.sendall(b"POST /v1/host-info HTTP/1.1\r\n")
@@ -462,7 +400,7 @@ def startup_limits(root, env):
                                 "version": host_process.WIRE_VERSION, "type": "busy", "code": "discovery_capacity_exhausted",
                             }, response
                         for _ in range(2):
-                            control = socket.socket(socket.AF_UNIX)
+                            control = os_semantics.unix_stream()
                             borrowers.append(control)
                             control.settimeout(3)
                             control.connect(socket_path)
@@ -949,10 +887,10 @@ def main():
         caller = None
         try:
             original_terminal = termios.tcgetattr(master)
-            caller = subprocess.Popen([RUI], cwd=root, env=bare_env,
+            caller = spawn([RUI], cwd=root, env=bare_env,
                 stdin=slave, stdout=slave, stderr=slave)
             output = bytearray()
-            screen = ScreenCapture(COLUMNS, ROWS)
+            screen = ScreenCapture(COLUMNS, ROWS, reply=answers_to(master))
             until = time.monotonic() + COMMAND_TIMEOUT
             # The committed screen, not a byte match, establishes the overview:
             # the empty Store's hint has drawn and the cursor sits at the composer.

@@ -15,6 +15,7 @@ const named_scratch = @import("named_scratch.zig");
 const output_format = @import("output_format.zig");
 const pages = @import("os/pages.zig");
 const protocol = @import("protocol.zig");
+const ScratchBudget = @import("ScratchBudget.zig");
 const transport_policy = @import("transport_policy.zig");
 
 /// One response's decoding, in the execution Workspace; the Host decodes
@@ -213,13 +214,13 @@ pub const Validated = struct {
 pub const EventData = struct {
     io: std.Io,
     file: std.Io.File,
-    budget: protocol.ScratchBudget,
+    budget: ScratchBudget,
     length: u64 = 0,
     charged: u64 = 0,
 
     /// Fills `self` with an empty unlinked scratch file. On error `self`
     /// owns nothing and `retained` holds any name left to reclaim.
-    pub fn init(self: *EventData, io: std.Io, scratch_path: []const u8, name: []const u8, budget: protocol.ScratchBudget, fail_unlink: bool, retained: *?named_scratch.Owner) !void {
+    pub fn init(self: *EventData, io: std.Io, scratch_path: []const u8, name: []const u8, budget: ScratchBudget, fail_unlink: bool, retained: *?named_scratch.Owner) !void {
         retained.* = null;
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
@@ -1562,7 +1563,7 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
         var root_buffer: [protocol.max_store_bytes]u8 = undefined;
         const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
         var used: std.atomic.Value(u64) = .init(raw.len);
-        const budget = protocol.ScratchBudget{ .used = &used, .limit = raw.len + decoded.len + 6 * output_format.output_metadata_record_bytes - shortfall };
+        const budget = ScratchBudget{ .used = &used, .limit = raw.len + decoded.len + 6 * output_format.output_metadata_record_bytes - shortfall };
         var retained: ?named_scratch.Owner = null;
         const descriptors = @import("os/descriptor_limit.zig");
         const baseline = (try descriptors.observe(std.testing.io)).open_descriptors;
@@ -1614,7 +1615,7 @@ test "an event's data is charged whole before its metadata from a shared budget"
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used: std.atomic.Value(u64) = .init(0);
-    const budget = protocol.ScratchBudget{ .used = &used, .limit = done.len + output_format.output_metadata_record_bytes };
+    const budget = ScratchBudget{ .used = &used, .limit = done.len + output_format.output_metadata_record_bytes };
     var retained: ?named_scratch.Owner = null;
     var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root, "metadata", budget, false, &retained);
     defer metadata.deinit();
@@ -1924,7 +1925,7 @@ test "provider reasoning strings preserve raw items" {
         const path = root[0..try tmp.dir.realPath(std.testing.io, &root)];
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
-        const budget = protocol.ScratchBudget{ .used = &used, .limit = sse.len + 64 * 1024 };
+        const budget = ScratchBudget{ .used = &used, .limit = sse.len + 64 * 1024 };
         var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, path, "metadata", budget, false, &retained);
         defer metadata.deinit();
         var data: EventData = undefined;

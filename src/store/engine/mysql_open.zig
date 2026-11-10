@@ -6,7 +6,9 @@ const wire = @import("../wire/mysql_connection.zig");
 const rows = @import("../mysql_row.zig");
 const literal = @import("../mysql_literal.zig");
 const schema = @import("../schema.zig");
-const protocol = @import("../../protocol.zig");
+const store_path = @import("../../store_path.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
+const wire_version = @import("../../wire_version.zig").wire_version;
 const policy = @import("mysql_refusal.zig");
 
 pub const Options = struct {
@@ -16,20 +18,20 @@ pub const Options = struct {
 pub const State = struct {
     epoch: u64,
     commit_seq: u64,
-    doublewrite: protocol.Bounded(32),
+    doublewrite: Bounded(32),
     store_id: [2 * schema.store_id_bytes]u8,
 };
 const FactsRow = struct {
-    version: protocol.Bounded(128),
-    version_comment: protocol.Bounded(256),
+    version: Bounded(128),
+    version_comment: Bounded(256),
     read_only: bool,
     super_read_only: bool,
     flush: u64,
     sync: u64,
     bin: bool,
-    bin_format: protocol.Bounded(32),
-    doublewrite: protocol.Bounded(32),
-    database: protocol.Bounded(64),
+    bin_format: Bounded(32),
+    doublewrite: Bounded(32),
+    database: Bounded(64),
 };
 
 pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []const u8) !State {
@@ -37,7 +39,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     // The database name is also MySQL's connection-owned lock name.
     // GET_LOCK accepts at most 64 characters; do not truncate and collide.
     if (options.database.len == 0 or options.database.len > 64) return error.WrongStoreIdentity;
-    if (selector.len > protocol.max_store_bytes) return error.WrongStoreIdentity;
+    if (selector.len > store_path.max_bytes) return error.WrongStoreIdentity;
     const w = conn.batch();
     for (schema.mysql_session) |sql| {
         try w.writeAll(sql);
@@ -67,7 +69,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     })) |failure| return failure;
 
     try conn.query("SELECT meta_key,meta_value FROM store_meta;" ++ comptime schema.catalogSql("DATABASE()"));
-    const Meta = struct { key: protocol.Bounded(32), value: protocol.Bounded(protocol.max_store_bytes) };
+    const Meta = struct { key: Bounded(32), value: Bounded(store_path.max_bytes) };
     var meta_columns = try columns(Meta, conn);
     var store_id: [2 * schema.store_id_bytes]u8 = undefined;
     var seen: packed struct { format: bool = false, wire_version: bool = false, selector: bool = false, store_id: bool = false } = .{};
@@ -82,7 +84,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
             if (found != schema.schema_version) return error.StoreSchemaBehind;
             seen.format = true;
         } else if (std.mem.eql(u8, key, "wire_version")) {
-            if (!std.mem.eql(u8, value, protocol.wire_version)) return error.WrongStoreVersion;
+            if (!std.mem.eql(u8, value, wire_version)) return error.WrongStoreVersion;
             seen.wire_version = true;
         } else if (std.mem.eql(u8, key, "store_selector")) {
             if (!std.mem.eql(u8, value, selector)) return error.WrongStoreIdentity;
@@ -93,7 +95,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
             seen.store_id = true;
         } else return error.WrongStoreSchema;
     }
-    const Catalog = struct { line: protocol.Bounded(2048) };
+    const Catalog = struct { line: Bounded(2048) };
     var catalog_columns = try columns(Catalog, conn);
     var digest: u64 = 0;
     while (try nextRow(conn)) {
@@ -108,7 +110,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     const batch = conn.batch();
     try batch.writeAll("START TRANSACTION;");
     if (!seen.format) try insertMeta(batch, "format", std.fmt.comptimePrint("{d}", .{schema.schema_version}));
-    if (!seen.wire_version) try insertMeta(batch, "wire_version", protocol.wire_version);
+    if (!seen.wire_version) try insertMeta(batch, "wire_version", wire_version);
     if (!seen.selector) try insertMeta(batch, "store_selector", selector);
     if (!seen.store_id) {
         var random: [schema.store_id_bytes]u8 = undefined;

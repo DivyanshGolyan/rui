@@ -2,6 +2,7 @@
 const std = @import("std");
 const store = @import("store.zig");
 const protocol = @import("protocol.zig");
+const wire_request = @import("wire_request.zig");
 const tools = @import("tools.zig");
 const execution = @import("execution.zig");
 const Host = @import("server_host.zig").Host;
@@ -74,13 +75,13 @@ fn run(case: Case) !void {
     const workspace_buffer = try allocator.create([protocol.max_workspace_bytes]u8);
     defer allocator.destroy(workspace_buffer);
     const workspace = try store.testingCanonicalCwd(std.testing.io, workspace_buffer);
-    const command = try allocator.create(protocol.ConfigureCommand);
+    const command = try allocator.create(wire_request.ConfigureCommand);
     defer allocator.destroy(command);
     command.* = try store.testingCompleteConfiguration("mcp-config", "", workspace, "model-a");
     command.configuration.tools = try .of(&.{"fetch_page"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("bypass");
-    const configured = storage.configure(command, .{});
+    const configured = try storage.configure(command, .{});
     try expectHere(@src(), configured == .accepted);
     const session = configured.accepted.session;
     try store.testingSubmitMessage(storage, &tmp, "mcp-message", "mcp-message", session.slice(), "fetch");
@@ -99,24 +100,7 @@ fn run(case: Case) !void {
     script.* = .{ .reply = reply, .more = if (case == .serial) &.{reply} else &.{}, .hold_reply = case == .timeout or case == .stop or case == .shutdown or case == .concurrent };
     if (case != .down) try script.start();
     defer if (case != .down) script.stop();
-    // Keep the unavailable port ours without relying on a globally chosen
-    // unused port. A bound, non-listening TCP socket need not refuse promptly:
-    // Darwin tcp_input drops SYNs for a TCPS_CLOSED PCB without a reset.
-    const down_fd = if (case == .down) std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0) else -1;
-    defer if (down_fd >= 0) {
-        _ = std.c.close(down_fd);
-    };
-    if (case == .down) {
-        if (down_fd < 0) return error.SocketFailed;
-        var address: std.c.sockaddr.in = std.mem.zeroes(std.c.sockaddr.in);
-        address.family = std.c.AF.INET;
-        address.addr = @bitCast([4]u8{ 127, 0, 0, 1 });
-        if (@hasField(std.c.sockaddr.in, "len")) address.len = @sizeOf(std.c.sockaddr.in);
-        if (std.c.bind(down_fd, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)) != 0) return error.BindFailed;
-        var length: std.c.socklen_t = @sizeOf(std.c.sockaddr.in);
-        if (std.c.getsockname(down_fd, @ptrCast(&address), &length) != 0) return error.NameFailed;
-        script.port = std.mem.bigToNative(u16, address.port);
-    }
+    if (case == .down) script.port = try @import("socket_fixture.zig").refusedPort();
     var url_buffer: [128]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/mcp", .{script.port});
     const other_script = try allocator.create(Script);
@@ -171,7 +155,7 @@ fn run(case: Case) !void {
             // A new Session is independent of the first Session's sent call.
             try command.key.set("other-config");
             command.configuration.tools = try .of(&.{"fetch_other"});
-            const other_configured = storage.configure(command, .{});
+            const other_configured = try storage.configure(command, .{});
             try expectHere(@src(), other_configured == .accepted);
             const other_session = other_configured.accepted.session;
             try expectHere(@src(), !std.mem.eql(u8, session.slice(), other_session.slice()));

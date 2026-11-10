@@ -44,7 +44,9 @@ class DocumentationTest(unittest.TestCase):
         for path in ('README.md', 'ARCHITECTURE.md', 'CODING_STANDARDS.md', 'VERIFICATION.md',
                      'THIRD_PARTY_NOTICES.md', 'docs/guide.md', 'docs/nested/guide.md',
                      'docs/assets/diagram.svg', 'docs/images/screen.png', 'docs/images/map.svg',
-                     'docs/spaces and ünicode.md', 'docs/new\nline.md'):
+                     'docs/spaces and ünicode.md', 'docs/new\nline.md', 'AGENTS.md', 'CLAUDE.md',
+                     '.claude/skills/example/SKILL.md', 'research/notes.md',
+                     'research/probe/prototype.zig', 'research/probe/run.jsonl'):
             with self.subTest(path=path):
                 self.git('reset', '--hard', self.base)
                 self.git('clean', '-fdq')
@@ -53,10 +55,14 @@ class DocumentationTest(unittest.TestCase):
 
     def test_unknown_and_executable_owners_are_normal(self):
         for path in ('src/code.py', 'tests/ci/policy.py', '.github/workflows/check.yml',
-                     'build.zig', 'build.zig.zon', 'package.json', 'unknown.md', 'AGENTS.md',
-                     'CLAUDE.md', 'THIRD_PARTY.md', '.claude/skills/example/SKILL.md', 'docs/script.py',
+                     'build.zig', 'build.zig.zon', 'package.json', 'unknown.md',
+                     'THIRD_PARTY.md', 'docs/script.py',
                      'docs/data.json', 'docs/assets/script.js', 'docs/assets/image.png',
-                     'docs/.hidden.md', 'clients/ts/README.md'):
+                     'docs/.hidden.md', 'clients/ts/README.md', '.github/notes.md',
+                     '.claude/hooks/block_full_runs.py', '.claude/settings.json',
+                     '.claude/skills/example/scripts/run', '.agents/setup', '.agents/notes.md',
+                     '.claude/skills/example/.hidden.md',
+                     'research/.gitignore', 'research/.probe/notes.md', 'researcher/notes.txt'):
             with self.subTest(path=path):
                 self.git('reset', '--hard', self.base)
                 self.git('clean', '-fdq')

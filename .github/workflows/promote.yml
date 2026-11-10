@@ -1,0 +1,122 @@
+name: Promote
+# Manual only. Qualify main HEAD with the expensive tier over the batch since
+# stable, the last promoted release, then publish and advance stable on green.
+# A failing job bisects the batch with its own command; the run never merges.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One promotion at a time; a second dispatch waits for the first to finish.
+  group: promote
+  cancel-in-progress: false
+
+jobs:
+  batch:
+    if: ${{ github.ref == 'refs/heads/main' && !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      base: ${{ steps.batch.outputs.base }}
+      head: ${{ steps.batch.outputs.head }}
+      size: ${{ steps.batch.outputs.size }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Name the batch since stable
+        id: batch
+        env:
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin +refs/heads/stable:refs/remotes/origin/stable
+          base=$(git rev-parse origin/stable)
+          git merge-base --is-ancestor "$base" "$HEAD_SHA" || { echo "stable $base is not an ancestor of $HEAD_SHA" >&2; exit 1; }
+          size=$(git rev-list --count --first-parent "$base..$HEAD_SHA")
+          { echo "base=$base"; echo "head=$HEAD_SHA"; echo "size=$size"; } >> "$GITHUB_OUTPUT"
+          {
+            echo "Promoting $size main commits after stable $base, up to $HEAD_SHA:"
+            echo
+            git log --first-parent --format='- %h %s' "$base..$HEAD_SHA"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$size" = 0 ]; then echo 'stable already holds main HEAD; nothing to promote' | tee -a "$GITHUB_STEP_SUMMARY"; fi
+  selected:
+    # Full check-full, frame gate and Debug recovery on Linux and macOS, plus
+    # the targets the batch's paths select.
+    needs: batch
+    if: ${{ needs.batch.outputs.size != '0' }}
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+      checks: read
+    uses: ./.github/workflows/check.yml
+    with:
+      base: ${{ needs.batch.outputs.base }}
+      promotion: true
+  upgrade:
+    needs: batch
+    if: ${{ needs.batch.outputs.size != '0' }}
+    uses: ./.github/workflows/previous-release-upgrade.yml
+    with:
+      candidate-ref: ${{ needs.batch.outputs.head }}
+      batch-base: ${{ needs.batch.outputs.base }}
+  renderer:
+    needs: batch
+    if: ${{ needs.batch.outputs.size != '0' }}
+    uses: ./.github/workflows/renderer-contracts.yml
+    with:
+      ref: ${{ needs.batch.outputs.head }}
+      batch-base: ${{ needs.batch.outputs.base }}
+  qualified:
+    # The sole promotion verdict. Only success of every tier qualifies the batch.
+    needs: [batch, selected, upgrade, renderer]
+    if: ${{ always() && needs.batch.outputs.size != '0' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every selected promotion tier
+        env:
+          BATCH_RESULT: ${{ needs.batch.result }}
+          SELECTED_RESULT: ${{ needs.selected.result }}
+          UPGRADE_RESULT: ${{ needs.upgrade.result }}
+          RENDERER_RESULT: ${{ needs.renderer.result }}
+        run: |
+          set -euo pipefail
+          for result in "$BATCH_RESULT" "$SELECTED_RESULT" "$UPGRADE_RESULT" "$RENDERER_RESULT"; do
+            test "$result" = success
+          done
+  release:
+    # Cold builds, publication and the stable fast-forward of the qualified SHA.
+    needs: [batch, qualified]
+    permissions:
+      contents: write
+      actions: read
+    uses: ./.github/workflows/release.yml
+    with:
+      sha: ${{ needs.batch.outputs.head }}
+  report:
+    # One issue per failure signature, with the bisect's verdict on it.
+    needs: [batch, selected, upgrade, renderer]
+    if: ${{ failure() && needs.batch.outputs.size != '0' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: File each failure under its cause
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.batch.outputs.head }}
+        run: python3 -B tests/ci/report_issue.py --workflow Promote --run-id "$GITHUB_RUN_ID" --sha "$HEAD_SHA" --label promotion-red
