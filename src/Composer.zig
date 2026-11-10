@@ -32,7 +32,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const height = ctx.max.height.?;
     if (width == 0 or height == 0) return vxfw.Surface.init(ctx.arena, self.widget(), .{});
     const rule: u16 = if (height >= 3) 1 else 0;
-    const prefix: u16 = if (width >= 3) 2 else 0;
+    // One column of margin, as every line of the screen has, then the mark.
+    const prefix: u16 = if (width >= 4) 3 else 0;
     const draft = try ctx.arena.dupe(u8, self.editor.buffer[0..self.editor.length]);
     for (draft) |*byte| if (byte.* == '\t') {
         byte.* = ' ';
@@ -72,7 +73,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     for (lines[0..shown.rows], 0..) |line, index| {
         const row: u16 = @intCast(index + rule);
         if (prefix != 0) _ = window.child(.{ .y_off = row, .height = 1, .width = prefix }).printSegment(.{
-            .text = if (shown.first + index != 0) "  " else if (self.ascii) "> " else "› ",
+            .text = if (shown.first + index != 0) "   " else if (self.ascii) " > " else " › ",
             .style = self.style,
         }, .{ .wrap = .none });
         _ = window.child(.{ .x_off = prefix, .y_off = row, .height = 1 }).printSegment(.{
@@ -93,16 +94,17 @@ test "Composer keeps the caret visible between rules without changing draft byte
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 5 }, .cell_size = .{} };
     const tail = try composer.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 5), tail.size.height);
-    try std.testing.expectEqualStrings("f", tail.readCell(2, 1).char.grapheme);
-    try std.testing.expectEqualStrings("s", tail.readCell(2, 3).char.grapheme);
+    try std.testing.expectEqualStrings("f", tail.readCell(3, 1).char.grapheme);
+    try std.testing.expectEqualStrings("s", tail.readCell(3, 3).char.grapheme);
     try std.testing.expectEqual(@as(u16, 3), tail.cursor.?.row);
-    try std.testing.expectEqual(@as(u16, 5), tail.cursor.?.col);
+    try std.testing.expectEqual(@as(u16, 6), tail.cursor.?.col);
     try std.testing.expectEqualStrings("─", tail.readCell(0, 0).char.grapheme);
     try std.testing.expectEqualStrings("─", tail.readCell(0, 4).char.grapheme);
     editor.cursor = 0;
     const head = try composer.widget().draw(ctx.withConstraints(.{}, .{ .width = 8, .height = 5 }));
-    try std.testing.expectEqualStrings("›", head.readCell(0, 1).char.grapheme);
-    try std.testing.expectEqualStrings("o", head.readCell(2, 1).char.grapheme);
+    try std.testing.expectEqualStrings("›", head.readCell(1, 1).char.grapheme);
+    try std.testing.expectEqualStrings(" ", head.readCell(0, 1).char.grapheme);
+    try std.testing.expectEqualStrings("o", head.readCell(3, 1).char.grapheme);
     try std.testing.expectEqual(@as(u16, 1), head.cursor.?.row);
     try std.testing.expectEqualStrings("one\ntwo\nthree\nfour\nfive\nsix", &bytes);
 }
@@ -123,11 +125,11 @@ test "Composer draws between paste fragments that join the original suffix" {
         _ = editor.appEvent(keys, .paste_start, true);
         _ = editor.appEvent(keys, .{ .key_press = .{ .codepoint = 0, .text = case.first } }, true);
         const joined = try composer.widget().draw(ctx);
-        try std.testing.expectEqual(@as(u16, 5), joined.cursor.?.col);
+        try std.testing.expectEqual(@as(u16, 6), joined.cursor.?.col);
         _ = editor.appEvent(keys, .{ .key_press = .{ .codepoint = 0, .text = case.second } }, true);
         const continued = try composer.widget().draw(ctx);
         try std.testing.expectEqualStrings(case.expected, bytes[0..editor.length]);
-        try std.testing.expectEqual(@as(u16, 5), continued.cursor.?.col);
+        try std.testing.expectEqual(@as(u16, 6), continued.cursor.?.col);
         _ = editor.appEvent(keys, .paste_end, false);
         const ended = try composer.widget().draw(ctx);
         try std.testing.expectEqualDeep(continued.cursor, ended.cursor);
@@ -143,9 +145,9 @@ test "Composer empty draft shows the screen's placeholder and an input cursor" {
     defer arena.deinit();
     const surface = try composer.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 10 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 3), surface.size.height);
-    try std.testing.expectEqualStrings("T", surface.readCell(2, 1).char.grapheme);
-    try std.testing.expect(surface.readCell(2, 1).style.dim);
-    try std.testing.expectEqual(@as(u16, 2), surface.cursor.?.col);
+    try std.testing.expectEqualStrings("T", surface.readCell(3, 1).char.grapheme);
+    try std.testing.expect(surface.readCell(3, 1).style.dim);
+    try std.testing.expectEqual(@as(u16, 3), surface.cursor.?.col);
     try std.testing.expectEqual(@as(usize, 0), editor.length);
     for (surface.buffer) |cell| try std.testing.expectEqual(vaxis.Color{ .index = 19 }, cell.style.bg);
 }
