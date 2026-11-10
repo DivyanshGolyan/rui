@@ -9,63 +9,14 @@ import re
 import textwrap
 import unittest
 
-from release_numbers import digest_rows, drifted_row_fix, git, main_base, released_tag
+from release_numbers import (MIGRATIONS, SCHEMA, digest_rows, drifted_row_fix, git, main_base, migration_steps, released_tag,
+                             schema_version)
 
 ROOT = Path(__file__).resolve().parents[2]
-SCHEMA = "src/store/schema.zig"
-VERSION = re.compile(r"^pub const schema_version: u32 = (\d+);$", re.MULTILINE)
 TAG = re.compile(r"v0\.(\d+)\.\d+")
-MIGRATIONS = re.compile(r"^pub const migrations = \[_\]Migration\{", re.MULTILINE)
-FROM = re.compile(r"\.from\s*=\s*(\d+)")
 STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
 LITERALS = r'(?:"(?:,")*,?)?'
 LITERAL_STEP = re.compile(r"\{\.from=\d+,\.sqlite=&\.\{" + LITERALS + r"\},\.mysql=&\.\{" + LITERALS + r"\},?\}")
-
-
-def schema_version(source):
-    match = VERSION.search(source)
-    if match is None:
-        raise AssertionError(f"{SCHEMA} declares no schema_version")
-    return int(match[1])
-
-
-def migration_steps(source):
-    """Each step of `migrations` as its `from` and its entry's source text.
-
-    Splits the array literal at its top-level `.{` entries, skipping string
-    literals and comments, and drops whitespace outside strings so that a
-    reformat is no edit. A revision without the array has no steps.
-    """
-    match = MIGRATIONS.search(source)
-    if match is None:
-        return {}
-    steps, depth, entry, position = {}, 0, [], match.end()
-    while True:
-        char = source[position]
-        if char == '"':
-            end = position + 1
-            while source[end] != '"':
-                end += 2 if source[end] == "\\" else 1
-            entry.append(source[position:end + 1])
-            position = end + 1
-            continue
-        if source.startswith("//", position):
-            position = source.index("\n", position)
-            continue
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            if depth == 0:
-                return steps
-            depth -= 1
-        if depth > 0 or char == "}":
-            if not char.isspace():
-                entry.append(char)
-        if char == "}" and depth == 0:
-            text = "".join(entry).removesuffix(",")
-            steps[int(FROM.search(text)[1])] = text
-            entry = []
-        position += 1
 
 
 def non_literal_steps(steps):
