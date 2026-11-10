@@ -8,6 +8,7 @@ const h2 = @import("h2.zig");
 const Peer = @import("testing/Peer.zig");
 const Proxy = @import("testing/Proxy.zig");
 const Engine = @import("Engine.zig");
+const test_poll = @import("test_poll");
 const Connection = @import("Connection.zig");
 const Resolver = @import("Resolver.zig");
 const c = @import("h2_c");
@@ -763,7 +764,20 @@ test "a read cap defers expiry only for streams on that connection" {
     @memset(&response, 'r');
     for (harness.peer.streams.items) |stream| harness.peer.respond(stream, 200, &response);
     try harness.peer.pump();
-    try harness.peer.awaitDelivery();
+    // More than one drive's read allowance waits in the busy connection's
+    // socket. Not every byte: the peer has more in flight than a small
+    // receive buffer holds while the client reads nothing.
+    const Busy = struct {
+        fn queued(socket: std.posix.fd_t) !bool {
+            var bytes: c_int = 0;
+            if (std.c.ioctl(socket, std.c.T.FIONREAD, &bytes) != 0) return error.Unexpected;
+            return bytes >= h2.read_allowance_bytes;
+        }
+    };
+    const busy_socket = for (Engine.of(&harness.client).connections[0..Engine.of(&harness.client).connections_len]) |*connection| {
+        if (connection.streams == busy.len) break connection.socket;
+    } else return error.TestUnexpectedResult;
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), busy_socket, Busy.queued);
     try harness.client.drive(&harness.receiver);
     // The silent stream's connection was drained, so it expires; the busy
     // connection stopped at its allowance, so none of its streams do.
