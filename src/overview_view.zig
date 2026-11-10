@@ -417,6 +417,27 @@ pub const Event = union(enum) {
 
 pub const Unconfirmed = struct { reference: Reference, recovery: submission.Recovery };
 
+/// Bytes `unconfirmedLine` takes at most.
+pub const max_unconfirmed_line_bytes = 80;
+
+/// What the status bar says while a send Esc left unconfirmed waits for
+/// the person: the newest one, with its recover key when it has one. Every
+/// one prints on departure. Null while none waits.
+pub fn unconfirmedLine(state: *const State, buffer: *[max_unconfirmed_line_bytes]u8) ?[]const u8 {
+    var at = state.request_count;
+    while (at > 0) {
+        at -= 1;
+        const request = &state.requests[at];
+        if (request.kind != .send or request.status != .unknown) continue;
+        // Fits 80 columns whole, key included.
+        return switch (request.sent) {
+            .saved => |saved| std.fmt.bufPrint(buffer, "! Not confirmed · rui request recover {s}", .{&saved.original.key}),
+            else => std.fmt.bufPrint(buffer, "! {s}: send not confirmed; details on exit", .{&request.session.?}),
+        } catch unreachable;
+    }
+    return null;
+}
+
 /// The ledger can hold a conversation's unconfirmed original.
 pub fn canHoldSend(state: *const State) bool {
     return state.request_count < max_requests;
@@ -1607,11 +1628,8 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             std.debug.assert(canHoldSend(state));
             state.requests[state.request_count] = .{ .kind = .send, .session = left.reference, .status = .unknown, .sent = left.recovery };
             state.request_count += 1;
-            switch (left.recovery) {
-                // Fits 80 columns whole, key included.
-                .saved => |saved| state.say(.attention, "! Not confirmed · rui request recover {s}", .{&saved.original.key}),
-                else => state.say(.attention, "! {s}: send not confirmed; details on exit", .{&left.reference}),
-            }
+            // `unconfirmedLine` says it until the overview ends.
+            state.notice = null;
         },
         .conversed => |input| {
             switch (input.input) {
@@ -5213,6 +5231,7 @@ test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
 }
 
 test "an original Esc left unconfirmed is named at once and recovered on departure, until the ledger is full" {
+    var line: [max_unconfirmed_line_bytes]u8 = undefined;
     const refs = [_]Reference{ "k7m2qx".*, "r4t9vw".* };
     var rows: [refs.len]Listed = undefined;
     for (&rows, &refs, 0..) |*row, *ref, n| row.* = session(ref, .{ .working = ago(10 * (n + 1)) }, .{});
@@ -5220,11 +5239,18 @@ test "an original Esc left unconfirmed is named at once and recovered on departu
     defer state.deinit();
     const saved_key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
     const reserved_key: [36]u8 = "fedcba98-7654-4321-8fed-cba987654321".*;
+    try std.testing.expectEqual(null, unconfirmedLine(&state, &line));
     try expectEffects(&.{}, try step(&state, .{ .unconfirmed = .{ .reference = refs[0], .recovery = .{ .saved = .{ .original = .{ .kind = .decision, .key = saved_key }, .rejected = false } } } }));
-    try std.testing.expectEqualStrings("! Not confirmed · rui request recover " ++ saved_key, state.notice.?.text());
-    // A capture that may not be published has no key to recover yet.
+    // It needs the person, so it lives on the status bar, not as a notice
+    // the next key clears.
+    try std.testing.expectEqualStrings("! Not confirmed · rui request recover " ++ saved_key, unconfirmedLine(&state, &line).?);
+    try std.testing.expectEqual(null, state.notice);
+    _ = try press(&state, .{}, .next);
+    try std.testing.expectEqualStrings("! Not confirmed · rui request recover " ++ saved_key, unconfirmedLine(&state, &line).?);
+    // A capture that may not be published has no key to recover yet; the
+    // newest unconfirmed send is the one named.
     try expectEffects(&.{}, try step(&state, .{ .unconfirmed = .{ .reference = refs[1], .recovery = .{ .uncertain = reserved_key } } }));
-    try std.testing.expectEqualStrings("! r4t9vw: send not confirmed; details on exit", state.notice.?.text());
+    try std.testing.expectEqualStrings("! r4t9vw: send not confirmed; details on exit", unconfirmedLine(&state, &line).?);
     // Each takes a ledger slot, so the shell asks before the last one.
     while (canHoldSend(&state)) try expectEffects(&.{}, try step(&state, .{ .unconfirmed = .{ .reference = refs[0], .recovery = .{ .saved = .{ .original = .{ .kind = .message, .key = saved_key }, .rejected = false } } } }));
     try std.testing.expectEqual(@as(usize, max_requests), state.request_count);
