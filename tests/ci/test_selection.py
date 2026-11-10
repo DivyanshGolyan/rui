@@ -106,6 +106,28 @@ class BuildModuleTest(unittest.TestCase):
                 with self.subTest(module=module):
                     self.assertEqual(select([module], "review", AVAILABLE), hub)
 
+    def test_a_fixture_row_edit_selects_only_that_fixture(self):
+        table = "build/fixtures.zig"
+        before = (build_files.ROOT / table).read_text()
+        row = next(line for line in before.splitlines(keepends=True) if '.step = "login-signal-integration"' in line)
+        everything = set(select([table], "review", AVAILABLE)["targets"])
+        self.assertLessEqual({"control-integration", "login-signal-integration", "peer-integration"}, everything)
+        new_row = row.replace("login-signal-integration", "new-integration")
+        for name, after, expected, native in (
+                ("one row", before.replace(row, row.replace("loader witness", "loader check")),
+                 {"login-signal-integration"}, set()),  # Linux-only: Mac never runs it.
+                ("added row", before.replace(row, row + new_row), {"new-integration"}, {"new-integration"}),
+                ("removed row", before.replace(row, ""), set(), set()),
+                ("outside the rows", before.replace("run.addArgs(fixture.args);", "run.addArgs(fixture.args);\n        run.has_side_effects = true;"),
+                 everything, everything - {"login-signal-integration"})):  # Mac never runs Linux-only fixtures.
+            with self.subTest(name):
+                self.assertNotEqual(before, after)
+                result = select([table], "review", AVAILABLE | {"new-integration"}, contents={table: (before, after)})
+                self.assertEqual(set(result["targets"]) - {"stack-frames"}, expected - {"stack-frames"})
+                if native is not None:
+                    self.assertEqual(set(result["native_targets"]), native)
+                self.assertTrue(result["typecheck_macos"])
+
     def test_checks_read_every_build_file(self):
         # A read of build.zig alone misses the targets and calls build/ modules hold.
         read = re.compile(r"""build\.zig["']\)\.read_text\(""")
@@ -1018,6 +1040,11 @@ class SelectionTest(unittest.TestCase):
         for target in observing:
             with self.subTest(target=target):
                 fixture = FIXTURES[target][0][0]
+                row = re.search(r'(?m)^\s*\.\{ \.step = "' + re.escape(target) + r'",[^\n]*$', build)
+                if row:
+                    self.assertIn(f'.script = "{fixture}"', row[0])
+                    self.assertIn('.screen = true', row[0])
+                    continue
                 run = re.search(r'(\w+)\.addFileArg\(b\.path\("' + re.escape(fixture) + r'"\)\)', build)
                 self.assertIsNotNone(run, fixture)
                 self.assertIn(f"const {run[1]} = screen_module.screenCommand(", build, fixture)
