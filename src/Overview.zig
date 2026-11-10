@@ -516,6 +516,7 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     // path cancels and joins the same frontend before freeing it.
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
     count = 0;
+    self.state.conversing = reference;
     try self.root.openSession(ctx, child);
 }
 
@@ -529,6 +530,7 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
             if (recovery != .none) _ = try self.event(.{ .unconfirmed = .{ .reference = left.session, .recovery = recovery } });
             try self.retired.append(self.init.gpa, .{ .left = left.*, .frame = self.root.frames });
             self.app_session = null;
+            self.state.conversing = null;
             try self.root.closeSession(ctx);
             // App's last frame can still point at the old widgets. Dispose
             // only after the next frame replaces that focus/hit-test tree.
