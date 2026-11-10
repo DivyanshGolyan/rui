@@ -121,6 +121,8 @@ pub const Client = struct {
         const salt_len = base64.Decoder.calcSizeForSlice(salt_text) catch return error.ProtocolViolation;
         if (salt_len == 0 or salt_len > salt.len) return error.ProtocolViolation;
         base64.Decoder.decode(salt[0..salt_len], salt_text) catch return error.ProtocolViolation;
+        // RFC 5802 `posit-number`: digits, where parseUnsigned also takes underscores.
+        if (iterations_text.len == 0 or std.mem.indexOfNone(u8, iterations_text, "0123456789") != null) return error.ProtocolViolation;
         const iterations = std.fmt.parseUnsigned(u32, iterations_text, 10) catch return error.ProtocolViolation;
         if (iterations == 0) return error.ProtocolViolation;
         if (iterations > max_iterations) return error.UnsupportedIterations;
@@ -211,6 +213,7 @@ test "a server nonce that does not extend the client's, or a mandatory extension
     try std.testing.expectError(error.ProtocolViolation, client.clientFinal("r=abc,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096", "pencil", &buffer));
     try std.testing.expectError(error.ProtocolViolation, client.clientFinal("m=x,r=abc1,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096", "pencil", &buffer));
     try std.testing.expectError(error.ProtocolViolation, client.clientFinal("r=abc1,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=0", "pencil", &buffer));
+    try std.testing.expectError(error.ProtocolViolation, client.clientFinal("r=abc1,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4_096", "pencil", &buffer));
     try std.testing.expectError(error.UnsupportedIterations, client.clientFinal("r=abc1,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=1000001", "pencil", &buffer));
     // The longest server nonce accepted still fits the client-final buffer.
     const longest = "r=abc" ++ @as([max_server_first_bytes - "r=abc,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=1".len]u8, @splat('x')) ++ ",s=W22ZaJ0SNY7soEsUEjb6gQ==,i=1";

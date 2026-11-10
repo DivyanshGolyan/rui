@@ -585,10 +585,12 @@ pub const Client = struct {
         return .{ .consumed = prefix_len, .event = .{ .value = len } };
     }
 
-    /// Stores the row's progress; after its last value the packet must end.
+    /// Stores the row's progress. The last value must end its packet; that is
+    /// checked once its length is known, before its bytes, so the refusal
+    /// does not depend on how those bytes arrive.
     fn advanceRow(self: *Client, row: State.Row) Error!void {
+        if (row.columns_left == 0 and row.packet_left != row.value_left) return error.ProtocolViolation;
         if (row.columns_left == 0 and row.value_left == 0) {
-            if (row.packet_left != 0) return error.ProtocolViolation;
             self.state = .rows;
         } else {
             self.state = .{ .row = row };
@@ -625,10 +627,15 @@ pub const Client = struct {
 fn checkVersion(version: []const u8) Error!void {
     if (std.mem.indexOf(u8, version, "MariaDB") != null) return error.UnsupportedServer;
     var parts = std.mem.splitScalar(u8, version, '.');
-    const major = std.fmt.parseInt(u16, parts.next().?, 10) catch return error.UnsupportedServer;
-    const minor_text = parts.next() orelse return error.UnsupportedServer;
-    const minor = std.fmt.parseInt(u16, minor_text, 10) catch return error.UnsupportedServer;
+    const major = decimal(parts.next().?) orelse return error.UnsupportedServer;
+    const minor = decimal(parts.next() orelse return error.UnsupportedServer) orelse return error.UnsupportedServer;
     if (major < 8 or (major == 8 and minor < 4)) return error.UnsupportedServer;
+}
+
+/// Decimal digits only: parseInt also takes a sign and underscores.
+fn decimal(text: []const u8) ?u16 {
+    if (text.len == 0 or std.mem.indexOfNone(u8, text, "0123456789") != null) return null;
+    return std.fmt.parseInt(u16, text, 10) catch null;
 }
 
 /// caching_sha2_password: SHA256(p) XOR SHA256(SHA256(SHA256(p)) || nonce).
@@ -1023,6 +1030,8 @@ test "MariaDB and MySQL before 8.4 are refused" {
     try checkVersion("8.4.0");
     try std.testing.expectError(error.UnsupportedServer, checkVersion("8.3.0"));
     try std.testing.expectError(error.UnsupportedServer, checkVersion("5.7.44-log"));
+    try std.testing.expectError(error.UnsupportedServer, checkVersion("+9.1.0"));
+    try std.testing.expectError(error.UnsupportedServer, checkVersion("8.0_4.0"));
 }
 
 fn authSwitch(comptime body: []const u8) *const [5 + body.len]u8 {
@@ -1098,13 +1107,46 @@ test "malformed results are refused" {
     client.state = .rows;
     try std.testing.expectEqual(Event.row, (try readOne(&client, "\x02\x00\x00\x01\x05ab")).event.?);
     try std.testing.expectError(error.ProtocolViolation, readOne(&client, "\x05ab"));
-    // A row with bytes after its last value.
-    client = try querying();
-    client.column_count = 1;
-    client.state = .rows;
-    _ = try readOne(&client, "\x03\x00\x00\x01\x01ab");
-    try std.testing.expectEqual(@as(?u32, 1), (try readOne(&client, "\x01ab")).event.?.value);
-    try std.testing.expectError(error.ProtocolViolation, readOne(&client, "ab"));
+}
+
+test "the last value of a row ends its packet, or the row is refused before that value" {
+    // Two columns, the first "x". `refused_at` is the offset of the last
+    // value's first byte, where a packet it does not end is refused.
+    const cases = [_]struct { payload: []const u8, refused_at: ?usize }{
+        .{ .payload = "\x01x\xfb", .refused_at = null },
+        .{ .payload = "\x01x\xfbz", .refused_at = 6 },
+        .{ .payload = "\x01x\x00", .refused_at = null },
+        .{ .payload = "\x01x\x00z", .refused_at = 6 },
+        .{ .payload = "\x01x\x02ab", .refused_at = null },
+        .{ .payload = "\x01x\x01ab", .refused_at = 6 },
+    };
+    for (cases) |case| for ([_]bool{ false, true }) |split| {
+        var stream: [16]u8 = undefined;
+        stream[0..4].* = .{ @intCast(case.payload.len), 0, 0, 1 };
+        @memcpy(stream[4..][0..case.payload.len], case.payload);
+        const in = stream[0 .. 4 + case.payload.len];
+        var client = try querying();
+        client.column_count = 2;
+        client.state = .rows;
+        // Whole: everything left at once. Split: one more byte whenever the
+        // client needs more.
+        var at: usize = 0;
+        var end: usize = if (split) 1 else in.len;
+        const refused_at: ?usize = while (at < in.len) {
+            const step = readOne(&client, in[at..end]) catch |err| {
+                try std.testing.expectEqual(error.ProtocolViolation, err);
+                break at;
+            };
+            if (step.consumed == 0) {
+                // Waiting for bytes the row does not have.
+                if (end == in.len) return error.TestUnexpectedResult;
+                end += 1;
+            } else at += step.consumed;
+            if (!split) end = in.len else end = @max(end, at + 1);
+        } else null;
+        try std.testing.expectEqual(case.refused_at, refused_at);
+        if (refused_at == null) try std.testing.expect(client.state == .rows);
+    };
 }
 
 test "a query that needs a continuation packet is refused" {

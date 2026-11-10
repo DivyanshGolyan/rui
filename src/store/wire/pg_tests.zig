@@ -217,6 +217,81 @@ test "malformed messages are protocol violations, never misread" {
     }
 }
 
+test "a command tag's row count is its last word, in digits only" {
+    try std.testing.expectEqual(@as(?u64, 3), (pg.CommandComplete{ .tag = "INSERT 0 3" }).rows());
+    try std.testing.expectEqual(@as(?u64, null), (pg.CommandComplete{ .tag = "INSERT 0 1_0" }).rows());
+    try std.testing.expectEqual(@as(?u64, null), (pg.CommandComplete{ .tag = "BEGIN" }).rows());
+}
+
+test "fuzz postgres decoder: any bytes read alike in any split" {
+    // test-pg runs its seeds; a campaign is
+    // `zig build test-pg -Dtest-filter='fuzz postgres' --fuzz=1K`.
+    try std.testing.fuzz({}, struct {
+        fn one(_: void, smith: *std.testing.Smith) !void {
+            var buffer: [1024]u8 = undefined;
+            const input = buffer[0..smith.slice(&buffer)];
+            var whole: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer whole.deinit();
+            try fuzzTranscript(input, @max(input.len, 1), &whole.writer);
+            for ([_]usize{ 1, smith.valueRangeAtMost(u16, 1, 300) }) |chunk| {
+                var split: std.Io.Writer.Allocating = .init(std.testing.allocator);
+                defer split.deinit();
+                try fuzzTranscript(input, chunk, &split.writer);
+                try std.testing.expectEqualStrings(whole.written(), split.written());
+            }
+        }
+    }.one, .{ .corpus = &.{
+        fuzzSeed(captured_round),
+        fuzzSeed(captured_startup),
+        fuzzSeed(fieldMessage('N', "SNOTICE\x00C00000\x00Mm\x00") ++ fieldMessage('E', "VERROR\x00C22012\x00Mdivision\x00")),
+    } });
+}
+
+/// A seed as `Smith.slice` reads one: a little-endian length, then the bytes.
+fn fuzzSeed(comptime bytes: []const u8) []const u8 {
+    return comptime &std.mem.toBytes(std.mem.nativeToLittle(u32, bytes.len)) ++ bytes;
+}
+
+/// `transcript` for any bytes: a column's parts are joined, since where they
+/// split depends on the reads, and the error that ended decoding comes last.
+fn fuzzTranscript(input: []const u8, chunk: usize, writer: *std.Io.Writer) !void {
+    var inbox: [pg.receive_buffer_bytes]u8 = undefined;
+    var start: usize = 0;
+    var end: usize = 0;
+    var fed: usize = 0;
+    var decoder: pg.Decoder = .{};
+    var part_left: ?u32 = null;
+    while (true) {
+        const decoded = decoder.next(inbox[start..end]) catch |err| return writer.print("\n{t}\n", .{err});
+        try std.testing.expect(decoded.consumed <= end - start);
+        start += decoded.consumed;
+        if (decoded.event) |event| {
+            if (event == .value_part) {
+                try std.testing.expect(event.value_part.len != 0);
+                part_left.? = try std.math.sub(u32, part_left.?, @intCast(event.value_part.len));
+                try writer.writeAll(event.value_part);
+                continue;
+            }
+            // A long column's parts add up to its length before the next event.
+            if (part_left) |left| try std.testing.expectEqual(@as(u32, 0), left);
+            part_left = if (event == .value_begin) event.value_begin else null;
+            try writer.writeAll("\n");
+            try describe(event, writer);
+            continue;
+        }
+        if (fed == input.len) break;
+        if (start > 0) {
+            std.mem.copyForwards(u8, &inbox, inbox[start..end]);
+            end -= start;
+            start = 0;
+        }
+        const count = @min(chunk, input.len - fed, inbox.len - end);
+        @memcpy(inbox[end..][0..count], input[fed..][0..count]);
+        end += count;
+        fed += count;
+    }
+}
+
 test "SQLSTATEs map to the Store's classes" {
     const cases = [_]struct { []const u8, pg.Class }{
         .{ "08006", .connection },       .{ "57P01", .connection },        .{ "57P03", .unavailable },
