@@ -340,16 +340,20 @@ fn serviceSkills(self: *Self) !void {
 }
 
 /// Stops and joins the skills read, and lets every page go: the
-/// conversation ends, or an Upgrade may change the Host.
-fn dropSkills(self: *Self) void {
+/// conversation ends, or an Upgrade may change the Host. Returns the
+/// read's canonical Store failure, which ends the conversation as the
+/// reader's does; any other failure, cancellation among them, goes.
+fn dropSkills(self: *Self) ?anyerror {
     self.skill_task.cancel();
-    self.skill_task.join() catch {};
+    const ended = self.skill_task.join();
     if (self.skill_job.page) |*page| page.deinit(self.init.gpa);
     self.skill_job.page = null;
     if (self.skills.reset()) |page| {
         var held = page;
         held.deinit(self.init.gpa);
     }
+    ended catch |err| if (err == error.CanonicalStoreFailure) return err;
+    return null;
 }
 
 /// Starts the job `freeze` filled.
@@ -775,7 +779,6 @@ fn startInput(self: *Self) void {
     self.input.init();
     self.input.complete(.{ .context = self, .add = tabCompletion });
     self.screen.commands = null;
-    self.dropSkills();
 }
 
 /// Where Esc leads once the frontend stopped.
@@ -858,7 +861,7 @@ pub fn stop(self: *Self) void {
 }
 
 fn settle(self: *Self, restored: anyerror!void) Settled {
-    self.dropSkills();
+    const skills_error = self.dropSkills();
     const reader = self.joinReader();
     var admission = self.submission.join();
     self.followAdmission(admission) catch |err| {
@@ -867,7 +870,7 @@ fn settle(self: *Self, restored: anyerror!void) Settled {
     // One Enter asked for the reason and the denial: leaving after the
     // reason was accepted still sends the denial, and waits for it.
     if (self.submission.task.thread != null) admission = self.joinAdmission();
-    return .{ .restored = restored, .reader = reader, .admission_error = admission.failure() };
+    return .{ .restored = restored, .reader = reader, .admission_error = admission.failure(), .skills_error = skills_error };
 }
 
 test "Ctrl-D leaves the Session detached with no notice" {
@@ -1302,6 +1305,28 @@ test "frontend consumed canonical reader and admission failures survive external
     }
 }
 
+test "a skills read's canonical failure survives leaving the Session" {
+    const Worker = struct {
+        fn fail(_: *anyopaque, _: *Task) !void {
+            return error.CanonicalStoreFailure;
+        }
+    };
+    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .colour = false, .leaving = .returned };
+    self.init.io = std.testing.io;
+    self.init.gpa = std.testing.allocator;
+    self.input.init();
+    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+    // The read failed as Esc returned, before any frame answered it.
+    try self.skill_task.start(std.testing.io, &self.skill_job, Worker.fail);
+    while (!self.skill_task.completed()) std.Thread.yield() catch {};
+    self.stop();
+    const failure: ?anyerror = switch (self.back(true)) {
+        .overview => null,
+        .ended => |ending| if (ending) |_| error.TestUnexpectedResult else |err| err,
+    };
+    try std.testing.expectEqual(@as(?anyerror, error.CanonicalStoreFailure), failure);
+}
+
 test "Esc goes back to the overview only when the joined reader leaves nothing to show" {
     const Worker = struct {
         fn read(_: *anyopaque, task: *Task) !void {
@@ -1371,7 +1396,7 @@ fn quiesceUpgrade(self: *Self) !bool {
         if (self.reader.completed()) try self.settleReader();
     }
     if (self.reading.pending_diagnostic != null and self.reader.thread == null) try self.presentReadDiagnostic(self.screen);
-    self.dropSkills();
+    if (self.dropSkills()) |err| return err;
     try self.startQueuedCommand();
     const lender_ready = if (self.lender.upgrade) |handoff| try handoff(self.lender.context, .quiesce) else true;
     return lender_ready and self.reader.thread == null and self.submission.task.thread == null;
@@ -2322,7 +2347,7 @@ fn settleReader(self: *Self) !void {
     // A reload changed what this Session's Messages bind: its held skills
     // are stale.
     if (end == .complete and phase == .inspection and inspection == .command) switch (slash_commands.parse(self.job.command_text[0..self.job.command_text_length])) {
-        .command => |command| if (command.name == .@"reload-skills") self.dropSkills(),
+        .command => |command| if (command.name == .@"reload-skills") if (self.dropSkills()) |err| return err,
         else => {},
     };
     if (end == .complete and reader_policy.defaultsChanged(phase, inspection, self.statusShown())) {
@@ -2946,7 +2971,7 @@ const HeldFrontend = struct {
     }
 
     fn destroy(held: *HeldFrontend) void {
-        held.self.dropSkills();
+        _ = held.self.dropSkills();
         // As `settle` does: a read a key started, such as /help's page, may
         // still be running, and it borrows the frontend freed below.
         held.self.stop();
