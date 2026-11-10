@@ -5186,7 +5186,115 @@ const ChromeFixture = struct {
     fn now() u64 {
         return @intCast(@max(std.Io.Clock.real.now(std.testing.io).toMilliseconds(), 0));
     }
+
+    /// The 80x24 screen a terminal shows after the next frame, one string
+    /// per row with trailing blanks dropped, in the fixture's arena.
+    fn rows(fixture: *ChromeFixture) ![24][]const u8 {
+        const arena = fixture.arena.allocator();
+        const surface = try fixture.draw();
+        var screen: vaxis.Screen = try .init(arena, .{ .rows = 24, .cols = 80, .x_pixel = 0, .y_pixel = 0 });
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 24, .screen = &screen };
+        surface.render(window, fixture.self.app_input.composer.widget());
+        var result: [24][]const u8 = undefined;
+        for (&result, 0..) |*line, row| {
+            var out: std.Io.Writer.Allocating = .init(arena);
+            var col: u16 = 0;
+            while (screen.readCell(col, @intCast(row))) |cell| : (col += 1) {
+                if (cell.char.width == 0 and cell.char.grapheme.len == 0) continue;
+                try out.writer.writeAll(if (cell.char.grapheme.len == 0) " " else cell.char.grapheme);
+                if (cell.char.width == 2) col += 1;
+            }
+            line.* = std.mem.trim(u8, out.written(), " ");
+        }
+        return result;
+    }
+
+    /// The first row at or after `from` that starts with `prefix`.
+    fn find(shown: *const [24][]const u8, prefix: []const u8) ?usize {
+        for (shown, 0..) |line, row| if (std.mem.startsWith(u8, line, prefix)) return row;
+        return null;
+    }
+
+    fn call(operation: u64, ordinal: u64, description: []const u8) View.Live.Entry {
+        var value: View.Live.Entry = std.mem.zeroes(View.Live.Entry);
+        value.operation = operation;
+        value.ordinal = ordinal;
+        value.presentation.code = .unresolved;
+        value.presentation.description = .{};
+        value.presentation.description.?.set(description) catch unreachable;
+        return value;
+    }
 };
+
+test "App Session shows running calls in order above the input, with +N more running and the work line below them" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    self.live.view.entries = .{ ChromeFixture.call(7, 1, "Read src/overview_view.zig"), ChromeFixture.call(7, 2, "Run zig build test"), ChromeFixture.call(7, 3, "Read docs/using-rui.md") };
+    self.live.view.count = 3;
+    self.live.view.total = 5;
+    self.live.work.state = .{ .working = .{ .since = ChromeFixture.now() / 1000 - 12 } };
+    const shown = try fixture.rows();
+    const first = ChromeFixture.find(&shown, "• Read src/overview_view.zig").?;
+    try std.testing.expectEqualStrings("• Run zig build test", shown[first + 1]);
+    try std.testing.expectEqualStrings("• Read docs/using-rui.md", shown[first + 2]);
+    try std.testing.expectEqualStrings("+2 more running · /status", shown[first + 3]);
+    // No shown call carries the clock, so the work line follows, once.
+    try std.testing.expect(std.mem.eql(u8, shown[first + 4], "• Waiting · 12s") or std.mem.eql(u8, shown[first + 4], "• Waiting · 13s"));
+    // The tail sits right above the input's top rule.
+    try std.testing.expect(std.mem.startsWith(u8, shown[first + 5], "─"));
+    var waiting: usize = 0;
+    for (shown) |line| waiting += @intFromBool(std.mem.startsWith(u8, line, "• Waiting"));
+    try std.testing.expectEqual(@as(usize, 1), waiting);
+    // Work ends: the tail goes, and history reaches the rule again.
+    self.live.view = .{};
+    self.live.work.state = .{ .idle = .{ .since = 0 } };
+    const idle = try fixture.rows();
+    try std.testing.expect(ChromeFixture.find(&idle, "•") == null and ChromeFixture.find(&idle, "+") == null);
+}
+
+test "App Session shows the newest waiting Message as ◌ [N ·] its first line, without the word queued" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    self.live.work.state = .{ .working = .{ .since = ChromeFixture.now() / 1000 } };
+    self.live.queued = .{ .count = 3, .oldest_position = 50, .newest_admission = 9, .newest_position = 70 };
+    self.live.queued_line = .{ .admission = 9, .line = .{} };
+    try self.live.queued_line.?.line.set("also update docs/using-rui.md");
+    const three = try fixture.rows();
+    const row = ChromeFixture.find(&three, "◌").?;
+    try std.testing.expectEqualStrings("◌ 3 · also update docs/using-rui.md", three[row]);
+    // The waiting row is the tail's last, under the work line.
+    try std.testing.expect(std.mem.startsWith(u8, three[row - 1], "• Waiting"));
+    try std.testing.expect(std.mem.startsWith(u8, three[row + 1], "─"));
+    for (three) |line| try std.testing.expect(std.ascii.findIgnoreCase(line, "queued") == null);
+    // One waiting: no count. A first line read for an older Message shows nothing.
+    self.live.queued.count = 1;
+    self.live.queued.oldest_position = 70;
+    try std.testing.expectEqualStrings("◌ also update docs/using-rui.md", (try fixture.rows())[row]);
+    self.live.queued_line.?.admission = 8;
+    try std.testing.expect(ChromeFixture.find(&(try fixture.rows()), "◌") == null);
+}
+
+test "App Session's last row says the send state, which stays past a key and five seconds" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    const original = self.input.submitText("original model input");
+    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .submitting, .key = @splat('K') };
+    defer self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+    try std.testing.expectEqualStrings("Sending…", (try fixture.rows())[23]);
+    self.submission.state = .unconfirmed;
+    // A notice arrives and goes; what needs the person outranks it and stays.
+    self.shown_notice.show("Copied 3 lines", ChromeFixture.now() - 6_000);
+    try fixture.press(.{ .codepoint = 'a', .text = "a" });
+    const unconfirmed = try fixture.rows();
+    try std.testing.expectEqualStrings("! Not confirmed · Ctrl-R retries original", unconfirmed[23]);
+    try std.testing.expectEqualStrings("Ctrl-R retries original", self.chrome.status.key.label);
+}
 
 test "App Session shows work under way at the transcript's tail, and the ↓ marker in its place while scrolled back" {
     var fixture: ChromeFixture = undefined;
