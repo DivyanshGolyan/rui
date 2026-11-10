@@ -121,6 +121,8 @@ pub fn testSettings(view: *HistoricalView) !HistoricalSettings {
 test "Store allocates six character IDs atomically retries collisions and replays creation" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
+            // A rerun draws its Session ID again.
+            if (case.rerun) return;
             const Entropy = struct {
                 var draws: usize = 0;
                 fn random(_: ?*anyopaque, bytes: []u8) std.Io.RandomSecureError!void {
@@ -5907,6 +5909,8 @@ test "content verification failure rolls back new imports and deduplicated input
 test "content import reads once and rolls back sources that change during reading" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
+            // A rerun reads its source again.
+            if (case.rerun) return;
             const Probe = struct {
                 const Change = enum { none, truncate, grow };
                 var change: Change = .none;
@@ -9375,6 +9379,8 @@ pub fn testingAgentSpec(tools: []const []const u8, permission_mode: []const u8) 
 test "each Store entry point takes its round budget on its common path" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
+            // A rerun repeats the rounds this counts.
+            if (case.rerun) return;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
@@ -9983,6 +9989,8 @@ test "creating a Session takes the same work however many Sessions exist, in rou
 test "a Workspace's changed page reads only its own Sessions, however many others changed, in rounds" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
+            // A rerun repeats the rounds this counts.
+            if (case.rerun) return;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
@@ -11707,6 +11715,8 @@ test "observation since leaves absent and non Session targets untokened and repo
 test "model fact refresh reads existence once before batched writes" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
+            // A rerun repeats the rounds this counts.
+            if (case.rerun) return;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;

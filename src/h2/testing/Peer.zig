@@ -363,25 +363,31 @@ pub fn pump(self: *Peer) !void {
 /// right after `pump` can find only some of them; Linux delivers them
 /// within the send, so there it returns at once.
 pub fn awaitDelivery(self: *Peer) !void {
+    for (self.connections.items) |connection| {
+        if (!connection.closed) try awaitSocketDelivery(connection.socket);
+    }
+}
+
+/// Waits until the other end of `socket` acknowledged every byte sent on
+/// it, so they wait in its receive buffer. Either end's socket works,
+/// such as the client's, so a pump then reads all the client sent.
+pub fn awaitSocketDelivery(socket: std.posix.fd_t) !void {
     // SIOCOUTQ and Darwin's SO_NWRITE: bytes sent but not yet acknowledged.
     const siocoutq = 0x5411;
     const so_nwrite = 0x1024;
     const Socket = struct {
-        fn delivered(socket: std.posix.fd_t) !bool {
+        fn delivered(fd: std.posix.fd_t) !bool {
             var unacknowledged: c_int = 0;
             var size: std.c.socklen_t = @sizeOf(c_int);
             const status = if (builtin.os.tag.isDarwin())
-                std.c.getsockopt(socket, std.c.SOL.SOCKET, so_nwrite, @ptrCast(&unacknowledged), &size)
+                std.c.getsockopt(fd, std.c.SOL.SOCKET, so_nwrite, @ptrCast(&unacknowledged), &size)
             else
-                std.c.ioctl(socket, siocoutq, &unacknowledged);
+                std.c.ioctl(fd, siocoutq, &unacknowledged);
             if (status != 0) return error.Unexpected;
             return unacknowledged == 0;
         }
     };
-    for (self.connections.items) |connection| {
-        if (connection.closed) continue;
-        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), connection.socket, Socket.delivered);
-    }
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), socket, Socket.delivered);
 }
 
 const Transfer = union(enum) { bytes: usize, again, closed };

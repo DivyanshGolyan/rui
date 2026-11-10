@@ -20,9 +20,9 @@ const Viewport = @import("ConversationViewport.zig");
 const session_line = @import("session_line.zig");
 const slash_commands = @import("slash_commands.zig");
 const queued_line = @import("queued_line.zig");
+const session_chrome = @import("session_chrome.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const AnswerRenderer = @import("AnswerRenderer.zig");
-const Terminal = @import("SessionTerminal.zig");
 const status_page = @import("status_page.zig");
 const ReadPhase = departure.ReadPhase;
 const session_transcript = @import("session_transcript.zig");
@@ -281,6 +281,8 @@ pub const Job = struct {
         boundaries: Boundaries = .{},
         // Each Message this read's output shows, in order, as output offsets.
         echoes: Echoes = .{},
+        // How many items this read's output shows.
+        entries: u64 = 0,
         // The Messages of the collapsed blocks in this read's output, in order.
         collapsed: Collected = .{},
         // Where a transcript's search for Messages a seam lists may stop
@@ -536,6 +538,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
+    job.result.entries = output.entries;
     if (output.lowest) |lowest| job.result.lowest = lowest;
     const queued = page.facts.queued;
     job.result.queued = queued;
@@ -555,9 +558,11 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
 }
 
 /// The submission the UI shows under a page.
-pub fn writeSubmission(view: ?Submission.View, out: *std.Io.Writer) !void {
+/// `failure` is what its last attempt's failure says the person must do,
+/// in place of the state's own words.
+pub fn writeSubmission(view: ?Submission.View, failure: ?[]const u8, out: *std.Io.Writer) !void {
     const submission = view orelse return;
-    try out.print("Original reserved request: {s}\n{s}\n", .{ submission.key, if (submission.state == .rejected) "Submission rejected; /discard releases only this original, retaining the next draft." else "Publication/admission may be incomplete; Ctrl-R retries this exact original." });
+    try out.print("Original reserved request: {s}\n{s}\n", .{ submission.key, failure orelse if (submission.state == .rejected) "Submission rejected; /discard releases only this original, retaining the next draft." else "Publication/admission may be incomplete; Ctrl-R retries this exact original." });
     if (submission.last_error) |err| try out.print("Last submission error: {s}\n", .{@errorName(err)});
 }
 
@@ -679,6 +684,7 @@ test "a stop answers every Message up to its cutoff, and no boundary precedes qu
     try answered.feed("! Session stopped.\n");
     try std.testing.expectEqualDeep(@as([]const Boundary, &.{.{ .output = 9, .cursor = .{ .end = 19 }, .admitted = 20 }}), answered.boundaries.slice());
     try std.testing.expect(answered.finish().settled());
+    try std.testing.expectEqual(@as(u64, 2), answered.entries);
     // The Messages a stop shows belong to no item, and nothing before the
     // stop in this read begins a transcript: once they are excluded, one
     // beginning there would list them at its seam too.
@@ -695,6 +701,19 @@ test "a stop answers every Message up to its cutoff, and no boundary precedes qu
     try shown.feed("! Session stopped.\n");
     try std.testing.expectEqual(@as(usize, 1), shown.boundaries.count);
     try std.testing.expectEqual(@as(u64, 20), shown.boundaries.items[0].admitted);
+    // Entries are the items that showed bytes: an item that writes nothing
+    // is none, however far its position moved, one written in several
+    // pieces is one, and two at one position are two.
+    var counted: DisplayCapture = .{ .task = &task, .file = file, .end = 30 };
+    counted.item(.{ .position = 40, .at = 1, .value = outcome.value });
+    try counted.feed("");
+    counted.item(.{ .position = 47, .ordinal = 0, .at = 1, .value = outcome.value });
+    try counted.feed("✓ first");
+    try counted.feed(" result\n");
+    counted.item(.{ .position = 47, .ordinal = 1, .at = 1, .value = outcome.value });
+    try counted.feed("✓ second result\n");
+    _ = counted.finish();
+    try std.testing.expectEqual(@as(u64, 2), counted.entries);
 }
 
 /// The collapsed blocks one read writes, oldest first. A page shows each
@@ -748,6 +767,9 @@ const DisplayCapture = struct {
     boundaries: Boundaries = .{},
     /// Shown Messages.
     echoes: Echoes = .{},
+    /// Items shown so far: an item that writes nothing is no entry, and two
+    /// at one position are two.
+    entries: u64 = 0,
     current: ?protocol.ActivityItem = null,
     current_start: u64 = 0,
     current_shown: bool = false,
@@ -788,6 +810,7 @@ const DisplayCapture = struct {
         if (bytes.len == 0 or self.current_shown) return;
         const current = self.current orelse return;
         self.current_shown = true;
+        self.entries += 1;
         if (self.messages.settled())
             self.boundaries.add(.{ .output = self.current_start, .cursor = beginningBefore(current, self.end), .admitted = current.position });
     }
@@ -1002,7 +1025,7 @@ pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
         job.result.copied = .saved;
         return;
     }
-    if (copy == .answer and answer.content.bytes > Terminal.clipboard_limit) {
+    if (copy == .answer and answer.content.bytes > TerminalText.clipboard_limit) {
         job.result.copied = .too_large;
         return;
     }
@@ -1017,7 +1040,7 @@ pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
         }
     else
         .{ .start = 0, .length = sink.offset };
-    job.result.copied = if (range.length > Terminal.clipboard_limit) .too_large else .{ .clipboard = range };
+    job.result.copied = if (range.length > TerminalText.clipboard_limit) .too_large else .{ .clipboard = range };
 }
 
 /// The Conversation's newest assistant answer, or null before the first.
@@ -1050,12 +1073,12 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Ctrl-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Ctrl-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash/MCP when Bash or MCP asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAt an Action, Left/Right choose Allow once or Deny · Enter decides\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands, then their choices · Up/Down highlight one · Tab or Enter takes it\nOn /status, Up/Down choose a setting · Enter starts its change\n\n" ++ slash_commands.conversation.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: ");
+        try output.interface.writeAll(session_chrome.help ++ slash_commands.conversation.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: ");
         try output.interface.print("{s} in your shell.\n", .{(job.provider orelse comptime protocol.Provider.onlyWith(.sign_in)).login()});
     } else {
         std.debug.assert(job.inspection_kind == .requests);
         try job.requests(job.init, task.requests(), job.store, job.session, &output.interface, &job.result.requests);
-        try writeSubmission(job.inspection_submission, &output.interface);
+        try writeSubmission(job.inspection_submission, null, &output.interface);
     }
     try output.flush();
 }

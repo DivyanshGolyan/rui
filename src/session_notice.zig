@@ -6,7 +6,31 @@ const submission = @import("submission_state.zig");
 const ConsentPolicy = @import("session_consent.zig");
 
 /// The original a submission holds, as the conversation shows it.
-pub const Held = struct { kind: submission.Kind, state: submission.State };
+/// `failure` is the line its last attempt's failure left (a rejection with
+/// its code, `too_large`), which says more than its state's own words.
+pub const Held = struct { kind: submission.Kind, state: submission.State, failure: ?Failure = null };
+
+/// A failed attempt's own line, and the key that line names.
+pub const Failure = struct { line: []const u8, key: Key };
+
+/// What ends what the held original needs: Ctrl-R's retry, or a command.
+/// The status names it after its last ` · `; a click there runs it.
+pub const Key = enum { retry, discard, status };
+
+/// The key that ends what `held` needs, or null while it is in flight.
+pub fn key(held: Held) ?Key {
+    if (held.failure) |failure| return failure.key;
+    return switch (held.state) {
+        .not_started, .unconfirmed => .retry,
+        .submitting => null,
+        .rejected => .discard,
+    };
+}
+
+/// What a Message refused for its environment needs: a retry from this
+/// process fails the same way, so no Ctrl-R; /status says the size, the
+/// largest variables and the fix.
+pub const too_large = "! Environment too large; nothing sent · /status";
 
 /// The status above the input: the opening, else nothing over a waiting
 /// Action, which says how to decide it under the input, else the held
@@ -15,10 +39,11 @@ pub fn status(opening: bool, waiting: bool, held: ?Held) ?[]const u8 {
     if (opening) return "Opening…";
     if (waiting) return "";
     const original = held orelse return null;
+    if (original.failure) |failure| return failure.line;
     return switch (original.state) {
-        .not_started => "Not sent · Ctrl-R retries original",
+        .not_started => "Not sent · ctrl+r retries original",
         .submitting => "Sending…",
-        .unconfirmed => if (original.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
+        .unconfirmed => if (original.kind == .decision) "! Decision not confirmed · ctrl+r retries original" else "! Not confirmed · ctrl+r retries original",
         .rejected => "Rejected · /discard",
     };
 }
@@ -88,14 +113,43 @@ pub fn close(held: ?submission.State, published: bool, draft_empty: bool) Close 
     return if (draft_empty) .leave else .{ .stay = "Esc returns to the overview once the draft is empty." };
 }
 
+/// A click on a Session link leaves this Session as Esc does, under the
+/// same rule; a waiting Action or a running command keeps it here too,
+/// where Esc would show them rather than leave.
+pub fn follow(held: ?submission.State, published: bool, draft_empty: bool, action: bool, command: bool) Close {
+    if (action) return .{ .stay = "Links open once the Action is decided." };
+    if (command) return .{ .stay = "Links open once the command ends." };
+    return close(held, published, draft_empty);
+}
+
+test "a Session link leaves only where Esc would, and never past a waiting Action or command" {
+    try std.testing.expectEqual(Close.leave, follow(null, false, true, false, false));
+    try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", follow(null, false, false, false, false).stay);
+    try std.testing.expectEqualStrings("Esc returns to the overview once the original is confirmed.", follow(.submitting, false, true, false, false).stay);
+    try std.testing.expectEqualStrings("Links open once the Action is decided.", follow(null, false, true, true, true).stay);
+    try std.testing.expectEqualStrings("Links open once the command ends.", follow(null, false, true, false, true).stay);
+}
+
 test "the status says the opening first, nothing over a waiting Action, then the original's progress" {
     const unconfirmed: Held = .{ .kind = .decision, .state = .unconfirmed };
     try std.testing.expectEqualStrings("Opening…", status(true, true, unconfirmed).?);
     try std.testing.expectEqualStrings("", status(false, true, unconfirmed).?);
     try std.testing.expectEqual(@as(?[]const u8, null), status(false, false, null));
-    try std.testing.expectEqualStrings("! Decision not confirmed · Ctrl-R retries original", status(false, false, unconfirmed).?);
-    try std.testing.expectEqualStrings("! Not confirmed · Ctrl-R retries original", status(false, false, .{ .kind = .message, .state = .unconfirmed }).?);
+    // Keys read as the rest of the last row writes them: lowercase, joined by +.
+    try std.testing.expectEqualStrings("! Decision not confirmed · ctrl+r retries original", status(false, false, unconfirmed).?);
+    try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries original", status(false, false, .{ .kind = .message, .state = .unconfirmed }).?);
+    try std.testing.expectEqualStrings("Not sent · ctrl+r retries original", status(false, false, .{ .kind = .message, .state = .not_started }).?);
     try std.testing.expectEqualStrings("Rejected · /discard", status(false, false, .{ .kind = .decision, .state = .rejected }).?);
+    // A failure's own line replaces its state's words, under the opening.
+    const refused: Failure = .{ .line = too_large, .key = .status };
+    try std.testing.expectEqualStrings(too_large, status(false, false, .{ .kind = .message, .state = .not_started, .failure = refused }).?);
+    try std.testing.expectEqualStrings("Opening…", status(true, false, .{ .kind = .message, .state = .not_started, .failure = refused }).?);
+    // Each line's key is the held original's, never read back from its words.
+    try std.testing.expectEqual(@as(?Key, .status), key(.{ .kind = .message, .state = .not_started, .failure = refused }));
+    try std.testing.expectEqual(@as(?Key, .retry), key(.{ .kind = .message, .state = .not_started }));
+    try std.testing.expectEqual(@as(?Key, .retry), key(unconfirmed));
+    try std.testing.expectEqual(@as(?Key, .discard), key(.{ .kind = .decision, .state = .rejected }));
+    try std.testing.expectEqual(@as(?Key, null), key(.{ .kind = .message, .state = .submitting }));
 }
 
 test "Enter in the draft says the most pressing reason it sent nothing" {

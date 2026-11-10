@@ -1935,12 +1935,14 @@ def app_terminal_cases():
 
 def app_signal_cases():
     binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
-    for sent in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, *([None] * 8)):
+    # "late": the shell's hangup reaches Rui only after App released the
+    # terminal, which then exits as it would have without it.
+    for sent in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, *([None] * 8), "late"):
         master, slave = open_pty()
         caller = None
         original = termios.tcgetattr(slave)
         try:
-            caller = spawn([str(binary), "app-signal"], stdin=slave,
+            caller = spawn([str(binary), "app-late-hangup" if sent == "late" else "app-signal"], stdin=slave,
                            stdout=slave, stderr=subprocess.PIPE)
             opening = bytearray()
             answered = False
@@ -1961,7 +1963,7 @@ def app_signal_cases():
                 error.add_note(f"App startup bytes: {bytes(opening)!r}; exit: {caller.poll()}")
                 raise
             assert not termios.tcgetattr(slave)[3] & termios.ICANON
-            if sent is None:
+            if sent in (None, "late"):
                 close_pty(master)
                 master = None
                 _, diagnostic = caller.communicate(timeout=5)
