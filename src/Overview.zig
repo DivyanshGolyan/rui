@@ -113,9 +113,9 @@ pub const Operations = struct {
     archive: *const fn (*Self, client.Requests, client.SessionArchiveInput, *Reply) anyerror!void,
     /// The Host's `model_list` reply, owned by the allocator.
     models: *const fn (*Self, client.Requests, std.mem.Allocator) anyerror![]u8,
-    /// The overview Workspace's skills whose names start `prefix`, owned
-    /// by the allocator.
-    skills: *const fn (*Self, client.Requests, std.mem.Allocator, []const u8) anyerror!skill_suggestions.Page,
+    /// The skills of `workspace` whose names start `prefix`, owned by the
+    /// allocator.
+    skills: *const fn (*Self, client.Requests, std.mem.Allocator, []const u8, []const u8) anyerror!skill_suggestions.Page,
     /// Saves the person's default for new Sessions.
     save_default: *const fn (*Self, view.Default) anyerror!void,
     /// Runs a command line for a Session, or for none when it is empty,
@@ -245,8 +245,8 @@ const Job = union(enum) {
     archive: view.ArchiveRequest,
     models,
     /// A skill suggestions read, numbered by the core, for its own copy of
-    /// the name.
-    skills: struct { read: u64, prefix: protocol.Bounded(skill_completion.max_prefix_bytes) },
+    /// the Workspace and the name.
+    skills: struct { read: u64, workspace: protocol.Bounded(protocol.max_workspace_bytes), prefix: protocol.Bounded(skill_completion.max_prefix_bytes) },
     save: view.Default,
     /// Owns its line, as a start owns its text.
     command: struct { name: view.commands.Name, session: ?view.Reference, line: []u8 },
@@ -859,7 +859,7 @@ fn askSkills(self: *Self) void {
     const ask = view.askSkills(&self.state, self.composerDraft()) orelse return;
     var prefix: protocol.Bounded(skill_completion.max_prefix_bytes) = .{};
     prefix.set(ask.prefix) catch unreachable; // The core asks for no longer name.
-    self.queue(.{ .skills = .{ .read = ask.read, .prefix = prefix } });
+    self.queue(.{ .skills = .{ .read = ask.read, .workspace = self.state.skills_workspace, .prefix = prefix } });
 }
 
 fn composerDraft(self: *const Self) view.Draft {
@@ -957,7 +957,7 @@ fn runJob(self: *Self, requests: client.Requests) !void {
             defer gpa.free(body);
             self.menu = try model_picker.read(gpa, try protocol_reply.modelListProviders(body));
         },
-        .skills => |*read| self.skill_page = try self.ops.skills(self, requests, self.init.gpa, read.prefix.slice()),
+        .skills => |*read| self.skill_page = try self.ops.skills(self, requests, self.init.gpa, read.workspace.slice(), read.prefix.slice()),
         .save => |binding| try self.ops.save_default(self, binding),
         .command => |*command| {
             self.output = .{};
@@ -1119,8 +1119,8 @@ fn startInput(self: *const Self, start: *const view.OwnedStart, compaction_buffe
     return .{ .store = self.options.store, .session = "", .text_path = "", .text = start.text(), .configuration = configuration };
 }
 
-fn skillSuggestions(self: *Self, requests: client.Requests, gpa: std.mem.Allocator, prefix: []const u8) !skill_suggestions.Page {
-    return requests.skillSuggestions(gpa, self.options.store, .{ .workspace = self.options.workspace }, prefix);
+fn skillSuggestions(self: *Self, requests: client.Requests, gpa: std.mem.Allocator, workspace: []const u8, prefix: []const u8) !skill_suggestions.Page {
+    return requests.skillSuggestions(gpa, self.options.store, .{ .workspace = workspace }, prefix);
 }
 
 fn listModels(self: *Self, requests: client.Requests, gpa: std.mem.Allocator) ![]u8 {
@@ -1450,6 +1450,8 @@ const test_now_s: u64 = 1_800_000_000;
 const Seen = struct {
     hosts: usize = 0,
     skill_reads: usize = 0,
+    /// The Workspace the latest skills read asked in.
+    skill_workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
     lists: usize = 0,
     since: ?protocol.SinceToken = null,
     line: struct { session: view.Reference = @splat(0), position: u64 = 0 } = .{},
@@ -1496,11 +1498,14 @@ const listed_references = [_][]const u8{ "k7m2qx", "b4n8wd", "p3c6tz", "h5r9vy",
 /// Operations that answer from fixed facts and record what they were asked.
 /// The skills the fake Host's Workspace catalog holds.
 const test_skills = [_]skill_suggestions.Entry{ .{ .name = "recap", .description = "Summarise" }, .{ .name = "review", .description = "Review a change" }, .{ .name = "triage", .description = "Sort issues" } };
+/// The skills another Workspace, `/other`, holds.
+const other_skills = [_]skill_suggestions.Entry{.{ .name = "release", .description = "Cut a release" }};
 
 const fake_operations: Operations = .{
     .skills = struct {
-        fn skills(_: *Self, _: client.Requests, gpa: std.mem.Allocator, prefix: []const u8) !skill_suggestions.Page {
+        fn skills(_: *Self, _: client.Requests, gpa: std.mem.Allocator, workspace: []const u8, prefix: []const u8) !skill_suggestions.Page {
             Seen.now.skill_reads += 1;
+            Seen.now.skill_workspace.set(workspace) catch unreachable;
             var entries: std.ArrayList(skill_suggestions.Entry) = .empty;
             errdefer {
                 for (entries.items) |entry| {
@@ -1509,7 +1514,8 @@ const fake_operations: Operations = .{
                 }
                 entries.deinit(gpa);
             }
-            for (test_skills) |entry| if (std.mem.startsWith(u8, entry.name, prefix)) {
+            const catalog: []const skill_suggestions.Entry = if (std.mem.eql(u8, workspace, "/other")) &other_skills else &test_skills;
+            for (catalog) |entry| if (std.mem.startsWith(u8, entry.name, prefix)) {
                 const name = try gpa.dupe(u8, entry.name);
                 errdefer gpa.free(name);
                 const description = try gpa.dupe(u8, entry.description);
@@ -1907,6 +1913,28 @@ test "a /word reads the Workspace's skills on the worker, lists them over the dr
     try std.testing.expect(try rig.press("\r") == null);
     try std.testing.expectEqualStrings("use /review it /triage ", overview.composerDraft().bytes);
     try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
+}
+
+test "the composer's /word reads skills in the Workspace the next Session starts in" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.press("use /re") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("/work", Seen.now.skill_workspace.slice());
+    // /configure moves the next Session to another Workspace: the held
+    // page is the old one's, so it lists nothing and the read asks again.
+    try std.testing.expect(try rig.press("\x15/configure --workspace /other\r") == null);
+    try std.testing.expect(try rig.press("use /re") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 2), Seen.now.skill_reads);
+    try std.testing.expectEqualStrings("/other", Seen.now.skill_workspace.slice());
+    var shown = try rig.shown(60, 24);
+    defer shown.deinit();
+    const text = try shown.text();
+    try std.testing.expect(std.mem.indexOf(u8, text, "/release") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "/recap") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "/review") == null);
 }
 
 test "the selected Session stays on screen above an open /model picker, at any height" {

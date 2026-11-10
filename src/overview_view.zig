@@ -35,6 +35,7 @@ const submission = @import("submission_state.zig");
 pub const commands = slash_commands.overview;
 const TerminalText = @import("TerminalText.zig");
 const work_line = @import("work_line.zig");
+const workspace_path = @import("workspace_path.zig");
 const unicode = @import("terminal_unicode");
 const gwidth = @import("terminal_width");
 
@@ -1002,6 +1003,9 @@ pub const State = struct {
     commands: ?slash_commands.Shown = null,
     /// The composer's skill suggestions reads, and the rows they list.
     skills: skill_completion.Reads = .{},
+    /// The Workspace those reads asked in; another one's pages answer
+    /// nothing.
+    skills_workspace: Bounded(workspace_path.max_bytes) = .{},
     skill_rows: skill_completion.Rows = .{},
     /// The open picker's latest model lists, freed when it closes.
     menu: model_picker.Menu = .{},
@@ -3075,11 +3079,24 @@ fn caretName(draft: Draft) ?[]const u8 {
 
 /// The skill suggestions read the caret's `/word` in `draft` needs, if
 /// any: the shell asks after each composer input and each answer, runs it
-/// on its worker in the overview's Workspace, and answers it with
+/// on its worker in `state.skills_workspace`, and answers it with
 /// `skillsRead`. Its prefix borrows the state until then.
 pub fn askSkills(state: *State, draft: Draft) ?skill_completion.Ask {
     // The Host may not speak this protocol while an Upgrade is under way.
     if (state.inputMode() != .compose or state.upgrade_blocked or state.upgrade_pending) return null;
+    // A Message binds the skills of the Workspace its Session starts in:
+    // a held `/configure --workspace`, else the overview's. When that
+    // changes, nothing held or in flight answers.
+    const workspace = state.settings.get(startOption("workspace").?) orelse state.workspaces.items[state.cwd];
+    if (!std.mem.eql(u8, state.skills_workspace.slice(), workspace)) {
+        if (state.skills.reset()) |page| {
+            var held = page;
+            held.deinit(state.gpa);
+        }
+        state.skills_workspace = .{};
+        // The Host refuses a longer Workspace, so nothing is read in it.
+        state.skills_workspace.set(workspace) catch return null;
+    }
     return state.skills.ask(caretName(draft) orelse return null);
 }
 

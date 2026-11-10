@@ -79,11 +79,13 @@ pub const Reads = struct {
 
     /// The read `typed`, the caret word's name, needs, if any: none while
     /// one runs, for a name the Host would refuse, after that name failed,
-    /// or while the held page holds every skill `typed` can match.
+    /// or while the held page answers `typed`: its own name, cut off or
+    /// not, or a longer one when it holds every skill its name matches.
     pub fn ask(self: *Reads, typed: []const u8) ?Ask {
         if (typed.len > max_prefix_bytes or self.pending != null) return null;
         if (self.failed) |*failed| if (std.mem.eql(u8, failed.slice(), typed)) return null;
-        if (self.held) |*held| if (std.mem.startsWith(u8, typed, held.prefix.slice()) and held.page.total == held.page.entries.len) return null;
+        if (self.held) |*held| if (std.mem.startsWith(u8, typed, held.prefix.slice()) and
+            (typed.len == held.prefix.len or held.page.total == held.page.entries.len)) return null;
         self.last += 1;
         self.pending = .{ .read = self.last, .prefix = .of(typed) };
         return .{ .read = self.last, .prefix = self.pending.?.prefix.slice() };
@@ -382,8 +384,10 @@ test "skill reads ask once per name, one at a time, and not while the held page 
     try std.testing.expectEqual(@as(u64, 2), reads.ask("r").?.read);
     const replaced = reads.answer(2, .{ .entries = entries[0..1], .total = 30 }, "r").?;
     try std.testing.expectEqual(@as(usize, 2), replaced.entries.len);
-    // That page was cut off at the Host's row limit, so it may leave out
-    // skills a longer name matches: `/rev` reads again too.
+    // Cut off at the Host's row limit, it still answers its own name: a
+    // caret resting on `/r` reads nothing more.
+    try std.testing.expectEqual(@as(?Ask, null), reads.ask("r"));
+    // It may leave out skills a longer name matches: `/rev` reads again.
     try std.testing.expectEqual(@as(u64, 3), reads.ask("rev").?.read);
     // A name longer than the Host reads asks nothing.
     var fresh: Reads = .{};
