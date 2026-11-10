@@ -10,7 +10,9 @@
 //! queue one statement any number of times: SQLite steps what is queued,
 //! in order (an engine pass), before it rebinds a statement already
 //! queued, when the queue's 8 slots are full, when `contentSink` opens a
-//! row, before the commit round's compare-and-sets, and at `run`. A pass
+//! row on SQLite, before the commit round's compare-and-sets, and at
+//! `run`. On MySQL a pass also runs when a content chunk lacks room in the
+//! batch (`queueChunk`). A pass
 //! is in-process work inside the round, never a round trip, so a
 //! destination is defined only after `run`, as it will be on a network
 //! engine, where a repeated statement is one more Bind/Execute in the same
@@ -202,6 +204,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// The last `max_taken` content ids this Access took, the rows
         /// `contentSink` may open; 0 marks a free entry.
         taken: [if (mode == .read or mode == .single) 0 else max_taken]u64 = @splat(0),
+        /// Whether this Access queued the content row of the `taken` id
+        /// beside it (`recordContentRow`).
+        taken_rows: [if (mode == .read or mode == .single) 0 else max_taken]bool = @splat(false),
         taken_count: u64 = 0,
         /// The content rows this Access queued, by identity, so a second
         /// import of an equal value reuses the row (`content.importSlot`).
@@ -426,6 +431,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             const id = try store_core.takeIdentity(a.store, column);
             if (column == .content_id) {
                 a.taken[a.taken_count % max_taken] = id;
+                a.taken_rows[a.taken_count % max_taken] = false;
                 a.taken_count += 1;
             }
             return id;
@@ -471,25 +477,65 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (@import("builtin").is_test) _ = a.store.testing_content_work.blob.fetchAdd(destination.len, .monotonic);
         }
 
+        /// Records that this Access queued the content row `content_id`,
+        /// one of the last `max_taken` ids it took: what lets
+        /// `contentSink` open on it.
+        pub fn recordContentRow(a: *Self, content_id: u64) void {
+            comptime std.debug.assert(mode != .read and mode != .single);
+            const index = std.mem.findScalar(u64, &a.taken, content_id) orelse @panic("a content row is recorded under an id this Access took");
+            a.taken_rows[index] = true;
+        }
+
         /// A sink for the payload of the content row `content_id`, which
-        /// holds `length` bytes. It
-        /// checks exactly that the id is one of the last `max_taken` this
-        /// Access took with `identity(.content_id)`; any other, 0 and ids
-        /// other code took in the same transaction included, is
-        /// `ContentNotInserted`. It does not check that this Access
-        /// queued a row with that id. It runs an engine pass first, so an
-        /// insert queued before it has stepped; an id with no row is
+        /// holds `length` bytes. The id must be one of the last
+        /// `max_taken` this Access took with `identity(.content_id)`; any
+        /// other, 0 and ids other code took in the same transaction
+        /// included, is `ContentNotInserted`. One taken whose row this
+        /// Access did not queue (`recordContentRow`) is
         /// `ContentWriteFailed`. It writes into the open transaction, so
-        /// the bytes commit with the row. Streamed imports need it
-        /// (`importSealed`, settlement), so a value is never held in
-        /// memory whole.
+        /// the bytes commit with the row. On MySQL each chunk is one more
+        /// INSERT in this Access's round, so the row, its bytes and the
+        /// writes around them share round trips; SQLite steps the queued
+        /// row first, in process, for its blob handle. Streamed imports
+        /// need it (`importSealed`, settlement), so a value is never held
+        /// in memory whole.
         pub fn contentSink(a: *Self, content_id: u64, length: u64) Error!ContentSink {
             comptime std.debug.assert(mode != .read and mode != .single);
             if (a.failure) |err| return err;
-            if (content_id == 0 or std.mem.findScalar(u64, &a.taken, content_id) == null) return error.ContentNotInserted;
-            a.pass();
-            if (a.failure) |err| return err;
-            return a.store.engine.openSink(content_id, length);
+            if (content_id == 0) return error.ContentNotInserted;
+            const index = std.mem.findScalar(u64, &a.taken, content_id) orelse return error.ContentNotInserted;
+            if (!a.taken_rows[index]) return error.ContentWriteFailed;
+            if (a.store.engine == .sqlite) {
+                a.pass();
+                if (a.failure) |err| return err;
+            }
+            return a.store.engine.openSink(content_id, length, .{ .context = a, .chunk = queueChunk });
+        }
+
+        /// `engine.Mysql.ContentHost.chunk`: queues one chunk INSERT of `n`
+        /// payload bytes, after a pass when the queue or the batch lacks
+        /// room, and returns the batch's writer for its payload.
+        fn queueChunk(context: *anyopaque, id: u64, index: u64, n: usize) error{ContentWriteFailed}!*std.Io.Writer {
+            const a: *Self = @ptrCast(@alignCast(context));
+            a.ensureOpen();
+            if (a.failure != null) return error.ContentWriteFailed;
+            const mysql = &a.store.engine.mysql;
+            if (!mysql.chunkFits(id, index, n)) {
+                a.pass();
+                // A server whose packets cannot hold one chunk refuses the
+                // write before any of it is sent.
+                if (a.failure == null and !mysql.chunkFits(id, index, n)) return error.ContentWriteFailed;
+            }
+            const slot = a.reserve() orelse return error.ContentWriteFailed;
+            const w = mysql.beginChunk(id, index) catch |err| {
+                a.failure = err;
+                return error.ContentWriteFailed;
+            };
+            // The chunk's bytes are in the batch already: it reads none in place.
+            slot.* = .{ .statement = null, .run = runChunk, .target = .{ .none = {} } };
+            slot.borrowed = .of(struct {}, &.{});
+            a.queued += 1;
+            return w;
         }
 
         /// Runs the queued writes and one compare-and-set per Session that
@@ -758,6 +804,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                     }
                 }
             }.run);
+        }
+
+        /// A sink's chunk INSERT (`queueChunk`): one row.
+        fn runChunk(a: *Self, _: *const Queued) Error!void {
+            if (try a.store.engine.stepWrite(null) != 1) return error.CorruptStore;
         }
 
         fn runPayload(a: *Self, entry: *const Queued) Error!void {

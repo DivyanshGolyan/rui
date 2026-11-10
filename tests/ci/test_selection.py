@@ -476,9 +476,20 @@ class SelectionTest(unittest.TestCase):
                                              ('false', 'success', 'failure')):
                 cases.append((targets, 'success', 'success', build, native, False, expected,
                               typecheck, 'false', 'skipped', codegen, result))
-        for targets, plan, policy, build, native, private, expected, typecheck, split, unit, codegen, codegen_result in cases:
+        # Above, the plan selects the type-check exactly when it selects targets.
+        cases = [(*case, 'false' if case[0] in ('', '[]') else 'true') for case in cases]
+        # A selection without compile inputs runs targets but no type-check,
+        # and a type-check the plan did not select must not have run.
+        for typecheck, expected in (('skipped', 'success'), ('success', 'failure'), ('failure', 'failure')):
+            cases.append(('["test-logic"]', 'success', 'success', 'success', 'success', False, expected,
+                          typecheck, 'false', 'skipped', 'false', 'skipped', 'false'))
+        for typecheck, expected in (('success', 'success'), ('skipped', 'failure'), ('failure', 'failure')):
+            cases.append(('[]', 'success', 'success', 'skipped', 'skipped', False, expected,
+                          typecheck, 'false', 'skipped', 'false', 'skipped', 'true'))
+        for (targets, plan, policy, build, native, private, expected, typecheck, split, unit, codegen, codegen_result,
+             typecheck_selected) in cases:
             with self.subTest(targets=targets, plan=plan, policy=policy, build=build, native=native, private=private,
-                              typecheck=typecheck, split=split, unit=unit):
+                              typecheck=typecheck, typecheck_selected=typecheck_selected, split=split, unit=unit):
                 needs = SimpleNamespace(plan=SimpleNamespace(result=plan, outputs=SimpleNamespace(targets=targets)))
                 github = SimpleNamespace(event=SimpleNamespace(repository=SimpleNamespace(private=private)))
                 admitted = eval(expression, {'__builtins__': {}, 'always': lambda: True,
@@ -493,6 +504,7 @@ class SelectionTest(unittest.TestCase):
                                             env={**os.environ, 'TARGETS': targets, 'PLAN_RESULT': plan,
                                                  'POLICY_RESULT': policy, 'BUILD_RESULT': build,
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
+                                                 'TYPECHECK': typecheck_selected,
                                                  'SPLIT': split, 'UNIT_RESULT': unit,
                                                  'CODEGEN': codegen, 'CODEGEN_RESULT': codegen_result})
                     actual = 'success' if result.returncode == 0 else 'failure'
@@ -1224,6 +1236,18 @@ fi
             ["host-launch-integration"], ["check-full"],
         ])
         self.assertEqual(execution_batches([]), [])
+
+    def test_macos_type_check_runs_only_for_what_it_compiles(self):
+        for path in ("src/TerminalText.zig", "build.zig", "build/darwin.zig", "build.zig.zon", "src/host_launch.c",
+                     "src/vaxis-parser.patch", "src/fetch_dependencies.sh", ".github/actions/setup/action.yml",
+                     # Embedded, or a module build.zig adds and Zig embeds.
+                     "src/model_instructions.txt", "src/store/migration_baseline_rows.sql", "openapi.json"):
+            self.assertTrue(select([path], "review", AVAILABLE)["typecheck_macos"], path)
+        for path in ("tests/integration/terminal_leader.py", "tests/ci/quarantine.json", "tests/ci/select_tests.py",
+                     ".github/workflows/check.yml", "clients/ts/src/wire.ts", "README.md"):
+            self.assertFalse(select([path], "review", AVAILABLE)["typecheck_macos"], path)
+        self.assertTrue(select(["tests/ci/quarantine.json", "src/TerminalText.zig"], "development",
+                               AVAILABLE)["typecheck_macos"])
 
     def test_cache_proof_tracks_cache_policy_not_every_runtime_edit(self):
         for path in ("build.zig", ".github/actions/setup/action.yml", "tests/ci/cache_execution.py",

@@ -1743,6 +1743,9 @@ test "a stale Action settlement leaves the Store byte-identical" {
         pub fn recordInserted(self: *@This(), digest: *const [32]u8, length: u64, private: bool, content_id: u64) void {
             self.inner.recordInserted(digest, length, private, content_id);
         }
+        pub fn recordContentRow(self: *@This(), content_id: u64) void {
+            self.inner.recordContentRow(content_id);
+        }
         pub fn commit(self: *@This()) Inner.Error!void {
             var sql: [160]u8 = undefined;
             const unattempt = std.fmt.bufPrintSentinel(&sql, "UPDATE action_operation SET attempt_ordinal=0,bash_timeout_ms=NULL,attempt_at=NULL,sender_handle=NULL WHERE action_id={d}", .{self.action_id}, 0) catch unreachable;
