@@ -11,7 +11,7 @@ import textwrap
 import unittest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from platform_boundary import (bind_sites, build_violations, mac_path, pty_close_violations, python_sites, shell_sites, sites, typescript_sites,  # noqa: E402
+from platform_boundary import (bind_sites, build_violations, flag_violations, mac_path, pty_close_violations, python_sites, shell_sites, sites, typescript_sites,  # noqa: E402
                                unlistened_binds, violations, zig_sites)
 import build_files  # noqa: E402
 from select_tests import select  # noqa: E402
@@ -63,6 +63,33 @@ class PlatformBoundaryTest(unittest.TestCase):
 
     def test_repository_platform_sites_are_all_under_mac_paths(self):
         self.assertEqual(violations(sites()), [])
+
+    def test_file_flag_comparisons_use_portable_owner(self):
+        self.assertEqual(flag_violations(), [])
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            directory = root / "tests/integration"
+            directory.mkdir(parents=True)
+            fixture = directory / "example.py"
+            fixture.write_text(textwrap.dedent('''\
+                def check(fd, expected):
+                    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+                    assert flags == expected
+                    assert expected != fcntl.fcntl(fd, fcntl.F_GETFL)
+                    assert os_semantics.user_file_flags(flags) == expected
+                    assert user_file_flags(fcntl.fcntl(fd, fcntl.F_GETFL)) != expected
+                    assert termios.tcgetattr(fd) == expected
+                    assert b"a" != b"b"
+                def unrelated(flags, expected):
+                    assert flags == expected
+            '''))
+            for exempt in ("os_semantics.py", "terminal_restoration_fixture.py"):
+                (directory / exempt).write_text("def check(fd):\n    assert fcntl.fcntl(fd, fcntl.F_GETFL) == 0\n")
+            messages = flag_violations(root)
+            self.assertEqual(len(messages), 2)
+            self.assertIn("tests/integration/example.py:3:", messages[0])
+            self.assertIn("tests/integration/example.py:4:", messages[1])
+            self.assertTrue(all("assert_file_flags or os_semantics.user_file_flags" in m for m in messages))
 
     def test_darwin_build_branches_delegate_to_mac_path(self):
         for path in build_files.files():
