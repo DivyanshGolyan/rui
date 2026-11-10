@@ -662,7 +662,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     // An accepted Message reads Sent until live output, or the waiting row, shows it.
     const sent = if (self.admission.echo) |echo| if (self.queuedRow()) |row| echo > row.newest else true else false;
     const send = session_chrome.send(session_notice.status(self.reading.opening, self.app_consent.request != null, held), self.reading.opening or (held != null and held.?.state == .submitting), sent);
-    const facts_buffer = try ctx.arena.create([session_line.capacity]u8);
+    const facts_buffer = try ctx.arena.create([session_chrome.facts_bytes]u8);
     chrome.place(&self.app_screen, .{
         .browsing = browsing,
         .new_entries = if (self.browsed_from) |from| self.live.cursor.position -| from else 0,
@@ -670,7 +670,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .needs_key = if (send.needs) |needs| session_chrome.needsKey(needs) else "",
         .progress = send.progress,
         .stoppable = said.stoppable,
-        .facts = if (self.line.facts(&self.hint, self.session)) |value| session_line.write(facts_buffer, value, ctx.max.width.? -| 2, self.app_caps.width) else self.session,
+        .facts = session_chrome.factsRow(facts_buffer, self.line.facts(&self.hint, self.session), self.session, status_page.archiveBadge(self.line.archive_state), ctx.max.width.? -| 2, self.app_caps.width),
         .notice = said.text orelse self.shown_notice.current(now_ms),
         .shortcuts = self.shortcuts_open,
         .overlay = palette,
@@ -5119,6 +5119,9 @@ test "upgrade reobservation retains a refused archive command from the completio
 
 /// An App Session with a settled live view, for the chrome's tests.
 const ChromeFixture = struct {
+    /// What the fixture's overview says under the input.
+    var overview_says: ?[]const u8 = null;
+
     environ: std.process.Environ.Map,
     screen: *Screen,
     tmp: std.testing.TmpDir,
@@ -5153,7 +5156,7 @@ const ChromeFixture = struct {
         var lender = quiet_overview;
         lender.line = struct {
             fn line(_: *anyopaque, kind: protocol.session_work.Kind) Lender.Said {
-                return .{ .stoppable = kind == .working };
+                return .{ .text = ChromeFixture.overview_says, .stoppable = kind == .working };
             }
         }.line;
         fixture.self.begin(init_, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } }, undefined, undefined, undefined, fixture.screen, &fixture.interrupted, lender);
@@ -5318,6 +5321,44 @@ test "App Session says Sent from the Host's acceptance until the Message's own r
     // Live output delivered it: its row is the feedback, so the notice shows.
     self.admission.echo = null;
     try std.testing.expectEqualStrings("Copied 3 lines", (try fixture.rows())[23]);
+}
+
+test "App Session's facts row ends with the archive badge while the Session is archived or archiving" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    const facts = struct {
+        fn row(shown: *const [24][]const u8) []const u8 {
+            return shown[ChromeFixture.find(shown, "‹").?];
+        }
+    }.row;
+    try std.testing.expectEqualStrings("‹ k7m2qx", facts(&try fixture.rows()));
+    self.line.archive_state = .archived;
+    try std.testing.expectEqualStrings("‹ k7m2qx · Archived · /unarchive", facts(&try fixture.rows()));
+    self.line.archive_state = .archiving;
+    try std.testing.expectEqualStrings("‹ k7m2qx · Stopping and archiving", facts(&try fixture.rows()));
+    // A notice on the last row leaves the badge where it is.
+    self.shown_notice.show("Copied 3 lines", ChromeFixture.now());
+    const shown = try fixture.rows();
+    try std.testing.expectEqualStrings("‹ k7m2qx · Stopping and archiving", facts(&shown));
+    try std.testing.expectEqualStrings("Copied 3 lines", shown[23]);
+}
+
+test "App Session's last row offers ctrl+x stop at the right while work runs, beside the overview's notice" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    self.live.work.state = .{ .working = .{ .since = ChromeFixture.now() / 1000 } };
+    ChromeFixture.overview_says = "Port overview to vxfw finished";
+    defer ChromeFixture.overview_says = null;
+    const shown = try fixture.rows();
+    try std.testing.expect(std.mem.startsWith(u8, shown[23], "Port overview to vxfw finished"));
+    try std.testing.expect(std.mem.endsWith(u8, shown[23], " ctrl+x stop"));
+    // Work ends: the stop key goes; the overview's notice stays its own.
+    self.live.work.state = .{ .idle = .{ .since = 0 } };
+    try std.testing.expectEqualStrings("Port overview to vxfw finished", (try fixture.rows())[23]);
 }
 
 test "App Session's last row says the send state, which stays past a key and five seconds" {
