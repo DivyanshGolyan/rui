@@ -580,19 +580,17 @@ pub const Client = struct {
         next.packet_left -= prefix_len;
         if (len > next.packet_left) return error.ProtocolViolation;
         next.columns_left -= 1;
-        // The last value ends its packet. Refusing one that does not here,
-        // before its bytes, makes the refusal independent of how the
-        // value's bytes arrive.
-        if (next.columns_left == 0 and len != next.packet_left) return error.ProtocolViolation;
         next.value_left = len;
         try self.advanceRow(next);
         return .{ .consumed = prefix_len, .event = .{ .value = len } };
     }
 
-    /// Stores the row's progress; after its last value the packet must end.
+    /// Stores the row's progress. The last value must end its packet; that is
+    /// checked once its length is known, before its bytes, so the refusal
+    /// does not depend on how those bytes arrive.
     fn advanceRow(self: *Client, row: State.Row) Error!void {
+        if (row.columns_left == 0 and row.packet_left != row.value_left) return error.ProtocolViolation;
         if (row.columns_left == 0 and row.value_left == 0) {
-            if (row.packet_left != 0) return error.ProtocolViolation;
             self.state = .rows;
         } else {
             self.state = .{ .row = row };
