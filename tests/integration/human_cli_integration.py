@@ -4726,9 +4726,10 @@ def renderer_cases():
             requests = len(endpoint.requests)
             tty.send("o\x1b.\x1b ", predicate=lambda: "! Key combination not recognized; ignored. Draft unchanged." in tty.capture.completed and tty.capture.draft("o", 3))
             tty.send("k", predicate=lambda: "! Key combination not recognized" not in tty.capture.completed and tty.capture.draft("ok", 4))
-            # Shift-Enter as Ghostty sends it (ESC CR), and ESC LF, add a line.
-            tty.send("\x1b\r", predicate=lambda: "! Key combination not recognized" not in tty.capture.completed and tty.capture.draft("", 2, prompt="  "))
-            tty.send("\x1b\r2", predicate=lambda: tty.capture.draft("2", 3, prompt="  "))
+            # Shift-Enter as Ghostty sends it (ESC CR) adds a line, whose row
+            # starts under the text after the margin and the mark.
+            tty.send("\x1b\r", predicate=lambda: "! Key combination not recognized" not in tty.capture.completed and tty.capture.draft("", 3, prompt="   "))
+            tty.send("\x1b\r2", predicate=lambda: tty.capture.draft("2", 4, prompt="   "))
             # A hand-typed Esc expires before Enter, which then sends.
             marker = answer("esc then enter")
             os.write(tty.master, b"\x1b")
