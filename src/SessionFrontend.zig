@@ -2488,6 +2488,107 @@ fn sendKeys(frontend: *Self, bytes: []const u8) !void {
     try held.keys(bytes);
 }
 
+test "a history page read for an earlier transcript never joins the current one" {
+    const Worker = struct {
+        fn read(_: *anyopaque, _: *Task) !void {}
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.files.inspection = try held.tmp.dir.createFile(std.testing.io, "older", .{ .read = true });
+    defer self.files.inspection.close(std.testing.io);
+    try self.files.inspection.writePositionalAll(std.testing.io, "STALE PAGE ROW\n", 0);
+    try held.settle();
+    try held.keys("\x1b[5~");
+    self.job.transcript = self.transcript.id;
+    self.reading.phase = .history;
+    try self.reader.start(std.testing.io, self, Worker.read);
+    defer {
+        self.reader.cancel();
+        self.reader.join() catch {};
+    }
+    try held.keys("\x07\x1b[5~");
+    try std.testing.expect(self.job.transcript != self.transcript.id);
+    while (!self.reader.completed()) std.Thread.yield() catch {};
+    try held.settle();
+    try held.keys("\x1b[5~");
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "STALE PAGE ROW") == null);
+}
+
+test "sending a Message drops an older-page read still waiting to start" {
+    const Worker = struct {
+        var release: std.atomic.Value(bool) = .init(false);
+        fn read(_: *anyopaque, _: *Task) !void {
+            while (!release.load(.acquire)) std.Thread.yield() catch {};
+        }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    Worker.release.store(false, .release);
+    try self.reader.start(std.testing.io, self, Worker.read);
+    defer {
+        Worker.release.store(true, .release);
+        self.reader.cancel();
+        self.reader.join() catch {};
+    }
+    try held.keys("/history\r");
+    try std.testing.expect(self.transcript.history_requested != null);
+    try held.keys("hello\r");
+    try std.testing.expect(self.transcript.history_requested == null);
+    Worker.release.store(true, .release);
+    while (!self.reader.completed()) std.Thread.yield() catch {};
+    try self.settleReader();
+    try held.settle();
+    try std.testing.expect(self.transcript.history_requested == null);
+    try std.testing.expect(self.reader.thread == null);
+}
+
+test "sending a Message drops a /status read still waiting to start" {
+    const Worker = struct {
+        var release: std.atomic.Value(bool) = .init(false);
+        fn read(_: *anyopaque, _: *Task) !void {
+            while (!release.load(.acquire)) std.Thread.yield() catch {};
+        }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    Worker.release.store(false, .release);
+    try self.reader.start(std.testing.io, self, Worker.read);
+    defer {
+        Worker.release.store(true, .release);
+        self.reader.cancel();
+        self.reader.join() catch {};
+    }
+    try held.keys("/status\r");
+    try held.settle();
+    try std.testing.expect(self.inspection.status_requested);
+    try held.keys("hello\r");
+    try std.testing.expect(!self.inspection.status_requested);
+    Worker.release.store(true, .release);
+    while (!self.reader.completed()) std.Thread.yield() catch {};
+    try self.settleReader();
+    try held.settle();
+    try std.testing.expect(!self.inspection.status_requested);
+    try std.testing.expect(self.reader.thread == null);
+}
+
+test "sending a Message from a browsed page returns the screen to the latest conversation" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try held.screen.append("OLDER ROW\n");
+    for (0..60) |_| try held.screen.append("conversation row\n");
+    try held.screen.append("LATEST ROW\n");
+    try held.settle();
+    for (0..6) |_| try held.keys("\x1b[5~");
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "OLDER ROW") != null);
+    try held.keys("hello\r");
+    const shown = try held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, shown, "LATEST ROW") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "OLDER ROW") == null);
+}
+
 /// Terminal bytes, then App's next tick.
 fn stepKeys(held: *HeldFrontend, bytes: []const u8) !void {
     try held.keys(bytes);
