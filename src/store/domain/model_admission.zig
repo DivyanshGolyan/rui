@@ -586,6 +586,36 @@ const insert_operation = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
+/// What an admission of `kind` selects: the owner `admitNextModelAttempt`
+/// and the dispatch loop's work read (`dispatchWork`) queue it here.
+fn queueSelection(reader: anytype, kind: ModelAdmissionKind, found: *runnable_selection.Result) void {
+    switch (kind) {
+        .message => reader.read(runnable_selection, .{}, found),
+        .open_turn_message => reader.read(open_turn_selection, .{}, found),
+        .tool_continuation => reader.read(tool_continuation_selection, .{}, found),
+    }
+}
+
+/// What a model admission that selected nothing checks before the Store
+/// counts as idle: no continuation disagrees with its calls, and every
+/// blocked Operation's calls have their outcomes. `queue` rides the
+/// caller's round; `settle` runs after it and costs one more round only
+/// when an Operation is blocked.
+const IdleChecks = struct {
+    disagreeing: disagreeing_continuation.Result = undefined,
+    blocked: reads_domain.First(blocked_operation.Row) = .{},
+
+    fn queue(checks: *IdleChecks, reader: anytype) void {
+        reader.read(disagreeing_continuation, .{}, &checks.disagreeing);
+        reader.readEach(blocked_operation, .{}, 1, &checks.blocked);
+    }
+
+    fn settle(checks: *const IdleChecks, reader: anytype) !void {
+        if (checks.disagreeing != null) return error.CorruptStore;
+        if (checks.blocked.row != null) try validateBlockedToolCalls(reader);
+    }
+};
+
 /// Admits the next model Attempt of `kind`. The read Access `reader`
 /// selects, outside any transaction; with nothing selected it runs main's
 /// idle checks, the disagreeing continuations with whether any Operation
@@ -599,20 +629,13 @@ const insert_operation = rsql.Write(.{
 /// holds; a moved head is `SelectionChanged`.
 pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
     var found: runnable_selection.Result = undefined;
-    switch (kind) {
-        .message => reader.read(runnable_selection, .{}, &found),
-        .open_turn_message => reader.read(open_turn_selection, .{}, &found),
-        .tool_continuation => reader.read(tool_continuation_selection, .{}, &found),
-    }
+    queueSelection(reader, kind, &found);
     try store_access.runAs(reader, error.RunnableSelectionFailed);
     const selection = found orelse {
-        var disagreeing: disagreeing_continuation.Result = undefined;
-        var blocked: reads_domain.First(blocked_operation.Row) = .{};
-        reader.read(disagreeing_continuation, .{}, &disagreeing);
-        reader.readEach(blocked_operation, .{}, 1, &blocked);
+        var idle: IdleChecks = .{};
+        idle.queue(reader);
         try store_access.runNamed(reader, .{.{ blocked_operation, error.CallReadFailed }}, error.TurnReadFailed);
-        if (disagreeing != null) return error.CorruptStore;
-        if (blocked.row != null) try validateBlockedToolCalls(reader);
+        try idle.settle(reader);
         return null;
     };
     if (selection.cutoff.get() < selection.first_admission.get()) return error.CorruptStore;
@@ -726,26 +749,20 @@ pub const DispatchWork = struct {
 };
 
 /// Reads `DispatchWork` in one round: the selections the slot-free, Bash,
-/// message and tool-continuation scans each open with. When no model
-/// admission has work, the round also holds the checks an empty admission
-/// scan runs before the Store counts as idle, and blocked Operations cost
-/// one more round, as there.
+/// message and tool-continuation scans each open with, queued by those
+/// scans' own owners, and the `IdleChecks` a model admission that selects
+/// nothing would run, settled here when either has no work.
 pub fn dispatchWork(reader: anytype, paused: bool) !DispatchWork {
     var actions: action_domain.WorkProbe = .{};
     var message: runnable_selection.Result = undefined;
-    var continuation: tool_continuation_selection.Result = undefined;
-    var disagreeing: disagreeing_continuation.Result = undefined;
-    var blocked: reads_domain.First(blocked_operation.Row) = .{};
+    var continuation: runnable_selection.Result = undefined;
+    var idle: IdleChecks = .{};
     actions.queue(reader);
-    if (paused) reader.read(open_turn_selection, .{}, &message) else reader.read(runnable_selection, .{}, &message);
-    reader.read(tool_continuation_selection, .{}, &continuation);
-    reader.read(disagreeing_continuation, .{}, &disagreeing);
-    reader.readEach(blocked_operation, .{}, 1, &blocked);
+    queueSelection(reader, if (paused) .open_turn_message else .message, &message);
+    queueSelection(reader, .tool_continuation, &continuation);
+    idle.queue(reader);
     try store_access.runNamed(reader, .{.{ blocked_operation, error.CallReadFailed }}, error.TurnReadFailed);
-    if (message == null or continuation == null) {
-        if (disagreeing != null) return error.CorruptStore;
-        if (blocked.row != null) try validateBlockedToolCalls(reader);
-    }
+    if (message == null or continuation == null) try idle.settle(reader);
     return .{
         .core = actions.core(),
         .mcp = actions.mcp(),
