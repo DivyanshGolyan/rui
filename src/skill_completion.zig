@@ -38,22 +38,104 @@ pub fn atCaret(draft: []const u8, caret: usize) ?Word {
     return .{ .slash = slash, .end = end };
 }
 
-/// A suggestion page, the name prefix it was read for, and which read it
-/// answered: the shell numbers each read, so another page is another list,
-/// which no key acts on until a frame draws it.
-pub const Held = struct {
-    prefix: []const u8,
-    page: *const skill_suggestions.Page,
-    read: u64,
+/// The longest name prefix the Host reads suggestions for.
+pub const max_prefix_bytes = 64;
+
+const Prefix = struct {
+    bytes: [max_prefix_bytes]u8 = undefined,
+    len: u8 = 0,
+
+    fn of(typed: []const u8) Prefix {
+        var prefix: Prefix = .{ .len = @intCast(typed.len) };
+        @memcpy(prefix.bytes[0..typed.len], typed);
+        return prefix;
+    }
+
+    fn slice(self: *const Prefix) []const u8 {
+        return self.bytes[0..self.len];
+    }
 };
 
-/// Whether `typed` needs a read: no page is held, or the held one is for a
-/// prefix `typed` does not start with, or it left matches out.
-pub fn wants(typed: []const u8, held: ?Held) bool {
-    const kept = held orelse return true;
-    if (!std.mem.startsWith(u8, typed, kept.prefix)) return true;
-    return kept.page.total != kept.page.entries.len;
-}
+/// A read for the shell's worker: the Host's `skill_suggestions` for
+/// `prefix`, in the screen's scope (its Session, or the overview's
+/// workspace). Its page or failure comes back numbered `read`. `prefix`
+/// borrows the `Reads` that asked.
+pub const Ask = struct { read: u64, prefix: []const u8 };
+
+/// The composer's suggestion reads: at most one in flight, and the page
+/// the latest useful answer held. Each read is numbered, so rows from
+/// another page are another list (`Shown.nextOf`'s source), which no key
+/// acts on until a frame draws it. Pages are the caller's allocation;
+/// every call that lets one go returns it to be freed.
+pub const Reads = struct {
+    last: u64 = 0,
+    pending: ?Numbered = null,
+    /// A name whose read failed: not asked again until the name changes.
+    failed: ?Prefix = null,
+    held: ?Held = null,
+
+    const Numbered = struct { read: u64, prefix: Prefix };
+    pub const Held = struct { read: u64, prefix: Prefix, page: skill_suggestions.Page };
+
+    /// The read `typed`, the caret word's name, needs, if any: none while
+    /// one runs, for a name the Host would refuse, after that name failed,
+    /// or while the held page holds every skill `typed` can match.
+    pub fn ask(self: *Reads, typed: []const u8) ?Ask {
+        if (typed.len > max_prefix_bytes or self.pending != null) return null;
+        if (self.failed) |*failed| if (std.mem.eql(u8, failed.slice(), typed)) return null;
+        if (self.held) |*held| if (std.mem.startsWith(u8, typed, held.prefix.slice()) and held.page.total == held.page.entries.len) return null;
+        self.last += 1;
+        self.pending = .{ .read = self.last, .prefix = .of(typed) };
+        return .{ .read = self.last, .prefix = self.pending.?.prefix.slice() };
+    }
+
+    /// Read `read`'s page, for the caret word's name now, `typed` (null when
+    /// the caret is in no `/word`). It is held when it is the read in flight
+    /// and `typed` still starts with what it asked for; returns the page to
+    /// free: this one when stale, else the one it replaced.
+    pub fn answer(self: *Reads, read: u64, page: skill_suggestions.Page, typed: ?[]const u8) ?skill_suggestions.Page {
+        const pending = self.pending orelse return page;
+        if (pending.read != read) return page;
+        self.pending = null;
+        self.failed = null;
+        const now = typed orelse return page;
+        if (!std.mem.startsWith(u8, now, pending.prefix.slice())) return page;
+        const replaced = if (self.held) |held| held.page else null;
+        self.held = .{ .read = read, .prefix = pending.prefix, .page = page };
+        return replaced;
+    }
+
+    /// Read `read` failed; the held page stays.
+    pub fn fail(self: *Reads, read: u64) void {
+        const pending = self.pending orelse return;
+        if (pending.read != read) return;
+        self.failed = pending.prefix;
+        self.pending = null;
+    }
+
+    /// Another scope: nothing held or in flight counts. Returns the held
+    /// page to free.
+    pub fn reset(self: *Reads) ?skill_suggestions.Page {
+        const held = self.held;
+        self.* = .{ .last = self.last };
+        return if (held) |kept| kept.page else null;
+    }
+
+    /// The Palette's rows for the draft at `revision`, with the caret at
+    /// `caret`, after `previous`: `commands` (the draft's own command list,
+    /// used only for the draft's first word), then the held page's skills
+    /// the caret word's name starts. Null when the caret is in no `/word`
+    /// or nothing matches.
+    pub fn shown(self: *const Reads, rows: *Rows, draft: []const u8, caret: usize, revision: u64, commands: ?slash_commands.List, previous: ?slash_commands.Shown) ?slash_commands.Shown {
+        const word = atCaret(draft, caret) orelse return null;
+        const typed = word.name(draft);
+        const listed = if (word.slash == 0) commands else null;
+        const held = if (self.held) |*kept| (if (std.mem.startsWith(u8, typed, kept.prefix.slice())) kept else null) else null;
+        const none: skill_suggestions.Page = .{};
+        const page = if (held) |kept| &kept.page else &none;
+        return slash_commands.Shown.nextOf(previous, revision, if (held) |kept| kept.read else 0, rows.list(typed, listed, page));
+    }
+};
 
 /// Each skill row's text, `/name `: a row shows `/name` and completes
 /// `name `. Held here, at one address, so a list can borrow it.
@@ -206,13 +288,89 @@ test "skill completion replaces the caret's name, spacing only at the draft's en
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&before, "{s}{s}", .{ draft, commands.completion(0) }), after);
 }
 
-test "skill completion reads again only when the held page cannot answer" {
+fn testPage(entries: []const skill_suggestions.Entry) skill_suggestions.Page {
+    return .{ .entries = entries, .total = entries.len };
+}
+
+test "skill reads ask once per name, one at a time, and not while the held page answers" {
+    const entries = [_]skill_suggestions.Entry{ .{ .name = "recap", .description = "Summarise" }, .{ .name = "review", .description = "Review a change" } };
+    var reads: Reads = .{};
+    const first = reads.ask("re").?;
+    try std.testing.expectEqual(@as(u64, 1), first.read);
+    try std.testing.expectEqualStrings("re", first.prefix);
+    // One read at a time: typing on waits for its answer.
+    try std.testing.expectEqual(@as(?Ask, null), reads.ask("rev"));
+    try std.testing.expectEqual(@as(?skill_suggestions.Page, null), reads.answer(1, testPage(&entries), "rev"));
+    // The whole catalog under `re` is held, so narrowing reads nothing.
+    try std.testing.expectEqual(@as(?Ask, null), reads.ask("rev"));
+    try std.testing.expectEqual(@as(?Ask, null), reads.ask("re"));
+    // A shorter name, or a page that left matches out, reads again.
+    try std.testing.expectEqual(@as(u64, 2), reads.ask("r").?.read);
+    const replaced = reads.answer(2, .{ .entries = entries[0..1], .total = 30 }, "r").?;
+    try std.testing.expectEqual(@as(usize, 2), replaced.entries.len);
+    try std.testing.expectEqual(@as(u64, 3), reads.ask("r").?.read);
+    // A name longer than the Host reads asks nothing.
+    var fresh: Reads = .{};
+    try std.testing.expectEqual(@as(?Ask, null), fresh.ask(&@as([max_prefix_bytes + 1]u8, @splat('a'))));
+    try std.testing.expect(fresh.ask(&@as([max_prefix_bytes]u8, @splat('a'))) != null);
+}
+
+test "skill reads drop an answer the word moved past, or one a reset left behind" {
     const entries = [_]skill_suggestions.Entry{.{ .name = "review", .description = "" }};
-    const whole: skill_suggestions.Page = .{ .entries = &entries, .total = 1 };
-    const partial: skill_suggestions.Page = .{ .entries = &entries, .total = 30 };
-    try std.testing.expect(wants("re", null));
-    try std.testing.expect(!wants("rev", .{ .prefix = "re", .page = &whole, .read = 1 }));
-    try std.testing.expect(!wants("re", .{ .prefix = "re", .page = &whole, .read = 1 }));
-    try std.testing.expect(wants("rev", .{ .prefix = "re", .page = &partial, .read = 1 }));
-    try std.testing.expect(wants("r", .{ .prefix = "re", .page = &whole, .read = 1 }));
+    var reads: Reads = .{};
+    _ = reads.ask("re").?;
+    // The person typed another word while the read ran: its page answers
+    // nothing now, so it comes back to be freed and the new word reads.
+    const moved = reads.answer(1, testPage(&entries), "x").?;
+    try std.testing.expectEqual(@as(usize, 1), moved.entries.len);
+    try std.testing.expectEqual(@as(?Reads.Held, null), reads.held);
+    try std.testing.expectEqual(@as(u64, 2), reads.ask("x").?.read);
+    // The caret left every `/word`: nothing to answer.
+    try std.testing.expect(reads.answer(2, testPage(&entries), null) != null);
+    // Another scope (a Session switched) resets; the earlier scope's
+    // answer, arriving while the new scope's read runs, is dropped.
+    _ = reads.ask("re").?;
+    try std.testing.expectEqual(@as(?skill_suggestions.Page, null), reads.reset());
+    try std.testing.expectEqual(@as(u64, 4), reads.ask("re").?.read);
+    try std.testing.expect(reads.answer(3, testPage(&entries), "re") != null);
+    try std.testing.expectEqual(@as(?Reads.Held, null), reads.held);
+    try std.testing.expectEqual(@as(?skill_suggestions.Page, null), reads.answer(4, testPage(&entries), "re"));
+    try std.testing.expectEqual(@as(usize, 1), reads.reset().?.entries.len);
+}
+
+test "a failed skill read is not asked again for the same name" {
+    var reads: Reads = .{};
+    _ = reads.ask("re").?;
+    reads.fail(1);
+    try std.testing.expectEqual(@as(?Ask, null), reads.ask("re"));
+    try std.testing.expectEqual(@as(u64, 2), reads.ask("rev").?.read);
+    // A failure of a read no longer asked for changes nothing.
+    reads.fail(1);
+    try std.testing.expectEqual(@as(?Ask, null), reads.ask("rev"));
+}
+
+test "skill rows are the held page's, numbered by the read that made them" {
+    const entries = [_]skill_suggestions.Entry{ .{ .name = "recap", .description = "Summarise" }, .{ .name = "review", .description = "Review a change" } };
+    var reads: Reads = .{};
+    var rows: Rows = .{};
+    const draft = "use /re";
+    // No page yet, and a word past the draft's start lists no commands.
+    try std.testing.expectEqual(@as(?slash_commands.Shown, null), reads.shown(&rows, draft, draft.len, 1, slash_commands.conversation.suggest("/re", .{}), null));
+    _ = reads.ask("re").?;
+    _ = reads.answer(1, testPage(&entries), "re");
+    const shown = reads.shown(&rows, draft, draft.len, 1, null, null).?;
+    try std.testing.expectEqual(@as(usize, 2), shown.list.count);
+    try std.testing.expectEqual(@as(u64, 1), shown.source);
+    try std.testing.expectEqual(.hidden, shown.seen);
+    try std.testing.expectEqualStrings("/review", shown.list.entries[1].shown);
+    // The caret in no `/word` shows nothing; a word the page does not
+    // cover shows only commands, which the draft's first word lists.
+    try std.testing.expectEqual(@as(?slash_commands.Shown, null), reads.shown(&rows, "use it", 3, 2, null, null));
+    const commands = slash_commands.conversation.suggest("/st", .{}).?;
+    const start = reads.shown(&rows, "/st", 3, 3, commands, null).?;
+    try std.testing.expectEqual(commands.count, start.list.count);
+    try std.testing.expectEqual(@as(u64, 0), start.source);
+    // At the draft's start, commands first, then the page's skills.
+    const both = reads.shown(&rows, "/re", 3, 4, slash_commands.conversation.suggest("/re", .{}), null).?;
+    try std.testing.expectEqualStrings("/review", both.list.entries[both.list.count - 1].shown);
 }
