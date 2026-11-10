@@ -423,7 +423,9 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 };
             } else {
                 self.notice = null;
-                const allowed = !self.reading.opening and self.reading.phase != .permission and !self.commandActive();
+                // One submission at a time: a decision or Message in flight,
+                // or an original still held, makes Enter say so and keep the draft.
+                const allowed = !self.reading.opening and self.reading.phase != .permission and !self.commandActive() and self.submission.intent == null;
                 if (!(event == .key_press and !pasting and Editor.isEnter(event.key_press) and self.startChange())) {
                     switch (self.input.appEvent(conversation_keys, event, pasting, allowed)) {
                         .message => |ticket| try self.beginMessage(.{ .message = ticket }),
