@@ -49,10 +49,10 @@ BUDGET = {
     # Each later operation, exact.
     "commits": 3,
     "write_round_trips": 10,
-    # Any operation, upper bound: rescans, the observe loop below and
-    # history read one round at a time make the total vary (37 to 54 over
-    # seven runs once one work read named the scans a commit leaves due).
-    "round_trips": 60,
+    # Any operation, upper bound: rescans and the observe loop below make
+    # the total vary (32 to 38 over five runs once a history batch's
+    # items, parts and small contents came in one round).
+    "round_trips": 44,
     # Over IDLE_SECONDS with no Session, exact: the Host asks again only
     # after a commit, a slot change or a scheduled retry falling due.
     "idle_round_trips": 0,

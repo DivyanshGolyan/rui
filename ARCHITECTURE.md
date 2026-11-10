@@ -843,6 +843,9 @@ Generic content access cannot open private continuation; the provider view grant
 One shared, pointer-stable preparation owner retains the admitted Operation/Attempt binding, historical view and active reader, charged scratch, encoder/replay cursor and cleanup state.
 There is at most one such owner across all execution slots; it is resumable orchestration state, not durable authority, a worker or a prepared-request queue.
 Borrowed record metadata expires on reader advance; opaque handles remain stable until view release, and payload reads use bounded caller buffers.
+The view reads history in batches of 16 entries, and one more round per batch reads the batch's page: each output item with its call, the items' parts in order, and with every row the whole bytes of each content it names of at most 16 KiB.
+The page is plain values on the heap for the view's life (under 300 KiB), because history below the admission never changes; a reader of a content the page kept copies from it without entering the Store and still checks its digest, and a larger content, or one the page had no room for, is read through its own reader.
+A batch that comes back short is the Session's last, so the end of the walk costs no round.
 No SQLite transaction spans adapter processing or network activity.
 Historical retention must preserve referenced versions through required recovery; an expired or foreign handle is programmer misuse, while missing/corrupt content and resource/storage failures are explicit failures.
 
