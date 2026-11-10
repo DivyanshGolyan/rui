@@ -128,7 +128,8 @@ On Host threads:
 
 ## Review
 
-Codex on the PR is the code review: comment `@codex review` after every push, because it does not re-review on its own.
+Codex on the PR is the code review: comment `@codex review for duplicated authority and braided concerns; group symptoms by owner` after every push, because it does not re-review on its own.
+The [Code Review Rules](AGENTS.md#code-review-rules) own how it groups and orders its findings; the rules it applies stay here.
 The author's own reviews are design reviews of the approved design, and a redesign when fixes keep producing new findings.
 Reviewers apply the rules below and the [product tenets](VERIFICATION.md#product-tenets).
 The author fixes each finding at its class ([Ownership and transitions](#ownership-and-transitions)), or records in the PR why it stays.

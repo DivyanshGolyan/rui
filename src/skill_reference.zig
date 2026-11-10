@@ -47,8 +47,7 @@ pub const References = struct {
                 }
             } else {
                 self.follow(byte);
-                const ends = std.ascii.isWhitespace(byte) or std.mem.indexOfScalar(u8, ".,;:!?)", byte) != null;
-                if (ends and validName(self.name[0..self.len])) return self.name[0..self.len];
+                if (ends(byte) and validName(self.name[0..self.len])) return self.name[0..self.len];
             },
             .prose => self.follow(byte),
         }
@@ -60,11 +59,22 @@ pub const References = struct {
         return if (self.state == .name and validName(self.name[0..self.len])) self.name[0..self.len] else null;
     }
 
-    fn follow(self: *References, byte: u8) void {
-        self.state = if (std.ascii.isWhitespace(byte) or byte == '(') .boundary else .prose;
+    /// Whether `byte` after a name ends it as a reference rather than
+    /// making the word prose.
+    pub fn ends(byte: u8) bool {
+        return std.ascii.isWhitespace(byte) or std.mem.indexOfScalar(u8, ".,;:!?)", byte) != null;
     }
 
-    fn nameByte(byte: u8) bool {
+    /// Whether a `/` after `byte` may start a reference.
+    pub fn opens(byte: u8) bool {
+        return std.ascii.isWhitespace(byte) or byte == '(';
+    }
+
+    fn follow(self: *References, byte: u8) void {
+        self.state = if (opens(byte)) .boundary else .prose;
+    }
+
+    pub fn nameByte(byte: u8) bool {
         return (byte >= 'a' and byte <= 'z') or (byte >= '0' and byte <= '9') or byte == '-';
     }
 };
