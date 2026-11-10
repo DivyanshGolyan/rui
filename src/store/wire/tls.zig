@@ -5,17 +5,17 @@
 //!
 //! Verification is never off: the chain against the trust and the host
 //! name or IP literal against the leaf. The context settings, host naming
-//! and trust loading are h2's, so `SSL_CERT_FILE` and the host bundles
-//! behave the same for the Store as for providers. On macOS, `.system` is
-//! the bundle OpenSSL reads (`/etc/ssl/cert.pem`), not SecTrust.
+//! and trust loading are `tls_client`'s, shared with h2, so `SSL_CERT_FILE`
+//! and the host bundles behave the same for the Store as for providers. On
+//! macOS, `.system` is the bundle OpenSSL reads (`/etc/ssl/cert.pem`), not
+//! SecTrust, which only h2 uses.
 const std = @import("std");
-const h2 = @import("h2");
-const shared = h2.openssl_client;
+const shared = @import("tls_client");
 const c = shared.c;
 
-pub const Trust = h2.Trust;
+pub const Trust = shared.Trust;
 /// Why `Context.init` failed: memory, or trust that would not load.
-pub const ContextError = h2.EndpointError;
+pub const ContextError = shared.TrustError || error{OutOfMemory};
 pub const HostKind = shared.HostKind;
 
 /// Room for one TLS record of a full plaintext fragment (2^14 bytes plus
@@ -82,8 +82,8 @@ pub const Session = struct {
     /// A client session verifying `host`: SNI and the name check for a DNS
     /// name, the IP check (and no SNI) for a literal.
     pub fn init(context: *const Context, host: []const u8, kind: HostKind) error{ OutOfMemory, InvalidHost }!Session {
-        var host_z: [h2.max_host_bytes + 1]u8 = undefined;
-        if (host.len > h2.max_host_bytes or std.mem.indexOfScalar(u8, host, 0) != null) return error.InvalidHost;
+        var host_z: [shared.max_host_bytes + 1]u8 = undefined;
+        if (host.len > shared.max_host_bytes or std.mem.indexOfScalar(u8, host, 0) != null) return error.InvalidHost;
         @memcpy(host_z[0..host.len], host);
         host_z[host.len] = 0;
         const ssl = c.SSL_new(context.ctx) orelse return error.OutOfMemory;

@@ -6,6 +6,18 @@
 * **native**: all non-`store.` tests;
 * **store**: every `store.` test, including migration/dialect acceptance.
 
+`test-native` and `test-store` run their respective roots independently;
+`test-native` also runs the renderer-allocation actor and signal-stack probe
+that `test` runs. With `-Dtest-filter`, either runs the single filtered
+aggregate. Selection follows each root's import closure, conservatively using
+the entire aggregate for native. When both are reached, selection emits `test`
+instead of the pair.
+Native tests that call the Store's engine-conformance seam also keep `test`
+for native-only changes in their import closure, so their MySQL pass runs in
+Linux CI. Shared Store inputs follow the Store rule in development and select
+both roots in review.
+The Store root alone starts and verifies the live MySQL dialect check in Linux CI.
+
 Module ownership preserves each module's process globals. Executions are
 **serial, Store last**: the MySQL dialect fixture uses fixed schema names and
 rewrites `RUI_TEST_MYSQL_RECORD`. The final record remains the Store owner's
@@ -24,9 +36,15 @@ tracks file contents and directory additions. Discovery imports must be eager
 in the aggregate: a module imported only inside an excluded named test body is
 not discovered merely because its compiler filter exists.
 
-Explicit `-Dtest-filter` invocations retain the original single stock-runner
-`test` binary, full debug info, filter behavior and globals. This also preserves
-renderer-mutation reproduction and cache-execution probes. `test-full` retains
+Explicit `-Dtest-filter` invocations retain the original single `test` binary,
+full debug info, filter behavior and globals. This also preserves
+renderer-mutation reproduction and cache-execution probes. Their `test`,
+`test-logic` and `test-full` runners are the stock runner adapted to fail when
+the filter leaves no named test: anonymous discovery tests always compile, and
+a module imported only by excluded tests contributes none of its own, so an
+empty run would otherwise pass. Each step checks alone, so a filtered `check`
+fails unless the filter names a test in both `test` and `test-logic`: filter
+the step that owns the test, such as `zig build test-logic -Dtest-filter=X`. `test-full` retains
 its separate aggregate/default witness and `RUI_TEST_EXACT_INACTIVITY=1`; normal
 unit/check runs force `0`. The complete aggregate also remains the macOS
 semantic/type-check root.

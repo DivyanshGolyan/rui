@@ -9,48 +9,16 @@ import sys
 import tempfile
 import threading
 
-import bash_integration as bash
+import bash_fixture as bash
 import model_fixture as fixture
-import human_cli_integration as human
+import human_cli_fixture as human
 import host_process
-from host_process import HostDiagnostics
 from terminal_process import terminal_process
+from bash_fixture import finish_case, start_case
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
 fixture.RUI = RUI
-
-
-def open_gate(path):
-    os.mkfifo(path)
-    return os.open(path, os.O_RDWR | os.O_NONBLOCK)
-
-
-def start_case(state, name, transition, command, stdin="x"):
-    store = state / f"{name}-store"
-    marker = state / f"{name}-effect"
-    if callable(command):
-        command = command(marker)
-    responses = []
-    bash.add_exchange(responses, name, command, answer=f"{name} completed", stdin=stdin)
-    endpoint = fixture.SuccessEndpoint(responses)
-    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-    thread.start()
-    gate_path = state / f"{name}-gate"
-    keeper = open_gate(gate_path)
-    host = fixture.start_host(
-        store,
-        f"http://127.0.0.1:{endpoint.server_port}/responses",
-        "--test-phase-trace",
-        "--test-transition",
-        transition.replace("_", "-"),
-        "--test-transition-gate-path",
-        gate_path,
-    )
-    diagnostics = HostDiagnostics(host)
-    session = bash.configure(state, store, f"{name}-configure", permission="bypass")
-    fixture.message(state, store, f"{name}-message", session, "run")
-    return store, marker, endpoint, thread, keeper, host, diagnostics, session
 
 
 def assert_continuation(endpoint, name, result, stdin="x"):
@@ -63,25 +31,6 @@ def assert_continuation(endpoint, name, result, stdin="x"):
     outputs = [item for item in continuation["input"] if item.get("type") == "function_call_output"]
     assert outputs == [{"type": "function_call_output", "call_id": f"{name}-call", "output": result}], outputs
     assert [item["content"][0]["text"] for item in continuation["input"] if item.get("role") == "user"] == ["run"]
-
-
-def finish_case(original_host, recovered_host, keeper, endpoint, thread):
-    incoming_error = sys.exc_info()[1]
-    errors = []
-    for dispose in (lambda: fixture.stop_host(original_host) if original_host is not None else None,
-                    lambda: fixture.stop_host(recovered_host) if recovered_host is not None else None,
-                    lambda: os.close(keeper), endpoint.shutdown, endpoint.server_close,
-                    lambda: thread.join(timeout=5)):
-        try:
-            dispose()
-        except BaseException as error:
-            errors.append(error)
-    if thread.is_alive():
-        errors.append(AssertionError("Bash recovery endpoint thread did not retire"))
-    if errors:
-        if incoming_error is None:
-            raise errors[0]
-        incoming_error.add_note("Bash recovery cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
 
 
 def prove_lost_bash_permit_becomes_indeterminate(state):

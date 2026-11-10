@@ -18,23 +18,6 @@ type optionalField struct {
 	State string  `json:"state"`
 	Value *string `json:"value,omitempty"`
 }
-type configurationFields struct {
-	Workspace      optionalField `json:"workspace"`
-	Provider       optionalField `json:"provider"`
-	Model          optionalField `json:"model"`
-	Instructions   optionalField `json:"instructions"`
-	Tools          optionalField `json:"tools"`
-	PermissionMode optionalField `json:"permission_mode"`
-	OutputSchema   optionalField `json:"output_schema"`
-}
-type configurationCommand struct {
-	Version       string              `json:"version"`
-	Kind          string              `json:"kind"`
-	Store         string              `json:"store"`
-	Key           string              `json:"key"`
-	Session       string              `json:"session"`
-	Configuration configurationFields `json:"configuration"`
-}
 type messageCommand struct {
 	Version string `json:"version"`
 	Kind    string `json:"kind"`
@@ -73,21 +56,6 @@ func field(value map[string]any, names ...string) any {
 	return current
 }
 
-func configure(deadline measurement.Deadline, socket, store, workspace, key string) (string, error) {
-	omitted := optionalField{State: "omitted"}
-	provider := "codex"
-	model := "measurement-model"
-	value := configurationCommand{Version: measurement.WireVersion, Kind: "configure", Store: store, Key: "configure-" + key, Configuration: configurationFields{Workspace: optionalField{State: "value", Value: &workspace}, Provider: optionalField{State: "value", Value: &provider}, Model: optionalField{State: "value", Value: &model}, Instructions: omitted, Tools: omitted, PermissionMode: omitted, OutputSchema: omitted}}
-	var response map[string]any
-	if err := measurement.ExchangeUnix(deadline, socket, "/v1/configure", value, &response); err != nil {
-		return "", err
-	}
-	if field(response, "answer", "status") != "accepted" {
-		return "", fmt.Errorf("configuration failed: %v", response)
-	}
-	return measurement.ConfigurationSession(response)
-}
-
 func messageValue(store, key, session, text string) messageCommand {
 	return messageCommand{Version: measurement.WireVersion, Kind: "message", Store: store, Key: key, Session: session, Text: optionalField{State: "value", Value: &text}}
 }
@@ -121,10 +89,10 @@ func stageSample(host *measurement.Host, store, directory, name string) (map[str
 	return map[string]any{"process": process, "database": database}, nil
 }
 
-func payloadProfile(binary, workspace, parent string) ([]map[string]any, error) {
+func payloadProfile(binary, parent string) ([]map[string]any, error) {
 	var rows []map[string]any
 	for _, size := range payloadBytes {
-		row, err := payloadCase(binary, workspace, parent, size)
+		row, err := payloadCase(binary, parent, size)
 		if err != nil {
 			return nil, err
 		}
@@ -133,7 +101,7 @@ func payloadProfile(binary, workspace, parent string) ([]map[string]any, error) 
 	return rows, nil
 }
 
-func payloadCase(binary, workspace, parent string, size int) (row map[string]any, resultError error) {
+func payloadCase(binary, parent string, size int) (row map[string]any, resultError error) {
 	directory := filepath.Join(parent, fmt.Sprintf("payload-%d", size))
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		return nil, err
@@ -146,7 +114,8 @@ func payloadCase(binary, workspace, parent string, size int) (row map[string]any
 	defer func() {
 		measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
 	}()
-	session, err := configure(deadline, socket, store, workspace, "measure/payload")
+	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
+	session, err := client.Configure("payload", "", "--tools", "none")
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +160,7 @@ func payloadCase(binary, workspace, parent string, size int) (row map[string]any
 	return row, nil
 }
 
-func historyProfile(binary, workspace, parent string) (rows []map[string]any, resultError error) {
+func historyProfile(binary, parent string) (rows []map[string]any, resultError error) {
 	directory := filepath.Join(parent, "history")
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		return nil, err
@@ -204,7 +173,8 @@ func historyProfile(binary, workspace, parent string) (rows []map[string]any, re
 	defer func() {
 		measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
 	}()
-	session, err := configure(deadline, socket, store, workspace, "measure/history")
+	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
+	session, err := client.Configure("history", "", "--tools", "none")
 	if err != nil {
 		return nil, err
 	}
@@ -278,15 +248,11 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	workspace, err := measurement.RepositoryRoot()
+	payload, err := payloadProfile(os.Args[1], parent)
 	if err != nil {
 		panic(err)
 	}
-	payload, err := payloadProfile(os.Args[1], workspace, parent)
-	if err != nil {
-		panic(err)
-	}
-	history, err := historyProfile(os.Args[1], workspace, parent)
+	history, err := historyProfile(os.Args[1], parent)
 	if err != nil {
 		panic(err)
 	}

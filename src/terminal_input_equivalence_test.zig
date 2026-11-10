@@ -307,9 +307,11 @@ test "TD2 double ESC retains fragmented paste provenance and the following edit"
 
 test "TD2 Ghostty modified control chords cannot turn retained choice text into a submission" {
     // Ghostty's legacy function-key table emits case27 even without mode
-    // negotiation. Ctrl-Enter/Ctrl-Tab/Shift-Escape retain Kitty's existing
-    // draft-invalidating policy, rather than silently submitting an 'a'.
+    // negotiation. Ctrl-Enter and Ctrl-Tab are unbound Ctrl keys, dropped
+    // and reported with the draft kept; Shift-Escape retains Kitty's
+    // draft-invalidating policy. Neither silently submits an 'a'.
     for ([_][]const u8{ "\x1b[13;5u", "\x1b[27;5;13~", "\x1b[9;5u", "\x1b[27;5;9~", "\x1b[27;2u", "\x1b[27;2;27~" }) |encoded| {
+        const ctrl = std.mem.indexOf(u8, encoded, ";5") != null;
         for (0..encoded.len + 1) |split| for ([_]bool{ false, true }) |choice| {
             var storage: [128]u8 = undefined;
             var editor: Editor = .{ .buffer = &storage, .allow_paste = !choice };
@@ -320,9 +322,11 @@ test "TD2 Ghostty modified control chords cannot turn retained choice text into 
             feed(&editor, &input, encoded[split..], &outcome);
             try std.testing.expectEqual(@as(usize, 0), outcome.submits);
             try std.testing.expectEqualStrings("a", storage[0..editor.length]);
+            if (ctrl) try std.testing.expectEqual(KeyOutcome{ .refused = .unbound }, outcome.event);
+            // Only a later, separate Enter sends what was typed.
             feed(&editor, &input, "\r", &outcome);
-            try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, outcome.event);
-            try std.testing.expectEqual(@as(usize, 0), outcome.submits);
+            try std.testing.expectEqual(if (ctrl) KeyOutcome.submit else KeyOutcome{ .refused = .invalid }, outcome.event);
+            try std.testing.expectEqual(@as(usize, @intFromBool(ctrl)), outcome.submits);
             try std.testing.expectEqualStrings("a", storage[0..editor.length]);
         };
     }

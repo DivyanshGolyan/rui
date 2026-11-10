@@ -9,7 +9,6 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import host_process
 from host_process import HostDiagnostics
 
 
@@ -113,10 +112,3 @@ def check_missing_classification(run_actor):
     else:
         raise AssertionError("missing classification was accepted")
     print("host-stop oracle passed: missing required phase expires without actor")
-
-
-if __name__ == "__main__":
-    host_process.enter()
-    import host_stop_integration as stop
-    check_classification_oracle(stop.actor_after_classification)
-    check_missing_classification(stop.actor_after_classification)

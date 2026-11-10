@@ -3,9 +3,25 @@
 //! identities and traces. The facade re-exports only the Store type and its value types.
 
 const std = @import("std");
+const command_reply = @import("../command_reply.zig");
 const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
-const protocol = @import("../protocol.zig");
+const activity_facts = @import("../activity_facts.zig");
+const conversation_read = @import("../conversation_read.zig");
+const session_list = @import("../session_list.zig");
+const activity_read = @import("../activity_read.zig");
+const tool_proposal = @import("../tool_proposal.zig");
+const workspace_path = @import("../workspace_path.zig");
+const store_path = @import("../store_path.zig");
+const provider_route = @import("../provider_route.zig");
+const outcome_code = @import("../outcome_code.zig");
+const content_string = @import("../content_string.zig");
+const Bounded = @import("../bounded.zig").Bounded;
+const model_capability = @import("../model_capability.zig");
+const session_id = @import("../session_id.zig");
+const cli_value = @import("../cli_value.zig");
+const content_custody = @import("../content_custody.zig");
+const command_input = @import("../command_input.zig");
 const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
 const action_domain = @import("domain/action.zig");
@@ -16,12 +32,14 @@ const content_domain = @import("domain/content.zig");
 const tool_set_domain = @import("domain/tool_set.zig");
 const model_facts_domain = @import("domain/model_facts.zig");
 const model_catalog = @import("../model_catalog.zig");
-const tool_catalog = @import("../tools.zig");
+const tool_catalog = @import("../tool_record.zig");
 const historical_domain = @import("domain/historical.zig");
 const model_admission_domain = @import("domain/model_admission.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
+const session_list_read = @import("domain/session_list_read.zig");
+const session_report_read = @import("domain/session_report_read.zig");
 const rsql = @import("rsql.zig");
 const store_access = @import("access.zig");
 const Access = store_access.Access;
@@ -59,33 +77,21 @@ const ModelOperationKind = historical_domain.ModelOperationKind;
 const PermissionDecisionReply = command_domain.PermissionDecisionReply;
 const PrefixSeal = historical_domain.PrefixSeal;
 const PublicConversationPage = reads_domain.PublicConversationPage;
-const SessionListOptions = report_domain.SessionListOptions;
 const SessionObservation = reads_domain.SessionObservation;
-const SessionReport = report_domain.SessionReport;
-const SessionReportCapture = report_domain.SessionReportCapture;
-const SessionReportOptions = report_domain.SessionReportOptions;
 const SessionStopReply = command_domain.SessionStopReply;
 const SessionArchiveReply = command_domain.SessionArchiveReply;
 const SupersedingControl = action_domain.SupersedingControl;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 const Queue = @import("queue.zig").Queue;
 
-/// A repeat read owns only its token; a full read is filled in the caller's
-/// storage rather than copied through Store/worker frames.
-pub const Observed = union(enum) {
-    not_modified: change_ring.SessionToken,
-    full: struct {
-        token: ?change_ring.SessionToken,
-        observation: CommandObservation = undefined,
-    },
-};
+pub const Observed = command_reply.Observed;
 
 pub const Store = struct {
     io: std.Io,
     /// The connection, its prepared statements and an Entry's content
     /// read handle.
     engine: Engine,
-    selector: protocol.Bounded(protocol.max_store_bytes),
+    selector: Bounded(store_path.max_bytes),
     fenced: std.atomic.Value(bool) = .init(false),
     /// Advances before `release` of any entry point that changed rows, so
     /// after every successful COMMIT. An unchanged value proves no canonical
@@ -107,7 +113,7 @@ pub const Store = struct {
     /// change ring, so a new identity does not grow the Store.
     /// The labels of the providers whose Sessions get model Attempts, each
     /// between commas, fixed at open.
-    served: protocol.Routes = protocol.routesAll(.unserved),
+    served: provider_route.Routes = provider_route.all(.unserved),
     /// Which use holds the out-of-line scratch in this entry point.
     scratch_use: ScratchUse = .none,
     /// The batch of writes the holder is running (`Queue.Batch`). `.ready`
@@ -174,7 +180,7 @@ pub const Store = struct {
 
     pub fn setHistoricalModelForTesting(self: *Store, binding: AttemptBinding, model: []const u8) !void {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-        var bounded: protocol.Bounded(protocol.max_model_bytes) = .{};
+        var bounded: Bounded(model_capability.max_model_bytes) = .{};
         try bounded.set(model);
         if (bounded.len == 0) return error.InvalidModel;
         try self.engine.sqlite.setHistoricalModelForTesting(binding.operation_id, model);
@@ -202,7 +208,7 @@ pub const Store = struct {
         const opened = try Sqlite.open(io, database_path, selector, options);
         errdefer opened.abandon();
 
-        var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
+        var stored_selector: Bounded(store_path.max_bytes) = .{};
         try stored_selector.set(selector);
         const changes = try createRing();
         errdefer destroyRing(changes);
@@ -311,7 +317,7 @@ pub const Store = struct {
         errdefer self.* = undefined;
         var opened = try Mysql.open(io, connection, selector, options);
         errdefer opened.close() catch {};
-        var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
+        var stored_selector: Bounded(store_path.max_bytes) = .{};
         try stored_selector.set(selector);
         const changes = try createRing();
         errdefer destroyRing(changes);
@@ -437,8 +443,8 @@ pub const Store = struct {
             const schema = take(saved.texts, &used, @intCast(row.schema_length));
             try self.readCatalogText(row.description_id.get(), description);
             try self.readCatalogText(row.schema_id.get(), schema);
-            if (!std.mem.eql(u8, &protocol.contentDigest(description), &row.description_digest) or
-                !std.mem.eql(u8, &protocol.contentDigest(schema), &row.schema_digest)) return error.CorruptStore;
+            if (!std.mem.eql(u8, &content_string.digest(description), &row.description_digest) or
+                !std.mem.eql(u8, &content_string.digest(schema), &row.schema_digest)) return error.CorruptStore;
             out.* = .{ .name = name, .owner = row.owner, .server = server, .description = description, .input_schema = schema };
             digest.* = tool_catalog.recordDigest(out);
         }
@@ -593,7 +599,7 @@ pub const Store = struct {
     }
 
     pub const SkillsState = struct {
-        workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{ .len = 0 },
+        workspace: Bounded(workspace_path.max_bytes) = .{ .len = 0 },
         catalog: @import("../skills.zig").Catalog = .{ .entries = &.{} },
     };
 
@@ -609,9 +615,11 @@ pub const Store = struct {
     fn readSkillsHeld(self: *Store, allocator: std.mem.Allocator, session: []const u8, out: *SkillsState) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        var access: Access(.read, error{SessionNotFound}) = .open(&entry);
+        // Decoding the catalog allocates from the caller's memory; running
+        // out of it is the caller's to answer, not canonical corruption.
+        var access: Access(.read, error{ SessionNotFound, OutOfMemory }) = .open(&entry);
         defer access.deinit();
-        return entry.finish(error{SessionNotFound}, readSkillsOn(&access, allocator, session, out));
+        return entry.finish(error{ SessionNotFound, OutOfMemory }, readSkillsOn(&access, allocator, session, out));
     }
 
     fn readSkillsOn(a: anytype, allocator: std.mem.Allocator, session: []const u8, out: *SkillsState) !void {
@@ -627,9 +635,9 @@ pub const Store = struct {
     /// not serve its Session's provider.
     pub fn configure(
         self: *Store,
-        command: *const protocol.ConfigureCommand,
+        command: *const content_custody.ConfigureCommand,
         faults: Faults,
-    ) ConfigureReply {
+    ) error{OutOfMemory}!ConfigureReply {
         return self.configureWithInitialSkills(command, null, null, faults);
     }
 
@@ -638,34 +646,40 @@ pub const Store = struct {
     /// Borrows `preset` until the synchronous queued write returns.
     pub fn configureWithPreset(
         self: *Store,
-        command: *const protocol.ConfigureCommand,
+        command: *const content_custody.ConfigureCommand,
         preset: *const configuration_domain.PresetDecision,
         faults: Faults,
-    ) ConfigureReply {
+    ) error{OutOfMemory}!ConfigureReply {
         return self.configureWithInitialSkills(command, preset, null, faults);
     }
 
-    pub fn configureWithInitialSkills(self: *Store, command: *const protocol.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, faults: Faults) ConfigureReply {
-        return self.configureWithCapturedSkills(command, preset, initial_skills, null, faults);
+    pub fn configureWithInitialSkills(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, faults: Faults) error{OutOfMemory}!ConfigureReply {
+        return self.configureWithCapturedSkills(command, preset, initial_skills, null, std.heap.c_allocator, faults);
     }
 
-    pub fn configureWithCapturedSkills(self: *Store, command: *const protocol.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, faults: Faults) ConfigureReply {
-        return self.queue().write(configureHeld, .{ self, command, preset, initial_skills, reload_capture, faults });
+    pub fn configureWithCapturedSkills(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, allocator: std.mem.Allocator, faults: Faults) error{OutOfMemory}!ConfigureReply {
+        return self.queue().write(configureHeld, .{ self, command, preset, initial_skills, reload_capture, allocator, faults });
     }
 
     fn configureHeld(
         self: *Store,
-        command: *const protocol.ConfigureCommand,
+        command: *const content_custody.ConfigureCommand,
         preset: ?*const configuration_domain.PresetDecision,
         initial_skills: ?*const skills_domain.Initial,
         reload_capture: ?*const skills_domain.Capture,
+        allocator: std.mem.Allocator,
         faults: Faults,
-    ) ConfigureReply {
+    ) error{OutOfMemory}!ConfigureReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
         defer entry.release();
         var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, initial_skills, reload_capture, faults))) catch .infrastructure_failure;
+        // Running out of memory, the caller's for a reload or the engine's,
+        // rolls the write back cleanly and is the caller's to answer.
+        return entry.finishTransaction(error{OutOfMemory}, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, initial_skills, reload_capture, allocator, faults))) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => .infrastructure_failure,
+        };
     }
 
     /// A fresh Message admission, as `MessageCommitted` receives it.
@@ -691,27 +705,27 @@ pub const Store = struct {
     /// Session's provider before creating anything.
     pub fn submitMessageWithModel(
         self: *Store,
-        command: *const protocol.MessageCommand,
+        command: *const content_custody.MessageCommand,
         committed: ?MessageCommitted,
         faults: Faults,
     ) MessageReply {
         return self.submitMessageWithInitialSkills(command, committed, null, faults);
     }
 
-    pub fn submitMessageWithInitialSkills(self: *Store, command: *const protocol.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) MessageReply {
+    pub fn submitMessageWithInitialSkills(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) MessageReply {
         return self.submitMessageCapturedSkills(command, committed, initial_skills, null, faults);
     }
 
-    pub fn submitMessageCapturedSkills(self: *Store, command: *const protocol.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.Capture, faults: Faults) MessageReply {
+    pub fn submitMessageCapturedSkills(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.MessageCapture, faults: Faults) MessageReply {
         return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, faults });
     }
 
     fn submitMessageWithModelHeld(
         self: *Store,
-        command: *const protocol.MessageCommand,
+        command: *const content_custody.MessageCommand,
         committed: ?MessageCommitted,
         initial_skills: ?*const skills_domain.Initial,
-        captured_skill: ?*const skills_domain.Capture,
+        captured_skill: ?*const skills_domain.MessageCapture,
         faults: Faults,
     ) MessageReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
@@ -723,7 +737,7 @@ pub const Store = struct {
 
     pub fn stopSession(
         self: *Store,
-        command: *const protocol.SessionStopCommand,
+        command: *const command_input.SessionStopCommand,
         faults: Faults,
     ) SessionStopReply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
@@ -732,7 +746,7 @@ pub const Store = struct {
 
     fn stopSessionHeld(
         self: *Store,
-        command: *const protocol.SessionStopCommand,
+        command: *const command_input.SessionStopCommand,
         faults: Faults,
     ) SessionStopReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
@@ -742,12 +756,12 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopSession(&access, command, faults))) catch .infrastructure_failure;
     }
 
-    pub fn archiveSession(self: *Store, command: *const protocol.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
+    pub fn archiveSession(self: *Store, command: *const command_input.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
         return self.queue().write(archiveSessionHeld, .{ self, command, faults });
     }
 
-    fn archiveSessionHeld(self: *Store, command: *const protocol.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
+    fn archiveSessionHeld(self: *Store, command: *const command_input.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
         defer entry.release();
         var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
@@ -756,11 +770,11 @@ pub const Store = struct {
     }
 
     /// The stop an attached child owes (D38), as `nextCoreWork` names it.
-    pub fn stopOwedSession(self: *Store, command: *const protocol.SessionStopCommand, faults: Faults) SessionStopReply {
+    pub fn stopOwedSession(self: *Store, command: *const command_input.SessionStopCommand, faults: Faults) SessionStopReply {
         return self.queue().write(stopOwedSessionHeld, .{ self, command, faults });
     }
 
-    fn stopOwedSessionHeld(self: *Store, command: *const protocol.SessionStopCommand, faults: Faults) SessionStopReply {
+    fn stopOwedSessionHeld(self: *Store, command: *const command_input.SessionStopCommand, faults: Faults) SessionStopReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
         defer entry.release();
         var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
@@ -770,7 +784,7 @@ pub const Store = struct {
 
     pub fn interruptModel(
         self: *Store,
-        command: *const protocol.ModelInterruptionCommand,
+        command: *const command_input.ModelInterruptionCommand,
         faults: Faults,
     ) ModelInterruptionReply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
@@ -779,7 +793,7 @@ pub const Store = struct {
 
     fn interruptModelHeld(
         self: *Store,
-        command: *const protocol.ModelInterruptionCommand,
+        command: *const command_input.ModelInterruptionCommand,
         faults: Faults,
     ) ModelInterruptionReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
@@ -791,7 +805,7 @@ pub const Store = struct {
 
     pub fn decidePermission(
         self: *Store,
-        command: *const protocol.PermissionDecisionCommand,
+        command: *const command_input.PermissionDecisionCommand,
         faults: Faults,
     ) PermissionDecisionReply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
@@ -800,7 +814,7 @@ pub const Store = struct {
 
     fn decidePermissionHeld(
         self: *Store,
-        command: *const protocol.PermissionDecisionCommand,
+        command: *const command_input.PermissionDecisionCommand,
         faults: Faults,
     ) PermissionDecisionReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
@@ -831,7 +845,7 @@ pub const Store = struct {
 
     /// Tokens cover follow polling after the unpinned forward page is drained,
     /// not another slice of a bounded, backward or intra-position traversal.
-    fn activitySince(request: *const protocol.ActivityPage) ?change_ring.SessionToken {
+    fn activitySince(request: *const activity_read.ActivityPage) ?change_ring.SessionToken {
         if (request.direction != .forward or request.end != null or request.ordinal != null) return null;
         return sessionSince(request.session.slice(), request.since);
     }
@@ -859,8 +873,8 @@ pub const Store = struct {
         defer access.deinit();
         try entry.finish(Ordinary.none, command_domain.observeCommand(&access, key, &out.full.observation));
         const observation = &out.full.observation;
-        if (observation.status != .absent and protocol.validSessionId(observation.target.slice())) {
-            out.full.token = .{ .instance = self.instance, .generation = generation, .session = observation.target.slice()[0..protocol.session_id_bytes].* };
+        if (observation.status != .absent and session_id.valid(observation.target.slice())) {
+            out.full.token = .{ .instance = self.instance, .generation = generation, .session = observation.target.slice()[0..session_id.bytes].* };
         }
     }
 
@@ -892,11 +906,11 @@ pub const Store = struct {
     // group's final acceptance position. No transaction survives this call.
     // The fixed end is the last committed position at the first read, not a
     // count of visible rows; a private-only append cannot become public later.
-    pub fn publicConversationPage(self: *Store, request: *const protocol.ConversationPage, out: *PublicConversationPage) !void {
+    pub fn publicConversationPage(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage) !void {
         return self.queue().run(publicConversationPageHeld, .{ self, request, out });
     }
 
-    fn publicConversationPageHeld(self: *Store, request: *const protocol.ConversationPage, out: *PublicConversationPage) !void {
+    fn publicConversationPageHeld(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -906,11 +920,11 @@ pub const Store = struct {
 
     // Resolve the public identity again, rather than accepting a global digest:
     // another Session's content or private provider material is not authority.
-    pub fn openPublicConversationContent(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
+    pub fn openPublicConversationContent(self: *Store, request: *const conversation_read.ConversationContent) !ContentLocation {
         return self.queue().run(openPublicConversationContentHeld, .{ self, request });
     }
 
-    fn openPublicConversationContentHeld(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
+    fn openPublicConversationContentHeld(self: *Store, request: *const conversation_read.ConversationContent) !ContentLocation {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -918,7 +932,7 @@ pub const Store = struct {
         return entry.finish(Ordinary.public_content, reads_domain.openPublicConversationContent(&access, request));
     }
 
-    pub fn activityPage(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
+    pub fn activityPage(self: *Store, request: *const activity_read.ActivityPage, out: *activity_facts.Page) !void {
         try request.validate();
         if (self.unchangedSession(activitySince(request))) |token| {
             out.not_modified = true;
@@ -928,7 +942,7 @@ pub const Store = struct {
         return self.queue().run(activityPageHeld, .{ self, request, out });
     }
 
-    fn activityPageHeld(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
+    fn activityPageHeld(self: *Store, request: *const activity_read.ActivityPage, out: *activity_facts.Page) !void {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
@@ -949,15 +963,15 @@ pub const Store = struct {
             out.work.work.state != .retrying and out.work.work.state != .pending) out.token = .{
             .instance = self.instance,
             .generation = generation,
-            .session = request.session.slice()[0..protocol.session_id_bytes].*,
+            .session = request.session.slice()[0..session_id.bytes].*,
         };
     }
 
-    pub fn searchActivity(self: *Store, request: *const protocol.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+    pub fn searchActivity(self: *Store, request: *const activity_read.ActivitySearch, out: *activity_facts.Search) !void {
         return self.queue().run(searchActivityHeld, .{ self, request, out });
     }
 
-    fn searchActivityHeld(self: *Store, request: *const protocol.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+    fn searchActivityHeld(self: *Store, request: *const activity_read.ActivitySearch, out: *activity_facts.Search) !void {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
@@ -966,11 +980,11 @@ pub const Store = struct {
         return entry.finish(Ordinary.page, reads_domain.searchActivity(&access, request, out));
     }
 
-    pub fn openActivityContent(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
+    pub fn openActivityContent(self: *Store, request: *const activity_read.ReadActivityContent) !ContentLocation {
         return self.queue().run(openActivityContentHeld, .{ self, request });
     }
 
-    fn openActivityContentHeld(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
+    fn openActivityContentHeld(self: *Store, request: *const activity_read.ReadActivityContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const entry = try enter(self, .none);
         defer entry.release();
@@ -979,11 +993,11 @@ pub const Store = struct {
         return entry.finish(Ordinary.content, reads_domain.openActivityContent(&access, request));
     }
 
-    pub fn activityTool(self: *Store, request: *const protocol.ReadActivityContent) !reads_domain.ActivityTool {
+    pub fn activityTool(self: *Store, request: *const activity_read.ReadActivityContent) !reads_domain.ActivityTool {
         return self.queue().run(activityToolHeld, .{ self, request });
     }
 
-    fn activityToolHeld(self: *Store, request: *const protocol.ReadActivityContent) !reads_domain.ActivityTool {
+    fn activityToolHeld(self: *Store, request: *const activity_read.ReadActivityContent) !reads_domain.ActivityTool {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const entry = try enter(self, .none);
         defer entry.release();
@@ -994,61 +1008,60 @@ pub const Store = struct {
 
     /// Authenticates the Session/Operation/Attempt before reading optional
     /// diagnostics. Diagnostic faults never fence canonical state.
-    pub fn captureFailedResponse(self: *Store, request: *const protocol.InspectSession, store_dir: std.Io.Dir, options: SessionListOptions) !SessionReport {
-        const selection = request.failed_response.?;
-        const binding = try self.queue().run(captureFailedResponseHeld, .{ self, request.session.slice(), selection });
-        var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
-        try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
-        errdefer capture.deinit();
-        try @import("../failed_responses.zig").exportRecord(self.io, store_dir, binding, selection.part, &capture);
-        return capture.seal();
+    pub fn failedResponseBinding(self: *Store, session_ref: []const u8, operation: u64, attempt_ordinal: u64) !AttemptBinding {
+        return self.queue().run(failedResponseBindingHeld, .{ self, session_ref, operation, attempt_ordinal });
     }
 
-    fn captureFailedResponseHeld(self: *Store, session_ref: []const u8, selection: protocol.FailedResponseExport) !AttemptBinding {
+    fn failedResponseBindingHeld(self: *Store, session_ref: []const u8, operation: u64, attempt_ordinal: u64) !AttemptBinding {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.content, report_domain.failedResponseBinding(&access, session_ref, selection));
+        return entry.finish(Ordinary.content, report_domain.failedResponseBinding(&access, session_ref, operation, attempt_ordinal));
     }
 
-    pub fn captureSessionReport(
-        self: *Store,
-        session_ref: []const u8,
-        options: SessionReportOptions,
-    ) !SessionReport {
-        var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
-        try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
-        errdefer capture.deinit();
-        try self.queue().run(captureSessionReportHeld, .{ self, session_ref, options, &capture });
-        return capture.seal();
+    /// Reads the report of `session_ref` under one Entry and hands it to
+    /// `visitor` (`session_report_read.readSessionReport`). An error the
+    /// visitor returns, or its capture's while the Store writes the Full
+    /// profile into it, is its own and does not fence the Store.
+    pub fn readSessionReport(self: *Store, session_ref: []const u8, profile: cli_value.ReportProfile, visitor: anytype) !void {
+        var watched: session_report_read.Watched(@TypeOf(visitor)) = .{ .visitor = visitor };
+        try self.queue().run(SessionReportHeld(@TypeOf(visitor)).readSessionReportHeld, .{ self, session_ref, profile, &watched });
     }
 
-    fn captureSessionReportHeld(self: *Store, session_ref: []const u8, options: SessionReportOptions, capture: *SessionReportCapture) !void {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        try entry.finishCapture(capture, report_domain.renderSessionReport(&access, session_ref, options.profile, options.execution, capture));
+    fn SessionReportHeld(comptime Visitor: type) type {
+        return struct {
+            fn readSessionReportHeld(self: *Store, session_ref: []const u8, profile: cli_value.ReportProfile, watched: *session_report_read.Watched(Visitor)) !void {
+                const entry = try enter(self, .none);
+                defer entry.release();
+                var access: ReadAccess = .open(&entry);
+                defer access.deinit();
+                const result = session_report_read.readSessionReport(&access, session_ref, profile, watched);
+                return entry.finishCapture(watched.failed, result);
+            }
+        };
     }
 
-    /// Returns an owned, unlinked page; no SQLite cursor survives capture.
-    /// The caller releases its scratch charge by deinitializing the report.
-    pub fn captureSessionList(self: *Store, request: *const protocol.ListSessions, options: SessionListOptions) !SessionReport {
+    /// Reads one list page under one Entry and hands it to `visitor`
+    /// (`session_list_read.readSessionList`). An error the visitor returns
+    /// is its own and does not fence the Store.
+    pub fn readSessionList(self: *Store, request: *const session_list.ListSessions, visitor: anytype) !void {
         try request.validate();
-        var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
-        try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
-        errdefer capture.deinit();
-        try self.queue().run(captureSessionListHeld, .{ self, request, &capture });
-        return capture.seal();
+        var watched: session_list_read.Watched(@TypeOf(visitor)) = .{ .visitor = visitor };
+        try self.queue().run(SessionListHeld(@TypeOf(visitor)).readSessionListHeld, .{ self, request, &watched });
     }
 
-    fn captureSessionListHeld(self: *Store, request: *const protocol.ListSessions, capture: *SessionReportCapture) !void {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        try entry.finishCapture(capture, report_domain.renderSessionList(&access, request, capture));
+    fn SessionListHeld(comptime Visitor: type) type {
+        return struct {
+            fn readSessionListHeld(self: *Store, request: *const session_list.ListSessions, watched: *session_list_read.Watched(Visitor)) !void {
+                const entry = try enter(self, .none);
+                defer entry.release();
+                var access: ReadAccess = .open(&entry);
+                defer access.deinit();
+                const result = session_list_read.readSessionList(&access, request, watched);
+                return entry.finishCapture(watched.failed, result);
+            }
+        };
     }
 
     pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
@@ -1059,11 +1072,11 @@ pub const Store = struct {
         return self.actionContent(session_ref, action_id, .call_id);
     }
 
-    fn actionContent(self: *Store, session_ref: []const u8, action_id: u64, field: protocol.ProposalField) !ContentReference {
+    fn actionContent(self: *Store, session_ref: []const u8, action_id: u64, field: tool_proposal.Field) !ContentReference {
         return self.queue().run(actionContentHeld, .{ self, session_ref, action_id, field });
     }
 
-    fn actionContentHeld(self: *Store, session_ref: []const u8, action_id: u64, field: protocol.ProposalField) !ContentReference {
+    fn actionContentHeld(self: *Store, session_ref: []const u8, action_id: u64, field: tool_proposal.Field) !ContentReference {
         const entry = try enter(self, .none);
         defer entry.release();
         if (action_id == 0 or action_id > std.math.maxInt(i64)) return error.ActionNotFound;
@@ -1234,15 +1247,20 @@ pub const Store = struct {
     /// Delivers the owed child ending (D39) `nextCoreWork` names, or only
     /// settles one its parent's stop caused (D139).
     pub fn deliverChildEnding(self: *Store, turn_id: u64, faults: Faults) !bool {
-        return self.queue().write(deliverChildEndingHeld, .{ self, turn_id, faults });
+        return self.deliverChildEndingBound(turn_id, null, faults);
     }
 
-    fn deliverChildEndingHeld(self: *Store, turn_id: u64, faults: Faults) !bool {
+    /// `captured` is what the Host's binding of the ending's text found.
+    pub fn deliverChildEndingBound(self: *Store, turn_id: u64, captured: ?*const skills_domain.MessageCapture, faults: Faults) !bool {
+        return self.queue().write(deliverChildEndingHeld, .{ self, turn_id, captured, faults });
+    }
+
+    fn deliverChildEndingHeld(self: *Store, turn_id: u64, captured: ?*const skills_domain.MessageCapture, faults: Faults) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.deliverChildEnding(&access, turn_id, faults)));
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.deliverChildEnding(&access, turn_id, captured, faults)));
     }
 
     /// Positions one ancestor feed row and durably queues its next hop.
@@ -1278,42 +1296,49 @@ pub const Store = struct {
     /// Runs the `message_agent` call `binding` names with its checked
     /// arguments, in one transaction.
     pub fn deliverAgentMessage(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, faults: Faults) !AgentDelivery {
-        return self.queue().write(deliverAgentMessageHeld, .{ self, binding, target, text, faults });
+        return self.deliverAgentMessageBound(binding, target, text, null, faults);
     }
 
-    fn deliverAgentMessageHeld(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, faults: Faults) !AgentDelivery {
+    /// `captured` is what the Host's binding of `text` found.
+    pub fn deliverAgentMessageBound(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentDelivery {
+        return self.queue().write(deliverAgentMessageHeld, .{ self, binding, target, text, captured, faults });
+    }
+
+    fn deliverAgentMessageHeld(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentDelivery {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.deliverAgentMessage(&access, binding, target, text, faults)));
+        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.deliverAgentMessage(&access, binding, target, text, captured, faults)));
     }
 
     /// Runs the `start_agent` call `binding` names with its checked
     /// arguments, in one transaction; `configuration` is the agent's spec,
     /// which this completes. `committed` runs once the task is admitted.
-    pub fn startAgent(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *protocol.Configuration, committed: ?MessageCommitted, faults: Faults) !AgentStart {
-        return self.startAgentWithInitialSkills(binding, caller, task, attached, configuration, committed, null, faults);
+    pub fn startAgent(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, faults: Faults) !AgentStart {
+        return self.startAgentWithInitialSkills(binding, caller, task, attached, configuration, committed, null, null, faults);
     }
 
-    pub fn startAgentWithInitialSkills(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *protocol.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) !AgentStart {
-        return self.queue().write(startAgentHeld, .{ self, binding, caller, task, attached, configuration, committed, initial_skills, faults });
+    /// `captured` is what the Host's binding of `task` against
+    /// `initial_skills`' catalog found.
+    pub fn startAgentWithInitialSkills(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentStart {
+        return self.queue().write(startAgentHeld, .{ self, binding, caller, task, attached, configuration, committed, initial_skills, captured, faults });
     }
 
-    fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *protocol.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) !AgentStart {
+    fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentStart {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.agent_start) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.agent_start, faults, access.end(faults, command_domain.startAgent(&access, self.io, binding, caller, task, attached, configuration, committed, initial_skills, faults)));
+        return entry.finishTransaction(Ordinary.agent_start, faults, access.end(faults, command_domain.startAgent(&access, self.io, binding, caller, task, attached, configuration, committed, initial_skills, captured, faults)));
     }
 
     /// Loads matching saved tools and resolves the call in one transaction.
-    pub fn findTools(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../core_tools.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
+    pub fn findTools(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../find_tools_words.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
         return self.queue().write(findToolsHeld, .{ self, binding, arena, words, refusal, faults });
     }
 
-    fn findToolsHeld(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../core_tools.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
+    fn findToolsHeld(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../find_tools_words.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
@@ -1330,7 +1355,9 @@ pub const Store = struct {
         defer entry.release();
         var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, skills_domain.runTool(&access, allocator, binding, captured, faults)));
+        // A reload allocates from `allocator` inside the write; running out
+        // of it rolls back cleanly and is the caller's to retry.
+        return entry.finishTransaction(Ordinary.action_attempt || error{OutOfMemory}, faults, access.end(faults, skills_domain.runTool(&access, allocator, binding, captured, faults)));
     }
 
     /// Fails the core tool call `binding` names with `result`, in one
@@ -1502,7 +1529,7 @@ pub const Store = struct {
             std.debug.assert(detail.len <= 512 and std.unicode.utf8ValidateSlice(detail));
         }
         const report = failure.report();
-        std.debug.assert(report.len <= protocol.max_report_bytes and std.unicode.utf8ValidateSlice(report));
+        std.debug.assert(report.len <= outcome_code.max_report_bytes and std.unicode.utf8ValidateSlice(report));
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.attempt_binding) = .open(&entry);
@@ -1617,7 +1644,7 @@ pub const AttemptBinding = attempt.AttemptBinding;
 
 pub const OpenOptions = struct {
     /// The providers whose Sessions get model Attempts.
-    served: protocol.Routes = protocol.routesAll(.endpoint),
+    served: provider_route.Routes = provider_route.all(.endpoint),
     cache_spill: bool = true,
     cache_kib: u32 = 1024,
     found_schema_version: ?*u32 = null,
@@ -1642,7 +1669,7 @@ pub const SqliteDiagnostic = struct {
     synchronous: ?i64 = null,
     temp_store: ?i64 = null,
     busy_timeout_ms: ?u64 = null,
-    journal_mode: ?protocol.Bounded(16) = null,
+    journal_mode: ?Bounded(16) = null,
 };
 
 /// Test builds' counters on a Store. `read` and `blob` count content bytes
@@ -1696,10 +1723,12 @@ const accepted_settlement_growth = 14352;
 comptime {
     // The settlement batch is the larger use: 19240 bytes, the original
     // 14480 plus 4760 for per-batch call names, membership flags and their
-    // lookup visitor. The creation reads use 14472, including command/Message
+    // lookup visitor. The creation reads use 14968, including command/Message
     // facts, saved parent reference and the saved tool and loaded names a
-    // subset update reads. Exact, so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 14472 or scratch_bytes != 19240)
+    // subset update reads, the skills a Message bound and the one retained
+    // validation plan. This uses existing scratch, with no resident growth.
+    // Exact, so a change to either size is a decision.
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 14968 or scratch_bytes != 19240)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -1833,11 +1862,12 @@ pub const Entry = struct {
         };
     }
 
-    /// Report capture marks its own scratch failures ordinary.
-    fn finishCapture(self: Entry, capture: *const SessionReportCapture, result: anytype) @TypeOf(result) {
+    /// A capture's own failure, such as exhausted scratch, is `ordinary`
+    /// and does not fence the Store.
+    fn finishCapture(self: Entry, ordinary: bool, result: anytype) @TypeOf(result) {
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
-            if (capture.ordinary_failure) return err;
+            if (ordinary) return err;
             return fence(self.store, err);
         };
     }
@@ -2047,13 +2077,13 @@ pub fn readSessionForTesting(self: *Store, session_ref: []const u8) !?CurrentCon
     return current;
 }
 
-pub fn activityPageForTesting(self: *Store, request: protocol.ActivityPage) !protocol.ActivityFacts {
-    var page: protocol.ActivityFacts = undefined;
+pub fn activityPageForTesting(self: *Store, request: activity_read.ActivityPage) !activity_facts.Page {
+    var page: activity_facts.Page = undefined;
     try self.activityPage(&request, &page);
     return page;
 }
 
-pub fn publicConversationPageForTesting(self: *Store, request: protocol.ConversationPage) !PublicConversationPage {
+pub fn publicConversationPageForTesting(self: *Store, request: conversation_read.ConversationPage) !PublicConversationPage {
     var page: PublicConversationPage = undefined;
     try self.publicConversationPage(&request, &page);
     return page;

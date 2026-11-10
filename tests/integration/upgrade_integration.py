@@ -28,7 +28,7 @@ import threading
 import host_process
 import os_semantics
 from host_process import canonical_fixture_root, dispose_all, start_ready_process, stop_process, wait_for
-from terminal_process import COLUMNS, ROWS, terminal_process
+from terminal_process import COLUMNS, ROWS, answers_to, terminal_process
 from terminal_screen import ScreenCapture, shown
 
 
@@ -259,7 +259,7 @@ def case(root, binary, releases, name):
 
 def peer_pid(path):
     """Independent OS receipt of the exact listening native process."""
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+    with os_semantics.unix_stream() as connection:
         connection.connect(path)
         return os_semantics.socket_peer_pid(connection)
 
@@ -550,7 +550,7 @@ class TerminalScreen:
 
     def __init__(self, master, process):
         self.master, self.process = master, process
-        self.capture = ScreenCapture(COLUMNS, ROWS)
+        self.capture = ScreenCapture(COLUMNS, ROWS, reply=answers_to(master))
         self.tail = bytearray()
         os.set_blocking(master, False)
 
@@ -589,7 +589,7 @@ class TerminalScreen:
 def terminal_setup(c):
     # Reuse the existing synthetic credential authority; never inspect the
     # caller's HOME, real credentials or a live provider endpoint.
-    from codex_integration import credentials
+    from codex_fixture import credentials
     directory = c.home / ".config/rui"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     credential = directory / "codex.json"

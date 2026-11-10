@@ -1,28 +1,258 @@
 #!/usr/bin/env python3
-"""Select existing build targets for fresh execution."""
+"""Select existing build targets for fresh execution.
+
+A changed file selects the unit roots and process fixtures that reach it
+through literal imports (`Graph`), plus the targets its path rules name.
+"""
 import argparse
+from functools import cache
 import fnmatch
+import io
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
+import tokenize
 
+from import_architecture import scoped_imports
 from platform_boundary import mac_path
 from qualification import RESOURCES
 from strict_paths import strict
 
 
-# Renderer, terminal and frontend owners select the roots that run their unit
-# tests and PTY callers, not the Store-native check, unless a strict path changes.
-FRONTEND = ("src/AnswerRenderer.zig", "src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig",
-            "src/session_departure.zig", "src/SessionScreen.zig", "src/SessionTerminal.zig",
-            "src/session_view.zig", "src/session_history.zig", "src/session_reads.zig", "src/ClientTask.zig",
-            "src/ConversationViewport.zig", "src/Terminal*", "src/session_sequence_model_test.zig", "src/overview_view.zig",
-            "src/Overview.zig", "src/keymap.zig", "src/status_page.zig", "src/command_value.zig", "src/home_path.zig")
-PTY_TARGETS = ("terminal-restoration-integration", "canonical-failure-integration")
-# Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
-RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py",
-                      "tests/integration/terminal_input_replay.py")
+ROOT = Path(__file__).resolve().parents[2]
+RUI = "src/cli.zig"
+HOST = "src/server.zig"
+CALLER = "src/client.zig"
+FUNCTIONAL_CORES = "src/logic_tests.zig"
+STACK_FRAMES_GATE = "tests/ci/stack_frames.json"
+
+# build.zig's named modules that are repository files. Every other named
+# import must be a package or generated module, or the graph refuses it.
+MODULES = {
+    "test_poll": "src/testing/poll.zig", "h2": "src/h2/h2.zig", "tls_client": "src/tls_client/tls_client.zig", "rui_client": CALLER, "client": CALLER,
+    "mysql_connection": "src/store/wire/mysql_connection.zig", "preferences": "src/preferences.zig",
+    "codex_credentials": "src/codex_credentials.zig", "AnswerRenderer": "src/AnswerRenderer.zig",
+    "openapi.json": "openapi.json",
+}
+PACKAGES = {"std", "builtin", "vaxis", "terminal_width", "terminal_unicode", "h2_c", "openssl_c", "posix",
+            "transport_options", "yaml", "sqlite", "unit_test_options", "unit_test_partition"}
+
+# Unit test executables: a change runs each one whose build compiles it.
+UNIT_ROOTS = {
+    "test-native": ("src/tests.zig", "src/unit_test_partition.zig", "src/signal_stack_probe.zig",
+                    "tests/integration/answer_renderer_allocation.zig"),
+    "test-store": ("src/store.zig", "src/unit_test_partition.zig"),
+    "test-logic": (FUNCTIONAL_CORES, "tests/integration/answer_renderer_allocation.zig"),
+    "test-h2": ("src/h2/h2.zig",),
+    "test-pg": ("src/store/wire/pg.zig",),
+    "mysql-wire-integration": ("tests/integration/mysql_wire_test.zig",),
+}
+
+# Process fixtures: build target -> (its scripts, the test executables it runs
+# besides Rui, and the Rui owners whose behavior it asserts). Only fixtures
+# that assert caller behavior name the caller (`CALLER`); admission owns the
+# common caller-to-Host path every other fixture also takes. A Rui file
+# reaches a fixture when an owner imports it, or when it is Host code (or
+# Rui's root) that imports an owner: the Host's dispatch into the driven
+# path. Registered functional cores reach only unit roots: their value tests
+# own their decisions. Promotion runs every fixture, so an owner missing here
+# surfaces there; add it. Long witnesses and Debug twins outside check name no
+# owners: RULES map the files they qualify, and promotion runs them.
+I = "tests/integration/"
+BASH = ("src/bash.zig", "src/BashLifecycle.zig", "src/deadline.zig")
+# Model admission: what dispatch and the managed H2 transport assert about a request.
+MODEL = ("src/provider.zig", "src/transport_policy.zig", "src/output_decode.zig", "src/history_memo.zig",
+         "src/model_capability.zig", "src/failed_responses.zig")
+CREDENTIALS = ("src/codex_credential_policy.zig", "src/codex_token_wire.zig")
+FIXTURES = {
+    "admission-integration": ((I + "admission_integration.sh",), (), (CALLER, HOST)),
+    "admission-debug-integration": ((I + "admission_integration.sh",), (), ()),
+    "dispatch-integration": ((I + "dispatch_integration.py",), (), ("src/model_adapter.zig", *MODEL)),
+    "dispatch-debug-integration": ((I + "dispatch_integration.py",), (), ()),
+    "bash-integration": ((I + "bash_integration.py",), (), BASH),
+    "bash-owner-integration": ((I + "bash_owner_integration.py",), (), BASH),
+    "bash-lifecycle-integration": ((I + "bash_lifecycle_integration.py",), (), BASH),
+    "bash-recovery-integration": ((I + "bash_recovery_integration.py",), (), BASH),
+    "bash-environment-integration": ((I + "bash_environment_integration.py",), (),
+                                     ("src/bash.zig", "src/SessionEnvironments.zig")),
+    "peer-integration": ((I + "peer_integration.py",), (), ("src/bash.zig", "src/peer_message.txt")),
+    "sender-identity-integration": ((I + "sender_identity_integration.py",), (), ("src/bash.zig",)),
+    "codex-integration": ((I + "codex_integration.py",), (), ("src/providers.zig", *CREDENTIALS)),
+    "codex-h2-integration": ((I + "codex_h2_integration.py",), (), ("src/providers.zig", *CREDENTIALS)),
+    "transport-h2-integration": ((I + "transport_h2_integration.py", I + "transport_h2_integration_test.py"), (),
+                                 ("src/providers.zig", "src/model_adapter.zig", *MODEL)),
+    "login-signal-integration": ((I + "login_signal_integration.py",), (), ()),
+    "codex-credential-integration": ((I + "codex_credential_integration.py",), (I + "codex_credential_actor.zig",),
+                                     ("src/providers.zig", "src/api_key.zig", "src/codex_auth.zig", *CREDENTIALS)),
+    "preference-policy-integration": ((I + "preference_policy_integration.py",), (I + "preference_policy.zig",), ()),
+    "mysql-wire-integration": ((I + "mysql_wire_integration.py",), (), ()),
+    "skills-integration": ((I + "skills_integration.py",), (), ("src/session_skills.zig",)),
+    "launch-frame-integration": ((I + "launch_frame_integration.py", I + "launch_frame_mysql_integration.py"),
+                                 (I + "mysql_launch_admin.zig",),
+                                 ("src/launch_frame.zig", "src/mysql_url.zig", "src/mcp/Running.zig", "src/mcp/servers.zig")),
+    "ts-client": ((I + "host_process.py",), (), ("src/launch_frame.zig",)),
+    "request-wait-integration": ((I + "request_wait_integration.py",), (),
+                                 (CALLER, "src/request_wait.zig", "src/server_host.zig", "src/cli_args.zig",
+                                  "src/caller_error.zig", "src/caller_exit.zig")),
+    "current-facts-integration": ((I + "current_facts_integration.py",), (), ()),
+    "server-delivery-integration": ((I + "server_delivery_integration.py",), (), ()),
+    "control-integration": ((I + "control_integration.py",), (), (CALLER, HOST)),
+    "conversation-page-integration": ((I + "conversation_page_integration.py",), (), (CALLER, HOST)),
+    "session-list-integration": ((I + "session_list_integration.py",), (I + "session_list_client.zig",), (CALLER, HOST)),
+    "activity-integration": ((I + "activity_integration.py",), (I + "activity_client.zig",), (CALLER, HOST)),
+    "host-status-integration": ((I + "host_status_integration.py",), (I + "host_status_actor.zig",), (CALLER, HOST)),
+    "host-stop-integration": ((I + "host_stop_integration.py",), (I + "host_status_actor.zig",),
+                              (CALLER, "src/HostLifecycle.zig", "src/server_host.zig")),
+    "host-launch-integration": ((I + "host_launch_integration.py",), (),
+                                ("src/HostLifecycle.zig", "src/descriptor_capacity.zig", "src/os/descriptor_limit.zig")),
+    "descriptor-capacity-integration": ((I + "descriptor_capacity_integration.py",), (),
+                                        ("src/descriptor_capacity.zig", "src/os/descriptor_limit.zig")),
+    "host-allocator-integration": ((I + "host_allocator_test.py",), (), ("src/os/process.zig",)),
+    "host-process-test": ((I + "host_process_test.py",), (), ()),
+    "installer-integration": ((I + "installer_integration.py",), (),
+                              ("src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig")),
+    "upgrade-integration": ((I + "upgrade_integration.py",), (),
+                            ("src/upgrade.zig", "src/upgrade_process.zig", "src/UpgradePanel.zig",
+                             "src/HostLifecycle.zig", "src/Installation.zig")),
+    "terminal-restoration-integration": ((I + "terminal_restoration_integration.py",), ("src/terminal_notice_test.zig",),
+                                         ("src/SessionFrontend.zig", "src/SessionTerminal.zig", "src/TerminalEditor.zig")),
+    "canonical-failure-integration": ((I + "canonical_failure_integration.py",), (),
+                                      (CALLER, "src/SessionFrontend.zig", "src/failure_class.zig", "src/model_adapter.zig")),
+    "human-cli-integration": ((I + "human_cli_integration.py",), ("src/terminal_notice_test.zig",),
+                              (CALLER, "src/SessionFrontend.zig", "src/Overview.zig", "src/request_wait.zig",
+                               "src/cli_args.zig", "src/slash_commands.zig")),
+}
+# Fixtures a broader target runs in full.
+FIXTURE_COVERS = {"human-cli-integration": {"canonical-failure-integration", "terminal-restoration-integration"}}
+# Test code under src/: it reaches the unit roots and test executables that
+# compile it, never Rui's behavior.
+TEST_CODE = ("src/*tests.zig", "src/*_test.zig", "src/*testing.zig", "src/*testing/*", "src/mcp/test_server.zig",
+             "src/socket_fixture.zig", "src/store/mysql_dialect_check.zig")
+# Targets that need a Linux runner; Mac Selected never runs them.
+LINUX_ONLY = {"login-signal-integration", "mysql-wire-integration"}
+
+EMBED = re.compile(r'@embedFile\(\s*"([^"]+)"\s*\)')
+PYTHON_IMPORT = re.compile(r"^\s*(?:from\s+([A-Za-z_]\w*)\S*\s+import\b|import\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*))", re.M)
+# A fixture that reads a source file names it relative to the repository,
+# or joins it under the repository's "src" path.
+SOURCE_READ = re.compile(r"\b(src/[\w./-]+)")
+SOURCE_JOIN = re.compile(r'/\s*"src"\s*/\s*"([\w./-]+)"')
+
+
+class Graph:
+    """Literal import edges of one source tree and the targets each file reaches.
+
+    Zig edges are `@import` and `@embedFile`; `production` leaves out imports
+    only test declarations use. Python edges join tests/integration modules,
+    including those a shell script runs, and the source files they read.
+    """
+
+    def __init__(self, names, read):
+        names = set(names)
+        self.production, self.every, self.python = {}, {}, {}
+        for name in sorted(names):
+            if name.endswith(".zig") and name.startswith(("src/", I)):
+                self.zig(name, read(name))
+            elif name.startswith(I) and name.endswith((".py", ".sh")):
+                source = read(name)
+                # Python names a file it reads in a string; shell, anywhere.
+                strings = (" ".join(token.string for token in tokenize.generate_tokens(io.StringIO(source).readline)
+                                    if token.type == tokenize.STRING) if name.endswith(".py") else source)
+                self.python[name] = ({f"{I}{module}.py" for match in PYTHON_IMPORT.finditer(source)
+                                      for module in (match[1] and [match[1]] or re.split(r"\s*,\s*", match[2]))}
+                                     | set(SOURCE_READ.findall(strings))
+                                     | {"src/" + joined for joined in SOURCE_JOIN.findall(source)}) & names - {name}
+        self.cores = {"src/" + core for core in re.findall(
+            r'\.\{ "([^"]+\.zig)", @import', read(FUNCTIONAL_CORES).split("const cores = .{", 1)[1].split("\n};", 1)[0])}
+        # Rui's code: its production imports, less test code that a
+        # top-level alias names but only tests use.
+        self.tests = {name for name in self.production if matches(name, TEST_CODE)}
+        product = {source: targets - self.tests for source, targets in self.production.items() if source not in self.tests}
+        # The Host is what stack_frames.py walks: server.zig and the modules
+        # it names, which the Host also reaches through function pointers.
+        modules = json.loads(read(STACK_FRAMES_GATE))["host_modules"] if STACK_FRAMES_GATE in names else []
+        host = [HOST, *(name for module in modules for name in self.production
+                        if f"/{name}".endswith("/" + module.replace(".", "/") + ".zig"))]
+        self.host = self.closure(product, host)
+        rui = self.closure(product, [RUI])
+        callers = {}
+        for source, targets in product.items():
+            for target in targets:
+                callers.setdefault(target, set()).add(source)
+        # Each target's files: those its unit roots compile and its scripts
+        # use or read, and those it reaches only through the code it runs (the
+        # owners it drives and its test executables), which cores do not reach.
+        self.reached = {target: self.closure(self.every, roots) for target, roots in UNIT_ROOTS.items()}
+        # Native tests outside Store can exercise every Store engine too. A
+        # change they reach must retain the composed run and its live MySQL.
+        conformance = [name for name in self.reached["test-native"]
+                       if name.startswith("src/") and not name.startswith("src/store/")
+                       and name.endswith(".zig") and name in names
+                       and re.search(r'\b\w+\.forEachEngine\s*\(', read(name))]
+        self.live_conformance = self.closure(self.every, conformance)
+        self.driven, self.owners = {}, {}
+        for target, (scripts, executables, owners) in FIXTURES.items():
+            self.owners[target] = set(owners)
+            owners = [*owners, *(host if HOST in owners else ())]
+            self.reached[target] = self.reached.get(target, set()) | self.scripts(scripts)
+            dispatch = self.closure(callers, owners) & (self.host | {RUI})
+            self.driven[target] = ((self.closure(product, owners) | dispatch) & rui
+                                   | self.closure(self.production, executables))
+
+    def zig(self, name, source):
+        production, tested, _ = scoped_imports(source)
+        directory = Path(name).parent
+
+        def resolve(imported):
+            if imported in MODULES:
+                return {MODULES[imported]}
+            if imported in PACKAGES:
+                return set()
+            if not imported.endswith(".zig"):
+                raise ValueError(f"{name} imports module {imported!r}: name its file in select_tests.MODULES "
+                                 "or list it in PACKAGES")
+            return {os.path.normpath(directory / imported)}
+
+        embedded = {os.path.normpath(directory / path) for path in EMBED.findall(source)}
+        self.production[name] = embedded.union(*map(resolve, production))
+        self.every[name] = self.production[name].union(*map(resolve, tested))
+
+    def scripts(self, scripts):
+        """The modules and source files fixture scripts use, transitively: a
+        library a fixture imports may import other libraries. No fixture
+        imports another (test_harness_contracts.FixtureImportTest), so a
+        change to one fixture's script selects only the targets that run it."""
+        return self.closure(self.python, scripts)
+
+    @staticmethod
+    def closure(edges, roots):
+        reached, pending = set(), list(roots)
+        while pending:
+            name = pending.pop()
+            if name not in reached:
+                reached.add(name)
+                pending.extend(edges.get(name, ()))
+        return reached
+
+    def targets(self, path):
+        """The unit roots and fixtures that reach `path`, None when no graph
+        edge names it. A functional core or test code reaches fixtures only
+        through their scripts and test executables, or as a named owner."""
+        if not (path in self.production or path in self.python
+                or any(path in edges for graph in (self.every, self.python) for edges in graph.values())):
+            return None
+        return ({target for target, reached in self.reached.items() if path in reached}
+                | {target for target, driven in self.driven.items()
+                   if path in driven and (path not in self.cores or path in self.owners[target])})
+
+
+@cache
+def tree_graph():
+    tracked = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z"]).decode().split("\0")
+    return Graph([name for name in tracked if name and (ROOT / name).is_file()], lambda name: (ROOT / name).read_text())
+
 
 # The upgrade fixture is standalone, including when a composed gate is selected.
 UPGRADE_PATHS = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
@@ -41,163 +271,82 @@ INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_
                    "src/cli.zig", "src/cli_args.zig", "src/store/schema.zig",
                    "src/fetch_dependencies.sh", "release/*", "install.sh", "build.zig", "build.zig.zon")
 
-# Paths sharing an owner select its maintained boundary checks. Unknown code
-# selects check rather than silently declaring that no tests apply.
+# Ready PRs run the previous installed-release upgrade only when they change
+# what it exercises: installation, the upgrade and Host lifecycle owners, the
+# Store format, the build or the check itself. Promotion runs it for every batch.
+UPGRADE_CHECK_PATHS = ("src/upgrade*.zig", "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
+                       "src/HostLifecycle.zig", "src/host_identity.*", "src/host_launch.c",
+                       "src/store/schema.zig", "src/store/migration_*", "install.sh", "release/*", "build.zig", "build.zig.zon",
+                       "tests/integration/previous_release_upgrade.py", "tests/ci/test_previous_release_upgrade.py",
+                       ".github/workflows/previous-release-upgrade.yml", ".github/workflows/cache-maintenance.yml")
+
+# Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
+RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py",
+                      "tests/integration/terminal_input_replay.py")
+
+# What the import graph cannot see: inputs no literal import names (C
+# sources, generators, non-Zig consumers) and owners whose checks a test
+# reaches by other means. The graph selects everything else; a source file
+# neither names selects check.
 RULES = (
     (INSTALLER_PATHS, ("installer-integration",), ("installer-integration",),
      "Installer: real publication and PATH boundary"),
     (UPGRADE_PATHS, ("upgrade-integration",), ("upgrade-integration",),
      "Stable upgrade: installed binary, lifecycle and installer boundary"),
-    (("src/logic_tests.zig", "src/request_wait.zig", "src/core_boundary.zig", "src/word_search.zig", "src/execution_turn.zig", "src/request_encoding.zig",
-      "src/AnswerRenderer.zig", "src/store/engine/mysql_refusal.zig"),
-     ("test-logic",), (), "Portable owner transitions and encoding"),
-    (("src/ResponseTiming.zig",), ("test-logic",), ("test-logic",),
-     "Response policy values alongside native timeout consumers"),
-    (("src/turn_policy.zig",), ("test-logic",), ("test-logic",),
-     "Turn completion and compaction decisions over transaction facts"),
-    (("src/retry_policy.zig",), ("test-logic", "check"), ("test-logic", "test"),
-     "Model retry waits and maximum; Store SQL and index text derive from them"),
-    (("src/bounded.zig", "src/built_in_tool.zig", "src/session_work.zig", "src/session_archive.zig"), ("test-logic", "check"), ("test-logic", "test"),
-     "Shared values, tool names and the Session work derivation; Store readers and wire encoders follow"),
-    (("src/change_ring.zig",), ("test-logic", "check"), ("test-logic", "test"),
-     "The Session change hint; the Store records into it and list pages read it"),
-    (("src/client_defaults.zig", "src/new_session_selection.zig", "src/preference_values.zig",
-      "src/provider_selection.zig", "src/model_capability.zig", "src/provider_name.zig"),
-     ("test-logic",), ("test-logic",), "Prospective selection policy and owned values"),
     (("src/models_dev.zig", "src/model_catalog*.zig"), ("test-logic",), ("test-logic",),
      "Shipped model facts and the models.dev token-walk parser, without production callers"),
-    (("src/model_list.zig",), ("test-logic", "test", "codex-h2-integration"),
-     ("test-logic", "test", "codex-h2-integration"), "Provider model lists; the Host's fetch and the wire reply follow"),
-    (("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/session_departure.zig",
-      "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/session_view.zig", "src/session_history.zig",
-      "src/session_reads.zig", "src/ClientTask.zig", "src/Overview.zig", "src/keymap.zig", "src/slash_commands.zig",
-      "src/status_page.zig", "src/command_value.zig", "src/home_path.zig"),
-     ("test-logic", "test", "admission-debug-integration", *PTY_TARGETS),
-     ("test-logic", "test", "admission-debug-integration", *PTY_TARGETS),
-     "Frontend value decisions and native terminal/borrower handoffs"),
-    (("src/ConversationViewport.zig", "src/TerminalFrame.zig", "src/draft_layout.zig", "src/session_line.zig", "src/work_line.zig", "src/queued_line.zig", "src/TerminalInput.zig", "src/TerminalEditor.zig", "src/keymap.zig"),
-     ("test-logic", *PTY_TARGETS), ("test-logic", *PTY_TARGETS),
-     "Terminal layout and input values retain their separate logic root and native wiring"),
-    (("src/overview_view.zig", "src/attention.zig", "src/model_picker.zig"), ("test-logic",), ("test-logic",),
-     "Overview decisions and screen over values; its shell's owner selects native checks"),
-    (("src/failure_class.zig",), ("test-logic", "test"), ("test-logic", "test"),
-     "What a saved failure code lets the person do; the conversation view renders it"),
+    (("src/model_list.zig",), ("codex-h2-integration",), ("codex-h2-integration",),
+     "Provider model lists: the Host's fetch and the wire reply follow"),
     (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the nonblocking renderer contracts run them"),
     (("src/session_sequence_model_test.zig",), ("test-logic",), ("test-logic",),
      "Sequence-model oracle: no gate compiles it; nonblocking renderer contracts run it"),
-    (("src/Terminal*",), ("test-logic", "admission-debug-integration", *PTY_TARGETS),
-     ("test-logic", "admission-debug-integration", *PTY_TARGETS), "Terminal values and native callers"),
-    (("src/cli_args.zig", "src/caller_error.zig", "src/caller_exit.zig", "src/cli_value.zig", "src/session_id.zig", "src/json_ascii.zig", "src/json_scalar.zig"), ("test-logic",), ("test-logic",),
-     "Portable CLI grammar, validation and terminal-safe JSON; native callers follow below"),
-    (("src/cli.zig", "src/caller_rejection.zig", "src/cli_args.zig", "src/caller_error.zig", "src/caller_exit.zig", "src/cli_value.zig", "src/slash_commands.zig", "src/json_ascii.zig", "src/client.zig", "src/protocol_reply.zig", "src/ResponseTiming.zig", "src/preferences.zig", "src/provider_selection.zig",
-      "src/client_defaults.zig", "src/new_session_selection.zig", "src/preference_values.zig", "src/product_defaults.zig",
-      "tests/integration/product_defaults.py"),
-     ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
-     "CLI selection and otherwise unnamed native caller checks"),
-    (("src/store.zig", "src/store/*", "!src/store/wire/*"), ("check", "dispatch-debug-integration"), ("test", "dispatch-debug-integration"),
-     "Store SQL owners: composed Linux caller checks, native SQLite tests and Debug failure provenance"),
-    (("tests/integration/peer_integration.py",), ("check",), ("check",),
-     "Peer round trip through installed Bash, runtime address and capture recovery"),
-    (("tests/integration/activity_*",),
-     ("activity-integration",), ("activity-integration",), "Session activity fixture and typed Client"),
-    (("tests/integration/preference_policy*",),
-     ("preference-policy-integration",), ("preference-policy-integration",),
-     "Preference publication fixture and native actor"),
-    (("src/server*.zig", "tests/integration/admission_integration.sh"),
-     ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
-     "Admission/capture owner: complete Debug recovery matrix, not artifact smoke"),
-    (("src/skills.zig", "src/session_skills.zig", "tests/integration/skills_integration.py"),
-     ("test", "skills-integration"), ("test", "skills-integration"),
-     "Skill discovery and captured content: pure/native owners and isolated Host wire"),
     (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
      "The wire contract: openapi.json must equal what the wire types emit"),
     (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
-    (("src/launch_frame.zig", "src/mysql_url.zig", "tests/integration/mysql_launch_admin.zig", "tests/integration/launch_frame*", "tests/integration/mcp_sdk/*"), ("test", "launch-frame-integration", "ts-client"),
-     ("test", "launch-frame-integration", "ts-client"), "The launch frame a program uses to start its own Host"),
-    (("src/protocol.zig", "src/cli_value.zig", "src/retention_capacity.zig", "src/provider_name.zig", "src/platform.zig",
-      "src/execution.zig", "src/attempt.zig", "src/tools.zig", "src/*Scratch*",
-      "src/named_scratch.zig", "src/output_retention.zig", "src/HostDiagnostics.zig"),
-     ("check",), ("check",), "Shared protocol, native execution or resource ownership"),
-    (("src/BashLifecycle.zig", "src/deadline.zig"), ("test-logic",), ("test-logic",),
-     "Portable Bash lifecycle and service-turn deadlines; native owner checks follow below"),
-    (("src/SessionInput.zig", "src/tools.zig"), ("test-logic", "check"), ("test-logic", "check"),
-     "Portable input and tool-parser tests; shared native owners stay in check"),
-    (("src/attempt.zig", "src/descriptor_capacity.zig", "src/product_defaults.zig", "src/transport_policy.zig", "src/retention_capacity.zig"), ("test-logic",), ("test-logic",),
-     "Functional cores beside shared owners; their native checks follow"),
-    (("src/codex_credential_policy.zig", "src/codex_token_wire.zig"), ("test-logic",), ("test-logic",),
-     "Portable Codex credential decisions and token messages; native owner checks follow below"),
-    (("src/bash*", "src/BashLifecycle.zig", "src/deadline.zig", "tests/integration/bash*"),
-     ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
-     ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
-     "Bash execution, direct custody and process-crash recovery"),
-    (("src/h2/*",), ("test-h2",), ("test-h2",), "The HTTP/2 client module's own tests"),
-    (("src/h2/policy.zig",), ("test-logic",), ("test-logic",), "HTTP/2 client policy core boundary"),
-    (("src/http1/*",), ("test-logic", "test", "launch-frame-integration"), ("test-logic", "test", "launch-frame-integration"),
-     "The loopback HTTP/1.1 client: its value cores and its socket exchange"),
-    (("src/mcp/*",), ("test-logic", "test", "launch-frame-integration"), ("test-logic", "test", "launch-frame-integration"),
-     "The MCP client: its value cores and the request that drives one exchange"),
-    (("src/codec_abi.zig", "src/codecs/*"), ("test-logic", "check"), ("test-logic", "check"),
-     "The codec contract and the built-in codecs, functional cores; the Host's encode and transport follow"),
-    (("src/history_memo.zig",), ("test-logic",), ("test-logic",), "History memo decisions and table"),
-    (("src/provider.zig", "src/transport_policy.zig", "src/output_decode.zig", "src/model_adapter.zig", "src/history_memo.zig",
-      "src/model_capability.zig", "src/failed_responses.zig"),
-     ("test", "dispatch-integration", "transport-h2-integration"),
-     ("test", "dispatch-integration", "transport-h2-integration"), "Model admission and transport"),
-    (("src/model_instructions.txt",),
-     ("check", "transport-h2-integration", "codex-h2-integration", "current-facts-integration",
-      "server-delivery-integration", "measurement-check"),
-     ("check", "transport-h2-integration", "codex-h2-integration", "current-facts-integration",
-      "server-delivery-integration", "measurement-check"),
-     "Shared model context prose: native encoding, fixture consumers and Go request oracles"),
-    (("src/peer_message.txt",),
-     ("test", "check", "dispatch-integration", "transport-h2-integration"),
-     ("test", "check", "dispatch-integration", "transport-h2-integration"),
-     "Shared peer facts: native request encoding and installed peer round trip"),
-    (("src/client.zig", "src/request_wait.zig", "src/cli.zig", "src/cli_args.zig",
-      "src/caller_error.zig", "src/caller_exit.zig", "src/server.zig", "src/server_host.zig",
-      "src/TestObservation.zig", "tests/integration/request_wait_integration.py",
-      "tests/integration/model_fixture.py", "tests/integration/host_process.py",
-      "tests/integration/canonical_failure_integration.py"),
-     ("request-wait-integration",), ("request-wait-integration",), "Request wait owner-boundary oracle"),
-    (("tests/integration/bash_integration.py",),
-     ("bash-integration", "request-wait-integration"),
-     ("bash-integration", "request-wait-integration"), "Bash fixture and request wait recovery consumer"),
-    (("tests/integration/bash_recovery_integration.py",),
-     ("bash-recovery-integration", "request-wait-integration"),
-     ("bash-recovery-integration", "request-wait-integration"), "Bash recovery fixture and request wait consumer"),
-    (("tests/integration/dispatch_integration.py",),
-     ("dispatch-integration", "dispatch-debug-integration"), ("dispatch-integration", "dispatch-debug-integration"),
-     "Model scenarios, not shared fixture infrastructure"),
-    (("tests/integration/transport_h2*", "tests/integration/codex_h2*",
-      "tests/integration/codex_integration.py"),
-     ("transport-h2-integration", "codex-h2-integration"),
-     ("transport-h2-integration", "codex-h2-integration"),
-     "Shared H2 fixture, managed imports and companion caller regression"),
-    (("src/codex*", "src/api_key.zig", "src/providers.zig", "tests/integration/codex*"),
-     ("test", "codex-integration", "codex-credential-integration", "codex-h2-integration"),
-     ("test", "codex-integration", "codex-credential-integration", "codex-h2-integration"),
-     "Credential mutation and synthetic managed transport"),
-    (("src/path_list.zig",), ("test-logic", "check"), ("test-logic", "test"),
-     "Search path values; the system PATH reader and Bash's environment build on them"),
-    (("src/environment.zig",), ("test-logic", "check", "bash-integration", "bash-environment-integration"),
-     ("test-logic", "test", "bash-integration", "bash-environment-integration"),
+    (("tests/integration/mcp_sdk/*",), ("launch-frame-integration", "ts-client"), ("launch-frame-integration", "ts-client"),
+     "The MCP SDK servers a launch frame starts"),
+    (("src/mcp/*", "src/http1/*"), ("launch-frame-integration",), ("launch-frame-integration",),
+     "The MCP and HTTP/1.1 clients, value cores included, against the real MCP SDK servers"),
+    (("src/environment.zig",), ("bash-integration", "bash-environment-integration"),
+     ("bash-integration", "bash-environment-integration"),
      "The Bash child environment core; Bash and peer calls read what it builds"),
-    (("src/SessionEnvironments.zig", "tests/integration/bash_environment_integration.py"),
-     ("test", "check", "bash-environment-integration"),
-     ("test", "check", "bash-environment-integration"),
-     "The Host's per-Session client environment register; intake installs, Bash copies"),
-    (("src/os/*",),
-     ("check", "codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
-     ("check", "codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
-     "Platform boundary: the native owners it serves on each OS"),
-    (("src/descriptor*", "src/os/descriptor_limit.zig", "src/host_launch.c", "src/server*.zig", "src/platform.zig", "src/cli.zig",
+    (("src/bash_platform.c",),
+     ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
+     ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
+     "Bash's native platform adapter, linked into the unit roots and Rui"),
+    (("src/host_launch.c", "src/host_identity.c"),
+     ("test", "host-launch-integration", "descriptor-capacity-integration", "codex-h2-integration", "transport-h2-integration"),
+     ("test", "host-launch-integration", "descriptor-capacity-integration", "codex-h2-integration", "transport-h2-integration"),
+     "Host launch adapters: every startup refusal boundary and managed transport"),
+    (("src/os/*",), ("codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
+     ("codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
+     "Platform boundary: the managed transport and credential store it serves on each OS"),
+    # The managed H2 fixtures probe the Host's descriptor refusal without
+    # importing its owners (08b23a01).
+    (("src/descriptor*", "src/os/descriptor_limit.zig", "src/server*.zig", "src/platform.zig", "src/cli.zig",
       "tests/integration/descriptor*", "tests/integration/host_launch*", "src/product_defaults.zig",
       "tests/integration/product_defaults.py"),
-     ("test", "host-launch-integration", "descriptor-capacity-integration",
-      "codex-h2-integration", "transport-h2-integration"),
-     ("test", "host-launch-integration", "descriptor-capacity-integration",
-      "codex-h2-integration", "transport-h2-integration"),
+     ("test", "host-launch-integration", "descriptor-capacity-integration", "codex-h2-integration", "transport-h2-integration"),
+     ("test", "host-launch-integration", "descriptor-capacity-integration", "codex-h2-integration", "transport-h2-integration"),
      "Startup capacity: every refusal boundary, managed transport and its companion oracle"),
+    (("src/model_instructions.txt",),
+     ("transport-h2-integration", "codex-h2-integration", "current-facts-integration",
+      "server-delivery-integration", "measurement-check"),
+     ("transport-h2-integration", "codex-h2-integration", "current-facts-integration",
+      "server-delivery-integration", "measurement-check"),
+     "Shared model context prose: fixture consumers and Go request oracles"),
+    (("src/server*.zig", "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/caller_*.zig", "src/cli_value.zig",
+      "src/slash_commands.zig", "src/protocol_reply.zig", "src/ResponseTiming.zig", "src/preferences.zig",
+      "src/provider_selection.zig", "src/client_defaults.zig", "src/configure_input.zig", "src/new_session_selection.zig",
+      "src/preference_values.zig", "src/product_defaults.zig", "tests/integration/product_defaults.py"),
+     ("admission-debug-integration",), ("admission-debug-integration",),
+     "Admission, capture and CLI selection: the complete Debug recovery matrix"),
+    (("src/cli.zig", "src/cli_args.zig", "src/cli_value.zig", "src/client.zig", "src/client_defaults.zig",
+      "src/configure_input.zig", "src/product_defaults.zig", "src/protocol.zig", "src/store/domain/configuration.zig", "openapi.json"),
+     ("measurement-check",), ("measurement-check",),
+     "CLI configuration surface: the measurement runners' configure call against the current CLI"),
+    (("src/store.zig", "src/store/*", "!src/store/wire/*"), ("dispatch-debug-integration",), ("dispatch-debug-integration",),
+     "Store SQL owners: Debug failure provenance through SQLite"),
     (("tests/integration/check.sh",), ("check-full",), ("check-full",),
      "Shared process inventory: native cases once, scheduling modes checked by driver tests"),
     (("tests/integration/login_signal_integration.py", "build.zig"), ("login-signal-integration",), (),
@@ -206,22 +355,10 @@ RULES = (
      ("current-facts-integration",), ("current-facts-integration",), "Current producer/consumer oracle"),
     (("tests/integration/server_delivery_integration.py", "build.zig"),
      ("server-delivery-integration",), ("server-delivery-integration",), "Real reply inactivity and Host drain"),
-    (("tests/integration/canonical_failure_integration.py", "tests/integration/model_fixture.py",
-      "tests/integration/host_process.py", "build.zig"),
+    (("tests/integration/canonical_failure_integration.py", "build.zig"),
      ("canonical-failure-integration",), ("canonical-failure-integration",), "Canonical failure caller oracle"),
-    (("tests/integration/control_integration.py", "tests/integration/model_fixture.py",
-      "tests/integration/host_process.py"),
-     ("check", "transport-h2-integration", "codex-h2-integration"),
-     ("check", "transport-h2-integration", "codex-h2-integration"),
-     "Shared fixture helpers retain composed callers and separately owned H2 consumers"),
-    (("tests/integration/model_fixture.py", "tests/integration/host_process.py",
-      "tests/integration/canonical_failure_integration.py"),
-     ("current-facts-integration",), ("current-facts-integration",), "Current oracle's imported fixture owners"),
-    (("tests/integration/model_fixture.py", "tests/integration/host_process.py",
-      "tests/integration/control_integration.py"),
-     ("server-delivery-integration",), ("server-delivery-integration",), "Delivery oracle's imported fixture owners"),
     (("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_*", "src/*.patch", ".agents/setup",
-      ".github/actions/setup/action.yml"),
+      ".github/actions/setup/action.yml", "screen-emulator/*"),
      ("check-full", "admission-debug-integration", "test-full"),
      ("check-full", "admission-debug-integration", "test-full"),
      "Build, dependency or bootstrap inputs"),
@@ -235,7 +372,7 @@ RULES = (
 
 # check.yml's LIVE_MYSQL: Linux shards for the unit dialect check
 # (src/store/mysql_dialect_check.zig) and the launch-frame Host fixture.
-LIVE_MYSQL_DIALECT_TARGETS = frozenset({"test", "check", "check-full"})
+LIVE_MYSQL_DIALECT_TARGETS = frozenset({"test", "test-store", "check", "check-full"})
 LIVE_MYSQL_TARGETS = LIVE_MYSQL_DIALECT_TARGETS | {"launch-frame-integration"}
 # check.yml's Postgres step condition: the Linux targets whose shards start
 # postgres:15 for test-pg's live rounds.
@@ -250,7 +387,7 @@ LIVE_RULES = (
      ("test", "launch-frame-integration"), ("launch-frame-integration",),
      "The launch-frame Host opens a live MySQL Store on Linux; macOS skips the live server",
      frozenset({"launch-frame-integration", "check", "check-full"})),
-    (("src/store/wire/pg*.zig", "src/store/wire/scram.zig", "src/store/wire/tls.zig", "src/h2/h2.zig", "src/h2/tls.zig",
+    (("src/store/wire/pg*.zig", "src/store/wire/scram.zig", "src/store/wire/tls.zig", "src/tls_client/*",
       "tests/integration/live_engines.py", "tests/ci/live_engine_step.py"),
      ("test-pg",), ("test-pg",), "The Postgres wire client's own tests, live against postgres:15 on Linux",
      LIVE_POSTGRES_TARGETS),
@@ -264,24 +401,27 @@ LIVE_RULES = (
     (("src/store.zig", "src/store/*", "!src/store/wire/pg*.zig", "!src/store/wire/scram.zig",
       "!src/store/wire/tls.zig", "tests/integration/mysql_server.py",
       "tests/integration/live_engines.py", "tests/ci/live_engine_step.py"),
-     ("test",), (),
+     ("test-store",), (),
      "The Store's live MySQL dialect check drives MySQL 8.4 through the wire client; macOS skips it",
      LIVE_MYSQL_DIALECT_TARGETS),
 )
 RULES += tuple(rule[:4] for rule in LIVE_RULES)
 
 
-# Inputs to the Host's ReleaseSafe frames or to their gate. Frontend owners are
-# client-only. check runs stack-frames; check-full does not.
+# Inputs to the Host's ReleaseSafe frames or to their gate: Zig source the
+# Host imports (`Graph.host`), and anything else under src/. check runs
+# stack-frames; check-full does not.
 STACK_FRAMES = ("src/*", "build.zig", "build.zig.zon", "tests/ci/stack_frames.py", "tests/ci/stack_frames.json")
 
 CHECK_COVERS = {
-    "test", "test-h2", "test-pg", "admission-integration", "dispatch-integration",
+    "test", "test-native", "test-store", "test-h2", "test-pg", "admission-integration", "dispatch-integration",
     "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
     "bash-integration", "bash-environment-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
     "descriptor-capacity-integration", "request-wait-integration",
-    "activity-integration", "preference-policy-integration",
+    "activity-integration", "preference-policy-integration", "session-list-integration",
+    "peer-integration", "sender-identity-integration", "conversation-page-integration",
+    "host-allocator-integration", "host-process-test", "human-cli-integration",
     "canonical-failure-integration",  # human_cli_integration.main executes all cases.
     "terminal-restoration-integration",  # Same full fixture in the human CLI gate.
 }
@@ -296,10 +436,34 @@ CACHE_POLICY = {
 }
 
 
+# tests/ci units that read no repository file outside their inputs (traced).
+# The policy job skips a unit whose inputs the diff leaves unchanged; every
+# other tests/ci test always runs.
+POLICY_SELF_CHECKS = (
+    # The check.sh driver tests run the real driver and host_process.py, which
+    # imports live_engines.py and h2 and reads the wire version.
+    ("test_selection.FullCheckPartitionTest",
+     ("tests/ci/*", "build.zig", "tests/integration/check.sh", "tests/integration/host_process.py",
+      "tests/integration/live_engines.py", "tests/integration/requirements.txt", "src/wire_version.zig")),
+    ("test_admission", ("tests/ci/*", ".github/*", "build.zig")),
+    ("test_release_publication", ("tests/ci/*",)),
+    ("test_build_artifact", ("tests/ci/*",)),
+)
+
+
+# Steps that run the PTY screen observer, whose libghostty-vt comes from the
+# test-only package in screen-emulator: setup fetches its packages for these only.
+# A step missing here still builds, fetching them on demand.
+SCREEN_TARGETS = frozenset({"check", "check-full", "terminal-restoration-integration", "canonical-failure-integration",
+                            "host-launch-integration", "upgrade-integration", "human-cli-integration",
+                            "skills-integration", "bash-recovery-integration", "renderer-contracts-selftest",
+                            "direct-pty", "direct-pty-controls", "input-equivalence", "screen-emulator"})
+
+
 def setup_requirements(targets):
     # Every runner installs the same fixture packages (tests/integration/requirements.txt)
     # for any target, so no fixture's import depends on a hand-kept target list.
-    return {"go": bool(({"measurement-check"} | set(RESOURCES)).intersection(targets)), "node": bool({"ts-client", "launch-frame-integration", "check", "check-full"}.intersection(targets)), "python": bool(targets), "tmux": "upgrade-integration" in targets}
+    return {"go": bool(({"measurement-check"} | set(RESOURCES)).intersection(targets)), "node": bool({"ts-client", "launch-frame-integration", "check", "check-full"}.intersection(targets)), "python": bool(targets), "screen": bool(SCREEN_TARGETS.intersection(targets)), "tmux": "upgrade-integration" in targets}
 
 
 def execution_batches(targets, check_part="all"):
@@ -327,20 +491,22 @@ def matches(path, patterns):
     return included and not any(fnmatch.fnmatchcase(path, pattern[1:]) for pattern in patterns if pattern.startswith("!"))
 
 
-def select(paths, phase, available):
+def select(paths, phase, available, graph=None):
+    graph = graph or tree_graph()
     targets, native_targets, reasons = set(), set(), set()
     live_targets, live_reasons = set(), set()
     manual_checks = set()
     linux_memory_checks = False
     for path in paths:
+        reached = graph.targets(path)
         # A shortcut only adds its reason, and stops the fallbacks below; every
         # rule, LIVE_RULES included, still matches the path.
         shortcut = False
         if path.endswith(".md") or path.startswith(("docs/", "research/")):
             reasons.add("Documentation: references and diff whitespace, no runtime change")
             shortcut = True
-        elif (any(fnmatch.fnmatchcase(path, pattern) for pattern in STACK_FRAMES)
-                and not any(fnmatch.fnmatchcase(path, pattern) for pattern in FRONTEND)):
+        elif (path in graph.host if path.startswith("src/") and path.endswith(".zig")
+              else any(fnmatch.fnmatchcase(path, pattern) for pattern in STACK_FRAMES)):
             targets.add("stack-frames")
             reasons.add("Host stack frames: the ReleaseSafe frame gate (tests/ci/stack_frames.py)")
         if (path.startswith((".github/", "tests/ci/")) and path != ".github/actions/setup/action.yml"
@@ -358,8 +524,20 @@ def select(paths, phase, available):
             if matches(path, patterns):
                 live_targets.update(set(checks) & served_by)
                 live_reasons.add((reason, served_by))
+        if path in graph.live_conformance and path not in graph.reached["test-store"]:
+            targets.add("test")
+            native_targets.add("test")
+            live_targets.add("test")
+            live_reasons.add(("Native Store conformance tests require live MySQL", LIVE_MYSQL_DIALECT_TARGETS))
+            reasons.add("Native Store conformance tests require live MySQL")
+            matched = True
         if shortcut:
             continue
+        if reached:
+            targets.update(reached)
+            native_targets.update(reached - LINUX_ONLY)
+            reasons.add("Import graph: the unit roots and fixtures that reach the changed file")
+            matched = True
         if path.startswith("tests/qualification/"):
             if path.endswith((".go", "go.mod", "go.sum")):
                 targets.add("measurement-check")
@@ -380,20 +558,19 @@ def select(paths, phase, available):
         if not matched and path.startswith("src/"):
             targets.add("check")
             native_targets.add("check")
-            reasons.add("Unmapped source: full fallback")
+            reasons.add("Source no import or rule reaches: full fallback")
         if path in ("src/client.zig", "src/ResponseTiming.zig"):
             targets.add("test-full")  # Response wait/inactivity owner.
             native_targets.add("test-full")
-    frontend = {path for path in paths if any(fnmatch.fnmatchcase(path, pattern) for pattern in FRONTEND)}
-    others = [path for path in paths if path not in frontend
-              and not (path.endswith(".md") or path.startswith(("docs/", "research/")))]
-    # Only renderer-only diffs skip check. Beside other executable changes, frontend
-    # owners that selected check keep it; AnswerRenderer never did unless strict.
-    if frontend and (strict(paths) or others and frontend - {"src/AnswerRenderer.zig"}):
-        targets.add("check")
-        native_targets.add("check")
-        reasons.add("Frontend change beside a strict path or other executable change keeps check")
     for checks in (targets, native_targets):
+        if "test" in checks or {"test-native", "test-store"} <= checks:
+            checks.difference_update({"test-native", "test-store"})
+            checks.add("test")
+        covered = {case for broad, cases in FIXTURE_COVERS.items() if broad in checks for case in cases}
+        checks -= covered
+        # Every case check runs is selected: run them as one gate.
+        if CHECK_COVERS - UNIT_ROOTS.keys() - {"test"} <= checks | covered:
+            checks.add("check")
         if "check-full" in checks:
             checks.discard("check")
         if checks & {"check", "check-full"}:
@@ -404,6 +581,9 @@ def select(paths, phase, available):
     mac_required = phase == "review" and any(mac_path(path) for path in paths)
     if mac_required:
         reasons.add("Mac-specific path: PR runs Mac Selected (tests/ci/platform_boundary.py)")
+    upgrade_required = phase == "review" and any(matches(path, UPGRADE_CHECK_PATHS) for path in paths)
+    if upgrade_required:
+        reasons.add("Upgrade, installer or Store-format path: PR runs the previous installed-release upgrade")
     if phase == "development":
         # Development does not replace final boundary/native acceptance, but
         # keeps each matched live rule's own targets (`LIVE_RULES`).
@@ -412,6 +592,8 @@ def select(paths, phase, available):
                    ({"installer-integration"} if any(matches(path, INSTALLER_PATHS) for path in paths) else set())
                    if targets else set())
         native_targets = set()
+    if "test" in targets:
+        targets.difference_update({"test-native", "test-store"})
     for reason, served_by in live_reasons:
         if not targets & served_by:
             raise ValueError(f"{reason!r} selected none of the targets that start its server: {sorted(served_by)}")
@@ -421,13 +603,15 @@ def select(paths, phase, available):
         raise ValueError(f"Selected targets absent from build.zig: {sorted(missing)}")
     return {"phase": phase, "targets": sorted(targets),
             # The selected targets that start a live server in CI (`LIVE_RULES`).
-            "server_targets": sorted(targets & live_targets),
+            "server_targets": sorted((targets & live_targets) | ({"test"} if "test" in targets and "test-store" in live_targets else set())),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
-            "mac_required": mac_required,
+            "mac_required": mac_required, "upgrade_required": upgrade_required,
             # Store, recovery and upgrade changes fail for real; never rerun them.
             "retry": not strict(paths),
             "cache_execution_checks": cache_execution_checks,
             "linux_memory_checks": linux_memory_checks, "manual_checks": sorted(manual_checks),
+            "policy_skips": [unit for unit, inputs in POLICY_SELF_CHECKS
+                             if not any(matches(path, inputs) for path in paths)],
             "reasons": sorted(reasons)}
 
 

@@ -4,10 +4,12 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
+const activity_reply = @import("activity_reply.zig");
 const protocol = @import("protocol.zig");
 const Input = @import("SessionInput.zig");
 const TerminalInput = @import("TerminalInput.zig");
 const Submission = @import("SessionSubmission.zig");
+const original_state = @import("submission_state.zig");
 const Task = @import("ClientTask.zig");
 const Terminal = @import("SessionTerminal.zig");
 const Screen = @import("SessionScreen.zig");
@@ -19,9 +21,13 @@ const test_poll = @import("test_poll");
 const View = @import("session_view.zig");
 const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
+const reader_policy = @import("session_reading.zig");
+const session_notice = @import("session_notice.zig");
+const session_keys = @import("session_keys.zig");
 const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
 const UpgradePanel = @import("UpgradePanel.zig");
+const session_upgrade = @import("session_upgrade.zig");
 const Self = @This();
 
 const reads = @import("session_reads.zig");
@@ -72,9 +78,7 @@ saved_requests: reads.SavedRequests = .{},
 /// are listed.
 recover_line: [slash_commands_shared.recover_line_bytes]u8 = undefined,
 reader: Task = .{},
-upgrade_requested: bool = false,
-upgrade_blocked: bool = false,
-upgrade_reobserving: bool = false,
+upgrade: session_upgrade.Upgrade = .{},
 // The reader's only context; the UI reads its result after join.
 job: Job = .{},
 // When the next live read may start.
@@ -283,11 +287,9 @@ pub const Lender = struct {
     upgrade: ?*const fn (context: *anyopaque, handoff: UpgradeHandoff) anyerror!bool = null,
 
     pub const Said = struct {
-        /// The prompt or overview notice; null for neither.
+        /// The overview's notice; null for none.
         text: ?[]const u8 = null,
-        /// The confirmation shown; Esc or Ctrl-G only cancels.
-        asking: ?overview_view.Prompt.Action = null,
-        /// Ctrl-X would ask to stop the work.
+        /// Ctrl-X would stop the work.
         stoppable: bool = false,
     };
 };
@@ -327,18 +329,31 @@ fn startInput(self: *Self) void {
     self.terminal.screen.commands = null;
 }
 
+/// Where Esc leads once the frontend stopped.
+pub const Back = union(enum) {
+    /// The overview, which names the original left unconfirmed, if any,
+    /// until it ends and then prints its recovery.
+    overview: original_state.Recovery,
+    /// The ending of a normal `leave` instead.
+    ended: anyerror!Outcome,
+};
+
 /// After `run` returned `returned`, which Esc only asks for: settles the
 /// stopped borrowers as `leave` does, while the terminal stays lent. Esc
-/// needs no running command and no unresolved submission, so they observe
-/// their stop within one transport poll. Null goes back to the overview;
-/// a failure or recovery to show is instead the ending of a normal `leave`.
-pub fn back(self: *Self) ?(anyerror!Outcome) {
+/// needs no running command or submission, so they observe their stop
+/// within one transport poll. A rejected original is released as /discard
+/// does. An unconfirmed one goes to the overview while it has `room` for
+/// it; otherwise, or on a failure, the frontend leaves as `leave` would.
+pub fn back(self: *Self, room: bool) Back {
     std.debug.assert(self.leaving == .returned);
-    const plan = departure.exit(self.settle({}), null, self.submission.view() != null);
-    if (plan.failure) |err| return err;
-    if (plan.recovery_before_notice or self.reading.pending_diagnostic != null) return .detached;
+    const plan = departure.exit(self.settle({}), null, false);
+    if (plan.failure) |err| return .{ .ended = err };
+    if (self.reading.pending_diagnostic != null) return .{ .ended = .detached };
+    if (self.submission.view()) |held| if (held.state == .rejected) self.submission.discardRejected() catch unreachable;
+    const recovery: original_state.Recovery = if (self.submission.view() != null) self.submission.recovery() else .none;
+    if (recovery != .none and !room) return .{ .ended = .detached };
     self.submission.close();
-    return null;
+    return .{ .overview = recovery };
 }
 
 /// What the restored screen shows after `leave`.
@@ -482,21 +497,7 @@ pub fn recoveryGuide(self: *const Self) void {
 }
 
 fn writeRecoveryGuide(self: *const Self, out: *std.Io.Writer) !void {
-    switch (self.submission.recovery()) {
-        .none => {},
-        .not_sent => |kind| try out.print("rui: {s} was not sent: capture did not begin. You may submit it again; no recovery record was published for this attempt.\n", .{if (kind == .decision) "Decision" else "Message"}),
-        .uncertain => |key| try out.print("rui: Capture not confirmed. Inspect rui request list for reserved key {s}; reservation does not prove publication. Recover only that original, never replacement input.\n", .{key}),
-        .saved => |saved| {
-            if (saved.rejected) {
-                try out.print("rui: Original request rejected. Use rui request inspect {s} to inspect its saved outcome.\n", .{saved.original.key});
-            } else try out.print("rui: {s} not confirmed. Use rui request recover {s} to retry the exact original; do not resubmit it.\n", .{ if (saved.original.kind == .decision) "Decision" else "Message", saved.original.key });
-        },
-        .accepted => |accepted| {
-            if (accepted.kind == .message) {
-                try out.print("rui: Message accepted; do not resubmit it. Use rui request read-result {s} for the same Message's answer.\n", .{accepted.key});
-            } else try out.print("rui: Decision accepted; do not repeat it. Use rui request inspect {s} to inspect the same saved admission.\n", .{accepted.key});
-        },
-    }
+    try original_state.writeGuide(self.submission.recovery(), out);
 }
 
 test "frontend exit guidance preserves accepted identity and never substitutes it for current intent" {
@@ -560,7 +561,7 @@ fn parse(text: []const u8) Slash {
         .help => .{ .inspection = .help },
         // The table's /copy words are `reads.Copy`'s own names.
         .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
-        .@"inspect-action", .setup, .configure, .result, .rename, .effort, .skill, .@"reload-skills" => .{ .inspection = .command },
+        .@"inspect-action", .setup, .configure, .result, .rename, .effort, .@"reload-skills" => .{ .inspection = .command },
         .recover => .{ .recover = command.argument },
         .discard => .discard,
         .wait => .wait,
@@ -587,12 +588,12 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         .archive, .unarchive, .upgrade, .exit, .model => true,
         else => false,
     };
-    if (self.upgradeHeld() and !admitted_elsewhere) {
+    if (self.upgrade.held() and !admitted_elsewhere) {
         self.notice = upgrade_recovery;
         return;
     }
     switch (parsed) {
-        .upgrade => self.upgrade_requested = true,
+        .upgrade => self.upgrade.requested = true,
         .archive => try self.perform(.archive),
         .unarchive => try self.converse(.unarchive),
         .exit => self.leaving = .detached,
@@ -775,8 +776,38 @@ test "Esc goes back to the overview only when the joined reader leaves nothing t
         // The reader is still running as Esc returns.
         try self.reader.start(std.testing.io, &self, case[0]);
         self.stop();
-        const failure: ?anyerror = if (self.back()) |ending| if (ending) |_| error.TestUnexpectedResult else |err| err else null;
+        const failure: ?anyerror = switch (self.back(true)) {
+            .overview => null,
+            .ended => |ending| if (ending) |_| error.TestUnexpectedResult else |err| err,
+        };
         try std.testing.expectEqual(case[1], failure);
+    }
+}
+
+test "Esc hands an unconfirmed original to the overview while it has room, and releases a rejected one" {
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const Case = struct { state: Submission.State, room: bool };
+    for ([_]Case{
+        .{ .state = .unconfirmed, .room = true },
+        .{ .state = .unconfirmed, .room = false },
+        .{ .state = .rejected, .room = true },
+        .{ .state = .rejected, .room = false },
+    }) |case| {
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .leaving = .returned };
+        self.init.io = std.testing.io;
+        self.input.init();
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = self.input.submitText("original A") }, .state = case.state, .publication = .published, .key = key };
+        const went = self.back(case.room);
+        if (case.state == .rejected) {
+            // Released whatever the room: nothing is left to recover.
+            try std.testing.expectEqual(original_state.Recovery.none, went.overview);
+            try std.testing.expectEqual(@as(?Submission.View, null), self.submission.view());
+        } else if (case.room) {
+            try std.testing.expectEqual(original_state.Recovery{ .saved = .{ .original = .{ .kind = .message, .key = key }, .rejected = false } }, went.overview);
+        } else {
+            // No room: the frontend leaves as Ctrl-C would, printing it.
+            try std.testing.expectEqual(Outcome.detached, try went.ended);
+        }
     }
 }
 
@@ -810,11 +841,7 @@ test "frontend cleanup joins both borrowers before reporting restoration failure
     }
 }
 
-const upgrade_recovery = "! Host requests paused after Upgrade; draft and original retained. /upgrade or use the selected Rui in a new terminal.";
-
-fn upgradeHeld(self: *const Self) bool {
-    return self.upgrade_requested or self.upgrade_blocked or self.upgrade_reobserving;
-}
+const upgrade_recovery = session_upgrade.recovery;
 
 fn quiesceUpgrade(self: *Self) !bool {
     self.notice = "Upgrade: waiting for Client borrowers; draft and original retained.";
@@ -837,28 +864,19 @@ fn quiesceUpgrade(self: *Self) !bool {
 
 fn showUpgrade(self: *Self) !void {
     const outcome = try UpgradePanel.run(self.init, self.store, self.terminal, &self.input.stream, self.interrupted);
-    self.upgrade_requested = false;
     self.applyUpgrade(outcome);
     if (self.lender.upgrade) |handoff| {
-        _ = try handoff(self.lender.context, if (self.upgrade_blocked) .incompatible else .ready);
+        _ = try handoff(self.lender.context, if (self.upgrade.after == .blocked) .incompatible else .ready);
     }
 }
 
 fn applyUpgrade(self: *Self, outcome: UpgradePanel.Outcome) void {
-    switch (outcome) {
-        .unchanged => {},
-        .compatible => {
-            self.upgrade_blocked = false;
-            self.poll_at = 0;
-            self.upgrade_reobserving = true;
-            self.reading.prepared_action = null;
-        },
-        .incompatible => {
-            self.upgrade_blocked = true;
-            self.upgrade_reobserving = false;
-        },
+    self.upgrade.close(outcome);
+    if (outcome == .compatible) {
+        self.poll_at = 0;
+        self.reading.prepared_action = null;
     }
-    self.notice = if (self.upgrade_blocked) upgrade_recovery else "Upgrade closed; draft and original retained. No work was resent.";
+    self.notice = self.upgrade.notice();
     self.dirty = true;
 }
 
@@ -888,49 +906,48 @@ fn startQueuedCommand(self: *Self) !void {
 fn driveActive(self: *Self) !void {
     while (self.leaving == null) {
         if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-        if (!self.upgrade_requested and !self.upgrade_blocked) {
+        if (self.upgrade.lends()) {
             if (try self.lender.service(self.lender.context)) self.dirty = true;
         }
         const size = self.terminal.geometry();
         if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
-        if (self.upgrade_requested) {
-            const ready = self.quiesceUpgrade() catch |err| {
-                if (err == error.CanonicalStoreFailure) return err;
-                self.upgrade_requested = false;
-                self.upgrade_blocked = true;
-                self.upgrade_reobserving = false;
-                var writer = std.Io.Writer.fixed(&self.notice_buffer);
-                try writer.print("! Upgrade could not settle Client work: {s}. Draft and original retained; /upgrade to retry.", .{@errorName(err)});
-                self.notice = writer.buffered();
-                self.dirty = true;
-                if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, .incompatible);
-                continue;
-            };
-            if (ready) try self.showUpgrade();
-            if (self.dirty or self.terminal.screen.stale()) _ = try self.draw();
-            _ = try self.step(16);
-            continue;
-        }
-        if (self.upgrade_blocked) {
-            if (self.notice == null) self.notice = upgrade_recovery;
-            if (self.dirty or self.terminal.screen.stale()) _ = try self.draw();
-            _ = try self.step(16);
-            continue;
-        }
-        if (self.upgrade_reobserving) {
-            if (self.reader.thread != null and self.reader.completed()) {
-                self.settleReader() catch |err| {
+        // An Upgrade's pass ends with a frame and a wait even when it closes
+        // the panel or settles the read; Host work resumes on the next.
+        const phase = self.upgrade.phase();
+        switch (phase) {
+            .quiescing => {
+                const ready = self.quiesceUpgrade() catch |err| {
                     if (err == error.CanonicalStoreFailure) return err;
-                    self.upgrade_blocked = true;
-                    self.upgrade_reobserving = false;
+                    self.upgrade.fail();
                     var writer = std.Io.Writer.fixed(&self.notice_buffer);
-                    try writer.print("! Reattach failed: {s}. Draft and original retained; /upgrade or reopen with selected Rui.", .{@errorName(err)});
+                    try writer.print("! Upgrade could not settle Client work: {s}. Draft and original retained; /upgrade to retry.", .{@errorName(err)});
                     self.notice = writer.buffered();
+                    self.dirty = true;
                     if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, .incompatible);
+                    continue;
                 };
-                self.withdrawDecided();
-            }
-            if (self.upgrade_reobserving and self.reader.thread == null) try self.launch(self.freeze(.activity), reads.scan);
+                if (ready) try self.showUpgrade();
+            },
+            .blocked => if (self.notice == null) {
+                self.notice = upgrade_recovery;
+            },
+            .reobserving => {
+                if (self.reader.thread != null and self.reader.completed()) {
+                    self.settleReader() catch |err| {
+                        if (err == error.CanonicalStoreFailure) return err;
+                        self.upgrade.fail();
+                        var writer = std.Io.Writer.fixed(&self.notice_buffer);
+                        try writer.print("! Reattach failed: {s}. Draft and original retained; /upgrade or reopen with selected Rui.", .{@errorName(err)});
+                        self.notice = writer.buffered();
+                        if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, .incompatible);
+                    };
+                    self.withdrawDecided();
+                }
+                if (self.upgrade.after == .reobserving and self.reader.thread == null) try self.launch(self.freeze(.activity), reads.scan);
+            },
+            .active => {},
+        }
+        if (phase != .active) {
             if (self.dirty or self.terminal.screen.stale()) _ = try self.draw();
             _ = try self.step(16);
             continue;
@@ -953,7 +970,7 @@ fn driveActive(self: *Self) !void {
         }
         // A joined read may hide or withdraw the Action, so a sequence the
         // choice is decoding finishes there first and keeps its meaning.
-        if (self.reader.thread != null and self.reader.completed() and !(self.terminal.screen.inputRow() == .selector and self.input.pending() != .none)) {
+        if (self.reader.thread != null and reader_policy.settles(self.reader.completed(), self.terminal.screen.inputRow() == .selector, self.input.pending() != .none)) {
             try self.settleReader();
             self.withdrawDecided();
         }
@@ -997,14 +1014,14 @@ fn driveActive(self: *Self) !void {
                 job.recall = recall;
                 try self.launch(job, reads.recall);
             };
-            if (self.reader.thread != null) {} else if (self.olderWanted()) {
-                self.notice = "Loading earlier messages…";
-                try self.launch(self.freeze(.history), reads.history);
-            } else if (std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at) {
-                try self.launch(self.freeze(.activity), reads.scan);
-            } else if (self.terminal.screen.consent == null and !self.reading.opening and self.submission.view() == null and self.live.work.first_action != null and self.input.pending() == .none) {
-                try self.launch(self.freeze(.permission), reads.permission);
-            }
+            if (self.reader.thread == null) if (reader_policy.background(self.idleReader())) |read| switch (read) {
+                .history => {
+                    self.notice = "Loading earlier messages…";
+                    try self.launch(self.freeze(.history), reads.history);
+                },
+                .activity => try self.launch(self.freeze(.activity), reads.scan),
+                .permission => try self.launch(self.freeze(.permission), reads.permission),
+            };
         }
         // Input routes by the latest frame's editor. Once a transition revokes
         // that frame, draw its replacement before reading further input.
@@ -1069,12 +1086,7 @@ fn drawFrame(self: *Self) !void {
     // A waiting Action says how to decide it under the input, not here. A
     // sent Message reads Sent until live output shows it: as its row, at
     // its stop, or in the queued row, which the frame may drop.
-    const submission_status: ?[]const u8 = if (self.reading.opening) "Opening…" else if (waiting) "" else if (self.submission.view()) |submission| switch (submission.state) {
-        .not_started => "Not sent · Ctrl-R retries original",
-        .submitting => "Sending…",
-        .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
-        .rejected => "Rejected · /discard",
-    } else null;
+    const submission_status = session_notice.status(self.reading.opening, waiting, self.heldOriginal());
     const base_status = submission_status orelse if (self.admission.echo != null) "Sent" else "";
     // A waiting Action speaks for itself; elsewhere the work says what it is
     // doing now, on every view.
@@ -1142,8 +1154,8 @@ fn recoverable(self: *const Self) ?*const [36]u8 {
 /// Ctrl-R, or /recover with the original's key: retries the original,
 /// except while an Action waits, which only its choice decides.
 fn recover(self: *Self, key: ?[]const u8) !void {
-    if (self.terminal.screen.consent != null) {
-        self.notice = self.decisionNotice();
+    if (self.waitingAction()) |action| {
+        self.notice = session_notice.decision(action);
         return;
     }
     try self.submission.requestRecovery(key);
@@ -1297,72 +1309,15 @@ fn beginMessage(self: *Self, intent: Submission.Intent) !void {
 
 /// A queued or running command holds the choice until it completes.
 fn commandActive(self: *const Self) bool {
-    return self.upgradeHeld() or self.input.queuedCommand() != null or self.inspection.command_running;
+    return self.upgrade.held() or self.input.queuedCommand() != null or self.inspection.command_running;
 }
 
 /// What a key does in a conversation, beside the draft or an Action's choice.
-const ConversationAction = enum {
-    page_up,
-    page_down,
-    /// Up and Down: the shown list's highlight, the /status page's row,
-    /// else a line of scrolling.
-    previous,
-    next,
-    /// Shift-Up and Shift-Down: the shown list's highlight, else a line of
-    /// scrolling, also on the /status page.
-    scroll_up,
-    scroll_down,
-    /// On an empty or recalled draft, the Message sent before the one it
-    /// shows.
-    older,
-    /// On a recalled draft, the Message sent after it, or past the newest
-    /// an empty draft.
-    newer,
-    /// The latest view, which is the pending Action if there is one.
-    latest,
-    /// Out of a Message page, else to the latest view. It never leaves the
-    /// conversation.
-    back,
-    /// As `back`, and from the settled latest view, once nothing would be
-    /// lost, to the overview.
-    close,
-    /// Opens the lowest collapsed Message, or leaves a Message page.
-    expand,
-    /// Leaves the conversation; Host work continues.
-    detach,
-    /// Retries the uncertain original.
-    recover,
-    /// Asks to stop the Session, and stops it at a second press.
-    stop,
-    archive,
-};
-
-/// The conversation's one key table.
-const conversation_keys: keymap.Keymap(ConversationAction) = .init(.{
-    .escape = .close,
-    // A lone ESC acts only once it expires; Ctrl-G acts at once.
-    .ctrl_g = .close,
-    .ctrl_c = .detach,
-    .ctrl_d = .detach,
-    .ctrl_n = .newer,
-    .ctrl_o = .expand,
-    .ctrl_p = .older,
-    .ctrl_r = .recover,
-    .ctrl_x = .stop,
-    .alt_a = .archive,
-    .up = .previous,
-    .down = .next,
-    .shift_up = .scroll_up,
-    .shift_down = .scroll_down,
-    .page_up = .page_up,
-    .page_down = .page_down,
-    .home = null,
-    .end = .back,
-    .ctrl_end = .latest,
-});
+const ConversationAction = session_keys.Action;
+const conversation_keys = session_keys.keys;
 
 fn perform(self: *Self, action: ConversationAction) !void {
-    if (self.upgradeHeld() and (action == .recover or action == .expand)) {
+    if (self.upgrade.held() and (action == .recover or action == .expand)) {
         self.notice = upgrade_recovery;
         return;
     }
@@ -1393,18 +1348,13 @@ fn perform(self: *Self, action: ConversationAction) !void {
             self.dropMessageRequest();
             screen.moveRow(.selector);
             if (action == .close and self.settledView()) {
-                if (self.submission.view()) |submission| {
-                    self.notice = switch (submission.state) {
-                        .rejected => "Esc returns to the overview once /discard clears the rejected original.",
-                        .submitting => "Esc returns to the overview once the original is confirmed.",
-                        .not_started, .unconfirmed => "Esc returns to the overview once Ctrl-R retries the original.",
-                    };
-                } else if (self.input.composition().bytes.len == 0) {
-                    self.leaving = .returned;
-                    return;
-                } else {
-                    // No draft outlives the frontend, so leaving would lose it.
-                    self.notice = "Esc returns to the overview once the draft is empty.";
+                const original: ?Submission.State = if (self.submission.view()) |submission| submission.state else null;
+                switch (session_notice.close(original, self.submission.published(), self.input.composition().bytes.len == 0)) {
+                    .leave => {
+                        self.leaving = .returned;
+                        return;
+                    },
+                    .stay => |why| self.notice = why,
                 }
             }
             if (action != .latest and screen.view == .message) try screen.leaveMessage() else try screen.latest();
@@ -1434,9 +1384,9 @@ fn perform(self: *Self, action: ConversationAction) !void {
 fn converse(self: *Self, input: overview_view.ConversationInput) !void {
     const host_intent = switch (input) {
         .other => false,
-        .stop, .archive, .unarchive, .confirm_archive => true,
+        .stop, .archive, .unarchive => true,
     };
-    if (host_intent and self.upgradeHeld()) {
+    if (host_intent and self.upgrade.held()) {
         self.notice = upgrade_recovery;
         return;
     }
@@ -1487,7 +1437,21 @@ fn settledView(self: *const Self) bool {
         self.reading.prepared_action == null and !self.commandActive();
 }
 
-const MessageRequest = struct { target: View.Collapsed, view: Screen.ViewKind, transcript: u64, sent: u64, generation: u64 };
+const MessageRequest = struct { target: View.Collapsed, asked: reader_policy.Asked };
+
+/// Where a Message page would be asked from now.
+fn pagePlace(self: *const Self) reader_policy.Place {
+    return switch (self.terminal.screen.view) {
+        .live => .live,
+        .transcript => .{ .transcript = self.transcript.id },
+        .inspection, .action, .message => .elsewhere,
+    };
+}
+
+/// What a Message page asked for now is asked over.
+fn pageAsked(self: *const Self) reader_policy.Asked {
+    return .{ .place = self.pagePlace(), .sent = self.admission.sent, .generation = self.expansion.generation };
+}
 
 /// No Message page asked for so far opens.
 fn dropMessageRequest(self: *Self) void {
@@ -1501,7 +1465,7 @@ fn expand(self: *Self) !void {
     self.expansion.pending = false;
     self.dirty = true;
     const screen = self.terminal.screen;
-    if (screen.view != .live and screen.view != .transcript) {
+    if (self.pagePlace() == .elsewhere) {
         self.notice = "! Ctrl-O opens a collapsed message from the conversation.";
         return;
     }
@@ -1514,7 +1478,7 @@ fn expand(self: *Self) !void {
         self.notice = "! That message's full text is no longer held here; /history shows it again.";
         return;
     };
-    self.expansion.requested = .{ .target = target, .view = screen.view, .transcript = self.transcript.id, .sent = self.admission.sent, .generation = self.expansion.generation };
+    self.expansion.requested = .{ .target = target, .asked = self.pageAsked() };
     self.notice = "Opening message…";
 }
 
@@ -1551,8 +1515,20 @@ fn showOlderLabels(self: *Self) !void {
     }
 }
 
-fn olderWanted(self: *const Self) bool {
-    return (self.transcript.plan.next() != null or self.transcript.older != null) and !self.transcript.older_failed and self.terminal.screen.transcriptAtTop() and !self.reading.opening;
+/// What the idle reader may start from, read now.
+fn idleReader(self: *const Self) reader_policy.Idle {
+    return .{
+        .now_ns = std.Io.Clock.awake.now(self.init.io).nanoseconds,
+        .scan_due_ns = self.poll_at,
+        .opening = self.reading.opening,
+        .older_remain = self.transcript.plan.next() != null or self.transcript.older != null,
+        .older_failed = self.transcript.older_failed,
+        .at_top = self.terminal.screen.transcriptAtTop(),
+        .choice_open = self.terminal.screen.consent != null,
+        .action_named = self.live.work.first_action != null,
+        .submission = self.submission.view() != null,
+        .decoder_pending = self.input.pending() != .none,
+    };
 }
 
 fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
@@ -1601,24 +1577,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
 fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     const screen = self.terminal.screen;
     const offer = screen.spendOffer();
-    const selected = Editor.select(conversation_keys, decoded);
-    const asked = self.overviewSays().asking;
-    if (asked == .archive and selected == .enter) {
-        try self.converse(if (Editor.plainEnter(decoded)) .confirm_archive else .other);
-        self.dirty = true;
-        return;
-    }
-    if (asked != null and selected == .action and selected.action == .close) {
-        try self.converse(.other);
-        self.dirty = true;
-        return;
-    }
-    const controls_prompt = !self.reading.opening and switch (selected) {
-        .action => |action| action == .stop or action == .archive,
-        else => false,
-    };
-    // Cancel the old context before ordinary input can create a new prompt.
-    if (!controls_prompt) try self.converse(.other);
+    if (session_keys.clearsOverviewNotice(Editor.select(conversation_keys, decoded), self.reading.opening)) try self.converse(.other);
     if (screen.inputRow() == .selector) try self.choiceEvent(decoded, offer) else try self.draftEvent(decoded, offer);
     if (self.leaving != null) screen.interruptConsent();
 }
@@ -1627,28 +1586,17 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
 /// act on it, and only with the offer this input spent.
 fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer) !void {
     const screen = self.terminal.screen;
-    switch (Editor.select(conversation_keys, decoded)) {
-        .none => {},
-        // While an Action waits there is no original to retry.
-        .action => |action| switch (action) {
-            .recover => self.notice = "! Action needs a decision; nothing to retry.",
-            // The draft is not the choice's; its sent Messages wait.
-            .older, .newer => {},
-            else => try self.perform(action),
-        },
-        .left => try self.choose(.{ .pick = .allow_once }, offer),
-        .right => try self.choose(.{ .pick = .deny }, offer),
-        .enter => try self.choose(.enter, offer),
-        // The draft takes this key and those after it, beside the Action;
-        // while a command runs, neither a Message nor a command could go.
-        .text => if (screen.selected.approval == .held) {
-            self.notice = "! Command still running. Input ignored.";
-        } else {
+    switch (session_keys.atChoice(Editor.select(conversation_keys, decoded), screen.selected.approval == .held)) {
+        .nothing => {},
+        .say => |text| self.notice = text,
+        .perform => |action| try self.perform(action),
+        .pick => |choice| try self.choose(.{ .pick = choice }, offer),
+        .confirm => try self.choose(.enter, offer),
+        .draft => {
             screen.moveRow(.draft);
             // No frame has shown this draft yet: the key offers nothing.
             try self.draftEvent(decoded, null);
         },
-        .refused => self.notice = "! Key combination not recognized; nothing authorized.",
     }
 }
 
@@ -1674,21 +1622,17 @@ fn choose(self: *Self, key: Screen.ChoiceKey, offer: ?Screen.Offer) !void {
     }
 }
 
-/// Why a draft waits for the Action: a previewed Action is decided only in the shell.
-fn decisionNotice(self: *const Self) []const u8 {
+/// The waiting Action, as the screen shows it now.
+fn waitingAction(self: *const Self) ?session_notice.Action {
     const screen = self.terminal.screen;
-    if (screen.consent.?.presentation == .preview) return "! Approval disabled · /help for exact shell commands. Draft retained.";
-    return if (screen.actionVisible()) "! Action needs a decision; Esc returns to the choice. Draft retained." else "! Action needs a decision; Esc returns to it. Draft retained.";
+    const pending = screen.consent orelse return null;
+    return .{ .preview = pending.presentation == .preview, .visible = screen.actionVisible(), .reason = screen.liveApproval(self.commandActive()) == .reason };
 }
 
-/// Says what Enter in the draft does, so the frame showing it may offer the
-/// denial.
-const reason_not_ready = "! Not ready; nothing denied · " ++ Screen.deny_words;
-
-/// Why Enter in the draft beside an Action sent nothing.
-fn reasonNotice(self: *const Self, letter: bool) []const u8 {
-    if (self.terminal.screen.liveApproval(self.commandActive()) != .reason) return self.decisionNotice();
-    return if (letter) "! Use ←→ and Enter to choose; a message denies the call." else reason_not_ready;
+/// The original the submission holds, as the conversation shows it.
+fn heldOriginal(self: *const Self) ?session_notice.Held {
+    const submission = self.submission.view() orelse return null;
+    return .{ .kind = submission.kind, .state = submission.state };
 }
 
 /// One input in the draft, with the offer this input spent. Beside an Action
@@ -1719,7 +1663,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer)
             try self.beginMessage(.{ .message_then_deny = .{ .ticket = ticket, .action = denial.action } });
         } else try self.beginMessage(.{ .message = ticket }),
         .command => try self.commandLine(),
-        .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (screen.consent != null) self.reasonNotice(letter) else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
+        .busy => self.notice = session_notice.busy(.{ .command = self.commandActive(), .held = self.heldOriginal(), .preparing = self.reading.phase == .permission, .action = self.waitingAction(), .letter = letter }),
         .editor => |outcome| switch (outcome) {
             .action => |action| try self.perform(action),
             .refused => |why| self.notice = refusedNotice(why),
@@ -1743,12 +1687,12 @@ fn commandLine(self: *Self) !void {
         switch (self.input.append(taken.rest)) {
             .refused => |why| self.notice = refusedNotice(why),
             else => if (taken.runs) {
-                defer if (!self.upgradeHeld()) self.input.clear();
+                defer if (!self.upgrade.held()) self.input.clear();
                 try self.slashCommand(self.input.composition().bytes);
             },
         }
     } else {
-        defer if (!self.upgradeHeld()) self.input.clear();
+        defer if (!self.upgrade.held()) self.input.clear();
         try self.slashCommand(self.input.composition().bytes);
     }
 }
@@ -1816,65 +1760,66 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
 fn settleReader(self: *Self) !void {
     const end = self.joinReader();
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
-    // A pending inspection supersedes a silent read it cancelled.
-    const mode: departure.Mode = if (self.upgrade_requested or self.input.queuedCommand() != null) .inspection else .active;
     // A fatal failure leaves command output for exit to print.
-    if (end.failure(mode)) |err| return err;
-    if (end != .complete and self.inspection.command_running) {
-        // Nothing to show: the command failed before writing output.
-        self.inspection.command_running = false;
-    }
-    if (end == .complete and self.reading.phase == .history) {
-        // What a seam's search found holds whatever the view now shows.
-        if (self.job.result.searched) |floor| if (self.live.lowest) |known| {
-            self.live.lowest = @max(known, floor);
-        };
-        // The user may have left the transcript while this page loaded.
-        const screen = self.terminal.screen;
-        if (screen.view == .transcript and self.job.transcript == self.transcript.id) {
-            const prepended = try screen.prependFile(self.init.io, self.files.inspection);
-            // The page's newest blocks are those its kept rows show.
-            const collapsed = &self.job.result.collapsed;
-            var older: [reads.Collected.capacity]?View.Collapsed = @splat(null);
-            const kept = @min(prepended.older, older.len);
-            for (0..kept) |index| {
-                const from_end = kept - index;
-                older[index] = if (from_end <= collapsed.count) collapsed.at(collapsed.count - from_end) else null;
-            }
-            self.transcript.blocks.prepend(older[0..kept]);
-            self.transcript.blocks.dropNewest(prepended.trimmed);
-            if (self.job.target == .listing) self.transcript.plan.listed(self.job.target.listing, self.job.result.listing) else {
-                self.transcript.older = self.job.result.history_cursor;
-                self.transcript.beginning = self.transcript.older == null;
-            }
-            try self.showOlderLabels();
-        }
-    } else if (end == .complete and self.reading.phase == .message) {
-        const screen = self.terminal.screen;
-        const request = self.expansion.reading.?;
-        self.expansion.reading = null;
-        // Only over the unchanged view it was asked from, before any send,
-        // dismissal or newer Ctrl-O.
-        if (request.generation == self.expansion.generation and request.sent == self.admission.sent and screen.view == request.view and
-            (request.view == .live or request.transcript == self.transcript.id))
-            try screen.showMessage(self.init.io, self.files.inspection);
-    } else if (end == .complete and self.reading.phase == .recall) {
-        try self.showRecalled();
-    } else if (end == .complete and (self.reading.phase == .activity or self.reading.phase == .permission)) {
-        try self.showStaged();
-    } else if (end == .complete and self.reading.phase == .inspection and self.inspection.kind == .copy) {
-        try self.showCopy();
-        self.inspection.command_running = false;
-    } else if (end == .complete and (self.reading.phase == .details or self.reading.phase == .inspection)) {
-        if (self.reading.phase != .details or self.admission.details_sent == self.admission.sent) try self.showInspection();
-        self.inspection.command_running = false; // Shown; exit no longer prints it.
-        // A /setup run over the page may have changed the defaults it shows.
-        if (self.reading.phase == .inspection and self.inspection.kind == .command and self.statusShown()) {
-            self.inspection.defaults = savedDefaults(self.home);
-            try self.refreshStatusPage();
-        }
+    if (end.failure(reader_policy.settleMode(self.upgrade.requested, self.input.queuedCommand() != null))) |err| return err;
+    const phase = self.reading.phase;
+    const inspection = self.readInspection();
+    if (end == .complete) switch (reader_policy.shows(phase, inspection)) {
+        .older => try self.showOlder(),
+        .message => {
+            const request = self.expansion.reading.?;
+            self.expansion.reading = null;
+            if (reader_policy.messageShows(request.asked, self.pageAsked())) try self.terminal.screen.showMessage(self.init.io, self.files.inspection);
+        },
+        .recalled => try self.showRecalled(),
+        .staged => try self.showStaged(),
+        .copy => try self.showCopy(),
+        .page => if (phase != .details or reader_policy.detailsShows(self.admission.details_sent, self.admission.sent)) try self.showInspection(),
+    };
+    // Shown, or never written: exit no longer prints it.
+    if (reader_policy.commandSettled(end == .complete, phase)) self.inspection.command_running = false;
+    if (end == .complete and reader_policy.defaultsChanged(phase, inspection, self.statusShown())) {
+        self.inspection.defaults = savedDefaults(self.home);
+        try self.refreshStatusPage();
     }
     try self.applyReader(end);
+}
+
+/// The inspection the joined read ran for, as settling needs it.
+fn readInspection(self: *const Self) reader_policy.Inspection {
+    return switch (self.inspection.kind) {
+        .copy => .copy,
+        .command => .command,
+        .status, .requests, .help => .other,
+    };
+}
+
+/// Prepends a completed older page to the transcript it was read for.
+fn showOlder(self: *Self) !void {
+    // What a seam's search found holds whatever the view now shows.
+    if (self.job.result.searched) |floor| if (self.live.lowest) |known| {
+        self.live.lowest = @max(known, floor);
+    };
+    // The user may have left the transcript while this page loaded.
+    const screen = self.terminal.screen;
+    if (screen.view == .transcript and self.job.transcript == self.transcript.id) {
+        const prepended = try screen.prependFile(self.init.io, self.files.inspection);
+        // The page's newest blocks are those its kept rows show.
+        const collapsed = &self.job.result.collapsed;
+        var older: [reads.Collected.capacity]?View.Collapsed = @splat(null);
+        const kept = @min(prepended.older, older.len);
+        for (0..kept) |index| {
+            const from_end = kept - index;
+            older[index] = if (from_end <= collapsed.count) collapsed.at(collapsed.count - from_end) else null;
+        }
+        self.transcript.blocks.prepend(older[0..kept]);
+        self.transcript.blocks.dropNewest(prepended.trimmed);
+        if (self.job.target == .listing) self.transcript.plan.listed(self.job.target.listing, self.job.result.listing) else {
+            self.transcript.older = self.job.result.history_cursor;
+            self.transcript.beginning = self.transcript.older == null;
+        }
+        try self.showOlderLabels();
+    }
 }
 
 /// What the queued row shows, if it shows (see `queued_line.unshown`): the
@@ -2094,12 +2039,9 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
     if (end.preparationFailure()) {
         if (self.reading.phase == .history) self.transcript.older_failed = true;
         if (self.reading.pending_diagnostic == null)
-            self.notice = switch (self.reading.phase) {
-                .details => "! Details unavailable; draft retained.",
-                .message => "! Message unavailable; Ctrl-O to retry. Draft retained.",
-                .recall => "! Sent message unavailable; draft retained.",
-                .inspection => if (self.inspection.kind == .copy) self.copyFailure(end.failed.err) else "! Inspection unavailable; draft retained.",
-                else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
+            self.notice = switch (reader_policy.unavailable(self.reading.phase, self.readInspection())) {
+                .say => |text| text,
+                .copy => reader_policy.copyFailure(self.inspection.kind.copy == .file, end.failed.err),
             };
         self.dirty = true;
         return;
@@ -2118,8 +2060,8 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         // History, footer, status, Sent and /status change together, in one frame.
         const result = &self.job.result;
         self.admission.delivered = @max(self.admission.delivered, result.delivered);
-        observed = .{ .work = result.work.work.core(), .opening = self.reading.opening };
-        self.live.work = result.work.work;
+        observed = .{ .work = result.work.work, .opening = self.reading.opening };
+        self.live.work = .fromCore(result.work.work);
         // A taken Message leaves the queued row in the frame that shows it.
         self.live.queued = result.queued;
         if (result.queued_line) |shown| self.live.queued_line = shown;
@@ -2133,7 +2075,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         self.live.view = result.live;
         self.live.cursor = result.cursor;
         self.reading.opening = false;
-        self.upgrade_reobserving = false;
+        self.upgrade.reobserved();
         if (self.reading.phase == .permission) {
             self.reading.prepared_action = result.action;
             self.reading.prepared_summary = result.summary;
@@ -2141,7 +2083,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         }
     }
     // A /status asked for during this read is the next read's, at once.
-    self.poll_at = if (self.inspection.status_requested) 0 else std.Io.Clock.awake.now(self.init.io).nanoseconds + 250_000_000;
+    self.poll_at = reader_policy.scanDue(std.Io.Clock.awake.now(self.init.io).nanoseconds, self.inspection.status_requested);
     // News goes out first in the next frame, once the read is applied.
     if (observed) |read| try self.lender.observed(self.lender.context, read.work, if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session, read.opening);
     self.dirty = true;
@@ -2301,14 +2243,6 @@ fn showCopy(self: *Self) !void {
 }
 
 /// Only a failure the person can act on is named.
-fn copyFailure(self: *const Self, err: anyerror) []const u8 {
-    if (self.inspection.kind.copy == .file) switch (err) {
-        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => return "! This directory is not writable; draft retained.",
-        else => {},
-    };
-    return "! Copy unavailable; draft retained.";
-}
-
 /// A settled scan's /status: the page asked for, or the shown page updated in
 /// place. An update keeps the reader's place, notice and consent.
 fn applyStatus(self: *Self) !void {
@@ -2523,7 +2457,7 @@ test "a transcript begun before grown live output is drawn shows the gap, not a 
     try screen.append("GROWS-FIRST\n");
     self.live.marks.record(.{ .offset = 12, .cursor = .{ .end = 3 }, .admitted = 4 });
     // Unescaped, the rows after the mark fit; escaped, they evict it.
-    for (0..45000) |_| try screen.append("\u{200b}");
+    try Screen.appendEscapeGrowth(screen);
     try screen.append("\nGROWS-END\n");
     try self.beginTranscript();
     try std.testing.expect(std.mem.indexOf(u8, screen.browsing.text(), "Earlier rows left this view.") != null);
@@ -2789,7 +2723,7 @@ test "a Message being written when an Action arrives keeps the input row, so its
     try std.testing.expect(held.self.submission.view() == null);
     try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
     try std.testing.expectEqualStrings("run the tests", held.self.input.composition().bytes);
-    try std.testing.expectEqualStrings(reason_not_ready, held.self.notice.?);
+    try std.testing.expectEqualStrings(session_notice.reason_not_ready, held.self.notice.?);
     try held.settle();
     try std.testing.expectEqual(ConsentPolicy.Projection{ .approval = .reason }, held.screen.selected);
     // Esc shows the choice at Allow once, and the draft stays.
@@ -2835,13 +2769,13 @@ test "an Enter in the draft beside an Action before its frame is offered denies 
     try std.testing.expect(held.self.submission.view() == null);
     try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
     try std.testing.expectEqualStrings("skip it", held.self.input.composition().bytes);
-    try std.testing.expectEqualStrings(reason_not_ready, held.self.notice.?);
+    try std.testing.expectEqualStrings(session_notice.reason_not_ready, held.self.notice.?);
     // A frame held while its write pumps the Enter: still not delivered.
     try held.hold("\r");
     _ = try held.self.draw();
     try std.testing.expect(held.pumps != 0);
     try std.testing.expect(held.self.submission.view() == null);
-    try std.testing.expectEqualStrings(reason_not_ready, held.self.notice.?);
+    try std.testing.expectEqualStrings(session_notice.reason_not_ready, held.self.notice.?);
     // The refusal is drawn and offered; the Enter after it sends the line.
     try held.settle();
     try sendKeys(&held.self, "\r");
@@ -2858,7 +2792,7 @@ test "a draft beside an Action denies only after a frame whose line under it say
     // The Enter meant to send the line, read before any frame showed the
     // Action, is refused.
     try sendKeys(&held.self, "\r");
-    try std.testing.expectEqualStrings(reason_not_ready, held.self.notice.?);
+    try std.testing.expectEqualStrings(session_notice.reason_not_ready, held.self.notice.?);
     // Another notice takes the line under the draft, as a confirmation of
     // an earlier Message would: the frame shows the reason but never says
     // what Enter does, so the Enter after it denies nothing.
@@ -2872,10 +2806,10 @@ test "a draft beside an Action denies only after a frame whose line under it say
     try std.testing.expectEqual(@as(?Submission.View, null), held.self.submission.view());
     try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
     // That refusal says it; once its frame is offered, Enter denies.
-    try std.testing.expectEqualStrings(reason_not_ready, held.self.notice.?);
+    try std.testing.expectEqualStrings(session_notice.reason_not_ready, held.self.notice.?);
     held.self.dirty = true;
     try held.settle();
-    try std.testing.expectEqualStrings(reason_not_ready, lastRow(held.screen, &storage));
+    try std.testing.expectEqualStrings(session_notice.reason_not_ready, lastRow(held.screen, &storage));
     try sendKeys(&held.self, "\r");
     try std.testing.expectEqual(@as(?ConsentPolicy.Pending, null), held.screen.consent);
     const reason = held.self.submission.intent.?.message_then_deny;
@@ -3138,7 +3072,7 @@ test "each source admits a slash command while another is active as it always di
     }
 }
 
-test "Esc at the latest view returns to the overview only with nothing to lose or dismiss" {
+test "Esc at the latest view returns to the overview unless unsent text or a choice would be lost" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
@@ -3148,22 +3082,31 @@ test "Esc at the latest view returns to the overview only with nothing to lose o
     try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", self.notice.?);
     try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
     self.input.clear();
-    // An unresolved submission keeps the conversation open and says what
-    // resolves it.
+    // An original not yet saved keeps the conversation open and says what
+    // resolves it; a saved one, rejected or not, lets it go.
     self.submission.intent = .{ .decision = .{ .action = 1, .decision = .deny } };
     defer self.submission.intent = null;
-    for ([_]struct { Submission.State, []const u8 }{
-        .{ .rejected, "Esc returns to the overview once /discard clears the rejected original." },
-        .{ .unconfirmed, "Esc returns to the overview once Ctrl-R retries the original." },
+    for ([_]struct { Submission.State, Submission.Publication, ?[]const u8 }{
+        .{ .not_started, .not_sent, "Esc returns to the overview once Ctrl-R retries the original." },
+        .{ .rejected, .published, null },
+        // A capture that failed before publishing may have saved nothing.
+        .{ .unconfirmed, .unknown, "Esc returns to the overview once Ctrl-R retries the original." },
+        .{ .unconfirmed, .published, null },
     }) |case| {
         self.submission.state = case[0];
+        self.submission.publication = case[1];
         self.notice = null;
+        self.leaving = null;
         try sendKeys(self, "\x07");
-        try std.testing.expect(self.leaving == null);
-        try std.testing.expectEqualStrings(case[1], self.notice.?);
+        if (case[2]) |why| {
+            try std.testing.expect(self.leaving == null);
+            try std.testing.expectEqualStrings(why, self.notice.?);
+        } else try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
     }
+    self.leaving = null;
     self.submission.intent = null;
     self.submission.state = .not_started;
+    self.submission.publication = .not_sent;
     // A running command keeps the conversation open.
     self.inspection.command_running = true;
     try sendKeys(self, "\x07");
@@ -3435,7 +3378,7 @@ test "End on an empty draft goes to the latest view and never leaves the convers
         try std.testing.expect(self.leaving == null);
     }
     // A rejected draft changes no key's meaning: Esc still returns.
-    try sendKeys(self, "\x00\x1b[27u");
+    try sendKeys(self, "\xff\x1b[27u");
     try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
 }
 
@@ -3556,7 +3499,7 @@ test "permission resolved between the activity scan and Current keeps the fronte
     try facts.work.workspace.set("/w");
     var page_buffer: [4096]u8 = undefined;
     var page = std.Io.Writer.fixed(&page_buffer);
-    try facts.writeJson(&page);
+    try activity_reply.writePage(&page, &facts);
     try Host.respond(&listener, "/v1/activity-page", page.buffered());
     // Another client denies the selected Action (or its Turn stops/finishes)
     // before the next read: Current no longer has that unresolved row.
@@ -3581,7 +3524,7 @@ test "permission resolved between the activity scan and Current keeps the fronte
     try self.launch(self.freeze(.activity), reads.scan);
     facts.work.work = .{ .state = .{ .idle = .{ .since = 1 } } };
     page = std.Io.Writer.fixed(&page_buffer);
-    try facts.writeJson(&page);
+    try activity_reply.writePage(&page, &facts);
     try Host.respond(&listener, "/v1/activity-page", page.buffered());
     try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), self, struct {
         fn completed(frontend: *Self) !bool {
@@ -3774,23 +3717,20 @@ const quiet_overview: Lender = .{ .context = undefined, .step = struct {
 /// An overview that lent the terminal, reduced to one Session's stop
 /// prompt, stop and notice.
 const FakeOverview = struct {
-    asking: bool = false,
     stopping: bool = false,
     stops: usize = 0,
     notice: ?[]const u8 = null,
 
     fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !void {
         const fake: *FakeOverview = @ptrCast(@alignCast(raw));
-        const asked = fake.asking;
-        fake.asking = false;
         fake.notice = null;
         if (input != .stop) return;
         if (fake.stopping or work != .working) {
             fake.notice = "unused: Stopping";
-        } else if (asked) {
+        } else {
             fake.stops += 1;
             fake.stopping = true;
-        } else fake.asking = true;
+        }
     }
 
     fn service(_: *anyopaque) !bool {
@@ -3799,7 +3739,7 @@ const FakeOverview = struct {
 
     fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
         const fake: *FakeOverview = @ptrCast(@alignCast(raw));
-        return .{ .text = if (fake.asking) "Stop unused? ctrl+x yes · esc no" else fake.notice, .asking = if (fake.asking) .stop else null, .stoppable = work == .working and !fake.stopping };
+        return .{ .text = fake.notice, .stoppable = work == .working and !fake.stopping };
     }
 
     fn lender(fake: *FakeOverview) Lender {
@@ -3807,7 +3747,7 @@ const FakeOverview = struct {
     }
 };
 
-test "Ctrl-X twice stops the open Session through the overview; any other key only cancels the ask" {
+test "Ctrl-X stops the open Session through the overview at once, asking nothing" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     var overview: FakeOverview = .{};
@@ -3829,22 +3769,15 @@ test "Ctrl-X twice stops the open Session through the overview; any other key on
         }
     };
     var storage: [512]u8 = undefined;
-    // The hint shows only while the overview says Ctrl-X would ask.
+    // The hint shows only while the overview says Ctrl-X would stop.
     try std.testing.expectEqualStrings("unused · gpt-6-sol", try Bottom.row(held, &storage));
     held.self.live.work.state = .{ .working = .{ .since = 1 } };
     try std.testing.expectEqualStrings("unused · gpt-6-sol · ctrl+x stop", try Bottom.row(held, &storage));
-    try sendKeys(&held.self, "\x18");
-    try std.testing.expectEqualStrings("Stop unused? ctrl+x yes · esc no", try Bottom.row(held, &storage));
-    // Ctrl-G, like Esc, cancels and stays in the conversation.
-    try sendKeys(&held.self, "\x07");
-    try std.testing.expect(held.self.leaving == null and !overview.asking);
-    try std.testing.expectEqualStrings("unused · gpt-6-sol · ctrl+x stop", try Bottom.row(held, &storage));
-    // Typing cancels too and still types, so the next Ctrl-X asks again.
-    try sendKeys(&held.self, "\x18x\x18");
-    try std.testing.expectEqualStrings("x", held.self.input.composition().bytes);
-    try std.testing.expect(overview.asking and overview.stops == 0);
-    try sendKeys(&held.self, "\x18");
+    // One Ctrl-X stops, with the draft kept and nothing asked.
+    try sendKeys(&held.self, "x\x18");
     try std.testing.expectEqual(@as(usize, 1), overview.stops);
+    try std.testing.expectEqualStrings("x", held.self.input.composition().bytes);
+    try std.testing.expect(held.self.leaving == null);
     try std.testing.expectEqualStrings("unused · gpt-6-sol", try Bottom.row(held, &storage));
     // The overview's notice comes before the conversation's own.
     held.self.notice = "Work continues while you compose.";
@@ -3852,13 +3785,13 @@ test "Ctrl-X twice stops the open Session through the overview; any other key on
     try std.testing.expectEqualStrings("unused: Stopping", try Bottom.row(held, &storage));
     try sendKeys(&held.self, "y");
     try std.testing.expectEqualStrings("Work continues while you compose.", try Bottom.row(held, &storage));
-    // Until the Session opens its work is unknown: Ctrl-X says so and asks
-    // nothing.
+    // Until the Session opens its work is unknown: Ctrl-X says so and
+    // stops nothing.
     overview = .{};
     held.self.notice = null;
     held.self.reading.opening = true;
     try sendKeys(&held.self, "\x18");
-    try std.testing.expect(!overview.asking);
+    try std.testing.expectEqual(@as(usize, 0), overview.stops);
     try std.testing.expectEqualStrings("Ctrl-X stops the Session once it opens.", try Bottom.row(held, &storage));
 }
 
@@ -4064,7 +3997,7 @@ test "upgrade command stays local and preserves the actual draft cursor and orig
     const before = self.input.composition();
     const revision = self.input.revision;
     try self.commandLine();
-    try std.testing.expect(self.upgrade_requested);
+    try std.testing.expect(self.upgrade.requested);
     try std.testing.expectEqualStrings(before.bytes, self.input.composition().bytes);
     try std.testing.expectEqual(before.cursor, self.input.composition().cursor);
     try std.testing.expectEqual(revision, self.input.revision);
@@ -4083,7 +4016,7 @@ test "upgrade outcomes retain Unicode draft cursor selection and unresolved orig
     defer std.testing.allocator.destroy(self);
     inline for (std.enums.values(UpgradePanel.Outcome)) |outcome| {
         for ([_]bool{ false, true }) |blocked| {
-            self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .upgrade_blocked = blocked };
+            self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .upgrade = .{ .after = if (blocked) .blocked else .open } };
             self.input.init();
             const original = self.input.submitText("the original request");
             self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('H') };
@@ -4100,8 +4033,8 @@ test "upgrade outcomes retain Unicode draft cursor selection and unresolved orig
             try std.testing.expectEqualStrings("the original request", try self.input.message(original));
             try std.testing.expectEqualStrings(&@as([36]u8, @splat('H')), &self.submission.view().?.key);
             try std.testing.expect(self.reader.thread == null and self.submission.task.thread == null);
-            try std.testing.expectEqual(outcome == .compatible, self.upgrade_reobserving);
-            try std.testing.expectEqual(if (outcome == .unchanged) blocked else outcome == .incompatible, self.upgrade_blocked);
+            try std.testing.expectEqual(outcome == .compatible, self.upgrade.after == .reobserving);
+            try std.testing.expectEqual(if (outcome == .unchanged) blocked else outcome == .incompatible, self.upgrade.after == .blocked);
             if (outcome != .unchanged or blocked) try std.testing.expect(self.commandActive());
         }
     }
@@ -4115,7 +4048,7 @@ test "upgrade quiescing reobservation and protocol holds refuse a fresh Message 
     screen.* = .{ .colour = false };
     var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
     for (0..3) |hold| {
-        self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false, .reading = .{ .opening = false }, .upgrade_requested = hold == 0, .upgrade_reobserving = hold == 1, .upgrade_blocked = hold == 2 };
+        self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false, .reading = .{ .opening = false }, .upgrade = .{ .requested = hold == 0, .after = if (hold == 1) .reobserving else if (hold == 2) .blocked else .open } };
         self.input.init();
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         _ = self.input.append("never send before safe reattachment");
@@ -4128,7 +4061,6 @@ test "upgrade quiescing reobservation and protocol holds refuse a fresh Message 
 
 const ArchiveOverview = struct {
     state: overview_view.State,
-    prompt: [overview_view.max_prompt_bytes]u8 = undefined,
     archives: usize = 0,
     stops: usize = 0,
     host_inputs: usize = 0,
@@ -4152,8 +4084,8 @@ const ArchiveOverview = struct {
 
     fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
-        const said = overview_view.conversation(&self.state, "k7m2qx".*, work, &self.prompt);
-        return .{ .text = said.text, .asking = said.asking, .stoppable = said.stoppable };
+        const said = overview_view.conversation(&self.state, "k7m2qx".*, work);
+        return .{ .text = said.text, .stoppable = said.stoppable };
     }
 
     fn lender(self: *ArchiveOverview) Lender {
@@ -4161,8 +4093,8 @@ const ArchiveOverview = struct {
     }
 };
 
-test "Alt-A archives the open conversation without submitting or changing its draft or retained original" {
-    for ([_][]const u8{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" }) |chord| for ([_]bool{ false, true }) |original| for ([_][]const u8{ "\r", "\n", "\x1b[13u", "\x1b[27;1;13~" }) |confirmation| {
+test "Alt-A archives the open conversation at once without submitting or changing its draft or retained original" {
+    for ([_][]const u8{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" }) |chord| for ([_]bool{ false, true }) |original| {
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
@@ -4175,16 +4107,9 @@ test "Alt-A archives the open conversation without submitting or changing its dr
         const before = held.self.input.composition();
         const revision = held.self.input.revision;
         try sendKeys(&held.self, chord);
-        try std.testing.expectEqual(overview_view.Prompt.Action.archive, held.self.overviewSays().asking.?);
-        try std.testing.expectEqualStrings("Stop and archive k7m2qx? enter yes · esc no", held.self.overviewSays().text.?);
-        try sendKeys(&held.self, "\x07");
-        try std.testing.expect(held.self.overviewSays().asking == null);
-        try std.testing.expect(held.self.leaving == null);
-        try std.testing.expectEqual(@as(usize, 0), overview.archives);
-        try sendKeys(&held.self, chord);
-        try sendKeys(&held.self, confirmation);
         try std.testing.expectEqual(@as(usize, 1), overview.archives);
         try std.testing.expectEqualStrings("k7m2qx", &overview.archived.?);
+        try std.testing.expect(held.self.leaving == null);
         _ = try overview_view.step(&overview.state, .{ .archive = .{ .request = .{ .reference = "k7m2qx".* }, .outcome = .{ .failed = "archive_pending" } } });
         try std.testing.expectEqualStrings("/rename unfinished", held.self.input.composition().bytes);
         try std.testing.expectEqual(before.cursor, held.self.input.composition().cursor);
@@ -4195,8 +4120,8 @@ test "Alt-A archives the open conversation without submitting or changing its dr
     };
 }
 
-test "Alt-A confirmation precedes an offered approval and spends its offer without deciding or sending" {
-    for ([_]bool{ false, true }) |draft| for ([_][]const u8{ "\r", "\n", "\x1b[13u", "\x1b[27;1;13~" }) |confirmation| {
+test "Alt-A at an offered approval archives, spends the offer and decides nothing" {
+    for ([_]bool{ false, true }) |draft| for ([_][]const u8{ "\r", "\n", "\x1b[13u", "\x1b[27;1;13~" }) |enter| {
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
@@ -4215,14 +4140,9 @@ test "Alt-A confirmation precedes an offered approval and spends its offer witho
         const before = held.self.input.composition();
         const revision = held.self.input.revision;
         const consent = held.screen.consent.?;
-        try sendKeys(&held.self, "\x1ba\x07");
-        try std.testing.expect(held.self.overviewSays().asking == null);
-        try std.testing.expectEqual(consent, held.screen.consent.?);
-        try sendKeys(&held.self, "\x1ba");
-        try held.settle();
         if (!draft) try std.testing.expect(held.screen.offered() != null);
         const inputs = held.screen.inputs;
-        try sendKeys(&held.self, confirmation);
+        try sendKeys(&held.self, "\x1ba");
         try std.testing.expectEqual(inputs + 1, held.screen.inputs);
         try std.testing.expect(held.screen.offered() == null);
         try std.testing.expectEqual(@as(usize, 1), overview.archives);
@@ -4232,73 +4152,15 @@ test "Alt-A confirmation precedes an offered approval and spends its offer witho
         try std.testing.expectEqualStrings(if (draft) "permission reason" else "", held.self.input.composition().bytes);
         try std.testing.expectEqual(before.cursor, held.self.input.composition().cursor);
         try std.testing.expectEqual(revision, held.self.input.revision);
-        try sendKeys(&held.self, confirmation);
+        // An Enter right after decides nothing: the offer is spent.
+        try sendKeys(&held.self, enter);
         try std.testing.expect(held.self.submission.view() == null);
         try std.testing.expectEqual(consent, held.screen.consent.?);
     };
 }
 
-test "Alt-A archive cannot be authorized by paste modified Enter or Ctrl-X" {
-    for ([_][]const u8{ "\x1b[13;2u", "\x1b[13;3u", "\x1b[13;5u", "\x1b[200~\r\x1b[201~", "\x1b[200~\n\x1b[201~", "\x18" }) |other| {
-        const held = try HeldFrontend.create();
-        defer held.destroy();
-        var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
-        held.self.lender = overview.lender();
-        held.self.live.work.state = .{ .working = .{ .since = 1 } };
-        try sendKeys(&held.self, "keep me\x1b[D\x1ba");
-        try sendKeys(&held.self, other);
-        try std.testing.expectEqual(@as(usize, 0), overview.archives);
-        try std.testing.expect(held.self.submission.view() == null);
-        try std.testing.expect(held.self.input.submitted == null);
-        try std.testing.expect(held.self.input.queuedCommand() == null);
-        try std.testing.expect(held.self.overviewSays().asking != .archive);
-    }
-}
-
-test "Alt-A prompt replacement survives stop archive and repeated archive keys without confirming the wrong intent" {
-    const Case = enum { stop_to_archive, archive_to_stop, repeat_archive };
-    const Surface = enum { draft, approval_choice, approval_draft };
-    for ([_][]const u8{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" }) |chord| for (std.enums.values(Case)) |case| for (std.enums.values(Surface)) |surface| {
-        const held = try HeldFrontend.create();
-        defer held.destroy();
-        var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
-        errdefer std.debug.print("prompt replacement case={s} surface={s} chord={s}\n", .{ @tagName(case), @tagName(surface), chord[1..] });
-        held.self.lender = overview.lender();
-        held.self.live.work.state = if (surface == .draft) .{ .working = .{ .since = 1 } } else .{ .approval = .{ .since = 1 } };
-        const file: ?std.Io.File = if (surface == .draft) null else try held.adopt(3);
-        defer if (file) |opened| opened.close(std.testing.io);
-        if (surface != .draft) try held.settle();
-        if (surface != .approval_choice) try sendKeys(&held.self, "unfinished message\x1b[D\x1b[D");
-        const before = held.self.input.composition();
-        const revision = held.self.input.revision;
-        const consent = held.screen.consent;
-        try sendKeys(&held.self, if (case == .stop_to_archive) "\x18" else chord);
-        try std.testing.expectEqual(@as(?overview_view.Prompt.Action, if (case == .stop_to_archive) .stop else .archive), held.self.overviewSays().asking);
-        try sendKeys(&held.self, if (case == .archive_to_stop) "\x18" else chord);
-        const replacement: overview_view.Prompt.Action = if (case == .archive_to_stop) .stop else .archive;
-        try std.testing.expectEqual(@as(?overview_view.Prompt.Action, replacement), held.self.overviewSays().asking);
-        try std.testing.expectEqual(@as(usize, 0), overview.archives);
-        try std.testing.expectEqual(@as(usize, 0), overview.stops);
-        try sendKeys(&held.self, if (case == .archive_to_stop) "\x18" else "\r");
-        try std.testing.expectEqual(@as(usize, if (case == .archive_to_stop) 0 else 1), overview.archives);
-        try std.testing.expectEqual(@as(usize, if (case == .archive_to_stop) 1 else 0), overview.stops);
-        try std.testing.expect(held.self.overviewSays().asking == null);
-        try std.testing.expectEqualStrings(if (surface == .approval_choice) "" else "unfinished message", held.self.input.composition().bytes);
-        try std.testing.expectEqual(before.cursor, held.self.input.composition().cursor);
-        try std.testing.expectEqual(revision, held.self.input.revision);
-        try std.testing.expectEqual(consent, held.screen.consent);
-        try std.testing.expect(held.self.input.submitted == null);
-        try std.testing.expect(held.self.input.queuedCommand() == null);
-        try std.testing.expect(held.self.submission.view() == null);
-    };
-}
-
-test "Alt-A and Ctrl-X during opening still cancel an old prompt without forwarding an intent" {
-    for ([_][]const u8{ "\x1ba", "\x18" }) |chord| for (std.enums.values(overview_view.Prompt.Action)) |prompt| {
+test "Alt-A and Ctrl-X during opening forward no intent and keep the draft" {
+    for ([_][]const u8{ "\x1ba", "\x18" }) |chord| {
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
@@ -4308,16 +4170,15 @@ test "Alt-A and Ctrl-X during opening still cancel an old prompt without forward
         try sendKeys(&held.self, "keep draft\x1b[D");
         const revision = held.self.input.revision;
         const cursor = held.self.input.composition().cursor;
-        overview.state.prompt = .{ .stop = "k7m2qx".*, .action = prompt };
         held.self.reading.opening = true;
         try sendKeys(&held.self, chord);
-        try std.testing.expect(held.self.overviewSays().asking == null);
+        try std.testing.expectEqual(@as(usize, 0), overview.host_inputs);
         try std.testing.expectEqual(@as(usize, 0), overview.archives);
         try std.testing.expectEqual(@as(usize, 0), overview.stops);
         try std.testing.expectEqualStrings("keep draft", held.self.input.composition().bytes);
         try std.testing.expectEqual(cursor, held.self.input.composition().cursor);
         try std.testing.expectEqual(revision, held.self.input.revision);
-    };
+    }
 }
 
 const UnusedArchiveCommand = struct {
@@ -4329,8 +4190,8 @@ const UnusedArchiveCommand = struct {
     }
 };
 
-test "conversation slash archive shares busy confirmation and consumes only its submitted command without approving" {
-    for ([_]bool{ false, true }) |approval| for ([_][]const u8{ "\r", "\n" }) |confirmation| for ([_]bool{ false, true }) |completion| {
+test "conversation slash archive archives a busy Session at once and consumes only its submitted command without approving" {
+    for ([_]bool{ false, true }) |approval| for ([_][]const u8{ "\r", "\n" }) |enter| for ([_]bool{ false, true }) |completion| {
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
@@ -4344,22 +4205,16 @@ test "conversation slash archive shares busy confirmation and consumes only its 
         defer if (file) |opened| opened.close(std.testing.io);
         if (approval) try held.settle();
         const original = held.self.input.submitText("retained original");
+        // A second /archive while the first is pending sends nothing more.
         for (0..2) |attempt| {
-            errdefer std.debug.print("slash archive approval={} completion={} attempt={d} enter={any} draft={s} notice={s}\n", .{ approval, completion, attempt, confirmation, held.self.input.composition().bytes, held.self.notice orelse "" });
+            errdefer std.debug.print("slash archive approval={} completion={} attempt={d} enter={any} draft={s} notice={s}\n", .{ approval, completion, attempt, enter, held.self.input.composition().bytes, held.self.notice orelse "" });
             try sendKeys(&held.self, if (completion) "/arch" else "/archive");
             if (completion) try held.settle();
             const consent = held.screen.consent;
-            try sendKeys(&held.self, confirmation);
-            try std.testing.expectEqual(@as(?overview_view.Prompt.Action, .archive), held.self.overviewSays().asking);
-            try std.testing.expectEqual(@as(usize, 0), overview.archives);
+            try sendKeys(&held.self, enter);
+            try std.testing.expectEqual(@as(usize, 1), overview.archives);
             try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
             try std.testing.expect(held.self.input.queuedCommand() == null);
-            try std.testing.expectEqual(consent, held.screen.consent);
-            const inputs = held.screen.inputs;
-            try sendKeys(&held.self, if (attempt == 0) "\x07" else confirmation);
-            try std.testing.expectEqual(inputs + 1, held.screen.inputs);
-            try std.testing.expectEqual(@as(usize, attempt), overview.archives);
-            try std.testing.expect(held.self.overviewSays().asking == null);
             try std.testing.expectEqual(consent, held.screen.consent);
             try std.testing.expect(held.screen.offered() == null);
         }
@@ -4405,8 +4260,8 @@ test "conversation slash and shortcut archive restore share one pending or unkno
     };
 }
 
-test "conversation stop prompt is cancelled before submitting slash archive creates its own confirmation" {
-    for ([_][]const u8{ "\r", "\n" }) |confirmation| {
+test "Ctrl-X stops at once beside a typed slash archive, and Enter then archives" {
+    for ([_][]const u8{ "\r", "\n" }) |enter| {
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
@@ -4415,15 +4270,12 @@ test "conversation stop prompt is cancelled before submitting slash archive crea
         held.self.lender = overview.lender();
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
         try sendKeys(&held.self, "/archive\x18");
-        try std.testing.expectEqual(@as(?overview_view.Prompt.Action, .stop), held.self.overviewSays().asking);
-        try sendKeys(&held.self, confirmation);
-        try std.testing.expectEqual(@as(?overview_view.Prompt.Action, .archive), held.self.overviewSays().asking);
+        try std.testing.expectEqual(@as(usize, 1), overview.stops);
         try std.testing.expectEqual(@as(usize, 0), overview.archives);
-        try std.testing.expectEqual(@as(usize, 0), overview.stops);
-        try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
-        try sendKeys(&held.self, confirmation);
+        try std.testing.expectEqualStrings("/archive", held.self.input.composition().bytes);
+        try sendKeys(&held.self, enter);
         try std.testing.expectEqual(@as(usize, 1), overview.archives);
-        try std.testing.expectEqual(@as(usize, 0), overview.stops);
+        try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
     }
 }
 
@@ -4446,7 +4298,7 @@ test "conversation slash archive errors propagate and consume only the submitted
 }
 
 test "upgrade holds classify every lender intent before forwarding and allow local cancellation" {
-    const inputs: []const overview_view.ConversationInput = &.{ .stop, .{ .archive = .active }, .unarchive, .confirm_archive };
+    const inputs: []const overview_view.ConversationInput = &.{ .stop, .{ .archive = .active }, .unarchive };
     for (0..3) |hold| for (inputs) |input| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -4454,23 +4306,19 @@ test "upgrade holds classify every lender intent before forwarding and allow loc
         try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
         defer overview.state.deinit();
         held.self.lender = overview.lender();
-        held.self.upgrade_requested = hold == 0;
-        held.self.upgrade_blocked = hold == 1;
-        held.self.upgrade_reobserving = hold == 2;
-        overview.state.prompt = .{ .stop = "k7m2qx".*, .action = .archive };
+        held.self.upgrade = .{ .requested = hold == 0, .after = if (hold == 1) .blocked else if (hold == 2) .reobserving else .open };
         try held.self.converse(input);
         try std.testing.expectEqual(@as(usize, 0), overview.host_inputs);
         try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
         try std.testing.expectEqualStrings(upgrade_recovery, held.self.notice.?);
         try held.self.converse(.other);
-        try std.testing.expect(overview.state.prompt == null);
         try std.testing.expectEqual(@as(usize, 0), overview.archives);
         try std.testing.expectEqual(@as(usize, 0), overview.stops);
     };
 }
 
-test "upgrade holds refuse archive shortcuts confirmations and slash commands without consuming custody" {
-    const Path = enum { alt_a, kitty_alt_a, legacy_alt_a, confirm, kitty_confirm, slash_archive, slash_unarchive };
+test "upgrade holds refuse archive shortcuts and slash commands without consuming custody" {
+    const Path = enum { alt_a, kitty_alt_a, legacy_alt_a, slash_archive, slash_unarchive };
     for (0..3) |hold| for ([_]protocol.session_work.Kind{ .idle, .working, .approval }) |work| for (std.enums.values(Path)) |path| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -4495,16 +4343,12 @@ test "upgrade holds refuse archive shortcuts confirmations and slash commands wi
         });
         const before = held.self.input.composition();
         const revision = held.self.input.revision;
-        held.self.upgrade_requested = hold == 0;
-        held.self.upgrade_blocked = hold == 1;
-        held.self.upgrade_reobserving = hold == 2;
-        if (path == .confirm or path == .kitty_confirm) overview.state.prompt = .{ .stop = "k7m2qx".*, .action = .archive };
+        held.self.upgrade = .{ .requested = hold == 0, .after = if (hold == 1) .blocked else if (hold == 2) .reobserving else .open };
         try sendKeys(&held.self, switch (path) {
             .alt_a => "\x1ba",
             .kitty_alt_a => "\x1b[97;3u",
             .legacy_alt_a => "\x1b[27;3;97~",
-            .kitty_confirm => "\x1b[13u",
-            .confirm, .slash_archive, .slash_unarchive => "\r",
+            .slash_archive, .slash_unarchive => "\r",
         });
         try std.testing.expectEqual(@as(usize, 0), overview.host_inputs);
         try std.testing.expectEqual(@as(usize, 0), overview.archives);
@@ -4534,7 +4378,7 @@ test "upgrade reobservation retains a refused archive command from the completio
         held.self.lender = overview.lender();
         try sendKeys(&held.self, line);
         try held.settle();
-        held.self.upgrade_reobserving = true;
+        held.self.upgrade.after = .reobserving;
         try sendKeys(&held.self, "\r");
         try std.testing.expectEqualStrings(if (std.mem.eql(u8, line, "/arch")) "/archive" else "/unarchive", held.self.input.composition().bytes);
         try std.testing.expectEqual(@as(usize, 0), overview.host_inputs);

@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const wire_request = @import("wire_request.zig");
 
 /// Presets live in their launch frame, never in the Store. The spec's JSON
 /// strings and objects are borrowed for the Host's life, not copied per slot.
@@ -20,19 +21,11 @@ pub fn validPresetName(name: []const u8) bool {
     return true;
 }
 
-/// The most decoded bytes a `message_agent` text carries.
-pub const message_agent_max_text_bytes = 64 * 1024;
-
-// Prompt text: written here, and given no tests (D141).
-pub const message_agent_description = "Send a Message to another Rui Session by its ID. It returns once the Message is delivered, before any answer. A reply, if the receiver sends one, arrives later as a Message that starts your next turn.";
-pub const message_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
-    "\"id\":{\"type\":\"string\",\"description\":\"The receiving Session's six-character ID.\"}," ++
-    std.fmt.comptimePrint("\"text\":{{\"type\":\"string\",\"description\":\"The Message: nonempty UTF-8, at most {d} bytes.\"}}", .{message_agent_max_text_bytes}) ++
-    "},\"required\":[\"id\",\"text\"],\"additionalProperties\":false}";
-
-// Prompt text: written here, and given no tests (D141).
-pub const find_tools_description = "Find and load tools available to this Session but not yet loaded. Give one to eight space-separated search words, at most 64 bytes each; a tool matches any word in its name or description, ignoring ASCII case. Loads at most eight matches in name order. Loaded tools become available on your next request.";
-pub const find_tools_schema = "{\"type\":\"object\",\"properties\":{\"words\":{\"type\":\"string\",\"description\":\"One to eight search words separated by ASCII spaces; each word is at most 64 bytes.\"}},\"required\":[\"words\"],\"additionalProperties\":false}";
+pub const message_agent_max_text_bytes = @import("tool_record.zig").message_agent_max_text_bytes;
+pub const message_agent_description = @import("tool_record.zig").message_agent_description;
+pub const message_agent_schema = @import("tool_record.zig").message_agent_schema;
+pub const find_tools_description = @import("tool_record.zig").find_tools_description;
+pub const find_tools_schema = @import("tool_record.zig").find_tools_schema;
 
 pub const find_tools_max_word_bytes = 64;
 /// Eight words of 64 bytes fit with room for JSON escapes and spacing; a
@@ -40,10 +33,7 @@ pub const find_tools_max_word_bytes = 64;
 pub const find_tools_max_argument_bytes = 4096;
 pub const find_tools_too_long = std.fmt.comptimePrint("words must fit arguments of at most {d} bytes", .{find_tools_max_argument_bytes});
 
-pub const FindTools = struct {
-    words: [8][]const u8 = @splat(""),
-    count: usize = 0,
-};
+pub const FindTools = @import("find_tools_words.zig").FindTools;
 
 /// Checked when the core call runs, not when its model output settles.
 pub fn checkFindTools(arena: std.mem.Allocator, bytes: []const u8, out: *FindTools) error{OutOfMemory}!StartAgentCheck {
@@ -72,24 +62,8 @@ pub fn checkFindTools(arena: std.mem.Allocator, bytes: []const u8, out: *FindToo
 /// Read arguments are deliberately small; content is read in bounded windows.
 pub const read_transcript_max_argument_bytes = 4096;
 
-// Prompt text: written here, and given no tests (D141).
-pub const read_transcript_description = "Read any Rui Session's public transcript, newest first. Omit id to read your own. Outline lines give entry addresses, kinds, people or tools, call notes, result codes, byte sizes and quoted first-line previews (at most 100 bytes). Use before to page older entries. Open an entry with full and continue its 16 KiB text windows with offset; call entries show the tool name and arguments JSON. Use query for ASCII-case-insensitive word search with quoted snippets; query cannot be combined with full. Private content is never shown.";
-const transcript_kind_schema = blk: {
-    var names: []const u8 = "";
-    for (std.enums.values(protocol.ActivityItem.Kind), 0..) |kind, index| {
-        names = names ++ (if (index == 0) "" else ",") ++ "\"" ++ @tagName(kind) ++ "\"";
-    }
-    break :blk "{\"type\":\"string\",\"enum\":[" ++ names ++ "]}";
-};
-pub const read_transcript_schema = "{\"type\":\"object\",\"properties\":{" ++
-    "\"id\":{\"type\":\"string\",\"description\":\"Session ID; omitted means your own Session.\"}," ++
-    "\"query\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"Search public text (1 to 256 UTF-8 bytes); not with full.\"}," ++
-    "\"kinds\":{\"type\":\"array\",\"items\":" ++ transcript_kind_schema ++ ",\"minItems\":1,\"description\":\"Public feed kind names, exactly as on the wire. Omitted means all kinds.\"}," ++
-    "\"before\":{\"type\":\"string\",\"description\":\"List entries strictly older than this P or P.O address.\"}," ++
-    "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":16}," ++
-    "\"full\":{\"type\":\"string\",\"description\":\"Open entry P.O instead of listing; omit kinds, before and limit.\"}," ++
-    "\"offset\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"Byte offset, only with full.\"}" ++
-    "},\"additionalProperties\":false}";
+pub const read_transcript_description = @import("tool_record.zig").read_transcript_description;
+pub const read_transcript_schema = @import("tool_record.zig").read_transcript_schema;
 
 pub const TranscriptAddress = struct { position: u64, ordinal: ?u64 = null };
 pub const ReadTranscriptCheck = StartAgentCheck;
@@ -180,25 +154,8 @@ pub fn checkReadTranscript(arena: std.mem.Allocator, bytes: []const u8, out: *Re
 /// (`\u0001` for each byte), and its spec.
 pub const start_agent_max_argument_bytes = 6 * message_agent_max_text_bytes + 16 * 1024;
 
-// Prompt text: written here, and given no tests (D141).
-pub const start_agent_description = "Start another Rui agent on a task. It creates the agent's Session, gives it the task as its first Message and returns the agent's ID at once, before any answer. " ++
-    "An attached agent is your child: it works in your Workspace with your provider and Bash environment, and stops when you are stopped or run out of context. A standalone agent has its own lifetime. " ++
-    "The spec may only narrow your own tools and permission mode.";
-pub const start_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
-    std.fmt.comptimePrint("\"task\":{{\"type\":\"string\",\"description\":\"The agent's first Message: nonempty UTF-8, at most {d} bytes.\"}},", .{message_agent_max_text_bytes}) ++
-    "\"attached\":{\"type\":\"boolean\",\"description\":\"true starts your child, which stops with you; false starts a standalone agent.\"}," ++
-    "\"preset\":{\"type\":\"string\",\"description\":\"A connect-time preset; spec fields override it.\"}," ++
-    "\"spec\":{\"type\":\"object\",\"properties\":{" ++
-    "\"model\":{\"type\":\"string\"}," ++
-    "\"effort\":{\"type\":[\"string\",\"null\"],\"enum\":[null,\"none\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]}," ++
-    "\"compactAt\":{\"type\":\"integer\",\"description\":\"Tokens of context at which the agent compacts.\"}," ++
-    "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Tool names, each one of yours.\"}," ++
-    "\"permissionMode\":{\"type\":\"string\",\"enum\":[\"ask\",\"bypass\"]}," ++
-    "\"instructions\":{\"type\":\"string\",\"description\":\"Optional agent instructions.\"}," ++
-    "\"outputSchema\":{\"type\":[\"object\",\"null\"],\"description\":\"Optional JSON output schema.\"}," ++
-    "\"label\":{\"type\":[\"string\",\"null\"],\"description\":\"A few words naming the agent's task.\"}" ++
-    "},\"additionalProperties\":false}" ++
-    "},\"required\":[\"task\",\"attached\"],\"anyOf\":[{\"required\":[\"spec\"]},{\"required\":[\"preset\"]}],\"additionalProperties\":false}";
+pub const start_agent_description = @import("tool_record.zig").start_agent_description;
+pub const start_agent_schema = @import("tool_record.zig").start_agent_schema;
 
 /// A `start_agent` call's checked arguments: the task, whether the agent
 /// is attached, and its spec as a creating Configuration without the
@@ -208,7 +165,7 @@ pub const StartAgent = struct {
     instructions: ?[]const u8 = null,
     output_schema: ?[]const u8 = null,
     attached: bool,
-    configuration: protocol.Configuration,
+    configuration: wire_request.Configuration,
 };
 
 pub const StartAgentCheck = union(enum) {
@@ -293,11 +250,11 @@ pub fn checkStartAgentWithPresets(arena: std.mem.Allocator, bytes: []const u8, p
 
 /// The single agent-spec parser for start_agent, launch presets and creation
 /// seeds. It writes in place; content borrows `arena` through Store admission.
-pub fn parseAgentSpec(arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *protocol.Configuration) error{OutOfMemory}!StartAgentCheck {
+pub fn parseAgentSpec(arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *wire_request.Configuration) error{OutOfMemory}!StartAgentCheck {
     return parseAgentSpecFor(arena, spec, configuration, false);
 }
 
-fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *protocol.Configuration, comptime inherits_parent: bool) error{OutOfMemory}!StartAgentCheck {
+fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *wire_request.Configuration, comptime inherits_parent: bool) error{OutOfMemory}!StartAgentCheck {
     // D221 applies after preset resolution too: no preset can change these.
     if (inherits_parent) {
         if (spec.contains("workspace")) return refused("spec.workspace: an agent always works in your Workspace");
@@ -447,171 +404,10 @@ fn toolsField(arena: std.mem.Allocator, value: std.json.Value, tools: *protocol.
     for (names) |name| tools.append(name) catch return error.Refused;
 }
 
-/// A `message_agent` call's checked arguments, without its text.
-pub const MessageAgentArguments = struct {
-    id: protocol.Bounded(protocol.session_id_bytes) = .{},
-    text_bytes: u64 = 0,
-};
-
-/// Why a `message_agent` call's arguments were rejected. Its text goes back
-/// to the model as the call's result.
-pub const MessageAgentProblem = enum {
-    malformed_json,
-    unknown_field,
-    duplicate_field,
-    missing_id,
-    missing_text,
-    id_invalid,
-    text_invalid,
-
-    pub fn text(self: MessageAgentProblem) []const u8 {
-        return switch (self) {
-            .malformed_json => "the arguments are not one well-formed JSON object",
-            .unknown_field => "only id and text are accepted",
-            .duplicate_field => "a field appears more than once",
-            .missing_id => "id is required",
-            .missing_text => "text is required",
-            .id_invalid => "id must be a Session's six-character ID",
-            .text_invalid => std.fmt.comptimePrint("text must be a nonempty string of UTF-8 text, at most {d} bytes", .{message_agent_max_text_bytes}),
-        };
-    }
-};
-
-pub const MessageAgentCheck = union(enum) {
-    accepted: MessageAgentArguments,
-    rejected: MessageAgentProblem,
-};
-
-/// Checks a `message_agent` call's decoded arguments from `source` (with
-/// `peek` and `take`, as Bash's parser reads them) and writes the text's
-/// decoded bytes to `text` (with `writeAll`) as they are read. The writer
-/// sees text from arguments that may yet be rejected, so a caller keeps it
-/// only on `.accepted`.
-pub fn checkMessageAgent(source: anytype, text: anytype) !MessageAgentCheck {
-    return checkObject(source, text) catch |err| switch (err) {
-        error.Malformed => .{ .rejected = .malformed_json },
-        else => |e| e,
-    };
-}
-
-fn checkObject(source: anytype, text: anytype) !MessageAgentCheck {
-    // A flat object needs one level of the scanner's stack, which grows
-    // its list by more than one byte at a time.
-    var stack: [256]u8 = undefined;
-    var fixed = std.heap.FixedBufferAllocator.init(&stack);
-    var reader: Reader(@TypeOf(source)) = .{ .source = source, .scanner = .initStreaming(fixed.allocator()) };
-    if (try reader.next() != .object_begin) return error.Malformed;
-    const Field = enum { id, text };
-    var seen: std.EnumSet(Field) = .empty;
-    var out: MessageAgentArguments = .{ .id = .{ .len = 0 } };
-    while (true) {
-        var token = try reader.next();
-        if (token == .object_end) break;
-        // The key, piece by piece; one longer than every field's is unknown.
-        var key: protocol.Bounded(8) = .{ .len = 0 };
-        var key_fits = true;
-        while (true) {
-            const piece = stringPiece(&token) orelse return error.Malformed;
-            if (key.len + piece.len > key.bytes.len) key_fits = false else {
-                @memcpy(key.bytes[key.len..][0..piece.len], piece);
-                key.len += piece.len;
-            }
-            if (token == .string) break;
-            token = try reader.next();
-        }
-        const field = (if (key_fits) std.meta.stringToEnum(Field, key.slice()) else null) orelse return .{ .rejected = .unknown_field };
-        if (seen.contains(field)) return .{ .rejected = .duplicate_field };
-        seen.insert(field);
-        var value = try reader.next();
-        if (stringPiece(&value) == null) return .{ .rejected = switch (field) {
-            .id => .id_invalid,
-            .text => .text_invalid,
-        } };
-        var id_fits = true;
-        while (true) {
-            const piece = stringPiece(&value) orelse return error.Malformed;
-            switch (field) {
-                .id => if (out.id.len + piece.len > out.id.bytes.len) {
-                    id_fits = false;
-                } else {
-                    @memcpy(out.id.bytes[out.id.len..][0..piece.len], piece);
-                    out.id.len += piece.len;
-                },
-                .text => {
-                    out.text_bytes += piece.len;
-                    if (out.text_bytes > message_agent_max_text_bytes) return .{ .rejected = .text_invalid };
-                    try text.writeAll(piece);
-                },
-            }
-            if (value == .string) break;
-            value = try reader.next();
-        }
-        switch (field) {
-            .id => if (!id_fits or !protocol.validSessionId(out.id.slice())) return .{ .rejected = .id_invalid },
-            .text => if (out.text_bytes == 0) return .{ .rejected = .text_invalid },
-        }
-    }
-    if (try reader.next() != .end_of_document) return error.Malformed;
-    if (!seen.contains(.id)) return .{ .rejected = .missing_id };
-    if (!seen.contains(.text)) return .{ .rejected = .missing_text };
-    return .{ .accepted = out };
-}
-
-/// The bytes a string token carries, or null for any other token.
-fn stringPiece(token: *const std.json.Token) ?[]const u8 {
-    return switch (token.*) {
-        .partial_string, .string => |bytes| bytes,
-        .partial_string_escaped_1 => |*bytes| bytes,
-        .partial_string_escaped_2 => |*bytes| bytes,
-        .partial_string_escaped_3 => |*bytes| bytes,
-        .partial_string_escaped_4 => |*bytes| bytes,
-        else => null,
-    };
-}
-
-/// Feeds the scanner from `source` a chunk at a time. A token's bytes
-/// point into `chunk`, which is refilled only once they are used.
-fn Reader(comptime Source: type) type {
-    return struct {
-        source: Source,
-        scanner: std.json.Scanner,
-        /// Small: the source buffers its own reads, and this lives in the
-        /// settlement scan's and the engine's frames.
-        chunk: [256]u8 = undefined,
-        ended: bool = false,
-
-        fn next(self: *@This()) !std.json.Token {
-            while (true) return self.scanner.next() catch |err| switch (err) {
-                error.BufferUnderrun => {
-                    try self.refill();
-                    continue;
-                },
-                error.SyntaxError, error.UnexpectedEndOfInput, error.OutOfMemory => error.Malformed,
-            };
-        }
-
-        fn refill(self: *@This()) !void {
-            if (self.ended) return error.Malformed;
-            var length: usize = 0;
-            while (length < self.chunk.len) : (length += 1) {
-                const byte = (self.source.peek() catch |err| return if (isDecodeError(err)) error.Malformed else err) orelse break;
-                _ = byte;
-                self.chunk[length] = self.source.take() catch |err| return if (isDecodeError(err)) error.Malformed else err;
-            }
-            if (length == 0) {
-                self.ended = true;
-                self.scanner.endInput();
-            } else self.scanner.feedInput(self.chunk[0..length]);
-        }
-    };
-}
-
-fn isDecodeError(err: anyerror) bool {
-    return switch (err) {
-        error.InvalidDescriptorShape, error.InvalidUtf8 => true,
-        else => false,
-    };
-}
+pub const MessageAgentArguments = @import("message_agent_arguments.zig").MessageAgentArguments;
+pub const MessageAgentProblem = @import("message_agent_arguments.zig").MessageAgentProblem;
+pub const MessageAgentCheck = @import("message_agent_arguments.zig").MessageAgentCheck;
+pub const checkMessageAgent = @import("message_agent_arguments.zig").checkMessageAgent;
 
 /// A call's arguments already in memory, as the checks read them.
 pub const SliceSource = struct {
@@ -635,7 +431,7 @@ const TestText = struct {
     bytes: [256]u8 = undefined,
     len: usize = 0,
 
-    fn writeAll(self: *TestText, piece: []const u8) !void {
+    pub fn writeAll(self: *TestText, piece: []const u8) !void {
         @memcpy(self.bytes[self.len..][0..piece.len], piece);
         self.len += piece.len;
     }
@@ -678,7 +474,7 @@ test "a message_agent call's arguments name a Session and carry nonempty text" {
 
 test "a message_agent text over its bound is rejected, across chunk boundaries" {
     const Discard = struct {
-        fn writeAll(_: *@This(), _: []const u8) !void {}
+        pub fn writeAll(_: *@This(), _: []const u8) !void {}
     };
     var buffer: [message_agent_max_text_bytes + 64]u8 = undefined;
     for ([_]usize{ message_agent_max_text_bytes, message_agent_max_text_bytes + 1 }) |length| {
@@ -1040,7 +836,7 @@ test "start_agent presets cannot supply provider or workspace even with override
     defer memory.deinit();
     const arena = memory.allocator();
     const start = try arena.create(StartAgent);
-    const configuration = try arena.create(protocol.Configuration);
+    const configuration = try arena.create(wire_request.Configuration);
     for ([_][]const u8{ "provider", "workspace" }) |field| {
         const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
             \\{"model":"model-a","effort":"low","compactAt":1000,"tools":[],"permissionMode":"ask"}
@@ -1062,8 +858,9 @@ test "start_agent presets cannot supply provider or workspace even with override
     }
 }
 
-pub const skill_description = "Invoke an advertised skill by name to read its complete raw SKILL.md and absolute path. Reload rescans this Session's repository and Host-home .agents/skills roots, appending only changed catalog entries. Skills are ordinary conversation content, grant no tools or permissions, and execute nothing on load.";
-pub const skill_schema = "{\"type\":\"object\",\"properties\":{\"operation\":{\"type\":\"string\",\"enum\":[\"invoke\",\"reload\"]},\"name\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64}},\"required\":[\"operation\"],\"additionalProperties\":false}";
+pub const skill_description = @import("tool_record.zig").skill_description;
+pub const skill_schema = @import("tool_record.zig").skill_schema;
+
 pub const skill_max_argument_bytes = 4096;
 
 pub fn checkSkill(arena: std.mem.Allocator, bytes: []const u8, out: *protocol.SkillRequest) error{OutOfMemory}!StartAgentCheck {

@@ -6,6 +6,7 @@ const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
 const Input = @import("SessionInput.zig");
 const Task = @import("ClientTask.zig");
+const original_state = @import("submission_state.zig");
 const Self = @This();
 
 pub const Intent = union(enum) {
@@ -33,18 +34,12 @@ pub const Intent = union(enum) {
         };
     }
 };
-pub const Kind = enum { message, decision };
-pub const State = enum { not_started, submitting, unconfirmed, rejected };
-const Publication = enum { not_sent, unknown, published };
-pub const Accepted = struct { kind: Kind, key: [36]u8 };
+pub const Kind = original_state.Kind;
+pub const State = original_state.State;
+pub const Publication = original_state.Publication;
+pub const Accepted = original_state.Accepted;
 pub const View = struct { kind: Kind, state: State, key: [36]u8, last_error: ?anyerror };
-pub const Recovery = union(enum) {
-    none,
-    not_sent: Kind,
-    uncertain: [36]u8,
-    saved: struct { original: Accepted, rejected: bool },
-    accepted: Accepted,
-};
+pub const Recovery = original_state.Recovery;
 pub const End = union(enum) {
     absent,
     // A Message's admission orders it among delivered ones. An accepted
@@ -85,16 +80,17 @@ pub fn view(self: *const Self) ?View {
     return .{ .kind = intent.kind(), .state = self.state, .key = self.key, .last_error = self.last_error };
 }
 
+/// Whether the original's request is published, so a saved copy outlives
+/// this frontend. False while a worker runs: it owns publication until join.
+pub fn published(self: *const Self) bool {
+    return self.task.thread == null and self.publication == .published;
+}
+
 /// Recovery guidance is read only after both frontend borrowers have joined.
 pub fn recovery(self: *const Self) Recovery {
     std.debug.assert(self.task.thread == null);
-    if (self.intent) |intent| {
-        const kind = intent.kind();
-        if (self.state == .not_started) return .{ .not_sent = kind };
-        if (self.publication != .published) return .{ .uncertain = self.key };
-        return .{ .saved = .{ .original = .{ .kind = kind, .key = self.key }, .rejected = self.state == .rejected } };
-    }
-    return if (self.accepted) |accepted| .{ .accepted = accepted } else .none;
+    const original: ?original_state.Original = if (self.intent) |intent| .{ .kind = intent.kind(), .state = self.state, .publication = self.publication, .key = self.key } else null;
+    return original_state.recovery(original, self.accepted);
 }
 
 pub fn begin(self: *Self, intent: Intent) !void {
@@ -141,7 +137,7 @@ fn canRetry(self: *const Self, requested: [36]u8) bool {
 
 /// The original's key while a retry of it may go: it is not rejected.
 fn retryable(self: *const Self) ?*const [36]u8 {
-    return if (self.intent != null and self.state != .rejected) &self.key else null;
+    return if (self.intent != null and original_state.retries(self.state)) &self.key else null;
 }
 
 /// The original a retry would send now and could only send as a Message:
@@ -149,8 +145,7 @@ fn retryable(self: *const Self) ?*const [36]u8 {
 /// Never a decision, or a Message that carries one.
 pub fn unconfirmedMessage(self: *const Self) ?*const [36]u8 {
     const key = self.retryable() orelse return null;
-    if (self.task.thread != null or self.state != .unconfirmed or self.intent.? != .message) return null;
-    return key;
+    return if (original_state.retriesAsMessage(self.state, self.intent.? == .message, self.task.thread != null)) key else null;
 }
 
 fn launchRetry(self: *Self) !void {
@@ -333,7 +328,7 @@ pub fn join(self: *Self) End {
     const result = self.task.join();
     return self.apply(result) catch |err| {
         self.last_error = err;
-        self.state = if (self.publication == .not_sent) .not_started else .unconfirmed;
+        self.state = original_state.failed(self.publication);
         return .{ .failed = .{ .err = err } };
     };
 }
@@ -363,7 +358,7 @@ fn apply(self: *Self, result: anyerror!void) !End {
 
 pub fn discardRejected(self: *Self) !void {
     if (self.intent == null) return;
-    if (self.task.thread != null or self.state != .rejected) return error.SubmissionUnresolved;
+    if (!original_state.discardable(self.state, self.task.thread != null)) return error.SubmissionUnresolved;
     self.release();
 }
 
@@ -388,7 +383,7 @@ pub fn close(self: *Self) void {
 fn submit(raw: *anyopaque, task: *Task) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
-    if (self.publication == .not_sent) self.publication = .unknown;
+    self.publication = original_state.capturing(self.publication);
     self.captured = switch (self.intent.?) {
         .message, .message_then_deny => try client.captureMessage(task.io, .{ .store = self.store, .session = self.session, .text_path = "", .text = try self.input.message(self.intent.?.ticket().?) }, self.target).get(),
         .decision => |decision| try client.capturePermissionDecision(task.io, .{ .store = self.store, .session = self.session, .action_id = decision.action, .decision = decision.decision }, self.target),

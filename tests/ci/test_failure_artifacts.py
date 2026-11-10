@@ -2,6 +2,7 @@ import contextlib
 import io
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import threading
@@ -122,7 +123,8 @@ class FailureArtifactsTest(unittest.TestCase):
         for name, parts in (("check.yml", 2), ("previous-release-upgrade.yml", 1)):
             with self.subTest(workflow=name):
                 workflow = Path(".github/workflows", name).read_text()
-                self.assertEqual(workflow.count("RUI_FAILURE_ARTIFACTS:"), parts)
+                # As step env or set inline on the one check that retains them.
+                self.assertEqual(len(re.findall(r"RUI_FAILURE_ARTIFACTS[:=]", workflow)), parts)
                 # Acceptance receipts and synthetic upgrade Stores are separate
                 # artifacts. Check the bounded failure upload contract itself.
                 blocks = workflow.split("      - name: Retain bounded failed-fixture diagnostics\n")[1:]

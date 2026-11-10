@@ -19,7 +19,7 @@ from urllib.parse import quote
 import host_process
 import live_engines
 import os_semantics
-import launch_frame_integration as frame_host
+import launch_frame_fixture as frame_host
 
 
 def main():
@@ -68,12 +68,12 @@ def main():
 
     def ready(child):
         try:
-            frame_host.wait_for_socket(sock, child)
+            frame_host.wait_for_host(sock, "", child)
         except AssertionError:
             if child.poll() is None:
                 raise
             out, err = child.communicate(timeout=5)
-            raise AssertionError(f"the Host exited {child.returncode} before its socket appeared: stdout={out!r} stderr={err!r}")
+            raise AssertionError(f"the Host exited {child.returncode} before it answered Host info: stdout={out!r} stderr={err!r}")
         info = frame_host.host_info(sock, "")
         assert re.fullmatch("[0-9a-f]{32}", info["store"]), "readiness did not report a Store id"
         assert info["active_capacity"] == "2"
@@ -92,7 +92,7 @@ def main():
                 assert url.encode() not in data and password.encode() not in data, f"login reached {name}"
 
     def close(child):
-        child.stdin.close()
+        host_process.close_stdin(child)
         assert child.wait(timeout=20) == 0, "stdin close did not cleanly stop the Host"
         assert not sock.exists(), "the stopped Host retained its socket"
 

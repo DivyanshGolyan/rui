@@ -2,7 +2,6 @@
 """Native client/Host observation without a CLI status command or SQLite access."""
 
 import fcntl
-import hashlib
 import http.server
 import json
 import os
@@ -10,7 +9,6 @@ import pathlib
 import re
 import socket
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -18,9 +16,9 @@ import time
 import host_process
 from host_process import HeldReplies, HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, is_peer_disconnect, start_ready_process, stop_process, wait_for
 import os_semantics
+from host_status_fixture import ACTOR, RUI, complete_response, socket_path, status
 
 
-RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
 PUBLISH = pathlib.Path(__file__).resolve().parents[2] / "release/publish.sh"
 
 
@@ -30,12 +28,6 @@ def installer_view(home):
         env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0 and result.stderr == "", result
     return result.stdout.splitlines()
-
-
-def status(store):
-    result = subprocess.run([ACTOR, store], capture_output=True, text=True, timeout=10)
-    assert result.returncode == 0, result.stderr
-    return result.stdout.strip()
 
 
 def cli_status(home, *args):
@@ -101,17 +93,12 @@ def start(store, capacity, *options):
         observations="status" if "--test-phase-trace" in options else None,
     )
 
-def socket_path(store):
-    digest = hashlib.sha256(str(store.resolve()).encode()).hexdigest()[:32]
-    return pathlib.Path(f"/tmp/rui-{os.geteuid()}/{digest}.sock")
-
-
 def raw_info(sock, store, instance=None, *, kind="host_info", route="host-info", extra=None):
     payload = json.dumps({"version": host_process.WIRE_VERSION, "kind": kind, "store": str(store), **(extra or {})}).encode()
     header = b"X-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\n"
     if instance is not None:
         header += f"X-Rui-Host-Instance: {instance}\r\n".encode()
-    with socket.socket(socket.AF_UNIX) as stream:
+    with os_semantics.unix_stream() as stream:
         stream.settimeout(5)
         stream.connect(str(sock))
         stream.sendall(
@@ -135,30 +122,8 @@ def wait_for_descriptors(pid, expected=None, timeout=5):
                     ready=lambda observed: observed is not None and (expected is None or observed == expected))
 
 
-def complete_response(stream):
-    response = bytearray()
-    while True:
-        try:
-            chunk = stream.recv(4096)
-        except OSError as error:
-            if not is_peer_disconnect(error):
-                raise
-            # Early route/kind rejection leaves hostile bytes unread. Reset
-            # can terminate a complete reply, but never certify a prefix.
-            break
-        if not chunk:
-            break
-        response.extend(chunk)
-        assert len(response) < 8192, response
-    head, body = response.split(b"\r\n\r\n", 1)
-    lengths = [line.split(b":", 1)[1].strip() for line in head.split(b"\r\n")[1:]
-               if line.lower().startswith(b"content-length:")]
-    assert len(lengths) == 1 and int(lengths[0]) == len(body), (head, body)
-    return bytes(response)
-
-
 def held_request(store, route, length=512, *, complete_headers=True):
-    stream = socket.socket(socket.AF_UNIX)
+    stream = os_semantics.unix_stream()
     stream.settimeout(2)
     stream.connect(str(socket_path(store)))
     stream.sendall(f"POST /v1/{route} HTTP/1.1\r\n".encode())
@@ -399,7 +364,7 @@ def main():
             fifo_lock.unlink()
         stale = socket_path(store)
         stale.parent.mkdir(mode=0o700, exist_ok=True)
-        with socket.socket(socket.AF_UNIX) as endpoint:
+        with os_semantics.unix_stream() as endpoint:
             endpoint.bind(str(stale))
         assert status(store) == "unavailable", "stale socket claimed readiness"
         stale.unlink()
@@ -409,7 +374,7 @@ def main():
             assert status(store) == "owned_unavailable"
             assert cli_status(home, "--store", store)["status"] == "owned_unavailable"
             for partial in (b"", b"HTTP/1.1 200 OK\r\n", b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\n\r\n{"):
-                with socket.socket(socket.AF_UNIX) as endpoint:
+                with os_semantics.unix_stream() as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(1)
                     release = threading.Event()
@@ -426,40 +391,37 @@ def main():
                     stalled.start()
                     try:
                         started = time.monotonic()
-                        assert status(store) == "owned_unavailable"
+                        assert status(store, timed=True) == "owned_unavailable"
                         assert time.monotonic() - started < 2.5, "stalled Host-info peer exceeded deadline"
                     finally:
                         release.set()
                         stalled.join(timeout=3)
                     assert not stalled.is_alive()
                 stale.unlink()
-            with socket.socket(socket.AF_UNIX) as endpoint:
+            with os_semantics.unix_stream() as endpoint:
                 endpoint.bind(str(stale))
                 endpoint.listen(1)
                 def incompatible_peer():
-                    for _ in range(3):
-                        connection, _ = endpoint.accept()
-                        with connection:
-                            read_request(connection)
-                            connection.sendall(
-                                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                                b"Content-Length: 2\r\nX-Rui-Wire-Version: " + str(int(host_process.WIRE_VERSION) + 1).encode() + b"\r\n\r\n{}"
-                            )
+                    connection, _ = endpoint.accept()
+                    with connection:
+                        read_request(connection)
+                        connection.sendall(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                            b"Content-Length: 2\r\nX-Rui-Wire-Version: " + str(int(host_process.WIRE_VERSION) + 1).encode() + b"\r\n\r\n{}"
+                        )
 
                 peer = threading.Thread(target=incompatible_peer)
                 peer.start()
+                # The CLI's status, exit and `host start` refusal for this peer
+                # are cli.zig's "host status and start classify a Host's reply
+                # however late it comes": the CLI runs on the real 1 s
+                # Host-info deadline, which a loaded runner can miss (#967).
                 assert status(store) == "incompatible"
-                assert cli_status(home, "--store", store)["status"] == "incompatible"
-                # A client of another wire version names the mismatch and the
-                # way out instead of failing on its first read.
-                started = subprocess.run([RUI, "host", "start", "--store", str(store)],
-                    env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
-                assert started.returncode != 0 and "does not speak this rui's protocol" in started.stderr, started
                 peer.join(timeout=3)
                 assert not peer.is_alive()
             stale.unlink()
             if os_semantics.SOCKET_MODE_ENFORCED:
-                with socket.socket(socket.AF_UNIX) as endpoint:
+                with os_semantics.unix_stream() as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(1)
                     stale.chmod(0)
@@ -509,23 +471,22 @@ def main():
                 *((f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n"
                    f"X-Rui-Wire-Version: {host_process.WIRE_VERSION}\r\n\r\n").encode() + body for body in ambiguous_bodies),
             ):
-                with socket.socket(socket.AF_UNIX) as endpoint:
+                with os_semantics.unix_stream() as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(2)
 
                     def malformed_peer():
-                        for _ in range(2):
-                            connection, _ = endpoint.accept()
-                            with connection:
-                                read_request(connection)
-                                connection.sendall(response)
+                        connection, _ = endpoint.accept()
+                        with connection:
+                            read_request(connection)
+                            connection.sendall(response)
 
                     peer = threading.Thread(target=malformed_peer, daemon=True)
                     peer.start()
+                    # The CLI prints this same classification; cli.zig checks
+                    # its incompatible status and exit against a newer wire.
                     observed = status(store)
                     assert observed == "incompatible", (response, observed)
-                    observed = cli_status(home, "--store", store)
-                    assert observed["status"] == "incompatible", (response, observed)
                     peer.join(timeout=3)
                     assert not peer.is_alive()
                 stale.unlink()
@@ -534,21 +495,21 @@ def main():
                 body = json.dumps({"version": host_process.WIRE_VERSION, "type": kind, "code": code}).encode()
                 response = (f"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n"
                             f"Content-Length: {len(body)}\r\nX-Rui-Wire-Version: {host_process.WIRE_VERSION}\r\n\r\n").encode() + body
-                with socket.socket(socket.AF_UNIX) as endpoint:
+                with os_semantics.unix_stream() as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(2)
 
                     def unavailable_peer():
-                        for _ in range(2):
-                            connection, _ = endpoint.accept()
-                            with connection:
-                                read_request(connection)
-                                connection.sendall(response)
+                        connection, _ = endpoint.accept()
+                        with connection:
+                            read_request(connection)
+                            connection.sendall(response)
 
                     peer = threading.Thread(target=unavailable_peer, daemon=True)
                     peer.start()
+                    # The untimed actor proves the reply was classified, not
+                    # timed out; cli.zig checks the CLI renders a fenced Host.
                     assert status(store) == "owned_unavailable"
-                    assert cli_status(home, "--store", store)["status"] == "owned_unavailable"
                     peer.join(timeout=3)
                     assert not peer.is_alive()
                 stale.unlink()

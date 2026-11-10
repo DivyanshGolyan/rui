@@ -21,12 +21,12 @@ LINUX_SHARDS = 10
 # Targets whose graph compiles the unit test roots (src/tests.zig). Their
 # producer compiles them in parallel, separately from the remaining gates.
 # build.zig refuses a split producer whose selection does not reach it.
-UNIT_TARGETS = frozenset(("test", "check", "check-full"))
+UNIT_TARGETS = frozenset(("test", "test-native", "test-store", "check", "check-full"))
 
 
 def split_build(targets):
     # A selection of the unit tests alone leaves the rest producer nothing to compile.
-    return bool(UNIT_TARGETS & set(targets)) and set(targets) != {"test"}
+    return bool(UNIT_TARGETS & set(targets)) and set(targets) not in ({"test"}, {"test-native"}, {"test-store"})
 
 
 def shards(targets, platform="linux", limit=LINUX_SHARDS):

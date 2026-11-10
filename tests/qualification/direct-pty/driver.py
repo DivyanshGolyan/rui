@@ -20,7 +20,7 @@ from contextlib import contextmanager
 INTEGRATION = pathlib.Path(__file__).resolve().parents[2] / "integration"
 sys.path.insert(0, str(INTEGRATION))
 from host_process import dispose_all, stop_process
-from terminal_process import open_pty
+from terminal_process import answers_to, open_pty, spawn
 from terminal_screen import ScreenCapture
 
 LIMIT = 1024 * 1024
@@ -29,9 +29,11 @@ LIMIT = 1024 * 1024
 def assert_file_flags(actual, expected):
     # Same policy as terminal_restoration_integration.assert_file_flags, which
     # cannot be imported here without its CLI-binary argv/setup side effects.
-    # XNU exposes kernel-only FWASWRITTEN after a write; F_SETFL cannot clear
-    # it. Access mode, NONBLOCK and every other bit must still match exactly.
-    history = 0x00010000 if sys.platform == "darwin" else 0
+    # XNU exposes kernel-only FWASWRITTEN after a write and FMARK after a
+    # unix-socket collection while the file was in flight (os_semantics.py
+    # explains both); F_SETFL can't change either. Access mode, NONBLOCK and
+    # every other bit must still match exactly.
+    history = 0x00010000 | 0x00001000 if sys.platform == "darwin" else 0
     assert actual & ~history == expected & ~history, (
         f"file flags actual={actual:#x} expected={expected:#x} excluded={history:#x}")
 
@@ -79,13 +81,13 @@ class DirectPty:
                 self.original[6][termios.VERASE] = b"\x08"
                 termios.tcsetattr(self.slave, termios.TCSANOW, self.original)
                 self.flags = fcntl.fcntl(self.slave, fcntl.F_GETFL)
-                self.screen = ScreenCapture(columns, rows)
+                self.screen = ScreenCapture(columns, rows, reply=answers_to(self.master))
                 self.input = self._open("input.bin", "wb")
                 self.raw = self._open("output.bin", "wb")
                 self.errors = self._open("stderr.bin", "wb")
                 self.events = self._open("events.jsonl", "w")
-                self.process = subprocess.Popen(args, env=env, cwd=cwd, stdin=self.slave,
-                                                stdout=self.slave, stderr=subprocess.PIPE)
+                self.process = spawn(args, env=env, cwd=cwd, stdin=self.slave,
+                                     stdout=self.slave, stderr=subprocess.PIPE)
                 os.set_blocking(self.master, False)
                 self.event("launch", pid=self.process.pid, columns=columns, rows=rows)
         except BaseException:
@@ -106,7 +108,7 @@ class DirectPty:
         ready = select.select([fd for fd in descriptors if fd not in self.eof], [], [], timeout)[0]
         for fd in ready:
             try:
-                chunk = os.read(fd, 65536)
+                chunk = os.read(fd, 65536) if fd == self.master else os.read(fd, 65536)
             except OSError as error:
                 if fd != self.master or error.errno != errno.EIO:
                     raise

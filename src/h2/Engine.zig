@@ -103,7 +103,7 @@ pub const ProxyRoute = struct {
     /// `Proxy-Authorization`'s value, owned.
     credentials: ?[]u8,
 
-    fn init(allocator: std.mem.Allocator, settings: h2.Proxy) h2.InitError!ProxyRoute {
+    pub fn init(allocator: std.mem.Allocator, settings: h2.Proxy) h2.InitError!ProxyRoute {
         const text = try allocator.alloc(u8, settings.url.len + settings.no_proxy.len);
         errdefer {
             std.crypto.secureZero(u8, text);
@@ -123,7 +123,7 @@ pub const ProxyRoute = struct {
         };
     }
 
-    fn deinit(self: *ProxyRoute, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *ProxyRoute, allocator: std.mem.Allocator) void {
         if (self.credentials) |credentials| {
             std.crypto.secureZero(u8, credentials);
             allocator.free(credentials);

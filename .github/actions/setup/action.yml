@@ -14,8 +14,11 @@ inputs:
     description: A verified same-run artifact supplies emitted executables and pinned package sources
     default: 'false'
   publish-caches:
+    # Only main publishes. PR jobs compile about as fast from main's snapshots
+    # as from their own, whose 0.1-0.7 GB saves per job overflowed the shared
+    # quota and evicted main's.
     description: Save caches after the job; read-only cache workflows pass 'false' to restore only
-    default: 'true'
+    default: ${{ github.ref == 'refs/heads/main' }}
 runs:
   using: composite
   steps:
@@ -95,7 +98,7 @@ runs:
       if: ${{ inputs.cold != 'true' && inputs.compiled != 'true' }}
       shell: bash
       env:
-        DEPS: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-
+        DEPS: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'screen-emulator/build.zig.zon', 'src/build_*', 'src/*.patch') }}-
         SOURCES: ${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-
         CHECK_PART: ${{ inputs.check-part }}
       run: |
@@ -109,7 +112,7 @@ runs:
       if: ${{ inputs.cold != 'true' && inputs.compiled == 'true' }}
       shell: bash
       env:
-        CPU: rui-runner-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ steps.tools.outputs.cpu }}-
+        CPU: rui-runner-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ steps.tools.outputs.identity }}-${{ steps.tools.outputs.cpu }}-
         BUILD: ${{ hashFiles('build.zig', 'build.zig.zon') }}
       run: |
         {
@@ -122,12 +125,12 @@ runs:
       if: ${{ inputs.publish-caches == 'true' }}
       with:
         path: ${{ runner.temp }}/rui-zig
-        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.0
+        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.1
     - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: ${{ inputs.publish-caches != 'true' }}
       with:
         path: ${{ runner.temp }}/rui-zig
-        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.0
+        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.1
     # Build pair: build.zig marks every Zig test run side-effectful, so no
     # acceptance manifests are written/read. Output-producing build steps stay cached.
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -138,6 +141,7 @@ runs:
           ~/.cache/zig
           .zig-cache
           zig-pkg
+          screen-emulator/zig-pkg
         key: ${{ steps.build-keys.outputs.key }}
         restore-keys: |
           ${{ steps.build-keys.outputs.prefix-sources }}
@@ -150,10 +154,29 @@ runs:
           ~/.cache/zig
           .zig-cache
           zig-pkg
+          screen-emulator/zig-pkg
         key: ${{ steps.build-keys.outputs.key }}
         restore-keys: |
           ${{ steps.build-keys.outputs.prefix-sources }}
           ${{ steps.build-keys.outputs.prefix-deps }}
+    # Package pair: pinned package sources depend only on build.zig.zon, so a
+    # tool, image or build-input change that misses every build snapshot reads
+    # them here instead of from codeberg.org and GitHub, whose 504s and stalls
+    # failed producers. A repinned package restores the newest earlier set, so
+    # only the repinned one comes from its host; the fetch below downloads only
+    # packages still missing.
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.publish-caches == 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
+      with:
+        path: zig-pkg
+        key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
+        restore-keys: rui-packages-v1-
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.publish-caches != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
+      with:
+        path: zig-pkg
+        key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
+        restore-keys: rui-packages-v1-
     # Runner pair: consumers compile only the build runner and configuration; executables
     # come from the verified artifact and test runs are never cached.
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -180,28 +203,39 @@ runs:
         set -euo pipefail
         case "$(uname -s)/$(uname -m)" in
           Linux/x86_64)
-            archive=zig-x86_64-linux-0.17.0
-            checksum=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+            archive=zig-x86_64-linux-0.17.1
+            checksum=3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a
             ;;
           Linux/aarch64)
-            archive=zig-aarch64-linux-0.17.0
-            checksum=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
+            archive=zig-aarch64-linux-0.17.1
+            checksum=a1546d5646eb184437918d6635ca6b762a0e889eac09cef720ee7a1ed3fe7795
             ;;
           Darwin/arm64)
-            archive=zig-aarch64-macos-0.17.0
-            checksum=b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a
+            archive=zig-aarch64-macos-0.17.1
+            checksum=75f1bc7a1e9852f17ec9a0c1895f767c4ec56d46bc8a834920eece1d0359dd8d
             ;;
           *) echo "Unsupported actual native architecture" >&2; exit 1 ;;
         esac
         if [ ! -x "$RUNNER_TEMP/rui-zig/zig" ]; then
-          curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
-            --retry 2 --retry-all-errors --retry-max-time 200 \
-            "https://pkg.hexops.org/zig/$archive.tar.xz" -o "$RUNNER_TEMP/zig.tar.xz"
-          echo "$checksum  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -
+          # Mirrors serve identical archives and the pinned checksum is the
+          # authority, so a stalled source falls through to the next one and
+          # the slow origin is tried last, as in .agents/setup.
+          verified=false
+          for source in https://pkg.hexops.org/zig https://zigmirror.hryx.net/zig https://ziglang.org/download/0.17.1; do
+            if curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
+                --retry 1 --retry-all-errors --retry-max-time 100 \
+                "$source/$archive.tar.xz" -o "$RUNNER_TEMP/zig.tar.xz" &&
+              echo "$checksum  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -; then
+              verified=true
+              break
+            fi
+            echo "::warning::Zig download from $source failed; trying the next source."
+          done
+          "$verified" || { echo "No source supplied a verified $archive archive" >&2; exit 1; }
           mkdir -p "$RUNNER_TEMP/rui-zig"
           tar -xJf "$RUNNER_TEMP/zig.tar.xz" --strip-components=1 -C "$RUNNER_TEMP/rui-zig"
         fi
-        test "$("$RUNNER_TEMP/rui-zig/zig" version)" = 0.17.0
+        test "$("$RUNNER_TEMP/rui-zig/zig" version)" = 0.17.1
         echo "$RUNNER_TEMP/rui-zig" >> "$GITHUB_PATH"
         echo "ZIG_GLOBAL_CACHE_DIR=$HOME/.cache/zig" >> "$GITHUB_ENV"
         mkdir -p .zig-cache/tmp "$HOME/.cache/zig/tmp"
@@ -234,7 +268,20 @@ runs:
     - name: Fetch the existing pinned dependency graph
       if: ${{ inputs.compiled != 'true' && (inputs.cold == 'true' || (steps.build-cache.outputs.cache-hit || steps.build-cache-restore.outputs.cache-hit) != 'true') }}
       shell: bash
+      env:
+        # GitHub-hosted archives come through the API, which anonymous load shedding spares.
+        GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
         bash src/fetch_dependencies.sh
+    # Only steps that run the PTY screen observer build its libghostty-vt,
+    # from the test-only package in screen-emulator; installs never fetch it.
+    # It keeps its own zig-pkg: Zig refuses ghostty's path dependencies from
+    # a package directory outside it.
+    - name: Fetch the screen observer's pinned package graph
+      if: ${{ steps.requirements.outputs.screen == 'true' && inputs.compiled != 'true' && (inputs.cold == 'true' || (steps.build-cache.outputs.cache-hit || steps.build-cache-restore.outputs.cache-hit) != 'true') }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        env -u ZIG_LOCAL_PKG_DIR zig build --build-file screen-emulator/build.zig --fetch

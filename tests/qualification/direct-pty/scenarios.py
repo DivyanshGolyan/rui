@@ -11,8 +11,8 @@ import time
 from driver import DirectPty, defer_signals
 from host_process import canonical_fixture_root, dispose_all
 import model_fixture as model
-import codex_integration as codex
-from canonical_failure_integration import ReplyProxy
+import codex_fixture as codex
+from canonical_fixture import ReplyProxy
 
 
 def assert_submitted(requests, expected):
@@ -27,7 +27,7 @@ class Fixture:
         self.root = None
         self.env = dict(os.environ)
         model.RUI = pathlib.Path(binary)
-        self.host = self.endpoint = self.thread = self.proxy = self.tty = self.tmux = None
+        self.host = self.endpoint = self.thread = self.proxy = self.tty = None
         self.gates = []
 
     def start(self):
@@ -90,7 +90,6 @@ class Fixture:
         # ReplyProxy's socket path. No caller can observe its old rename gap.
         dispose_all(*(gate.set for gate in self.gates),
             lambda: self.tty.close() if self.tty is not None else None,
-            lambda: self.tmux.close() if self.tmux is not None else None,
             self.save,
             lambda: self.proxy.close() if self.proxy is not None else None,
             lambda: model.stop_host(self.host) if self.host is not None else None,
@@ -102,7 +101,6 @@ class Fixture:
     def retired(self):
         assert self.host is None or self.host.poll() is not None, "owned Host survived disposal"
         assert self.tty is None or self.tty.process is None or self.tty.process.poll() is not None, "owned caller survived disposal"
-        assert self.tmux is None or self.tmux.clean, "tmux disposal unconfirmed; retained private root"
         assert self.thread is None or not self.thread.is_alive(), "provider thread survived disposal"
         if self.root is not None:
             shutil.rmtree(self.root)

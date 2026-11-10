@@ -3,6 +3,7 @@ package measurement
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -710,5 +711,68 @@ func TestLoopbackProtocolsServeHTTP1AndH2C(t *testing.T) {
 		if err != nil || string(body) != test.want {
 			t.Fatalf("served %q, %v; want %q", body, err, test.want)
 		}
+	}
+}
+
+var ruiTestBinary = flag.String("rui", "", "current Rui for the configure contract")
+
+// The runners' configure calls against the current CLI and Host: each option
+// set a runner passes, an update of an existing Session, and the wire body.
+func TestConfigureContract(t *testing.T) {
+	if *ruiTestBinary == "" {
+		t.Skip("requires the current Rui (zig build measurement-check)")
+	}
+	binary := *ruiTestBinary
+	if !filepath.IsAbs(binary) {
+		// go test runs from measurement/; Zig renders the path from tests/qualification.
+		binary = filepath.Join("..", binary)
+	}
+	directory, err := os.MkdirTemp("", "rui-configure-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(directory) })
+	store := filepath.Join(directory, "store")
+	deadline := NewDeadline(time.Minute)
+	host, err := StartHost(binary, store, "", 1, filepath.Join(directory, "host-stderr.log"), deadline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := host.Stop(TeardownAllowance); err != nil {
+			t.Error(err)
+		}
+	}()
+	client := Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
+	var created []string
+	for index, extra := range [][]string{
+		nil,
+		{"--tools", "none"},
+		{"--tools", "bash", "--permission-mode", "ask"},
+		{"--tools", "bash", "--permission-mode", "bypass"},
+	} {
+		session, err := client.Configure(fmt.Sprintf("cli-%d", index), "", extra...)
+		if err != nil {
+			t.Fatalf("session configure %v: %v", extra, err)
+		}
+		created = append(created, session)
+	}
+	if _, err := client.Configure("cli-update", created[1], "--tools", "none"); err != nil {
+		t.Fatalf("session configure --session: %v", err)
+	}
+	record, err := client.ConfigureRecord("cli-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record["key"] = "wire"
+	var answer map[string]any
+	if err := ExchangeUnix(deadline, host.Ready["socket"], "/v1/configure", record, &answer); err != nil {
+		t.Fatal(err)
+	}
+	if status, _ := StringField(answer, "answer", "status"); status != "accepted" {
+		t.Fatalf("replayed configure record was not accepted: %v", answer)
+	}
+	if session, err := ConfigurationSession(answer); err != nil || session == created[1] {
+		t.Fatalf("replayed configure record allocated %q, %v; want a new Session", session, err)
 	}
 }

@@ -22,9 +22,6 @@ const Self = @This();
 /// reads.
 pub const ViewKind = enum { live, transcript, inspection, action, message };
 
-/// What a reason's line under the input says, as its hint or a notice.
-pub const deny_words = "enter denies the call and sends this";
-
 /// A delivered frame's choice, offered to the next input.
 pub const Offer = struct { frame: u64, scope: u64, decision: ConsentPolicy.Decision };
 
@@ -815,7 +812,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     var says_deny = false;
     if (layout.notice.length != 0) {
         _ = layout.notice.draw(window.child(.{ .y_off = line_row, .height = layout.line_height }), .{}, true, self.colour, self.style(if (std.mem.startsWith(u8, footer.notice, "!")) .failure else .normal));
-        says_deny = std.mem.indexOf(u8, footer.notice, deny_words) != null;
+        says_deny = std.mem.indexOf(u8, footer.notice, ConsentPolicy.deny_words) != null;
     } else if (layout.line_height != 0) {
         // While an Action waits, the line under the input says how to decide it.
         const text = if (self.selected.approval != .absent)
@@ -920,7 +917,7 @@ fn approvalHint(approval: ConsentPolicy.Approval, action_visible: bool, width: u
         .choice => &.{ "←→ choose · enter confirms", "←→ · enter" },
         .reading => &.{ "PgDn reads the rest · then choose", "PgDn · then choose" },
         .held => &.{ "the choice returns when it ends", "then the choice" },
-        .reason => &.{ deny_words ++ " · esc back to the choice", "enter denies and sends this · esc choice", "enter denies · esc choice" },
+        .reason => &.{ ConsentPolicy.deny_words ++ " · esc back to the choice", "enter denies and sends this · esc choice", "enter denies · esc choice" },
         .paused => if (action_visible) &.{ "Approval paused · Esc returns to the choice", "Esc · choice" } else &.{ "Approval paused · Esc returns to Action", "Esc · Action" },
         .preview => &.{ "Approval disabled · /help for exact shell commands", "Approval disabled" },
     };
@@ -1080,6 +1077,18 @@ test "wide resize preserves a growing combining draft" {
     }
 }
 
+/// Appends text that fits the view unescaped and whose zero-width spaces,
+/// escaped, take 160 bytes more than the view holds. Shared by tests whose
+/// point is that escaping can evict older live text.
+pub fn appendEscapeGrowth(screen: *Self) !void {
+    const spaces = 64; // 3 bytes each, 8 escaped: 320 more.
+    const filler = try std.testing.allocator.alloc(u8, Viewport.capacity - "GROWS-FIRST\n".len - "\nGROWS-END\n".len - 3 * spaces - 160);
+    defer std.testing.allocator.free(filler);
+    for (filler, 0..) |*byte, index| byte.* = if (index % 64 == 63) '\n' else 'a';
+    try screen.append(filler);
+    for (0..spaces) |_| try screen.append("\u{200b}");
+}
+
 test "a transcript's front is taken after escaping, which can grow live text past the view" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
@@ -1087,9 +1096,9 @@ test "a transcript's front is taken after escaping, which can grow live text pas
     defer std.testing.allocator.destroy(screen);
     try screen.init(std.testing.io, &environ, false);
     defer screen.deinit();
-    // 135 KiB of zero-width spaces fit unescaped; escaped they exceed the view.
+    // Fits unescaped; escaping its zero-width spaces grows it past the view.
     try screen.append("GROWS-FIRST\n");
-    for (0..45000) |_| try screen.append("\u{200b}");
+    try appendEscapeGrowth(screen);
     try screen.append("\nGROWS-END\n");
     try std.testing.expectEqual(@as(u64, 0), screen.live.origin);
     const front = try screen.liveStart();
@@ -1826,8 +1835,11 @@ test "Ctrl-O names the lowest collapsed block drawn, counted from the end" {
     // off the end and says so, so its Message leaves the map with it.
     for (0..2) |label| {
         try screen.latest();
-        var line: [64]u8 = undefined;
-        for (0..Viewport.capacity / 32) |row| try screen.append(try std.fmt.bufPrint(&line, "filler row {d:0>20}\n", .{row}));
+        var filler: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer filler.deinit();
+        for (0..Viewport.capacity / 32) |row| try filler.writer.print("filler row {d:0>20}\n", .{row});
+        // One append: a full view moves all its bytes per append.
+        try screen.append(filler.written());
         try screen.append("\n› " ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n");
         try screen.beginTranscript(try screen.liveStart());
         try std.testing.expectEqual(@as(usize, 1), screen.transcriptCollapsed());
