@@ -39,7 +39,9 @@ test "the ? shortcuts float the Keys table in a few rows that fit the screen" {
     try std.testing.expectEqual(vxfw.Size{ .width = 80, .height = 3 }, drawn.size);
     try std.testing.expectEqualStrings(" ", drawn.readCell(0, 0).char.grapheme);
     try std.testing.expectEqualStrings("e", drawn.readCell(1, 0).char.grapheme);
-    try std.testing.expectEqualStrings("s", drawn.readCell(1, 2).char.grapheme);
+    // The last binding, `? shortcuts`, starts the third row.
+    try std.testing.expectEqualStrings("?", drawn.readCell(1, 2).char.grapheme);
+    try std.testing.expectEqualStrings("s", drawn.readCell(3, 2).char.grapheme);
     try std.testing.expectEqual(vaxis.Color{ .index = 8 }, drawn.readCell(79, 1).style.fg);
     const narrow = try shortcuts.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 4 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 4), narrow.size.height);

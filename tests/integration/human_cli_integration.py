@@ -2500,11 +2500,14 @@ def main(selected="all"):
             assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
             assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" in binding and permission_row(binding, "ask"), binding
             help_text = terminal_step(master, "/help", "/result KEY", composer=True)
-            for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "Ctrl-R"):
+            # The page is taller than the screen: page down to its end and read every frame on the way.
+            os.write(master, b"\x1b[6~" * 6)
+            help_text += read_terminal(master, "in your shell.", composer=True)
+            for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
                 assert command in help_text, help_text
             assert "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
-            # This Session asks: help must not describe the bypass default as its mode.
-            assert "without approval" not in help_text and "\nThat line ends with asks before Bash/MCP when Bash or MCP asks first\n" in help_text, help_text
+            # This Session asks: help must not describe the bypass default as its mode (the facts row shows the mode).
+            assert "without approval" not in help_text, help_text
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
             assert "result: completed\nfirst answer" in result, result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
