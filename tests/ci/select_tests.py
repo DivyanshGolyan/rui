@@ -89,7 +89,8 @@ FIXTURES = {
     "preference-policy-integration": ((I + "preference_policy_integration.py",), (I + "preference_policy.zig",), ()),
     "mysql-wire-integration": ((I + "mysql_wire_integration.py",), (), ()),
     "skills-integration": ((I + "skills_integration.py",), (), ("src/session_skills.zig",)),
-    "launch-frame-integration": ((I + "launch_frame_integration.py", I + "launch_frame_mysql_integration.py"),
+    "launch-frame-integration": ((I + "launch_frame_integration.py", I + "launch_frame_mysql_integration.py",
+                                  I + "store_rounds_cases.py"),
                                  (I + "mysql_launch_admin.zig",),
                                  ("src/launch_frame.zig", "src/mysql_url.zig", "src/mcp/Running.zig", "src/mcp/servers.zig")),
     "ts-client": ((I + "host_process.py",), (), ("src/launch_frame.zig",)),
@@ -406,6 +407,12 @@ LIVE_RULES = (
      LIVE_MYSQL_DIALECT_TARGETS),
 )
 RULES += tuple(rule[:4] for rule in LIVE_RULES)
+# The Store's MySQL round-trip budget runs against the live MySQL that
+# launch-frame-integration starts (LIVE_MYSQL_TARGETS); development skips it.
+RULES += ((("src/store.zig", "src/store/*", "!src/store/wire/*", "src/server_execution.zig", "src/execution_turn.zig",
+            "src/model_adapter.zig", "tests/integration/store_rounds_cases.py"),
+           ("launch-frame-integration",), (),
+           "The Store's MySQL round trips per model operation and while idle stay within their budget"),)
 
 
 # Inputs to the Host's ReleaseSafe frames or to their gate: Zig source the
