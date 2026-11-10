@@ -117,6 +117,10 @@ class AdmissionTest(unittest.TestCase):
 
         release = RELEASE.read_text()
         self.assertGreaterEqual(budget(job(text, 'macos_build')), budget(job(release, 'build')))
+        # On-demand Mac qualification compiles the same native gates cold.
+        qualify = job((ROOT / '.github/workflows/qualify-macos.yml').read_text(), 'compile')
+        self.assertIn("    timeout-minutes: ${{ needs.plan.outputs.platform == 'linux' && 15 || %d }}"
+                      % budget(job(text, 'macos_build')), qualify)
         # Only a promotion's bisect extends a job; the suites keep their deadline.
         for name, step in (('linux_suites', 'Run selected targets'), ('macos_suites', 'Run required native targets')):
             self.assertIn('    timeout-minutes: ${{ inputs.promotion && 300 || 35 }}', job(text, name))
