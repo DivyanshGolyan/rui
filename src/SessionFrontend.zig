@@ -10,6 +10,8 @@ const Root = @import("Root.zig");
 const ActionConsent = @import("ActionConsent.zig");
 const PermissionCard = @import("PermissionCard.zig");
 const Palette = @import("Palette.zig");
+const SessionChrome = @import("SessionChrome.zig");
+const session_chrome = @import("session_chrome.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const activity_reply = @import("activity_reply.zig");
@@ -223,6 +225,15 @@ leaving: ?Outcome = null,
 /// Shown under the input until the next key, in place of the Session line.
 notice: ?[]const u8 = null,
 notice_buffer: [notice_capacity]u8 = undefined,
+/// On the App: what `notice` said, until the next key or its time runs
+/// out. Each App event moves `notice` here.
+shown_notice: session_chrome.Notice(notice_capacity) = .{},
+/// The `?` shortcuts are open.
+shortcuts_open: bool = false,
+/// Where live output stood when the view was scrolled back, so the marker
+/// counts the entries that arrived since.
+browsed_from: ?u64 = null,
+chrome: SessionChrome = undefined,
 /// The Session line's facts from the latest read that took them, the
 /// unlabelled Session's name, and the line as last written.
 line: reads.Line = .{},
@@ -368,7 +379,52 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
     self.screen.setWidth(caps.width);
     self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour };
     self.app_card = .{ .consent = &self.app_consent, .pasting = &hooks.root.pasting, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
+    self.chrome = .init(.{ .userdata = self, .key = chromeKey, .stop = chromeClick(.stop), .back = chromeClick(.close), .latest = chromeClick(.latest), .status_page = chromeStatus });
     return self.widget();
+}
+
+/// A click on the chrome runs what its key runs.
+fn chromeClick(comptime action: ConversationAction) *const fn (*anyopaque, *vxfw.EventContext) anyerror!void {
+    return struct {
+        fn click(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+            const self: *Self = @ptrCast(@alignCast(raw));
+            if (self.leaving != null) return;
+            self.shown_notice.dismiss();
+            try self.perform(action);
+            try self.afterInput(ctx);
+        }
+    }.click;
+}
+
+/// The key that ends what needs the person: `/discard` for a rejected
+/// original, else Ctrl-R's retry.
+fn chromeKey(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.leaving != null) return;
+    self.shown_notice.dismiss();
+    const rejected = if (self.heldOriginal()) |held| held.state == .rejected else false;
+    if (rejected) try self.slashCommand("/discard") else try self.perform(.recover);
+    self.dirty = true;
+    try self.afterInput(ctx);
+}
+
+/// `+N more running · /status`.
+fn chromeStatus(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.leaving != null) return;
+    self.shown_notice.dismiss();
+    try self.slashCommand("/status");
+    self.dirty = true;
+    try self.afterInput(ctx);
+}
+
+/// The Session's name as the terminal title leads with it.
+pub fn titleName(self: *const Self) []const u8 {
+    return if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session;
+}
+
+fn nowMs(self: *const Self) u64 {
+    return @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
 }
 
 pub fn widget(self: *Self) vxfw.Widget {
@@ -459,11 +515,18 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
             };
             try self.app_card.widget().handleEvent(ctx, .tick);
             if (self.expansion.queued == .after_frame) if (try self.expand()) |peer| try self.follow(ctx, &peer);
+            if (self.shown_notice.expire(self.nowMs())) self.dirty = true;
             ctx.redraw = ctx.redraw or self.dirty;
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
             const pasting = self.app_hooks.root.pasting;
-            if (self.app_consent.request != null) {
+            self.shown_notice.dismiss();
+            const question = event == .key_press and !pasting and event.key_press.codepoint == '?' and !event.key_press.mods.ctrl and !event.key_press.mods.alt;
+            const shortcut = session_chrome.shortcut(self.shortcuts_open, self.input.composition().bytes.len == 0, question);
+            self.shortcuts_open = shortcut == .open;
+            if (shortcut == .open) {
+                // The key types nothing.
+            } else if (self.app_consent.request != null) {
                 if (event == .key_press and !pasting) if (Editor.selectKey(conversation_keys, event.key_press) == .action) {
                     try self.perform(Editor.selectKey(conversation_keys, event.key_press).action);
                 };
@@ -489,7 +552,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         },
         .mouse => |mouse| switch (mouse.button) {
             .wheel_up, .wheel_down => {
-                try self.scroll(mouse.button == .wheel_down, false);
+                try self.scroll(mouse.button == .wheel_down, 1);
                 ctx.consumeEvent();
                 ctx.redraw = true;
             },
@@ -497,6 +560,18 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         },
         else => {},
     }
+    try self.afterInput(ctx);
+}
+
+/// After any App input: moves what was said into the notice, prepares the
+/// documents and, once the person asked to leave, leaves.
+fn afterInput(self: *Self, ctx: *vxfw.EventContext) !void {
+    if (self.notice) |text| {
+        self.shown_notice.show(text, self.nowMs());
+        self.notice = null;
+        self.dirty = true;
+    }
+    ctx.redraw = ctx.redraw or self.dirty;
     try self.screen.live.prepare();
     try self.screen.browsing.prepare();
     try self.screen.staging.prepare();
@@ -542,23 +617,47 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     // Live output follows the latest rows; only a drag held at its top
     // edge moves it, until the drag ends.
     if (screen.view == .live and !self.app_content.dragging()) screen.live.top = null;
-    const facts = try ctx.arena.create(vxfw.Text);
-    const status = try ctx.arena.create(vxfw.Text);
-    const facts_buffer = try ctx.arena.create([session_line.capacity]u8);
-    facts.* = .{ .text = if (self.line.facts(&self.hint, self.session)) |value| session_line.write(facts_buffer, value, ctx.max.width.?, self.app_caps.width) else self.session, .style = quiet };
-    status.* = .{ .text = self.notice orelse session_notice.status(self.reading.opening, self.app_consent.request != null, self.heldOriginal()) orelse "", .style = quiet };
-    self.app_input.facts = facts.widget();
-    self.app_input.status = status.widget();
+    const attention = style.of(self.app_caps, .{ .colour = .attention });
     screen.commands = self.nextCommands(screen.commands);
-    self.app_screen.overlay = null;
+    var palette: ?vxfw.Widget = null;
     if (self.app_consent.request == null) if (screen.commands) |*shown| {
         self.app_palette = .{ .shown = shown, .method = self.app_caps.width, .style = normal, .quiet = quiet };
-        self.app_screen.overlay = self.app_palette.widget();
+        palette = self.app_palette.widget();
     };
-    defer {
-        self.app_input.facts = empty_app_text.widget();
-        self.app_input.status = empty_app_text.widget();
-    }
+    const now_ms = self.nowMs();
+    const work = self.live.work.state.asOf(now_ms);
+    const said = self.lender.line(self.lender.context, work);
+    const browsing = screen.view != .live;
+    if (!browsing) self.browsed_from = null else if (self.browsed_from == null) self.browsed_from = self.live.cursor.position;
+    const chrome = &self.chrome;
+    chrome.activity.live = self.live.view;
+    chrome.activity.work = if (self.app_consent.request != null) null else work_line.of(try ctx.arena.create([work_line.max_words_bytes]u8), &self.live.work.state, self.live.work.operation, now_ms);
+    chrome.activity.queued = if (self.queuedRow()) |row| row.waiting else null;
+    chrome.activity.method = self.app_caps.width;
+    chrome.activity.styles = .{ .normal = normal, .quiet = quiet, .attention = attention, .failure = attention };
+    chrome.status.method = self.app_caps.width;
+    chrome.status.quiet = quiet;
+    chrome.status.attention = attention;
+    chrome.facts.method = self.app_caps.width;
+    chrome.facts.style = quiet;
+    chrome.marker.method = self.app_caps.width;
+    chrome.marker.style = .{ .reverse = true };
+    chrome.shortcuts.method = self.app_caps.width;
+    chrome.shortcuts.style = normal;
+    const needs = session_notice.status(self.reading.opening, self.app_consent.request != null, self.heldOriginal()) orelse "";
+    const facts_buffer = try ctx.arena.create([session_line.capacity]u8);
+    chrome.place(&self.app_screen, .{
+        .browsing = browsing,
+        .new_entries = if (self.browsed_from) |from| self.live.cursor.position -| from else 0,
+        .needs = if (needs.len == 0) null else needs,
+        .needs_key = session_chrome.needsKey(needs),
+        .stoppable = said.stoppable,
+        .facts = if (self.line.facts(&self.hint, self.session)) |value| session_line.write(facts_buffer, value, ctx.max.width.? -| 2, self.app_caps.width) else self.session,
+        .notice = said.text orelse self.shown_notice.current(now_ms),
+        .shortcuts = self.shortcuts_open,
+        .overlay = palette,
+        .width = ctx.max.width.?,
+    });
     self.app_preview.size = .{};
     var surface = try self.app_screen.widget().draw(ctx);
     const visible = if (self.app_consent.request != null) &self.app_preview else &self.app_content;
@@ -889,7 +988,7 @@ test "App Session Ctrl-O follows the lowest drawn peer name, or opens the lower 
     try std.testing.expectEqual(@as(?u64, 9), self.app_consent.drawn);
     try widget_.handleEvent(&ctx, ctrl_o);
     try widget_.handleEvent(&ctx, .tick);
-    try std.testing.expectEqualStrings("! Ctrl-O opens a message or Session name from the conversation.", self.notice.?);
+    try std.testing.expectEqualStrings("! Ctrl-O opens a message or Session name from the conversation.", self.shown_notice.current(self.nowMs()).?);
     try std.testing.expectEqual(@as(?[session_id.bytes]u8, null), Hooks.opened);
     try std.testing.expectEqual(@as(?Outcome, null), self.leaving);
     self.live.work.first_action = null;
@@ -900,7 +999,7 @@ test "App Session Ctrl-O follows the lowest drawn peer name, or opens the lower 
     _ = try widget_.draw(draw_context);
     try widget_.handleEvent(&ctx, ctrl_o);
     try widget_.handleEvent(&ctx, .tick);
-    try std.testing.expectEqualStrings("Opening message…", self.notice.?);
+    try std.testing.expectEqualStrings("Opening message…", self.shown_notice.current(self.nowMs()).?);
     try std.testing.expectEqual(@as(u64, 2), self.expansion.queued.ready.target.ordinal);
     try std.testing.expectEqual(@as(?[session_id.bytes]u8, null), Hooks.opened);
     // With the peer row lowest again, Ctrl-O follows the peer.
@@ -1924,16 +2023,17 @@ fn perform(self: *Self, action: ConversationAction) !void {
         .previous, .next => if (if (screen.inputRow() == .draft) self.shownCommands() else null) |shown| {
             shown.move(action == .next);
             self.dirty = true;
-        } else if (screen.inputRow() != .draft or !try self.moveSelection(action == .next)) try self.scroll(action == .next, false),
+        } else if (screen.inputRow() != .draft or !try self.moveSelection(action == .next)) try self.scroll(action == .next, 1),
+        // Shift-Up/Down move half a screen; PgUp/PgDn are their aliases.
         .scroll_up, .scroll_down => if (if (screen.inputRow() == .draft) self.shownCommands() else null) |shown| {
             shown.move(action == .scroll_down);
             self.dirty = true;
-        } else try self.scroll(action == .scroll_down, false),
-        .page_up, .page_down => try self.scroll(action == .page_down or action == .scroll_down, action == .page_up or action == .page_down),
+        } else try self.scroll(action == .scroll_down, session_chrome.halfScreen(screen.height)),
+        .page_up, .page_down => try self.scroll(action == .page_down, session_chrome.halfScreen(screen.height)),
         .older, .newer => if (self.input.press(action == .older) == .typed) {
             self.notice = "Ctrl-P recalls sent messages once the draft is empty.";
         },
-        .latest, .back, .close => {
+        .latest, .close => {
             // Esc closes only a list the person saw.
             if (action == .close and screen.inputRow() == .draft) if (self.shownCommands()) |shown| {
                 shown.close();
@@ -2000,14 +2100,14 @@ fn shownWork(self: *const Self) protocol.session_work.Kind {
     return self.live.work.state.asOf(now_ms);
 }
 
-fn scroll(self: *Self, down: bool, page: bool) !void {
+fn scroll(self: *Self, down: bool, rows: usize) !void {
     const screen = self.screen;
     if (screen.view == .live) {
         if (down) return; // Live output already shows the latest rows.
         try self.beginTranscript();
     }
     self.transcript.older_failed = false; // A new scroll may retry a failed load.
-    if (screen.browse(down, page)) try screen.latest();
+    for (0..rows) |_| if (screen.browse(down, false)) return screen.latest();
 }
 
 /// Lands a read recall step on the draft it began from.
@@ -3980,7 +4080,7 @@ test "/recover typed beside a waiting Action retries nothing, as Ctrl-R does" {
     self.submission.intent = null;
 }
 
-test "End on an empty draft goes to the latest view and never leaves the conversation" {
+test "End on an empty draft does nothing and never leaves the conversation" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
@@ -4990,4 +5090,161 @@ test "upgrade reobservation retains a refused archive command from the completio
         try std.testing.expectEqual(@as(usize, 0), overview.host_inputs);
         try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
     }
+}
+
+/// An App Session with a settled live view, for the chrome's tests.
+const ChromeFixture = struct {
+    environ: std.process.Environ.Map,
+    screen: *Screen,
+    tmp: std.testing.TmpDir,
+    page: std.Io.File,
+    interrupted: client.Cancellation = .{},
+    self: *Self,
+    root: Root,
+    widget: vxfw.Widget = undefined,
+    arena: std.heap.ArenaAllocator,
+    ctx: vxfw.EventContext = undefined,
+
+    const Hooks = struct {
+        fn leave(_: *anyopaque, _: *vxfw.EventContext, _: Outcome) !void {}
+        fn upgrade(_: *anyopaque, _: *vxfw.EventContext) !void {}
+        fn copy(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {}
+        fn open(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {}
+    };
+
+    fn init(fixture: *ChromeFixture) !void {
+        fixture.environ = try std.testing.environ.createMap(std.testing.allocator);
+        fixture.screen = try std.testing.allocator.create(Screen);
+        try fixture.screen.init(std.testing.io, &fixture.environ, false);
+        fixture.tmp = std.testing.tmpDir(.{});
+        fixture.page = try fixture.tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+        var init_: std.process.Init = undefined;
+        init_.io = std.testing.io;
+        init_.gpa = std.testing.allocator;
+        init_.environ_map = &fixture.environ;
+        fixture.self = try std.testing.allocator.create(Self);
+        const page = fixture.page;
+        // The overview decides whether Ctrl-X has work to stop.
+        var lender = quiet_overview;
+        lender.line = struct {
+            fn line(_: *anyopaque, kind: protocol.session_work.Kind) Lender.Said {
+                return .{ .stoppable = kind == .working };
+            }
+        }.line;
+        fixture.self.begin(init_, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } }, undefined, undefined, undefined, fixture.screen, &fixture.interrupted, lender);
+        fixture.root = .{ .overview = empty_app_text.widget() };
+        fixture.widget = fixture.self.attach(.{ .root = &fixture.root, .context = fixture.self, .leave = Hooks.leave, .upgrade = Hooks.upgrade, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
+        fixture.self.reading.opening = false;
+        fixture.self.poll_at = std.math.maxInt(i96);
+        fixture.arena = .init(std.testing.allocator);
+        fixture.ctx = .{ .io = std.testing.io, .alloc = fixture.arena.allocator(), .cmds = .empty };
+        var history: [100 * 20]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&history);
+        for (0..100) |number| try writer.print("History line {d:0>3}\n", .{number});
+        try fixture.screen.live.append(writer.buffered());
+    }
+
+    fn deinit(fixture: *ChromeFixture) void {
+        fixture.arena.deinit();
+        std.testing.allocator.destroy(fixture.self);
+        fixture.page.close(std.testing.io);
+        fixture.tmp.cleanup();
+        fixture.screen.deinit();
+        std.testing.allocator.destroy(fixture.screen);
+        fixture.environ.deinit();
+    }
+
+    fn draw(fixture: *ChromeFixture) !vxfw.Surface {
+        return fixture.widget.draw(.{ .arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
+    }
+
+    fn press(fixture: *ChromeFixture, key: vaxis.Key) !void {
+        try fixture.widget.handleEvent(&fixture.ctx, .{ .key_press = key });
+    }
+
+    fn now() u64 {
+        return @intCast(@max(std.Io.Clock.real.now(std.testing.io).toMilliseconds(), 0));
+    }
+};
+
+test "App Session shows work under way at the transcript's tail, and the ↓ marker in its place while scrolled back" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    self.live.work.state = .{ .working = .{ .since = ChromeFixture.now() / 1000 } };
+    _ = try fixture.draw();
+    try std.testing.expect(self.app_screen.tail != null);
+    try std.testing.expect(self.app_screen.marker == null);
+    try std.testing.expectEqualStrings("Waiting", self.chrome.activity.work.?.words);
+    try std.testing.expect(self.chrome.status.bar.stop);
+
+    try fixture.press(.{ .codepoint = vaxis.Key.up, .mods = .{ .shift = true } });
+    _ = try fixture.draw();
+    try std.testing.expect(self.app_screen.tail == null);
+    try std.testing.expect(self.app_screen.marker.?.eql(self.chrome.marker.widget()));
+    try std.testing.expectEqualStrings("↓", self.chrome.marker.label);
+
+    try fixture.press(.{ .codepoint = vaxis.Key.escape });
+    _ = try fixture.draw();
+    try std.testing.expect(self.app_screen.marker == null);
+    try std.testing.expect(self.app_screen.tail != null);
+}
+
+test "App Session's End no longer returns to the latest; Esc and the marker do" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    try fixture.press(.{ .codepoint = vaxis.Key.page_up });
+    _ = try fixture.draw();
+    const anchor = self.app_content.first;
+    try fixture.press(.{ .codepoint = vaxis.Key.end });
+    _ = try fixture.draw();
+    try std.testing.expect(self.app_screen.marker != null);
+    try std.testing.expectEqual(anchor, self.app_content.first);
+    try self.chrome.marker.on_click(self.chrome.marker.userdata, &fixture.ctx);
+    _ = try fixture.draw();
+    try std.testing.expect(self.app_screen.marker == null);
+}
+
+test "App Session notice goes after five seconds or at the next key" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    self.shown_notice.show("Copied 12 lines", ChromeFixture.now() - 4_000);
+    _ = try fixture.draw();
+    try std.testing.expectEqualStrings("Copied 12 lines", self.chrome.status.bar.left);
+    self.shown_notice.show("Copied 12 lines", ChromeFixture.now() - 6_000);
+    _ = try fixture.draw();
+    try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
+    self.shown_notice.show("Copied 12 lines", ChromeFixture.now());
+    try fixture.press(.{ .codepoint = 'a', .text = "a" });
+    _ = try fixture.draw();
+    try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
+}
+
+test "App Session ? on an empty draft shows the shortcuts; the next key closes them; ?? types one" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    try fixture.press(.{ .codepoint = '?', .text = "?" });
+    _ = try fixture.draw();
+    try std.testing.expect(self.app_screen.overlay.?.eql(self.chrome.shortcuts.widget()));
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    try fixture.press(.{ .codepoint = 'a', .text = "a" });
+    _ = try fixture.draw();
+    try std.testing.expect(self.app_screen.overlay == null);
+    try std.testing.expectEqualStrings("a", self.input.composition().bytes);
+    // On a draft with text, ? is a character.
+    try fixture.press(.{ .codepoint = '?', .text = "?" });
+    try std.testing.expectEqualStrings("a?", self.input.composition().bytes);
+    _ = self.input.clear();
+    try fixture.press(.{ .codepoint = '?', .text = "?" });
+    try fixture.press(.{ .codepoint = '?', .text = "?" });
+    _ = try fixture.draw();
+    try std.testing.expect(self.app_screen.overlay == null);
+    try std.testing.expectEqualStrings("?", self.input.composition().bytes);
 }

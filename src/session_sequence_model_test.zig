@@ -246,8 +246,8 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
         // change retires it.
         var fresh = false;
         // The input row is the draft: a line was being written when the
-        // Action arrived, or a key was typed beside it, until Esc, Ctrl-G,
-        // Ctrl-End or End on an empty draft returns to the choice.
+        // Action arrived, or a key was typed beside it, until Esc or Ctrl-G
+        // returns to the choice.
         var typing = alive and written;
         // The highlighted option: Allow once until an arrow moves it on an
         // offer.
