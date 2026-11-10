@@ -313,6 +313,20 @@ test "skill rows give way to the command's own list where the caret is in no /wo
     try std.testing.expectEqualStrings(plain.list.entries[0].word, shown.list.entries[0].word);
 }
 
+test "a draft's first /word lists its commands only while the draft is that word" {
+    const entries = [_]skill_suggestions.Entry{.{ .name = "configure-ci", .description = "" }};
+    var reads: Reads = .{};
+    var rows: Rows = .{};
+    _ = reads.ask("configure").?;
+    _ = reads.answer(1, testPage(&entries), "configure");
+    // The caret is back in `/configure`, with an option after it: that
+    // option's list is not this word's, so only skills list.
+    const draft = "/configure --";
+    const shown = reads.shown(&rows, draft, 2, 1, slash_commands.conversation.suggest(draft, .{}), null).?;
+    try std.testing.expectEqual(@as(usize, 1), shown.list.count);
+    try std.testing.expectEqualStrings("/configure-ci", shown.list.entries[0].shown);
+}
+
 test "a caret moved to another /word is another list, which no key takes until drawn" {
     const entries = [_]skill_suggestions.Entry{ .{ .name = "recap", .description = "" }, .{ .name = "review", .description = "" } };
     var reads: Reads = .{};
