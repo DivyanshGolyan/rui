@@ -381,6 +381,12 @@ class SelectionTest(unittest.TestCase):
         result = select(["src/serve_grammar.zig"], "review", AVAILABLE)
         for target in ("host-launch-integration", "request-wait-integration"):
             self.assertTrue(covered(target, set(result["targets"])), target)
+        # The grammar engine keeps every gate that cli_args.zig selected.
+        for path in ("src/cli_grammar.zig", "src/cli_option_names.zig"):
+            targets = set(select([path], "review", AVAILABLE)["targets"])
+            for target in ("human-cli-integration", "request-wait-integration", "admission-debug-integration",
+                           "measurement-check", "upgrade-integration", "installer-integration"):
+                self.assertTrue(covered(target, targets), (path, target))
 
     def test_strict_paths_never_retry(self):
         # Each of these selected retryable suites before strictness decided retries.
