@@ -828,6 +828,9 @@ fn event(self: *Self, value: view.Event) !?Next {
 fn sendStatuses(self: *Self) void {
     if (self.state.left) return;
     const out = self.attention;
+    // Nothing to report or clear: every event ends here, so a keystroke
+    // never reads the preferences file.
+    if (self.state.statusesSettled() and !out.statuses_shown) return;
     if (!(preferences.load(self.options.home) catch preferences.Values{}).notifications) {
         out.clear() catch return;
         self.state.statusesCleared();
