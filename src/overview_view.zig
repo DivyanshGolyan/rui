@@ -3894,8 +3894,15 @@ pub fn markSpins(state: *const State, item: Item, caps: Caps) bool {
 
 /// Counts and any actionable Host/provider warnings, above the list.
 pub fn headerSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
+    return (try header(arena, state, width, caps)).segments;
+}
+
+/// The header's lines, and where its first line, the counts line, shows
+/// the view name a click takes back to the default view.
+pub fn header(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!CountsLine {
+    const top = try countsLine(arena, state, width, caps);
     var lines: [3][]const Segment = undefined;
-    lines[0] = try countsSegments(arena, state, width, caps);
+    lines[0] = top.segments;
     var count: usize = 1;
     var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
     if (state.unreachable_since_ms) |since| {
@@ -3920,7 +3927,7 @@ pub fn headerSegments(arena: Allocator, state: *const State, width: u16, caps: C
         @memcpy(segments[offset..][0..line.len], line);
         offset += line.len;
     }
-    return segments;
+    return .{ .segments = segments, .view = top.view };
 }
 
 pub const ListRow = struct { segments: []const Segment, heading: bool, selected: bool };

@@ -17,6 +17,7 @@ const Root = @import("Root.zig");
 const AppScreen = @import("AppScreen.zig");
 const InputArea = @import("InputArea.zig");
 const GroupedList = @import("GroupedList.zig");
+const OverviewLines = @import("OverviewLines.zig");
 const Palette = @import("Palette.zig");
 const client = @import("client.zig");
 const configure_input = @import("configure_input.zig");
@@ -304,6 +305,8 @@ root: Root = undefined,
 app_screen: AppScreen.Overview = undefined,
 app_input: InputArea = undefined,
 app_list: GroupedList = .{},
+/// The counts line and its bands, which take the view-name click.
+app_header: OverviewLines.Header = undefined,
 app_palette: Palette = undefined,
 app_frame: u64 = 0,
 /// Whether the latest frame showed a mark that spins.
@@ -457,6 +460,13 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         },
         else => {},
     }
+}
+
+/// A click the screen's widgets name steps the core as a key does.
+fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    try self.appNext(ctx, try self.event(.{ .clicked = click }));
+    ctx.redraw = true;
 }
 
 fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
@@ -648,7 +658,8 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_list.rows = .{ .userdata = self, .count = @intCast(if (panel) |items| items.len else view.listLength(&self.state)), .rowFn = appRow };
     self.app_list.caps = self.caps;
     self.state.commands = view.nextCommands(&self.state, self.composerDraft());
-    self.app_screen.header = try rich(ctx, self.caps, try view.headerSegments(ctx.arena, &self.state, size.width, self.caps));
+    self.app_header.caps = self.caps;
+    self.app_screen.header = self.app_header.widget();
     self.app_input.facts = try rich(ctx, self.caps, try view.factsSegments(ctx.arena, &self.state, size.width, self.caps));
     self.app_input.status = try rich(ctx, self.caps, try view.statusSegments(ctx.arena, &self.state, self.composerDraft(), size.width, self.caps));
     // The picker sits right above the input; the Sessions keep the rows
@@ -720,6 +731,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.root = .{ .overview = self.widget() };
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" } };
     self.app_screen = .{ .content = &self.app_list, .input = &self.app_input, .userdata = self, .on_event = appEvent };
+    self.app_header = .{ .state = &self.state, .userdata = self, .on_click = appClick };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     errdefer self.closePipes();
@@ -1643,6 +1655,18 @@ const Rig = struct {
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         try app_events.send(&ctx, bytes, rig.overview.root.widget(), rig.overview.widget());
+        return if (ctx.quit) .overview else null;
+    }
+
+    /// A left press at `column`, `row` on the frame a terminal of `width`
+    /// by `height` shows, delivered as App delivers it.
+    fn click(rig: *Rig, column: u16, row: u16, width: u16, height: u16) !?Ending {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const frame = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try app_events.mouse(&ctx, frame, .{ .col = @intCast(column), .row = @intCast(row), .button = .left, .type = .press, .mods = .{} });
         return if (ctx.quit) .overview else null;
     }
 
@@ -3038,6 +3062,29 @@ fn openComposer() !*Rig {
         var cancellation: client.Cancellation = .{};
     };
     return Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &Shared.cancellation);
+}
+
+test "a click on the counts line's view name, as a terminal sends it, lists the default view" {
+    const rig = try openComposer();
+    defer rig.close();
+    try std.testing.expect(try rig.press("/sessions archived\r") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.archived, Seen.now.archive_filter);
+    var shown = try rig.shown(80, 24);
+    defer shown.deinit();
+    // The name's first cell, as the terminal lays the top row out.
+    const column: u16 = for (0..79) |at| {
+        const here = shown.screen.readCell(@intCast(at), 0).?.char.grapheme;
+        const after = shown.screen.readCell(@intCast(at + 1), 0).?.char.grapheme;
+        if (std.mem.eql(u8, here, "A") and std.mem.eql(u8, after, "r")) break @intCast(at);
+    } else return error.TestUnexpectedResult;
+    // The cell just past the name is not it.
+    try std.testing.expect(try rig.click(column + 8, 0, 80, 24) == null);
+    try std.testing.expectEqual(view.ArchiveFilter.archived, rig.overview.state.archive);
+    try std.testing.expect(try rig.click(column, 0, 80, 24) == null);
+    try std.testing.expectEqual(view.ArchiveFilter.active, rig.overview.state.archive);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.active, Seen.now.archive_filter);
 }
 
 test "bytes that are not text reject the composer's line at Enter, as in a conversation" {
