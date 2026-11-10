@@ -31,27 +31,13 @@ Honor narrower user limits and one-way-door approvals.
 
 ## Code Review Rules
 
-These rules state [Review](CODING_STANDARDS.md#review) in the form Codex applies on a PR.
+[Review](CODING_STANDARDS.md#review) and [Ownership and transitions](CODING_STANDARDS.md#ownership-and-transitions) own what a change must satisfy.
+This section owns only how Codex reports what it finds:
 
-### One finding per class
-
-- When two or more symptoms share a cause (a fact derived in two places, a rule with two owners, state synced instead of derived), report one finding at the owner, list every site and make the correction the design that removes the class.
-  Safe path: one function or owner that every reader calls.
-- Simple means unbraided, as in Rich Hickey's "Simple Made Easy": independent concerns kept independent, whatever the line count.
-
-### Boundaries
-
-- Flag a decision made inside a shell (a file that reads the terminal, the Store, the network or the clock) that mixes that I/O with policy.
-  Safe path: a core that takes the values the shell read and returns the decision, listed in `src/logic_tests.zig`; the shell only reads and applies.
-
-### Deep modules
-
-- Flag new public surface that exposes representation, call order or cleanup details, and a second implementation of a behavior an existing component owns.
-  Safe path: the caller states intent and the existing owner does the work.
-
-### Domain tests
-
-- For an edge case in a combination of states, report once the missing test over the owner's whole domain, and name the cases it must include.
+- **One finding per class.** When two or more symptoms share a cause (a fact derived in two places, a rule with two owners, state synced instead of derived), report one finding at the owner and list every site.
+  Safe path: the correction those sections lead with, one owner that every reader calls.
+- **Design before cases.** Report a departure from those sections (duplicated authority, policy mixed with I/O in a shell, public surface that exposes representation) ahead of any single edge case it causes.
+- **Domain tests.** For an edge case in a combination of states, report once the missing test over the owner's whole domain and name the cases it must include.
   Do not report each case as its own finding.
 
 ## Status updates
