@@ -770,7 +770,9 @@ test "a read cap defers expiry only for streams on that connection" {
     const Busy = struct {
         fn queued(socket: std.posix.fd_t) !bool {
             var bytes: c_int = 0;
-            if (std.c.ioctl(socket, std.c.T.FIONREAD, &bytes) != 0) return error.Unexpected;
+            // FIONREAD: bytes waiting to be read.
+            const fionread = if (builtin.os.tag.isDarwin()) 0x4004667f else std.os.linux.T.FIONREAD;
+            if (std.c.ioctl(socket, fionread, &bytes) != 0) return error.Unexpected;
             return bytes >= h2.read_allowance_bytes;
         }
     };
