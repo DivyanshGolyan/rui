@@ -2842,7 +2842,7 @@ fn showCopy(self: *Self) !void {
         // Rui cannot see whether the clipboard took it.
         .clipboard => |range| sent: {
             try self.app_hooks.copy(self.app_hooks.context, self.files.scratch, range.start, range.length);
-            break :sent if (self.tmux) "Sent to clipboard · tmux needs set-clipboard on" else "Sent to clipboard";
+            break :sent "Sent to clipboard";
         },
         .saved => saved: {
             var name: [reads.copy_name_bytes]u8 = undefined;

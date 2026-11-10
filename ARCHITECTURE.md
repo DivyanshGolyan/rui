@@ -2864,7 +2864,6 @@ After a failure or an interruption partway, the next write, or restoration on le
 At most 75,000 bytes go to the clipboard: their base64 is 100,000 bytes, the most hterm's `osc52.sh` sends.
 Over that nothing is written and the notice says `Too large for the clipboard · /copy file`.
 Rui cannot see whether the terminal took the bytes.
-Inside tmux the sequence goes out unwrapped, like Rui's other terminal sequences, and reaches the outer terminal only with `set-clipboard on`, so there the notice reads `Sent to clipboard · tmux needs set-clipboard on`, and `/help` says so too.
 `/copy file` writes the last answer as it arrives to an exclusively created mode 0600 temporary file beside `rui-ID-answer.md` in the directory Rui runs in, then renames it over that name, so an earlier file or a link there is replaced and a link's target is never followed or changed.
 If the read fails the temporary file is removed and the name keeps what it had.
 It says `Saved to ./rui-ID-answer.md`.
