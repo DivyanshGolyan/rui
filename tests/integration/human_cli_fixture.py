@@ -16,25 +16,39 @@ import terminal_process as terminal_process_module
 from terminal_process import answers_to
 
 
-# A waiting Action's input row while its choice is offered, and the key
-# that decides it: Enter confirms the highlighted option, Allow once at first.
-CHOICE = "› Allow once"
+# The permission card's choice row: its buttons " Allow once " and " Deny ",
+# two cells apart, inside the card's border. The highlighted one is drawn in
+# reverse video only (see `highlighted`). Enter answers with the
+# highlighted button, Allow once at first.
+CHOICE = "Allow once    Deny"
 
 
 ALLOW = b"\r"
 
 
-# The choice's input row at any width, picked or not.
-CHOICE_ROW = re.compile(r"^ *(?:› )?(?:Allow once|Allow|A) +(?:› )?(?:Deny|D) *$", re.M)
+# The choice row at any width; a card too small for its border drops it.
+CHOICE_ROW = re.compile(r"^(?:│ )? Allow", re.M)
 
 
-def pick_deny(master, ready):
-    """Move a ready choice to Deny; return once a delivered frame shows it ready.
+def highlighted(capture):
+    """The button the latest committed frame's choice row draws in reverse
+    video, or None when no choice row is shown."""
+    rows = capture.completed.split("\n")
+    for index, row in enumerate(rows):
+        if CHOICE_ROW.match(row):
+            cells = capture.completed_cells[index]
+            marked = [label for label in ("Allow once", "Deny")
+                      if label in row and cells[row.index(label)].reverse]
+            assert len(marked) <= 1, (row, marked)
+            return marked[0] if marked else None
+    return None
 
-    An arrow spends readiness, so an Enter sent with it would decide nothing.
-    """
-    os.write(master, b"\x1b[C")
-    return read_terminal(master, "› Deny") + action_ready(ready, master)
+
+def pick_deny(master):
+    """Move the card's highlight to Deny; return the first frame that shows
+    it. The card answers the request it drew, so no new readiness follows."""
+    capture = terminal_capture(master)
+    return keyed_frame(master, b"\x1b[C", lambda screen, x, y: highlighted(capture) == "Deny")
 
 
 def run(home, *args, success=True, environment=None, input=None):
@@ -417,26 +431,21 @@ def terminal_step(master, command, marker, *, composer=False):
 
 
 def drop_spent_readiness(descriptor):
-    """Discard notifications already queued: input sent next spends every
-    offer made so far. A redraw while the choice waits (a Host update the
-    screen does not show) offers that frame too, so a queued byte may be
-    from an offer the fixture never waited for; left there, the next wait
-    would take it as readiness for input the caller has not seen handled."""
+    """Discard notifications already queued, so the next wait reads one made
+    after the input sent next: the card notifies once per request it draws,
+    and a byte left from an earlier request would pass for this one."""
     while select.select([descriptor], [], [], 0)[0]:
         assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
 
 
-def action_ready(descriptor, master, timeout=15, *, return_to_action=True, shows=None, send=None):
-    """Supply normal terminal credit until the actual fresh-input boundary.
+def action_ready(descriptor, master, timeout=15, *, shows=None, send=None):
+    """Supply normal terminal credit until the card has drawn its request.
 
-    Read exactly one notification, never a future choice's byte. Return the
-    distinct committed frames shown meanwhile. A selected inspection keeps
-    the Action behind it; like a user, return to it once with Ctrl-G unless
-    the caller is checking that paused state itself. Deliberately
-    withheld-credit controls must select the pipe directly. `shows` names
-    the offered frame awaited when it is not the choice, such as a reason's.
-    `send` is input written first, after dropping offers it spends, so the
-    notification read is one made after that input was handled.
+    Read exactly one notification, never a future request's byte. Return the
+    distinct committed frames shown meanwhile. Deliberately withheld-credit
+    controls must select the pipe directly. `shows` names the frame awaited
+    when it is not the choice. `send` is input written first, after dropping
+    notifications already queued, so the one read follows that input.
     """
     if send is not None:
         drop_spent_readiness(descriptor)
@@ -444,7 +453,6 @@ def action_ready(descriptor, master, timeout=15, *, return_to_action=True, shows
     capture = terminal_capture(master)
     deadline = time.monotonic() + timeout
     frames = []
-    returned = [not return_to_action]
 
     def observe(screen, x, y):
         if not frames or frames[-1] != screen:
@@ -455,9 +463,6 @@ def action_ready(descriptor, master, timeout=15, *, return_to_action=True, shows
     capture.listener = observe
     try:
         while True:
-            if not returned[0] and "Approval paused · Esc returns to Action" in capture.completed:
-                returned[0] = True
-                os.write(master, b"\x07")
             remaining = deadline - time.monotonic()
             assert remaining > 0, ("Action input flush did not finish", capture.completed)
             ready = select.select([descriptor, master], [], [], remaining)[0]
@@ -473,11 +478,9 @@ def action_ready(descriptor, master, timeout=15, *, return_to_action=True, shows
                     chunk = os.read(master, 65536)
                     assert chunk, "Action terminal closed at readiness"
                     capture.feed(chunk)
-                # A notification from before a later invalidation (another
-                # page selected, or approval readiness redrawn) is stale:
-                # readiness is the visible Action with its choice.
+                # Readiness is the drawn card with its choice.
                 shown = capture.completed
-                if shows(shown) if shows else "Approval paused" not in shown and CHOICE_ROW.search(shown):
+                if shows(shown) if shows else CHOICE_ROW.search(shown):
                     return "\n".join(frames)
     finally:
         capture.listener = None
