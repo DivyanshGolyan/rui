@@ -98,6 +98,7 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
                 .command = undefined,
                 .colour = false,
                 .reading = .{ .opening = false },
+                .screen = self.screen,
                 .terminal = &self.terminal,
                 .interrupted = &self.interrupted,
             };
