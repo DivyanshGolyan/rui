@@ -122,18 +122,21 @@ pub const Reads = struct {
     }
 
     /// The Palette's rows for the draft at `revision`, with the caret at
-    /// `caret`, after `previous`: `commands` (the draft's own command list,
-    /// used only for the draft's first word), then the held page's skills
-    /// the caret word's name starts. Null when the caret is in no `/word`
-    /// or nothing matches.
+    /// `caret`, after `previous`. In a `/word`: `commands` (the draft's own
+    /// command list) when the word starts the draft, then the held page's
+    /// skills the word's name starts, a new list for each page and each
+    /// word. Anywhere else, `commands` alone, as a command's later words
+    /// list. Null when nothing matches.
     pub fn shown(self: *const Reads, rows: *Rows, draft: []const u8, caret: usize, revision: u64, commands: ?slash_commands.List, previous: ?slash_commands.Shown) ?slash_commands.Shown {
-        const word = atCaret(draft, caret) orelse return null;
+        const word = atCaret(draft, caret) orelse return slash_commands.Shown.next(previous, revision, commands);
         const typed = word.name(draft);
-        const listed = if (word.slash == 0) commands else null;
+        // The command list is the word's only while the draft is the word.
+        const listed = if (word.slash == 0 and word.end == draft.len) commands else null;
         const held = if (self.held) |*kept| (if (std.mem.startsWith(u8, typed, kept.prefix.slice())) kept else null) else null;
         const none: skill_suggestions.Page = .{};
         const page = if (held) |kept| &kept.page else &none;
-        return slash_commands.Shown.nextOf(previous, revision, if (held) |kept| kept.read else 0, rows.list(typed, listed, page));
+        const source = if (held) |kept| std.hash.Wyhash.hash(kept.read, std.mem.asBytes(&word.slash)) else 0;
+        return slash_commands.Shown.nextOf(previous, revision, source, rows.list(typed, listed, page));
     }
 };
 
@@ -175,6 +178,15 @@ pub const Replacement = struct { start: usize, end: usize, text: []const u8 };
 pub fn complete(draft: []const u8, word: Word, entry: slash_commands.Entry) Replacement {
     const text = if (word.end == draft.len) entry.word else std.mem.trimEnd(u8, entry.word, " ");
     return .{ .start = word.slash + 1, .end = word.end, .text = text };
+}
+
+/// What Tab, or Enter on a row that runs nothing, does with `shown`'s
+/// highlighted row, built for `draft` with the caret at `caret`: the row's
+/// word in place of the caret's `/word` name, else, for a command's later
+/// word, the rest of the row's word at the draft's end.
+pub fn edit(draft: []const u8, caret: usize, shown: *const slash_commands.Shown) Replacement {
+    if (atCaret(draft, caret)) |word| return complete(draft, word, shown.list.entries[shown.highlight]);
+    return .{ .start = draft.len, .end = draft.len, .text = shown.completion() };
 }
 
 fn expectWord(draft: []const u8, caret: usize, expected: ?[]const u8) !void {
@@ -288,6 +300,52 @@ test "skill completion replaces the caret's name, spacing only at the draft's en
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&before, "{s}{s}", .{ draft, commands.completion(0) }), after);
 }
 
+test "skill rows give way to the command's own list where the caret is in no /word" {
+    var reads: Reads = .{};
+    var rows: Rows = .{};
+    // After a command word, its next word's choices list as they always did.
+    const draft = "/configure ";
+    const listed = slash_commands.conversation.suggest(draft, .{});
+    const shown = reads.shown(&rows, draft, draft.len, 5, listed, null).?;
+    const plain = slash_commands.Shown.next(null, 5, listed).?;
+    try std.testing.expectEqual(plain.list.count, shown.list.count);
+    try std.testing.expectEqual(plain.source, shown.source);
+    try std.testing.expectEqualStrings(plain.list.entries[0].word, shown.list.entries[0].word);
+}
+
+test "a caret moved to another /word is another list, which no key takes until drawn" {
+    const entries = [_]skill_suggestions.Entry{ .{ .name = "recap", .description = "" }, .{ .name = "review", .description = "" } };
+    var reads: Reads = .{};
+    var rows: Rows = .{};
+    _ = reads.ask("re").?;
+    _ = reads.answer(1, testPage(&entries), "re");
+    const draft = "a /re b /re";
+    var first = reads.shown(&rows, draft, "a /re".len, 7, null, null).?;
+    first.highlight = 1;
+    first.drew(true);
+    // Same draft, same revision: only the caret moved.
+    const second = reads.shown(&rows, draft, draft.len, 7, null, first).?;
+    try std.testing.expectEqual(@as(usize, 0), second.highlight);
+    try std.testing.expectEqual(.hidden, second.seen);
+    const again = reads.shown(&rows, draft, "a /re".len, 7, null, first).?;
+    try std.testing.expectEqual(@as(usize, 1), again.highlight);
+}
+
+test "Tab or Enter on a row replaces the caret's name, or adds a later word's rest at the end" {
+    const entries = [_]skill_suggestions.Entry{ .{ .name = "recap", .description = "" }, .{ .name = "review", .description = "" } };
+    var reads: Reads = .{};
+    var rows: Rows = .{};
+    _ = reads.ask("re").?;
+    _ = reads.answer(1, testPage(&entries), "re");
+    const draft = "use /re on it";
+    var shown = reads.shown(&rows, draft, "use /r".len, 1, null, null).?;
+    shown.highlight = 1;
+    try expectReplacement(.{ .start = "use /".len, .end = "use /re".len, .text = "review" }, edit(draft, "use /r".len, &shown));
+    const command = "/configure ";
+    const listed = reads.shown(&rows, command, command.len, 2, slash_commands.conversation.suggest(command, .{}), null).?;
+    try expectReplacement(.{ .start = command.len, .end = command.len, .text = listed.completion() }, edit(command, command.len, &listed));
+}
+
 fn testPage(entries: []const skill_suggestions.Entry) skill_suggestions.Page {
     return .{ .entries = entries, .total = entries.len };
 }
@@ -362,7 +420,7 @@ test "skill rows are the held page's, numbered by the read that made them" {
     _ = reads.answer(1, testPage(&entries), "re");
     const shown = reads.shown(&rows, draft, draft.len, 1, null, null).?;
     try std.testing.expectEqual(@as(usize, 2), shown.list.count);
-    try std.testing.expectEqual(@as(u64, 1), shown.source);
+    try std.testing.expect(shown.source != 0);
     try std.testing.expectEqual(.hidden, shown.seen);
     try std.testing.expectEqualStrings("/review", shown.list.entries[1].shown);
     // The caret in no `/word` shows nothing; a word the page does not
