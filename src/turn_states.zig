@@ -19,7 +19,9 @@ const protocol = @import("protocol.zig");
 const provider = @import("provider.zig");
 
 /// One table per provider, so Turns of two served providers never retire
-/// each other's values by alternating owners. Execution-thread-owned.
+/// each other's values by alternating owners. Reached only through `sink`,
+/// under the provider Reactor's lock: the transport thread captures and the
+/// execution thread replays.
 pub const PerProvider = struct {
     tables: std.EnumArray(protocol.Provider, TurnStates) = .initFill(.{}),
 
@@ -41,12 +43,18 @@ pub const PerProvider = struct {
     /// Every transfer's header callback delivers its value straight here,
     /// keyed by its provider, Turn and the epoch its launch selected.
     pub fn sink(self: *PerProvider) provider.TurnStateSink {
-        return .{ .context = self, .capture = observe };
+        return .{ .context = self, .capture = observe, .replay = replayFor };
     }
 
     fn observe(context: *anyopaque, key: provider.TurnStateKey, value: []const u8) void {
         const self: *PerProvider = @ptrCast(@alignCast(context));
         self.get(key.provider).capture(key.turn_id, key.epoch, value);
+    }
+
+    fn replayFor(context: *anyopaque, served: protocol.Provider, turn_id: u64, owner: TurnStates.Owner) provider.TurnStateSink.Replay {
+        const self: *PerProvider = @ptrCast(@alignCast(context));
+        const replayed = self.get(served).replay(turn_id, owner);
+        return .{ .epoch = replayed.epoch, .value = replayed.value };
     }
 
     pub fn deinit(self: *PerProvider) void {
@@ -62,7 +70,7 @@ pub const TurnStates = struct {
     epoch: u64 = 0,
     uses: u64 = 0,
 
-    pub const Owner = [32]u8;
+    pub const Owner = provider.RoutingOwner;
     pub const Replay = struct {
         epoch: u64,
         /// Borrowed until the next mutation of this table.

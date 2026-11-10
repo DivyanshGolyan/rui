@@ -417,10 +417,6 @@ const observed_codec = blk: {
     break :blk codec;
 };
 
-/// The header a Turn's routing value is echoed under: the one the Reactor
-/// observes it in.
-const routing_header = codecs.manifest(observed_codec).observe.turn_state;
-
 pub fn executionMain(host: *Host) void {
     const mapped_workspace = pages.Mapped(Workspace).map() catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
@@ -531,6 +527,19 @@ pub fn executionMain(host: *Host) void {
     defer if (reactor) |active| {
         for (std.enums.values(provider.ListingKind)) |kind| endListing(active, kind, workspace.listings.getPtr(kind));
     };
+    // Streams, PING answers and flow control move on their own thread, so a
+    // Store round this thread waits on never holds them up.
+    const transport: ?std.Thread = if (reactor) |active|
+        signal_stack.spawn(.{}, provider.Reactor.serve, .{active}) catch |err| {
+            fenceDispatch(host, "transport thread start", err);
+            return;
+        }
+    else
+        null;
+    defer if (transport) |thread| {
+        reactor.?.stop();
+        thread.join();
+    };
     if (reactor != null) host.scratch_budget = budget;
     defer host.scratch_budget = null;
     var mcp_calls: server_mcp.Calls = .{};
@@ -556,10 +565,7 @@ pub fn executionMain(host: *Host) void {
                 if (heap_release.due(slots, if (reactor) |active| active.listingPending() else false)) process.releaseFreeHeap();
                 const wait_started = std.Io.Clock.Timestamp.now(host.io, .awake);
                 switch (kind) {
-                    .transport => reactor.?.wait(if (mcp_calls.any()) 25 else transportWaitMs(slots)) catch |err| {
-                        fenceDispatch(host, "transport wait", err);
-                        break;
-                    },
+                    .transport => reactor.?.awaitFinished(if (mcp_calls.any()) 25 else transportWaitMs(slots)),
                     .bash => _ = host.io.sleep(.fromMilliseconds(25), .awake) catch {},
                     .idle => _ = host.io.sleep(.fromMilliseconds(100), .awake) catch {},
                 }
@@ -801,12 +807,14 @@ const NativeTurn = struct {
         };
     }
 
+    /// The transport thread drives the Client; this step fences on the
+    /// failure that ended it and traces the completions waiting.
     pub fn driveTransport(self: *NativeTurn) error{Fence}!void {
-        self.reactor.?.drive() catch |err| {
+        if (self.reactor.?.failed()) |err| {
             fenceDispatch(self.host, "transport reactor", err);
             self.fenced = true;
             return error.Fence;
-        };
+        }
         observeUnprocessedCompletions(self.host, self.reactor.?);
     }
 
@@ -2073,11 +2081,6 @@ fn launchPreparedRequest(
         finishCustodyNow(host, slot);
         return;
     };
-    // Every request echoes its Turn's routing value, whatever its provider:
-    // one that never sends the codec's routing header has none to echo.
-    const replay = host.turn_states.get(request.provider).replay(binding.turn_id, served.credential.routingOwner(lease));
-    headers.routing(routing_header, replay.value);
-    const turn_state = provider.TurnStateKey{ .provider = request.provider, .turn_id = binding.turn_id, .epoch = replay.epoch };
     // h2 holds the Transfer's stream from launch, so construct it in its
     // final slot and keep that union arm active through completion and deinit.
     moveSlot(host, slot, .provider, .{
@@ -2088,7 +2091,7 @@ fn launchPreparedRequest(
     active.transfer.start(reactor, request, binding, .{
         .fields = headers.fields(),
         .credential = headers.takeCredential(),
-        .turn_state = turn_state,
+        .routing = .{ .turn_id = binding.turn_id, .owner = served.credential.routingOwner(lease) },
         .faults = host.hooks.transferFaults(host.hook_progress.response_write_once_spent),
     }, &retained_response) catch |err| {
         request.deinit(host.io, host.scratch_budget.?);
