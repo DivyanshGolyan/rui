@@ -1,0 +1,156 @@
+name: Restore and save the build caches
+description: The compiler, build, package and build-runner cache pairs, keyed on the native tools
+inputs:
+  check-part:
+    description: Full-check partition, keeping concurrent cache writers separate
+    required: true
+  cold:
+    description: Use genuinely empty build, package and global compiler caches
+    required: true
+  compiled:
+    description: A verified same-run artifact supplies emitted executables and pinned package sources
+    required: true
+  publish-caches:
+    description: Save caches after the job; otherwise restore only
+    required: true
+outputs:
+  build-hit:
+    description: Whether the build cache restored an exact key
+    value: ${{ steps.build-cache.outputs.cache-hit || steps.build-cache-restore.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: Identify the actual native build tools
+      id: tools
+      shell: bash
+      run: |
+        set -euo pipefail
+        identity="$RUNNER_TEMP/rui-native-tools.txt"
+        {
+          uname -sm
+          cc --version
+          make --version
+          perl -v
+          if [ "$(uname -s)" = Darwin ]; then
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-path
+            xcrun --sdk macosx --show-sdk-version
+            xcrun --sdk macosx --show-sdk-build-version
+          else
+            cat /etc/os-release
+            ldd --version
+            ld --version
+          fi
+        } > "$identity"
+        cat "$identity"
+        echo "identity=$(shasum -a 256 "$identity" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+        # The build runner is compiled for the host CPU, which varies between
+        # runners of one image, so its cache is only reusable per CPU model.
+        # x86 names the model; ARM Linux has no "model name" line, so the first implementer line stands in, and
+        # a /proc/cpuinfo with neither falls back to the machine type rather than failing the step.
+        if [ "$(uname -s)" = Darwin ]; then cpu=$(sysctl -n machdep.cpu.brand_string); else cpu=$(grep -m1 -E '^(model name|CPU implementer)' /proc/cpuinfo || uname -m); fi
+        echo "cpu=$(printf '%s' "$cpu" | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
+    - name: Name the build cache keys
+      id: build-keys
+      if: ${{ inputs.cold != 'true' && inputs.compiled != 'true' }}
+      shell: bash
+      env:
+        DEPS: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'screen-emulator/build.zig.zon', 'src/build_*') }}-
+        SOURCES: ${{ hashFiles('build.zig', 'build/**', 'src/**', 'tests/integration/**') }}-
+        CHECK_PART: ${{ inputs.check-part }}
+      run: |
+        {
+          echo "key=$DEPS$SOURCES$CHECK_PART"
+          echo "prefix-sources=$DEPS$SOURCES"
+          echo "prefix-deps=$DEPS"
+        } >> "$GITHUB_OUTPUT"
+    - name: Name the build runner cache keys
+      id: runner-keys
+      if: ${{ inputs.cold != 'true' && inputs.compiled == 'true' }}
+      shell: bash
+      env:
+        CPU: rui-runner-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ steps.tools.outputs.identity }}-${{ steps.tools.outputs.cpu }}-
+        BUILD: ${{ hashFiles('build.zig', 'build/**', 'build.zig.zon') }}
+      run: |
+        {
+          echo "key=$CPU$BUILD"
+          echo "prefix-cpu=$CPU"
+        } >> "$GITHUB_OUTPUT"
+    # Each cache is a pair: save where the token may write, else only restore.
+    # A `cache-mode: read` token refuses saves, so those workflows pass 'false'.
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.publish-caches == 'true' }}
+      with:
+        path: ${{ runner.temp }}/rui-zig
+        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.1
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.publish-caches != 'true' }}
+      with:
+        path: ${{ runner.temp }}/rui-zig
+        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.1
+    # Build pair: build.zig marks every Zig test run side-effectful, so no
+    # acceptance manifests are written/read. Output-producing build steps stay cached.
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      id: build-cache
+      if: ${{ inputs.publish-caches == 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
+      with:
+        path: |
+          ~/.cache/zig
+          .zig-cache
+          zig-pkg
+          screen-emulator/zig-pkg
+        key: ${{ steps.build-keys.outputs.key }}
+        restore-keys: |
+          ${{ steps.build-keys.outputs.prefix-sources }}
+          ${{ steps.build-keys.outputs.prefix-deps }}
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      id: build-cache-restore
+      if: ${{ inputs.publish-caches != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
+      with:
+        path: |
+          ~/.cache/zig
+          .zig-cache
+          zig-pkg
+          screen-emulator/zig-pkg
+        key: ${{ steps.build-keys.outputs.key }}
+        restore-keys: |
+          ${{ steps.build-keys.outputs.prefix-sources }}
+          ${{ steps.build-keys.outputs.prefix-deps }}
+    # Package pair: pinned package sources depend only on build.zig.zon, so a
+    # tool, image or build-input change that misses every build snapshot reads
+    # them here instead of from codeberg.org and GitHub, whose 504s and stalls
+    # failed producers. A repinned package restores the newest earlier set, so
+    # only the repinned one comes from its host; the fetch below downloads only
+    # packages still missing.
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.publish-caches == 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
+      with:
+        path: zig-pkg
+        key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
+        restore-keys: rui-packages-v1-
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.publish-caches != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
+      with:
+        path: zig-pkg
+        key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
+        restore-keys: rui-packages-v1-
+    # Runner pair: consumers compile only the build runner and configuration; executables
+    # come from the verified artifact and test runs are never cached.
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.publish-caches == 'true' && inputs.cold != 'true' && inputs.compiled == 'true' }}
+      with:
+        path: |
+          ~/.cache/zig
+          .zig-cache
+          !.zig-cache/o/ci-compiled
+        key: ${{ steps.runner-keys.outputs.key }}
+        restore-keys: ${{ steps.runner-keys.outputs.prefix-cpu }}
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.publish-caches != 'true' && inputs.cold != 'true' && inputs.compiled == 'true' }}
+      with:
+        path: |
+          ~/.cache/zig
+          .zig-cache
+          !.zig-cache/o/ci-compiled
+        key: ${{ steps.runner-keys.outputs.key }}
+        restore-keys: ${{ steps.runner-keys.outputs.prefix-cpu }}
