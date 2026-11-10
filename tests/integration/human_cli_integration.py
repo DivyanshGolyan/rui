@@ -2499,10 +2499,9 @@ def main(selected="all"):
             binding = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
             assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" in binding and permission_row(binding, "ask"), binding
-            help_text = terminal_step(master, "/help", "/result KEY", composer=True)
-            # The page is taller than the screen: page down to its end and read every frame on the way.
-            os.write(master, b"\x1b[6~" * 6)
-            help_text += read_terminal(master, "in your shell.", composer=True)
+            # The whole page fits this terminal's 50 rows, so one frame shows it from Marks to Login.
+            help_text = terminal_step(master, "/help", "in your shell.", composer=True)
+            assert help_text.lstrip().startswith("Marks\n"), help_text
             for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
                 assert command in help_text, help_text
             assert "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
