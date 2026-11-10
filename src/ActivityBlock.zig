@@ -63,11 +63,21 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     // The work line and the waiting row keep their rows; the calls take
     // what is left, newest first, with `+N more` counting every call not
     // drawn. A screen too short even for those keeps the newest rows.
-    const fixed = @as(usize, @intFromBool(self.work != null and clock_call == null)) + @intFromBool(self.queued != null);
-    const room = max.height -| fixed;
-    const all_fit = self.live.count + @intFromBool(self.live.total > self.live.count) <= room;
-    const shown: usize = if (all_fit) self.live.count else room -| 1;
-    const more = if (all_fit) self.live.total > self.live.count else room >= 1;
+    // When the call that carries the work line's clock is clipped, the work
+    // line takes a row of its own, so the clock always shows.
+    var work_row = self.work != null and clock_call == null;
+    var shown: usize = undefined;
+    var more: bool = undefined;
+    for (0..2) |_| {
+        const fixed = @as(usize, @intFromBool(work_row)) + @intFromBool(self.queued != null);
+        const room = max.height -| fixed;
+        const all_fit = self.live.count + @intFromBool(self.live.total > self.live.count) <= room;
+        shown = if (all_fit) self.live.count else room -| 1;
+        more = if (all_fit) self.live.total > self.live.count else room >= 1;
+        if (work_row or self.work == null or clock_call.? >= self.live.count - shown) break;
+        work_row = true;
+    }
+    const fixed = @as(usize, @intFromBool(work_row)) + @intFromBool(self.queued != null);
     const total: u16 = @intCast(shown + @intFromBool(more) + fixed);
     const height = @min(total, max.height);
     var surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = max.width, .height = height });
@@ -108,7 +118,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             children[0] = .{ .origin = .{ .row = index - skip, .col = indent }, .surface = try self.more.widget().draw(ctx.withConstraints(.{}, .{ .width = width - indent, .height = 1 })) };
         }
     }
-    if (self.work) |line| if (clock_call == null) {
+    if (self.work) |line| if (work_row) {
         defer index += 1;
         if (index >= skip) {
             const row = index - skip;
@@ -253,7 +263,7 @@ test "a narrow or short activity tail keeps the clock and the newest rows" {
     block.live.entries[1] = entry(7, 2, "Run the whole store conformance suite on every dialect", .unresolved);
     block.live.count = 2;
     block.live.total = 30;
-    block.work = .{ .mark = "•", .tone = .normal, .words = "", .clock = .{ .elapsed = 61 }, .call = .{ .operation = 7, .ordinal = 2 } };
+    block.work = .{ .mark = "•", .tone = .normal, .words = "Run the whole store conformance suite on every dialect", .clock = .{ .elapsed = 61 }, .call = .{ .operation = 7, .ordinal = 2 } };
     block.queued = .{ .line = "and then summarize", .count = 3 };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -263,12 +273,11 @@ test "a narrow or short activity tail keeps the clock and the newest rows" {
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(narrow, 3));
     _ = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 27, .height = 20 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("+28 · /status", block.more.label);
-    // Two rows of room: no call fits beside the overflow and the waiting
-    // row, so the overflow counts all 30.
+    // Two rows of room: the call carrying the clock is clipped, so the work
+    // line keeps the clock above the waiting row.
     const short = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 2), short.size.height);
-    try std.testing.expectEqual(@as(i17, 0), short.children[0].origin.row);
-    try std.testing.expectEqualStrings("+30 more running · /status", block.more.label);
+    try std.testing.expectEqualStrings("• Run the whole store… · 1m 1s", try rowText(short, 0));
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(short, 1));
     // Three rows: the newest call, then the 29 not drawn.
     const three = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 3 }, .cell_size = .{} });
@@ -276,12 +285,15 @@ test "a narrow or short activity tail keeps the clock and the newest rows" {
     try std.testing.expectEqualStrings("+29 more running · /status", block.more.label);
     // Every running call retained, but not every one fits: the clipped ones
     // still get an overflow row.
+    const work = block.work;
+    block.work = null;
     block.live.total = 2;
     const clipped = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(usize, 1), clipped.children.len);
     try std.testing.expectEqualStrings("+2 more running · /status", block.more.label);
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(clipped, 1));
     block.live.total = 30;
+    block.work = work;
     for ([_]vxfw.Size{ .{ .width = 0, .height = 4 }, .{ .width = 1, .height = 1 }, .{ .width = 4, .height = 0 } }) |size| {
         const tiny = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
         try std.testing.expect(tiny.size.width <= size.width and tiny.size.height <= size.height);

@@ -411,7 +411,7 @@ fn chromeKey(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
     if (self.leaving != null) return;
     self.shown_notice.dismiss();
     const key = session_chrome.needsKey(session_notice.status(false, false, self.heldOriginal()) orelse "");
-    if (std.mem.startsWith(u8, key, "/")) try self.slashCommand(key) else try self.perform(.recover);
+    if (std.mem.startsWith(u8, key, "/")) try self.clickCommand(key) else try self.perform(.recover);
     self.dirty = true;
     try self.afterInput(ctx);
 }
@@ -421,9 +421,19 @@ fn chromeStatus(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.leaving != null) return;
     self.shown_notice.dismiss();
-    try self.slashCommand("/status");
+    try self.clickCommand("/status");
     self.dirty = true;
     try self.afterInput(ctx);
+}
+
+/// A command a click runs, admitted as a typed one is (`SessionInput`):
+/// while another command waits its turn, it says so and runs nothing.
+fn clickCommand(self: *Self, text: []const u8) !void {
+    if (self.input.queuedCommand() != null) {
+        self.notice = session_notice.busy(.{ .command = true, .held = self.heldOriginal(), .preparing = self.reading.phase == .permission, .action = null, .letter = false });
+        return;
+    }
+    try self.slashCommand(text);
 }
 
 /// The Session's name as the terminal title leads with it.
@@ -4911,6 +4921,26 @@ test "App Session shows a command's two-line result as a page, both lines whole"
     try held.settle();
     try std.testing.expect((try rowWith(held, "Saved defaults.")) != null);
     try std.testing.expect((try rowWith(held, "Host unavailable; the Session keeps its settings")) != null);
+}
+
+test "App Session's chrome clicks that run a command say so while another waits its turn, and run nothing" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    self.input.queueCommand("/requests");
+    // `+N more running · /status`, twice before any tick.
+    for (0..2) |_| try self.chrome.activity.more.on_click(self.chrome.activity.more.userdata, &fixture.ctx);
+    try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
+    try std.testing.expectEqualStrings("! Command still running. Draft retained.", (try fixture.rows())[23]);
+    // A needs key that names a command: `/discard` on a rejected original.
+    const original = self.input.submitText("original model input");
+    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .rejected, .key = @splat('K') };
+    defer self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+    try self.chrome.status.key.on_click(self.chrome.status.key.userdata, &fixture.ctx);
+    try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
+    try std.testing.expectEqual(Submission.State.rejected, self.submission.view().?.state);
+    try std.testing.expectEqualStrings("! Command still running. Draft retained.", self.shown_notice.current(self.nowMs()).?);
 }
 
 test "App Session says Sent for a Message waiting behind work while scrolled back, where its waiting row is out of view" {
