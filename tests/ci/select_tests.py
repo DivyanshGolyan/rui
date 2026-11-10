@@ -322,12 +322,37 @@ def workflow_job(source, name):
     return code_lines(match[0]) if match else None
 
 
+def yaml_context(lines, index):
+    """A YAML line with what gives it meaning: each less-indented line above
+    it (its keys) and the whole list item (workflow step) it sits in."""
+    def indent(line):
+        return len(line) - len(line.lstrip())
+    context, level, item = [lines[index]], indent(lines[index]), index if lines[index].lstrip().startswith("- ") else None
+    for above in range(index - 1, -1, -1):
+        if indent(lines[above]) < level:
+            context.append(lines[above])
+            level = indent(lines[above])
+            if item is None and lines[above].lstrip().startswith("- "):
+                item = above
+    if item is not None:
+        end = item + 1
+        while end < len(lines) and indent(lines[end]) > indent(lines[item]):
+            end += 1
+        context += lines[item:end]
+    return context
+
+
 def cache_policy_changed(path, before, after):
-    """An added or removed file counts by its own lines."""
+    """Whether a changed line, or for YAML its keys and step, names a build
+    cache. An added or removed file counts by its own lines."""
     pattern = SETUP_CACHE_LINE if path.startswith(".github/actions/") else CACHE_LINE
-    changed = [line[1:] for line in difflib.unified_diff(code_lines(before), code_lines(after), lineterm="", n=0)
-               if line[:1] in "+-" and not line.startswith(("+++", "---"))]
-    return (any(pattern.search(line) for line in changed)
+    old, new = code_lines(before), code_lines(after)
+    changed = []
+    for tag, old_start, old_end, new_start, new_end in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+        if tag != "equal":
+            changed += [(old, index) for index in range(old_start, old_end)] + [(new, index) for index in range(new_start, new_end)]
+    context = (yaml_context if path.endswith(".yml") else lambda lines, index: [lines[index]])
+    return (any(pattern.search(line) for lines, index in changed for line in context(lines, index))
             or workflow_job(before, "cache_execution") != workflow_job(after, "cache_execution"))
 
 

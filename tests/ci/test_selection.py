@@ -1241,7 +1241,7 @@ fi
         self.assertTrue(cache("build.zig", build, build.replace("    run.has_side_effects = true;\n", "")))
         action = Path(".github/actions/setup/action.yml").read_text()
         self.assertFalse(cache(".github/actions/setup/action.yml", action,
-                               action.replace("name: Install pinned compiler", "name: Install the pinned compiler")))
+                               action.replace("name: Select fixture dependencies", "name: Select the fixture dependencies")))
         self.assertTrue(cache(".github/actions/setup/action.yml", action, action.replace("~/.cache/zig", "~/.cache/zig2", 1)))
         check = Path(".github/workflows/check.yml").read_text()
         policy_step = "Reject undefined fixture names before native builds"
@@ -1257,6 +1257,16 @@ fi
         self.assertIn(actionlint, check)
         self.assertFalse(cache(".github/workflows/check.yml", check, check.replace(actionlint, actionlint + "-2")))
         self.assertFalse(cache("build/new.zig", None, 'const std = @import("std");\n'))
+        # A value inside a cache step or input counts, though the line names no cache.
+        deps = re.search(r"(?m)^\s+DEPS: rui-build-v2-", action)[0]
+        self.assertTrue(cache(".github/actions/setup/action.yml", action, action.replace(deps, deps.replace("v2", "v3"))))
+        default = re.search(r"(?ms)^  publish-caches:\n.*?default: (.*?)$", action)
+        self.assertTrue(cache(".github/actions/setup/action.yml", action,
+                              action[:default.start(1)] + "'false'" + action[default.end(1):]))
+        upgrade = Path(".github/workflows/previous-release-upgrade.yml").read_text()
+        self.assertIn("key: rui-previous-release-", upgrade)
+        self.assertTrue(cache(".github/workflows/previous-release-upgrade.yml", upgrade,
+                              upgrade.replace("key: rui-previous-release-", "key: rui-previous-release-2-")))
         self.assertTrue(cache("build/new.zig", None, "    run.has_side_effects = true;\n"))
 
     def test_cache_maintenance_preserves_unowned_and_current_caches(self):
