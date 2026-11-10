@@ -525,15 +525,16 @@ test "modified kitty text cannot become an ordinary permission choice" {
         }
     }
     // A malformed key fails closed even where its damaged number would name
-    // Enter or a function key: it is refused as invalid where it arrives,
-    // which ends its line, never submitted or left standing as typed.
+    // Enter or a function key: it rejects its line, which stays shown until
+    // Enter reports it, never submitted or left standing as typed.
     for ([_][]const u8{ "\x1b[+27;1;13~", "\x1b[1:999;1P", "\x1b[+11;1~", "\x1b[114;999u", "\x1b[13;0u" }) |malformed| {
         errdefer std.debug.print("malformed={any}\n", .{malformed});
         var editor: Editor = .{ .buffer = &storage };
         var stream: Typing = .{};
         _ = stream.send(&editor, "a");
-        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, stream.send(&editor, malformed));
+        try std.testing.expectEqual(KeyOutcome.none, stream.send(&editor, malformed));
         try std.testing.expectEqualStrings("a", storage[0..editor.length]);
+        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, stream.send(&editor, "\r"));
     }
     for ([_]u8{ 1, 2, 65, 129 }) |modifier| {
         var sequence: [32]u8 = undefined;
@@ -1037,16 +1038,17 @@ test "xterm modifyOtherKeys bindings mean what the same Kitty keys mean" {
         try std.testing.expectEqualStrings("one\nX\ntwo", storage[0..editor.length]);
     }
     // A malformed form is a key the user pressed whose meaning was lost. It
-    // adds no line and drops no chord, and it fails closed: it is refused as
-    // invalid, which ends its line, rather than letting the text around it
+    // adds no line and drops no chord, and it fails closed: it rejects its
+    // line, which Enter reports, rather than letting the text around it
     // stand.
     for ([_][]const u8{ "\x1b[27;2~", "\x1b[27;;13~", "\x1b[27;2;~", "\x1b[27;2;13;1~", "\x1b[27;0;13~", "\x1b[27;17;13~", "\x1b[27;2:3;13~", "\x1b[27;2;1114112~", "\x1b[27;2;55296~", "\x1b[27;+2;13~" }) |malformed| {
         var editor: Editor = .{ .buffer = &storage };
         var stream: Typing = .{};
         _ = stream.send(&editor, "ok");
         errdefer std.debug.print("malformed={any}\n", .{malformed});
-        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, stream.send(&editor, malformed));
+        try std.testing.expectEqual(KeyOutcome.none, stream.send(&editor, malformed));
         try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
+        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, stream.send(&editor, "\r"));
     }
 }
 
@@ -1109,7 +1111,7 @@ test "unknown CSI retains following text and malformed input rejects" {
     editor = .{ .buffer = &storage };
     try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, stream.send(&editor, "\xc3(\r"));
     // A Kitty report of a surrogate or a codepoint past Unicode is no key.
-    for ([_][]const u8{ "a\x1b[55296u", "a\x1b[1114112u" }) |input| {
+    for ([_][]const u8{ "a\x1b[55296u\r", "a\x1b[1114112u\r" }) |input| {
         editor = .{ .buffer = &storage };
         try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, stream.send(&editor, input));
     }
