@@ -672,6 +672,8 @@ pub const Picker = struct {
     highlight: Bounded(model_capability.max_model_bytes) = .{ .len = 0 },
     choice: ?model_picker_view.Choice = null,
     edits: ?u32 = null,
+    query_effort: ?ReasoningEffort = null,
+    query_provider: ?Provider = null,
 };
 
 /// News: the most urgent Session that newly wants the person, by the name
@@ -2576,10 +2578,19 @@ pub fn syncPicker(state: *State, draft: Draft) void {
     if (shown.edits != null and shown.edits.? == draft.edits and shown.choice != null) return;
     const previous = shown.choice;
     const wanted = if (shown.choice) |choice| choice.index else if (shown.highlight.len != 0) state.menu.find(shown.highlight.slice()) else if (state.nextBinding().model) |id| state.menu.find(id) else null;
-    shown.choice = model_picker_view.select(&state.menu, pickerWords(draft.bytes), pickerDefaults(state), wanted);
-    if (shown.edits == null) if (previous) |old| if (shown.choice) |current| {
-        if (old.index == current.index) shown.choice = model_picker_view.retain(current, old);
+    const words = pickerWords(draft.bytes);
+    const query = model_picker.Query.parse(words);
+    shown.choice = model_picker_view.select(&state.menu, words, pickerDefaults(state), wanted);
+    if (previous) |old| if (shown.choice) |current| {
+        if (old.index == current.index) {
+            var kept = model_picker_view.retain(current, old);
+            if (query.effort != null and query.effort != shown.query_effort) kept.row.effort = current.row.effort;
+            if (query.provider != null and query.provider != shown.query_provider) kept.row.provider = current.row.provider;
+            shown.choice = kept;
+        }
     };
+    shown.query_effort = query.effort;
+    shown.query_provider = query.provider;
     shown.edits = draft.edits;
 }
 
@@ -6459,6 +6470,49 @@ test "/model retains selected row and effort when a pending list refreshes" {
     try std.testing.expectEqual(expected, refreshed.row.effort);
     const effects = try submit(&state, draft);
     try std.testing.expectEqual(expected, effects.items[1].save_default.effort);
+}
+
+test "/model keeps adjusted controls after a whitespace edit" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer state.deinit();
+    try openPicker(&state, &both);
+    var draft = try typeText(&state, "/model gpt-6-luna");
+    _ = try step(&state, .{ .picker_action = .{ .action = .higher_effort, .draft = draft } });
+    _ = try step(&state, .{ .picker_action = .{ .action = .next_sign_in, .draft = draft } });
+    const adjusted = state.picker.?.choice.?.row;
+    try std.testing.expect(adjusted.effort != null);
+    try std.testing.expectEqual(Provider.openai, adjusted.provider);
+    draft = try typeText(&state, "/model gpt-6-luna ");
+    const effects = try submit(&state, draft);
+    try std.testing.expectEqual(adjusted.effort, effects.items[1].save_default.effort);
+    try std.testing.expectEqual(adjusted.provider, effects.items[1].save_default.provider);
+}
+
+test "/model explicit effort overrides an adjusted control" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer state.deinit();
+    try openPicker(&state, &both);
+    var draft = try typeText(&state, "/model gpt-6-luna");
+    _ = try step(&state, .{ .picker_action = .{ .action = .higher_effort, .draft = draft } });
+    _ = try step(&state, .{ .picker_action = .{ .action = .next_sign_in, .draft = draft } });
+    try std.testing.expectEqual(@as(?ReasoningEffort, .medium), state.picker.?.choice.?.row.effort);
+    draft = try typeText(&state, "/model gpt-6-luna high");
+    const effects = try submit(&state, draft);
+    try std.testing.expectEqual(@as(?ReasoningEffort, .high), effects.items[1].save_default.effort);
+    try std.testing.expectEqual(Provider.openai, effects.items[1].save_default.provider);
+}
+
+test "/model explicit sign-in overrides an adjusted control" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer state.deinit();
+    try openPicker(&state, &both);
+    var draft = try typeText(&state, "/model gpt-6-luna");
+    _ = try step(&state, .{ .picker_action = .{ .action = .higher_effort, .draft = draft } });
+    _ = try step(&state, .{ .picker_action = .{ .action = .next_sign_in, .draft = draft } });
+    draft = try typeText(&state, "/model gpt-6-luna chatgpt");
+    const effects = try submit(&state, draft);
+    try std.testing.expectEqual(@as(?ReasoningEffort, .medium), effects.items[1].save_default.effort);
+    try std.testing.expectEqual(Provider.codex, effects.items[1].save_default.provider);
 }
 
 test "with both sign-ins, one Enter saves the selected sign-in and Escape closes the picker" {
