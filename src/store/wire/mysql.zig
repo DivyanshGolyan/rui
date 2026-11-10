@@ -1107,15 +1107,46 @@ test "malformed results are refused" {
     client.state = .rows;
     try std.testing.expectEqual(Event.row, (try readOne(&client, "\x02\x00\x00\x01\x05ab")).event.?);
     try std.testing.expectError(error.ProtocolViolation, readOne(&client, "\x05ab"));
-    // A row with bytes after its last value is refused at that value's
-    // length, before any of its bytes, however many of them have arrived.
-    for ([_][]const u8{ "\x01ab", "\x01a", "\x01" }) |rest| {
-        client = try querying();
-        client.column_count = 1;
+}
+
+test "the last value of a row ends its packet, or the row is refused before that value" {
+    // Two columns, the first "x". `refused_at` is the offset of the last
+    // value's first byte, where a packet it does not end is refused.
+    const cases = [_]struct { payload: []const u8, refused_at: ?usize }{
+        .{ .payload = "\x01x\xfb", .refused_at = null },
+        .{ .payload = "\x01x\xfbz", .refused_at = 6 },
+        .{ .payload = "\x01x\x00", .refused_at = null },
+        .{ .payload = "\x01x\x00z", .refused_at = 6 },
+        .{ .payload = "\x01x\x02ab", .refused_at = null },
+        .{ .payload = "\x01x\x01ab", .refused_at = 6 },
+    };
+    for (cases) |case| for ([_]bool{ false, true }) |split| {
+        var stream: [16]u8 = undefined;
+        stream[0..4].* = .{ @intCast(case.payload.len), 0, 0, 1 };
+        @memcpy(stream[4..][0..case.payload.len], case.payload);
+        const in = stream[0 .. 4 + case.payload.len];
+        var client = try querying();
+        client.column_count = 2;
         client.state = .rows;
-        _ = try readOne(&client, "\x03\x00\x00\x01\x01ab");
-        try std.testing.expectError(error.ProtocolViolation, readOne(&client, rest));
-    }
+        // Whole: everything left at once. Split: one more byte whenever the
+        // client needs more.
+        var at: usize = 0;
+        var end: usize = if (split) 1 else in.len;
+        const refused_at: ?usize = while (at < in.len) {
+            const step = readOne(&client, in[at..end]) catch |err| {
+                try std.testing.expectEqual(error.ProtocolViolation, err);
+                break at;
+            };
+            if (step.consumed == 0) {
+                // Waiting for bytes the row does not have.
+                if (end == in.len) return error.TestUnexpectedResult;
+                end += 1;
+            } else at += step.consumed;
+            if (!split) end = in.len else end = @max(end, at + 1);
+        } else null;
+        try std.testing.expectEqual(case.refused_at, refused_at);
+        if (refused_at == null) try std.testing.expect(client.state == .rows);
+    };
 }
 
 test "a query that needs a continuation packet is refused" {
