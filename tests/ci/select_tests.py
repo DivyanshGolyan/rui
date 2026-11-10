@@ -700,6 +700,9 @@ def select(paths, phase, available, graph=None, contents=None):
         if path in ("src/client.zig", "src/ResponseTiming.zig"):
             targets.add("test-full")  # Response wait/inactivity owner.
             native_targets.add("test-full")
+    # The unit roots review runs on Linux, before `check` absorbs them: drafts
+    # run these too. Process fixtures among UNIT_ROOTS keep their own rules.
+    unit_roots = targets & ({"test"} | UNIT_ROOTS.keys()) - FIXTURES.keys()
     for checks in (targets, native_targets):
         if "test" in checks or {"test-native", "test-store"} <= checks:
             checks.difference_update({"test-native", "test-store"})
@@ -725,12 +728,15 @@ def select(paths, phase, available, graph=None, contents=None):
         reasons.add("Upgrade, installer or Store-format path: PR runs the previous installed-release upgrade")
     if phase == "development":
         # Development does not replace final boundary/native acceptance, but
-        # keeps each matched live rule's own targets (`LIVE_RULES`).
-        targets = ({"test-logic"} | live_targets |
+        # keeps the Linux unit roots the change reaches and each matched live
+        # rule's own targets (`LIVE_RULES`). No fixture, long suite or Mac.
+        targets = ({"test-logic"} | unit_roots | live_targets |
                    ({"upgrade-integration"} if any(matches(path, UPGRADE_PATHS) for path in paths) else set()) |
                    ({"installer-integration"} if any(matches(path, INSTALLER_PATHS) for path in paths) else set())
                    if targets else set())
         native_targets = set()
+        if {"test-native", "test-store"} <= targets:
+            targets.add("test")
     if "test" in targets:
         targets.difference_update({"test-native", "test-store"})
     for reason, served_by in live_reasons:
