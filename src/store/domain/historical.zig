@@ -191,12 +191,23 @@ pub const HistoricalView = struct {
     entries: [entry_batch]HistoricalEntry = undefined,
     entries_next: usize = 0,
     entries_end: usize = 0,
+    /// After this position the Session has no further ordinary entry
+    /// below the admission: a ranged read came back short. History there
+    /// never changes, so the walk's end costs no round.
+    entries_done_after: ?u64 = null,
+    /// What the entry batch holds beyond its entries, on the heap for the
+    /// view's life; the first entry step allocates it.
+    page: ?*Page = null,
+    /// Open readers that borrow the page's bytes, which are then only
+    /// added to.
+    inline_readers: usize = 0,
     /// The output item whose parts `nextOutputPart` serves.
     output_parts: ?OutputPartCursor = null,
 
     const entry_batch = 16;
 
     const OutputPartCursor = struct {
+        position: u64,
         operation_id: u64,
         item_ordinal: u64,
         kind: OutputItemKind,
@@ -266,6 +277,7 @@ pub const HistoricalView = struct {
         std.debug.assert(self.active and self.outputs_validated and self.active_tool_group_source_id == null);
         if (bytes_left.* == 0 or items_left.* == 0) return .pending;
         items_left.* -= 1;
+        try self.allocatePage();
         // An Operation entry's declaration depends on the selected base.
         _ = try self.coverage();
         return readHistoricalEntry(self.store, self, after_position) catch |err| switch (err) {
@@ -402,12 +414,13 @@ pub const HistoricalView = struct {
     /// follow from `nextOutputPart` until it returns null.
     pub fn openOutput(self: *HistoricalView, position: u64) !HistoricalOutput {
         std.debug.assert(self.active and self.output_parts == null);
-        return readHistoricalOutput(self.store, self, position);
+        return outputAt(self, position) catch |err| store_core.fence(self.store, err);
     }
 
     pub fn nextOutputPart(self: *HistoricalView) !?HistoricalPart {
         std.debug.assert(self.active and self.output_parts != null);
-        return readHistoricalPart(self.store, self);
+        if (partsExhausted(self)) try readHistoricalParts(self.store, self);
+        return nextPart(self) catch |err| store_core.fence(self.store, err);
     }
 
     pub fn nextToolResult(self: *HistoricalView) !?HistoricalToolResult {
@@ -428,11 +441,40 @@ pub const HistoricalView = struct {
         out.reader.open(location);
         out.reader.first = first;
         out.reader.check.verified = reference.verified or reference.text_start != null;
+        if (self.pageBytes(reference)) |bytes| {
+            out.reader.inline_bytes = bytes;
+            self.inline_readers += 1;
+        }
         self.readers += 1;
+    }
+
+    /// Once, outside Store access. Raw: a read fills what it serves
+    /// before any of it is used; create would first write 0xAA over all
+    /// of it in ReleaseSafe.
+    fn allocatePage(self: *HistoricalView) error{OutOfMemory}!void {
+        if (self.page != null) return;
+        const bytes = std.heap.c_allocator.rawAlloc(@sizeOf(Page), .of(Page), @returnAddress()) orelse return error.OutOfMemory;
+        const page: *Page = @ptrCast(@alignCast(bytes));
+        page.items_end = 0;
+        page.parts_next = 0;
+        page.parts_end = 0;
+        page.parts_complete = true;
+        page.last = 0;
+        page.count = 0;
+        self.page = page;
+    }
+
+    /// The whole bytes of `reference`'s content when the page holds them.
+    fn pageBytes(self: *HistoricalView, reference: HistoricalContent) ?[]const u8 {
+        const page = self.page orelse return null;
+        const whole = if (reference.text_start != null) self.output_parts.?.text.?.length else reference.length;
+        return page.find(@intCast(reference.content_id), whole);
     }
 
     pub fn close(self: *HistoricalView) void {
         std.debug.assert(self.active and self.readers == 0);
+        if (self.page) |page| std.heap.c_allocator.rawFree(std.mem.asBytes(page), .of(Page), @returnAddress());
+        self.page = null;
         self.active = false;
     }
 
@@ -512,6 +554,7 @@ pub const HistoricalReader = struct {
 
     pub fn close(self: *HistoricalReader) void {
         std.debug.assert(self.usable());
+        if (self.reader.inline_bytes != null) self.view.inline_readers -= 1;
         self.reader.close();
         self.view.readers -= 1;
         self.active = false;
@@ -733,8 +776,12 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
     row.workspace = &out.workspace;
     var found: store_access.Found = undefined;
     a.readInto(historical_settings, .{ .operation = view.binding.operation_id }, &row, &found);
+    // The output check's boundary rides this round.
+    var boundary: reads_domain.First(output_boundary.Row) = .{};
+    if (view.output_frontier == null) a.readEach(output_boundary, .{ .operation = view.binding.operation_id }, 1, &boundary);
     try store_access.runAs(a, error.CorruptStore);
     if (!found.get() or !row.catalogs_consistent) return error.CorruptStore;
+    if (view.output_frontier == null) try keepOutputBoundary(view, &(boundary.row orelse return error.CorruptStore));
     if (row.member_count > tool_catalog.max_tools or row.provider_count > row.member_count) return error.CorruptStore;
     view.tool_set_id = row.tool_set_id.get();
     view.tool_count = row.member_count;
@@ -916,8 +963,9 @@ const output_boundary = rsql.Read(.{
 // The primary key makes ordinals unique, so the count, the first and last
 // ordinal and one position offset prove ordinals 0..count-1 at consecutive
 // positions, all after admission and below the boundary.
-/// The next accepted producing Operation after cursor (?3, ?5), from the
-/// frontier ?2 to the boundary ?4, with whether its items are complete.
+/// The next accepted producing Operations after cursor (?3, ?5), from the
+/// frontier ?2 to the boundary ?4, each with whether its items are
+/// complete: one page of them, so a step's work stays bounded.
 const output_source = rsql.Read(.{
     .sql = "SELECT source.operation_id,source.admission_position,source.output_item_count,source.purpose," ++
         "(SELECT count(*)=source.output_item_count AND coalesce(min(item.item_ordinal)=0 AND max(item.item_ordinal)=count(*)-1 " ++
@@ -928,13 +976,50 @@ const output_source = rsql.Read(.{
         "FROM model_operation current JOIN model_operation source @index(model_operation_context_history) ON source.session_ref=current.session_ref " ++
         "WHERE current.operation_id=?1 AND source.admission_position>=?2 AND (source.admission_position>?3 OR (source.admission_position=?3 AND source.operation_id>?5)) " ++
         "AND source.admission_position<?4 AND " ++ store_schema.oneOf("source.resolution_code", &accepted_resolutions) ++ " " ++
-        "ORDER BY source.admission_position,source.operation_id LIMIT 1",
+        "ORDER BY source.admission_position,source.operation_id LIMIT " ++ std.fmt.comptimePrint("{d}", .{output_source_page}),
     .Args = struct { operation: u64, from: u64, after_position: u64, boundary: u64, after_operation: u64 },
     .Row = struct { operation_id: rsql.Positive, admission_position: rsql.Positive, output_item_count: u64, purpose: u8, complete: bool },
-    .cardinality = .optional,
+    .cardinality = .each,
 });
 
-// Each step checks one producing Operation and its items in one
+/// The producing Operations one output check step reads.
+const output_source_page = 64;
+
+/// Checks a page of producing Operations and keeps the last as the cursor.
+const OutputSources = struct {
+    view: *HistoricalView,
+    rows: u8 = 0,
+    corrupt: bool = false,
+
+    pub fn visit(page: *OutputSources, source: *const output_source.Row) bool {
+        page.rows += 1;
+        page.view.output_cursor_id = source.operation_id.get();
+        page.view.output_cursor = source.admission_position.get();
+        if ((source.purpose == 1 and source.output_item_count == 0) or !source.complete) {
+            page.corrupt = true;
+            return false;
+        }
+        return true;
+    }
+};
+
+fn keepOutputBoundary(view: *HistoricalView, row: *const output_boundary.Row) error{CorruptStore}!void {
+    view.output_boundary = row.admission_position.get();
+    view.selected_base = if (row.operation_id) |id| id.get() else 0;
+    view.output_frontier = row.frontier;
+    const base_floor: u64 = if (row.base_floor) |floor| floor.get() else 0;
+    const own_floor: u64 = if (row.own_floor) |floor| floor.get() else 0;
+    // A compaction keeps its base's floor or goes deeper.
+    if (own_floor != 0 and own_floor < base_floor) return error.CorruptStore;
+    view.floor = .{
+        .position = @max(own_floor, base_floor),
+        .first_message = row.first_message,
+        .own = own_floor > base_floor,
+    };
+}
+
+// The settings round reads the boundary, so the first step here is a page.
+// Each step checks a page of producing Operations and their items in one
 // statement. Its own item count detects even a completely missing output.
 // No statement or lock survives this one step. A failed step is
 // `CorruptStore`, main's answer for it.
@@ -944,23 +1029,11 @@ fn checkOutputsStep(a: *ReadAccess, view: *HistoricalView) !bool {
         var first: reads_domain.First(output_boundary.Row) = .{};
         a.readEach(output_boundary, .{ .operation = view.binding.operation_id }, 1, &first);
         try store_access.runAs(a, error.CorruptStore);
-        const row = first.row orelse return error.CorruptStore;
-        view.output_boundary = row.admission_position.get();
-        view.selected_base = if (row.operation_id) |id| id.get() else 0;
-        view.output_frontier = row.frontier;
-        const base_floor: u64 = if (row.base_floor) |floor| floor.get() else 0;
-        const own_floor: u64 = if (row.own_floor) |floor| floor.get() else 0;
-        // A compaction keeps its base's floor or goes deeper.
-        if (own_floor != 0 and own_floor < base_floor) return error.CorruptStore;
-        view.floor = .{
-            .position = @max(own_floor, base_floor),
-            .first_message = row.first_message,
-            .own = own_floor > base_floor,
-        };
+        try keepOutputBoundary(view, &(first.row orelse return error.CorruptStore));
         return false;
     }
-    var found: output_source.Result = undefined;
-    a.read(output_source, .{
+    var page: OutputSources = .{ .view = view };
+    a.readEach(output_source, .{
         .operation = view.binding.operation_id,
         // SQLite seeks the index only on this bound, never on the
         // cursor's OR, so it carries the cursor; each step then starts at
@@ -969,17 +1042,12 @@ fn checkOutputsStep(a: *ReadAccess, view: *HistoricalView) !bool {
         .after_position = view.output_cursor,
         .boundary = view.output_boundary,
         .after_operation = view.output_cursor_id,
-    }, &found);
+    }, output_source_page, &page);
     try store_access.runAs(a, error.CorruptStore);
-    const source = found orelse {
-        view.outputs_validated = true;
-        return true;
-    };
-    view.output_cursor_id = source.operation_id.get();
-    view.output_cursor = source.admission_position.get();
-    if (source.purpose == 1 and source.output_item_count == 0) return error.CorruptStore;
-    if (!source.complete) return error.CorruptStore;
-    return false;
+    if (page.corrupt) return error.CorruptStore;
+    // A short page was the last: nothing accepted lies past it.
+    view.outputs_validated = page.rows < output_source_page;
+    return view.outputs_validated;
 }
 
 /// The served entry lives in the view: in its read-ahead, its next tool
@@ -1019,13 +1087,20 @@ fn entryAfter(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*con
     return ordinary;
 }
 
+/// The output items a view serves: `item`'s Operation `owner` is unknown,
+/// above the floor, or the selected base. Every read of a view's items
+/// selects by it, so a page holds what the entries name.
+fn servedItemSql(comptime floor: []const u8, comptime base: []const u8) []const u8 {
+    return "(owner.admission_position IS NULL OR owner.admission_position>" ++ floor ++ " OR owner.operation_id=" ++ base ++ ")";
+}
+
 /// The host inputs and output items after ?2 below the Operation's
 /// admission, the first `HistoricalView.entry_batch` of them in position
 /// order.
 const historical_entries = rsql.Read(.{
     .sql = "SELECT e.session_position,CASE WHEN e.entry_kind=4 THEN 5 ELSE e.entry_kind END AS entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AS consistent," ++
         "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender,NULL AS effort," ++
-        "NULL AS tool_set_id,NULL AS declares " ++
+        "NULL AS tool_set_id,NULL AS declares," ++ pageBytesSql("content", "bytes") ++ " " ++
         "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
         "LEFT JOIN content ON content.content_id=e.content_id " ++
         "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
@@ -1037,18 +1112,18 @@ const historical_entries = rsql.Read(.{
         "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
         "AND owner.admission_position<current.admission_position AND " ++
         "(item.item_kind!=3 OR " ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ") AND " ++
-        "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call tool_call WHERE tool_call.operation_id=owner.operation_id)),NULL,NULL,NULL,NULL " ++
+        "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call tool_call WHERE tool_call.operation_id=owner.operation_id)),NULL,NULL,NULL,NULL,NULL " ++
         "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
         "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
         "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
         "LEFT JOIN session_revision r ON r.session_ref=owner.session_ref AND r.revision=owner.settings_revision " ++
         "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position " ++
-        "AND (owner.admission_position IS NULL OR owner.admission_position>?3 OR owner.operation_id=?5) UNION ALL " ++
+        "AND " ++ servedItemSql("?3", "?5") ++ " UNION ALL " ++
         // Every earlier Operation of the Session above the floor, whatever
         // its outcome: its request carried its own boundary, so later ones do too.
         // With each, its tool set and whether it declares any tool.
         "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,earlier.reasoning_effort,coalesce(revision.loaded_tool_set_id,revision.tool_set_id)," ++
-        "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("coalesce(revision.loaded_tool_set_id,revision.tool_set_id)", "earlier.admission_position", "?6") ++ ") " ++
+        "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("coalesce(revision.loaded_tool_set_id,revision.tool_set_id)", "earlier.admission_position", "?6") ++ "),NULL " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++
         "WHERE current.operation_id=?1 AND earlier.admission_position>?2 AND earlier.admission_position<current.admission_position " ++
@@ -1071,6 +1146,7 @@ const historical_entries = rsql.Read(.{
         effort: ?model_capability.ReasoningEffort,
         tool_set_id: ?rsql.Positive,
         declares: ?bool,
+        bytes: ?Page.Bytes,
     },
     .cardinality = .each,
     .compound = true,
@@ -1105,6 +1181,8 @@ fn declared_members_where(comptime set: []const u8, comptime position: []const u
 /// its failure is the round's answer.
 const EntryBatch = struct {
     view: *HistoricalView,
+    /// The page's row, which the read decodes into.
+    decoded: *historical_entries.Row,
     failure: ?error{CorruptStore} = null,
 
     pub fn visit(batch: *EntryBatch, row: *const historical_entries.Row) bool {
@@ -1114,6 +1192,7 @@ const EntryBatch = struct {
             return false;
         };
         view.entries_end += 1;
+        view.page.?.keep(row.content_id, &row.bytes);
         return true;
     }
 };
@@ -1133,10 +1212,15 @@ fn nextOrdinaryHistoricalEntry(a: *ReadAccess, view: *HistoricalView, after_posi
     while (view.entries_next < view.entries_end) : (view.entries_next += 1) {
         if (view.entries[view.entries_next].position > after_position) return &view.entries[view.entries_next];
     }
+    if (view.entries_done_after) |last| if (after_position >= last) return null;
     view.entries_next = 0;
     view.entries_end = 0;
+    view.entries_done_after = null;
     errdefer view.entries_end = 0;
-    var batch: EntryBatch = .{ .view = view };
+    const page = view.page.?;
+    // A reader that borrows the page's bytes keeps them where they are.
+    if (view.inline_readers == 0) page.count = 0;
+    var batch: EntryBatch = .{ .view = view, .decoded = &page.entry_row };
     var sources: historical_catalog_sources.Row = undefined;
     a.read(historical_catalog_sources, .{ .operation = view.binding.operation_id }, &sources);
     a.readEach(historical_entries, .{
@@ -1150,7 +1234,288 @@ fn nextOrdinaryHistoricalEntry(a: *ReadAccess, view: *HistoricalView, after_posi
     try store_access.runAs(a, error.HistoricalEntryReadFailed);
     if (!sources.consistent) return error.CorruptStore;
     if (batch.failure) |err| return err;
-    return if (view.entries_end == 0) null else &view.entries[0];
+    if (view.entries_end < HistoricalView.entry_batch)
+        view.entries_done_after = if (view.entries_end == 0) after_position else view.entries[view.entries_end - 1].position;
+    if (view.entries_end == 0) return null;
+    try loadPage(a, view);
+    return &view.entries[0];
+}
+
+/// The content row columns a page row carries for one of its contents,
+/// NULL when the row is missing, and after them the content's bytes when
+/// it is small.
+fn pageContentSql(comptime table: []const u8, comptime name: []const u8) []const u8 {
+    return table ++ ".byte_length AS " ++ name ++ "_length," ++ table ++ ".digest AS " ++ name ++ "_digest," ++ table ++ ".private AS " ++ name ++ "_private," ++
+        pageBytesSql(table, name ++ "_bytes");
+}
+
+/// The bytes of content row `table` when it is small enough for the page
+/// to hold whole, else NULL: a larger content is read through its reader.
+fn pageBytesSql(comptime table: []const u8, comptime name: []const u8) []const u8 {
+    return "CASE WHEN " ++ table ++ ".byte_length BETWEEN 1 AND " ++ std.fmt.comptimePrint("{d}", .{Page.inline_bytes}) ++ " THEN @payload(" ++ table ++ ") END AS " ++ name;
+}
+
+/// The output items the view serves at positions ?2 to ?3, in order, each
+/// with its call's fields and, for every content it names, the metadata and
+/// the bytes of a small one.
+const page_items = rsql.Read(.{
+    .sql = "SELECT item.session_position,item.operation_id,item.item_ordinal,item.item_kind,item.phase,item.replay_omits_reasoning_text,item.part_count," ++
+        "item.extras_content_id," ++ pageContentSql("bag", "bag") ++ ",item.message_content_id," ++ pageContentSql("message", "message") ++ "," ++
+        "tool_call.name_content_id," ++ pageContentSql("name", "name") ++ ",tool_call.call_id_content_id," ++ pageContentSql("call_id", "call_id") ++ "," ++
+        "tool_call.arguments_content_id," ++ pageContentSql("arguments", "arguments") ++ " " ++
+        "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
+        "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
+        "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=item.operation_id AND tool_call.item_ordinal=item.item_ordinal " ++
+        "LEFT JOIN content bag ON bag.content_id=item.extras_content_id " ++
+        "LEFT JOIN content message ON message.content_id=item.message_content_id " ++
+        "LEFT JOIN content name ON name.content_id=tool_call.name_content_id " ++
+        "LEFT JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
+        "LEFT JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
+        "WHERE current.operation_id=?1 AND item.session_position>=?2 AND item.session_position<=?3 AND " ++ servedItemSql("?4", "?5") ++
+        " ORDER BY item.session_position",
+    .Args = struct { operation: u64, first: u64, last: u64, floor: u64, base: u64 },
+    .Row = struct {
+        session_position: rsql.Positive,
+        operation_id: rsql.Positive,
+        item_ordinal: u64,
+        item_kind: u8,
+        phase: u8,
+        replay_omits_reasoning_text: bool,
+        part_count: u64,
+        extras_content_id: rsql.Positive,
+        bag_length: ?u64,
+        bag_digest: ?[32]u8,
+        bag_private: ?bool,
+        bag_bytes: ?Page.Bytes,
+        message_content_id: ?rsql.Positive,
+        message_length: ?u64,
+        message_digest: ?[32]u8,
+        message_private: ?bool,
+        message_bytes: ?Page.Bytes,
+        name_content_id: ?rsql.Positive,
+        name_length: ?u64,
+        name_digest: ?[32]u8,
+        name_private: ?bool,
+        name_bytes: ?Page.Bytes,
+        call_id_content_id: ?rsql.Positive,
+        call_id_length: ?u64,
+        call_id_digest: ?[32]u8,
+        call_id_private: ?bool,
+        call_id_bytes: ?Page.Bytes,
+        arguments_content_id: ?rsql.Positive,
+        arguments_length: ?u64,
+        arguments_digest: ?[32]u8,
+        arguments_private: ?bool,
+        arguments_bytes: ?Page.Bytes,
+    },
+    .cardinality = .each,
+});
+
+/// The parts of the served items from part ?3 of the item at ?2 on, in item
+/// then part order, each with the metadata of its own text and its bag
+/// and the bytes of a small one.
+const page_parts = rsql.Read(.{
+    .sql = "SELECT item.session_position,part.part_ordinal,part.part_array,part.part_kind,part.text_length,part.text_content_id," ++
+        pageContentSql("own", "own") ++ ",part.extras_content_id," ++ pageContentSql("bag", "bag") ++ " " ++
+        "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
+        "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
+        "JOIN model_output_part part ON part.operation_id=item.operation_id AND part.item_ordinal=item.item_ordinal " ++
+        "LEFT JOIN content own ON own.content_id=part.text_content_id " ++
+        "LEFT JOIN content bag ON bag.content_id=part.extras_content_id " ++
+        "WHERE current.operation_id=?1 AND item.session_position>=?2 AND item.session_position<=?4 AND " ++ servedItemSql("?5", "?6") ++ " " ++
+        "AND (item.session_position>?2 OR part.part_ordinal>=?3) ORDER BY item.session_position,part.part_ordinal " ++
+        std.fmt.comptimePrint("LIMIT {d}", .{Page.part_batch}),
+    .Args = struct { operation: u64, first: u64, part: u64, last: u64, floor: u64, base: u64 },
+    .Row = struct {
+        session_position: rsql.Positive,
+        part_ordinal: u64,
+        part_array: u8,
+        part_kind: u8,
+        text_length: ?u64,
+        text_content_id: ?rsql.Positive,
+        own_length: ?u64,
+        own_digest: ?[32]u8,
+        own_private: ?bool,
+        own_bytes: ?Page.Bytes,
+        extras_content_id: rsql.Positive,
+        bag_length: ?u64,
+        bag_digest: ?[32]u8,
+        bag_private: ?bool,
+        bag_bytes: ?Page.Bytes,
+    },
+    .cardinality = .each,
+});
+
+/// What one entry batch holds beyond its entries: its output items, their
+/// parts in order, and the whole bytes of every small content the batch
+/// names, each read with the row that names it. History below the
+/// admission never changes, so the page is plain values; content rows
+/// never change either, so bytes kept under an id are that content's
+/// whichever row brought them.
+const Page = struct {
+    /// The rows the reads decode into (`Access.readEach`), bytes and all.
+    entry_row: historical_entries.Row,
+    item_row: page_items.Row,
+    part_row: page_parts.Row,
+    items: [HistoricalView.entry_batch]Item,
+    items_end: usize,
+    parts: [part_batch]Part,
+    parts_next: usize,
+    parts_end: usize,
+    /// Whether `parts` reaches the batch's last part.
+    parts_complete: bool,
+    /// The batch's last position.
+    last: u64,
+    /// The kept contents' ids, and where each one's bytes end in `bytes`.
+    ids: [max_contents]u64,
+    ends: [max_contents]u32,
+    count: usize,
+    bytes: [arena_bytes]u8,
+
+    /// A content at most this long rides the row that names it.
+    const inline_bytes = 16 * 1024;
+    const Bytes = rsql.Blob(inline_bytes);
+    const part_batch = 32;
+    /// One per entry, five per item and two per part.
+    const max_contents = HistoricalView.entry_batch * 6 + part_batch * 2;
+    const arena_bytes = 128 * 1024;
+
+    /// An item row without its contents' bytes.
+    const Item = struct {
+        session_position: rsql.Positive,
+        operation_id: rsql.Positive,
+        item_ordinal: u64,
+        item_kind: u8,
+        phase: u8,
+        replay_omits_reasoning_text: bool,
+        part_count: u64,
+        extras_content_id: rsql.Positive,
+        bag_length: ?u64,
+        bag_digest: ?[32]u8,
+        bag_private: ?bool,
+        message_content_id: ?rsql.Positive,
+        message_length: ?u64,
+        message_digest: ?[32]u8,
+        message_private: ?bool,
+        name_content_id: ?rsql.Positive,
+        name_length: ?u64,
+        name_digest: ?[32]u8,
+        name_private: ?bool,
+        call_id_content_id: ?rsql.Positive,
+        call_id_length: ?u64,
+        call_id_digest: ?[32]u8,
+        call_id_private: ?bool,
+        arguments_content_id: ?rsql.Positive,
+        arguments_length: ?u64,
+        arguments_digest: ?[32]u8,
+        arguments_private: ?bool,
+    };
+
+    /// A part row without its contents' bytes.
+    const Part = struct {
+        session_position: rsql.Positive,
+        part_ordinal: u64,
+        part_array: u8,
+        part_kind: u8,
+        text_length: ?u64,
+        text_content_id: ?rsql.Positive,
+        own_length: ?u64,
+        own_digest: ?[32]u8,
+        own_private: ?bool,
+        extras_content_id: rsql.Positive,
+        bag_length: ?u64,
+        bag_digest: ?[32]u8,
+        bag_private: ?bool,
+    };
+
+    /// Copies `row` without its bytes, which it keeps in the page.
+    fn store(page: *Page, row: anytype, out: anytype) void {
+        const columns = @typeInfo(@TypeOf(row.*)).@"struct";
+        const kept = @typeInfo(@TypeOf(out.*)).@"struct";
+        // Every column but the bytes has its field in `out`.
+        comptime {
+            var bytes: usize = 0;
+            for (columns.field_types) |Field| bytes += @intFromBool(Field == ?Bytes);
+            std.debug.assert(kept.field_names.len + bytes == columns.field_names.len);
+        }
+        inline for (kept.field_names) |name| @field(out, name) = @field(row, name);
+        inline for (columns.field_names, columns.field_types) |name, Field| if (Field == ?Bytes) {
+            const id = comptime if (std.mem.eql(u8, name, "bag_bytes")) "extras_content_id" else if (std.mem.eql(u8, name, "own_bytes")) "text_content_id" else name[0 .. name.len - "_bytes".len] ++ "_content_id";
+            page.keep(@field(row, id), &@field(row, name));
+        };
+    }
+
+    /// Keeps content `id`'s whole `bytes`, when the row brought them and
+    /// there is room: a content not kept is read through its reader.
+    fn keep(page: *Page, id: ?rsql.Positive, bytes: *const ?Bytes) void {
+        const content = (id orelse return).get();
+        const whole = if (bytes.*) |*value| value.slice() else return;
+        const start: usize = if (page.count == 0) 0 else page.ends[page.count - 1];
+        if (page.count == max_contents or whole.len > arena_bytes - start) return;
+        if (std.mem.findScalar(u64, page.ids[0..page.count], content) != null) return;
+        @memcpy(page.bytes[start..][0..whole.len], whole);
+        page.ids[page.count] = content;
+        page.ends[page.count] = @intCast(start + whole.len);
+        page.count += 1;
+    }
+
+    /// The bytes of content `id`, `length` long, if kept.
+    fn find(page: *const Page, id: u64, length: u64) ?[]const u8 {
+        const index = std.mem.findScalar(u64, page.ids[0..page.count], id) orelse return null;
+        const start: usize = if (index == 0) 0 else page.ends[index - 1];
+        const whole = page.bytes[start..page.ends[index]];
+        return if (whole.len == length) whole else null;
+    }
+
+    pub const Items = struct {
+        page: *Page,
+        decoded: *page_items.Row,
+        pub fn visit(items: *Items, row: *const page_items.Row) bool {
+            const page = items.page;
+            page.store(row, &page.items[page.items_end]);
+            page.items_end += 1;
+            return true;
+        }
+    };
+
+    pub const Parts = struct {
+        page: *Page,
+        decoded: *page_parts.Row,
+        pub fn visit(parts: *Parts, row: *const page_parts.Row) bool {
+            const page = parts.page;
+            page.store(row, &page.parts[page.parts_end]);
+            page.parts_end += 1;
+            return true;
+        }
+    };
+
+    /// Queues the parts read from part `part` of the item at `first`.
+    fn queueParts(page: *Page, a: *ReadAccess, view: *const HistoricalView, visitor: *Parts, first: u64, part: u64) void {
+        page.parts_next = 0;
+        page.parts_end = 0;
+        a.readEach(page_parts, .{ .operation = view.binding.operation_id, .first = first, .part = part, .last = page.last, .floor = view.floor.position, .base = view.selected_base }, part_batch, visitor);
+    }
+};
+
+/// Reads what the entry batch's output items hold, in one round: a batch
+/// with no output item reads nothing. A failed step is `CorruptStore`,
+/// main's answer for an item's reads.
+fn loadPage(a: *ReadAccess, view: *HistoricalView) !void {
+    const page = view.page.?;
+    page.items_end = 0;
+    page.parts_next = 0;
+    page.parts_end = 0;
+    page.parts_complete = true;
+    const first = for (view.entries[0..view.entries_end]) |*entry| {
+        if (entry.kind == .provider_output) break entry.position;
+    } else return;
+    page.last = view.entries[view.entries_end - 1].position;
+    var items: Page.Items = .{ .page = page, .decoded = &page.item_row };
+    var parts: Page.Parts = .{ .page = page, .decoded = &page.part_row };
+    a.readEach(page_items, .{ .operation = view.binding.operation_id, .first = first, .last = page.last, .floor = view.floor.position, .base = view.selected_base }, HistoricalView.entry_batch, &items);
+    page.queueParts(a, view, &parts, first, 0);
+    try store_access.runAs(a, error.CorruptStore);
+    page.parts_complete = page.parts_end < Page.part_batch;
 }
 
 fn historicalEntry(view: *HistoricalView, row: *const historical_entries.Row) error{CorruptStore}!HistoricalEntry {
@@ -1352,119 +1717,93 @@ fn readNextHistoricalToolGroup(a: *ReadAccess, view: *HistoricalView) !?Historic
     return error.HistoricalPending;
 }
 
-fn readHistoricalOutput(self: *Store, view: *HistoricalView, position: u64) !HistoricalOutput {
-    return self.queue().run(readHistoricalOutputHeld, .{ self, view, position });
+/// A page row's content metadata; a missing content row left it NULL.
+fn pageMetadata(length: ?u64, digest: ?[32]u8, private: ?bool) error{CorruptStore}!content_metadata.Row {
+    return .{
+        .byte_length = length orelse return error.CorruptStore,
+        .digest = digest orelse return error.CorruptStore,
+        .private = private orelse return error.CorruptStore,
+    };
 }
 
-fn readHistoricalOutputHeld(self: *Store, view: *HistoricalView, position: u64) !HistoricalOutput {
-    const entry = try store_core.enter(self, .none);
-    defer entry.release();
-    var access: ReadAccess = .open(&entry);
-    defer access.deinit();
-    return entry.finish(Ordinary.none, outputAt(&access, view, position));
-}
-
-/// The output item at ?2 in the Operation's Session, with its call's
-/// fields.
-const historical_output = rsql.Read(.{
-    .sql = "SELECT item.operation_id,item.item_ordinal,item.item_kind,item.phase,item.replay_omits_reasoning_text,item.extras_content_id," ++
-        "tool_call.name_content_id,tool_call.call_id_content_id,tool_call.arguments_content_id,item.part_count,item.message_content_id " ++
-        "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref AND item.session_position=?2 " ++
-        "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=item.operation_id AND tool_call.item_ordinal=item.item_ordinal " ++
-        "WHERE current.operation_id=?1",
-    .Args = struct { operation: u64, position: u64 },
-    .Row = struct {
-        operation_id: rsql.Positive,
-        item_ordinal: u64,
-        item_kind: u8,
-        phase: u8,
-        replay_omits_reasoning_text: bool,
-        extras_content_id: rsql.Positive,
-        name_content_id: ?rsql.Positive,
-        call_id_content_id: ?rsql.Positive,
-        arguments_content_id: ?rsql.Positive,
-        part_count: u64,
-        message_content_id: ?rsql.Positive,
-    },
-    .cardinality = .one,
-});
-
-/// Round 1 reads the item; round 2 the metadata of its message text, its
-/// call's three fields and its bag together. A failed step is
-/// `CorruptStore`, main's answer for both.
-fn outputAt(a: *ReadAccess, view: *HistoricalView, position: u64) !HistoricalOutput {
-    var row: historical_output.Row = undefined;
-    a.read(historical_output, .{ .operation = view.binding.operation_id, .position = position }, &row);
-    try store_access.runAs(a, error.CorruptStore);
+/// The output item at `position`, from the batch's page: its entry came
+/// from the same batch, so a missing row is `CorruptStore`.
+fn outputAt(view: *HistoricalView, position: u64) error{CorruptStore}!HistoricalOutput {
+    const page = view.page orelse return error.CorruptStore;
+    const row = for (page.items[0..page.items_end]) |*item| {
+        if (item.session_position.get() == position) break item;
+    } else return error.CorruptStore;
     const kind = std.enums.fromInt(OutputItemKind, row.item_kind) orelse return error.CorruptStore;
     const phase = std.enums.fromInt(output_format.NeutralPhase, row.phase) orelse return error.CorruptStore;
     if (row.part_count != 0 and kind != .reasoning and kind != .message) return error.CorruptStore;
     const has_call = row.name_content_id != null;
     if (has_call != (kind == .function_call)) return error.CorruptStore;
-    var call_ids: [3]u64 = undefined;
-    for (&call_ids, [3]?rsql.Positive{ row.name_content_id, row.call_id_content_id, row.arguments_content_id }) |*id, column| id.* = if (column) |value| value.get() else if (has_call) return error.CorruptStore else 0;
     if ((row.message_content_id != null) != (kind == .message)) return error.CorruptStore;
-    var text_row: content_metadata.Row = undefined;
-    var call_rows: [3]content_metadata.Row = undefined;
-    var bag_row: content_metadata.Row = undefined;
-    if (row.message_content_id) |id| a.read(content_metadata, .{ .content_id = id.get() }, &text_row);
-    if (has_call) for (&call_rows, call_ids) |*call_row, id| a.read(content_metadata, .{ .content_id = id }, call_row);
-    a.read(content_metadata, .{ .content_id = row.extras_content_id.get() }, &bag_row);
-    try store_access.runAs(a, error.CorruptStore);
     var text: ?HistoricalView.MessageText = null;
     if (row.message_content_id) |id| {
-        const content = try viewContent(view, id.get(), &text_row, false);
+        const content = try viewContent(view, id.get(), &try pageMetadata(row.message_length, row.message_digest, row.message_private), false);
         // Its parts' reads check a nonempty text; an empty one is
         // checked here.
         if (content.length == 0 and !std.mem.eql(u8, &content.digest, &content_string.digest(""))) return error.CorruptStore;
         text = .{ .content_id = content.content_id, .length = content.length, .digest = content.digest };
     }
     var call: ?[3]HistoricalContent = null;
-    if (has_call) {
-        var fields: [3]HistoricalContent = undefined;
-        for (&fields, call_ids, &call_rows) |*content, id, *call_row| content.* = try viewContent(view, id, call_row, false);
-        call = fields;
-    }
-    view.output_parts = .{ .operation_id = row.operation_id.get(), .item_ordinal = row.item_ordinal, .kind = kind, .count = row.part_count, .text = text };
+    if (has_call) call = .{
+        try viewContent(view, row.name_content_id.?.get(), &try pageMetadata(row.name_length, row.name_digest, row.name_private), false),
+        try viewContent(view, (row.call_id_content_id orelse return error.CorruptStore).get(), &try pageMetadata(row.call_id_length, row.call_id_digest, row.call_id_private), false),
+        try viewContent(view, (row.arguments_content_id orelse return error.CorruptStore).get(), &try pageMetadata(row.arguments_length, row.arguments_digest, row.arguments_private), false),
+    };
+    const bag = try viewBag(view, row.extras_content_id.get(), &try pageMetadata(row.bag_length, row.bag_digest, row.bag_private));
+    view.output_parts = .{ .position = position, .operation_id = row.operation_id.get(), .item_ordinal = row.item_ordinal, .kind = kind, .count = row.part_count, .text = text };
     return .{
         .kind = kind,
         .phase = phase,
         .omit_reasoning_text = row.replay_omits_reasoning_text,
-        .bag = try viewBag(view, row.extras_content_id.get(), &bag_row),
+        .bag = bag,
         .call = call,
     };
 }
 
-fn readHistoricalPart(self: *Store, view: *HistoricalView) !?HistoricalPart {
-    return self.queue().run(readHistoricalPartHeld, .{ self, view });
+/// Whether the open item's next part may lie past what `parts` holds:
+/// the page's parts are in item order, and items the request leaves out
+/// are passed over here.
+fn partsExhausted(view: *HistoricalView) bool {
+    const position = view.output_parts.?.position;
+    const page = view.page.?;
+    while (page.parts_next < page.parts_end and page.parts[page.parts_next].session_position.get() < position) page.parts_next += 1;
+    return page.parts_next == page.parts_end and !page.parts_complete;
 }
 
-fn readHistoricalPartHeld(self: *Store, view: *HistoricalView) !?HistoricalPart {
+fn readHistoricalParts(self: *Store, view: *HistoricalView) !void {
+    return self.queue().run(readHistoricalPartsHeld, .{ self, view });
+}
+
+fn readHistoricalPartsHeld(self: *Store, view: *HistoricalView) !void {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
     defer access.deinit();
-    return entry.finish(Ordinary.none, nextPart(&access, view));
+    return entry.finish(Ordinary.none, partsFrom(&access, view));
 }
 
-/// The open item's part at or after ordinal ?3.
-const historical_part = rsql.Read(.{
-    .sql = "SELECT part_ordinal,part_array,part_kind,text_length,text_content_id,extras_content_id FROM model_output_part " ++
-        "WHERE operation_id=?1 AND item_ordinal=?2 AND part_ordinal>=?3 ORDER BY part_ordinal LIMIT 1",
-    .Args = struct { operation: u64, item: u64, part: u64 },
-    .Row = struct { part_ordinal: u64, part_array: u8, part_kind: u8, text_length: ?u64, text_content_id: ?rsql.Positive, extras_content_id: rsql.Positive },
-    .cardinality = .optional,
-});
-
-/// Round 1 reads the part; round 2 the metadata of its own text and its
-/// bag together. A failed step is main's name: `HistoricalEntryReadFailed`
-/// for the part, `CorruptStore` for the metadata.
-fn nextPart(a: *ReadAccess, view: *HistoricalView) !?HistoricalPart {
+/// Refills `parts` from the open item's next part, in a round of its
+/// own. A failed step is `HistoricalEntryReadFailed`, main's name.
+fn partsFrom(a: *ReadAccess, view: *HistoricalView) !void {
     const cursor = &view.output_parts.?;
-    var found: historical_part.Result = undefined;
-    a.read(historical_part, .{ .operation = cursor.operation_id, .item = cursor.item_ordinal, .part = cursor.next }, &found);
+    const page = view.page.?;
+    var parts: Page.Parts = .{ .page = page, .decoded = &page.part_row };
+    page.queueParts(a, view, &parts, cursor.position, cursor.next);
     try store_access.runAs(a, error.HistoricalEntryReadFailed);
-    const row = found orelse {
+    page.parts_complete = page.parts_end < Page.part_batch;
+}
+
+/// The open item's next part, from the page (`partsExhausted` is false).
+fn nextPart(view: *HistoricalView) error{CorruptStore}!?HistoricalPart {
+    const cursor = &view.output_parts.?;
+    const page = view.page.?;
+    const row = if (page.parts_next < page.parts_end and page.parts[page.parts_next].session_position.get() == cursor.position)
+        &page.parts[page.parts_next]
+    else {
         // A part missing from the end changes what the model saw,
         // and the text parts cover the whole message text.
         if (cursor.next != cursor.count) return error.CorruptStore;
@@ -1476,13 +1815,6 @@ fn nextPart(a: *ReadAccess, view: *HistoricalView) !?HistoricalPart {
     const array = std.enums.fromInt(output_format.PartArray, row.part_array) orelse return error.CorruptStore;
     const kind = std.enums.fromInt(output_format.PartKind, row.part_kind) orelse return error.CorruptStore;
     if (!partFits(cursor.kind, array, kind)) return error.CorruptStore;
-    // Only a summary or reasoning text has a row of its own.
-    const own_text = kind == .summary_text or kind == .reasoning_text;
-    var text_row: content_metadata.Row = undefined;
-    var bag_row: content_metadata.Row = undefined;
-    if (own_text and row.text_length == null) if (row.text_content_id) |id| a.read(content_metadata, .{ .content_id = id.get() }, &text_row);
-    a.read(content_metadata, .{ .content_id = row.extras_content_id.get() }, &bag_row);
-    try store_access.runAs(a, error.CorruptStore);
     const text: ?HistoricalContent = switch (kind) {
         .opaque_block => if (row.text_length != null or row.text_content_id != null) return error.CorruptStore else null,
         .output_text, .refusal => ranged: {
@@ -1492,9 +1824,15 @@ fn nextPart(a: *ReadAccess, view: *HistoricalView) !?HistoricalPart {
             defer whole.next += length;
             break :ranged .{ .view = view, .content_id = whole.content_id, .length = length, .digest = whole.digest, .text_start = whole.next };
         },
-        .summary_text, .reasoning_text => if (row.text_length != null) return error.CorruptStore else try viewContent(view, (row.text_content_id orelse return error.CorruptStore).get(), &text_row, true),
+        // Only a summary or reasoning text has a row of its own.
+        .summary_text, .reasoning_text => if (row.text_length != null) return error.CorruptStore else try viewContent(
+            view,
+            (row.text_content_id orelse return error.CorruptStore).get(),
+            &try pageMetadata(row.own_length, row.own_digest, row.own_private),
+            true,
+        ),
     };
-    const bag = try viewBag(view, row.extras_content_id.get(), &bag_row);
+    const bag = try viewBag(view, row.extras_content_id.get(), &try pageMetadata(row.bag_length, row.bag_digest, row.bag_private));
     // An opaque block is all bag: at least its type.
     if (kind == .opaque_block and bag == null) return error.CorruptStore;
     // Each array's parts are contiguous, so the writer opens it once.
@@ -1504,6 +1842,7 @@ fn nextPart(a: *ReadAccess, view: *HistoricalView) !?HistoricalPart {
         cursor.array = array;
     }
     cursor.next += 1;
+    page.parts_next += 1;
     return .{ .array = array, .kind = kind, .text = text, .bag = bag };
 }
 

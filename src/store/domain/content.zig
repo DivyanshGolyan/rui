@@ -96,6 +96,10 @@ pub const ContentReader = struct {
     /// Where its reads begin: a message part's reader reads only its range,
     /// so read-ahead is sized to that range, not the whole row.
     first: u64 = 0,
+    /// The content's whole bytes, borrowed from an owner that already read
+    /// them and outlives this reader: its reads copy from here and enter
+    /// no Store.
+    inline_bytes: ?[]const u8 = null,
 
     /// Builds the reader where it lives. Needs no Store access.
     pub fn open(self: *ContentReader, location: ContentLocation) void {
@@ -103,14 +107,18 @@ pub const ContentReader = struct {
     }
 
     // Allocate outside Store access. Read-ahead is optional: allocation failure
-    // keeps the original bounded read path, not a canonical/Host fault. Small
-    // values read straight into the caller's window.
-    fn prepareRead(self: *ContentReader) void {
-        if (self.prefetch == null and self.reference.length - self.first > 1024 * 1024) {
+    // keeps the original bounded read path, not a canonical/Host fault. A
+    // value the caller's window holds whole reads straight into it; one that
+    // runs past it is read ahead, in a window no larger than what is left,
+    // so each later window is not a round of its own.
+    fn prepareRead(self: *ContentReader, start: u64, wanted: usize) void {
+        const left = self.reference.length - start;
+        if (self.prefetch == null and left > wanted) {
+            const size: usize = @intCast(@min(content_prefetch_bytes, left));
             // Raw: a read fills the window before any byte of it is used;
-            // alloc would first write 0xAA over all 128 KB in ReleaseSafe.
-            if (self.allocator.rawAlloc(content_prefetch_bytes, .of(u8), @returnAddress())) |bytes|
-                self.prefetch = bytes[0..content_prefetch_bytes];
+            // alloc would first write 0xAA over all of it in ReleaseSafe.
+            if (self.allocator.rawAlloc(size, .of(u8), @returnAddress())) |bytes|
+                self.prefetch = bytes[0..size];
         }
     }
 
@@ -315,8 +323,12 @@ fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destinatio
     if (destination.len > ContentReader.content_window_bytes) return error.WindowTooLarge;
     if (start > reader.reference.length) return error.RangeOutOfBounds;
     const wanted: usize = @intCast(@min(destination.len, reader.reference.length - start));
-    if (wanted != 0) reader.prepareRead();
-    try self.queue().run(readOwnedContentHeld, .{ self, reader, start, destination[0..wanted] });
+    if (reader.inline_bytes) |bytes| {
+        @memcpy(destination[0..wanted], bytes[@intCast(start)..][0..wanted]);
+    } else {
+        if (wanted != 0) reader.prepareRead(start, wanted);
+        try self.queue().run(readOwnedContentHeld, .{ self, reader, start, destination[0..wanted] });
+    }
     if (@import("builtin").is_test) _ = self.testing_content_work.read.fetchAdd(wanted, .monotonic);
     return wanted;
 }

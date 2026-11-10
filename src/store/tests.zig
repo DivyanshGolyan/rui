@@ -7469,6 +7469,275 @@ fn nextTestingItem(view: *HistoricalView, after: u64) !?HistoricalEntry {
     return null;
 }
 
+/// The rounds and content rounds `store` took since `start`.
+const ViewRounds = struct {
+    store: *Store,
+    rounds: u16,
+    content_rounds: u16,
+
+    fn start(store: *Store) ViewRounds {
+        return .{ .store = store, .rounds = store.testing_content_work.rounds, .content_rounds = store.testing_content_work.content_rounds };
+    }
+
+    fn taken(self: ViewRounds) struct { rounds: u16, content_rounds: u16 } {
+        return .{ .rounds = self.store.testing_content_work.rounds - self.rounds, .content_rounds = self.store.testing_content_work.content_rounds - self.content_rounds };
+    }
+};
+
+/// A message item whose text is `count` output_text parts, part `index`
+/// reading `p<index>;`, written into `buffer`; `answer` gets the text.
+fn manyPartMessage(buffer: []u8, answer: []u8, comptime count: usize) !struct { item: []const u8, answer: []const u8 } {
+    var item = std.Io.Writer.fixed(buffer);
+    var text = std.Io.Writer.fixed(answer);
+    try item.writeAll("{\"type\":\"message\",\"id\":\"many\",\"role\":\"assistant\",\"content\":[");
+    for (0..count) |index| {
+        if (index != 0) try item.writeByte(',');
+        try item.print("{{\"type\":\"output_text\",\"text\":\"p{d};\"}}", .{index});
+        try text.print("p{d};", .{index});
+    }
+    try item.writeAll("]}");
+    return .{ .item = item.buffered(), .answer = text.buffered() };
+}
+
+test "a view's page holds the outputs its entries name under no floor, a deeper floor and an inherited one" {
+    try store_testing.forEachEngine(struct {
+        /// The view's entries in order, each rendered and joined by `;`.
+        fn walk(storage: *Store, binding: AttemptBinding, buffer: []u8) ![]const u8 {
+            var view: HistoricalView = undefined;
+            _ = try storage.openHistoricalView(binding, &view);
+            defer view.close();
+            var out = std.Io.Writer.fixed(buffer);
+            var cursor: TestingHistoryCursor = .{};
+            var rendered: [256]u8 = undefined;
+            while (try cursor.next(&view)) |entry| {
+                if (entry.kind == .tool_results) continue;
+                try out.print("{s};", .{try renderTestingEntry(&view, entry, &rendered)});
+            }
+            return out.buffered();
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "floor-page-config");
+            try submitTestMessage(&storage, &tmp, "floor-page-one", "floor-page-one", session.slice(), "first");
+            const overflowed = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try storage.settleModelAttemptFailure(overflowed, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+            const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
+            // More outputs than a page holds, from one Operation the floor
+            // will drop, between the base and a newer output it keeps.
+            const many = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var texts: [20][160]u8 = undefined;
+            var items: [20][]const u8 = undefined;
+            for (&items, &texts, 0..) |*item, *text, index|
+                item.* = try std.fmt.bufPrint(text, "{{\"type\":\"message\",\"id\":\"d{d}\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"dropped\"}}]}}", .{index});
+            try settleItemsForTesting(&storage, &tmp, many, &items, "dropped");
+            try submitTestMessage(&storage, &tmp, "floor-page-two", "floor-page-two", session.slice(), "second");
+            const kept = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleItemsForTesting(&storage, &tmp, kept, &.{"{\"type\":\"message\",\"id\":\"k\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"kept\"}]}"}, "kept");
+            try submitTestMessage(&storage, &tmp, "floor-page-three", "floor-page-three", session.slice(), "third");
+            const full = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var buffer: [4096]u8 = undefined;
+            const kept_output = "message{\"id\":\"k\"}|content.output_text=kept;";
+
+            // No floor: every output, across more than one batch.
+            const all = try walk(&storage, full, &buffer);
+            try std.testing.expectEqual(@as(usize, 20), std.mem.count(u8, all, "content.output_text=dropped;"));
+            try std.testing.expect(std.mem.endsWith(u8, all, "second;" ++ kept_output ++ "third;"));
+
+            // A floor deeper than the base's keeps the base and the newer
+            // output, with the dropped ones between them.
+            try storage.settleModelAttemptFailure(full, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+            const deeper = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(deeper));
+            try store_testing.setHistoryFloorForTesting(&storage, deeper.operation_id, "second", 1);
+            const floored = try walk(&storage, deeper, &buffer);
+            try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, floored, "dropped"));
+            try std.testing.expect(std.mem.startsWith(u8, floored, "first;compaction{"));
+            try std.testing.expect(std.mem.endsWith(u8, floored, kept_output ++ "third;"));
+
+            // A request on that compaction inherits its floor.
+            try settleCompactionForTesting(&storage, &tmp, deeper, &.{.compaction});
+            const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const inherited = try walk(&storage, successor, &buffer);
+            try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, inherited, "dropped"));
+            try std.testing.expect(std.mem.indexOf(u8, inherited, kept_output ++ "third;compaction{") != null);
+        }
+    }.run);
+}
+
+test "a history batch's items, parts and small contents cost no round after its first entry" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "page-config");
+            try submitTestMessage(&storage, &tmp, "page-one", "page-one", session.slice(), "question");
+            const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const items = [_][]const u8{
+                "{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"one \"},{\"type\":\"output_text\",\"text\":\"two \"},{\"type\":\"output_text\",\"text\":\"three\"}]}",
+                "{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}",
+            };
+            try settleItemsForTesting(&storage, &tmp, first, &items, "answer");
+            try submitTestMessage(&storage, &tmp, "page-two", "page-two", session.slice(), "follow-up");
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+
+            var view: HistoricalView = undefined;
+            _ = try storage.openHistoricalView(next, &view);
+            defer view.close();
+            var cursor: TestingHistoryCursor = .{};
+            var rendered: [256]u8 = undefined;
+            // The first entry's step reads the batch and its page.
+            try std.testing.expectEqualStrings("question", try renderTestingEntry(&view, (try cursor.next(&view)).?, &rendered));
+            const rounds = ViewRounds.start(&storage);
+            for ([_][]const u8{ "message{\"id\":\"m0\"}|content.output_text=one |content.output_text=two |content.output_text=three", "message{\"id\":\"m1\"}|content.output_text=answer", "follow-up" }) |expected|
+                try std.testing.expectEqualStrings(expected, try renderTestingEntry(&view, (try cursor.next(&view)).?, &rendered));
+            // A short batch is the Session's last: its end costs no round either.
+            try std.testing.expect((try cursor.next(&view)) == null);
+            try std.testing.expectEqual(@as(u16, 0), rounds.taken().rounds);
+            try std.testing.expectEqual(@as(u16, 0), rounds.taken().content_rounds);
+        }
+    }.run);
+}
+
+test "an output item with more parts than a page holds reads the rest from its next part" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "parts-config");
+            try submitTestMessage(&storage, &tmp, "parts-one", "parts-one", session.slice(), "question");
+            const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            // 70 parts: three reads of 32.
+            var item_buffer: [4096]u8 = undefined;
+            var answer_buffer: [512]u8 = undefined;
+            const many = try manyPartMessage(&item_buffer, &answer_buffer, 70);
+            try settleItemsForTesting(&storage, &tmp, first, &.{many.item}, many.answer);
+            try submitTestMessage(&storage, &tmp, "parts-two", "parts-two", session.slice(), "follow-up");
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+
+            var view: HistoricalView = undefined;
+            _ = try storage.openHistoricalView(next, &view);
+            defer view.close();
+            var cursor: TestingHistoryCursor = .{};
+            var rendered: [4096]u8 = undefined;
+            _ = (try cursor.next(&view)).?;
+            const rounds = ViewRounds.start(&storage);
+            const output = try renderTestingEntry(&view, (try cursor.next(&view)).?, &rendered);
+            var expected_buffer: [4096]u8 = undefined;
+            var expected = std.Io.Writer.fixed(&expected_buffer);
+            try expected.writeAll("message{\"id\":\"many\"}");
+            for (0..70) |index| try expected.print("|content.output_text=p{d};", .{index});
+            try std.testing.expectEqualStrings(expected.buffered(), output);
+            try std.testing.expectEqual(@as(u16, 2), rounds.taken().rounds);
+            try std.testing.expectEqual(@as(u16, 0), rounds.taken().content_rounds);
+            try std.testing.expectEqualStrings("follow-up", try renderTestingEntry(&view, (try cursor.next(&view)).?, &rendered));
+        }
+    }.run);
+}
+
+test "a content the page's rows cannot carry reads through its reader, and both read the same bytes" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "inline-config");
+            // The largest content a row carries, the smallest it does not,
+            // then ten that together outgrow the page's bytes.
+            const sizes = [_]usize{ 16 * 1024, 16 * 1024 + 1 } ++ @as([10]usize, @splat(16 * 1024 - 7));
+            const text = try std.testing.allocator.alloc(u8, 16 * 1024 + 1);
+            defer std.testing.allocator.free(text);
+            for (sizes, 0..) |size, index| {
+                for (text[0..size], 0..) |*byte, offset| byte.* = 'a' + @as(u8, @intCast((offset * 7 + index) % 26));
+                var name: [24]u8 = undefined;
+                const key = try std.fmt.bufPrint(&name, "inline-{d}", .{index});
+                try submitTestMessage(&storage, &tmp, key, key, session.slice(), text[0..size]);
+            }
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+
+            var view: HistoricalView = undefined;
+            _ = try storage.openHistoricalView(next, &view);
+            defer view.close();
+            const rendered = try std.testing.allocator.alloc(u8, 16 * 1024 + 1);
+            defer std.testing.allocator.free(rendered);
+            var cursor: TestingHistoryCursor = .{};
+            var content_rounds: [sizes.len]u16 = undefined;
+            for (sizes, 0..) |size, index| {
+                const entry = (try cursor.next(&view)).?;
+                const rounds = ViewRounds.start(&storage);
+                const bytes = try renderTestingEntry(&view, entry, rendered);
+                content_rounds[index] = rounds.taken().content_rounds;
+                for (text[0..size], 0..) |*byte, offset| byte.* = 'a' + @as(u8, @intCast((offset * 7 + index) % 26));
+                try std.testing.expectEqualStrings(text[0..size], bytes);
+            }
+            try std.testing.expectEqual(@as(u16, 0), content_rounds[0]);
+            try std.testing.expect(content_rounds[1] != 0);
+            // 128 KiB of page: the first of the ten shares it with the
+            // 16 KiB one, so seven fit and the last three do not.
+            for (content_rounds[2..9]) |taken| try std.testing.expectEqual(@as(u16, 0), taken);
+            for (content_rounds[9..]) |taken| try std.testing.expect(taken != 0);
+        }
+    }.run);
+}
+
+test "a reader that borrows the page's bytes keeps them when the next batch is read" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "borrow-config");
+            // Sixteen short Messages fill the first batch; the four after
+            // are long enough to cover where the sixteenth's bytes lie.
+            var texts: [20][400]u8 = undefined;
+            var lengths: [20]usize = undefined;
+            for (&texts, &lengths, 0..) |*text, *length, index| {
+                length.* = if (index < 16) 40 else 400;
+                for (text[0..length.*], 0..) |*byte, offset| byte.* = 'a' + @as(u8, @intCast((offset + index) % 26));
+                var name: [24]u8 = undefined;
+                const key = try std.fmt.bufPrint(&name, "borrow-{d}", .{index});
+                try submitTestMessage(&storage, &tmp, key, key, session.slice(), text[0..length.*]);
+            }
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+
+            var view: HistoricalView = undefined;
+            _ = try storage.openHistoricalView(next, &view);
+            defer view.close();
+            var cursor: TestingHistoryCursor = .{};
+            var sixteenth: HistoricalEntry = undefined;
+            for (0..16) |_| sixteenth = (try cursor.next(&view)).?;
+            var reader: HistoricalReader = undefined;
+            try view.openContent(sixteenth.content.?, &reader);
+            var rendered: [400]u8 = undefined;
+            // The next batch is read while the reader is open.
+            try std.testing.expectEqualStrings(texts[16][0..400], try renderTestingEntry(&view, (try cursor.next(&view)).?, &rendered));
+            var borrowed: [40]u8 = undefined;
+            const rounds = ViewRounds.start(&storage);
+            try std.testing.expectEqual(@as(usize, 40), try reader.read(0, &borrowed));
+            try std.testing.expectEqual(@as(u16, 0), rounds.taken().content_rounds);
+            reader.close();
+            try std.testing.expectEqualStrings(texts[15][0..40], &borrowed);
+            for (17..20) |index|
+                try std.testing.expectEqualStrings(texts[index][0..400], try renderTestingEntry(&view, (try cursor.next(&view)).?, &rendered));
+        }
+    }.run);
+}
+
 test "compaction success retains host inputs and ordered anchor suffix across reopen" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -9281,8 +9550,7 @@ const EntryPoint = enum {
     readPrefixSeal,
     recordPrefixSeal,
     readCompactionAnchor,
-    readHistoricalOutput,
-    readHistoricalPart,
+    readHistoricalParts,
     readHistoricalToolResult,
     readHistoricalTool,
     readDeclaredTool,
@@ -9348,13 +9616,13 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .openContentIdentity = 1,
     .readOwnedContent = 0,
     .readHistoricalSettings = 1,
-    .readHistoricalEntry = 10,
+    .readHistoricalEntry = 11,
     .validateHistoricalOutputsStep = 1,
     .readPrefixSeal = 1,
     .recordPrefixSeal = 2,
     .readCompactionAnchor = 2,
-    .readHistoricalOutput = 2,
-    .readHistoricalPart = 1,
+    // The entry batch's page already holds the item's parts.
+    .readHistoricalParts = 0,
     .readHistoricalToolResult = 2,
     .readHistoricalTool = 1,
     .readDeclaredTool = 1,
@@ -10038,10 +10306,8 @@ test "each Store entry point takes its round budget on its common path" {
                 try std.testing.expectEqual(HistoricalEntryKind.provider_output, entry.kind);
                 meter.start();
                 _ = try view.openOutput(entry.position);
-                meter.stop(.readHistoricalOutput);
-                meter.start();
                 _ = try view.nextOutputPart();
-                meter.stop(.readHistoricalPart);
+                meter.stop(.readHistoricalParts);
                 while (entry.kind != .tool_results) entry = (try nextTestingItem(&view, entry.position)).?;
                 meter.start();
                 _ = (try view.nextToolResult()).?;
