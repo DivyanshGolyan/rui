@@ -41,4 +41,5 @@ Changes reach `main` only by merging their PR.
 The admin bypass in [the main ruleset](.github/main-ruleset.json) is a last resort, used only for changes on the critical path.
 Use it only when every red or missing check is a macOS job that GitHub never assigned a runner, every check that ran passed, and an infra-retry also failed to get a runner.
 State why in the merge commit or a PR comment.
+A rename, removal or signature change of a shared name lands only when no open PR uses it or the same PR fixes those that do; check with `python3 tests/ci/pr_overlap.py` ([Concurrent PRs](docs/agents/landing.md#concurrent-prs)).
 For PR publication, stacking, landing or CI-failure ownership, read [Landing procedures](docs/agents/landing.md).
