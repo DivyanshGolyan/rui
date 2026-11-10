@@ -404,6 +404,14 @@ fn chromeClick(comptime action: ConversationAction) *const fn (*anyopaque, *vxfw
     }.click;
 }
 
+/// A key that types `?`, as the editor reads text: the codepoint itself or
+/// its text (Shift-/ on some terminals), with no modifier but Shift.
+fn typesQuestion(key: vaxis.Key) bool {
+    const mods = key.mods;
+    if (mods.ctrl or mods.alt or mods.super or mods.hyper or mods.meta) return false;
+    return key.codepoint == '?' or if (key.text) |text| std.mem.eql(u8, text, "?") else false;
+}
+
 /// The key that ends what needs the person: the command it names
 /// (`/discard`, `/status`), else Ctrl-R's retry.
 fn chromeKey(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
@@ -555,7 +563,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         .key_press, .paste_start, .paste_end, .invalid_key => {
             const pasting = self.app_hooks.root.pasting;
             self.shown_notice.dismiss();
-            const question = event == .key_press and !pasting and event.key_press.codepoint == '?' and !event.key_press.mods.ctrl and !event.key_press.mods.alt;
+            const question = event == .key_press and !pasting and typesQuestion(event.key_press);
             const shortcut = session_chrome.shortcut(self.shortcuts_open, self.input.composition().bytes.len == 0, question);
             self.shortcuts_open = shortcut == .open;
             if (shortcut == .open) {
@@ -5080,6 +5088,17 @@ test "App Session ? on an empty draft shows the shortcuts; the next key closes t
     _ = self.input.clear();
     try fixture.press(.{ .codepoint = '?', .text = "?" });
     try fixture.press(.{ .codepoint = '?', .text = "?" });
+    _ = try fixture.draw();
+    try std.testing.expect(self.app_screen.overlay == null);
+    try std.testing.expectEqualStrings("?", self.input.composition().bytes);
+    // A terminal that reports ? as Shift-/ with the text ?: the same.
+    _ = self.input.clear();
+    const shifted: vaxis.Key = .{ .codepoint = '/', .text = "?", .mods = .{ .shift = true } };
+    try fixture.press(shifted);
+    _ = try fixture.draw();
+    try std.testing.expect(self.app_screen.overlay.?.eql(self.chrome.shortcuts.widget()));
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    try fixture.press(shifted);
     _ = try fixture.draw();
     try std.testing.expect(self.app_screen.overlay == null);
     try std.testing.expectEqualStrings("?", self.input.composition().bytes);
