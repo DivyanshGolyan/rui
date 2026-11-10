@@ -108,6 +108,18 @@ pub fn applySelected(self: *Self, comptime keys: anytype, decoded: TerminalInput
     const edits = editor.edits;
     const outcome = editor.apply(keys, decoded);
     if (editor.edits != edits) self.changed();
+    return self.accept(@TypeOf(keys).Action, outcome, selected);
+}
+
+pub fn appEvent(self: *Self, comptime keys: anytype, event: @import("vaxis").vxfw.Event, pasting: bool, selected: bool) Event(@TypeOf(keys).Action) {
+    const editor = &self.editors[self.active];
+    const edits = editor.edits;
+    const outcome = editor.appEvent(keys, event, pasting);
+    if (editor.edits != edits) self.changed();
+    return self.accept(@TypeOf(keys).Action, outcome, selected);
+}
+
+fn accept(self: *Self, comptime Action: type, outcome: keymap.Outcome(Action), selected: bool) Event(Action) {
     if (outcome == .refused and outcome.refused.endsLine()) self.clear();
     if (outcome != .submit) return .{ .editor = outcome };
     const bytes = self.composition().bytes;

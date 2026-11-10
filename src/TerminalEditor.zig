@@ -217,6 +217,21 @@ pub fn select(comptime keys: anytype, decoded: Input.Decoded) Selection(@TypeOf(
         else => return .none,
     };
     if (value.pasted) return .text;
+    return selectKey(keys, pressed);
+}
+
+/// `select` for an App event, with Root's paste flag: paste boundaries and
+/// pasted text go to the composer as they do from a decoded stream.
+pub fn selectEvent(comptime keys: anytype, event: vaxis.vxfw.Event, pasting: bool) Selection(@TypeOf(keys).Action) {
+    return switch (event) {
+        .paste_start => .text,
+        .paste_end, .invalid_key => .refused,
+        .key_press => |pressed| if (pasting) .text else selectKey(keys, pressed),
+        else => .none,
+    };
+}
+
+pub fn selectKey(comptime keys: anytype, pressed: vaxis.Key) Selection(@TypeOf(keys).Action) {
     return switch (classify(pressed)) {
         .key => |key_name| if (keys.get(key_name)) |action| .{ .action = action } else .none,
         .enter => .enter,
@@ -303,19 +318,57 @@ fn take(self: *Editor, decoded: Input.Decoded) KeyOutcome {
         },
         .paste_end => blk: {
             if (!value.pasted or !self.pasting) self.reject(.invalid);
-            self.pasting = false;
-            if (self.rejected == .edit_rejected or self.rejected == .paste_overflow) {
-                const why = self.rejected.?;
-                self.rejected = null;
-                break :blk .{ .refused = why };
-            }
-            if (self.rejected == null and self.cursor != 0)
-                self.cursor = self.next(self.previous(self.cursor));
-            break :blk .none;
+            break :blk self.finishPaste();
         },
         .key_press => |key_value| self.key(key_value, value.pasted),
         else => .none,
     };
+}
+
+/// A screen hiding its composer closes the edit at the bytes already shown.
+/// Root still owns the terminal's paste flag: the remaining paste must not
+/// reach a new composer or become a permission choice.
+pub fn blur(self: *Editor) KeyOutcome {
+    if (!self.pasting) return .none;
+    return self.finishPaste();
+}
+
+/// App delivers paste boundaries through Root before the focused screen.
+/// Only the editor that received the start may accept pasted text. A screen
+/// calls blur before hiding its composer, retaining the prefix shown then.
+pub fn appEvent(self: *Editor, comptime keys: anytype, event: vaxis.vxfw.Event, pasting: bool) keymap.Outcome(@TypeOf(keys).Action) {
+    const outcome: KeyOutcome = switch (event) {
+        .focus_out => self.blur(),
+        .paste_start => blk: {
+            if (!self.allow_paste) break :blk .none;
+            self.paste_start = .{ .cursor = self.cursor, .length = self.length };
+            self.pasting = true;
+            break :blk .none;
+        },
+        .paste_end => if (self.pasting) self.finishPaste() else .none,
+        .key_press => |pressed| if (pasting and !self.pasting) .none else self.key(pressed, pasting),
+        .invalid_key => .{ .refused = .invalid },
+        else => .none,
+    };
+    const Outcome = keymap.Outcome(@TypeOf(keys).Action);
+    return switch (outcome) {
+        .action => |name| if (keys.get(name)) |action| .{ .action = action } else .none,
+        inline else => |payload, tag| @unionInit(Outcome, @tagName(tag), payload),
+    };
+}
+
+fn finishPaste(self: *Editor) KeyOutcome {
+    self.pasting = false;
+    self.partial_length = 0;
+    self.partial_need = 0;
+    if (self.rejected == .edit_rejected or self.rejected == .paste_overflow) {
+        const why = self.rejected.?;
+        self.rejected = null;
+        return .{ .refused = why };
+    }
+    if (self.rejected == null and self.cursor != 0)
+        self.cursor = self.next(self.previous(self.cursor));
+    return .none;
 }
 
 /// One byte through `input` and every event it completes, for tests of a
@@ -372,7 +425,7 @@ const chords = std.enums.EnumArray(Key, []const Chord).init(.{
 });
 const Chord = struct { code: u21, mods: vaxis.Key.Modifiers = .{} };
 
-fn named(value: vaxis.Key) ?Key {
+pub fn named(value: vaxis.Key) ?Key {
     for (std.enums.values(Key)) |candidate| {
         for (chords.get(candidate)) |chord| if (value.matchExact(chord.code, chord.mods)) return candidate;
     }
@@ -582,6 +635,54 @@ test "renderer declines standalone zero-width edits and rolls back an unrepresen
         for ("é🧑‍🌾") |byte| _ = editor.feed(&stream, byte);
         try std.testing.expectEqualStrings("é🧑‍🌾kept", storage[0..editor.length]);
         try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
+    }
+}
+
+test "App paste cannot follow focus into another composer or resume a hidden edit" {
+    const keys: keymap.Keymap(void) = comptime .{ .meanings = .initFill(null) };
+    var original_storage: [32]u8 = undefined;
+    @memcpy(original_storage[0..8], "headTAIL");
+    var original: Editor = .{ .buffer = &original_storage, .length = 8, .cursor = 4 };
+    var other_storage: [32]u8 = undefined;
+    @memcpy(other_storage[0..5], "other");
+    var other: Editor = .{ .buffer = &other_storage, .length = 5, .cursor = 2 };
+    _ = original.appEvent(keys, .paste_start, true);
+    _ = original.appEvent(keys, .{ .key_press = .{ .codepoint = 0, .text = "12" } }, true);
+    _ = original.appEvent(keys, .focus_out, true);
+    _ = other.appEvent(keys, .focus_in, true);
+    for ([_]*Editor{ &original, &other }) |editor| {
+        _ = editor.appEvent(keys, .{ .key_press = .{ .codepoint = 0, .text = "discarded" } }, true);
+        _ = editor.appEvent(keys, .paste_end, false);
+        try std.testing.expectEqual(.submit, editor.appEvent(keys, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, false));
+    }
+    try std.testing.expectEqualStrings("head12TAIL", original.buffer[0..original.length]);
+    try std.testing.expectEqual(@as(usize, 6), original.cursor);
+    try std.testing.expectEqualStrings("other", other.buffer[0..other.length]);
+    try std.testing.expectEqual(@as(usize, 2), other.cursor);
+}
+
+test "hiding a composer closes its paste before another edit or paste" {
+    const keys: keymap.Keymap(void) = comptime .{ .meanings = .initFill(null) };
+    for ([_][]const u8{ "12", "123456789" }) |text| {
+        var storage: [16]u8 = undefined;
+        @memcpy(storage[0..8], "headTAIL");
+        var editor: Editor = .{ .buffer = &storage, .length = 8, .cursor = 4 };
+        _ = editor.apply(keys, .{ .event = .{ .event = .paste_start, .pasted = false } });
+        _ = editor.apply(keys, .{ .event = .{ .event = .{ .key_press = .{ .codepoint = 0, .text = text } }, .pasted = true } });
+        const outcome = editor.blur();
+        if (text.len == 2) {
+            try std.testing.expectEqual(.none, outcome);
+            try std.testing.expectEqualStrings("head12TAIL", editor.buffer[0..editor.length]);
+        } else {
+            try std.testing.expectEqual(KeyOutcome{ .refused = .paste_overflow }, outcome);
+            try std.testing.expectEqualStrings("headTAIL", editor.buffer[0..editor.length]);
+        }
+        try std.testing.expectEqual(.none, editor.blur());
+        _ = editor.apply(keys, .{ .event = .{ .event = .paste_start, .pasted = false } });
+        _ = editor.apply(keys, .{ .event = .{ .event = .{ .key_press = .{ .codepoint = 0, .text = "X" } }, .pasted = true } });
+        _ = editor.apply(keys, .{ .event = .{ .event = .paste_end, .pasted = true } });
+        try std.testing.expectEqualStrings(if (text.len == 2) "head12XTAIL" else "headXTAIL", editor.buffer[0..editor.length]);
+        try std.testing.expectEqual(.submit, editor.apply(keys, .{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = false } }));
     }
 }
 

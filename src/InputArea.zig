@@ -8,6 +8,8 @@ const Composer = @import("Composer.zig");
 const PermissionCard = @import("PermissionCard.zig");
 const Self = @This();
 const empty: vxfw.Text = .{ .text = "" };
+/// The status's most lines: a command's short result.
+const status_lines = @import("slash_commands.zig").short_result_lines;
 
 composer: Composer,
 permission: ?*PermissionCard = null,
@@ -22,14 +24,19 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return vxfw.Surface.init(ctx.arena, self.widget(), .{});
-    const footer_rows = @min(2, size.height - 1);
-    const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + footer_rows);
+    // The facts row, then the status: a line, or as many as a command's
+    // short result has, while the content keeps a row.
+    const facts_rows: u16 = @min(1, size.height - 1);
+    const status_room: u16 = @min(status_lines, size.height -| 1 -| facts_rows);
+    const status = if (status_room == 0) null else try self.status.draw(ctx.withConstraints(.{ .width = size.width, .height = 1 }, .{ .width = size.width, .height = status_room }));
+    const footer_rows = facts_rows + if (status) |drawn| @min(drawn.size.height, status_room) else 0;
+    const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + facts_rows + @intFromBool(status != null));
     const primary = if (self.permission) |card| card.widget() else self.composer.widget();
     const content = try primary.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - footer_rows }));
     const row = ctx.withConstraints(.{ .width = size.width, .height = 1 }, .{ .width = size.width, .height = 1 });
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = content };
-    if (footer_rows >= 1) children[1] = .{ .origin = .{ .row = content.size.height, .col = 0 }, .surface = try self.facts.draw(row) };
-    if (footer_rows == 2) children[2] = .{ .origin = .{ .row = content.size.height + 1, .col = 0 }, .surface = try self.status.draw(row) };
+    if (facts_rows == 1) children[1] = .{ .origin = .{ .row = content.size.height, .col = 0 }, .surface = try self.facts.draw(row) };
+    if (status) |drawn| children[1 + facts_rows] = .{ .origin = .{ .row = content.size.height + facts_rows, .col = 0 }, .surface = drawn };
     return .{ .widget = self.widget(), .size = .{ .width = size.width, .height = content.size.height + footer_rows }, .buffer = &.{}, .children = children };
 }
 
@@ -54,6 +61,12 @@ test "InputArea keeps facts below the composer when a notice replaces the status
         try std.testing.expectEqual(@as(i17, 4), idle.children[2].origin.row);
         try std.testing.expectEqualStrings("n", idle.children[1].surface.readCell(0, 0).char.grapheme);
         try std.testing.expectEqualStrings("e", idle.children[2].surface.readCell(0, 0).char.grapheme);
+        // A command's two-line result takes two rows; the composer moves up.
+        status.text = &.{.{ .text = "Configured.\n! label saved locally only" }};
+        const two = try input.widget().draw(ctx);
+        try std.testing.expectEqual(@as(u16, 6), two.size.height);
+        try std.testing.expectEqual(@as(u16, 2), two.children[2].surface.size.height);
+        try std.testing.expectEqualStrings("!", two.children[2].surface.readCell(0, 1).char.grapheme);
         status.text = &.{.{ .text = "Not sent: this Action needs a decision", .style = .{ .bold = true } }};
         const notice = try input.widget().draw(ctx);
         try std.testing.expectEqualDeep(idle.children[1].surface.buffer, notice.children[1].surface.buffer);

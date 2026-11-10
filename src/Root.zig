@@ -8,6 +8,8 @@ const Self = @This();
 overview: vxfw.Widget,
 session: ?vxfw.Widget = null,
 pasting: bool = false,
+focused: bool = true,
+frames: u64 = 0,
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .captureHandler = capture, .eventHandler = event, .drawFn = draw };
@@ -16,8 +18,8 @@ pub fn widget(self: *Self) vxfw.Widget {
 pub fn openSession(self: *Self, ctx: *vxfw.EventContext, session: vxfw.Widget) !void {
     std.debug.assert(self.session == null);
     self.session = session;
-    try session.handleEvent(ctx, .init);
     try ctx.requestFocus(session);
+    try session.handleEvent(ctx, .init);
     ctx.redraw = true;
 }
 
@@ -34,6 +36,12 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     switch (input) {
         .paste_start => self.pasting = true,
         .paste_end => self.pasting = false,
+        .focus_in => self.focused = true,
+        .focus_out => self.focused = false,
+        .color_report, .color_scheme => {
+            try self.overview.handleEvent(ctx, input);
+            ctx.consumeEvent();
+        },
         .key_release => ctx.consumeEvent(),
         else => {},
     }
@@ -43,8 +51,8 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (input) {
         .init => {
-            try self.overview.handleEvent(ctx, .init);
             try ctx.requestFocus(self.overview);
+            try self.overview.handleEvent(ctx, .init);
             try ctx.tick(16, self.widget());
             ctx.redraw = true;
         },
@@ -67,6 +75,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const child = self.session orelse self.overview;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try child.draw(ctx) };
+    self.frames += 1;
     return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = children };
 }
 

@@ -14,6 +14,11 @@ style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
 placeholder: []const u8 = "",
 anchor: usize = 0,
+/// Draw rules, marks and the prompt in ASCII, for a terminal without
+/// Unicode.
+ascii: bool = false,
+/// Show the terminal's cursor at the caret; false while keys cannot edit.
+caret: bool = true,
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -55,19 +60,19 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .screen = &screen,
     };
     if (rule != 0) for (0..width) |column| {
-        const cell: vaxis.Cell = .{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.quiet };
+        const cell: vaxis.Cell = .{ .char = .{ .grapheme = if (self.ascii) "-" else "─", .width = 1 }, .style = self.quiet };
         surface.writeCell(@intCast(column), 0, cell);
         surface.writeCell(@intCast(column), surface.size.height - 1, cell);
     };
     const label_storage = try ctx.arena.create([64]u8);
-    const label = layout.label(label_storage, shown, .{ .up = "↑", .down = "↓", .dot = "·" });
+    const label = layout.label(label_storage, shown, if (self.ascii) .{ .up = "^", .down = "v", .dot = "-" } else .{ .up = "↑", .down = "↓", .dot = "·" });
     if (rule != 0) if (layout.labelColumn(vaxis.gwidth.gwidth(label, self.method), width)) |column| {
         _ = window.child(.{ .x_off = @intCast(column), .height = 1 }).printSegment(.{ .text = label, .style = self.quiet }, .{ .wrap = .none });
     };
     for (lines[0..shown.rows], 0..) |line, index| {
         const row: u16 = @intCast(index + rule);
         if (prefix != 0) _ = window.child(.{ .y_off = row, .height = 1, .width = prefix }).printSegment(.{
-            .text = if (shown.first + index == 0) "› " else "  ",
+            .text = if (shown.first + index != 0) "  " else if (self.ascii) "> " else "› ",
             .style = self.style,
         }, .{ .wrap = .none });
         _ = window.child(.{ .x_off = prefix, .y_off = row, .height = 1 }).printSegment(.{
@@ -75,7 +80,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             .style = if (draft.len == 0) self.quiet else self.style,
         }, .{ .wrap = .none });
     }
-    surface.cursor = .{ .row = @intCast(shape.caret_line - shown.first + rule), .col = shape.caret_column + prefix };
+    if (self.caret) surface.cursor = .{ .row = @intCast(shape.caret_line - shown.first + rule), .col = shape.caret_column + prefix };
     return surface;
 }
 
