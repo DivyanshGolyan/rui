@@ -1,6 +1,8 @@
 name: Renderer contracts
 # Nonblocking on PRs: Selected checks and merging never require these. PRs run
 # them only for renderer and frontend owners; every promotion requires them.
+# src/os/ holds no PTY or terminal code: socket, process and descriptor edits
+# cannot change rendering, and the Selected fixtures cover them.
 # Manual runs also execute the mutation campaign.
 on:
   pull_request:
@@ -25,7 +27,6 @@ on:
       - 'src/status_page.zig'
       - 'src/command_value.zig'
       - 'src/home_path.zig'
-      - 'src/os/**'
       - 'build.zig'
       - 'tests/ci/renderer_mutation*'
       - 'tests/integration/session_sequence_model*'
