@@ -3633,7 +3633,9 @@ Parsing wipes all JSON allocations, including failed
 parses; the connection handshake wipes the password and authentication
 buffer as soon as login finishes or fails.
 
-MySQL's `GET_LOCK` owns the Store.
+On MySQL the `store_owner` row owns the Store: open raises its `epoch`, and every write transaction first advances `commit_seq` only where both match what this Host last saw, so a Host that lost the Store fails its next write.
+`GET_LOCK` only refuses early a second Host on the same database.
+Every message the Host sends starts with its session settings, so no message relies on settings an earlier one left on the server connection.
 There is no `host.lock`: the runtime's
 `rui.lock` reserves only its socket, preventing two different Stores from
 reclaiming each other's endpoint.

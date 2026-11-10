@@ -193,8 +193,9 @@ Artificial shared setup or pair deadlines and prelaunch fit reserves are not rou
 
 ### Renderer contracts
 
-[Renderer contracts](.github/workflows/renderer-contracts.yml) run nonblocking build targets on pull requests that touch renderer, frontend, terminal or `src/os` owners, `build.zig` or the harnesses, and on manual dispatch: `renderer-contracts-selftest`, the synthetic `direct-pty` key matrix and Ghostty vectors, `direct-pty-controls`, `input-equivalence`, unattended input replay and `sequence-model`.
+[Renderer contracts](.github/workflows/renderer-contracts.yml) run nonblocking build targets on pull requests that touch renderer, frontend or terminal owners, `build.zig` or the harnesses, and on manual dispatch: `renderer-contracts-selftest`, the synthetic `direct-pty` key matrix and Ghostty vectors, `direct-pty-controls`, `input-equivalence`, unattended input replay and `sequence-model`.
 No gate root imports their sources, and neither Selected checks nor merging requires them; a red result is a defect to fix, not a waiver.
+`src/os` holds no PTY or terminal code, so its edits run the Selected fixtures that reach them, not these contracts.
 Every promotion requires them, and a failing contract bisects the batch.
 Manual dispatch adds the [renderer mutation runner](tests/ci/renderer_mutation.py) for `test`, `test-logic` and `sequence-model`.
 PR failures remain visible in workflow results; there is no scheduled campaign, and only a promotion files issues.
