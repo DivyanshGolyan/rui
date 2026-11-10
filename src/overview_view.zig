@@ -31,11 +31,14 @@ const provider_name = @import("provider_name.zig");
 const session_work = @import("session_work.zig");
 const session_upgrade = @import("session_upgrade.zig");
 const slash_commands = @import("slash_commands.zig");
+const skill_completion = @import("skill_completion.zig");
+const skill_suggestions = @import("skill_suggestions.zig");
 const submission = @import("submission_state.zig");
 pub const commands = slash_commands.overview;
 const TerminalText = @import("TerminalText.zig");
 const theme = @import("theme.zig");
 const work_line = @import("work_line.zig");
+const workspace_path = @import("workspace_path.zig");
 const unicode = @import("terminal_unicode");
 const gwidth = @import("terminal_width");
 
@@ -608,8 +611,8 @@ pub const Effect = union(enum) {
     upgrade,
     /// Empty the line editor.
     clear_draft,
-    /// Add these static bytes at the draft's end, as Tab does.
-    append: []const u8,
+    /// Put this in place of part of the draft, as Tab does.
+    replace: skill_completion.Replacement,
     /// Tell the person, if they look away, of the listing's news.
     notify: Alert,
     /// Run the command's line as a conversation runs it, and answer with
@@ -983,6 +986,12 @@ pub const State = struct {
     /// shell keeps from each `Screen.commands`: the one value Enter, Esc,
     /// the arrows and Tab act on, as in a conversation.
     commands: ?slash_commands.Shown = null,
+    /// The composer's skill suggestions reads, and the rows they list.
+    skills: skill_completion.Reads = .{},
+    /// The Workspace those reads asked in; another one's pages answer
+    /// nothing.
+    skills_workspace: Bounded(workspace_path.max_bytes) = .{},
+    skill_rows: skill_completion.Rows = .{},
     /// The open picker's latest model lists, freed when it closes.
     menu: model_picker.Menu = .{},
     /// How the open picker's latest model-list read ended.
@@ -1109,6 +1118,10 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State) void {
+        if (self.skills.reset()) |page| {
+            var held = page;
+            held.deinit(self.gpa);
+        }
         self.menu.deinit(self.gpa);
         self.closePanel();
         if (self.command) |command| self.gpa.free(command.text);
@@ -2241,14 +2254,14 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
                 @memcpy(line[value.draft.bytes.len..][0..taken.rest.len], taken.rest);
                 const completed = line[0 .. value.draft.bytes.len + taken.rest.len];
                 if (std.mem.eql(u8, completed, "/model")) {
-                    effects.add(.{ .append = "/model "[value.draft.bytes.len..] });
+                    effects.add(.{ .replace = .{ .start = value.draft.bytes.len, .end = value.draft.bytes.len, .text = "/model "[value.draft.bytes.len..] } });
                     openModelPicker(state, effects);
                 } else try enter(state, completed, effects);
             } else {
                 // The draft grows, or refuses a word it cannot hold, so the
                 // next list starts at its top.
+                effects.add(.{ .replace = skill_completion.edit(value.draft.bytes, value.draft.cursor, shown) });
                 shown.highlight = 0;
-                effects.add(.{ .append = taken.rest });
             }
         } else try enter(state, value.draft.bytes, effects),
         .refused => |why| {
@@ -2982,14 +2995,51 @@ fn topRows(state: *const State) usize {
 /// The list between the rule and the draft as it is now, while the person
 /// types a command, after the latest frame's; null for any other draft or
 /// when nothing matches. The next Session's model offers its efforts.
-pub fn nextCommands(state: *const State, draft: Draft) ?slash_commands.Shown {
+pub fn nextCommands(state: *State, draft: Draft) ?slash_commands.Shown {
     if (state.inputMode() != .compose or state.picker != null) return null;
     const held = state.heldEffort();
     const context: slash_commands.Context = .{
         .model = state.nextBinding().model,
         .effort = if (held) |text| std.meta.stringToEnum(model_capability.ReasoningEffort, text) else null,
     };
-    return slash_commands.Shown.next(state.commands, draft.edits, commands.suggest(draft.bytes, context));
+    return state.skills.shown(&state.skill_rows, draft.bytes, draft.cursor, draft.edits, commands.suggest(draft.bytes, context), state.commands);
+}
+
+/// The name of the `/word` the caret is in, or null.
+fn caretName(draft: Draft) ?[]const u8 {
+    const at = skill_completion.skillWordAt(draft.bytes, draft.cursor) orelse return null;
+    return at.name(draft.bytes);
+}
+
+/// The skill suggestions read the caret's `/word` in `draft` needs, if
+/// any: the shell asks after each composer input and each answer, runs it
+/// on its worker in `state.skills_workspace`, and answers it with
+/// `skillsRead`. Its prefix borrows the state until then.
+pub fn askSkills(state: *State, draft: Draft) ?skill_completion.Ask {
+    // The Host may not speak this protocol while an Upgrade is under way.
+    if (state.inputMode() != .compose or state.upgrade_blocked or state.upgrade_pending) return null;
+    // A Message binds the skills of the Workspace its Session starts in:
+    // a held `/configure --workspace`, else the overview's. When that
+    // changes, nothing held or in flight answers.
+    const workspace = state.settings.get(startOption("workspace").?) orelse state.workspaces.items[state.cwd];
+    if (!std.mem.eql(u8, state.skills_workspace.slice(), workspace)) {
+        if (state.skills.reset()) |page| {
+            var held = page;
+            held.deinit(state.gpa);
+        }
+        state.skills_workspace = .{};
+        // The Host refuses a longer Workspace, so nothing is read in it.
+        state.skills_workspace.set(workspace) catch return null;
+    }
+    return state.skills.ask(caretName(draft) orelse return null);
+}
+
+/// Read `read` ended with `page`, owned by the state's allocator, or null
+/// when it failed; `draft` is the composer's now.
+pub fn skillsRead(state: *State, read: u64, page: ?skill_suggestions.Page, draft: Draft) void {
+    const answered = page orelse return state.skills.fail(read);
+    var unheld = state.skills.answer(read, answered, caretName(draft)) orelse return;
+    unheld.deinit(state.gpa);
 }
 
 /// The list for `draft`, which Enter, Esc and the arrows act on when the
@@ -3314,7 +3364,7 @@ fn hints(painter: *Painter, state: *const State, draft: Draft, listed: bool) err
     } else if (draft.bytes.len != 0) {
         // What Enter and Esc do to this draft, as `enter` and `compose` read it.
         const slashed = draft.bytes[0] == '/' and !std.mem.startsWith(u8, draft.bytes, "//");
-        const enter_does: []const u8 = if (!slashed) "enter start " else if (commands.parse(draft.bytes) == .command) "enter run " else "";
+        const enter_does: []const u8 = if (!slashed) (if (listed) "enter pick " else "enter start ") else if (commands.parse(draft.bytes) == .command) "enter run " else "";
         const text = try std.fmt.allocPrint(painter.arena, "{s}{s}{s}", .{ enter_does, if (enter_does.len != 0) try std.fmt.allocPrint(painter.arena, "{s} ", .{dot}) else "", esc_does.? });
         _ = try painter.put(1, text, room, .{ .colour = .quiet });
     } else if (state.selectedRow()) |row| {
@@ -3992,7 +4042,12 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                 try std.testing.expectEqual(alert.kind, got.notify.kind);
                 try std.testing.expectEqual(alert.more, got.notify.more);
             },
-            .append => |text| try std.testing.expectEqualStrings(text, got.append),
+            .replace => |change| {
+                try std.testing.expectEqual(change.start, got.replace.start);
+                try std.testing.expectEqual(change.end, got.replace.end);
+                try std.testing.expectEqualStrings(change.text, got.replace.text);
+            },
+
             .command => |command| {
                 try std.testing.expectEqual(command.name, got.command.name);
                 try std.testing.expectEqualStrings(command.text, got.command.text);
@@ -5018,12 +5073,12 @@ test "arrows move the command list's highlight, and Enter takes it: a word anoth
     // /configure alone only says its usage: Enter adds its word and a
     // space, for an option.
     state.commands.?.highlight = 1;
-    try expectEffects(&.{.{ .append = "configure " }}, try submit(&state, draft));
+    try expectEffects(&.{.{ .replace = .{ .start = 1, .end = 1, .text = "configure " } }}, try submit(&state, draft));
     // An option that takes a value is added for it, and the next list
     // starts at its top, however far down the highlight was.
     draft = try typeText(&state, "/configure ");
     state.commands.?.highlight = 4;
-    try expectEffects(&.{.{ .append = "--label " }}, try submit(&state, draft));
+    try expectEffects(&.{.{ .replace = .{ .start = "/configure ".len, .end = "/configure ".len, .text = "--label " } }}, try submit(&state, draft));
     // A draft too full for the word refuses it and stays as it was; its
     // next frame lists it from the top too.
     drawWithRoom(&state, draft);
@@ -5126,12 +5181,34 @@ test "/configure holds start settings for the Session the next Enter starts" {
     // Alone, /configure waits for an option: Enter on it in the list adds
     // the space that shows them.
     draft = try typeText(&state, "/configure");
-    try expectEffects(&.{.{ .append = " " }}, try submit(&state, draft));
+    try expectEffects(&.{.{ .replace = .{ .start = "/configure".len, .end = "/configure".len, .text = " " } }}, try submit(&state, draft));
     // A model Rui does not list is held, with a quiet word on its limits.
     draft = try typeText(&state, "/configure --model unlisted-model");
     try expectEffects(&.{.clear_draft}, try submit(&state, draft));
     try std.testing.expectEqualStrings("unlisted-model", state.settings.get(startOption("model").?).?);
     try std.testing.expectEqual(Colour.quiet, state.notice.?.colour);
+}
+
+test "the composer's /word asks the Workspace's skills, but not while an Upgrade holds Host requests" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const draft: Draft = .{ .bytes = "use /re", .cursor = "use /re".len, .edits = 1 };
+    try std.testing.expectEqual(@as(?skill_completion.Ask, null), askSkills(&state, .{ .bytes = "use it", .cursor = 3, .edits = 1 }));
+    state.upgrade_pending = true;
+    try std.testing.expectEqual(@as(?skill_completion.Ask, null), askSkills(&state, draft));
+    state.upgrade_pending = false;
+    const read = askSkills(&state, draft).?;
+    try std.testing.expectEqualStrings("re", read.prefix);
+    // Its page, owned by the state, lists over the draft once a frame draws it.
+    const gpa = state.gpa;
+    const entries = try gpa.alloc(skill_suggestions.Entry, 1);
+    entries[0] = .{ .name = try gpa.dupe(u8, "review"), .description = try gpa.dupe(u8, "Review a change") };
+    skillsRead(&state, read.read, .{ .entries = entries, .total = 1 }, draft);
+    const shown = nextCommands(&state, draft).?;
+    try std.testing.expectEqualStrings("/review", shown.list.entries[0].shown);
+    // Over the drawn list, Enter picks the skill rather than starting.
+    drawWithRoom(&state, draft);
+    try expectLastLine(&state, draft, " enter pick · esc close");
 }
 
 test "start settings are the options session start shares with /configure" {
