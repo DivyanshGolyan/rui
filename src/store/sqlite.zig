@@ -57,6 +57,10 @@ pub fn prepare(database: *c.sqlite3, sql: [:0]const u8) !*c.sqlite3_stmt {
     return statement orelse error.StatementPrepareFailed;
 }
 
+/// Tests only: the next `StatementCache.insert` fails as a failed `grow`
+/// does. Read only when `builtin.is_test`.
+pub var testing_fail_next_insert = false;
+
 /// Every statement a Store entry point runs, prepared on first use and kept
 /// until `close`. Comptime SQL has static storage, so its address is the key.
 /// Bound: one per SQL text in this file, about 175. The Store tests reach 99,
@@ -77,6 +81,10 @@ pub const StatementCache = struct {
     }
 
     pub fn insert(self: *StatementCache, sql: [*:0]const u8, statement: *c.sqlite3_stmt) !void {
+        if (@import("builtin").is_test and testing_fail_next_insert) {
+            testing_fail_next_insert = false;
+            return error.OutOfMemory;
+        }
         if ((self.count + 1) * 2 > self.slots.len) try self.grow();
         const slot = probe(self.slots, sql);
         std.debug.assert(slot.sql == null);

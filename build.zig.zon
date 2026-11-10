@@ -2,7 +2,7 @@
     .name = .rui,
     .version = "0.1.0",
     .fingerprint = 0xce12316328c0bfb1,
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .yaml = .{
             .url = "https://github.com/yaml/libyaml/archive/refs/tags/0.2.5.tar.gz",
@@ -29,13 +29,14 @@
             .hash = "N-V-__8AACywKABFCj0r_Y-jIWsk9ahy10zlk78hjn6S-39g",
         },
         .vaxis = .{
-            .url = "git+https://github.com/DivyanshGolyan/libvaxis#cf8693e00676fba83bea7dcb017c85d28b84861c",
-            .hash = "vaxis-0.6.0-BWNV_LA0DgCzK-wro41ksoE-bE1yunT6oNGtGkJZFbyw",
+            .url = "git+https://github.com/DivyanshGolyan/libvaxis#fa05643589021ab97e4af971a239e84e5d80f2f1",
+            .hash = "vaxis-0.6.0-BWNV_JpFDgBzFE3jvM4LKOLez4u5c3Ai0xAWRSzQwoxI",
         },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "build",
         "install.sh",
         "release/publish.sh",
         "src",

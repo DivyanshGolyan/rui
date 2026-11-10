@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-zig_version=0.17.0
+zig_version=0.17.1
 go_version=1.27.1
 local_bin="$HOME/.local/bin"
 local_opt="$HOME/.local/opt"
@@ -89,11 +89,11 @@ install_zig() (
     case "$(uname -m)" in
         x86_64)
             archive_arch=x86_64
-            checksum=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+            checksum=3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a
             ;;
         aarch64 | arm64)
             archive_arch=aarch64
-            checksum=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
+            checksum=a1546d5646eb184437918d6635ca6b762a0e889eac09cef720ee7a1ed3fe7795
             ;;
         *)
             printf 'Unsupported Linux architecture for Zig: %s\n' "$(uname -m)" >&2

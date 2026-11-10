@@ -676,6 +676,16 @@ pub const FirstMessage = struct {
     pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = ActivityItem.Content }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
+    pub fn fromCore(first: session_list.FirstMessage) FirstMessage {
+        return .{
+            .position = first.position,
+            .admission = first.admission,
+            .admitted_at = first.admitted_at,
+            .sender = if (first.sender) |sender| .{ .session = sender } else null,
+            .content = .{ .length = first.length, .digest = first.digest },
+        };
+    }
+
     pub fn writeJson(self: *const FirstMessage, out: *std.Io.Writer) !void {
         try writeShape(out, json_shape, .{ self.position, self.admission, self.admitted_at, self.sender, self.content });
     }
@@ -1840,31 +1850,7 @@ fn ParserOf(comptime Custody: type) type {
     };
 }
 
-pub const Utf8State = struct {
-    bytes: [4]u8 = undefined,
-    used: u3 = 0,
-    expected: u3 = 0,
-
-    pub fn feed(self: *Utf8State, input: []const u8) !void {
-        for (input) |byte| {
-            if (self.used == 0) {
-                if (byte < 0x80) continue;
-                self.expected = std.unicode.utf8ByteSequenceLength(byte) catch return error.InvalidUtf8;
-            }
-            self.bytes[self.used] = byte;
-            self.used += 1;
-            if (self.used == self.expected) {
-                _ = std.unicode.utf8Decode(self.bytes[0..self.expected]) catch return error.InvalidUtf8;
-                self.used = 0;
-                self.expected = 0;
-            }
-        }
-    }
-
-    pub fn complete(self: *const Utf8State) bool {
-        return self.used == 0;
-    }
-};
+pub const Utf8State = @import("utf8_validation.zig").State;
 
 // Shared by the synchronous metadata grammar and suspended content ingestion.
 // The opening quote belongs to the caller; feed consumes through the closing

@@ -13507,63 +13507,123 @@
         "additionalProperties": false
       },
       "domainreportCurrentJsonUnresolved": {
-        "type": "object",
-        "properties": {
-          "action": {
-            "$ref": "#/components/schemas/Decimal"
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "parent_operation": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "call_ordinal": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "tool": {
+                "type": "string",
+                "enum": [
+                  "bash",
+                  "find_tools",
+                  "message_agent",
+                  "read_transcript",
+                  "skill",
+                  "start_agent",
+                  "web_search"
+                ]
+              },
+              "permission_revision": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "authorization": {
+                "type": "string",
+                "enum": [
+                  "core",
+                  "pending",
+                  "bypass",
+                  "allow_once"
+                ]
+              },
+              "call_id": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+              },
+              "arguments": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+              },
+              "presentation": {
+                "$ref": "#/components/schemas/ToolPresentation"
+              }
+            },
+            "required": [
+              "action",
+              "parent_operation",
+              "call_ordinal",
+              "tool",
+              "permission_revision",
+              "authorization",
+              "call_id",
+              "arguments",
+              "presentation"
+            ],
+            "additionalProperties": false
           },
-          "parent_operation": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "call_ordinal": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "tool": {
-            "type": "string",
-            "enum": [
-              "bash",
-              "find_tools",
-              "message_agent",
-              "read_transcript",
-              "skill",
-              "start_agent",
-              "web_search"
-            ]
-          },
-          "permission_revision": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "authorization": {
-            "type": "string",
-            "enum": [
-              "core",
-              "pending",
-              "bypass",
-              "allow_once"
-            ]
-          },
-          "call_id": {
-            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
-          },
-          "arguments": {
-            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
-          },
-          "presentation": {
-            "$ref": "#/components/schemas/ToolPresentation"
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "parent_operation": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "call_ordinal": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "tool": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,64}$"
+              },
+              "permission_revision": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "authorization": {
+                "type": "string",
+                "enum": [
+                  "core",
+                  "pending",
+                  "bypass",
+                  "allow_once"
+                ]
+              },
+              "call_id": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+              },
+              "server": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,64}$"
+              },
+              "arguments": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+              },
+              "presentation": {
+                "$ref": "#/components/schemas/ToolPresentation"
+              }
+            },
+            "required": [
+              "action",
+              "parent_operation",
+              "call_ordinal",
+              "tool",
+              "permission_revision",
+              "authorization",
+              "call_id",
+              "server",
+              "arguments",
+              "presentation"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "action",
-          "parent_operation",
-          "call_ordinal",
-          "tool",
-          "permission_revision",
-          "authorization",
-          "call_id",
-          "arguments",
-          "presentation"
-        ],
-        "additionalProperties": false
+        ]
       },
       "domainreportCurrentJsonWork": {
         "type": "object",

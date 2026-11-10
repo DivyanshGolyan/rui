@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   prune:
-    needs: baseline
+    needs: [baseline, runner]
     # Job completion includes post-job saves. A successful matrix peer can save
     # even when another fails; workflow_run skips baseline but still cleans up.
     if: ${{ always() && !github.event.repository.private && github.ref == 'refs/heads/main' }}
@@ -35,7 +35,6 @@ jobs:
     permissions:
       contents: read
       actions: write
-      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -90,6 +89,36 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/actionlint"
           bash .github/scripts/install-actionlint.sh "$RUNNER_TEMP/actionlint"
+  runner:
+    # Test shards restore the build runner compiled for their CPU model, which
+    # saves them a median 89 s, and only main saves it. Each Linux slot lands
+    # on a random model of the pool and saves only a model still missing; six
+    # cover about three quarters of shards per build.zig, more over pushes.
+    if: ${{ github.event_name != 'workflow_run' && !github.event.repository.private && github.ref == 'refs/heads/main' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4, 5, 6, mac]
+    runs-on: ${{ matrix.slot == 'mac' && 'macos-15' || 'ubuntu-24.04' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          compiled: 'true'
+      # Shards get packages from the producer artifact; this has none.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: zig-pkg
+          key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
+          restore-keys: rui-packages-v1-
+      - name: Compile and configure the build runner as a test shard does
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash src/fetch_dependencies.sh
   previous_release:
     # The upgrade check restores this; requested refs cannot publish caches.
     if: ${{ github.event_name != 'workflow_run' && !github.event.repository.private && github.ref == 'refs/heads/main' }}
@@ -122,7 +151,7 @@ jobs:
           path: |
             ${{ runner.temp }}/previous-release/.zig-cache
             ${{ runner.temp }}/previous-release/zig-pkg
-          key: rui-previous-release-${{ runner.os }}-${{ runner.arch }}-0.17.0-0e4b2225d106dd63fa9c38801188facb5e9c6335
+          key: rui-previous-release-${{ runner.os }}-${{ runner.arch }}-0.17.1-0e4b2225d106dd63fa9c38801188facb5e9c6335
       - name: Build the previous release as its installer does
         if: ${{ steps.restore.outputs.cache-hit != 'true' }}
         working-directory: ${{ runner.temp }}/previous-release

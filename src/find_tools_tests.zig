@@ -26,7 +26,7 @@ fn configure(storage: *Store, key: []const u8, names: []const []const u8, initia
     var command = try testing.completeConfiguration(key, "", try testing.canonicalCwd(std.testing.io, &path), "model-a");
     command.configuration.tools = try .of(names);
     command.configuration.loaded_tools = try .of(initial_loaded);
-    const reply = storage.configure(&command, .{});
+    const reply = try storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     return reply.accepted.session;
 }

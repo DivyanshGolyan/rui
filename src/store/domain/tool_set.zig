@@ -9,7 +9,7 @@ const protocol = @import("../../protocol.zig");
 const content_string = @import("../../content_string.zig");
 const tool_name = @import("../../tool_name.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
-const tool_catalog = @import("../../tools.zig");
+const tool_catalog = @import("../../tool_record.zig");
 const rsql = @import("../rsql.zig");
 const content_domain = @import("content.zig");
 
