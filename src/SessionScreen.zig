@@ -8,6 +8,7 @@ const Position = Viewport.Position;
 const slash_commands = @import("slash_commands.zig");
 const View = @import("session_view.zig");
 const ConsentPolicy = @import("session_consent.zig");
+const session_id = @import("session_id.zig");
 const Self = @This();
 
 /// What the conversation area shows. The transcript is a frozen copy of live
@@ -49,6 +50,10 @@ drawn: struct { first: Position = .{}, rows: u16 = 0 } = .{},
 // list's keys act on (`slash_commands.Shown`).
 commands: ?slash_commands.Shown = null,
 height: u16 = 1,
+// Rows a scrolled-back view gives up below the transcript, where the `↓`
+// marker sits; the latest view shows text there. Scrolling down returns to
+// the latest once the view reaches where the latest one starts.
+marker_rows: u16 = 0,
 colour: bool,
 
 pub fn init(self: *Self, io: std.Io, environ: *std.process.Environ.Map, colour: bool) !void {
@@ -167,13 +172,20 @@ pub fn beginTranscript(self: *Self, front: u64) !void {
 pub fn browse(self: *Self, down: bool, page: bool) bool {
     std.debug.assert(self.view != .live);
     const document = self.viewed();
-    const end = document.atBottom(self.textLayout(), self.height);
+    const latest_rows = self.height + self.marker_rows;
+    const end = document.atBottom(self.textLayout(), latest_rows);
     const moves: usize = if (page) self.height else 1;
     if (self.view == .transcript) self.overscroll = if (down) 0 else if (document.atTop(self.textLayout(), self.height)) @min(self.overscroll + moves, 4 * @as(usize, self.height)) else 0;
     document.browse(self.textLayout(), down, moves, self.height, null);
     if (self.view != .transcript or !down) return false;
     // Untrimmed transcript ends where live output continues.
-    return (end and self.newer_trimmed) or (!self.newer_trimmed and document.atBottom(self.textLayout(), self.height));
+    return (end and self.newer_trimmed) or (!self.newer_trimmed and document.atBottom(self.textLayout(), latest_rows));
+}
+
+/// A drag held at the top or bottom row moves the view one row through
+/// the text it already holds: it never reads older pages or changes view.
+pub fn dragScroll(self: *Self, up: bool) void {
+    self.viewed().browse(self.textLayout(), !up, 1, self.height, null);
 }
 
 /// Scrolls the inspection page so line `line` begins in view, as little as
@@ -261,18 +273,27 @@ fn boundary(self: *Self, text: []const u8) !usize {
     return before - self.transcriptCollapsed();
 }
 
-/// The lowest collapsed user block the latest frame drew in the live view
-/// or transcript, as how many collapsed blocks follow it in that document.
+/// What Ctrl-O opens: the lowest item the latest frame drew in the live
+/// view or transcript, a collapsed user block, counted by how many collapsed
+/// blocks follow it in that document, or a peer's name, by its Session's ID.
 /// Call right after drawing: later text moves what the frame drew.
-pub fn collapsedInView(self: *Self) ?usize {
+pub const Openable = union(enum) { message: usize, session: [session_id.bytes]u8 };
+
+pub fn openableInView(self: *Self, gpa: std.mem.Allocator) !?Openable {
     if (self.view != .live and self.view != .transcript) return null;
     const document = self.viewed();
     const text = document.text().len;
     const next = document.measure(self.textLayout(), self.drawn.first, self.drawn.rows).next;
     // A line cut at the bottom shows its first rows, which hold the mark.
     const end = if (next.offset >= text) text else if (next.row != 0) document.lineEnd(next.offset) else next.offset;
-    const last = document.collapsed(@min(self.drawn.first.offset, text), end).last orelse return null;
-    return document.collapsed(last + 1, text).count;
+    const start = @min(self.drawn.first.offset, text);
+    const mark = document.collapsed(start, end).last;
+    if (try document.lastShownSession(gpa, self.textLayout(), start, end)) |name| if (mark == null or name > mark.?) {
+        const id = document.sessionAt(name).?;
+        if (id.len == session_id.bytes) return .{ .session = id[0..session_id.bytes].* };
+    };
+    const last = mark orelse return null;
+    return .{ .message = document.collapsed(last + 1, text).count };
 }
 
 /// Shows one Message's full text over the live view or the transcript.

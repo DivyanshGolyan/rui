@@ -249,7 +249,12 @@ pub const Reader = struct {
             else
                 1;
             while (length < needed) {
-                scalar[length] = (try source.peek()) orelse return error.UnexpectedJsonEnd;
+                scalar[length] = (try source.peek()) orelse {
+                    // Ended inside the scalar: an earlier byte may already
+                    // be invalid, and its reason comes first, as in `read`.
+                    _ = try decodeString(scalar[0..length], 0, self);
+                    return error.UnexpectedJsonEnd;
+                };
                 _ = try source.take();
                 length += 1;
                 if (length == 2 and byte == '\\' and scalar[1] == 'u') needed = 6;
@@ -709,6 +714,30 @@ fn expectReadAsStd(document: []const u8) !void {
     const accepted = if (reader.readSource(&source, &streamed)) |_| true else |_| false;
     try std.testing.expectEqual(expected, accepted);
     if (accepted) try std.testing.expectEqualStrings(recorder.events(), streamed.events());
+}
+
+test "both readers fail a document that ends inside an escape for its first invalid byte" {
+    for ([_]struct { []const u8, Error }{
+        .{ "{\"a\":\"\\ud83d\\ude\x92", error.InvalidJsonEscape },
+        .{ "{\"a\":\"\\ud83dx", error.InvalidJsonSurrogate },
+        .{ "{\"a\":\"\\ud83d\\ud8", error.UnexpectedJsonEnd },
+    }) |case| {
+        var reader: Reader = undefined;
+        var recorder: Recorder = .{};
+        try std.testing.expectError(case[1], reader.read(case[0], &recorder));
+        var source: struct {
+            bytes: []const u8,
+            at: usize = 0,
+            pub fn peek(self: *@This()) !?u8 {
+                return if (self.at < self.bytes.len) self.bytes[self.at] else null;
+            }
+            pub fn take(self: *@This()) !u8 {
+                defer self.at += 1;
+                return self.bytes[self.at];
+            }
+        } = .{ .bytes = case[0] };
+        try std.testing.expectError(case[1], reader.readSource(&source, &recorder));
+    }
 }
 
 test "the reader reports keys and values with their depths, ranges and decoded starts" {

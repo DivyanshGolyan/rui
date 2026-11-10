@@ -4,11 +4,18 @@ test {
     _ = @import("widget_style.zig");
     _ = @import("InputArea.zig");
     _ = @import("GroupedList.zig");
+    _ = @import("OverviewLines.zig");
     _ = @import("Palette.zig");
     _ = @import("skill_palette_tests.zig");
     _ = @import("Composer.zig");
     _ = @import("Transcript.zig");
     _ = @import("Root.zig");
+    _ = @import("Chip.zig");
+    _ = @import("StatusRow.zig");
+    _ = @import("FactsRow.zig");
+    _ = @import("ActivityBlock.zig");
+    _ = @import("Shortcuts.zig");
+    _ = @import("SessionChrome.zig");
     _ = @import("TerminalApp.zig");
     _ = @import("Installation.zig");
     _ = @import("release_candidate.zig");
@@ -17,6 +24,8 @@ test {
     _ = @import("host_identity.zig");
     _ = @import("upgrade.zig");
     _ = @import("installation_path.zig");
+    _ = @import("UpgradeJob.zig");
+    _ = @import("stderr.zig");
     // These were previously discovered only while compiling another test's
     // body. Every filtered root must discover them before ownership filtering.
     _ = @import("BashLifecycle.zig");

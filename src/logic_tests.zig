@@ -73,6 +73,7 @@ const cores = .{
     .{ "overview_style.zig", @import("overview_style.zig") },
     .{ "overview_view.zig", @import("overview_view.zig") },
     .{ "path_list.zig", @import("path_list.zig") },
+    .{ "process_memory.zig", @import("process_memory.zig") },
     .{ "product_defaults.zig", @import("product_defaults.zig") },
     .{ "protocol.zig", @import("protocol.zig") },
     .{ "provider_name.zig", @import("provider_name.zig") },
@@ -84,6 +85,7 @@ const cores = .{
     .{ "retry_policy.zig", @import("retry_policy.zig") },
     .{ "serve_grammar.zig", @import("serve_grammar.zig") },
     .{ "session_archive.zig", @import("session_archive.zig") },
+    .{ "session_chrome.zig", @import("session_chrome.zig") },
     .{ "session_consent.zig", @import("session_consent.zig") },
     .{ "session_departure.zig", @import("session_departure.zig") },
     .{ "session_field.zig", @import("session_field.zig") },
@@ -95,6 +97,7 @@ const cores = .{
     .{ "session_reading.zig", @import("session_reading.zig") },
     .{ "session_transcript.zig", @import("session_transcript.zig") },
     .{ "session_upgrade.zig", @import("session_upgrade.zig") },
+    .{ "upgrade_status.zig", @import("upgrade_status.zig") },
     .{ "session_work.zig", @import("session_work.zig") },
     .{ "skill_completion.zig", @import("skill_completion.zig") },
     .{ "skill_reference.zig", @import("skill_reference.zig") },
@@ -138,6 +141,8 @@ test {
     _ = @import("request_encoding.zig");
     _ = @import("ResponseTiming.zig");
     _ = @import("ConversationViewport.zig");
+    _ = @import("transcript_selection.zig");
+    _ = @import("session_follow.zig");
     _ = @import("SessionInput.zig");
     _ = @import("TerminalEditor.zig");
     _ = @import("tools.zig");

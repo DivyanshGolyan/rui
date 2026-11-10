@@ -27,9 +27,13 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("decision=none\n", .{});
         return;
     }
-    if (args.len == 2 and std.mem.eql(u8, args[1], "app-signal")) {
+    // `app-late-hangup` takes the hangup a shell forwards only after App
+    // released the terminal, as when App saw the end of input first.
+    const late_hangup = args.len == 2 and std.mem.eql(u8, args[1], "app-late-hangup");
+    if (late_hangup or (args.len == 2 and std.mem.eql(u8, args[1], "app-signal"))) {
         var runtime: @import("TerminalApp.zig") = .{};
         try runtime.init(init.io, init.environ_map);
+        defer if (late_hangup) std.posix.raise(.HUP) catch {};
         defer runtime.deinit();
         const text: @import("vaxis").vxfw.Text = .{ .text = "App signal fixture" };
         var screen = text.widget();

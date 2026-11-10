@@ -19,7 +19,7 @@ pub fn init(self: *Self, io: std.Io, environ: *std.process.Environ.Map) !void {
         .flags = 0,
     };
     inline for (Signals.handled, 0..) |signal, index| std.posix.sigaction(signal, &action, &self.previous[index]);
-    errdefer self.restoreSignals();
+    errdefer self.restoreSignals(.all);
     self.app = try .init(io, std.heap.page_allocator, environ, &self.output);
     self.attention = .{ .vx = &self.app.vx, .out = self.app.tty.writer() };
 }
@@ -30,11 +30,16 @@ pub fn deinit(self: *Self) void {
     // if the output channel has failed.
     self.attention.clear() catch |err| std.log.err("clearing Rui terminal status: {}", .{err});
     self.app.deinit();
-    self.restoreSignals();
+    self.restoreSignals(.keep_hangup);
 }
 
-fn restoreSignals(self: *Self) void {
-    inline for (Signals.handled, 0..) |signal, index| std.posix.sigaction(signal, &self.previous[index], null);
+/// Exit continues past App. When the terminal closes, its shell forwards a
+/// hangup to Rui, which may arrive only after App saw the end of input and
+/// released the terminal; Rui's handler then keeps it from ending that exit.
+fn restoreSignals(self: *Self, which: enum { all, keep_hangup }) void {
+    inline for (Signals.handled, 0..) |signal, index| {
+        if (which == .all or signal != std.posix.SIG.HUP) std.posix.sigaction(signal, &self.previous[index], null);
+    }
 }
 
 pub fn run(self: *Self, root: vaxis.vxfw.Widget) !void {

@@ -26,6 +26,18 @@ pub const link_end = "\x1b\\";
 pub const link_close = link_open ++ link_end;
 /// The longest address a link carries; a longer one stays literal text.
 pub const max_link_bytes = 2048;
+/// A peer's name in the conversation view's own stream links to its Session
+/// with this address and the Session ID after it. The view opens it on
+/// click and never sends it to the terminal as a hyperlink.
+pub const session_link = "rui-session:";
+
+/// The most bytes Rui sets the clipboard to (OSC 52): hterm's osc52.sh
+/// sends at most 100,000 base64 bytes, the smallest limit a terminal's own
+/// tooling documents.
+pub const clipboard_limit = 100_000 / 4 * 3;
+
+/// What a copy past that limit says, whichever gesture asked for it.
+pub const clipboard_too_large = "Too large for the clipboard · /copy file";
 
 /// An address a terminal may open: http or https with a host, every byte
 /// printable ASCII, so it cannot end or extend the OSC 8 sequence it rides in.

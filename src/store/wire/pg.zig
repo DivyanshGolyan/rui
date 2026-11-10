@@ -318,7 +318,10 @@ pub const CommandComplete = struct {
     /// MOVE, FETCH and COPY tags; null for any other command.
     pub fn rows(self: CommandComplete) ?u64 {
         const space = std.mem.lastIndexOfScalar(u8, self.tag, ' ') orelse return null;
-        return std.fmt.parseUnsigned(u64, self.tag[space + 1 ..], 10) catch null;
+        const digits = self.tag[space + 1 ..];
+        // parseUnsigned also takes underscores between digits.
+        if (digits.len == 0 or std.mem.indexOfNone(u8, digits, "0123456789") != null) return null;
+        return std.fmt.parseUnsigned(u64, digits, 10) catch null;
     }
 };
 

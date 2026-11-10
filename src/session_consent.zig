@@ -26,7 +26,7 @@ pub const Pending = struct {
     highlight: Choice = .allow_once,
     /// The input row the person chose beside this Action: the selector,
     /// unless they were writing a draft when it arrived or typed beside it,
-    /// until Esc, Ctrl-G, Ctrl-End or End on an empty draft returns to it.
+    /// until Esc or Ctrl-G returns to it.
     row: Row,
 
     /// The decision this Action's selector shows.

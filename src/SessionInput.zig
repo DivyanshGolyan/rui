@@ -135,15 +135,19 @@ fn accept(self: *Self, comptime Action: type, outcome: keymap.Outcome(Action), s
     if (bytes.len == 0) return .{ .editor = outcome };
     // A slash command stays in the draft; the caller clears it once it runs.
     // While another waits, every draft command waits too, local ones included.
-    if (bytes[0] == '/' and !std.mem.startsWith(u8, bytes, "//")) return if (self.command_length != null) .busy else .command;
+    if (bytes[0] == '/' and !std.mem.startsWith(u8, bytes, "//")) return if (self.admitsCommand()) .command else .busy;
     if (!selected or self.submitted != null) return .busy;
     return .{ .message = self.seal(false) };
 }
 
-/// Queues one inspection command for the draft's reader. The draft admits a
-/// command only while none waits.
+/// Whether a command may run now, typed or clicked: only while none waits.
+pub fn admitsCommand(self: *const Self) bool {
+    return self.command_length == null;
+}
+
+/// Queues one inspection command for the draft's reader.
 pub fn queueCommand(self: *Self, text: []const u8) void {
-    std.debug.assert(self.command_length == null);
+    std.debug.assert(self.admitsCommand());
     @memcpy(self.command_buffer[0..text.len], text);
     self.command_length = text.len;
 }

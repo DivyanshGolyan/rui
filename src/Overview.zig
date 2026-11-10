@@ -17,11 +17,14 @@ const Root = @import("Root.zig");
 const AppScreen = @import("AppScreen.zig");
 const InputArea = @import("InputArea.zig");
 const GroupedList = @import("GroupedList.zig");
+const host_identity = @import("host_identity.zig");
+const OverviewLines = @import("OverviewLines.zig");
 const Palette = @import("Palette.zig");
 const skill_completion = @import("skill_completion.zig");
 const skill_suggestions = @import("skill_suggestions.zig");
 const client = @import("client.zig");
 const configure_input = @import("configure_input.zig");
+const process_memory = @import("process_memory.zig");
 const product_defaults = @import("product_defaults.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -33,10 +36,14 @@ const test_poll = @import("test_poll");
 const app_events = @import("testing/app_events.zig");
 const view = @import("overview_view.zig");
 const ClientTask = @import("ClientTask.zig");
+const UpgradeJob = @import("UpgradeJob.zig");
+const session_chrome = @import("session_chrome.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const session_reads = @import("session_reads.zig");
 const SessionInput = @import("SessionInput.zig");
 const SessionScreen = @import("SessionScreen.zig");
+const session_id = @import("session_id.zig");
+const Follow = @import("session_follow.zig").Follow;
 const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalText = @import("TerminalText.zig");
 const keymap = @import("keymap.zig");
@@ -85,13 +92,23 @@ pub const Hooks = struct {
     captured: *const fn (std.Io) anyerror!void,
 };
 
+/// What one Host read found, kept whole so neither part outlives the read
+/// that took it.
+pub const HostRead = struct {
+    /// Null when no Host is ready.
+    facts: ?view.Host = null,
+    /// This TUI's memory, with the Host's and its tools' while one runs;
+    /// null when the read sampled none.
+    memory: ?view.Memory = null,
+};
+
 /// The client operations the effects run. The worker runs all but
 /// `converse`, each with its own cancellable requests; the loop runs
 /// `converse`. Each returns what the Host answered, failures included, and
 /// an error when there was no answer. Tests substitute their own.
 pub const Operations = struct {
-    /// host-info's facts, or null when the Host gives none.
-    host: *const fn (*Self) ?view.Host,
+    /// One Host read: host-info's facts and the memory sampled with them.
+    host: *const fn (*Self) HostRead,
     /// Whether no Host owns the Store: it stopped, rather than failing to
     /// answer discovery.
     stopped: *const fn (*Self) bool,
@@ -310,6 +327,8 @@ root: Root = undefined,
 app_screen: AppScreen.Overview = undefined,
 app_input: InputArea = undefined,
 app_list: GroupedList = .{},
+/// The counts line and its bands, which take the view-name click.
+app_header: OverviewLines.Header = undefined,
 app_palette: Palette = undefined,
 app_frame: u64 = 0,
 /// Whether the latest frame showed a mark that spins.
@@ -320,6 +339,8 @@ app_panel: ?[]const view.ListRow = null,
 app_models: ?model_picker_view.Rows = null,
 session_screen: *SessionScreen = undefined,
 app_session: ?Left = null,
+/// Where leaving a Session goes when Session links are followed.
+follow: Follow = .{},
 retired: std.ArrayList(struct { left: Left, frame: u64 }) = .empty,
 interrupted: *client.Cancellation,
 /// The composer's line editor, the conversation's, which owns the draft.
@@ -332,14 +353,22 @@ draft_anchor: usize = 0,
 done: [2]c_int = .{ -1, -1 },
 
 worker: ClientTask = .{},
-upgrade_requested: bool = false,
+/// The /upgrade run's worker, for as long as the core says one runs, and
+/// the receipts runs left, which print on exit.
+upgrade_job: UpgradeJob = .{},
+/// The serving Host's pid, read once per Host start.
+host_process: ?struct { started_at: u64, pid: i32 } = null,
+upgrade_report: ?std.Io.Writer.Allocating = null,
+/// The terminal title as last set: the open Session's name, if any, and how
+/// many Sessions need the person.
+title: session_chrome.Title = .{},
 jobs: [max_jobs]Job = undefined,
 job_count: usize = 0,
 /// The job the worker runs or last ran, and its output.
 job: Job = .list,
 traversal: protocol_reply.SessionTraversal = .init(null),
 traversal_archive: protocol.SessionArchiveFilter = .active,
-host: ?view.Host = null,
+host: HostRead = .{},
 page: protocol_reply.SessionListPage = undefined,
 lines: [view.max_first_line_reads]Line = @splat(.{}),
 /// Each command read's leading bytes, null when it has none to show.
@@ -460,14 +489,18 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     ctx.redraw = true;
                 }
                 const now = self.realMs();
-                if (self.state.wakeAt()) |at| if (now >= at) {
-                    try self.appNext(ctx, try self.event(.{ .tick = now }));
-                    ctx.redraw = true;
-                };
+                // An Upgrade holds Host work until it ends.
+                if (self.state.upgrading()) try self.appUpgrade(ctx) else {
+                    if (self.state.wakeAt()) |at| if (now >= at) {
+                        try self.appNext(ctx, try self.event(.{ .tick = now }));
+                        ctx.redraw = true;
+                    };
+                    try self.dispatch(.all);
+                }
                 if (self.wantsFrame()) ctx.redraw = true;
-                try self.dispatch(.all);
             }
-            if (self.upgrade_requested) try self.appUpgrade(ctx);
+            const open: ?[]const u8 = if (self.app_session) |shown| if (shown.frontend) |frontend| frontend.titleName() else null else null;
+            if (self.title.next(open, self.state.summary.counts.needs_you)) |text| try ctx.setTitle(text);
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
             if (self.state.picker != null and !self.root.pasting and input == .key_press) {
@@ -491,6 +524,18 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         },
         else => {},
     }
+}
+
+/// A click the screen's widgets name steps the core as a key does.
+fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    try self.appNext(ctx, try self.event(.{ .clicked = click }));
+    ctx.redraw = true;
+}
+
+/// A press on the list's line `index`; the core decides what it means.
+fn appPressed(raw: *anyopaque, ctx: *vxfw.EventContext, index: u32) anyerror!void {
+    try appClick(raw, ctx, .{ .line = index });
 }
 
 fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
@@ -529,7 +574,7 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     const frontend = try self.init.gpa.create(SessionFrontend);
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeHandoff };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
-    const child = frontend.attach(.{ .root = &self.root, .context = self, .leave = appSessionLeft, .upgrade = appSessionUpgrade, .copy = appCopy }, self.caps);
+    const child = frontend.attach(.{ .root = &self.root, .context = self, .leave = appSessionLeft, .upgrade = appSessionUpgrade, .copy = appCopy, .on_open = appSessionFollow }, self.caps);
     // Custody transfers before focus delivery: on failure the exit
     // path cancels and joins the same frontend before freeing it.
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
@@ -541,6 +586,7 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
 fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFrontend.Outcome) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const left = &self.app_session.?;
+    const from = left.session;
     left.ended = outcome;
     if (outcome == .returned) switch (left.frontend.?.back(view.canHoldSend(&self.state))) {
         .ended => |ended| left.ended = ended,
@@ -558,10 +604,22 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
             try self.root.closeSession(ctx);
             // App's last frame can still point at the old widgets. Dispose
             // only after the next frame replaces that focus/hit-test tree.
-            return;
+            return self.followNext(ctx, from);
         },
     };
     ctx.quit = true;
+}
+
+/// A clicked Session link: open it once the current Session has left.
+fn appSessionFollow(raw: *anyopaque, _: *vxfw.EventContext, target: *const [session_id.bytes]u8) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    self.follow.pending = target.*;
+}
+
+/// After leaving `from`, opens the Session a link named, or the one a
+/// followed link left, as opening it from the overview does.
+fn followNext(self: *Self, ctx: *vxfw.EventContext, from: view.Reference) !void {
+    if (self.follow.next(from)) |target| try self.appNext(ctx, try self.event(.{ .open = target }));
 }
 
 fn appSessionUpgrade(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
@@ -579,13 +637,35 @@ fn appCopy(raw: *anyopaque, file: std.Io.File, start: u64, length: u64) !void {
     try app.vx.copyToSystemClipboard(app.tty.writer(), bytes, self.init.gpa);
 }
 
+/// Runs the Upgrade the core says is going: once the overview's own Host
+/// work has settled, the check and install run on their worker. The core
+/// is told where the run stands whenever that differs from what it holds,
+/// so the worker is the one place the run's state is decided.
 fn appUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
-    self.upgrade_requested = false;
-    self.state.upgrade_pending = false;
-    const text = "Run rui upgrade in the shell";
-    self.state.notice = .{ .colour = .quiet, .len = text.len };
-    @memcpy(self.state.notice.?.bytes[0..text.len], text);
-    ctx.redraw = true;
+    const job = &self.upgrade_job;
+    // A failed start finishes the run, which the core is told below.
+    if (!job.started and try self.quiesceUpgrade()) job.begin(self.init, self.options.store) catch {};
+    const done = job.started and try job.advance();
+    const stands = job.status(self.state.summary.counts.working);
+    if (!std.meta.eql(stands, self.state.upgrade.?)) {
+        try self.appNext(ctx, try self.event(.{ .upgrade = stands }));
+        ctx.redraw = true;
+    }
+    if (done) try self.keepUpgrade();
+}
+
+/// Keeps a finished run's receipt for exit, the full report when it
+/// failed, retained cleanup or left an unusable Host, and frees the run.
+fn keepUpgrade(self: *Self) !void {
+    const job = &self.upgrade_job;
+    if (!job.started) return;
+    const detailed = job.failure != null or job.cleanup.any() or job.outcome == .incompatible;
+    if (detailed or job.result != null) {
+        if (self.upgrade_report == null) self.upgrade_report = .init(self.init.gpa);
+        const writer = &self.upgrade_report.?.writer;
+        if (detailed) try job.writeReport(writer) else try job.writeReceipt(writer);
+    }
+    job.deinit();
 }
 
 fn disposeSession(self: *Self, left: Left) void {
@@ -601,6 +681,14 @@ fn finishApp(self: *Self, ended: anyerror!void) !void {
         for (self.retired.items) |retired| self.disposeSession(retired.left);
         self.retired.deinit(self.init.gpa);
     }
+    // A run still going is cancelled and joined; what it published and
+    // the full check print with the departure.
+    self.upgrade_job.settle();
+    const kept = self.keepUpgrade();
+    // The terminal is restored: the report names what the run published or
+    // left behind, so it is written whole, however small the terminal's buffer.
+    // A stderr that takes nothing leaves no other place to say it.
+    if (self.upgrade_report) |*report| _ = stderr.writeReceipt(report.written());
     self.worker.cancel();
     const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
     const saved = self.flushSaves();
@@ -617,12 +705,16 @@ fn finishApp(self: *Self, ended: anyerror!void) !void {
         saved catch |err| {
             left.ended = err;
         };
+        kept catch |err| {
+            left.ended = err;
+        };
         return self.leave(left, {});
     }
     TerminalApp.detached(self.options.store, null, null);
     try ended;
     _ = try answered;
     try saved;
+    try kept;
 }
 
 /// The list's row `index` this frame: a panel's line, or the Sessions
@@ -673,20 +765,33 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const frame = self.animationFrame();
     self.app_frame = frame;
     self.app_width = size.width;
-    self.app_panel = try view.panelItems(ctx.arena, &self.state, size.width, self.caps);
-    const panel = self.app_panel;
     if (self.state.picker != null) view.syncPicker(&self.state, self.composerDraft());
-    self.app_models = if (self.state.picker) |shown| blk: {
-        const defaults = view.pickerDefaults(&self.state);
-        const words = view.pickerWords(self.composerDraft().bytes);
-        const choice = shown.choice orelse model_picker_view.open(&self.state.menu, words, defaults);
-        break :blk try model_picker_view.rows(ctx.arena, &self.state.menu, words, defaults, choice, size.width, self.caps.width, self.caps.unicode, self.state.menu_read);
-    } else null;
-    self.app_list.selected = if (self.app_models) |models| models.selected else if (panel == null) if (view.selectedLine(&self.state)) |line| @intCast(line) else null else null;
-    self.app_list.rows = .{ .userdata = self, .count = @intCast(if (self.app_models) |models| models.count else if (panel) |items| items.len else view.listLength(&self.state)), .rowFn = appRow };
+    // The core says what fills the list; this frame draws only that.
+    switch (self.state.listArea()) {
+        .picker => {
+            const defaults = view.pickerDefaults(&self.state);
+            const words = view.pickerWords(self.composerDraft().bytes);
+            const choice = self.state.picker.?.choice orelse model_picker_view.open(&self.state.menu, words, defaults);
+            const models = try model_picker_view.rows(ctx.arena, &self.state.menu, words, defaults, choice, size.width, self.caps.width, self.caps.unicode, self.state.menu_read);
+            self.app_models = models;
+            self.app_list.selected = models.selected;
+            self.app_list.rows = .{ .userdata = self, .count = @intCast(models.count), .rowFn = appRow };
+        },
+        .panel => {
+            const items = (try view.panelItems(ctx.arena, &self.state, size.width, self.caps)).?;
+            self.app_panel = items;
+            self.app_list.selected = null;
+            self.app_list.rows = .{ .userdata = self, .count = @intCast(items.len), .rowFn = appRow };
+        },
+        .sessions => {
+            self.app_list.selected = if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
+            self.app_list.rows = .{ .userdata = self, .count = @intCast(view.listLength(&self.state)), .rowFn = appRow };
+        },
+    }
     self.app_list.caps = self.caps;
     self.state.commands = view.nextCommands(&self.state, self.composerDraft());
-    self.app_screen.header = try rich(ctx, self.caps, try view.headerSegments(ctx.arena, &self.state, size.width, self.caps));
+    self.app_header.caps = self.caps;
+    self.app_screen.header = self.app_header.widget();
     self.app_input.facts = try rich(ctx, self.caps, try view.factsSegments(ctx.arena, &self.state, size.width, self.caps));
     self.app_input.status = try rich(ctx, self.caps, try view.statusSegments(ctx.arena, &self.state, self.composerDraft(), size.width, self.caps));
     self.app_screen.tail = null;
@@ -707,7 +812,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     var surface = try self.app_screen.widget().draw(ctx);
     surface.widget = self.widget();
     self.app_spins = false;
-    if (panel == null and self.state.picker == null) for (self.app_list.shown.first..self.app_list.shown.end) |at| {
+    if (self.state.listArea() == .sessions) for (self.app_list.shown.first..self.app_list.shown.end) |at| {
         if (view.markSpins(&self.state, view.listItem(&self.state, at).?, self.caps)) self.app_spins = true;
     };
     return surface;
@@ -757,6 +862,8 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.root = .{ .overview = self.widget() };
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" } };
     self.app_screen = .{ .content = &self.app_list, .input = &self.app_input, .userdata = self, .on_event = appEvent };
+    self.app_header = .{ .state = &self.state, .userdata = self, .on_click = appClick };
+    self.app_list.on_press = .{ .userdata = self, .pressed = appPressed };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     if (self.state.default) |*binding| binding.effort = self.savedEffort() catch null;
@@ -787,6 +894,8 @@ fn closePipes(self: *Self) void {
 
 fn destroy(self: *Self) void {
     std.debug.assert(self.worker.thread == null);
+    self.upgrade_job.deinit();
+    if (self.upgrade_report) |*report| report.deinit();
     self.job.deinit(self.init.gpa);
     for (self.jobs[0..self.job_count]) |job| job.deinit(self.init.gpa);
     if (self.scratch) |file| file.close(self.init.io);
@@ -826,10 +935,7 @@ fn event(self: *Self, value: view.Event) !?Next {
         .read_commands => |reads| self.queue(.{ .commands = reads }),
         .start => |request| self.queue(.{ .start = try request.own(self.init.gpa) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
-        .upgrade => {
-            self.upgrade_requested = true;
-            self.state.upgrade_pending = true;
-        },
+        .cancel_upgrade => self.upgrade_job.cancel(),
         .archive => |request| self.queue(.{ .archive = request }),
         .list_models => self.queue(.models),
         .save_default => |binding| self.queue(.{ .save = binding }),
@@ -1020,7 +1126,10 @@ fn complete(self: *Self) !?Next {
 
 fn deliver(self: *Self, outcome: anyerror!void) !?Next {
     switch (self.job) {
-        .host => return self.event(.{ .host = self.host }),
+        .host => {
+            if (self.host.memory) |memory| _ = try self.event(.{ .memory = memory });
+            return self.event(.{ .host = self.host.facts });
+        },
         .list => {
             outcome catch return self.event(.{ .list = .failed });
             var rows: [view.max_page_rows]view.Listed = undefined;
@@ -1249,7 +1358,7 @@ fn observed(raw: *anyopaque, read: protocol.session_work.Work, opening: bool) !v
 fn service(raw: *anyopaque) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
-    if (self.state.upgrade_blocked) return false;
+    if (self.state.upgrade_after == .blocked) return false;
     const now_ms = self.realMs();
     if (self.state.wakeAt()) |at| if (now_ms >= at) {
         _ = try self.event(.{ .tick = now_ms });
@@ -1292,7 +1401,6 @@ fn quiesceUpgrade(self: *Self) !bool {
             };
         }
     }
-    self.state.upgrade_pending = true;
     return self.worker.thread == null and self.job_count == 0;
 }
 
@@ -1300,7 +1408,7 @@ fn upgradeHandoff(raw: *anyopaque, handoff: SessionFrontend.UpgradeHandoff) !boo
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (handoff) {
         .quiesce => {
-            self.state.upgrade_pending = true;
+            self.state.holdForSessionUpgrade();
             return self.quiesceUpgrade();
         },
         .ready, .incompatible => {
@@ -1378,12 +1486,32 @@ fn hostStopped(self: *Self) bool {
     return client.hostStatus(self.init.io, self.options.store) == .unavailable;
 }
 
-fn hostFacts(self: *Self) ?view.Host {
-    const ready = switch (client.hostStatus(self.init.io, self.options.store)) {
+fn hostFacts(self: *Self) HostRead {
+    const ready: ?@FieldType(protocol_reply.HostStatus, "ready") = switch (client.hostStatus(self.init.io, self.options.store)) {
         .ready => |ready| ready,
-        else => return null,
+        else => null,
     };
-    return .{ .started_at = ready.started_at, .slots = ready.active_capacity, .slots_in_use = ready.custody_occupied };
+    return .{
+        .facts = if (ready) |host| .{ .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied } else null,
+        // The same read samples the counts line's memory.
+        .memory = self.liveMemory(if (ready) |host| host.started_at else null),
+    };
+}
+
+/// The counts line's memory: this TUI, the Host that started at
+/// `host_started_at` and its tools. With no Host ready it is this TUI alone.
+/// The Host's pid is read once per Host start.
+fn liveMemory(self: *Self, host_started_at: ?u64) view.Memory {
+    if (host_started_at) |started_at| {
+        if (self.host_process == null or self.host_process.?.started_at != started_at) {
+            self.host_process = if (client.observeHostProcess(self.init.io, self.options.store, null)) |process|
+                .{ .started_at = started_at, .pid = process.pid }
+            else |_|
+                null;
+        }
+    } else self.host_process = null;
+    var processes: host_identity.Processes = .{};
+    return process_memory.read(&processes, std.c.getpid(), if (self.host_process) |host| host.pid else null);
 }
 
 fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
@@ -1560,9 +1688,9 @@ const fake_operations: Operations = .{
         }
     }.skills,
     .host = struct {
-        fn host(_: *Self) ?view.Host {
+        fn host(_: *Self) HostRead {
             Seen.now.hosts += 1;
-            return .{ .started_at = test_now_s - 60, .slots = 4, .slots_in_use = 1 };
+            return .{ .facts = .{ .started_at = test_now_s - 60, .slots = 4, .slots_in_use = 1 } };
         }
     }.host,
     .stopped = struct {
@@ -1760,6 +1888,18 @@ const Rig = struct {
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         try app_events.send(&ctx, bytes, rig.overview.root.widget(), rig.overview.widget());
+        return if (ctx.quit) .overview else null;
+    }
+
+    /// A left press at `column`, `row` on the frame a terminal of `width`
+    /// by `height` shows, delivered as App delivers it.
+    fn click(rig: *Rig, column: u16, row: u16, width: u16, height: u16) !?Ending {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const frame = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try app_events.mouse(&ctx, frame, .{ .col = @intCast(column), .row = @intCast(row), .button = .left, .type = .press, .mods = .{} });
         return if (ctx.quit) .overview else null;
     }
 
@@ -3477,6 +3617,24 @@ test "a listing failure under a conversation ends the overview once the terminal
     try std.testing.expectEqualStrings("", written);
 }
 
+test "App sets the terminal title once per change, with how many Sessions need the person" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try appEvent(rig.overview, &ctx, .tick);
+    try appEvent(rig.overview, &ctx, .tick);
+    rig.overview.state.summary.counts.needs_you = 2;
+    try appEvent(rig.overview, &ctx, .tick);
+    var titles: std.ArrayList([]const u8) = .empty;
+    for (ctx.cmds.items) |command| if (command == .set_title) try titles.append(arena.allocator(), command.set_title);
+    try std.testing.expectEqual(@as(usize, 2), titles.items.len);
+    try std.testing.expectEqualStrings("rui", titles.items[0]);
+    try std.testing.expectEqualStrings("rui · 2 needs you", titles.items[1]);
+}
+
 test "leaving while a start is queued or running says what became of it" {
     var cancellation: client.Cancellation = .{};
     var buffer: [1024]u8 = undefined;
@@ -3556,6 +3714,29 @@ fn openComposer() !*Rig {
         var cancellation: client.Cancellation = .{};
     };
     return Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &Shared.cancellation);
+}
+
+test "a click on the counts line's view name, as a terminal sends it, lists the default view" {
+    const rig = try openComposer();
+    defer rig.close();
+    try std.testing.expect(try rig.press("/sessions archived\r") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.archived, Seen.now.archive_filter);
+    var shown = try rig.shown(80, 24);
+    defer shown.deinit();
+    // The name's first cell, as the terminal lays the top row out.
+    const column: u16 = for (0..79) |at| {
+        const here = shown.screen.readCell(@intCast(at), 0).?.char.grapheme;
+        const after = shown.screen.readCell(@intCast(at + 1), 0).?.char.grapheme;
+        if (std.mem.eql(u8, here, "A") and std.mem.eql(u8, after, "r")) break @intCast(at);
+    } else return error.TestUnexpectedResult;
+    // The cell just past the name is not it.
+    try std.testing.expect(try rig.click(column + 8, 0, 80, 24) == null);
+    try std.testing.expectEqual(view.ArchiveFilter.archived, rig.overview.state.archive);
+    try std.testing.expect(try rig.click(column, 0, 80, 24) == null);
+    try std.testing.expectEqual(view.ArchiveFilter.active, rig.overview.state.archive);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.active, Seen.now.archive_filter);
 }
 
 test "bytes that are not text reject the composer's line at Enter, as in a conversation" {
@@ -4190,7 +4371,7 @@ test "upgrade quiescence settles accepted queued and running archive mutations b
         try std.testing.expectEqual(@as(usize, 1), overview.job_count);
         if (running) try overview.dispatch(.all);
         try std.testing.expect(try rig.press("/upgrade\r") == null);
-        try std.testing.expect(overview.upgrade_requested);
+        try std.testing.expect(overview.state.upgrading());
         try std.testing.expect(!try overview.quiesceUpgrade());
         try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &Gate.entered, test_poll.isSet);
         try std.testing.expect(!try overview.quiesceUpgrade());
@@ -4212,6 +4393,72 @@ test "upgrade quiescence settles accepted queued and running archive mutations b
         try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "original-archive-handle") != null);
         try std.testing.expect(overview.worker.thread == null);
     };
+}
+
+test "Esc while /upgrade waits for a held archive keeps the cancel: nothing checks or installs" {
+    const Gate = struct {
+        var entered: std.atomic.Value(bool) = .init(false);
+        var release: std.atomic.Value(bool) = .init(false);
+
+        fn archive(_: *Self, requests: client.Requests, _: client.SessionArchiveInput, reply: *Reply) !void {
+            entered.store(true, .release);
+            try test_poll.waitUntil(requests.io, test_poll.after(requests.io, .fromSeconds(10)), &release, test_poll.isSet);
+            reply.* = .{ .outcome = .accepted };
+        }
+
+        fn completed(overview: *Self) bool {
+            return overview.worker.completed();
+        }
+    };
+    var ops = fake_operations;
+    ops.archive = Gate.archive;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    Gate.entered.store(false, .release);
+    Gate.release.store(false, .release);
+    defer Gate.release.store(true, .release);
+    const overview = rig.overview;
+    _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .idle, .input = .{ .archive = .active } } });
+    try overview.dispatch(.all);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &Gate.entered, test_poll.isSet);
+    try std.testing.expect(try rig.press("/upgrade\r") == null);
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    // The archive holds the handoff: the run has not started.
+    try overview.appUpgrade(&ctx);
+    try std.testing.expect(overview.state.upgrading() and !overview.upgrade_job.started);
+    // Kitty's Esc, unambiguous on its own.
+    try std.testing.expect(try rig.press("\x1b[27u") == null);
+    Gate.release.store(true, .release);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), overview, Gate.completed);
+    var turns: usize = 0;
+    while (overview.state.upgrading()) : (turns += 1) {
+        try std.testing.expect(turns < 100);
+        try overview.appUpgrade(&ctx);
+    }
+    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", overview.state.notice.?.text());
+    try std.testing.expect(overview.upgrade_report == null);
+}
+
+test "memory counts this TUI alone while no Host runs, at open and after a Host it sampled is gone" {
+    var cancellation: client.Cancellation = .{};
+    // No Host serves this Store.
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    const first = overview.hostFacts();
+    try std.testing.expect(first.facts == null);
+    const alone = first.memory orelse return error.TestUnexpectedResult;
+    try std.testing.expect(alone.rui > 0 and alone.tools == null);
+    // As after one good sample of a Host and its tools, which then stopped:
+    // the read after it carries nothing over from that sample.
+    overview.host_process = .{ .started_at = 1, .pid = std.c.getpid() };
+    const second = overview.hostFacts();
+    try std.testing.expect(second.facts == null);
+    try std.testing.expect(overview.host_process == null);
+    const after = second.memory orelse return error.TestUnexpectedResult;
+    try std.testing.expect(after.rui > 0 and after.tools == null);
 }
 
 test "upgrade quiescence cancels read jobs rather than granting them mutation custody" {
@@ -4328,4 +4575,84 @@ test "a draft past its cap scrolls inside the composer, and the rule counts what
     var ascii = try rig.shown(40, 40);
     defer ascii.deinit();
     try ascii.expectLines(26, &.{ "------------ v 3 more lines ------------", " > 1" });
+}
+
+test "a click on a Session row, as a terminal sends it, opens the row under it after the list scrolls" {
+    const rig = try openListed();
+    defer rig.close();
+    // A short terminal with the last Session selected scrolls the list: the
+    // header holds row 0, and the list's last three rows fill rows 1 to 3.
+    rig.overview.state.selected = shownRow(rig, 4);
+    var shown = try rig.shown(60, 9);
+    defer shown.deinit();
+    try std.testing.expectEqualStrings("  ● Fix the flaky test                                  13s", try shown.line(2));
+    try std.testing.expectEqualStrings("────────────────────────────────────────────────────────────", try shown.line(4));
+    // Below the list, on the rule, nothing opens.
+    try std.testing.expect(try rig.click(10, 4, 60, 9) == null);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+    // Row 2 shows the fourth Session, one above the selected last.
+    try std.testing.expect(try rig.click(10, 2, 60, 9) == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
+    try std.testing.expectEqualStrings(&shownRow(rig, 3), &Seen.now.conversed);
+}
+
+test "a click on a group heading, as a terminal sends it, opens nothing" {
+    const rig = try openListed();
+    defer rig.close();
+    var shown = try rig.shown(60, 16);
+    defer shown.deinit();
+    const heading: u16 = for (1..16) |row| {
+        const text = try shown.line(@intCast(row));
+        if (text.len > 0 and !std.mem.startsWith(u8, text, " ") and std.mem.indexOf(u8, text, "flaky") == null) break @intCast(row);
+    } else return error.TestUnexpectedResult;
+    const selected = rig.overview.state.selected.?;
+    try std.testing.expect(try rig.click(3, heading, 60, 16) == null);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+    try std.testing.expectEqualStrings(&selected, &rig.overview.state.selected.?);
+}
+
+test "a followed Session link opens the peer, Esc reopens the Session it left, then the overview" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    // A link in k7m2qx names m3n4p5; k7m2qx then leaves.
+    overview.follow.pending = "m3n4p5".*;
+    try overview.followNext(&ctx, "k7m2qx".*);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
+    try std.testing.expectEqualStrings("m3n4p5", &Seen.now.conversed);
+    // Esc in m3n4p5 reopens k7m2qx; Esc there reaches the overview.
+    try overview.followNext(&ctx, "m3n4p5".*);
+    try std.testing.expectEqual(@as(usize, 2), Seen.now.conversations);
+    try std.testing.expectEqualStrings("k7m2qx", &Seen.now.conversed);
+    try overview.followNext(&ctx, "k7m2qx".*);
+    try std.testing.expectEqual(@as(usize, 2), Seen.now.conversations);
+    try std.testing.expect(!ctx.quit);
+}
+
+test "a Session link that no longer opens ends as any failed open, naming that Session" {
+    var ops = fake_operations;
+    ops.open = struct {
+        fn open(_: *Self, _: *vxfw.EventContext) !void {
+            return error.SessionNotFound;
+        }
+    }.open;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    overview.follow.pending = "m3n4p5".*;
+    try overview.followNext(&ctx, "k7m2qx".*);
+    try std.testing.expect(ctx.quit);
+    const unopened = overview.app_session.?;
+    try std.testing.expectEqualStrings("m3n4p5", &unopened.session);
+    try std.testing.expectError(error.SessionNotFound, unopened.ended);
+    // The way back names the Session the person left, never the failed one.
+    try std.testing.expectEqualStrings("k7m2qx", &overview.follow.return_to.?);
+    try std.testing.expectEqual(@as(?view.Reference, null), overview.follow.pending);
+    overview.app_session = null;
 }

@@ -1471,7 +1471,15 @@ MySQL schema application and backup remain operator-owned.
 
 `rui upgrade` replaces an eligible managed released selection with the latest published stable release and conditionally activates it for the selected Store only when its Host was already running.
 `rui upgrade --check` is read-only and starts no Host.
-`/upgrade` in the overview or a conversation tells the person to run `rui upgrade` in the shell; it never reaches the model.
+`/upgrade` runs inline on the status bar, with no page, without sending `/upgrade` to the model or adding an updater service.
+It checks (`Checking for updates…`), then installs a found release at once, with no Enter step even while Sessions work, and its first line says what the restart will do: `Upgrading to 0.60.0 · restarts the Host (2 Sessions working) · esc cancels`.
+Esc cancels while it checks or prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting the Host…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
+A release the running client cannot use leaves `Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave` on the status bar until another `/upgrade`; longer text, such as PATH warnings, the full check and retained cleanup paths, prints with the departure message.
+Esc cancels the check as it cancels an install still preparing, and so does leaving rui.
+The Upgrade worker says where the whole run stands (checking, installing and its step, cancelling, ended) each time that changes, and the overview stores that one value: Host requests wait, Esc is the run's and another `/upgrade` is a no-op by it alone.
+One pure core, `upgrade_status`, turns that value into the status bar's line for both screens.
+Divyansh chose this on 2026-11-09 (TUI rework plan, "/upgrade without a page"), replacing the `UpgradePanel` page and its Install step.
+It retains the draft, selected Session and unresolved capture handles through handoff and never replays indeterminate effects.
 Restart can interrupt work in every Session in that Store, not other Stores.
 No running Host means install only.
 
@@ -1677,7 +1685,7 @@ A caller that finds the Store free holds it and runs its entry point on its own 
 A holder runs at most 64 requests for others, then hands the Store to the next waiter.
 Writes the holder runs back to back share one transaction and one fsync: each later write runs in a savepoint, so a write that fails rolls back alone, and no caller hears its answer until the batch's COMMIT; a failed COMMIT fences the Store and every write in the batch hears the Store as fenced.
 A lone write costs BEGIN and COMMIT, as before.
-A Message's commit callback runs at its write's end, before the batch's COMMIT.
+A Message's commit callback runs once the batch's COMMIT succeeds, before any of its writers hears an answer.
 A dispatch check is never run for its caller: the holder hands that caller the Store, which keeps it until it has launched the Attempt or Action, so no stop commits between the check and the launch.
 
 The Host opens the Store database with `locking_mode=EXCLUSIVE`, `journal_mode=WAL`, `synchronous=FULL` (with `fullfsync` on macOS) and a 4-MiB `journal_size_limit`.
@@ -2236,7 +2244,7 @@ A ready existing Host retains its actual capacity/capabilities; no model capabil
 
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
 `/sessions unarchived`, `/sessions archived`, and `/sessions all` choose the server-side archive filter.
-The header names the view; changing it clears the previous traversal.
+The counts line names the view only off the default, and a click on the name returns to the default view; changing it clears the previous traversal.
 `/archive` or Alt-A puts away the selected Session at once, stopping its work first when it has any; nothing asks, because `/sessions archived` and `/unarchive` bring it back.
 `/unarchive` restores the selected Session.
 A row remains visible with archive progress until the server reports it archived.
@@ -2245,13 +2253,22 @@ Conversations also expose `/archive` and `/unarchive`; these validated commands 
 The overview core owns their archive/restore request ledger and worker effects; conversation slash commands never run a separate CLI archive mutation.
 Alt-A leaves the draft, caret and retained original unchanged.
 While a conversation is open the refreshes go on without the screen or input, for [desktop notifications](#desktop-notifications).
-Marks hold still: `●` active, `◌` queued, `○` idle or waiting on approval, `✓` finished, `×` failed, `■` stopped; moving to its group says a row changed.
+Marks hold still: `?` needs you, in the attention colour, `●` active, `◌` queued, dim, `○` idle, `✓` finished, `×` failed, `■` stopped; moving to its group says a row changed.
+The overview's top line is the counts line: the wordmark, then each mark's count where it is not zero, `? 1  ● 2  ◌ 3 · slots 2/2  × 1`, with only `?` and `×` coloured and the model slots only while a Session waits for one.
+On its right sits live memory in plain text, `rui 42 MB · tools 1.8 GB`: `rui` is this TUI plus its Host (the TUI alone with no Host), and `tools` the processes below the Host, shown only while one runs; a narrow screen drops memory before the counts, `rui` before `tools`.
+Memory is each process's physical footprint, `phys_footprint` on macOS and `RssAnon + RssShmem + VmSwap` on Linux, summed over the Host's process tree, which one pure core, `process_memory`, walks; a tool that leaves that tree is not counted.
+The counts line replaces the headline and the Host health line; uptime and slots are `/status`'s.
+Divyansh chose the counts line and totals-only memory on 2026-11-09 (TUI rework plan, "What changes" O1 to O4 and "Live memory on the overview").
 Only your own Session at work (an active mark under Yours) turns a spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one frame per 200 ms of the monotonic clock, every spinner in step.
 Only a Unicode, colour screen spins, and a row faded while the Host does not answer holds still.
 The overview wakes for frames only while a spinner is on screen, and each frame writes only the cells that changed.
-Beside its title a row says only what its mark and group leave out: approval, a retry and its countdown, the running command, stopping, and the Session that started a failed or stopped one.
-Divyansh chose this on 2026-11-02, replacing the 2026-10-30 pulse on every mark change.
-Enter on a row opens that Session's conversation; Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
+Beside its title a row says only what its mark and group leave out: on a needs-you row, the command its waiting Action would run; a retry and its countdown, without the attempt number; the running command; stopping; and a failed row's cause in a few words (`Sign-in expired`, `Out of quota`), else its saved code.
+A needs-you row reads its waiting Action's tool, then its arguments, once per Action, and names a command only for Bash, so another tool's arguments never read as a command; any other tool's row shows its mark and title.
+A narrow screen drops this detail column first and keeps the mark, title and age.
+Divyansh chose marks that hold still on 2026-11-02, replacing the 2026-10-30 pulse on every mark change, and the command and cause on 2026-11-09 (TUI rework plan, "What changes" O6), replacing the starter's name.
+Enter on a row opens that Session's conversation, and so does one click on the row, under Enter's rules; a click on a folded group's `N more` opens the group at its first hidden row, as moving into it does; headings, marks, counts, memory and row words take no click (Divyansh, 2026-11-09, TUI rework plan, "Click targets on the final screens").
+One line map, `listItem` in `src/overview_view.zig`, names each list line for drawing and for clicks.
+Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
 Every input takes one route, the one the core's input mode (`State.inputMode`: compose, frozen or choice) names, and the core steps once with what it made and the draft as it then stands.
 In compose mode the shell's line editor applies the input with the overview's one key table (`keys` in `src/overview_view.zig`); no key is caught ahead of the editor.
 While a start awaits its answer the composer is frozen: the table's keys still act, nothing edits, and a failed start keeps its text.
@@ -2416,7 +2433,7 @@ An incomplete CSI or SS3 sequence also times out and ends the caller, rather tha
 Each screen has one key table over the keys in `src/keymap.zig`: Esc, Ctrl-C, Ctrl-D, Ctrl-G, Ctrl-N, Ctrl-O, Ctrl-P, Ctrl-R, Ctrl-X, Up, Down, Shift-Up, Shift-Down, PgUp, PgDn, Home, End and Ctrl-End.
 The editor edits with such a key while the draft gives it a use (Up and Down with a draft line in that direction; Home, End and Ctrl-D with any draft) and otherwise returns the screen's action for it, or nothing where the table binds nothing.
 A rejected draft changes no key's meaning.
-In a conversation End on an empty draft returns to the latest view and never leaves, while Esc and Ctrl-G also return to the overview from there, and Ctrl-X stops the Session as on the overview.
+In a conversation Esc and Ctrl-G return to the latest view and, from there, to the overview, and Ctrl-X stops the Session as on the overview; its table binds nothing to End or Ctrl-End, keys a MacBook lacks, so End only edits a draft.
 Recalling sent Messages (approved 2026-10-31; keys chosen 2026-11-01): in a conversation Ctrl-P on an empty draft brings back the newest Message the person sent, for editing, and Ctrl-P again goes further back; Ctrl-N goes forward, and past the newest the draft is empty again.
 Up, Down and the wheel keep scrolling, and no history file is kept.
 As built, only Messages without a Session sender come back.
@@ -2575,7 +2592,7 @@ The frontend's caller owns the terminal and lends it.
 The conversation runs until the person leaves or a signal arrives, and reports how it stopped: `detached`, `interrupted` or `returned`.
 It returns `returned` only when nothing would be lost or dismissed: no draft, pending Action, sub-view or running command, and no original that is not yet saved (`not_started` or `submitting`).
 The overview then closes the frontend, which joins its reader, and draws again without restoring the terminal or printing a notice.
-A rejected original is released as `/discard` would. An unconfirmed one goes into the overview's request ledger: the overview says `! Not confirmed · rui request recover KEY`, and its departure prints the line the conversation's exit would have printed. When that ledger is full, the frontend leaves as Ctrl-C would and prints the line itself.
+A rejected original is released as `/discard` would. An unconfirmed one goes into the overview's request ledger: the overview's status bar names the newest one until the overview ends, `! Not confirmed · rui request recover KEY` (or `! REF: send not confirmed; details on exit` with no saved request), not as a notice the next key clears, and its departure prints the line the conversation's exit would have printed. When that ledger is full, the frontend leaves as Ctrl-C would and prints the line itself.
 It never restores the terminal or prints the Detached notice.
 Its caller restores the terminal, lets the frontend join its borrowers and write the guidance that follows restoration, then prints the notice from that outcome.
 A frontend that stops running never cancels Host work.
@@ -2649,28 +2666,29 @@ Interactive entry requires a terminal and refuses `TERM=dumb` with guidance befo
 A User Message is a block: `›` at the margin, dim body text, and its Host-written admission time as `HH:MM` in a right sidenote margin at 60 columns and wider.
 Assistant prose starts at column 0 without speaker labels.
 A Message over 1,024 bytes, 4 non-blank lines or 12 lines from its first to its last non-blank line shows its first two non-blank lines and a dim `┄ N more lines` row; `/details` shows it whole.
-Tool activity follows the conversation's last line.
-It shows at most the three oldest calls awaiting permanent presentation, fewer on short terminals, with an exact overflow count and `/status` guidance.
-A displayed call retains its complete wrapped description and outcome explanation; calls that do not fit the physical-row budget count in overflow rather than showing a misleading clipped prefix.
+Tool activity follows the conversation's last line as the activity tail, whose rows `ActivityBlock` alone decides.
+It shows at most the three oldest calls awaiting permanent presentation, oldest first and fewer on short terminals, then `+N more running · /status`, `+N · /status` on a narrow row, counting every call not drawn; a click on that row opens `/status`.
+Each call takes one row, so a retry or the next call replaces a row in place rather than stacking: words that do not fit end in `…` and a running call's clock stays.
 This display bound does not cap execution.
 While work is under way, the conversation says what it is doing now, and says nothing once the work ends.
 Call rows keep their places, in issue order.
 While the work is a running Bash call, that call's own row carries the clock, `• Run zig build test-store · 42s`, found by the call's Operation and ordinal, never by its text.
 Any other work is the conversation's last line: `• Queued · 3s` while the Session waits for a model slot, `• Waiting · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
 The time counts from the state's `since`, against the terminal's clock.
-A browsed page or transcript keeps the line under its shown text, so above the status when the page is full.
-The line takes a row after the input, status and overflow rows and before call rows, which the overflow row then counts; with no row left it is dropped rather than refusing the terminal.
+A browsed page or transcript draws no activity tail: the transcript is one row shorter and a `↓` chip sits alone at the right of the freed row, `↓ N new` once N entries have shown text below since the view left the latest (`session_reads.DisplayCapture` counts an entry when it first shows text, never Activity positions).
+When rows run short, the work line and a waiting Message's row keep theirs and call rows give way to the overflow row, which counts them; a running call whose row is not drawn hands its clock to the work line.
 While a permission prompt is open the Action's instructions speak instead.
 An overview row whose work needs the person or explains a wait (approval, a retry, a running command, stopping) says the same words beside its own age column, so it adds only a retry's countdown, and takes its tone; one functional core, `work_line`, holds the wording and tone for both.
-The overview groups its rows as Yours, Active (thinking, running a tool, waiting on approval, retrying or stopping), Queued (waiting for a model slot), Idle, Finished, and Stopped or failed; a Session the person spoke in is in Yours only.
-Each group heading ends in its count, folded rows included, `Active · 3`, and the Queued heading says its rows' state, so they show only how long they have waited.
-Divyansh asked for the counts and chose Active and Queued on 2026-11-02, replacing the 2026-10-31 headings without counts.
-A Message a person or script sends while work is under way waits dimmed right above the status and the input's rule, as one row with the newest such Message's first line, cut to fit, and `queued`, or `N queued`, at the right, until it shows as its conversation row; a Message a stop excluded shows labelled `! Stopped before it ran · send it again to run it` before `! Session stopped.`.
-Divyansh approved that row and those labels on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
+The overview groups its rows as Needs you (waiting on an Action, a Bash call's approval included, whoever started the Session), Yours, Active (thinking, running a tool, retrying or stopping), Idle, Finished, and Stopped or failed; a Session the person spoke in is in Yours unless it needs them.
+A queued row (waiting for a model slot, as a retry that has fallen due does) sits last in Active, or in Yours when it is yours, longest wait first, and shows only its dim `◌`, its title and how long it has waited.
+Each group heading ends in its count, folded rows included, `Active · 3`.
+Divyansh asked for the counts on 2026-11-02 and on 2026-11-09 chose Needs you first and Queued folded into Active (TUI rework plan, "What changes" O5 and "Queued rows inside Active"), replacing the Queued group of 2026-11-02.
+A Message a person or script sends while work is under way waits as the activity tail's last row, `◌ also update docs …`, or `◌ 3 · also update docs …` when more than one waits, with the newest such Message's first line cut to fit, until it shows as its conversation row; a Message a stop excluded shows labelled `! Stopped before it ran · send it again to run it` before `! Session stopped.`.
+Divyansh approved those labels on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF); the row's `◌` form is the vxfw rework plan's.
 The Host reports how many wait and the newest on each Activity page (`queued`), and the row reads that Message's first line at its Admission position, which holds that Admission alone, never by text; it keeps the line with that Message's admission ID and shows it only while the Host names that Message newest.
 A Message sent when the work does not hold the queue and no older one waits is taken next, so live output shows it at once as its Admission, and never its row again, however long a pending Session takes to start it (as after Ctrl-R recovery).
 Any other waits in the row, which shows only in the latest view, whenever the Host reports a Message waiting that live output has not shown, whatever the work is doing, and counts only those; live output shows a waiting Message only when it is the oldest, so at most that one is left out; until its row, its stop or the queued row shows it, the send reads `Sent`.
-It is the first row dropped when rows run short, before any draft row, and the frame that drops it, or a browsed page, says `Sent` instead; it leaves in the frame that shows the Message as its row or at its stop; `queued_line` fits the row.
+It keeps its row when rows run short, and a browsed page, which draws no tail, says nothing in its place; it leaves in the frame that shows the Message as its row or at its stop; `queued_line.waitingRow` fits the row.
 A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
@@ -2690,8 +2708,8 @@ Explicit `/status` keeps the current reserved recovery key under the page, even 
 The interface preserves the shell's previous screen; conversation output does not enter native scrollback or remain after exit, so terminal search covers only the shell.
 This trade-off is accepted for one library-owned renderer.
 It retains a bounded latest view (256 KiB each for live text and a selected inspection).
-PgUp/PgDn, Shift-PgUp/PgDn, Up/Down beyond the draft's lines and the mouse wheel scroll it; Esc, Ctrl-G, End on an empty draft or scrolling past the end returns to the latest view, or to a pending Action.
-At the latest view, Esc, Ctrl-G or End on an empty draft returns to the overview when nothing would be lost or dismissed: no pending Action, sub-view or running command, and no original still unsaved; a draft keeps the conversation open, and the status line says to clear it first.
+PgUp/PgDn, Shift-PgUp/PgDn, Up/Down beyond the draft's lines and the mouse wheel scroll it; Esc, Ctrl-G, a click on the `↓` marker or scrolling past the end returns to the latest view, or to a pending Action.
+At the latest view, Esc or Ctrl-G returns to the overview when nothing would be lost or dismissed: no pending Action, sub-view or running command, and no original still unsaved; a draft keeps the conversation open, and the status line says to clear it first.
 Sending a Message returns to the latest view, where it and its reply appear, and a page asked for before it no longer opens over it.
 With nothing said yet, scrolling up reaches `Start of conversation`.
 Scrolling up from live text freezes a transcript copy that starts at the first retained read boundary.
@@ -2716,6 +2734,7 @@ When no boundary remains in view (one page exceeded it, or a Message still await
 A boundary's offset is where its item's text begins in live output, which keeps text but not the styling the read staged; a saved page larger than the view keeps its newest whole lines and says so.
 `/history` jumps to the transcript's top.
 Ctrl-O opens the lowest collapsed Message the latest frame drew, live or in the transcript, as a Message page: it is read from the Store and shows only if its length and digest match.
+When a peer's name is drawn below that Message, Ctrl-O follows it instead, under the same rules and refusals as a click on the name, so every link has a keyboard path.
 The page shows the whole text up to the 256-KiB view, then says how many lines it did not show in full; a saved row's page names its exact raw export.
 Esc, Ctrl-G or Ctrl-O returns to the same view and rows.
 Each collapsed block keeps its Message's identity while it stays in the copy; a block whose identity is no longer held says so and opens nothing.
@@ -2833,10 +2852,6 @@ It says `Saved to ./rui-ID-answer.md`.
 Before the first answer each says `No answer to copy yet.`; `/copy code` on an answer with no complete fenced block says `No code block in the last answer.` A failed copy says `! Copy unavailable; draft retained.`, or `! This directory is not writable; draft retained.` when `/copy file` cannot write there.
 Non-TTY conversation invocation is refused; one-shot and pipe commands keep their existing contracts.
 
-On short layouts, the renderer can remove the spacer and shorten overflow to `+N · /status`.
-It budgets the actual undisplayed population after selecting complete call previews.
-Optional spacing and overflow wording yield before ordinary status.
-Only after trying those alternatives may genuine row pressure shorten the bounded status view.
 Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).
 If required instructions, overflow and input cannot fit, the renderer fails before emitting a clipped prompt and restores terminal configuration.
 
@@ -2847,10 +2862,21 @@ The Store looks the label up once per peer row; it is not copied into the Messag
 Peer rows group with tool rows: one after a tool row or another peer row follows it with no blank line, and a failed send stands apart as a failed tool row does.
 The line keeps one row and ends in `…` when it does not fit; it is never a collapsed block for Ctrl-O.
 Its admission time goes in the right margin as on a user block; below 60 columns it does not show.
+NAME alone is underlined and links to the peer's Session: the retained text keeps the ID as a hidden `rui-session:` address that takes no cells and is never sent to the terminal as an OSC 8 hyperlink.
+A click on NAME leaves this Session as Esc does and under the same rule (`session_notice.follow`), and also not while an Action waits or a command runs; a refused click says why and changes nothing.
+The overview then opens the peer as it opens any Session and remembers the Session left (`session_follow.Follow.return_to`, an ID, not a live widget): one level, so Esc in the peer reopens it and the next Esc reaches the overview, and following a second link replaces it.
+Reopening reads that Session's history again.
+A link to a Session that no longer opens ends as any failed open does.
 The label is the complete canonical ID, never an abbreviation or separate identity.
 Pages and Message selection retain that same ID, without abbreviation metadata.
 No colour carries meaning: the glyphs do.
 The Conversation pages that transcripts read hold received Messages only, so an older page shows `←` lines and no `→` lines; the Bash call that sent remains.
+
+In a Session's transcript, a press followed by a move to another cell starts a drag; the cells it crosses draw reversed, and release copies the shown text once through OSC 52 and clears the highlight; nothing persists.
+`transcript_selection` decides what the cells mean: wrapped rows join, and indents, margin times and link addresses are left out; above `TerminalText.clipboard_limit` nothing is copied and the status bar says `Too large for the clipboard · /copy file`, otherwise `Copied N lines`.
+A drag held at the top or bottom row moves the viewed document one row through text it already holds; in live view that moves `live.top` for the drag and live output returns to the latest rows on release, since switching to the transcript view would swap documents and drop the selection.
+No older page is read in under a press or drag; it waits for the release.
+A press or drag ends without copying when the pointer leaves the Transcript or its content is replaced, since vxfw sends no release then.
 
 Tool markers distinguish observed facts: `•` means unresolved, not proof that execution started; `?` means approval is required; `✓` means succeeded; `!` means failure or uncertainty with an explanation.
 Denied and rejected calls use neutral presentation with explicit outcome wording, distinct from execution failure.
@@ -2876,7 +2902,7 @@ This presentation fact grants no permission authority.
 
 Each read borrows only its own job: inputs frozen at launch and a result the UI applies after join.
 No worker reads or writes frontend state.
-A live read renders its page into scratch; after a successful join, the UI appends it whole and applies its footer, Current, cursor and `Sent` in the same step, so one frame shows them together and none shows part of a page.
+A live read renders its page into scratch; after a successful join, the UI appends it whole and applies its footer, Current and cursor in the same step, so one frame shows them together and none shows part of a page.
 The opening is such a read, so a failed opening draws none of its content.
 Each page carries the Session's work from the same Store read as its items, so a page and its work always agree and no read repeats to pair them: its [Session work](#work-state-and-wait-conditions) state, with `since` and that state's facts (a running Bash call's saved description, a waiting retry's due time, cause and ordinal, or a quota failure's saved reset time), the latest Turn and Operation, the first actionable Action, revision and workspace.
 Session listing rows carry the same work value from the same derivation.
@@ -2885,7 +2911,7 @@ Every input of the estimate (accepted output and usage, Tool Results, queued and
 A page delivered after a later change, such as another client's decision, still applies whole, and the next page supersedes it; a decision sent from its prompt for an already decided Action is refused by the Store.
 Accepted: decisions bind to the exact Action shown, so a stale prompt can only produce a rejected decision (`action_not_pending`), never one retargeted to another Action.
 An older transcript page applies only to the transcript it was loaded for.
-An accepted Message shows `Sent` until a delivered page contains its admission or a later one.
+The status bar never says `Sent`: an accepted Message's own row, or its waiting row, is its feedback (TUI rework plan, "drop Sent").
 The Store assigns admission IDs in Session position order, so a page that ends before it, or one read before a later Message's acceptance, does not clear it, and a page delivered before its acceptance joined does.
 
 The composer uses the same `› ` marker as submitted User messages.
@@ -3597,8 +3623,12 @@ A running MySQL Store that fences writes the same envelope with
 `store_fenced` before draining and exits 1 (D211).
 When the connection is lost around a COMMIT, the Store first reconnects, up to three times a second apart: it ends the old server session with `KILL`, takes `GET_LOCK` again once that session is gone, and reads `store_owner.commit_seq`.
 Every write transaction advances it by exactly one, so the value says whether the COMMIT landed.
-Landed is success and the Store carries on; not landed is reported as a lost connection, which still fences.
+Landed is success and the Store carries on.
+Not landed means nothing was saved: the Store keeps the new connection, gives back the ids the batch took, and runs the batch's writes again once, in order, so its writers never see the loss.
+A second loss in that rerun fences, as does a lost read, which may already have streamed part of its answer.
 Only when no reconnect succeeds does the outcome stay unknown (`CommitOutcomeUnknown`).
+COMMIT is a statement of its message, and reads may follow it in that message; every message sets `autocommit=1`, so they run outside any transaction.
+The transaction is saved once COMMIT's own OK arrives: a connection lost before that OK is settled as above, with the reads sent again on the new connection when the transaction landed, and one lost after it, while the reads stream, keeps the commit and fences, and the batch never runs again.
 
 Host information is a read-only, bounded `/v1/host-info` exchange for the canonical selected Store.
 A client first probes the existing `host.lock` with a nonblocking shared lock, without creating a Store or lock: no owner means unavailable even if a stale socket exists; an exclusive owner permits a protected socket request.
@@ -3771,7 +3801,8 @@ Settlement and inspection must also progress.
 Discovery uses bounded storage queries, not per-Session resident tasks.
 The writer rechecks after writes; accepted live-effect controls publish their required process-local signal.
 No SQLite watcher is required.
-Retry polling runs once per second with a due-time index that excludes future deadlines.
+The retry scans use a due-time index that excludes future deadlines, and run at most once per second.
+A scan that found nothing runs again only after a commit, a slot change or the earliest scheduled retry falling due by the wall clock, the clock the Store admits by; the admission scan reads that due time in its own round, and an idle Host sends the Store no query.
 Missed ticks do not queue.
 Full capacity or an empty array must not cause spinning.
 

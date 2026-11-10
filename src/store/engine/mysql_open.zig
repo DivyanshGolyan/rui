@@ -159,6 +159,15 @@ fn refusal(facts: *const FactsRow) ?policy.StartError {
     });
 }
 
+/// Releases the Store's GET_LOCK before the connection closes. COM_QUIT
+/// alone frees it only once the server has ended the session, after close
+/// returns, so a Host reopening the Store at once could find it locked.
+pub fn releaseLock(conn: *wire.Connection) void {
+    conn.batch().writeAll("DO RELEASE_ALL_LOCKS()") catch return;
+    conn.sendBatch() catch return;
+    _ = conn.next() catch {};
+}
+
 pub const Reclaimed = struct { epoch: u64, commit_seq: u64, connection_id: u64 };
 
 /// On a fresh connection after the last was lost: checks the server and

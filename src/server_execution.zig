@@ -604,6 +604,8 @@ const NativeTurn = struct {
     measurement: *LifecycleMeasurement,
     mcp: *server_mcp.Calls,
     fenced: bool,
+    /// What this turn's retry admission scan read, if one ran.
+    scheduled_retry: execution_turn.ScheduledRetry = .unknown,
 
     pub fn now(self: *NativeTurn) std.Io.Clock.Timestamp {
         return std.Io.Clock.Timestamp.now(self.host.io, .awake);
@@ -774,16 +776,32 @@ const NativeTurn = struct {
             .containsFn = activeOperationContains,
             .maximum_exclusions = self.slots.len,
         };
-        return switch (admitRetryAttempt(
+        self.scheduled_retry = .unknown;
+        var scanned = false;
+        var due_ms: ?u64 = null;
+        const progress = admitRetryAttempt(
             self.host,
             slot,
             active_filter,
             &self.workspace.model_preparation,
-        )) {
+            &scanned,
+            &due_ms,
+        );
+        if (scanned) self.scheduled_retry = if (due_ms) |ms| .{ .at_unix_ms = ms } else .none;
+        return switch (progress) {
             .admitted => .admitted,
             .no_work => .no_work,
             .retry_later => .retry_later,
         };
+    }
+
+    pub fn scheduledRetry(self: *const NativeTurn) execution_turn.ScheduledRetry {
+        return self.scheduled_retry;
+    }
+
+    /// The wall clock the Store dates retries by, or null when unreadable.
+    pub fn unixMilliseconds(self: *const NativeTurn) ?u64 {
+        return std.math.cast(u64, store_module.readUnixMilliseconds(self.host.io) catch return null);
     }
 
     /// While new Turns are held, waiting input only joins open Turns. The
@@ -1833,14 +1851,19 @@ fn admitRetryAttempt(
     slot: *ExecutionSlot,
     active: store_module.ActiveOperationFilter,
     preparation: *model_adapter.Preparation,
+    /// Set once the Store's scan found no retry to admit, with
+    /// `due_ms` as that scan read it.
+    scanned: *bool,
+    due_ms: *?u64,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
-    var admission = host.store.tryAdmitNextModelRetry(active, host.hooks.storeFaults(.attempt_admission)) catch |err| {
+    var admission = host.store.tryAdmitNextModelRetry(active, host.hooks.storeFaults(.attempt_admission), due_ms) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "retry Attempt admission", err);
         return .retry_later;
     } orelse {
         host.custody.releaseUnused(token) catch unreachable;
+        scanned.* = true;
         return .no_work;
     };
     return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation);
@@ -3309,9 +3332,11 @@ test "no-work admission restores only its temporary custody reservation" {
             var model_preparation: model_adapter.Preparation = undefined;
             const workspace = try pages.Mapped(Workspace).map();
             defer workspace.unmap();
+            var retry_scanned = false;
+            var retry_due_ms: ?u64 = null;
             const progress = switch (kind) {
                 .bash => admitBashAttempt(&host, &slots[0], workspace.value),
-                .retry => admitRetryAttempt(&host, &slots[0], store_module.ActiveOperationFilter.empty(), &model_preparation),
+                .retry => admitRetryAttempt(&host, &slots[0], store_module.ActiveOperationFilter.empty(), &model_preparation, &retry_scanned, &retry_due_ms),
                 .message => admitNewAttempt(&host, &slots[0], .message, &model_preparation),
                 .tool_continuation => admitNewAttempt(&host, &slots[0], .tool_continuation, &model_preparation),
             };
@@ -3420,9 +3445,11 @@ test "failed admission releases its reservation and fences the Store and dispatc
             var model_preparation: model_adapter.Preparation = undefined;
             const engine_workspace = try pages.Mapped(Workspace).map();
             defer engine_workspace.unmap();
+            var retry_scanned = false;
+            var retry_due_ms: ?u64 = null;
             const progress = switch (kind) {
                 .bash => admitBashAttempt(&host, &slots[0], engine_workspace.value),
-                .retry => admitRetryAttempt(&host, &slots[0], store_module.ActiveOperationFilter.empty(), &model_preparation),
+                .retry => admitRetryAttempt(&host, &slots[0], store_module.ActiveOperationFilter.empty(), &model_preparation, &retry_scanned, &retry_due_ms),
                 .message => admitNewAttempt(&host, &slots[0], .message, &model_preparation),
                 .tool_continuation => admitNewAttempt(&host, &slots[0], .tool_continuation, &model_preparation),
             };

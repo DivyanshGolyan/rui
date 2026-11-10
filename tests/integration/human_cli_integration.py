@@ -739,6 +739,16 @@ def persistent_copy_case():
             terminal_step(master, "/copy code", "No answer to copy yet.", composer=True)
             assert capture.clipboard == [] and not any(here.iterdir()), capture.clipboard
             terminal_step(master, "Copy request", "Done.", composer=True)
+            # A left drag over the answer's last word copies exactly the text
+            # it covered, in one OSC 52 sequence, once the button is released.
+            lines = current_screen(master).split("\n")
+            row = next(index for index, line in enumerate(lines) if line.strip() == "Done.")
+            column = lines[row].index("Done.")
+            capture.clipboard.clear()
+            drag = (f"\x1b[<0;{column + 1};{row + 1}M\x1b[<32;{column + 3};{row + 1}M"
+                    f"\x1b[<32;{column + 5};{row + 1}M\x1b[<0;{column + 5};{row + 1}m")
+            command_frame(master, drag, lambda frame: "Copied 1 line" in frame, end="")
+            assert capture.clipboard == ["\x1b]52;c;" + base64.b64encode(b"Done.").decode() + "\x1b\\"], capture.clipboard
 
             def sent(command):
                 before = len(capture.clipboard)
@@ -1771,10 +1781,15 @@ def provider_line_cases():
 def main(selected="all"):
     import canonical_failure_cases
     import canonical_fixture
+    import session_chrome_cases
     import terminal_restoration_cases
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines", "session-chrome"), selected
+    if selected in ("all", "renderer", "session-chrome"):
+        session_chrome_cases.main()
+    if selected == "session-chrome":
+        return
     if selected in ("all", "callers", "caller-core", "provider-lines"):
         provider_line_cases()
     if selected == "provider-lines":
@@ -2485,11 +2500,14 @@ def main(selected="all"):
             assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
             assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" in binding and permission_row(binding, "ask"), binding
             help_text = terminal_step(master, "/help", "/result KEY", composer=True)
-            for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "Ctrl-R"):
+            # The page is taller than the screen: page down to its end and read every frame on the way.
+            os.write(master, b"\x1b[6~" * 6)
+            help_text += read_terminal(master, "in your shell.", composer=True)
+            for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
                 assert command in help_text, help_text
             assert "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
-            # This Session asks: help must not describe the bypass default as its mode.
-            assert "without approval" not in help_text and "\nThat line ends with asks before Bash/MCP when Bash or MCP asks first\n" in help_text, help_text
+            # This Session asks: help must not describe the bypass default as its mode (the facts row shows the mode).
+            assert "without approval" not in help_text, help_text
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
             assert "result: completed\nfirst answer" in result, result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
