@@ -10,7 +10,7 @@ import json
 import os
 import pathlib
 import pty
-from terminal_process import open_pty, spawn
+from terminal_process import close_pty, open_pty, spawn
 import subprocess
 import sys
 import tempfile
@@ -32,7 +32,7 @@ def retained(state, binary, label, repetition, failed_key):
         if label == "baseline" else ["session", "resume", "--store", str(state / "store"), "--", "resources/message"])
     process = spawn([str(binary), *entry], env={**os.environ, "HOME": str(home)},
         stdin=slave, stdout=slave, stderr=slave)
-    os.close(slave)
+    close_pty(slave)
     try:
         prompt = "rui> " if label == "baseline" else "› "
         cli.read_terminal(master, prompt)
@@ -54,7 +54,7 @@ def retained(state, binary, label, repetition, failed_key):
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)
-        os.close(master)
+        close_pty(master)
 
 
 def held(state, binary, label, handle):

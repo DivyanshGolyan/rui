@@ -9,6 +9,7 @@ Mac does; PRs run Mac Selected only when they change one, and each promotion
 runs it before a release.
 """
 import argparse
+import ast
 import fnmatch
 import io
 from pathlib import Path
@@ -229,11 +230,38 @@ def bind_violations(found):
             for path, names in sorted(found.items()) for name in names]
 
 
+def pty_close_violations(source, name="fixture.py"):
+    """PTY descriptors must retire registration before their numbers are reused."""
+    tree = ast.parse(source, filename=name)
+    violations = []
+    for scope in (node for node in ast.walk(tree) if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef))):
+        owned = set()
+        for node in ast.walk(scope):
+            if not isinstance(node, ast.Assign) or not any(
+                    isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "open_pty"
+                    for call in ast.walk(node.value)):
+                continue
+            for target in node.targets:
+                targets = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
+                owned.update(ast.unparse(item) for item in targets if isinstance(item, (ast.Name, ast.Attribute)))
+        for node in ast.walk(scope):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "close"
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "os" and node.args
+                    and ast.unparse(node.args[0]) in owned):
+                message = f"{name}:{node.lineno}: close PTY descriptors with close_pty, not os.close"
+                if message not in violations:
+                    violations.append(message)
+    return violations
+
+
 def main():
     argparse.ArgumentParser(description=__doc__).parse_args()
     builds = [(path.relative_to(ROOT).as_posix(), path.read_text()) for path in build_files.files()]
     messages = ([message for name, source in builds if not mac_path(name) for message in build_violations(source, name)]
-                + violations(sites()) + bind_violations(bind_sites()))
+                + violations(sites()) + bind_violations(bind_sites())
+                + [message for folder in ("integration", "qualification")
+                   for path in sorted((ROOT / "tests" / folder).rglob("*.py"))
+                   for message in pty_close_violations(path.read_text(), path.relative_to(ROOT).as_posix())])
     for message in messages:
         print(message, file=sys.stderr)
     return 1 if messages else 0

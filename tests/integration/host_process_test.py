@@ -76,7 +76,24 @@ def assert_reaped(source, description, *, timeout=0.2, required_fields=None, obs
     raise AssertionError(f"{description} unexpectedly became ready")
 
 
+def prove_wait_hooks():
+    events = []
+    def hook():
+        events.append("drain")
+    host_process.WAIT_HOOKS.append(hook)
+    try:
+        wait_for(lambda: events.append("observe") or True, "hook ordering")
+        assert events == ["drain", "observe"], events
+        events.clear()
+        # The opt-out must skip every wait hook.
+        wait_for(lambda: events.append("observe") or True, "drain opt-out", drain=False)
+        assert events == ["observe"], events
+    finally:
+        host_process.WAIT_HOOKS.remove(hook)
+
+
 def main():
+    prove_wait_hooks()
     prove_dispose_all()
     prove_peer_disconnects()
     prove_peer_census()

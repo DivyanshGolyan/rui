@@ -18,7 +18,7 @@ import unittest
 from unittest.mock import patch
 
 from host_process import stop_process, wait_for
-from terminal_process import answers_to, open_pty, spawn, terminal_process
+from terminal_process import close_pty, CAPTURES, answers_to, open_pty, register_capture, spawn, terminal_process
 from terminal_screen import ScreenCapture
 
 
@@ -44,7 +44,7 @@ class TerminalProcessTest(unittest.TestCase):
         # Keep a broken owner from leaking descriptors during a negative control.
         for fd in self.descriptors:
             try:
-                os.close(fd)
+                close_pty(fd)
             except OSError as error:
                 if error.errno != errno.EBADF:
                     raise
@@ -55,6 +55,59 @@ class TerminalProcessTest(unittest.TestCase):
             with self.assertRaises(OSError) as raised:
                 os.fstat(fd)
             self.assertEqual(raised.exception.errno, errno.EBADF)
+
+    def test_wait_drains_writer_and_opt_out_preserves_output(self):
+        master, slave = open_pty()
+        received = bytearray()
+        register_capture(master, type("Capture", (), {"feed": received.extend})())
+        os.write(slave, b"pending")
+        # The opt-out must leave PTY output unread.
+        wait_for(lambda: True, "without drainage", drain=False)
+        self.assertEqual(received, b"")
+        self.assertTrue(select.select([master], [], [], 0)[0])
+        writer = subprocess.Popen([sys.executable, "-c", "import os; os.write(1, b'x' * 131072)"], stdout=slave)
+        self.addCleanup(stop_process, writer, timeout=5)
+        wait_for(lambda: writer.poll() is not None, "PTY writer", timeout=10)
+        self.assertEqual(writer.returncode, 0)
+        wait_for(lambda: len(received) == 131079, "all PTY output")
+
+    def test_reused_pipe_is_not_drained(self):
+        master, slave = open_pty()
+        register_capture(master, type("Capture", (), {"feed": lambda _, data: self.fail(data)})())
+        close_pty(master)
+        read, write = os.pipe()
+        self.addCleanup(close_quietly, write)
+        if read != master:
+            os.dup2(read, master)
+            os.close(read)
+        os.write(write, b"keep")
+        wait_for(lambda: True, "unrelated pipe")
+        self.assertEqual(os.read(master, 4), b"keep")
+        self.assertNotIn(master, CAPTURES)
+
+    def test_reused_other_pty_is_not_drained(self):
+        master, slave = open_pty()
+        register_capture(master, type("Capture", (), {"feed": lambda _, data: self.fail(data)})())
+        close_pty(master, slave)
+        other_master, other_slave = pty.openpty()
+        self.assertEqual(other_master, master)
+        os.write(other_slave, b"keep")
+        wait_for(lambda: True, "unrelated PTY")
+        self.assertEqual(os.read(other_master, 4), b"keep")
+        self.assertNotIn(master, CAPTURES)
+
+    def test_read_terminal_accepts_already_drained_frame(self):
+        import human_cli_fixture as human
+        master, slave = open_pty()
+        human.terminal_capture(master)
+        os.write(slave, b"\x1b[?2026h\x1b[H\x1b[2Jalready visible\x1b[?2026l")
+        wait_for(lambda: "already visible" in human.current_screen(master), "drained marker")
+        self.assertIn("already visible", human.read_terminal(master, "already visible", timeout=.1))
+        with self.assertRaises(AssertionError):
+            human.read_terminal(master, "already visible", timeout=.05, fresh=True)
+        os.write(slave, "\x1b[?2026h\x1b[H\x1b[2Janswer\r\n › \x1b[?2026l".encode())
+        wait_for(lambda: "answer" in human.current_screen(master), "drained composer")
+        self.assertIn("answer", human.read_terminal(master, "answer", timeout=.1, composer=True))
 
     def test_failed_launch_closes_terminal(self):
         with self.assertRaises(FileNotFoundError):
@@ -240,7 +293,7 @@ class TerminalProcessTest(unittest.TestCase):
         process = self.job("import os, time; os.write(1, b'R'); time.sleep(30)", slave,
                            default_signals=(signal.SIGHUP,))
         self.assertEqual(os.read(master, 1), b"R")
-        os.close(master)
+        close_pty(master)
         self.assertEqual(process.wait(timeout=5), -signal.SIGHUP)
         self.assertEqual(process.leader.process.wait(timeout=5), 0)
 

@@ -7,7 +7,7 @@ import json
 import os
 import pathlib
 import pty
-from terminal_process import answers_to, open_pty, spawn
+from terminal_process import close_pty, answers_to, open_pty, spawn
 import resource
 import select
 import shutil
@@ -906,7 +906,7 @@ def check_forwarding(state, library):
             lambda: termios.tcflush(slave, termios.TCOFLUSH),
             lambda: termios.tcflush(slave, termios.TCIFLUSH),
             lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
-            lambda: os.close(master), lambda: os.close(slave),
+            lambda: close_pty(master), lambda: close_pty(slave),
         )
 
     arm, log = state / "forward-startup-arm", state / "forward-startup.log"
@@ -1002,8 +1002,8 @@ def secret_entry_restore_case(state, library):
         assert "restore-flush" in log.read_text(), log.read_text()
         assert not (home / ".config" / "rui" / "openai.key").exists(), "a key was saved with the terminal unrestored"
     finally:
-        os.close(master)
-        os.close(slave)
+        close_pty(master)
+        close_pty(slave)
     print("secret entry restore passed: an unrestored terminal refuses the typed key and saves nothing")
 
 
@@ -1082,7 +1082,7 @@ def consent_boundary_cases(state):
                 lambda: termios.tcflush(slave, termios.TCOFLUSH),
                 lambda: termios.tcflush(slave, termios.TCIFLUSH),
                 lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
-                *(lambda fd=fd: os.close(fd) for fd in (master, slave, read_ready, write_ready)),
+                *(lambda fd=fd: close_pty(fd) for fd in (master, slave, read_ready, write_ready)),
             )
 
 
@@ -1135,7 +1135,7 @@ def fatal_reporting_cases(state):
                 dispose_all(
                     lambda: stop_process(caller, timeout=5) if caller is not None else None,
                     lambda: termios.tcflow(error_slave, termios.TCOON),
-                    *(lambda fd=fd: os.close(fd) for fd in (master, slave, error_master, error_slave)),
+                    *(lambda fd=fd: close_pty(fd) for fd in (master, slave, error_master, error_slave)),
                 )
         # Popen restores default SIGPIPE before exec. Rui's initialized IO
         # runtime must still preserve the real error when stderr disconnects.
@@ -1155,7 +1155,7 @@ def fatal_reporting_cases(state):
             finally:
                 dispose_all(
                     lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                    *(lambda fd=fd: os.close(fd) for fd in (master, slave, write_error)),
+                    *(lambda fd=fd: close_pty(fd) for fd in (master, slave, write_error)),
                 )
     finally:
         dispose_all(
@@ -1214,7 +1214,7 @@ def decision_reporting_cases(state):
                     human.pick_deny(master)
                 os.write(master, human.ALLOW)
                 if lost:
-                    fixture.wait_for(human.draining(master, received.is_set), "permission decision route reached", timeout=10)
+                    fixture.wait_for(received.is_set, "permission decision route reached", timeout=10)
                     caller.send_signal(signal.SIGINT)
                 else:
                     human.read_terminal(master, f"SETTLED-{name}", composer=True)
@@ -1271,7 +1271,7 @@ def decision_reporting_cases(state):
                     reply_release.set,
                     lambda: stop_process(caller, timeout=5) if caller is not None else None,
                     lambda: proxy.close() if proxy is not None else None,
-                    *(lambda fd=fd: os.close(fd) for fd in (master, slave, read_ready, write_ready)),
+                    *(lambda fd=fd: close_pty(fd) for fd in (master, slave, read_ready, write_ready)),
                 )
                 proxy = None
     finally:
@@ -1911,7 +1911,7 @@ def native_notice_cases(state):
             assert actual == (b"x" * filled if full else expected), actual
             print(f"native notice: {transport} full={full}, exact bytes and restored flags passed", flush=True)
         finally:
-            dispose_all(lambda: os.close(reader), lambda: os.close(writer))
+            dispose_all(lambda: close_pty(reader), lambda: close_pty(writer))
 
 
 def app_terminal_cases():
@@ -1930,7 +1930,7 @@ def app_terminal_cases():
         print("App.init OutOfMemory: terminal restored and process exited", flush=True)
     finally:
         dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                    lambda: os.close(master), lambda: os.close(slave))
+                    lambda: close_pty(master), lambda: close_pty(slave))
 
 
 def app_signal_cases():
@@ -1962,7 +1962,7 @@ def app_signal_cases():
                 raise
             assert not termios.tcgetattr(slave)[3] & termios.ICANON
             if sent is None:
-                os.close(master)
+                close_pty(master)
                 master = None
                 _, diagnostic = caller.communicate(timeout=5)
                 assert caller.returncode == 0, (caller.returncode, diagnostic)
@@ -1981,7 +1981,7 @@ def app_signal_cases():
             print(f"App {sent.name}: terminal settings and enabled modes restored", flush=True)
         finally:
             dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                        lambda: os.close(master) if master is not None else None, lambda: os.close(slave))
+                        lambda: close_pty(master) if master is not None else None, lambda: close_pty(slave))
 
 
 def app_resize_cases():
@@ -2037,7 +2037,7 @@ def app_resize_cases():
             print(f"App {columns}x{rows} → 80x24: redrawn, input accepted, terminal usable", flush=True)
         finally:
             dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                        lambda: os.close(master), lambda: os.close(slave))
+                        lambda: close_pty(master), lambda: close_pty(slave))
 
 
 def app_consent_cases():
@@ -2079,7 +2079,7 @@ def app_consent_cases():
             print(f"App consent: request-replaced={replaced}, keys={keys!r}, {diagnostic.decode().strip()}", flush=True)
         finally:
             dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                        lambda: os.close(master), lambda: os.close(slave),
+                        lambda: close_pty(master), lambda: close_pty(slave),
                         lambda: os.close(ready_read), lambda: os.close(ready_write))
 
 
@@ -2102,7 +2102,7 @@ def app_ready_failure_case():
         print("App readiness write failure: run returned BrokenPipe and terminal is usable", flush=True)
     finally:
         dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                    lambda: os.close(master), lambda: os.close(slave),
+                    lambda: close_pty(master), lambda: close_pty(slave),
                     lambda: os.close(ready_write))
 
 

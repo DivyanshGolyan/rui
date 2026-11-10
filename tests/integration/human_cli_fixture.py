@@ -91,7 +91,8 @@ def terminal_capture(master, *, fresh=False, silent=False):
     rows, columns = rows or 24, columns or 80
     capture = None if fresh else _captures.get(master)
     if capture is None:
-        capture = _captures[master] = ScreenCapture(columns, rows, reply=None if silent else answers_to(master))
+        capture = ScreenCapture(columns, rows, reply=None if silent else answers_to(master))
+        terminal_process_module.register_capture(master, capture)
     elif (capture.screen.columns, capture.screen.lines) != (columns, rows):
         capture.resize(columns, rows)
     return capture
@@ -208,7 +209,7 @@ def overview_frame(master, accept, keys=b"", timeout=15):
     return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_composer(screen, x, y), timeout)
 
 
-def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, initial=b""):
+def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, initial=b"", fresh=False):
     """Wait until a committed frame shows `marker`; return the frames shown.
 
     The renderer replaces whole frames, so each committed frame is checked as
@@ -217,6 +218,7 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
     input is accepted again. The "› " marker alone waits for that composer.
     The result joins distinct frames seen during this wait, oldest first,
     bounded to the newest MiB; use current_screen for what is shown now.
+    `fresh` requires a frame observed after this call, for repeated commands.
     """
     del preserve_colour, redraw  # Frames are cells, not a byte transcript.
     capture = terminal_capture(master)
@@ -253,6 +255,8 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
         return reached()
 
     try:
+        if not fresh:
+            observe(capture.completed, capture.screen.cursor.x, capture.screen.cursor.y)
         if initial:
             capture.feed(initial)
         deadline = time.monotonic() + timeout
@@ -417,7 +421,7 @@ def terminal_step(master, command, marker, *, composer=False):
     if composer:
         return command_frame(master, command, lambda frame: marker in frame)
     os.write(master, (command + "\r").encode())
-    return read_terminal(master, marker)
+    return read_terminal(master, marker, fresh=True)
 
 
 def drop_spent_readiness(descriptor):

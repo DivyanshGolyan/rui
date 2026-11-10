@@ -609,7 +609,10 @@ class WaitTimeout(AssertionError):
     pass
 
 
-def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, ready=bool):
+WAIT_HOOKS = []
+
+
+def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, ready=bool, drain=True):
     """The one place a test sleeps to wait (CODING_STANDARDS.md#evidence).
 
     Returns the first observation `ready` accepts that finished before the
@@ -620,6 +623,9 @@ def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, 
         deadline = time.monotonic() + timeout
     value = None
     while time.monotonic() < deadline:
+        if drain:
+            for hook in WAIT_HOOKS:
+                hook()
         value = observe()
         if time.monotonic() >= deadline:
             break

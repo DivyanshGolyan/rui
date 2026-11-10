@@ -20,15 +20,16 @@ import termios
 import threading
 import time
 
-from host_process import dispose_all, stop_process
+from host_process import WAIT_HOOKS, dispose_all, stop_process
 from terminal_leader import HEADER, LIMITS, frame
 
 
 # Conversations run full screen; tall enough that a short exchange stays in view.
 COLUMNS, ROWS = 80, 50
-# Screen observers by master descriptor. A new PTY can reuse a closed
-# descriptor number, so opening one discards the previous terminal's screen.
+# Screen observers by master descriptor.
 CAPTURES = {}
+PTY_MASTERS = set()
+PTY_LOCK = threading.RLock()
 # The master of each slave open_pty made, and the input master that answers
 # go to for an output master whose process reads another PTY.
 MASTERS = {}
@@ -39,14 +40,56 @@ LEADERS = {}
 STARTING = threading.Lock()
 
 
+def register_capture(master, capture):
+    with PTY_LOCK:
+        CAPTURES[master] = capture
+
+
+def drain_captures():
+    with PTY_LOCK:
+        for master in list(PTY_MASTERS):
+            capture = CAPTURES.get(master)
+            if capture is None:
+                continue
+            try:
+                while select.select([master], [], [], 0)[0]:
+                    chunk = os.read(master, 65536)
+                    if not chunk:
+                        break
+                    capture.feed(chunk)
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
+
+
+WAIT_HOOKS.append(drain_captures)
+
+
 def open_pty(columns=COLUMNS, rows=ROWS):
     """A PTY with real geometry, as every interactive terminal reports."""
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
-    CAPTURES.pop(master, None)
-    MASTERS[slave] = master
-    ANSWERS.pop(master, None)
+    with PTY_LOCK:
+        PTY_MASTERS.add(master)
+        MASTERS[slave] = master
     return master, slave
+
+
+def close_pty(*fds):
+    """Forget PTY ownership before releasing descriptors for reuse."""
+    with PTY_LOCK:
+        for fd in fds:
+            CAPTURES.pop(fd, None)
+            if fd in PTY_MASTERS:
+                PTY_MASTERS.remove(fd)
+                for slave, master in list(MASTERS.items()):
+                    if master == fd:
+                        del MASTERS[slave]
+                for master, answer in list(ANSWERS.items()):
+                    if master == fd or answer == fd:
+                        del ANSWERS[master]
+            MASTERS.pop(fd, None)
+            os.close(fd)
 
 
 def answers_to(master):
@@ -313,4 +356,4 @@ def terminal_process(args, *, env, cwd=None):
         yield process, master
     finally:
         dispose_all(lambda: stop_process(process, timeout=5) if process is not None else None,
-                    lambda: os.close(master), lambda: os.close(slave))
+                    lambda: close_pty(master), lambda: close_pty(slave))
