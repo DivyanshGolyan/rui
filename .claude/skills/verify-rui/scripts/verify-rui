@@ -23,7 +23,7 @@ import threading
 import time
 
 CACHE = pathlib.Path(os.environ.get("VERIFY_RUI_CACHE", pathlib.Path.home() / ".cache/verify-rui"))
-SCRATCH_PARENT = pathlib.Path("/private/tmp")  # short paths: Unix socket limits
+SCRATCH_PARENT = pathlib.Path("/private/tmp" if sys.platform == "darwin" else "/tmp")  # short paths: Unix socket limits
 HERE = pathlib.Path(__file__).resolve()
 REPO_URL = "https://github.com/DivyanshGolyan/rui.git"
 
@@ -1686,7 +1686,7 @@ def cmd_cleanup(args):
         with tarfile.open(run.evidence / "store-after.tgz", "w:gz") as archive:
             archive.add(run.store, arcname="store")
         act("archived Store into evidence", path=str(run.evidence / "store-after.tgz"))
-    if run.scratch.exists() and str(run.scratch).startswith("/private/tmp/vr."):
+    if run.scratch.exists() and str(run.scratch.resolve()).startswith(str(SCRATCH_PARENT / "vr.")):
         shutil.rmtree(run.scratch)
         act("removed scratch (synthetic HOME, Store, project, sockets)", path=str(run.scratch))
     survivors = [r for r in run.owned() if process_start(r["pid"]) and process_start(r["pid"])[0] == r["lstart"]]
