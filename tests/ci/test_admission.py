@@ -57,7 +57,7 @@ class PlanFixture:
         self.git('init', '-q', '-b', 'main')
         self.write('.git/info/exclude', 'selection.json\n__pycache__/\n')
         for name in ('select_tests.py', 'docs_only.py', 'qualification.py', 'strict_paths.py', 'platform_boundary.py',
-                     'import_architecture.py', 'stack_frames.json'):
+                     'import_architecture.py', 'release_numbers.py', 'stack_frames.json'):
             self.write('tests/ci/' + name, (ROOT / 'tests/ci' / name).read_text())
         # The selector's import graph reads the source tree.
         for name in subprocess.check_output(['git', 'ls-files', '-z', 'src', 'tests/integration'], cwd=ROOT).decode().split('\0'):
@@ -452,6 +452,39 @@ class CandidatePlanTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(select([path], 'review', available)['upgrade_required'], required)
                 self.assertFalse(select([path], 'development', available)['upgrade_required'])
+        # Its unit test runs in policy; cache maintenance publishes main's caches, which a PR's run never reads.
+        for path in ('tests/ci/test_previous_release_upgrade.py', '.github/workflows/cache-maintenance.yml'):
+            with self.subTest(path=path):
+                self.assertFalse(select([path], 'review', available)['upgrade_required'])
+
+    def test_schema_edits_run_the_upgrade_only_when_the_store_format_changes(self):
+        available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', (ROOT / 'build.zig').read_text()))
+        schema = 'src/store/schema.zig'
+        source = (ROOT / schema).read_text()
+        version = int(re.search(r'^pub const schema_version: u32 = (\d+);$', source, re.M)[1])
+        last_row = re.findall(r'\.\{ \.schema_version = \d+, \.digest = 0x[0-9a-f]+ \},\n', source)[-1]
+        bumped = (source.replace(f'schema_version: u32 = {version};', f'schema_version: u32 = {version + 1};')
+                  .replace(last_row, last_row + f'    .{{ .schema_version = {version + 1}, .digest = 0x0123456789abcdef }},\n'))
+        for after, required in (
+                # Imports, comments and code that read the format leave it alone.
+                ('const unused = @import("std");\n' + source, False),
+                (source.replace('/// `digest()` of each', '/// The `digest()` of each'), False),
+                (bumped, True),
+                # An edited released digest is a format change too (its guard then refuses it).
+                (source.replace(last_row, last_row.replace('.digest = 0x', '.digest = 0x1')), True),
+                (None, True)):
+            with self.subTest(required=required):
+                self.assertEqual(select([schema], 'review', available, contents={schema: (source, after)})
+                                 ['upgrade_required'], required)
+
+    def test_plan_reads_the_store_format_from_both_revisions(self):
+        schema = 'src/store/schema.zig'
+        source = (ROOT / schema).read_text()
+        for after, upgrade in (('const unused = @import("std");\n' + source, 'false'),
+                               (source.replace('.digest = 0x', '.digest = 0x1', 1), 'true')):
+            with self.subTest(upgrade=upgrade), PlanFixture() as fixture:
+                fixture.write(schema, after)
+                self.assertEqual(fixture.plan(self, candidate=fixture.commit())['upgrade'], upgrade)
 
     def assert_documentation_plan(self, output):
         self.assertEqual(output['change_kind'], 'documentation')
