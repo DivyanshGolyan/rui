@@ -95,6 +95,9 @@ test {
     _ = @import("client.zig");
     _ = @import("cli.zig");
     _ = @import("cli_args.zig");
+    _ = @import("cli_grammar.zig");
+    _ = @import("cli_option_names.zig");
+    _ = @import("serve_grammar.zig");
     _ = @import("TerminalText.zig");
     _ = @import("SessionInput.zig");
     _ = @import("SessionSubmission.zig");
