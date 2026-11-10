@@ -91,8 +91,9 @@ def is_overview(frame):
 
 
 def conversation_of(label):
-    """A frame showing `label`'s conversation: its status line names it."""
-    return lambda frame: any(line.startswith(f"{label} · {MODEL}") for line in frame.split("\n")) and not is_overview(frame)
+    """A frame showing `label`'s conversation: the facts row under its
+    composer leads with `‹` and names it."""
+    return lambda frame: any(line.startswith(f" ‹ {label} · {MODEL}") for line in frame.split("\n")) and not is_overview(frame)
 
 
 def back_to_overview(screen, *markers):
