@@ -933,7 +933,11 @@ def terminal_wait_oracles():
     del discarded, each
     gc.collect()
     assert not any(ref() for ref in released), "a discarded capture stayed alive with its emulator"
-    print("terminal wait oracles passed: committed frames only, replaced frames seen, composer cursor, bounded frames and closure, released captures", flush=True)
+    # Reverse video is read per cell, as a highlighted button is drawn.
+    styled = ScreenCapture(reply=lambda data: None)
+    styled.feed(b"\x1b[?2026h\x1b[H\x1b[7m Allow \x1b[0m  Deny \x1b[?2026l")
+    assert styled.style("Allow").reverse and not styled.style("Deny").reverse, styled.completed_cells[0][:10]
+    print("terminal wait oracles passed: committed frames only, replaced frames seen, composer cursor, bounded frames and closure, released captures, reverse video", flush=True)
 
 
 def shown_bash_command(master):
