@@ -209,7 +209,9 @@ def allocated(response):
 
 def session_link_journey(installed, store, home, session_a):
     """In A, B's name on its peer row is a Session link: a click opens B, Esc
-    returns to A, and the next Esc reaches the overview."""
+    returns to A, Ctrl-O on the same name opens B and stays there, Esc returns
+    to A again, and the next Esc reaches the overview. B bypasses permissions,
+    so no waiting Action refuses its Esc."""
     from human_cli_fixture import current_screen, keyed_frame, overview_title, read_terminal
     from terminal_process import terminal_process
     env = {"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}
@@ -227,6 +229,11 @@ def session_link_journey(installed, store, home, session_a):
         column = rows[row].index(B_LABEL) + 2
         click = f"\x1b[<0;{column};{row + 1}M\x1b[<0;{column};{row + 1}m".encode()
         keyed_frame(master, click, showing(B_LABEL))
+        keyed_frame(master, b"\x1b", showing(A_LABEL))
+        # Ctrl-O follows the lowest name in view. A leaves once, so B is
+        # drawn and stays open with A as the way back; leaving twice in one
+        # event would close B before any frame showed it.
+        keyed_frame(master, b"\x0f", showing(B_LABEL))
         keyed_frame(master, b"\x1b", showing(A_LABEL))
         keyed_frame(master, b"\x1b", lambda frame, x, y: overview_title(frame))
 

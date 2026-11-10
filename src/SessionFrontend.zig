@@ -451,9 +451,12 @@ fn appNotice(raw: *anyopaque, ctx: *vxfw.EventContext, text: []const u8) !void {
 fn appOpen(raw: *anyopaque, ctx: *vxfw.EventContext, id: []const u8) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     try self.follow(ctx, id);
+    try self.depart(ctx);
 }
 
-/// Opens the peer `id` names, by a click or Ctrl-O, under Esc's rules.
+/// Opens the peer `id` names, by a click or Ctrl-O, under Esc's rules. Its
+/// caller departs once, as `appEvent` does after every event: the screen
+/// opens the peer on that departure.
 fn follow(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
     if (self.leaving != null or id.len != session_id.bytes or !session_id.valid(id) or std.mem.eql(u8, id, self.session)) return;
     const screen = self.screen;
@@ -467,7 +470,6 @@ fn follow(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
         .leave => {
             try self.app_hooks.on_open(self.app_hooks.context, ctx, id[0..session_id.bytes]);
             self.leaving = .returned;
-            try self.depart(ctx);
         },
     }
 }
@@ -1051,7 +1053,10 @@ test "App Session Ctrl-O follows the lowest drawn peer name, or opens the lower 
     self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
     const Hooks = struct {
         var opened: ?[session_id.bytes]u8 = null;
-        fn leave(_: *anyopaque, _: *vxfw.EventContext, _: Outcome) !void {}
+        var leaves: usize = 0;
+        fn leave(_: *anyopaque, _: *vxfw.EventContext, _: Outcome) !void {
+            leaves += 1;
+        }
         fn upgrade(_: *anyopaque, _: *vxfw.EventContext) !void {
             return error.UnexpectedUpgrade;
         }
@@ -1063,6 +1068,7 @@ test "App Session Ctrl-O follows the lowest drawn peer name, or opens the lower 
         }
     };
     Hooks.opened = null;
+    Hooks.leaves = 0;
     var root: Root = .{ .overview = empty_app_text.widget() };
     const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .upgrade = Hooks.upgrade, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
     self.reading.opening = false;
@@ -1110,6 +1116,9 @@ test "App Session Ctrl-O follows the lowest drawn peer name, or opens the lower 
     try widget_.handleEvent(&ctx, .tick);
     try std.testing.expectEqualStrings("m3n4p5", &Hooks.opened.?);
     try std.testing.expectEqual(Outcome.returned, self.leaving.?);
+    // The Session leaves once: the screen opens the peer on that leave, so
+    // a second one would leave the peer too.
+    try std.testing.expectEqual(@as(usize, 1), Hooks.leaves);
 }
 
 /// A Session's input starts empty, and no frame of it has drawn a list yet:

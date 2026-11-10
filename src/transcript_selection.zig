@@ -120,6 +120,12 @@ pub fn relative(document: *const Document, at: u64) ?usize {
     return if (offset <= document.text().len) @intCast(offset) else null;
 }
 
+/// An absolute offset clamped to the current text: evicted text is its start.
+fn retained(document: *const Document, at: u64) usize {
+    if (at <= document.origin) return 0;
+    return @intCast(@min(at - document.origin, document.text().len));
+}
+
 /// A click on a peer's name opens its Session; any other click is on its row.
 pub fn opens(document: *const Document, spot: Spot) ?[]const u8 {
     if (spot.start == spot.end) return null;
@@ -138,8 +144,8 @@ pub const Copy = union(enum) {
 /// What releasing a drag over `range` copies: the text as shown, at most
 /// the clipboard limit. Text that has left the document is skipped.
 pub fn copy(gpa: std.mem.Allocator, document: *const Document, range: Range) !Copy {
-    const from = relative(document, range.from) orelse 0;
-    const to = relative(document, range.to) orelse document.text().len;
+    const from = retained(document, range.from);
+    const to = retained(document, range.to);
     if (from >= to) return .nothing;
     const bytes = try document.shownText(gpa, from, to, TerminalText.clipboard_limit) orelse return .too_large;
     if (bytes.len == 0) {
@@ -230,6 +236,13 @@ test "a release copies the shown text with its line count, within the clipboard 
     }
     try std.testing.expectEqual(Copy.nothing, try copy(gpa, document, .{ .from = 5, .to = 5 }));
     try std.testing.expectEqual(@as(?[]const u8, null), notice(.nothing, &buffer));
+    // Text evicted under a held drag is skipped: a range wholly before the
+    // retained text copies nothing, and one across its start copies the rest.
+    document.discardFront(8);
+    try std.testing.expectEqual(Copy.nothing, try copy(gpa, document, .{ .from = 0, .to = 4 }));
+    const across = try copy(gpa, document, .{ .from = 2, .to = 10 });
+    defer gpa.free(across.text.bytes);
+    try std.testing.expectEqualStrings("th", across.text.bytes);
     // Exactly the limit copies; one byte more copies nothing.
     document.clear();
     for (0..TerminalText.clipboard_limit / 1000) |_| try document.append(&@as([1000]u8, @splat('x')));
