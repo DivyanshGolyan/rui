@@ -3793,6 +3793,52 @@ test "upgrade quiescence settles accepted queued and running archive mutations b
     };
 }
 
+test "Esc while /upgrade waits for a held archive keeps the cancel: nothing checks or installs" {
+    const Gate = struct {
+        var entered: std.atomic.Value(bool) = .init(false);
+        var release: std.atomic.Value(bool) = .init(false);
+
+        fn archive(_: *Self, requests: client.Requests, _: client.SessionArchiveInput, reply: *Reply) !void {
+            entered.store(true, .release);
+            try test_poll.waitUntil(requests.io, test_poll.after(requests.io, .fromSeconds(10)), &release, test_poll.isSet);
+            reply.* = .{ .outcome = .accepted };
+        }
+
+        fn completed(overview: *Self) bool {
+            return overview.worker.completed();
+        }
+    };
+    var ops = fake_operations;
+    ops.archive = Gate.archive;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    Gate.entered.store(false, .release);
+    Gate.release.store(false, .release);
+    defer Gate.release.store(true, .release);
+    const overview = rig.overview;
+    _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .idle, .input = .{ .archive = .active } } });
+    try overview.dispatch(.all);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &Gate.entered, test_poll.isSet);
+    try std.testing.expect(try rig.press("/upgrade\r") == null);
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    // The archive holds the handoff: the run has not started.
+    try overview.appUpgrade(&ctx);
+    try std.testing.expect(overview.upgrade_requested and !overview.upgrade_job.started);
+    // Kitty's Esc, unambiguous on its own.
+    try std.testing.expect(try rig.press("\x1b[27u") == null);
+    Gate.release.store(true, .release);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), overview, Gate.completed);
+    var turns: usize = 0;
+    while (overview.upgrade_requested) : (turns += 1) {
+        try std.testing.expect(turns < 100);
+        try overview.appUpgrade(&ctx);
+    }
+    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", overview.state.notice.?.text());
+    try std.testing.expect(overview.upgrade_report == null);
+}
+
 test "upgrade quiescence cancels read jobs rather than granting them mutation custody" {
     const Read = struct {
         var cancelled: bool = false;

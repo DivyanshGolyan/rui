@@ -4,6 +4,7 @@
 //! full check and receipts print on exit.
 const std = @import("std");
 const upgrade = @import("upgrade.zig");
+const installation_path = @import("installation_path.zig");
 const ClientTask = @import("ClientTask.zig");
 const upgrade_status = @import("upgrade_status.zig");
 const UpgradeStep = @import("overview_view.zig").UpgradeStep;
@@ -35,6 +36,8 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8) !void {
     self.store = store;
     self.allocator = init.gpa;
     self.started = true;
+    // Esc came while the overview settled its Host work: nothing checks.
+    if (self.cancelling) return self.finish();
     self.task.start(init.io, self, work) catch |err| {
         self.failure = err;
         self.finished = true;
@@ -97,10 +100,11 @@ fn finish(self: *Self) void {
 }
 
 /// Cancellation is a request, never a promise that publication rolled back.
+/// One made before `begin` holds: the run then ends without checking.
 pub fn cancel(self: *Self) void {
-    if (!self.started or self.finished) return;
+    if (self.finished) return;
     self.cancelling = true;
-    self.task.cancel();
+    if (self.started) self.task.cancel();
 }
 
 /// On a fatal UI exit, preserve the joined outcome for writeReport before
@@ -184,6 +188,8 @@ fn ending(self: *const Self) upgrade_status.Ended {
 pub fn writeReceipt(self: *const Self, writer: *std.Io.Writer) !void {
     std.debug.assert(!self.started or self.finished);
     if (self.result) |*result| try upgrade.writeResult(writer, result);
+    // A shell that finds another rui first still needs telling.
+    if (self.checked) |*checked| try installation_path.write(writer, &checked.path, checked.home);
     try self.cleanup.write(writer);
 }
 
@@ -338,6 +344,36 @@ test "settle requests cancellation and joins before returning the failure" {
     try std.testing.expect(job.finished and job.task.thread == null);
     try std.testing.expectEqual(error.Cancelled, job.failure.?);
     job.deinit();
+}
+
+test "a cancel before the worker starts ends the run cancelled without checking" {
+    var init: std.process.Init = undefined;
+    init.io = std.testing.io;
+    init.gpa = std.testing.allocator;
+    var job: Self = .{};
+    // Esc while the overview still settles its own Host work.
+    job.cancel();
+    try std.testing.expect(job.cancelling);
+    try job.begin(init, "/store");
+    try std.testing.expect(try job.advance());
+    try std.testing.expect(job.task.thread == null and job.checked == null and job.result == null);
+    try std.testing.expectEqual(upgrade_status.Ended.cancelled, job.ending());
+    job.deinit();
+}
+
+test "a successful receipt keeps the check's PATH advice: a shadowed or missing install says how to fix it" {
+    for ([_]@FieldType(@FieldType(upgrade.Check, "path"), "state"){ .shadowed, .missing, .selected }) |state| {
+        var checked = news_check;
+        checked.path = .{ .state = state, .other = if (state == .selected) null else "/usr/bin/rui" };
+        const job: Self = .{ .started = true, .finished = true, .operation = .install, .checked = checked, .result = test_result };
+        var bytes: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        try job.writeReceipt(&writer);
+        const out = writer.buffered();
+        try std.testing.expect(std.mem.indexOf(u8, out, "Installation unchanged") != null or std.mem.indexOf(u8, out, "Installed Rui") != null);
+        const advice = std.mem.indexOf(u8, out, "/usr/bin/rui") != null;
+        try std.testing.expectEqual(state != .selected, advice);
+    }
 }
 
 test "failed check finishes without installation" {

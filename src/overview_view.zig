@@ -2437,6 +2437,8 @@ fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *co
 fn click(state: *State, line: usize, effects: *Effects) error{OutOfMemory}!void {
     // A shown panel fills the list's lines; none of them is a Session.
     if (state.panel != null) return;
+    // While a start waits, keys move nothing and Enter opens nothing.
+    if (state.inputMode() == .frozen) return;
     const item = listItem(state, line) orelse return;
     const at = switch (item) {
         .gap, .heading, .empty => return,
@@ -2464,6 +2466,11 @@ fn admitHostRequest(state: *State) bool {
 
 /// /upgrade checks at once; Host intents wait until it ends.
 fn startUpgrade(state: *State, effects: *Effects) void {
+    // The run going on keeps its progress and its Esc.
+    switch (state.upgrade.state) {
+        .checking, .installing => return,
+        .idle, .ended => {},
+    }
     state.upgrade_pending = true;
     state.upgrade.begin();
     effects.add(.upgrade);
@@ -5951,6 +5958,18 @@ test "one click on a row opens it, under Enter's rules" {
     try expectSelected(&state, "g7h8j9");
 }
 
+test "a click while a start waits changes nothing, as keys do, and the start then opens" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const selected = state.selected.?;
+    _ = try submit(&state, try typeText(&state, "go"));
+    try std.testing.expectEqual(InputMode.frozen, state.inputMode());
+    const row = try lineOfRow(&state, "b2c3d4");
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = row } }));
+    try expectSelected(&state, &selected);
+    try expectEffects(&.{ .clear_draft, .{ .open = "z9y8x7".* } }, try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } }));
+}
+
 test "a click on a folded group's more line opens it at its first hidden row" {
     var state = try opened(&mixed);
     defer state.deinit();
@@ -7631,6 +7650,25 @@ test "/upgrade runs inline: Esc cancels it before the draft, checking or prepari
     _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 61, .patch = 1 }, .host = .{ .running = 0 } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .upgraded = .{ .version = .{ .schema = 61, .patch = 1 }, .restarted = true } } } });
     try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending);
+}
+
+test "another /upgrade while one runs changes nothing: its progress and Esc stay" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } });
+    const preparing = try std.testing.allocator.dupe(u8, state.upgrade.line(&buffer, .unicode).?.text);
+    defer std.testing.allocator.free(preparing);
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try std.testing.expectEqualStrings(preparing, state.upgrade.line(&buffer, .unicode).?.text);
+    _ = try step(&state, .{ .upgrade = .{ .step = .publishing } });
+    const publishing = try std.testing.allocator.dupe(u8, state.upgrade.line(&buffer, .unicode).?.text);
+    defer std.testing.allocator.free(publishing);
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try std.testing.expectEqualStrings(publishing, state.upgrade.line(&buffer, .unicode).?.text);
+    // Past publishing Esc is still the draft's: nothing cancels.
+    try expectEffects(&.{.clear_draft}, try press(&state, try typeText(&state, "x"), .clear));
 }
 
 test "the status bar says the newest notice, else the Upgrade at work or held, else an unconfirmed send" {
