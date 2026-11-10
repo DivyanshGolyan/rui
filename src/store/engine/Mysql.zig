@@ -454,12 +454,18 @@ pub fn control(self: *Mysql, comptime which: engine.Control) Failure!void {
     self.state.committing = which == .commit;
     defer self.state.committing = false;
     if (is_test) self.state.testing_shape.controls += 1;
-    if (is_test and which == .commit and self.state.testing_drop == .before_commit) self.state.connection.close();
+    if (is_test and which == .commit and self.state.testing_drop == .before_commit) self.state.connection.disconnect();
     self.state.connection.query(text) catch {
         const err = self.lost();
         return if (which == .commit) self.settleLostCommit() else err;
     };
-    if (is_test and which == .commit and self.state.testing_drop == .after_commit) self.state.connection.close();
+    if (is_test and which == .commit and self.state.testing_drop == .after_commit) {
+        // Once COMMIT's OK is readable, the server has committed: the
+        // drop then loses only the acknowledgement.
+        var ready = [1]std.posix.pollfd{.{ .fd = self.state.connection.fd, .events = std.posix.POLL.IN, .revents = 0 }};
+        _ = std.posix.poll(&ready, 60_000) catch 0;
+        self.state.connection.disconnect();
+    }
     if (is_test and which == .commit) self.state.testing_drop = .none;
     _ = self.stepWrite() catch |err| {
         if (which == .rollback or which == .rollback_to) return error.CanonicalRollbackFailed;
@@ -503,14 +509,18 @@ fn settleLostCommit(self: *Mysql) Failure!void {
 fn reconnect(self: *Mysql) !mysql_open.Reclaimed {
     const s = self.state;
     const login = &(s.login orelse return error.StoreConnectionLost);
-    s.connection.close();
+    s.connection.disconnect();
     var attempt: u8 = 0;
     while (attempt < reconnect_attempts) : (attempt += 1) {
         if (attempt != 0) s.io.sleep(.fromSeconds(1), .awake) catch {};
         var refusal_buffer: [1024]u8 = undefined;
         var refusal = std.Io.Writer.fixed(&refusal_buffer);
-        s.connection.open(login.options(), &refusal) catch continue;
-        const owner = mysql_open.reclaim(&s.connection, login.database.slice(), s.connection_id) catch continue;
+        s.connection.reopen(login.options(), &refusal) catch continue;
+        const owner = mysql_open.reclaim(&s.connection, login.database.slice(), &s.store_id, s.connection_id) catch |err| switch (err) {
+            // Another server or Store, or one admission refuses: no retry helps.
+            error.WrongStoreIdentity, error.UnsupportedMysqlVersion, error.MysqlReadOnly, error.MysqlDurabilityTooWeak, error.MysqlStatementBinlog => return error.StoreConnectionLost,
+            else => continue,
+        };
         s.connection_id = owner.connection_id;
         if (is_test) s.testing_shape.reconnects += 1;
         return owner;
