@@ -2685,28 +2685,28 @@ Interactive entry requires a terminal and refuses `TERM=dumb` with guidance befo
 A User Message is a block: `›` at the margin, dim body text, and its Host-written admission time as `HH:MM` in a right sidenote margin at 60 columns and wider.
 Assistant prose starts at column 0 without speaker labels.
 A Message over 1,024 bytes, 4 non-blank lines or 12 lines from its first to its last non-blank line shows its first two non-blank lines and a dim `┄ N more lines` row; `/details` shows it whole.
-Tool activity follows the conversation's last line.
-It shows at most the three oldest calls awaiting permanent presentation, fewer on short terminals, with an exact overflow count and `/status` guidance.
-A displayed call retains its complete wrapped description and outcome explanation; calls that do not fit the physical-row budget count in overflow rather than showing a misleading clipped prefix.
+Tool activity follows the conversation's last line as the activity tail, whose rows `ActivityBlock` alone decides.
+It shows at most the three oldest calls awaiting permanent presentation, oldest first and fewer on short terminals, then `+N more running · /status`, `+N · /status` on a narrow row, counting every call not drawn; a click on that row opens `/status`.
+Each call takes one row, so a retry or the next call replaces a row in place rather than stacking: words that do not fit end in `…` and a running call's clock stays.
 This display bound does not cap execution.
 While work is under way, the conversation says what it is doing now, and says nothing once the work ends.
 Call rows keep their places, in issue order.
 While the work is a running Bash call, that call's own row carries the clock, `• Run zig build test-store · 42s`, found by the call's Operation and ordinal, never by its text.
 Any other work is the conversation's last line: `• Queued · 3s` while the Session waits for a model slot, `• Waiting · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
 The time counts from the state's `since`, against the terminal's clock.
-A browsed page or transcript keeps the line under its shown text, so above the status when the page is full.
-The line takes a row after the input, status and overflow rows and before call rows, which the overflow row then counts; with no row left it is dropped rather than refusing the terminal.
+A browsed page or transcript draws no activity tail: the transcript is one row shorter and a `↓` chip sits alone at the right of the freed row, `↓ N new` once N entries have shown text below since the view left the latest (`session_reads.DisplayCapture` counts an entry when it first shows text, never Activity positions).
+When rows run short, the work line and a waiting Message's row keep theirs and call rows give way to the overflow row, which counts them; a running call whose row is not drawn hands its clock to the work line.
 While a permission prompt is open the Action's instructions speak instead.
 An overview row whose work needs the person or explains a wait (approval, a retry, a running command, stopping) says the same words beside its own age column, so it adds only a retry's countdown, and takes its tone; one functional core, `work_line`, holds the wording and tone for both.
 The overview groups its rows as Yours, Active (thinking, running a tool, waiting on approval, retrying or stopping), Queued (waiting for a model slot), Idle, Finished, and Stopped or failed; a Session the person spoke in is in Yours only.
 Each group heading ends in its count, folded rows included, `Active · 3`, and the Queued heading says its rows' state, so they show only how long they have waited.
 Divyansh asked for the counts and chose Active and Queued on 2026-11-02, replacing the 2026-10-31 headings without counts.
-A Message a person or script sends while work is under way waits dimmed right above the status and the input's rule, as one row with the newest such Message's first line, cut to fit, and `queued`, or `N queued`, at the right, until it shows as its conversation row; a Message a stop excluded shows labelled `! Stopped before it ran · send it again to run it` before `! Session stopped.`.
-Divyansh approved that row and those labels on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
+A Message a person or script sends while work is under way waits as the activity tail's last row, `◌ also update docs …`, or `◌ 3 · also update docs …` when more than one waits, with the newest such Message's first line cut to fit, until it shows as its conversation row; a Message a stop excluded shows labelled `! Stopped before it ran · send it again to run it` before `! Session stopped.`.
+Divyansh approved those labels on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF); the row's `◌` form is the vxfw rework plan's.
 The Host reports how many wait and the newest on each Activity page (`queued`), and the row reads that Message's first line at its Admission position, which holds that Admission alone, never by text; it keeps the line with that Message's admission ID and shows it only while the Host names that Message newest.
 A Message sent when the work does not hold the queue and no older one waits is taken next, so live output shows it at once as its Admission, and never its row again, however long a pending Session takes to start it (as after Ctrl-R recovery).
 Any other waits in the row, which shows only in the latest view, whenever the Host reports a Message waiting that live output has not shown, whatever the work is doing, and counts only those; live output shows a waiting Message only when it is the oldest, so at most that one is left out; until its row, its stop or the queued row shows it, the send reads `Sent`.
-It is the first row dropped when rows run short, before any draft row, and the frame that drops it, or a browsed page, says `Sent` instead; it leaves in the frame that shows the Message as its row or at its stop; `queued_line` fits the row.
+It keeps its row when rows run short, and a browsed page, which draws no tail, says `Sent` instead; it leaves in the frame that shows the Message as its row or at its stop; `queued_line.waitingRow` fits the row.
 A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
@@ -2870,10 +2870,6 @@ It says `Saved to ./rui-ID-answer.md`.
 Before the first answer each says `No answer to copy yet.`; `/copy code` on an answer with no complete fenced block says `No code block in the last answer.` A failed copy says `! Copy unavailable; draft retained.`, or `! This directory is not writable; draft retained.` when `/copy file` cannot write there.
 Non-TTY conversation invocation is refused; one-shot and pipe commands keep their existing contracts.
 
-On short layouts, the renderer can remove the spacer and shorten overflow to `+N · /status`.
-It budgets the actual undisplayed population after selecting complete call previews.
-Optional spacing and overflow wording yield before ordinary status.
-Only after trying those alternatives may genuine row pressure shorten the bounded status view.
 Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).
 If required instructions, overflow and input cannot fit, the renderer fails before emitting a clipped prompt and restores terminal configuration.
 

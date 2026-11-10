@@ -4,7 +4,8 @@
 //! retry 2 in 18s`, `Stopping…`) when no shown call carries it; and the
 //! newest Message waiting its turn, `◌ also update docs …`. One row each, in
 //! that order, so a retry or the next call replaces a row in place rather
-//! than stacking. The screen shows it only at the latest view.
+//! than stacking. The screen shows it only at the latest view. This block
+//! alone decides which rows a short screen keeps.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -49,36 +50,56 @@ fn clockCall(self: *const Self) ?usize {
     return null;
 }
 
+/// Which rows a tail `height` rows tall keeps: the one decision `rows` and
+/// `draw` both read.
+const Plan = struct {
+    /// Calls drawn, the oldest retained first.
+    shown: usize,
+    /// Whether `+N more` shows, counting every call not drawn.
+    more: bool,
+    /// Whether the work line takes a row of its own.
+    work_row: bool,
+    queued: bool,
+
+    fn rows(self: Plan) usize {
+        return self.shown + @intFromBool(self.more) + @intFromBool(self.work_row) + @intFromBool(self.queued);
+    }
+};
+
+/// The work line and the waiting row keep their rows; the calls take what
+/// is left, oldest first as they are retained, with `+N more` counting
+/// every call not drawn. When the call that carries the work line's clock
+/// is not drawn, the work line takes a row of its own, so the clock always
+/// shows. A screen too short even for those keeps the last rows.
+fn plan(self: *const Self, height: usize) Plan {
+    const clock_call = self.clockCall();
+    const beyond = self.live.total > self.live.count;
+    var result: Plan = .{ .shown = 0, .more = false, .work_row = self.work != null and clock_call == null, .queued = self.queued != null };
+    for (0..2) |_| {
+        const room = height -| (@as(usize, @intFromBool(result.work_row)) + @intFromBool(result.queued));
+        const all_fit = self.live.count + @intFromBool(beyond) <= room;
+        result.shown = if (all_fit) self.live.count else room -| 1;
+        result.more = if (all_fit) beyond else room >= 1;
+        if (result.work_row or self.work == null or clock_call.? < result.shown) break;
+        result.work_row = true;
+    }
+    return result;
+}
+
 /// Rows the block takes at full height.
 pub fn rows(self: *const Self) u16 {
-    const more = @intFromBool(self.live.total > self.live.count);
-    const work = @intFromBool(self.work != null and self.clockCall() == null);
-    return @intCast(self.live.count + more + work + @intFromBool(self.queued != null));
+    return @intCast(self.plan(std.math.maxInt(u16)).rows());
 }
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const max = ctx.max.size();
     const clock_call = self.clockCall();
-    // The work line and the waiting row keep their rows; the calls take
-    // what is left, newest first, with `+N more` counting every call not
-    // drawn. A screen too short even for those keeps the newest rows.
-    // When the call that carries the work line's clock is clipped, the work
-    // line takes a row of its own, so the clock always shows.
-    var work_row = self.work != null and clock_call == null;
-    var shown: usize = undefined;
-    var more: bool = undefined;
-    for (0..2) |_| {
-        const fixed = @as(usize, @intFromBool(work_row)) + @intFromBool(self.queued != null);
-        const room = max.height -| fixed;
-        const all_fit = self.live.count + @intFromBool(self.live.total > self.live.count) <= room;
-        shown = if (all_fit) self.live.count else room -| 1;
-        more = if (all_fit) self.live.total > self.live.count else room >= 1;
-        if (work_row or self.work == null or clock_call.? >= self.live.count - shown) break;
-        work_row = true;
-    }
-    const fixed = @as(usize, @intFromBool(work_row)) + @intFromBool(self.queued != null);
-    const total: u16 = @intCast(shown + @intFromBool(more) + fixed);
+    const kept = self.plan(max.height);
+    const shown = kept.shown;
+    const more = kept.more;
+    const work_row = kept.work_row;
+    const total: u16 = @intCast(kept.rows());
     const height = @min(total, max.height);
     var surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = max.width, .height = height });
     @memset(surface.buffer, .{ .style = self.styles.normal });
@@ -89,7 +110,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var children: []vxfw.SubSurface = &.{};
     const clock = try ctx.arena.create([work_line.max_clock_bytes]u8);
 
-    for (self.live.count - shown..self.live.count) |call| {
+    for (0..shown) |call| {
         defer index += 1;
         if (index < skip) continue;
         const buffer = try ctx.arena.create([session_view.Live.line_bytes]u8);
@@ -256,7 +277,7 @@ test "the activity tail puts the clock on the running call's own row, and the wo
     try std.testing.expectEqual(@as(u16, 0), (try block.widget().draw(ctx)).size.height);
 }
 
-test "a narrow or short activity tail keeps the clock and the newest rows" {
+test "a narrow or short activity tail keeps the clock and the oldest calls" {
     var click: Click = .{};
     var block: Self = .{ .more = .{ .label = "", .userdata = &click, .on_click = Click.status } };
     block.live.entries[0] = entry(7, 1, "Read src/overview_view.zig", .succeeded);
@@ -279,14 +300,21 @@ test "a narrow or short activity tail keeps the clock and the newest rows" {
     try std.testing.expectEqual(@as(u16, 2), short.size.height);
     try std.testing.expectEqualStrings("• Run the whole store… · 1m 1s", try rowText(short, 0));
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(short, 1));
-    // Three rows: the newest call, then the 29 not drawn.
+    // Three rows: the oldest call would leave the clock's call clipped, so
+    // the work line takes the row and the overflow counts all 30.
     const three = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 3 }, .cell_size = .{} });
-    try std.testing.expect(std.mem.startsWith(u8, try rowText(three, 0), "• Run the whole store"));
-    try std.testing.expectEqualStrings("+29 more running · /status", block.more.label);
+    try std.testing.expectEqualStrings("+30 more running · /status", block.more.label);
+    try std.testing.expectEqualStrings("• Run the whole store… · 1m 1s", try rowText(three, 1));
+    try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(three, 2));
     // Every running call retained, but not every one fits: the clipped ones
     // still get an overflow row.
     const work = block.work;
     block.work = null;
+    // With no clock to keep, a short tail keeps the oldest call, as the
+    // three retained are the oldest, and counts the other 29.
+    const oldest = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 3 }, .cell_size = .{} });
+    try std.testing.expectEqualStrings("✓ Read src/overview_view.zig", try rowText(oldest, 0));
+    try std.testing.expectEqualStrings("+29 more running · /status", block.more.label);
     block.live.total = 2;
     const clipped = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(usize, 1), clipped.children.len);
