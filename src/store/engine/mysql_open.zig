@@ -18,6 +18,8 @@ pub const Options = struct {
 pub const State = struct {
     epoch: u64,
     commit_seq: u64,
+    /// The server session holding GET_LOCK, which `reclaim` ends.
+    connection_id: u64,
     doublewrite: Bounded(32),
     store_id: [2 * schema.store_id_bytes]u8,
 };
@@ -33,6 +35,7 @@ const FactsRow = struct {
     doublewrite: Bounded(32),
     max_allowed_packet: u64,
     database: Bounded(64),
+    connection_id: u64,
 };
 
 const session_settings = blk: {
@@ -51,7 +54,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     // connection a proxy sent the last one on.
     conn.useSettings(session_settings, schema.mysql_session.len);
     const w = conn.batch();
-    try w.writeAll("SELECT @@version,@@version_comment,@@global.read_only,@@global.super_read_only,@@global.innodb_flush_log_at_trx_commit,@@global.sync_binlog,@@global.log_bin,@@global.binlog_format,@@global.innodb_doublewrite,@@max_allowed_packet,DATABASE();SELECT GET_LOCK(");
+    try w.writeAll("SELECT @@version,@@version_comment,@@global.read_only,@@global.super_read_only,@@global.innodb_flush_log_at_trx_commit,@@global.sync_binlog,@@global.log_bin,@@global.binlog_format,@@global.innodb_doublewrite,@@max_allowed_packet,DATABASE(),CONNECTION_ID();SELECT GET_LOCK(");
     try text(w, options.database);
     try w.writeAll(",0)");
     try conn.sendBatch();
@@ -146,8 +149,43 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     // A missing acknowledgement is never reported as a successful open.
     expectOk(conn) catch return error.CommitOutcomeUnknown;
     if (!conn.isReady()) return error.ProtocolViolation;
-    return .{ .epoch = owner.epoch, .commit_seq = owner.commit_seq, .doublewrite = facts.doublewrite, .store_id = store_id };
+    return .{ .epoch = owner.epoch, .commit_seq = owner.commit_seq, .connection_id = facts.connection_id, .doublewrite = facts.doublewrite, .store_id = store_id };
 }
+
+pub const Reclaimed = struct { epoch: u64, commit_seq: u64, connection_id: u64 };
+
+/// On a fresh connection after the last was lost: ends the session the
+/// Store's GET_LOCK was taken on, takes the lock again once that session
+/// is gone, and reads the ownership row. With the old session gone, no
+/// statement it was sent can still commit, so `commit_seq` is final.
+pub fn reclaim(conn: *wire.Connection, database: []const u8, old_connection_id: u64) !Reclaimed {
+    errdefer conn.close();
+    conn.useSettings(session_settings, schema.mysql_session.len);
+    // Alone: a session that already ended fails KILL, which would stop a batch.
+    try conn.batch().print("KILL {d}", .{old_connection_id});
+    try conn.sendBatch();
+    switch (try conn.next()) {
+        .ok, .err => {},
+        else => return error.ProtocolViolation,
+    }
+    const w = conn.batch();
+    // KILL returns before the session ends; the lock waits for its end.
+    try w.writeAll("SELECT @@max_allowed_packet,CONNECTION_ID(),GET_LOCK(");
+    try text(w, database);
+    try w.print(",{d});SELECT epoch,commit_seq FROM store_owner WHERE owner_key=1", .{reclaim_lock_wait_s});
+    try conn.sendBatch();
+    const facts = try one(struct { max_allowed_packet: u64, connection_id: u64, acquired: ?u64 }, conn);
+    const owner = try one(struct { epoch: u64, commit_seq: u64 }, conn);
+    const acquired = facts.acquired orelse return error.StoreConnectionLost;
+    if (acquired == 0) return error.StoreLocked;
+    if (acquired != 1) return error.CorruptStore;
+    conn.limitBatch(facts.max_allowed_packet);
+    return .{ .epoch = owner.epoch, .commit_seq = owner.commit_seq, .connection_id = facts.connection_id };
+}
+
+/// How long `reclaim` waits for the old session to end, well inside the
+/// round deadline.
+const reclaim_lock_wait_s = 10;
 
 fn text(w: *std.Io.Writer, value: []const u8) !void {
     if (!std.unicode.utf8ValidateSlice(value)) return error.WrongStoreIdentity;

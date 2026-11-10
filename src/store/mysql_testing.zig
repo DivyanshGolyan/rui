@@ -673,6 +673,50 @@ test "store.mysql live every message carries the session settings, so none relie
     try std.testing.expect(!storage.isFenced());
 }
 
+test "store.mysql live a connection lost around COMMIT reconnects and reports what landed" {
+    const Drop = @TypeOf(@as(@import("engine/Mysql.zig").State, undefined).testing_drop);
+    for ([_]Drop{ .before_commit, .after_commit }) |drop| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try openLive(&storage, &tmp);
+        defer storage.close() catch {};
+        const state = storage.engine.mysql.state;
+        const old_connection = state.connection_id;
+        const id = id: {
+            const entry = try store_core.enter(&storage, .none);
+            defer entry.release();
+            var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+            defer access.deinit();
+            errdefer access.abandon(.{}) catch {};
+            const id = try access.identity(.content_id);
+            access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest("lost commit"), .length = 0 });
+            state.testing_drop = drop;
+            access.commit() catch |err| {
+                access.abandon(.{}) catch {};
+                // Not landed is known, never CommitOutcomeUnknown.
+                try std.testing.expectEqual(error.StoreConnectionLost, err);
+                try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{id}));
+                break :id null;
+            };
+            // Only a COMMIT that was sent can land.
+            try std.testing.expectEqual(Drop.after_commit, drop);
+            break :id id;
+        };
+        if (id) |landed| try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{landed}));
+        try std.testing.expectEqual(@as(u64, 1), state.testing_shape.reconnects);
+        try std.testing.expect(state.connection_id != old_connection);
+        // The new connection holds the lock: a second Store is refused.
+        var second: Store = undefined;
+        try std.testing.expectError(error.StoreLocked, open(&second, &tmp, std.testing.io, .{}));
+        if (id != null) {
+            // Landed: the Store carries on writing on its new connection.
+            try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }
+}
+
 test "store.mysql live GET_LOCK excludes a second Store on the same database" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

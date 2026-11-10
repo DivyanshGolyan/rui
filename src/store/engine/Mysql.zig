@@ -9,6 +9,7 @@ const wire = @import("../wire/mysql_connection.zig");
 const row_decoder = @import("../mysql_row.zig");
 const literal = @import("../mysql_literal.zig");
 const content = @import("mysql_content.zig");
+const mysql_open = @import("mysql_open.zig");
 const Mysql = @This();
 const Failure = engine.Failure;
 const allocator = std.heap.page_allocator;
@@ -21,6 +22,7 @@ pub const QueryShape = struct {
     access_passes: u64 = 0,
     identity_passes: u64 = 0,
     content_queries: u64 = 0,
+    reconnects: u64 = 0,
 };
 
 state: *State,
@@ -47,6 +49,14 @@ pub const State = struct {
     store_id: [32]u8 = undefined,
     testing_database: if (is_test) [40]u8 else void = if (is_test) @splat(0) else {},
     fence_result: u8 = 0,
+    /// The login a lost connection reconnects with, kept for the Host's
+    /// life; null when it cannot be kept, and then a loss stays final.
+    login: ?Login = null,
+    /// The server session holding the Store's GET_LOCK.
+    connection_id: u64 = 0,
+    io: std.Io = undefined,
+    /// Tests: where the next COMMIT loses its connection.
+    testing_drop: if (is_test) enum { none, before_commit, after_commit } else void = if (is_test) .none else {},
 
     /// Commit, rollback or a server abort ends the transaction, and with
     /// it every savepoint and any control not yet sent.
@@ -73,6 +83,61 @@ const Begin = union(enum) {
 /// stays independent of it (`Begin.sent.savepoint`).
 const Replacement = enum { none, pending, buffered };
 const unserved = provider_route.all(.unserved);
+
+/// A copy of the open-time login, so a reconnect needs nothing the caller
+/// wiped. Only system TLS trust is kept: a CA file path is not.
+const Login = struct {
+    address: enum { unix_socket, tcp_tls, tcp },
+    host: Bounded(253) = .{ .len = 0 },
+    port: u16 = 0,
+    user: Bounded(wire.mysql.max_user_bytes) = .{ .len = 0 },
+    password: Bounded(wire.mysql.max_password_bytes) = .{ .len = 0 },
+    database: Bounded(64) = .{ .len = 0 },
+    deadline_ms: u32,
+
+    fn of(given: wire.Options) ?Login {
+        var login: Login = .{ .address = undefined, .deadline_ms = given.deadline_ms };
+        switch (given.address) {
+            .unix_socket => |path| {
+                login.address = .unix_socket;
+                login.host.set(path) catch return null;
+            },
+            .tcp_tls => |t| {
+                if (t.trust != .system) return null;
+                login.address = .tcp_tls;
+                login.host.set(t.host) catch return null;
+                login.port = t.port;
+            },
+            .tcp => |t| {
+                login.address = .tcp;
+                login.host.set(t.host) catch return null;
+                login.port = t.port;
+            },
+        }
+        login.user.set(given.user) catch return null;
+        login.password.set(given.password) catch return null;
+        login.database.set(given.database) catch return null;
+        return login;
+    }
+
+    fn options(self: *const Login) wire.Options {
+        return .{
+            .address = switch (self.address) {
+                .unix_socket => .{ .unix_socket = self.host.slice() },
+                .tcp_tls => .{ .tcp_tls = .{ .host = self.host.slice(), .port = self.port, .trust = .system } },
+                .tcp => .{ .tcp = .{ .host = self.host.slice(), .port = self.port } },
+            },
+            .user = self.user.slice(),
+            .password = self.password.slice(),
+            .database = self.database.slice(),
+            .deadline_ms = self.deadline_ms,
+        };
+    }
+};
+
+/// Reconnects a lost connection tries, a second apart, before the loss
+/// stays final.
+const reconnect_attempts = 3;
 pub const ContentSink = content.ContentSink;
 pub const ContentHost = content.Host;
 pub const insert_chunk = rsql.Write(.{
@@ -84,7 +149,8 @@ pub const insert_chunk = rsql.Write(.{
 pub fn open(io: std.Io, options: wire.Options, selector: []const u8, store_options: Store.OpenOptions) !Mysql {
     const state = try allocator.create(State);
     errdefer allocator.destroy(state);
-    state.* = .{ .connection = undefined };
+    state.* = .{ .connection = undefined, .login = Login.of(options), .io = io };
+    errdefer std.crypto.secureZero(u8, std.mem.asBytes(state));
     var refusal_buffer: [1024]u8 = undefined;
     var refusal = std.Io.Writer.fixed(&refusal_buffer);
     try state.connection.open(options, &refusal);
@@ -93,6 +159,7 @@ pub fn open(io: std.Io, options: wire.Options, selector: []const u8, store_optio
     state.store_id = opened.store_id;
     state.epoch = opened.epoch;
     state.commit_seq = opened.commit_seq;
+    state.connection_id = opened.connection_id;
     return .{ .state = state };
 }
 
@@ -101,6 +168,7 @@ pub fn close(self: *Mysql) error{StoreCloseFailed}!void {
     const failed = self.state.failure != null;
     self.state.connection.close();
     allocator.free(self.state.kinds);
+    std.crypto.secureZero(u8, std.mem.asBytes(&self.state.login));
     allocator.destroy(self.state);
     if (failed) return error.StoreCloseFailed;
 }
@@ -386,9 +454,16 @@ pub fn control(self: *Mysql, comptime which: engine.Control) Failure!void {
     self.state.committing = which == .commit;
     defer self.state.committing = false;
     if (is_test) self.state.testing_shape.controls += 1;
-    self.state.connection.query(text) catch return self.lost();
+    if (is_test and which == .commit and self.state.testing_drop == .before_commit) self.state.connection.close();
+    self.state.connection.query(text) catch {
+        const err = self.lost();
+        return if (which == .commit) self.settleLostCommit() else err;
+    };
+    if (is_test and which == .commit and self.state.testing_drop == .after_commit) self.state.connection.close();
+    if (is_test and which == .commit) self.state.testing_drop = .none;
     _ = self.stepWrite() catch |err| {
         if (which == .rollback or which == .rollback_to) return error.CanonicalRollbackFailed;
+        if (err == error.CommitOutcomeUnknown) return self.settleLostCommit();
         return err;
     };
     if (which == .commit or which == .rollback) {
@@ -396,6 +471,53 @@ pub fn control(self: *Mysql, comptime which: engine.Control) Failure!void {
         if (which == .commit) self.state.commit_seq += 1;
     }
 }
+/// After the connection was lost around COMMIT: reconnects and reads
+/// `commit_seq`, which every transaction advances by exactly one, to learn
+/// whether the transaction landed. Landed is success. Not landed leaves
+/// the Store on its new connection with nothing saved, which still fences
+/// for now. When no reconnect succeeds the outcome stays unknown.
+fn settleLostCommit(self: *Mysql) Failure!void {
+    const s = self.state;
+    const owner = self.reconnect() catch return error.CommitOutcomeUnknown;
+    s.endTransaction();
+    s.long_query = false;
+    s.prefix_results = 0;
+    s.fence_result = 0;
+    s.pass_failure = null;
+    const err: Failure = if (owner.epoch != s.epoch)
+        error.OwnershipLost
+    else if (owner.commit_seq == s.commit_seq + 1) {
+        s.failure = null;
+        s.commit_seq += 1;
+        return;
+    } else if (owner.commit_seq == s.commit_seq)
+        error.StoreConnectionLost
+    else
+        error.OwnershipLost;
+    s.failure = err;
+    return err;
+}
+
+/// Replaces the lost connection with a new one that holds the Store's
+/// lock again, and returns the ownership row it read.
+fn reconnect(self: *Mysql) !mysql_open.Reclaimed {
+    const s = self.state;
+    const login = &(s.login orelse return error.StoreConnectionLost);
+    s.connection.close();
+    var attempt: u8 = 0;
+    while (attempt < reconnect_attempts) : (attempt += 1) {
+        if (attempt != 0) s.io.sleep(.fromSeconds(1), .awake) catch {};
+        var refusal_buffer: [1024]u8 = undefined;
+        var refusal = std.Io.Writer.fixed(&refusal_buffer);
+        s.connection.open(login.options(), &refusal) catch continue;
+        const owner = mysql_open.reclaim(&s.connection, login.database.slice(), s.connection_id) catch continue;
+        s.connection_id = owner.connection_id;
+        if (is_test) s.testing_shape.reconnects += 1;
+        return owner;
+    }
+    return error.StoreConnectionLost;
+}
+
 pub fn inTransaction(self: *const Mysql) bool {
     return self.state.begin != .none;
 }
