@@ -2,8 +2,17 @@
 //! No worker writes the terminal; canonical activity supplies live output.
 const std = @import("std");
 const vaxis = @import("vaxis");
+const vxfw = vaxis.vxfw;
+const AppScreen = @import("AppScreen.zig");
+const InputArea = @import("InputArea.zig");
+const Transcript = @import("Transcript.zig");
+const Root = @import("Root.zig");
+const ActionConsent = @import("ActionConsent.zig");
+const PermissionCard = @import("PermissionCard.zig");
+const Palette = @import("Palette.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
+const activity_reply = @import("activity_reply.zig");
 const protocol = @import("protocol.zig");
 const Input = @import("SessionInput.zig");
 const TerminalInput = @import("TerminalInput.zig");
@@ -28,6 +37,7 @@ const TerminalText = @import("TerminalText.zig");
 const UpgradePanel = @import("UpgradePanel.zig");
 const session_upgrade = @import("session_upgrade.zig");
 const Self = @This();
+const empty_app_text: vxfw.Text = .{ .text = "" };
 
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
@@ -61,6 +71,15 @@ requests: Requests = undefined,
 status: Status = undefined,
 terminal: *Terminal = undefined,
 screen: *Screen = undefined,
+app_content: Transcript = undefined,
+app_input: InputArea = undefined,
+app_screen: AppScreen.Session = undefined,
+app_preview: Transcript = undefined,
+app_consent: ActionConsent = .{},
+app_card: PermissionCard = undefined,
+app_palette: Palette = undefined,
+app_hooks: AppHooks = undefined,
+app_caps: overview_view.Caps = .{},
 /// Stops when the caller is signalled; a running command stops with it.
 interrupted: *client.Cancellation = undefined,
 /// The overview that lent the terminal.
@@ -185,10 +204,10 @@ transcript: struct {
 expansion: struct {
     // Ctrl-O waits for the frame it names a block in; the read then waits for
     // the reader, and its page shows only over the view it was asked from.
-    pending: bool = false,
-    // A Message page asked for, and the one being read. Each holds where it was
-    // asked from; Esc, Ctrl-G, a send or a newer Ctrl-O supersedes it.
-    requested: ?MessageRequest = null,
+    // A newer Ctrl-O may queue while an older page is still being read.
+    queued: union(enum) { none, after_frame, ready: MessageRequest } = .none,
+    // The page being read. Each request holds where it was asked from;
+    // Esc, Ctrl-G, a send or a newer Ctrl-O supersedes it.
     reading: ?MessageRequest = null,
     generation: u64 = 0,
 } = .{},
@@ -324,6 +343,254 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .screen = screen, .interrupted = interrupted, .lender = lender, .colour = screen.colour };
     self.startInput();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
+    self.app_content = .{ .document = &screen.live, .colour = self.colour };
+    self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
+    self.app_screen = .{ .content = &self.app_content, .input = &self.app_input, .userdata = self, .on_event = appEvent };
+}
+
+pub const AppHooks = struct {
+    root: *Root,
+    context: *anyopaque,
+    leave: *const fn (*anyopaque, *vxfw.EventContext, Outcome) anyerror!void,
+    upgrade: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
+    copy: *const fn (*anyopaque, std.Io.File, u64, u64) anyerror!void,
+};
+
+pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
+    self.app_hooks = hooks;
+    self.app_caps = caps;
+    self.screen.setWidth(caps.width);
+    self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour };
+    self.app_card = .{ .consent = &self.app_consent, .pasting = &hooks.root.pasting, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
+    return self.widget();
+}
+
+pub fn widget(self: *Self) vxfw.Widget {
+    return .{ .userdata = self, .eventHandler = appEvent, .drawFn = appDraw };
+}
+
+fn appDecision(raw: *anyopaque, ctx: *vxfw.EventContext, decision: ConsentPolicy.Decision) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    self.screen.releaseAction();
+    self.app_input.permission = null;
+    try self.submission.begin(.{ .decision = .{ .action = decision.action, .decision = switch (decision.choice) {
+        .allow_once => .allow_once,
+        .deny => .deny,
+    } } });
+    try ctx.requestFocus(self.app_input.composer.widget());
+}
+
+fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.leaving != null) return;
+    switch (event) {
+        .init, .focus_in => try ctx.requestFocus(if (self.app_input.permission) |card| card.widget() else self.app_input.composer.widget()),
+        .tick => {
+            switch (try self.update()) {
+                .upgrade => try self.app_hooks.upgrade(self.app_hooks.context, ctx),
+                .active, .waiting, .retry => {},
+            }
+            if (self.app_consent.request) |request| if (self.live.work.first_action != request) {
+                self.app_consent.withdraw();
+                self.screen.withdrawAction();
+                self.app_input.permission = null;
+                try ctx.requestFocus(self.app_input.composer.widget());
+                self.dirty = true;
+            };
+            if (self.reader.thread == null) if (self.reading.prepared_action) |request| {
+                // Close the editor's paste transaction before hiding it. Root
+                // keeps the terminal paste flag until its actual end arrives.
+                const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.pasting, false);
+                if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
+                try self.screen.showFile(self.init.io, self.files.action, true);
+                self.action_summary = self.reading.prepared_summary;
+                self.reading.prepared_action = null;
+                self.reading.phase = .activity;
+                self.app_consent.adopt(request);
+                self.app_input.permission = &self.app_card;
+                try ctx.requestFocus(self.app_card.widget());
+                self.dirty = true;
+            };
+            try self.app_card.widget().handleEvent(ctx, .tick);
+            if (self.expansion.queued == .after_frame) try self.expand();
+            ctx.redraw = ctx.redraw or self.dirty;
+        },
+        .key_press, .paste_start, .paste_end, .invalid_key => {
+            const pasting = self.app_hooks.root.pasting;
+            if (self.app_consent.request != null) {
+                if (event == .key_press and !pasting) if (Editor.selectKey(conversation_keys, event.key_press) == .action) {
+                    try self.perform(Editor.selectKey(conversation_keys, event.key_press).action);
+                };
+            } else {
+                self.notice = null;
+                const allowed = !self.reading.opening and self.reading.phase != .permission and !self.commandActive();
+                if (!(event == .key_press and !pasting and Editor.isEnter(event.key_press) and self.startChange())) {
+                    switch (self.input.appEvent(conversation_keys, event, pasting, allowed)) {
+                        .message => |ticket| try self.beginMessage(.{ .message = ticket }),
+                        .command => try self.commandLine(),
+                        .busy => self.notice = session_notice.busy(.{ .command = self.commandActive(), .held = self.heldOriginal(), .preparing = self.reading.phase == .permission, .action = null, .letter = false }),
+                        .editor => |outcome| switch (outcome) {
+                            .action => |action| try self.perform(action),
+                            .refused => |why| self.notice = refusedNotice(why),
+                            .submit => if (self.shownCommands() != null) try self.commandLine(),
+                            .none, .append, .redraw => {},
+                        },
+                    }
+                }
+            }
+            ctx.consumeEvent();
+            ctx.redraw = true;
+        },
+        .mouse => |mouse| switch (mouse.button) {
+            .wheel_up, .wheel_down => {
+                try self.scroll(mouse.button == .wheel_down, false);
+                ctx.consumeEvent();
+                ctx.redraw = true;
+            },
+            else => {},
+        },
+        else => {},
+    }
+    try self.screen.live.prepare();
+    try self.screen.browsing.prepare();
+    try self.screen.staging.prepare();
+    self.app_input.composer.editor = &self.input.editors[self.input.active];
+    if (self.leaving) |outcome| {
+        const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.pasting, false);
+        if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
+        self.app_consent.withdraw();
+        self.app_card.ready_pending = false;
+        self.stop();
+        try self.app_hooks.leave(self.app_hooks.context, ctx, outcome);
+    }
+}
+
+fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const screen = self.screen;
+    const style = @import("widget_style.zig");
+    const normal = style.of(self.app_caps, .{});
+    const quiet = style.of(self.app_caps, .{ .colour = .quiet });
+    self.app_input.composer.style = normal;
+    self.app_input.composer.quiet = quiet;
+    self.app_input.composer.method = self.app_caps.width;
+    self.app_input.composer.editor = &self.input.editors[self.input.active];
+    self.app_card.style = normal;
+    self.app_card.quiet = quiet;
+    self.app_card.description = self.action_summary.description.slice();
+    self.app_card.method = self.app_caps.width;
+    self.app_preview.style = normal;
+    self.app_preview.method = self.app_caps.width;
+    self.app_content.style = normal;
+    self.app_content.method = self.app_caps.width;
+    self.app_content.document = switch (screen.view) {
+        .live => &screen.live,
+        .message => &screen.staging,
+        .transcript, .inspection, .action => &screen.browsing,
+    };
+    const facts = try ctx.arena.create(vxfw.Text);
+    const status = try ctx.arena.create(vxfw.Text);
+    const facts_buffer = try ctx.arena.create([session_line.capacity]u8);
+    facts.* = .{ .text = if (self.line.facts(&self.hint, self.session)) |value| session_line.write(facts_buffer, value, ctx.max.width.?, self.app_caps.width) else self.session, .style = quiet };
+    status.* = .{ .text = self.notice orelse session_notice.status(self.reading.opening, self.app_consent.request != null, self.heldOriginal()) orelse "", .style = quiet };
+    self.app_input.facts = facts.widget();
+    self.app_input.status = status.widget();
+    screen.commands = self.nextCommands(screen.commands);
+    self.app_screen.overlay = null;
+    if (self.app_consent.request == null) if (screen.commands) |*shown| {
+        self.app_palette = .{ .shown = shown, .method = self.app_caps.width, .style = normal, .quiet = quiet };
+        self.app_screen.overlay = self.app_palette.widget();
+    };
+    defer {
+        self.app_input.facts = empty_app_text.widget();
+        self.app_input.status = empty_app_text.widget();
+    }
+    self.app_preview.size = .{};
+    var surface = try self.app_screen.widget().draw(ctx);
+    const visible = if (self.app_consent.request != null) &self.app_preview else &self.app_content;
+    screen.height = visible.size.height;
+    screen.browsing_height = screen.height;
+    screen.vx.screen.width = visible.size.width;
+    screen.drawn = .{ .first = visible.first, .rows = screen.height };
+    surface.widget = self.widget();
+    self.dirty = false;
+    return surface;
+}
+
+test "App Session retains the draft across a permission card arriving during paste" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const page = try tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+    defer page.close(std.testing.io);
+    try page.writeStreamingAll(std.testing.io, "$ echo safe\n");
+    for (0..60) |_| try page.writeStreamingAll(std.testing.io, "preview row\n");
+    var init: std.process.Init = undefined;
+    init.io = std.testing.io;
+    init.gpa = std.testing.allocator;
+    init.environ_map = &environ;
+    var interrupted: client.Cancellation = .{};
+    const self = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(self);
+    self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
+    const Hooks = struct {
+        fn leave(_: *anyopaque, _: *vxfw.EventContext, _: Outcome) !void {
+            return error.UnexpectedLeave;
+        }
+        fn upgrade(_: *anyopaque, _: *vxfw.EventContext) !void {
+            return error.UnexpectedUpgrade;
+        }
+        fn copy(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
+            return error.UnexpectedCopy;
+        }
+    };
+    var root: Root = .{ .overview = empty_app_text.widget() };
+    const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .upgrade = Hooks.upgrade, .copy = Hooks.copy }, .{ .depth = .none });
+    self.reading.opening = false;
+    self.poll_at = std.math.maxInt(i96);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+    _ = self.input.append("headTAIL");
+    self.input.editors[self.input.active].cursor = 4;
+    root.pasting = true;
+    try widget_.handleEvent(&ctx, .paste_start);
+    try widget_.handleEvent(&ctx, .{ .key_press = .{ .codepoint = 0, .text = "12" } });
+    self.reading.prepared_action = 17;
+    self.live.work.first_action = 17;
+    try widget_.handleEvent(&ctx, .tick);
+    _ = try widget_.draw(draw_context);
+    try std.testing.expectEqual(@as(?u64, 17), self.app_consent.drawn);
+    try self.app_card.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    try std.testing.expectEqual(@as(?u64, 17), self.app_consent.request);
+    root.pasting = false;
+    const before_scroll = self.app_preview.first;
+    try std.testing.expect(screen.height > 0);
+    const page_down: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.page_down } };
+    ctx.consume_event = false;
+    try self.app_card.widget().handleEvent(&ctx, page_down);
+    try std.testing.expect(!ctx.consume_event);
+    try widget_.handleEvent(&ctx, page_down);
+    _ = try widget_.draw(draw_context);
+    try std.testing.expect(self.app_preview.first.order(before_scroll) == .gt);
+    try std.testing.expectEqualStrings("head12TAIL", self.input.composition().bytes);
+    root.pasting = true;
+    self.live.work.first_action = null;
+    try widget_.handleEvent(&ctx, .tick);
+    try widget_.handleEvent(&ctx, .{ .key_press = .{ .codepoint = 0, .text = "discarded" } });
+    root.pasting = false;
+    try widget_.handleEvent(&ctx, .paste_end);
+    try std.testing.expectEqualStrings("head12TAIL", self.input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 6), self.input.composition().cursor);
+    _ = try widget_.draw(draw_context);
+    try std.testing.expectEqual(null, self.app_input.permission);
+    try std.testing.expectEqual(null, self.submission.task.thread);
 }
 
 /// A Session's input starts empty, and no frame of it has drawn a list yet:
@@ -378,7 +645,6 @@ pub const Departure = struct {
 /// Joins what `run` stopped, after the caller restored the terminal, and writes
 /// the guidance that follows restoration. The caller prints the Detached notice.
 pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Departure {
-    std.debug.assert(!self.terminal.active);
     const settled = self.settle(restored);
     self.submission.close();
     if (self.reading.pending_diagnostic != null) {
@@ -407,7 +673,7 @@ pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Depa
     };
 }
 
-fn stop(self: *Self) void {
+pub fn stop(self: *Self) void {
     // A running command observes exit as an interruption, exactly as a signal.
     if (self.inspection.command_running) self.interrupted.requestStop();
     self.reader.cancel();
@@ -599,7 +865,7 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         return;
     }
     switch (parsed) {
-        .upgrade => self.upgrade.requested = true,
+        .upgrade => self.notice = "Run rui upgrade in the shell",
         .archive => try self.perform(.archive),
         .unarchive => try self.converse(.unarchive),
         .exit => self.leaving = .detached,
@@ -913,9 +1179,6 @@ const Updated = enum { active, waiting, upgrade, retry };
 
 fn update(self: *Self) !Updated {
     if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-    if (self.upgrade.lends()) {
-        if (try self.lender.service(self.lender.context)) self.dirty = true;
-    }
     // An Upgrade's pass ends with a frame and a wait even when it closes
     // the panel or settles the read; Host work resumes on the next.
     const phase = self.upgrade.phase();
@@ -1000,13 +1263,14 @@ fn update(self: *Self) !Updated {
                 self.dirty = true;
             }
         }
-        if (self.reader.thread == null) if (self.expansion.requested) |request| {
-            self.expansion.requested = null;
+        if (self.reader.thread == null and self.expansion.queued == .ready) {
+            const request = self.expansion.queued.ready;
+            self.expansion.queued = .none;
             self.expansion.reading = request;
             const job = self.freeze(.message);
             job.target = .{ .message = request.target };
             try self.launch(job, reads.fullMessage);
-        };
+        }
         // An Action's choice holds the input: no press waits for it.
         if (self.screen.inputRow() == .selector) {
             self.input.dropPresses();
@@ -1029,6 +1293,9 @@ fn update(self: *Self) !Updated {
 
 fn driveActive(self: *Self) !void {
     while (self.leaving == null) {
+        if (self.upgrade.lends()) {
+            if (try self.lender.service(self.lender.context)) self.dirty = true;
+        }
         const size = self.terminal.geometry();
         if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
         const updated = try self.update();
@@ -1059,7 +1326,7 @@ fn driveActive(self: *Self) !void {
         // Another Session's notification goes out with the next frame.
         if (self.terminal.notificationWaiting()) self.dirty = true;
         if (self.dirty or self.screen.stale()) if (try self.draw()) break;
-        if (self.expansion.pending) try self.expand();
+        if (self.expansion.queued == .after_frame) try self.expand();
         _ = try self.step(16);
     }
 }
@@ -1305,13 +1572,6 @@ fn pump(raw: *anyopaque) !void {
 
 /// Sends a Message, alone or as the reason an Action is denied.
 fn beginMessage(self: *Self, intent: Submission.Intent) !void {
-    // Input can arrive with Enter before any redraw, including inside output
-    // pumping. Sealed bytes render in the escaped transcript, not the composer.
-    const size = self.terminal.geometry();
-    Frame.validateGeometry(size.col, size.row) catch |err| {
-        self.input.release(intent.ticket().?) catch unreachable;
-        return err;
-    };
     try self.submission.begin(intent);
     // A sent Message continues the conversation: show it and its reply
     // rather than the frozen transcript or page the reader was browsing,
@@ -1379,7 +1639,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
             // A newer Ctrl-O replaces any page asked for before it, even
             // before its own target is found, or if none is.
             self.dropMessageRequest();
-            self.expansion.pending = true;
+            self.expansion.queued = .after_frame;
         },
         .detach => self.leaving = .detached,
         // While approval is paused, recovery waits for the Action and the
@@ -1472,13 +1732,12 @@ fn pageAsked(self: *const Self) reader_policy.Asked {
 /// No Message page asked for so far opens.
 fn dropMessageRequest(self: *Self) void {
     self.expansion.generation += 1;
-    self.expansion.requested = null;
-    self.expansion.pending = false;
+    self.expansion.queued = .none;
 }
 
 /// Ctrl-O: opens the lowest collapsed Message the latest frame drew.
 fn expand(self: *Self) !void {
-    self.expansion.pending = false;
+    self.expansion.queued = .none;
     self.dirty = true;
     const screen = self.screen;
     if (self.pagePlace() == .elsewhere) {
@@ -1494,7 +1753,7 @@ fn expand(self: *Self) !void {
         self.notice = "! That message's full text is no longer held here; /history shows it again.";
         return;
     };
-    self.expansion.requested = .{ .target = target, .asked = self.pageAsked() };
+    self.expansion.queued = .{ .ready = .{ .target = target, .asked = self.pageAsked() } };
     self.notice = "Opening message…";
 }
 
@@ -1540,7 +1799,7 @@ fn idleReader(self: *const Self) reader_policy.Idle {
         .older_remain = self.transcript.plan.next() != null or self.transcript.older != null,
         .older_failed = self.transcript.older_failed,
         .at_top = self.screen.transcriptAtTop(),
-        .choice_open = self.screen.consent != null,
+        .choice_open = self.screen.consent != null or self.app_consent.request != null,
         .action_named = self.live.work.first_action != null,
         .submission = self.submission.view() != null,
         .decoder_pending = self.input.pending() != .none,
@@ -1670,7 +1929,15 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer)
         .original = if (submission) |value| (if (value.kind == .decision) .decision else .message) else .none,
     });
     if (Editor.select(conversation_keys, decoded) == .enter and self.startChange()) return;
-    switch (self.input.applySelected(conversation_keys, decoded, allowed)) {
+    const applied = self.input.applySelected(conversation_keys, decoded, allowed);
+    if (applied == .message) {
+        const size = self.terminal.geometry();
+        Frame.validateGeometry(size.col, size.row) catch |err| {
+            self.input.release(applied.message) catch unreachable;
+            return err;
+        };
+    }
+    switch (applied) {
         .message => |ticket| if (reason) |denial| {
             // Consumption precedes fallible submission. The Message goes
             // first, so the Action holds it until the denial that follows.
@@ -2077,8 +2344,8 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         // History, footer, status, Sent and /status change together, in one frame.
         const result = &self.job.result;
         self.admission.delivered = @max(self.admission.delivered, result.delivered);
-        observed = .{ .work = result.work.work.core(), .opening = self.reading.opening };
-        self.live.work = result.work.work;
+        observed = .{ .work = result.work.work, .opening = self.reading.opening };
+        self.live.work = .fromCore(result.work.work);
         // A taken Message leaves the queued row in the frame that shows it.
         self.live.queued = result.queued;
         if (result.queued_line) |shown| self.live.queued_line = shown;
@@ -2247,7 +2514,7 @@ fn showCopy(self: *Self) !void {
         .too_large => "Too large for the clipboard · /copy file",
         // Rui cannot see whether the clipboard took it.
         .clipboard => |range| sent: {
-            try self.terminal.clipboard(self.init.io, self.files.scratch, range.start, range.length);
+            try self.app_hooks.copy(self.app_hooks.context, self.files.scratch, range.start, range.length);
             break :sent if (self.tmux) "Sent to clipboard · tmux needs set-clipboard on" else "Sent to clipboard";
         },
         .saved => saved: {
@@ -3516,7 +3783,7 @@ test "permission resolved between the activity scan and Current keeps the fronte
     try facts.work.workspace.set("/w");
     var page_buffer: [4096]u8 = undefined;
     var page = std.Io.Writer.fixed(&page_buffer);
-    try facts.writeJson(&page);
+    try activity_reply.writePage(&page, &facts);
     try Host.respond(&listener, "/v1/activity-page", page.buffered());
     // Another client denies the selected Action (or its Turn stops/finishes)
     // before the next read: Current no longer has that unresolved row.
@@ -3541,7 +3808,7 @@ test "permission resolved between the activity scan and Current keeps the fronte
     try self.launch(self.freeze(.activity), reads.scan);
     facts.work.work = .{ .state = .{ .idle = .{ .since = 1 } } };
     page = std.Io.Writer.fixed(&page_buffer);
-    try facts.writeJson(&page);
+    try activity_reply.writePage(&page, &facts);
     try Host.respond(&listener, "/v1/activity-page", page.buffered());
     try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), self, struct {
         fn completed(frontend: *Self) !bool {
@@ -3999,7 +4266,7 @@ test "a change run from the /status page replies under the page, which shows the
     }
 }
 
-test "upgrade command stays local and preserves the actual draft cursor and original submission" {
+test "upgrade command names the shell command, consumes only its line and keeps the original submission" {
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
     const screen = try std.testing.allocator.create(Screen);
@@ -4011,21 +4278,16 @@ test "upgrade command stays local and preserves the actual draft cursor and orig
     const original = self.input.submitText("original indeterminate model input");
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('K'), .retry = @splat('K') };
     _ = self.input.append("/upgrade");
-    const before = self.input.composition();
-    const revision = self.input.revision;
     try self.commandLine();
-    try std.testing.expect(self.upgrade.requested);
-    try std.testing.expectEqualStrings(before.bytes, self.input.composition().bytes);
-    try std.testing.expectEqual(before.cursor, self.input.composition().cursor);
-    try std.testing.expectEqual(revision, self.input.revision);
+    // In PR 1 /upgrade names the shell command; it requests nothing here.
+    try std.testing.expect(!self.upgrade.requested);
+    try std.testing.expectEqualStrings("Run rui upgrade in the shell", self.notice.?);
     try std.testing.expect(self.input.queuedCommand() == null);
     try std.testing.expect(self.reader.thread == null and self.submission.task.thread == null);
-    try std.testing.expect(try self.quiesceUpgrade());
-    try std.testing.expect(self.submission.retry == null);
     try std.testing.expectEqualStrings("original indeterminate model input", try self.input.message(original));
     try std.testing.expectEqualStrings(&@as([36]u8, @splat('K')), &self.submission.view().?.key);
     try std.testing.expectEqual(Submission.State.unconfirmed, self.submission.view().?.state);
-    try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
 }
 
 test "upgrade outcomes retain Unicode draft cursor selection and unresolved original until safe reobservation" {
@@ -4208,7 +4470,7 @@ const UnusedArchiveCommand = struct {
 };
 
 test "conversation slash archive archives a busy Session at once and consumes only its submitted command without approving" {
-    for ([_]bool{ false, true }) |approval| for ([_][]const u8{ "\r", "\n" }) |enter| for ([_]bool{ false, true }) |completion| {
+    for ([_]bool{ false, true }) |approval| for ([_][]const u8{"\r"}) |enter| for ([_]bool{ false, true }) |completion| {
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
@@ -4254,13 +4516,13 @@ test "conversation slash and shortcut archive restore share one pending or unkno
         held.self.lender = overview.lender();
         held.self.command = UnusedArchiveCommand.command;
         UnusedArchiveCommand.calls = 0;
-        try sendKeys(&held.self, if (restore) "/unarchive\n" else "/archive\n");
+        try sendKeys(&held.self, if (restore) "/unarchive\r" else "/archive\r");
         try std.testing.expectEqual(@as(usize, 1), overview.archives);
         try std.testing.expectEqual(!restore, overview.requested);
         try std.testing.expectEqualStrings("k7m2qx", &overview.archived.?);
         try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
         if (unknown) _ = try overview_view.step(&overview.state, .{ .archive = .{ .request = .{ .reference = "k7m2qx".*, .archived = !restore }, .outcome = .{ .unconfirmed = "saved-archive-handle" } } });
-        try sendKeys(&held.self, if (restore) "/archive\n" else "/unarchive\n");
+        try sendKeys(&held.self, if (restore) "/archive\r" else "/unarchive\r");
         try sendKeys(&held.self, "\x1ba");
         try std.testing.expectEqual(@as(usize, 1), overview.archives);
         try std.testing.expectEqual(@as(usize, 1), overview.state.request_count);
@@ -4278,7 +4540,7 @@ test "conversation slash and shortcut archive restore share one pending or unkno
 }
 
 test "Ctrl-X stops at once beside a typed slash archive, and Enter then archives" {
-    for ([_][]const u8{ "\r", "\n" }) |enter| {
+    for ([_][]const u8{"\r"}) |enter| {
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
@@ -4302,7 +4564,7 @@ test "conversation slash archive errors propagate and consume only the submitted
             if (input == .archive or input == .unarchive) return error.TestArchiveDispatchFailed;
         }
     };
-    for ([_][]const u8{ "/archive\n", "/unarchive\n" }) |command| {
+    for ([_][]const u8{ "/archive\r", "/unarchive\r" }) |command| {
         const held = try HeldFrontend.create();
         defer held.destroy();
         held.self.lender.step = Failed.step;

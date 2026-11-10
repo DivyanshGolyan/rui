@@ -1,7 +1,6 @@
 //! Saved models.dev facts. Publication is one transaction: a model_id is
 //! unique across generations, so committing a partial refresh would hide old facts.
 const std = @import("std");
-const protocol = @import("../../protocol.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const catalog = @import("../../model_catalog.zig");
 const rsql = @import("../rsql.zig");

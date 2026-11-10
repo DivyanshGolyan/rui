@@ -3,6 +3,7 @@
 //! client.zig owns transport and request capture.
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const activity_reply = @import("activity_reply.zig");
 pub const SessionToken = @import("change_ring.zig").SessionToken;
 const model_list = @import("model_list.zig");
 const model_picker = @import("model_picker.zig");
@@ -151,7 +152,7 @@ pub const ActivityPage = struct {
 
     pub fn parse(bytes: []const u8, cursor: ActivityCursor) !ActivityPage {
         try cursor.validate();
-        if (bytes.len > protocol.max_activity_page_response_bytes) return error.InvalidActivityPage;
+        if (bytes.len > activity_reply.max_page_bytes) return error.InvalidActivityPage;
         const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
         const Fact = protocol.ActivityItem;
         const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, content: Ref };
@@ -198,7 +199,7 @@ pub const ActivityPage = struct {
         const Work = struct { state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
         const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20) };
         const Wire = struct { version: JsonString(8), type: JsonString(32), delta: JsonEnum(enum { full }), since: ?JsonString(SessionToken.max_bytes), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work };
-        var storage: [2 * protocol.max_activity_page_response_bytes]u8 = undefined;
+        var storage: [2 * activity_reply.max_page_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const Header = struct { delta: JsonEnum(enum { full, not_modified }) };
         const header = std.json.parseFromSliceLeaky(Header, fixed.allocator(), bytes, .{ .ignore_unknown_fields = true }) catch return error.InvalidActivityPage;
@@ -1980,9 +1981,9 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);
     facts.work.workspace.bytes[0] = '/';
     facts.work.workspace.len = protocol.max_workspace_bytes;
-    var page_buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+    var page_buffer: [activity_reply.max_page_bytes]u8 = undefined;
     var page_writer = std.Io.Writer.fixed(&page_buffer);
-    try facts.writeJson(&page_writer);
+    try activity_reply.writePage(&page_writer, &facts);
     const page = try ActivityPage.parse(page_writer.buffered(), .{});
     try std.testing.expectEqual(@as(usize, 16), page.facts.count);
     try std.testing.expectEqualDeep(facts.call_activity, page.facts.call_activity);
@@ -2019,9 +2020,9 @@ test "activity page delta variants validate tokens and preserve the cursor" {
 
     var facts: protocol.ActivityFacts = .{ .end = 40, .token = token, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/w");
-    var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try facts.writeJson(&writer);
+    try activity_reply.writePage(&writer, &facts);
     const full = try ActivityPage.parse(writer.buffered(), .{});
     try std.testing.expect(!full.facts.not_modified);
     try std.testing.expectEqualDeep(token, full.facts.token.?);
@@ -2036,7 +2037,7 @@ test "activity page delta variants validate tokens and preserve the cursor" {
     }
     facts.token = null;
     writer = std.Io.Writer.fixed(&buffer);
-    try facts.writeJson(&writer);
+    try activity_reply.writePage(&writer, &facts);
     try std.testing.expect((try ActivityPage.parse(writer.buffered(), .{})).facts.token == null);
 }
 
@@ -2057,9 +2058,9 @@ test "an activity page's queued Messages are none or a span at its boundary" {
         .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 0, .newest_position = 40 }, .valid = false },
     }) |case| {
         facts.queued = case.queued;
-        var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+        var buffer: [activity_reply.max_page_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
-        try facts.writeJson(&writer);
+        try activity_reply.writePage(&writer, &facts);
         if (case.valid) {
             try std.testing.expectEqualDeep(case.queued, (try ActivityPage.parse(writer.buffered(), .{})).facts.queued);
         } else try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
@@ -2086,9 +2087,9 @@ test "a turn_ended row's ending agrees with its saved code and content, and a fi
         facts.items[0] = .{ .position = 1, .at = 1, .value = .{ .assistant = .{ .content = content, .final = case.ending == .done } } };
         facts.items[1] = .{ .position = 2, .at = 1, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = case.ending, .code = code, .content = case.content } } };
         try facts.work.workspace.set("/w");
-        var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+        var buffer: [activity_reply.max_page_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
-        try facts.writeJson(&writer);
+        try activity_reply.writePage(&writer, &facts);
         if (!case.valid) {
             try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
             continue;
@@ -2116,9 +2117,9 @@ test "an activity row carries its time, and a Message's rows carry its admission
         var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         facts.items[0] = .{ .position = 1, .at = case.at, .value = case.value };
         try facts.work.workspace.set("/w");
-        var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+        var buffer: [activity_reply.max_page_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
-        try facts.writeJson(&writer);
+        try activity_reply.writePage(&writer, &facts);
         if (case.failure) |failure| {
             try std.testing.expectError(failure, ActivityPage.parse(writer.buffered(), .{}));
         } else try std.testing.expectEqual(case.at, (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].at);
@@ -2130,9 +2131,9 @@ test "an activity row carries its time, and a Message's rows carry its admission
         var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         facts.items[0] = .{ .position = 1, .at = 1792925000, .value = .{ .sent = named } };
         try facts.work.workspace.set("/w");
-        var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+        var buffer: [activity_reply.max_page_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
-        try facts.writeJson(&writer);
+        try activity_reply.writePage(&writer, &facts);
         const target = (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].value.sent.target;
         try std.testing.expectEqualStrings(label, target.label.slice());
         try std.testing.expectEqualStrings(if (label.len == 0) "k7m2qx" else label, target.name());
@@ -2141,12 +2142,12 @@ test "an activity row carries its time, and a Message's rows carry its admission
     var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
     facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .assistant = .{ .content = content } } };
     try facts.work.workspace.set("/w");
-    var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try facts.writeJson(&writer);
+    try activity_reply.writePage(&writer, &facts);
     const field = ",\"at\":\"7\"";
     const at = std.mem.indexOf(u8, writer.buffered(), field).?;
-    var missing: [protocol.max_activity_page_response_bytes]u8 = undefined;
+    var missing: [activity_reply.max_page_bytes]u8 = undefined;
     const bytes = try std.fmt.bufPrint(&missing, "{s}{s}", .{ writer.buffered()[0..at], writer.buffered()[at + field.len ..] });
     try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(bytes, .{}));
 }
@@ -2161,9 +2162,9 @@ test "refused peer activity retains absent and canonical targets" {
         var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .send_failed = failure } };
         try facts.work.workspace.set("/w");
-        var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+        var buffer: [activity_reply.max_page_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
-        try facts.writeJson(&writer);
+        try activity_reply.writePage(&writer, &facts);
         const decoded = (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].value.send_failed;
         try std.testing.expectEqualStrings(failure.key.slice(), decoded.key.slice());
         try std.testing.expectEqualStrings(failure.code.slice(), decoded.code.slice());
@@ -3554,9 +3555,9 @@ test "a hosted call travels as its presentation alone, in the conversation and t
     var facts: protocol.ActivityFacts = .{ .end = 9, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
     try facts.work.workspace.set("/w");
     facts.items[0] = .{ .position = 7, .at = 5, .value = .{ .hosted_call = presentation } };
-    var activity_buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+    var activity_buffer: [activity_reply.max_page_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&activity_buffer);
-    try facts.writeJson(&writer);
+    try activity_reply.writePage(&writer, &facts);
     const activity = try ActivityPage.parse(writer.buffered(), .{});
     try std.testing.expectEqualDeep(presentation, activity.facts.items[0].value.hosted_call);
 }
@@ -3568,9 +3569,9 @@ test "approval activity accepts own and forwarded ordinals and validates child s
             facts.items[0] = .{ .position = 1, .ordinal = ordinal, .at = 1, .value = .{ .approval_requested = .{ .session = .{}, .action = 1, .operation = 1, .call_ordinal = 0 } } };
             try facts.items[0].value.approval_requested.session.set(session);
             try facts.work.workspace.set("/w");
-            var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+            var buffer: [activity_reply.max_page_bytes]u8 = undefined;
             var writer = std.Io.Writer.fixed(&buffer);
-            try facts.writeJson(&writer);
+            try activity_reply.writePage(&writer, &facts);
             if (ordinal < 2 and protocol.validSessionId(session)) {
                 const page = try ActivityPage.parse(writer.buffered(), .{});
                 try std.testing.expectEqualStrings(session, page.facts.items[0].value.approval_requested.session.slice());
@@ -3589,9 +3590,9 @@ test "approval and ending activity require a valid explicit child session" {
         var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         facts.items[0] = .{ .position = 1, .at = 1, .value = value };
         try facts.work.workspace.set("/w");
-        var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+        var buffer: [activity_reply.max_page_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
-        try facts.writeJson(&writer);
+        try activity_reply.writePage(&writer, &facts);
         _ = try ActivityPage.parse(writer.buffered(), .{});
         for ([_][]const u8{ "", "\"session\":\"BAD\",", "\"session\":null," }) |replacement| {
             const malformed = try std.mem.replaceOwned(u8, std.testing.allocator, writer.buffered(), "\"session\":\"k7m2qx\",", replacement);

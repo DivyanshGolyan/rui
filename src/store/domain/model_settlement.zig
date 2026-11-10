@@ -2,7 +2,6 @@
 //! reports, and fencing Attempts superseded by a control.
 
 const std = @import("std");
-const protocol = @import("../../protocol.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
 const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");

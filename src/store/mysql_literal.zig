@@ -11,7 +11,6 @@
 //! Nothing is copied whole: `write` hex-encodes through the writer's buffer.
 const std = @import("std");
 const Bounded = @import("../bounded.zig").Bounded;
-const protocol = @import("../protocol.zig");
 const provider_route = @import("../provider_route.zig");
 const provider_name = @import("../provider_name.zig");
 const rsql = @import("rsql.zig");

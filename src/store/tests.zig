@@ -9872,10 +9872,8 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             std.testing.allocator.free(try testingSessionList(storage, tmp, .{}, &used, 2));
             meter.stop(.readSessionList);
-            var inspect: protocol.InspectSession = .{ .failed_response = .{ .operation = continuation.operation_id, .attempt = continuation.attempt_ordinal, .part = .body } };
-            try inspect.session.set(session.slice());
             meter.start();
-            const binding = try storage.failedResponseBinding(&inspect);
+            const binding = try storage.failedResponseBinding(session.slice(), continuation.operation_id, continuation.attempt_ordinal);
             meter.stop(.failedResponseBinding);
             try std.testing.expectEqualDeep(continuation, binding);
         }

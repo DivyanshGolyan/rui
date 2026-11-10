@@ -62,6 +62,8 @@ test {
     _ = @import("store.zig");
     _ = @import("session_list_golden_tests.zig");
     _ = @import("session_report_golden_tests.zig");
+    _ = @import("activity_golden_tests.zig");
+    _ = @import("activity_reply.zig");
     _ = @import("server.zig");
     _ = @import("server_execution.zig");
     _ = @import("server_host.zig");

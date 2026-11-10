@@ -41,10 +41,8 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         .key_press => |key| key: {
             // These keep the screen's meaning; every other typed key belongs
             // to this card, never the hidden composer.
-            if (@import("TerminalEditor.zig").frozenAction(@import("keymap.zig").every, .{
-                .event = .{ .event = .{ .key_press = key }, .pasted = self.pasting.* },
-            })) |named| switch (named) {
-                .escape, .ctrl_c, .ctrl_x => return,
+            if (!self.pasting.*) if (@import("TerminalEditor.zig").named(key)) |named| switch (named) {
+                .escape, .ctrl_c, .ctrl_x, .page_up, .page_down, .shift_up, .shift_down => return,
                 else => {},
             };
             if (key.matchExact(vaxis.Key.enter, .{})) break :key .enter;

@@ -13,10 +13,83 @@ pub const Row = struct {
     heading: bool = false,
 };
 
-rows: []Row = &.{},
+/// The list's rows, built one at a time as they come on screen, so a long
+/// list costs only what shows.
+pub const Rows = struct {
+    userdata: *const anyopaque,
+    count: u32,
+    rowFn: *const fn (userdata: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!Row,
+
+    pub const none: Rows = .{ .userdata = undefined, .count = 0, .rowFn = undefined };
+
+    /// Rows already built, as `rows` holds them.
+    pub fn of(rows: *const []const Row) Rows {
+        return .{ .userdata = @ptrCast(rows), .count = @intCast(rows.len), .rowFn = struct {
+            fn at(userdata: *const anyopaque, index: usize, _: std.mem.Allocator) std.mem.Allocator.Error!Row {
+                const all: *const []const Row = @ptrCast(@alignCast(userdata));
+                return all.*[index];
+            }
+        }.at };
+    }
+};
+
+/// One row of a frame, built when ListView draws it.
+const Lazy = struct {
+    list: *const Self,
+    index: u32,
+
+    fn widget(self: *const Lazy) vxfw.Widget {
+        return .{ .userdata = @constCast(self), .drawFn = drawRow };
+    }
+
+    fn drawRow(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+        const self: *const Lazy = @ptrCast(@alignCast(raw));
+        const list = self.list;
+        const row = try list.rows.rowFn(list.rows.userdata, self.index, ctx.arena);
+        const selected = list.selected != null and list.selected.? == self.index;
+        std.debug.assert(!(selected and row.heading));
+        const spans = try ctx.arena.alloc(vaxis.Segment, row.segments.len);
+        for (row.segments, spans) |segment, *span| {
+            var role = segment.style;
+            if (selected) role.background = .selection;
+            span.* = .{ .text = try ctx.arena.dupe(u8, segment.text), .style = widget_style.of(list.caps, role) };
+        }
+        const label = try ctx.arena.create(vxfw.RichText);
+        label.* = .{
+            .text = spans,
+            .base_style = widget_style.of(list.caps, .{ .background = if (selected) .selection else .ground }),
+            .width_basis = .parent,
+            .softwrap = false,
+        };
+        return label.widget().draw(ctx);
+    }
+};
+
+/// ListView's builder for one draw. Its callback cannot fail, so a failed
+/// allocation ends the rows and fails the draw after.
+const Building = struct {
+    list: *const Self,
+    arena: std.mem.Allocator,
+    failed: bool = false,
+
+    fn build(raw: *const anyopaque, index: usize, _: usize) ?vxfw.Widget {
+        const self: *Building = @ptrCast(@alignCast(@constCast(raw)));
+        if (self.failed or index >= self.list.rows.count) return null;
+        const row = self.arena.create(Lazy) catch {
+            self.failed = true;
+            return null;
+        };
+        row.* = .{ .list = self.list, .index = @intCast(index) };
+        return row.widget();
+    }
+};
+
+rows: Rows = .none,
 selected: ?u32 = null,
 caps: overview_view.Caps = .{},
 list: vxfw.ListView = .{ .children = .{ .slice = &.{} }, .draw_cursor = false },
+/// The rows the latest draw put on screen, `first` up to `end`.
+shown: struct { first: u32 = 0, end: u32 = 0 } = .{},
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -30,37 +103,33 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.selected) |selected| {
-        std.debug.assert(selected < self.rows.len and !self.rows[selected].heading);
-    }
+    if (self.selected) |selected| std.debug.assert(selected < self.rows.count);
     const cursor = self.selected orelse 0;
-    const count: u32 = @intCast(self.rows.len);
+    const count = self.rows.count;
     const changed = self.list.item_count != count or self.list.cursor != cursor;
-    const labels = try ctx.arena.alloc(vxfw.RichText, self.rows.len);
-    const children = try ctx.arena.alloc(vxfw.Widget, self.rows.len);
-    for (self.rows, labels, children, 0..) |row, *label, *child, index| {
-        const selected = self.selected != null and self.selected.? == index;
-        const spans = try ctx.arena.alloc(vaxis.Segment, row.segments.len);
-        for (row.segments, spans) |segment, *span| {
-            var role = segment.style;
-            if (selected) role.background = .selection;
-            span.* = .{ .text = try ctx.arena.dupe(u8, segment.text), .style = widget_style.of(self.caps, role) };
-        }
-        label.* = .{
-            .text = spans,
-            .base_style = widget_style.of(self.caps, .{ .background = if (selected) .selection else .ground }),
-            .width_basis = .parent,
-            .softwrap = false,
-        };
-        child.* = label.widget();
-    }
-    self.list.children = .{ .slice = children };
+    // ListView asks for the rows it draws, and only those get built.
+    var building: Building = .{ .list = self, .arena = ctx.arena };
+    self.list.children = .{ .builder = .{ .userdata = &building, .buildFn = Building.build } };
     defer self.list.children = .{ .slice = &.{} };
     self.list.item_count = count;
     self.list.cursor = cursor;
-    if (changed) self.list.ensureScroll();
+    // A jump past the screen starts drawing at the selected row, so the
+    // rows between are never built; a nearer move scrolls as little as it
+    // can.
+    if (changed) {
+        if (cursor > self.list.scroll.top + ctx.max.size().height) self.list.jumpToItem(cursor) else self.list.ensureScroll();
+    }
     var surface = try self.list.draw(ctx);
+    if (building.failed) return error.OutOfMemory;
     surface.widget = self.widget();
+    // ListView's children are its rows from `scroll.top` on, some above or
+    // below its edges.
+    self.shown = .{};
+    for (surface.children, self.list.scroll.top..) |child, at| {
+        if (child.origin.row + child.surface.size.height <= 0 or child.origin.row >= surface.size.height) continue;
+        if (self.shown.end == 0) self.shown.first = @intCast(at);
+        self.shown.end = @intCast(at + 1);
+    }
     return surface;
 }
 
@@ -72,7 +141,8 @@ test "GroupedList keeps a selected item visible while its keys stay with the com
         .{ .segments = &.{.{ .text = "First task", .style = .{} }} },
         .{ .segments = &.{.{ .text = "Last task", .style = .{} }} },
     };
-    var list: Self = .{ .rows = &rows, .selected = 4 };
+    const all: []const Row = &rows;
+    var list: Self = .{ .rows = .of(&all), .selected = 4 };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} };
@@ -122,7 +192,7 @@ test "GroupedList keeps a selected item visible while its keys stay with the com
         if (std.mem.eql(u8, child.surface.readCell(0, 0).char.grapheme, "A") and std.mem.eql(u8, child.surface.readCell(1, 0).char.grapheme, "p")) returned = true;
     }
     try std.testing.expect(returned);
-    list.rows = &.{};
+    list.rows = .none;
     list.selected = null;
     const empty = try list.widget().draw(ctx);
     try std.testing.expectEqual(@as(usize, 0), empty.children.len);
@@ -133,12 +203,14 @@ test "GroupedList retains frame children when row data refreshes before a mouse 
     var segments = [_]Segment{.{ .text = &text, .style = .{} }};
     var rows = [_]Row{.{ .segments = &segments }};
     var replacement = [_]Row{.{ .segments = &.{.{ .text = "After", .style = .{} }} }};
-    var list: Self = .{ .rows = &rows };
+    const before_rows: []const Row = &rows;
+    const after_rows: []const Row = &replacement;
+    var list: Self = .{ .rows = .of(&before_rows) };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} };
     const before = try list.widget().draw(ctx);
-    list.rows = &replacement;
+    list.rows = .of(&after_rows);
     @memset(&text, 'X');
     segments[0] = .{ .text = "Recycled", .style = .{ .colour = .failure } };
     rows[0] = replacement[0];
@@ -156,7 +228,8 @@ test "GroupedList selection preserves each segment foreground" {
         .{ .text = "!", .style = .{ .colour = .failure, .bold = true } },
         .{ .text = " task", .style = .{ .colour = .strong } },
     } }};
-    var list: Self = .{ .rows = &rows, .selected = 0 };
+    const all: []const Row = &rows;
+    var list: Self = .{ .rows = .of(&all), .selected = 0 };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 12, .height = 2 }, .cell_size = .{} };
@@ -177,4 +250,26 @@ test "GroupedList selection preserves each segment foreground" {
         try std.testing.expectEqual(vaxis.Color.default, cell.style.bg);
         try std.testing.expect(cell.style.reverse);
     }
+}
+
+test "GroupedList builds only the rows on screen" {
+    const Counted = struct {
+        built: usize = 0,
+
+        fn row(userdata: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!Row {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(userdata)));
+            self.built += 1;
+            return .{ .segments = try arena.dupe(Segment, &.{.{ .text = if (index % 2 == 0) "even" else "odd", .style = .{} }}) };
+        }
+    };
+    var counted: Counted = .{};
+    var list: Self = .{ .rows = .{ .userdata = &counted, .count = 10_000, .rowFn = Counted.row }, .selected = 9_000 };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const surface = try list.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 5 }, .cell_size = .{} });
+    // Five rows show, around the selected one; ListView may build a row or
+    // two past each edge, never the list.
+    try std.testing.expect(counted.built <= 10);
+    try std.testing.expectEqual(@as(u32, 9_005), list.shown.end);
+    try std.testing.expectEqualStrings("e", surface.children[surface.children.len - 1].surface.readCell(0, 0).char.grapheme);
 }

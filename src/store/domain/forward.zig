@@ -1,7 +1,6 @@
 //! Durable, one-hop delivery of child facts to ancestor Activity feeds.
 //! Queuing claims no position; each delivery positions one row and queues
 //! the next hop atomically, so tree depth never grows a transaction.
-const protocol = @import("../../protocol.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const session_id = @import("../../session_id.zig");
 const rsql = @import("../rsql.zig");
