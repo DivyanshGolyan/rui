@@ -3664,6 +3664,8 @@ Landed is success and the Store carries on.
 Not landed means nothing was saved: the Store keeps the new connection, gives back the ids the batch took, and runs the batch's writes again once, in order, so its writers never see the loss.
 A second loss in that rerun fences, as does a lost read, which may already have streamed part of its answer.
 Only when no reconnect succeeds does the outcome stay unknown (`CommitOutcomeUnknown`).
+COMMIT is a statement of its message, and reads may follow it in that message; every message sets `autocommit=1`, so they run outside any transaction.
+The transaction is saved once COMMIT's own OK arrives: a connection lost before that OK is settled as above, with the reads sent again on the new connection when the transaction landed, and one lost after it, while the reads stream, keeps the commit and fences, and the batch never runs again.
 
 Host information is a read-only, bounded `/v1/host-info` exchange for the canonical selected Store.
 A client first probes the existing `host.lock` with a nonblocking shared lock, without creating a Store or lock: no owner means unavailable even if a stale socket exists; an exclusive owner permits a protected socket request.
@@ -3836,7 +3838,8 @@ Settlement and inspection must also progress.
 Discovery uses bounded storage queries, not per-Session resident tasks.
 The writer rechecks after writes; accepted live-effect controls publish their required process-local signal.
 No SQLite watcher is required.
-Retry polling runs once per second with a due-time index that excludes future deadlines.
+The retry scans use a due-time index that excludes future deadlines, and run at most once per second.
+A scan that found nothing runs again only after a commit, a slot change or the earliest scheduled retry falling due by the wall clock, the clock the Store admits by; the admission scan reads that due time in its own round, and an idle Host sends the Store no query.
 Missed ticks do not queue.
 Full capacity or an empty array must not cause spinning.
 

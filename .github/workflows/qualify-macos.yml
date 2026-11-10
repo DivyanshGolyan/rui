@@ -73,7 +73,9 @@ jobs:
   compile:
     needs: plan
     runs-on: ${{ needs.plan.outputs.platform == 'linux' && 'ubuntu-24.04' || 'macos-15' }}
-    timeout-minutes: 15
+    # A cold macos-15 compile of the native suite overran 15 minutes (run
+    # 42817865735); match check.yml's macos_build budget there.
+    timeout-minutes: ${{ needs.plan.outputs.platform == 'linux' && 15 || 60 }}
     outputs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:
