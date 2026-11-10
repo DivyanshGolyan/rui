@@ -1300,7 +1300,9 @@ def notification_cases():
         assert raw.count(b"\x1b]9;") == 1, raw
         os.write(master, b"\x03")
         output, errors = terminal_exit(caller, master)
-        assert caller.returncode == 0 and not errors, errors
+        # App's detach notice, on stderr, names the waiting Action.
+        assert caller.returncode == 0 and errors.startswith(b"\nDetached. Host work continues.\nResume: "), errors
+        assert b"\nPending Action: inspect the complete proposal before deciding.\n" in errors, errors
         assert FOCUS_OFF.search(output), output[-256:]
         # A terminal that answers the program status probe before the device
         # attributes request behind it gets one record per Session in place
@@ -1312,7 +1314,8 @@ def notification_cases():
         raw_output(master, b"\x1b]7501;?\x1b\\\x1b[c")
         os.write(master, b"\x1b]7501;?\x1b\\\x1b[?62;22c")
         def record(state, label, kind=b""):
-            return (b"\x1b]7501;state=" + state + b":id=rui/" + lanes[label].encode() + b":app=rui" + kind
+            # vaxis writes a record's kind between its id and app.
+            return (b"\x1b]7501;state=" + state + b":id=rui/" + lanes[label].encode() + kind + b":app=rui"
                 + b":msg=" + base64.b64encode(label.encode()) + b"\x1b\\")
         # Its Action still waits, so the Session it opens on is blocked.
         raw = raw_output(master, record(b"blocked", "notify lane", b":kind=permission"))
@@ -1324,7 +1327,8 @@ def notification_cases():
         assert raw.count(b"state=done") == 1, raw
         os.write(master, b"\x03")
         output, errors = terminal_exit(caller, master)
-        assert caller.returncode == 0 and not errors, errors
+        # App's detach notice, and only that, is on stderr.
+        assert caller.returncode == 0 and errors.startswith(b"\nDetached. Host work continues.\nOverview: ") and errors.count(b"\n") == 3, errors
         assert b"\x1b]7501;state=clear:id=rui\x1b\\" in output, output[-256:]
         completed = True
         print("Notifications: overview finish once while away, none in focus or when off, conversation approval, another Session's finish under a conversation once, focus reporting restored; a terminal taking program status gets records instead, cleared on leaving", flush=True)
@@ -1874,7 +1878,7 @@ def persistent_opening_case():
             fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "history saved answer")
         # A queued local traversal is not eligible until opening establishes its
         # cursor. Both command and inspection cancellation must retain it.
-        for handoff in (b"/requests\n", b"/inspect-action\n"):
+        for handoff in (b"/requests\r", b"/inspect-action\r"):
             opening_release.clear()
             opening_held = threading.Event()
 
