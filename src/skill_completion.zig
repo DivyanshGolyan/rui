@@ -135,7 +135,9 @@ pub const Reads = struct {
         const held = if (self.held) |*kept| (if (std.mem.startsWith(u8, typed, kept.prefix.slice())) kept else null) else null;
         const none: skill_suggestions.Page = .{};
         const page = if (held) |kept| &kept.page else &none;
-        const source = if (held) |kept| std.hash.Wyhash.hash(kept.read, std.mem.asBytes(&word.slash)) else 0;
+        // The read in the high half, the word's `/` in the low: a draft
+        // holds far fewer than 2^32 bytes, and reads count from 1.
+        const source = if (held) |kept| (kept.read << 32) | @as(u32, @intCast(word.slash)) else 0;
         return slash_commands.Shown.nextOf(previous, revision, source, rows.list(typed, listed, page));
     }
 };
