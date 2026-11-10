@@ -75,11 +75,21 @@ pub fn send(status: ?[]const u8, in_flight: bool, sent: bool) Send {
 }
 
 test "a send is progress while in flight or just accepted, and needs the person once unresolved" {
-    try std.testing.expectEqualDeep(Send{ .progress = "Sending…" }, send("Sending…", true, false));
-    try std.testing.expectEqualDeep(Send{ .needs = "! Not confirmed · ctrl+r retries original" }, send("! Not confirmed · ctrl+r retries original", false, true));
-    try std.testing.expectEqualDeep(Send{ .progress = "Sent" }, send(null, false, true));
-    try std.testing.expectEqualDeep(Send{}, send("", false, true));
-    try std.testing.expectEqualDeep(Send{}, send(null, false, false));
+    const same = struct {
+        fn text(want: ?[]const u8, got: ?[]const u8) !void {
+            try std.testing.expectEqual(want == null, got == null);
+            if (want) |expected| try std.testing.expectEqualStrings(expected, got.?);
+        }
+        fn check(want: Send, got: Send) !void {
+            try text(want.needs, got.needs);
+            try text(want.progress, got.progress);
+        }
+    }.check;
+    try same(.{ .progress = "Sending…" }, send("Sending…", true, false));
+    try same(.{ .needs = "! Not confirmed · ctrl+r retries original" }, send("! Not confirmed · ctrl+r retries original", false, true));
+    try same(.{ .progress = "Sent" }, send(null, false, true));
+    try same(.{}, send("", false, true));
+    try same(.{}, send(null, false, false));
     // Progress outranks a notice, quietly; what needs the person outranks both.
     const sent = bar(.{ .progress = "Sent", .notice = "! Unknown command /x", .width = 80 });
     try std.testing.expectEqualStrings("Sent", sent.left);
