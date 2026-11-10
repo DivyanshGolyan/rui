@@ -8,9 +8,14 @@ const overview_view = @import("overview_view.zig");
 const widget_style = @import("widget_style.zig");
 
 pub const Segment = overview_view.Segment;
+/// What a press on a row means, as the screen's core takes it.
+pub const Target = overview_view.Click;
 pub const Row = struct {
     segments: []const Segment,
     heading: bool = false,
+    /// What a left press on this row means; null for a row that takes
+    /// none, as a heading or a gap.
+    target: ?Target = null,
 };
 
 /// The list's rows, built one at a time as they come on screen, so a long
@@ -37,15 +42,18 @@ pub const Rows = struct {
 const Lazy = struct {
     list: *const Self,
     index: u32,
+    /// What the row drew with, for a press on where it landed.
+    target: ?Target = null,
 
     fn widget(self: *const Lazy) vxfw.Widget {
         return .{ .userdata = @constCast(self), .drawFn = drawRow };
     }
 
     fn drawRow(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-        const self: *const Lazy = @ptrCast(@alignCast(raw));
+        const self: *Lazy = @ptrCast(@alignCast(raw));
         const list = self.list;
         const row = try list.rows.rowFn(list.rows.userdata, self.index, ctx.arena);
+        self.target = row.target;
         const selected = list.selected != null and list.selected.? == self.index;
         std.debug.assert(!(selected and row.heading));
         const spans = try ctx.arena.alloc(vaxis.Segment, row.segments.len);
@@ -71,6 +79,7 @@ const Building = struct {
     list: *const Self,
     arena: std.mem.Allocator,
     failed: bool = false,
+    built: std.ArrayList(*const Lazy) = .empty,
 
     fn build(raw: *const anyopaque, index: usize, _: usize) ?vxfw.Widget {
         const self: *Building = @ptrCast(@alignCast(@constCast(raw)));
@@ -80,15 +89,20 @@ const Building = struct {
             return null;
         };
         row.* = .{ .list = self.list, .index = @intCast(index) };
+        self.built.append(self.arena, row) catch {
+            self.failed = true;
+            return null;
+        };
         return row.widget();
     }
 };
 
-/// Who hears a left press on a row. The list passes the row's index,
-/// headings and gaps included, and leaves its meaning to the owner.
+/// Who hears a left press on a row that takes one. The list passes what
+/// the row drew with, so the press means what the person saw whatever the
+/// rows have become since.
 pub const Press = struct {
     userdata: *anyopaque,
-    pressed: *const fn (userdata: *anyopaque, ctx: *vxfw.EventContext, index: u32) anyerror!void,
+    pressed: *const fn (userdata: *anyopaque, ctx: *vxfw.EventContext, target: Target) anyerror!void,
 };
 
 rows: Rows = .none,
@@ -98,11 +112,11 @@ caps: overview_view.Caps = .{},
 list: vxfw.ListView = .{ .children = .{ .slice = &.{} }, .draw_cursor = false },
 /// The rows the latest draw put on screen, `first` up to `end`.
 shown: struct { first: u32 = 0, end: u32 = 0 } = .{},
-/// The screen row the latest draw put each shown row on, from
-/// `shown.first`, in the draw's arena.
+/// The screen row the latest draw put each shown row on and what a press
+/// there means, from `shown.first`, in the draw's arena.
 shown_at: []const Span = &.{},
 
-const Span = struct { row: i17, height: u16 };
+const Span = struct { row: i17, height: u16, target: ?Target };
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -114,10 +128,11 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     if (input != .mouse) return;
     const mouse = input.mouse;
     if (self.on_press) |press| if (mouse.button == .left and mouse.type == .press) {
-        for (self.shown_at, self.shown.first..) |span, index| {
+        for (self.shown_at) |span| {
             if (mouse.row >= span.row and mouse.row < span.row + span.height) {
+                const target = span.target orelse return;
                 ctx.consume_event = true;
-                return press.pressed(press.userdata, ctx, @intCast(index));
+                return press.pressed(press.userdata, ctx, target);
             }
         }
         return;
@@ -154,7 +169,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if (child.origin.row + child.surface.size.height <= 0 or child.origin.row >= surface.size.height) continue;
         if (self.shown.end == 0) self.shown.first = @intCast(at);
         self.shown.end = @intCast(at + 1);
-        try shown_at.append(ctx.arena, .{ .row = child.origin.row, .height = child.surface.size.height });
+        const target = for (building.built.items) |row| {
+            if (row.index == at) break row.target;
+        } else null;
+        try shown_at.append(ctx.arena, .{ .row = child.origin.row, .height = child.surface.size.height, .target = target });
     }
     self.shown_at = shown_at.items;
     return surface;
@@ -303,21 +321,17 @@ test "GroupedList builds only the rows on screen" {
 
 /// Records each press GroupedList reports, for the press tests.
 const Pressed = struct {
-    indexes: [8]u32 = undefined,
+    targets: [8]Target = undefined,
     count: usize = 0,
 
     fn press(self: *Pressed) Press {
         return .{ .userdata = self, .pressed = pressed };
     }
 
-    fn pressed(raw: *anyopaque, _: *vxfw.EventContext, index: u32) anyerror!void {
+    fn pressed(raw: *anyopaque, _: *vxfw.EventContext, target: Target) anyerror!void {
         const self: *Pressed = @ptrCast(@alignCast(raw));
-        self.indexes[self.count] = index;
+        self.targets[self.count] = target;
         self.count += 1;
-    }
-
-    fn got(self: *const Pressed) []const u32 {
-        return self.indexes[0..self.count];
     }
 };
 
@@ -325,10 +339,18 @@ fn leftPress(column: i16, row: i16) vxfw.Event {
     return .{ .mouse = .{ .col = column, .row = row, .button = .left, .type = .press, .mods = .{} } };
 }
 
-test "GroupedList reports a left press as the index of the row under it, after scrolling, headings included" {
+/// The Session a numbered test row names.
+fn numbered(index: usize) overview_view.Reference {
+    var reference: overview_view.Reference = undefined;
+    _ = std.fmt.bufPrint(&reference, "r{d:0>5}", .{index}) catch unreachable;
+    return reference;
+}
+
+test "GroupedList reports a left press as what the row under it drew with, after scrolling; a row with nothing takes none" {
     const Numbered = struct {
         fn row(_: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!Row {
-            return .{ .segments = try arena.dupe(Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "row {d}", .{index}), .style = .{} }}), .heading = index % 3 == 0 };
+            const heading = index % 3 == 0;
+            return .{ .segments = try arena.dupe(Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "row {d}", .{index}), .style = .{} }}), .heading = heading, .target = if (heading) null else .{ .open = numbered(index) } };
         }
     };
     var presses: Pressed = .{};
@@ -347,25 +369,31 @@ test "GroupedList reports a left press as the index of the row under it, after s
     const heading = (list.shown.first + 2) / 3 * 3;
     try std.testing.expect(heading < list.shown.end and heading != 25);
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    for ([_]u32{ list.shown.first, 25, heading, list.shown.end - 1 }) |index| {
+    var expected: usize = 0;
+    for ([_]u32{ list.shown.first, 25, list.shown.end - 1 }) |index| {
+        if (index % 3 == 0) continue;
         try list.widget().handleEvent(&events, leftPress(3, @intCast(drawn_at[index].?)));
-        try std.testing.expectEqual(index, presses.got()[presses.count - 1]);
+        expected += 1;
+        try std.testing.expectEqual(expected, presses.count);
+        try std.testing.expectEqualStrings(&numbered(index), &presses.targets[presses.count - 1].open);
         try std.testing.expect(events.consume_event);
         events.consume_event = false;
     }
-    try std.testing.expectEqual(@as(usize, 4), presses.count);
-    // The list passes a heading on and leaves its meaning to the owner.
-    try std.testing.expectEqual(heading, presses.got()[2]);
+    try std.testing.expect(expected >= 1);
+    // A heading drew with nothing to press, so its press reaches no one.
+    try list.widget().handleEvent(&events, leftPress(3, @intCast(drawn_at[heading].?)));
+    try std.testing.expectEqual(expected, presses.count);
+    try std.testing.expect(!events.consume_event);
     // Only a left press counts.
     try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = @intCast(drawn_at[25].?), .button = .right, .type = .press, .mods = .{} } });
     try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = @intCast(drawn_at[25].?), .button = .left, .type = .release, .mods = .{} } });
-    try std.testing.expectEqual(@as(usize, 4), presses.count);
+    try std.testing.expectEqual(expected, presses.count);
 }
 
 test "GroupedList ignores a press below its last row" {
     var rows = [_]Row{
         .{ .segments = &.{.{ .text = "Active", .style = .{ .bold = true } }}, .heading = true },
-        .{ .segments = &.{.{ .text = "Only task", .style = .{} }} },
+        .{ .segments = &.{.{ .text = "Only task", .style = .{} }}, .target = .{ .open = numbered(1) } },
     };
     const all: []const Row = &rows;
     var presses: Pressed = .{};
@@ -378,7 +406,26 @@ test "GroupedList ignores a press below its last row" {
     try std.testing.expectEqual(@as(usize, 0), presses.count);
     try std.testing.expect(!events.consume_event);
     try list.widget().handleEvent(&events, leftPress(0, 1));
-    try std.testing.expectEqualSlices(u32, &.{1}, presses.got());
+    try std.testing.expectEqual(@as(usize, 1), presses.count);
+    try std.testing.expectEqualStrings(&numbered(1), &presses.targets[0].open);
+}
+
+test "GroupedList reports what a row drew with, not what its index holds by the time of the press" {
+    var rows = [_]Row{
+        .{ .segments = &.{.{ .text = "First task", .style = .{} }}, .target = .{ .open = numbered(1) } },
+        .{ .segments = &.{.{ .text = "Second task", .style = .{} }}, .target = .{ .open = numbered(2) } },
+    };
+    var all: []const Row = &rows;
+    var presses: Pressed = .{};
+    var list: Self = .{ .rows = .of(&all), .on_press = presses.press() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    _ = try list.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 6 }, .cell_size = .{} });
+    // The rows change before the next frame: the first is gone.
+    all = rows[1..];
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try list.widget().handleEvent(&events, leftPress(0, 0));
+    try std.testing.expectEqualStrings(&numbered(1), &presses.targets[0].open);
 }
 
 test "GroupedList without on_press only scrolls on the wheel" {

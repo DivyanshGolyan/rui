@@ -394,9 +394,21 @@ pub const Event = union(enum) {
     unconfirmed: Unconfirmed,
 };
 
-/// What a click lands on: a Sessions list line `listItem` names, or the
-/// counts line's view name, which shows only off the default view.
-pub const Click = union(enum) { line: usize, view };
+/// What a click names, as the widget under it drew it: a Session to open,
+/// a folded group to unfold, or the counts line's view name, which shows
+/// only off the default view. A click names the thing and never a place,
+/// so it means what the person saw whatever the list has become since.
+pub const Click = union(enum) { open: Reference, unfold: Group, view };
+
+/// What a click on a Sessions list line names; null for a heading, a gap
+/// or the empty list's line, which take none.
+pub fn clickOf(state: *const State, item: Item) ?Click {
+    return switch (item) {
+        .gap, .heading, .empty => null,
+        .row => |at| .{ .open = state.rows.items[state.order.items[at]].reference },
+        .more => |more| .{ .unfold = more.group },
+    };
+}
 
 pub const Unconfirmed = struct { reference: Reference, recovery: submission.Recovery };
 
@@ -1662,7 +1674,8 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         // A click is input as a key is: the screen that takes no key takes
         // no click, wherever it lands.
         .clicked => |clicked| if (state.inputMode() != .frozen) switch (clicked) {
-            .line => |line| try click(state, line, &effects),
+            .open => |reference| try clickOpen(state, reference, &effects),
+            .unfold => |group| clickUnfold(state, group),
             // As `/sessions` does; the default view shows no name.
             .view => if (state.archive != .active) try changeArchiveView(state, .active, &effects),
         },
@@ -2440,20 +2453,21 @@ fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *co
 }
 
 /// One click on a row opens it, as selecting it and Enter on a blank draft
-/// do. A folded group's "more" line opens the group at its first hidden
-/// row, as moving into them does. Headings and gaps take no click.
-fn click(state: *State, line: usize, effects: *Effects) error{OutOfMemory}!void {
-    // Only the Sessions list's lines are Sessions.
-    if (state.listArea() != .sessions) return;
-    const item = listItem(state, line) orelse return;
-    const at = switch (item) {
-        .gap, .heading, .empty => return,
-        .row => |at| at,
-        .more => |more| state.runs.get(more.group).start + fold_rows,
-    };
+/// do. A Session that left the list since it was drawn opens nothing.
+fn clickOpen(state: *State, reference: Reference, effects: *Effects) error{OutOfMemory}!void {
+    const at = position(state, reference) orelse return;
     state.unfolded.insert(state.rows.items[state.order.items[at]].group());
-    state.selected = state.rows.items[state.order.items[at]].reference;
-    if (item == .row) try enter(state, "", effects);
+    state.selected = reference;
+    try enter(state, "", effects);
+}
+
+/// A click on a folded group's "more" line opens the group at its first
+/// hidden row, as moving into them does. A group with nothing hidden any
+/// more stays as it is.
+fn clickUnfold(state: *State, group: Group) void {
+    if (!folded(state, group)) return;
+    state.unfolded.insert(group);
+    state.selected = state.rows.items[state.order.items[state.runs.get(group).start + fold_rows]].reference;
 }
 
 /// Moves the selection where the Sessions show.
@@ -3540,7 +3554,8 @@ pub fn selectedLine(state: *const State) ?usize {
 }
 
 /// The Sessions list's line `line`, counted from its first, or null past
-/// its end. The list draws these lines, and a click names one.
+/// its end. The list draws these lines; `clickOf` says what a click on
+/// one names.
 pub fn listItem(state: *const State, line: usize) ?Item {
     if (state.rows.items.len == 0) return if (line == 0) .empty else null;
     return ListLines.of(state).item(state, line);
@@ -5807,25 +5822,15 @@ test "moving into a folded group's hidden rows opens it" {
     try expectSelected(&state, "r4t9vw");
 }
 
-/// The list line `listItem` names the row `ref` on, as a click finds it.
-fn lineOfRow(state: *const State, ref: *const [6]u8) !usize {
-    var line: usize = 0;
-    while (listItem(state, line)) |item| : (line += 1) switch (item) {
-        .row => |at| if (std.mem.eql(u8, ref, &state.rows.items[state.order.items[at]].reference)) return line,
-        else => {},
-    };
-    return error.TestUnexpectedResult;
-}
-
 test "one click on a row opens it, under Enter's rules" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try expectEffects(&.{.{ .open = "b2c3d4".* }}, try step(&state, .{ .clicked = .{ .line = try lineOfRow(&state, "b2c3d4") } }));
+    try expectEffects(&.{.{ .open = "b2c3d4".* }}, try step(&state, .{ .clicked = .{ .open = "b2c3d4".* } }));
     try expectSelected(&state, "b2c3d4");
     // While Host requests wait on an Upgrade, the click selects but does
     // not open, as Enter would not.
     state.upgrade = .checking;
-    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = try lineOfRow(&state, "g7h8j9") } }));
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .open = "g7h8j9".* } }));
     try expectSelected(&state, "g7h8j9");
 }
 
@@ -5835,8 +5840,7 @@ test "a click while a start waits changes nothing, as keys do, and the start the
     const selected = state.selected.?;
     _ = try submit(&state, try typeText(&state, "go"));
     try std.testing.expectEqual(InputMode.frozen, state.inputMode());
-    const row = try lineOfRow(&state, "b2c3d4");
-    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = row } }));
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .open = "b2c3d4".* } }));
     try expectSelected(&state, &selected);
     try expectEffects(&.{ .clear_draft, .{ .open = "z9y8x7".* } }, try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } }));
 }
@@ -5851,94 +5855,87 @@ test "a click on a folded group's more line opens it at its first hidden row" {
     } else return error.TestUnexpectedResult;
     // Seven finished rows show five, then "2 more".
     try std.testing.expectEqual(More{ .group = .finished, .hidden = 2 }, more);
-    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = line } }));
+    try std.testing.expectEqual(Click{ .unfold = .finished }, clickOf(&state, listItem(&state, line).?).?);
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .unfold = .finished } }));
     try std.testing.expect(!folded(&state, .finished));
     try expectSelected(&state, "v8w9x0");
-}
-
-test "a click on a heading, a gap or past the list changes nothing" {
-    var state = try opened(&mixed);
-    defer state.deinit();
+    // The line is gone with the fold; a click that still names it moves
+    // nothing.
     _ = try press(&state, .{}, .first);
-    try std.testing.expectEqual(Item{ .heading = .needs_you }, listItem(&state, 0).?);
-    var line: usize = 0;
-    while (listItem(&state, line)) |item| : (line += 1) if (item == .gap) break;
-    try std.testing.expectEqual(Item.gap, listItem(&state, line).?);
-    const selected = state.selected.?;
-    for ([_]usize{ 0, line, line + 1000 }) |clicked| {
-        try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = clicked } }));
-        try expectSelected(&state, &selected);
-    }
+    const first = state.selected.?;
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .unfold = .finished } }));
+    try expectSelected(&state, &first);
 }
 
-test "a click on a line while a panel shows changes nothing: its lines are not Sessions" {
+test "a heading, a gap and the empty list's line name nothing to click; a row names its Session" {
     var state = try opened(&mixed);
     defer state.deinit();
-    const line = try lineOfRow(&state, "b2c3d4");
-    const selected = state.selected.?;
-    state.panel = .help;
-    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = line } }));
-    try expectSelected(&state, &selected);
-    try std.testing.expect(state.panel != null and state.panel.? == .help);
+    var rows: usize = 0;
+    var line: usize = 0;
+    while (listItem(&state, line)) |item| : (line += 1) switch (item) {
+        .gap, .heading, .empty => try std.testing.expectEqual(null, clickOf(&state, item)),
+        .row => |at| {
+            rows += 1;
+            try std.testing.expectEqualStrings(&state.rows.items[state.order.items[at]].reference, &clickOf(&state, item).?.open);
+        },
+        .more => |more| try std.testing.expectEqual(Click{ .unfold = more.group }, clickOf(&state, item).?),
+    };
+    try std.testing.expect(rows > 0);
+    // Still loading, and listed with nothing in the view.
+    var loading = try testState();
+    defer loading.deinit();
+    try std.testing.expectEqual(null, clickOf(&loading, listItem(&loading, 0).?));
+    var empty = try opened(&.{});
+    defer empty.deinit();
+    try std.testing.expectEqual(null, clickOf(&empty, listItem(&empty, 0).?));
 }
 
-test "a click lands on what fills the list and obeys the input mode, whatever combination shows" {
+test "a click that names a Session gone from the list since it was drawn changes nothing" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const selected = state.selected.?;
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .open = "n0n0n0".* } }));
+    try expectSelected(&state, &selected);
+}
+
+test "a click on a Session while a panel shows opens it and closes the panel, as Enter does" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    state.panel = .help;
+    try expectEffects(&.{.{ .open = "b2c3d4".* }}, try step(&state, .{ .clicked = .{ .open = "b2c3d4".* } }));
+    try std.testing.expectEqual(null, state.panel);
+}
+
+test "every click obeys the input mode: a frozen screen takes none, whatever it names" {
     const ref = "b2c3d4";
-    for ([_]ListArea{ .sessions, .panel, .picker }) |area| for ([_]bool{ false, true }) |frozen| for ([_]bool{ false, true }) |on_view| {
+    for ([_]bool{ false, true }) |frozen| for ([_]Click{ .{ .open = ref.* }, .{ .unfold = .finished }, .view }) |clicked| {
         var state = try opened(&mixed);
         defer state.deinit();
-        const line = try lineOfRow(&state, ref);
-        if (on_view) {
+        if (clicked == .view) {
             _ = try submit(&state, .{ .bytes = "/sessions archived" });
             _ = try respond(&state, .full, testToken(2), &.{});
-        }
+        } else try std.testing.expect(folded(&state, .finished));
         if (frozen) {
             _ = try submit(&state, try typeText(&state, "go"));
             try std.testing.expectEqual(InputMode.frozen, state.inputMode());
         }
-        switch (area) {
-            .sessions => {},
-            .panel => state.panel = .help,
-            .picker => state.picker = .{},
-        }
-        defer state.picker = null;
-        try std.testing.expectEqual(area, state.listArea());
         const selected = state.selected;
-        const effects = try step(&state, .{ .clicked = if (on_view) .view else .{ .line = line } });
+        const effects = try step(&state, .{ .clicked = clicked });
         if (frozen) {
             // No key moves a frozen screen, and no click does.
             try expectEffects(&.{}, effects);
             try std.testing.expectEqual(selected, state.selected);
-            try std.testing.expectEqual(on_view, state.archive == .archived);
-        } else if (on_view) {
-            // The counts line is above the list: its click is the same
-            // whatever the list shows.
-            try expectEffects(&.{.{ .list = null }}, effects);
-            try std.testing.expectEqual(ArchiveFilter.active, state.archive);
-        } else if (area == .sessions) {
-            try expectEffects(&.{.{ .open = ref.* }}, effects);
-        } else {
-            // A panel's or the picker's line is no Session.
-            try expectEffects(&.{}, effects);
-            try std.testing.expectEqual(selected, state.selected);
+            try std.testing.expectEqual(clicked == .view, state.archive == .archived);
+            if (clicked != .view) try std.testing.expect(folded(&state, .finished));
+        } else switch (clicked) {
+            .open => try expectEffects(&.{.{ .open = ref.* }}, effects),
+            .unfold => try std.testing.expect(!folded(&state, .finished)),
+            .view => {
+                try expectEffects(&.{.{ .list = null }}, effects);
+                try std.testing.expectEqual(ArchiveFilter.active, state.archive);
+            },
         }
     };
-}
-
-test "a click on the empty list's one line changes nothing, loading or listed empty" {
-    // Still loading: the listing has not answered.
-    var loading = try testState();
-    defer loading.deinit();
-    try std.testing.expectEqual(Item.empty, listItem(&loading, 0).?);
-    try expectEffects(&.{}, try step(&loading, .{ .clicked = .{ .line = 0 } }));
-    try std.testing.expectEqual(null, loading.selected);
-    // Listed, with nothing in the view.
-    var empty = try opened(&.{});
-    defer empty.deinit();
-    try std.testing.expectEqual(Item.empty, listItem(&empty, 0).?);
-    try std.testing.expectEqual(null, listItem(&empty, 1));
-    try expectEffects(&.{}, try step(&empty, .{ .clicked = .{ .line = 0 } }));
-    try std.testing.expectEqual(null, empty.selected);
 }
 
 test "a click on the counts line's view name returns to the default view, as /sessions does" {
@@ -6802,17 +6799,6 @@ fn pickerState(default: ?Default) !State {
     state.default = default;
     try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 24 } }));
     return state;
-}
-
-test "a click while the model picker shows opens no Session: its rows are models" {
-    var state = try pickerState(null);
-    defer state.deinit();
-    const line = try lineOfRow(&state, "f1n1sh");
-    try openPicker(&state, &.{chatgpt});
-    const selected = state.selected.?;
-    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = line } }));
-    try expectSelected(&state, &selected);
-    try std.testing.expect(state.picker != null);
 }
 
 fn highlightModel(state: *State, draft: Draft, model: []const u8) !void {
