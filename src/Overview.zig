@@ -1889,6 +1889,11 @@ const Rig = struct {
         try rig.screen.init(std.testing.io, &rig.environ, true);
         errdefer rig.screen.deinit();
         rig.overview = try create(rig.init, options, undefined, ops, interrupted);
+        // What a test's frames show never depends on the environment the
+        // test binary runs in: `zig build` sets NO_COLOR for it and `check`
+        // does not, and a coloured working row's mark turns with the clock.
+        // A test of colour or locale sets its own caps.
+        rig.overview.caps = .{ .depth = .none };
         rig.overview.session_screen = rig.screen;
         rig.out = .init(std.testing.allocator);
         rig.attention = .{ .vx = &rig.screen.vx, .out = &rig.out.writer, .signal = .osc9 };
