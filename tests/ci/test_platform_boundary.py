@@ -211,7 +211,7 @@ class PlatformBoundaryTest(unittest.TestCase):
                      ".github/workflows/qualify-macos.yml", "install.sh", "build/darwin.zig",
                      "src/os/process.zig", "src/os/descriptor_limit.zig", "src/h2/Connection.zig",
                      "src/h2/testing/Peer.zig", "tests/integration/terminal_process.py",
-                     "tests/integration/terminal_leader.py"):
+                     "tests/integration/terminal_leader.py", "tests/integration/terminal_restoration_cases.py"):
             self.assertTrue(mac_path(path), path)
         for path in ("src/session_view.zig", "src/server.zig", "tests/integration/dispatch_integration.py",
                      ".github/workflows/check.yml", "README.md",
@@ -222,6 +222,7 @@ class PlatformBoundaryTest(unittest.TestCase):
     def test_selection_requires_mac_for_review_of_mac_specific_paths(self):
         self.assertTrue(select(["src/os/socket.zig"], "review", AVAILABLE)["mac_required"])
         self.assertTrue(select(["README.md", "src/host_launch.c"], "review", AVAILABLE)["mac_required"])
+        self.assertTrue(select(["tests/integration/terminal_restoration_cases.py"], "review", AVAILABLE)["mac_required"])
         self.assertFalse(select(["src/turn_policy.zig"], "review", AVAILABLE)["mac_required"])
         self.assertTrue(select(["tests/integration/terminal_leader.py"], "review", AVAILABLE)["mac_required"])
         # Drafts get development feedback only.

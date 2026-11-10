@@ -29,6 +29,17 @@ A request to create or update a PR authorizes scoped pushes and follow-up fixes 
 Ask before publishing elsewhere, widening scope, force-pushing, deploying or closing issues.
 Honor narrower user limits and one-way-door approvals.
 
+## Code Review Rules
+
+[Review](CODING_STANDARDS.md#review) and [Ownership and transitions](CODING_STANDARDS.md#ownership-and-transitions) own what a change must satisfy.
+This section owns only how Codex reports what it finds:
+
+- **One finding per class.** When two or more symptoms share a cause (a fact derived in two places, a rule with two owners, state synced instead of derived), report one finding at the owner and list every site.
+  Safe path: the correction those sections lead with, one owner that every reader calls.
+- **Design before cases.** Report a departure from those sections (duplicated authority, policy mixed with I/O in a shell, public surface that exposes representation) ahead of any single edge case it causes.
+- **Domain tests.** For an edge case in a combination of states, report once the missing test over the owner's whole domain and name the cases it must include.
+  Do not report each case as its own finding.
+
 ## Status updates
 
 Report progress, blockers and verification results relevant to the requested task.

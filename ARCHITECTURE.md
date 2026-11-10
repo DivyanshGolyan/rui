@@ -2431,13 +2431,13 @@ Ctrl-P past the oldest says `No earlier message.` While an Action's choice holds
 Ctrl-B and Ctrl-F move the caret a character left and right, as in readline.
 Any Ctrl, Alt, Super, Hyper or Meta chord with no binding, a typed C0 control among them, on a character, a control or a named key such as an arrow, is dropped as it arrives, with a notice, and the draft stays: ESC followed by a key (Option as Meta, an Esc pressed just before a key, or a chord tmux re-encodes that way) and Kitty Alt chords, even with associated text, never insert the bare key, reject the draft or send it.
 ESC before a key that starts no sequence is Alt on that key as decoded alone: ESC ^H is Alt-Backspace, ESC CR (which arrives as ESC LF under ICRNL) is Alt-Enter, and ESC before a multibyte scalar drops that scalar; a combining mark or joined scalar that arrives after it is ordinary text.
-Alt-Enter adds a line like Shift-Enter and Alt-J in every form (ESC CR, ESC LF, Kitty `CSI 13;3u` and `CSI 27;3;13~`) and never sends: Ghostty sends Shift-Enter as ESC CR.
+Alt-Enter adds a line like Shift-Enter and Ctrl-J in every form (ESC CR, ESC LF, Kitty `CSI 13;3u` and `CSI 27;3;13~`) and never sends: Ghostty sends Shift-Enter as ESC CR.
 A bare Esc that expires (80 ms) before Enter is Esc, then Enter, which sends.
 Every binding needs its exact modifiers: a Kitty key that reports Shift is never its unshifted binding, even when its associated text or shifted key equals the base key, so Ctrl-Shift-J does not send and Ctrl-Shift-R does not recover.
 ESC ESC is Esc, and the second ESC starts whatever follows: an Esc just before a marked paste or an arrow keeps that input whole, so an ESC ESC arrow (urxvt Meta-arrow) is Esc then that arrow.
 ESC before P, X, ], ^ or _ begins a terminal string, never typed text.
 A pending ESC before Ctrl-C or Ctrl-D is discarded, so those still interrupt or end input.
-A terminal path can change a key before Rui reads it: tmux delivers Shift-Enter as Enter and Hyper or Meta chords as their bare keys, so while a draft is composed inside tmux the status says `In tmux, Shift-Enter sends · Alt-J adds a line`, and `/help` says so too.
+A terminal path can change a key before Rui reads it: tmux delivers Shift-Enter as Enter and Hyper or Meta chords as their bare keys, so while a draft is composed inside tmux the status says `In tmux, Shift-Enter sends · Ctrl-J adds a line`, and `/help` says so too.
 At an Action's choice any chord is refused, spends freshness and authorizes nothing.
 Shift alone stays text.
 An xterm modifyOtherKeys key (`CSI 27 ; modifier ; code ~`, which Ghostty's legacy table sends for modified Enter without being asked) decodes as the Kitty key with the same modifiers and no associated text, so its bindings mean the same: Shift-Enter adds a line, Ctrl-A moves to the line start, Ctrl-J sends, and an unbound Ctrl, Alt or Super chord is dropped as its Kitty form is.

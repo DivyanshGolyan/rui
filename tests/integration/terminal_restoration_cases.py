@@ -1986,6 +1986,55 @@ def app_signal_cases():
                         lambda: os.close(master) if master is not None else None, lambda: os.close(slave))
 
 
+def app_full_pty_case():
+    binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
+    master, slave = open_pty()
+    caller = None
+    original = termios.tcgetattr(slave)
+    flags = fcntl.fcntl(slave, fcntl.F_GETFL)
+    try:
+        caller = spawn([str(binary), "app-signal"], stdin=slave,
+                       stdout=slave, stderr=subprocess.PIPE)
+        opening = bytearray()
+        answered = False
+
+        def frame_drawn():
+            nonlocal answered
+            if select.select([master], [], [], 0)[0]:
+                opening.extend(os.read(master, 65536))
+                assert len(opening) < 1024 * 1024, "unbounded App startup output"
+            if not answered and b"\x1b[c" in opening:
+                os.write(master, b"\x1b[?1;2c")
+                answered = True
+            return b"fixture" in opening and b"\x1b[?2026l" in opening
+
+        fixture.wait_for(frame_drawn, "App's first frame", timeout=5)
+        filled = 0
+        fcntl.fcntl(slave, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        try:
+            while True:
+                try:
+                    filled += os.write(slave, b"x" * 1024)
+                    assert filled < 1024 * 1024, "unbounded fixture output"
+                except BlockingIOError:
+                    break
+        finally:
+            fcntl.fcntl(slave, fcntl.F_SETFL, flags)
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        caller.send_signal(signal.SIGWINCH)
+        caller.send_signal(signal.SIGTERM)
+        # Simulate a terminal that stops reading before it catches up.
+        select.select([], [], [], 1)
+        _, diagnostic = human.terminal_exit(caller, master)
+        assert caller.returncode == 0, (caller.returncode, diagnostic)
+        assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original), "terminal not restored"
+        assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL), flags)
+        print("App full PTY SIGTERM: exited and terminal restored after draining resumed", flush=True)
+    finally:
+        dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                    lambda: os.close(master), lambda: os.close(slave))
+
+
 def app_resize_cases():
     from terminal_screen import ScreenCapture
 
@@ -2124,6 +2173,11 @@ def main(selected=None):
         if selected in (None, "app-signals"):
             app_signal_cases()
         if selected == "app-signals":
+            completed = True
+            return
+        if selected in (None, "app-full-pty"):
+            app_full_pty_case()
+        if selected == "app-full-pty":
             completed = True
             return
         if selected in (None, "app-resize"):
