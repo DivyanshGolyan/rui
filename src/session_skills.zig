@@ -89,6 +89,13 @@ pub const Text = union(enum) {
 pub fn prepareMessage(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, command: *const wire_request.MessageCommand, home: ?[]const u8) !*PreparedMessage {
     const prepared = try allocator.create(PreparedMessage);
     prepared.* = .{};
+    // A Message to a Session that names no skill prepares nothing, so it
+    // asks the Store nothing before its submission.
+    if (command.configuration == null) {
+        var any: AnyReference = .{};
+        try eachReference(allocator, io, .{ .field = &command.text }, &any);
+        if (!any.found) return prepared;
+    }
     // This includes accepted, rejected and conflicting keys: no metadata or
     // file discovery precedes the Store's authoritative replay classification.
     if (try store.commandExists(command.key.slice())) return prepared;

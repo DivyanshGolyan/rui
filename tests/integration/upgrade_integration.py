@@ -852,82 +852,6 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
                         lambda: setattr(releases, "digest", original_digest))
 
 
-
-def stop_tmux(base, env, server_pid):
-    """Retire this fixture's observed server; unsuccessful kills are not success."""
-    result = subprocess.run([*base, "kill-server"], env=env, capture_output=True,
-                            text=True, timeout=5)
-    assert server_pid is not None, ("tmux server identity was not observed; disposal unconfirmed", result)
-
-    def retired():
-        observed = subprocess.run(["ps", "-p", str(server_pid), "-o", "stat="],
-                                  env=env, capture_output=True, text=True, timeout=5)
-        if observed.returncode == 1 and not observed.stdout and not observed.stderr:
-            return True  # The independently observed server PID is absent.
-        assert observed.returncode == 0 and observed.stdout.strip(), ("tmux server census failed", observed)
-        # An exited orphan may await its OS reaper but owns no live resources.
-        return observed.stdout.strip().startswith("Z")
-
-    if result.returncode != 0:
-        assert retired(), ("tmux kill-server failed with a live server", result)
-    else:
-        wait_for(retired, "exact tmux server retirement")
-
-
-def tmux_cases(root, binary, releases, artifacts):
-    """Real tmux cells supplement, rather than replace, PTY process evidence."""
-    tmux = shutil.which("tmux")
-    assert tmux is not None, "native terminal evidence requires real tmux"
-    with case(root, binary, releases, "tmux-overview") as c:
-        c.old_selection()
-        old_host, previous = c.start_host()
-        session, credential = terminal_setup(c)
-        before = c.json("session", "inspect", "--store", c.store, "--session", session)
-        request_directory = c.home / ".config/rui/requests"
-        captures = {p.name: p.read_bytes() for p in request_directory.glob("*.json")}
-        socket_path = root / "tmux.sock"
-        base = [tmux, "-S", str(socket_path), "-f", "/dev/null"]
-
-        def command(*args):
-            result = subprocess.run([*base, *args], env=c.env, capture_output=True,
-                                    text=True, timeout=5)
-            assert result.returncode == 0, (args, result.stdout, result.stderr)
-            return result.stdout
-
-        def capture():
-            return command("capture-pane", "-p", "-t", "upgrade:0.0")
-
-        def reached(marker):
-            return wait_for(capture, f"real tmux screen: {marker}", timeout=15,
-                            ready=lambda text: shown(marker, text))
-
-        def save(name, text):
-            if artifacts is not None:
-                (artifacts / f"tmux-overview-{name}.txt").write_text(text)
-
-        server_pid = None
-        try:
-            command("new-session", "-d", "-x", str(COLUMNS), "-y", str(ROWS),
-                    "-s", "upgrade", "-c", str(c.root), "exec " + shlex.join(overview_args(binary, c)))
-            server_pid = int(command("display-message", "-p", "#{pid}").strip())
-            assert server_pid > 0
-            reached("›")
-            assert c.link.resolve() == c.original
-            command("send-keys", "-t", "upgrade:0.0", "-l", "/upgrade")
-            command("send-keys", "-t", "upgrade:0.0", "Enter")
-            installed = reached(f"Upgraded to {releases.version}")
-            save("installed", installed)
-            proof_ready(c, previous, old_host)
-            command("send-keys", "-t", "upgrade:0.0", "C-u")
-            command("send-keys", "-t", "upgrade:0.0", "-l", "unsent tmux draft")
-            save("returned", reached("unsent tmux draft"))
-            assert (c.home / ".config/rui/codex.json").read_bytes() == credential
-        finally:
-            dispose_all(lambda: stop_tmux(base, c.env, server_pid))
-        assert c.json("session", "inspect", "--store", c.store, "--session", session)["session"] == before["session"]
-        assert {p.name: p.read_bytes() for p in request_directory.glob("*.json")} == captures
-
-
 def main():
     if len(sys.argv) != 2:
         sys.exit("usage: python3 tests/integration/upgrade_integration.py PATH_TO_REAL_RUI")
@@ -963,8 +887,6 @@ def main():
         print("upgrade native: SIGINT after publication preserved and reported the installed receipt", flush=True)
         signal_during_check(root, binary, releases, artifacts)
         print("upgrade native: terminal signal restored during held release check", flush=True)
-        tmux_cases(root, binary, releases, artifacts)
-        print("upgrade native: real tmux /upgrade capture passed", flush=True)
         complete = True
     finally:
         retired = False

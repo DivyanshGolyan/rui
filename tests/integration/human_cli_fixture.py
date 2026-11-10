@@ -110,7 +110,7 @@ def shown(text, screen):
     return wrapped(text, screen)
 
 
-def command_frame(master, command, accept, timeout=15, *, end="\n"):
+def command_frame(master, command, accept, timeout=15, *, end="\r"):
     """Send `command` and `end`; return the first committed frame after it
     that `accept`s with the composer ready in that same frame. Page identity,
     readiness and any absence check then describe one shown frame."""
@@ -142,14 +142,15 @@ def composer_ready(screen, x, y):
     if "Opening…" in screen:
         return False
     line = screen.split("\n")[y] if y < len(screen.split("\n")) else ""
-    return x >= 2 and (line == "›" or line.startswith("› ") or line == ">" or line.startswith("> "))
+    # The composer's mark follows the screen's one-column margin.
+    return x >= 3 and any(line == " " + mark or line.startswith(" " + mark + " ") for mark in ("›", ">"))
 
 
 def overview_composer(screen, x, y):
     """Input is accepted at the overview's composer: the cursor is on its row."""
     lines = screen.split("\n")
     line = lines[y] if y < len(lines) else ""
-    return x >= 2 and any(line == " " + mark or line.startswith(" " + mark + " ") for mark in ("›", ">"))
+    return x >= 3 and any(line == " " + mark or line.startswith(" " + mark + " ") for mark in ("›", ">"))
 
 
 def keyed_frame(master, keys, accept, timeout=15):
@@ -411,7 +412,7 @@ def terminal_step(master, command, marker, *, composer=False):
     """
     if composer:
         return command_frame(master, command, lambda frame: marker in frame)
-    os.write(master, (command + "\n").encode())
+    os.write(master, (command + "\r").encode())
     return read_terminal(master, marker)
 
 

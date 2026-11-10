@@ -786,9 +786,6 @@ class SelectionTest(unittest.TestCase):
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 self.assertEqual(result["targets"] + result["native_targets"], [])
-        # A blocking fixture that imports a harness runs when it changes.
-        self.assertIn("human-cli-integration",
-                      select(["tests/integration/terminal_input_replay.py"], "review", AVAILABLE)["targets"])
 
     def test_missing_required_target_is_an_error_not_a_skip(self):
         with self.assertRaisesRegex(ValueError, "absent"):

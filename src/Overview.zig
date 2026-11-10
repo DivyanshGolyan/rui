@@ -3165,6 +3165,39 @@ test "a paste past the editor's capacity leaves the draft unchanged" {
     try expectStarted(rig, "\r", "kept");
 }
 
+test "a command word wrapped past the composer's rows shows no list, and Esc clears it" {
+    const rig = try openListed();
+    defer rig.close();
+    _ = try rig.press("/configure");
+    // At 8x6 the composer shows two of the word's three rows.
+    var shown = try rig.shown(8, 6);
+    defer shown.deinit();
+    try shown.expectLines(1, &.{ "   confi", "   gure" });
+    for (0..6) |row| try std.testing.expect(std.mem.indexOf(u8, try shown.line(@intCast(row)), "/configu") == null);
+    // With no list drawn, Esc clears the draft rather than closing one.
+    _ = try rig.press("\x1b");
+    try std.testing.expectEqualStrings("", rig.overview.composerDraft().bytes);
+}
+
+test "a full-capacity draft of spaces keeps the composer's caret on screen" {
+    const rig = try openComposer();
+    defer rig.close();
+    const pasted = "\x1b[200~" ++ @as([SessionInput.capacity]u8, @splat(' ')) ++ "\x1b[201~";
+    _ = try rig.press(pasted);
+    try std.testing.expectEqual(@as(usize, SessionInput.capacity), rig.overview.composerDraft().bytes.len);
+    var shown = try rig.shown(80, 24);
+    defer shown.deinit();
+    // The composer sits between the rules at rows 18 and 21; the caret
+    // shows inside it.
+    for ([_]u16{ 18, 21 }) |row| {
+        const line = try shown.line(row);
+        try std.testing.expectEqual(@as(usize, 80), std.mem.count(u8, line, "─"));
+        try std.testing.expectEqual(@as(usize, 80 * "─".len), line.len);
+    }
+    const caret = shown.cursor() orelse return error.TestExpectedCaret;
+    try std.testing.expect(caret.row > 18 and caret.row < 21 and caret.col < 80);
+}
+
 test "the composer edits at its caret, as a conversation's draft does" {
     const rig = try openComposer();
     defer rig.close();
@@ -3432,7 +3465,7 @@ test "both lines of a two-line command result show under the input" {
     try std.testing.expect(try rig.settle() == null);
     var shown = try rig.shown(80, 24);
     defer shown.deinit();
-    try shown.expectLines(19, &.{ "› Type a task", "────────────────────────────────────────────────────────────────────────────────", " new Session · no model · /work", " Configured.", " ! label saved locally only" });
+    try shown.expectLines(19, &.{ " › Type a task", "────────────────────────────────────────────────────────────────────────────────", " new Session · no model · /work", " Configured.", " ! label saved locally only" });
 }
 
 test "/rename and /setup run through the conversation's command hook on the worker, and what they print reaches the overview" {
@@ -3776,7 +3809,7 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
         "/unarchive            restore the selected Session without restarting work",
         "/upgrade              check stable Rui; install restarts this Store's Host",
         "────────────────────────────────────────────────────────────────────────────────",
-        "› /",
+        " › /",
     });
     try std.testing.expectEqualStrings(" esc close", try all.line(23));
     // Eleven rows leave the list four commands and a count of the rest.
@@ -3794,11 +3827,11 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
     _ = try rig.press("m");
     var narrowed = try rig.shown(80, 24);
     defer narrowed.deinit();
-    try narrowed.expectLines(18, &.{ "/model                choose the model new Sessions use", "────────────────────────────────────────────────────────────────────────────────", "› /m" });
+    try narrowed.expectLines(18, &.{ "/model                choose the model new Sessions use", "────────────────────────────────────────────────────────────────────────────────", " › /m" });
     _ = try rig.press("\x1b");
     var closed = try rig.shown(80, 24);
     defer closed.deinit();
-    try closed.expectLines(18, &.{ "", "────────────────────────────────────────────────────────────────────────────────", "› /m" });
+    try closed.expectLines(18, &.{ "", "────────────────────────────────────────────────────────────────────────────────", " › /m" });
     try std.testing.expectEqualStrings(" esc clear", try closed.line(23));
 }
 
@@ -3808,13 +3841,13 @@ test "the cursor sits at the composer's caret and hides while a start is pending
     _ = try rig.press("Fix 中");
     var typed = try rig.shown(80, 24);
     defer typed.deinit();
-    try std.testing.expectEqualStrings("› Fix 中", try typed.line(20));
-    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 20, .col = 8 }), typed.cursor());
+    try std.testing.expectEqualStrings(" › Fix 中", try typed.line(20));
+    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 20, .col = 9 }), typed.cursor());
     // Left steps over the wide character's two cells.
     _ = try rig.press("\x1b[D");
     var left = try rig.shown(80, 24);
     defer left.deinit();
-    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 20, .col = 6 }), left.cursor());
+    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 20, .col = 7 }), left.cursor());
     _ = try rig.press("\x1b[F\r");
     try std.testing.expectEqual(view.InputMode.frozen, rig.overview.state.inputMode());
     var pending = try rig.shown(80, 24);
@@ -3830,21 +3863,21 @@ test "a draft past its cap scrolls inside the composer, and the rule counts what
     var tail = try rig.shown(40, 40);
     defer tail.deinit();
     // Ten rows of draft between the rules, the caret on the last.
-    try tail.expectLines(26, &.{ "──────────── ↑ 3 more lines ────────────", "  4" });
-    try tail.expectLines(36, &.{ "  13", "────────────────────────────────────────" });
-    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 36, .col = 4 }), tail.cursor());
+    try tail.expectLines(26, &.{ "──────────── ↑ 3 more lines ────────────", "   4" });
+    try tail.expectLines(36, &.{ "   13", "────────────────────────────────────────" });
+    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 36, .col = 5 }), tail.cursor());
     // The caret moving above the shown lines takes them up with it.
     for (0..11) |_| _ = try rig.press("\x1b[A");
     var up = try rig.shown(40, 40);
     defer up.deinit();
-    try up.expectLines(26, &.{ "───────── ↑ 1 · ↓ 2 more lines ─────────", "  2" });
-    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 27, .col = 3 }), up.cursor());
+    try up.expectLines(26, &.{ "───────── ↑ 1 · ↓ 2 more lines ─────────", "   2" });
+    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 27, .col = 4 }), up.cursor());
     // Without Unicode the rules, marks and prompt are ASCII.
     rig.overview.caps.unicode = false;
     _ = try rig.press("\x1b[A");
     var ascii = try rig.shown(40, 40);
     defer ascii.deinit();
-    try ascii.expectLines(26, &.{ "------------ v 3 more lines ------------", "> 1" });
+    try ascii.expectLines(26, &.{ "------------ v 3 more lines ------------", " > 1" });
 }
 
 test "a click on a Session row, as a terminal sends it, opens the row under it after the list scrolls" {

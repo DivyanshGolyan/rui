@@ -48,7 +48,9 @@ const test_poll = @import("test_poll");
 // signal_stack.zig gives each Rui thread one in fresh pages instead.
 pub const std_options: std.Options = .{
     .signal_stack_size = null,
-    .log_scope_levels = &.{.{ .scope = .vaxis, .level = .info }},
+    // stderr is the terminal App draws on: capability reports would print
+    // over the screen, so vaxis reports only failures.
+    .log_scope_levels = &.{.{ .scope = .vaxis, .level = .err }},
 };
 
 extern "c" fn rui_launch_detached(executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize) c_int;

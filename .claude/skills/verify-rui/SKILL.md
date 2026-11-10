@@ -26,7 +26,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
    RUN=$($V new FULLSHA --seed 3 --label my-check)
    ```
 
-   This prints the evidence root `~/.cache/verify-rui/runs/ID`. Scratch lives at `/private/tmp/vr.*` because Unix socket paths are short, and contains `home/` (with synthetic Codex credentials), `store/`, `project/` and `tmux.sock`. The run then:
+   This prints the evidence root `~/.cache/verify-rui/runs/ID`. Scratch lives under a short temp root (`/private/tmp` on macOS, `/tmp` on Linux) for Unix socket paths, and contains `home/` (with synthetic Codex credentials), `store/`, `project/` and `tmux.sock`. The run then:
    - starts the fixture provider and `rui host serve --store STORE --provider-endpoint FIXTURE`;
    - waits for `host status` to report `ready`;
    - starts Session `demo` (bypass) and Session `approve` (ask), each labelled with its name, and records their IDs in `run.json` under `sessions`;

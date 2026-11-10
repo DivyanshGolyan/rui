@@ -2629,7 +2629,7 @@ test "canonical step faults fence rather than reading as ordinary misses" {
                         try store_testing.failReadsOf(&storage, "model_operation");
                         var view: HistoricalView = undefined;
                         break :blk switch (route) {
-                            .view => storage.openHistoricalView(binding, &view),
+                            .view => if (storage.openHistoricalView(binding, &view)) |_| {} else |err| err,
                             .purpose => if (storage.modelOperationKind(binding)) |_| {} else |err| err,
                             .handoff => storage.withDispatchHandoff(binding, {}, struct {
                                 fn run(_: void) !void {
@@ -3095,7 +3095,7 @@ test "terminal call-result import and read failures preserve canonical authority
             const continuation = (try read_store.admitNextModelAttempt(.{})).?.permit.binding;
             try store_testing.withoutForeignKeys(&read_store, "UPDATE model_tool_call SET rejection_content_id=9223372036854775807", .{});
             var view: HistoricalView = undefined;
-            try read_store.openHistoricalView(continuation, &view);
+            _ = try read_store.openHistoricalView(continuation, &view);
             defer view.close();
             var position: u64 = 0;
             while (true) {
@@ -3181,7 +3181,7 @@ test "compaction pressure uses provider usage appended input and complete call r
                 try std.testing.expectEqual(purpose, try storage.modelOperationKind(next));
                 {
                     var view: HistoricalView = undefined;
-                    try storage.openHistoricalView(next, &view);
+                    _ = try storage.openHistoricalView(next, &view);
                     defer view.close();
                     var cursor: TestingHistoryCursor = .{};
                     try std.testing.expect((try view.coverage()).anchor == null);
@@ -3206,7 +3206,7 @@ test "compaction pressure uses provider usage appended input and complete call r
                     try settleCompactionForTesting(&storage, &tmp, next, &.{.compaction});
                     const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                     var view: HistoricalView = undefined;
-                    try storage.openHistoricalView(successor, &view);
+                    _ = try storage.openHistoricalView(successor, &view);
                     defer view.close();
                     var cursor: TestingHistoryCursor = .{};
                     const anchor = (try view.coverage()).anchor.?;
@@ -3289,7 +3289,7 @@ test "missing canonical call outcome rows fence history and inspection" {
 
                 if (corruption == .action) {
                     var view: HistoricalView = undefined;
-                    try storage.openHistoricalView(continuation, &view);
+                    _ = try storage.openHistoricalView(continuation, &view);
                     defer view.close();
                     var position: u64 = 0;
                     while (true) {
@@ -3336,7 +3336,7 @@ test "historical tool-result EOF revalidates complete canonical coverage" {
             try settleCallsForTesting(&storage, &tmp, source, "eof-coverage-metadata", &calls);
             const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(continuation, &view);
+            _ = try storage.openHistoricalView(continuation, &view);
             defer view.close();
             var position: u64 = 0;
             while (true) {
@@ -5313,7 +5313,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             // The model's historical view carries the recorded sender, not text.
             var admitted = (try storage.admitNextModelAttempt(.{})).?;
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(try admitted.permit.consume(), &view);
+            _ = try storage.openHistoricalView(try admitted.permit.consume(), &view);
             defer view.close();
             const entry = (try view.nextEntry(0)).?;
             try std.testing.expect(entry.kind == .user);
@@ -6976,7 +6976,7 @@ test "completed tool labels trust admission while model replay authenticates pay
             try submitTestMessage(&storage, &tmp, "replay-next", "replay-next", session.slice(), "continue");
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(next, &view);
+            _ = try storage.openHistoricalView(next, &view);
             defer view.close();
             // Discovery trusts the labels; the first call's name fences when it is
             // read for replay.
@@ -7171,7 +7171,7 @@ test "compaction overflow admits a new Operation without losing applied input" {
             try std.testing.expectEqual(original.turn_id, next.permit.binding.turn_id);
             try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(next.permit.binding));
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(next.permit.binding, &view);
+            _ = try storage.openHistoricalView(next.permit.binding, &view);
             defer view.close();
             try std.testing.expectEqual(ModelOperationKind.compaction, (try testSettings(&view)).operation);
             try std.testing.expect((try view.coverage()).anchor == null);
@@ -7308,7 +7308,7 @@ test "compaction success retains host inputs and ordered anchor suffix across re
             try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(successor));
             {
                 var view: HistoricalView = undefined;
-                try storage.openHistoricalView(successor, &view);
+                _ = try storage.openHistoricalView(successor, &view);
                 defer view.close();
                 var cursor: TestingHistoryCursor = .{};
                 const anchor = (try view.coverage()).anchor.?;
@@ -7334,7 +7334,7 @@ test "compaction success retains host inputs and ordered anchor suffix across re
             const exhausted = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             {
                 var view: HistoricalView = undefined;
-                try storage.openHistoricalView(exhausted, &view);
+                _ = try storage.openHistoricalView(exhausted, &view);
                 defer view.close();
                 var cursor: TestingHistoryCursor = .{};
                 const anchor = (try view.coverage()).anchor.?;
@@ -7397,7 +7397,7 @@ test "explicit compaction thresholds and frozen retry survive reopen" {
                 try std.testing.expectEqual(first.operation_id, retry.operation_id);
                 {
                     var view: HistoricalView = undefined;
-                    try storage.openHistoricalView(retry, &view);
+                    _ = try storage.openHistoricalView(retry, &view);
                     defer view.close();
                     var frozen: HistoricalSettings = undefined;
                     try view.settings(&frozen);
@@ -7614,7 +7614,7 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
             try submitTestMessage(&storage, &tmp, "two", "two", session.slice(), "pending");
             const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(compact, &view);
+            _ = try storage.openHistoricalView(compact, &view);
             defer view.close();
             var frozen: HistoricalSettings = undefined;
             try view.settings(&frozen);
@@ -7637,7 +7637,7 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
             try settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
             const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             var later: HistoricalView = undefined;
-            try storage.openHistoricalView(successor, &later);
+            _ = try storage.openHistoricalView(successor, &later);
             defer later.close();
             var settings: HistoricalSettings = undefined;
             try later.settings(&settings);
@@ -7712,7 +7712,7 @@ test "compaction failed and unresolved candidates preserve the accepted base" {
             const candidate = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             {
                 var view: HistoricalView = undefined;
-                try storage.openHistoricalView(candidate, &view);
+                _ = try storage.openHistoricalView(candidate, &view);
                 defer view.close();
                 var cursor: TestingHistoryCursor = .{};
                 const anchor = (try view.coverage()).anchor.?;
@@ -7730,7 +7730,7 @@ test "compaction failed and unresolved candidates preserve the accepted base" {
             try submitTestMessage(&storage, &tmp, "three", "three", session.slice(), "new turn");
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(next, &view);
+            _ = try storage.openHistoricalView(next, &view);
             defer view.close();
             var cursor: TestingHistoryCursor = .{};
             const anchor = (try view.coverage()).anchor.?;
@@ -7772,7 +7772,7 @@ test "compaction selected newest base corruption fences rather than using an old
                     .payload => try store_testing.zeroContent(&storage, "SELECT extras_content_id FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item) AND item_kind=4"),
                 }
                 var view: HistoricalView = undefined;
-                try storage.openHistoricalView(next, &view);
+                _ = try storage.openHistoricalView(next, &view);
                 defer view.close();
                 if (corruption != .payload) {
                     try std.testing.expectError(error.CorruptStore, view.coverage());
@@ -8687,7 +8687,7 @@ test "a prefix seal is recorded only while its Attempt is current" {
             defer storage.close() catch unreachable;
             const attempt = try TestingAttempt.admit(&storage, &tmp);
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(attempt.binding, &view);
+            _ = try storage.openHistoricalView(attempt.binding, &view);
             defer view.close();
             try view.recordPrefixSeal(&TestingAttempt.seal);
             try std.testing.expectEqualDeep(TestingAttempt.seal, (try storage.prefixSealForTesting(attempt.binding)).?);
@@ -8711,12 +8711,11 @@ test "an Attempt check reads no Session, and a prefix seal's Session read answer
             defer storage.close() catch unreachable;
             const attempt = try TestingAttempt.admit(&storage, &tmp);
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(attempt.binding, &view);
+            _ = try storage.openHistoricalView(attempt.binding, &view);
             defer view.close();
             // Main touched the Session in each check, so a faulted session row
             // answered SessionReadFailed there; only the seal's write reads it now.
             try store_testing.failReadsOf(&storage, "session");
-            try view.checkAttempt();
             try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(attempt.binding));
             try storage.withDispatchHandoff(attempt.binding, {}, TestingAttempt.handoff);
             try std.testing.expect(!storage.isFenced());
@@ -9796,7 +9795,7 @@ test "each Store entry point takes its round budget on its common path" {
             const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             {
                 var view: HistoricalView = undefined;
-                try storage.openHistoricalView(continuation, &view);
+                _ = try storage.openHistoricalView(continuation, &view);
                 defer view.close();
                 meter.start();
                 _ = try view.validateOutputsStep();
@@ -9902,7 +9901,7 @@ test "each Store entry point takes its round budget on its common path" {
             try settleCompactionForTesting(storage, tmp, compaction, &.{.compaction});
             const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(successor, &view);
+            _ = try storage.openHistoricalView(successor, &view);
             defer view.close();
             while (!try view.validateOutputsStep()) {}
             meter.start();
@@ -10151,7 +10150,7 @@ test "complete historical tool-result traversal scales with groups and calls, in
             }
             const counter = TwinRounds.start(&storage);
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(binding, &view);
+            _ = try storage.openHistoricalView(binding, &view);
             defer view.close();
             var position: u64 = 0;
             var groups_seen: usize = 0;
@@ -10202,7 +10201,7 @@ test "historical accepted output selection work excludes failed Operation popula
             try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL", .{});
             try store_testing.exec(&storage, failed_operations_sql, .{ population, current.operation_id });
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(current, &view);
+            _ = try storage.openHistoricalView(current, &view);
             defer view.close();
             const counter = TwinRounds.start(&storage);
             while (!try view.validateOutputsStep()) {}
@@ -10237,7 +10236,7 @@ test "historical context selection work excludes nonmatching Operation populatio
             try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL", .{});
             try store_testing.exec(&storage, failed_purpose_operations_sql, .{ population, current.operation_id });
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(current, &view);
+            _ = try storage.openHistoricalView(current, &view);
             defer view.close();
             const counter = TwinRounds.start(&storage);
             while (!try view.validateOutputsStep()) {}
@@ -12044,7 +12043,7 @@ test "skills catalog provenance fences readSkills history and full reports" {
     try store_testing.forEachEngine(struct {
         fn scan(storage: *Store, binding: AttemptBinding) !void {
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(binding, &view);
+            _ = try storage.openHistoricalView(binding, &view);
             defer view.close();
             var position: u64 = 0;
             while (try view.nextEntry(position)) |entry| position = entry.position;

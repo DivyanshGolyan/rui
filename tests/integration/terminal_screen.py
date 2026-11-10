@@ -370,7 +370,11 @@ class ScreenCapture:
     def draft(self, text, caret, *, prompt="› "):
         """Check the actual caret row, not an identical earlier User row."""
         cursor = self.screen.cursor
+        line = self.screen.display[cursor.y].rstrip()
+        # The composer keeps the screen's one-column margin before its mark;
+        # `caret` counts from the mark, as `prompt` starts there.
+        margin = 1 if line.startswith(" ") and not prompt.startswith(" ") else 0
         return (not self.synchronized and self.generation > 0
                 and "Opening…" not in self.completed
-                and cursor.x == caret
-                and self.screen.display[cursor.y].rstrip() == (prompt + unicodedata.normalize("NFC", text)).rstrip())
+                and cursor.x == caret + margin
+                and line[margin:] == (prompt + unicodedata.normalize("NFC", text)).rstrip())

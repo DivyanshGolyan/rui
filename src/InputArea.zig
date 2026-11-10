@@ -79,7 +79,7 @@ test "InputArea keeps facts below the composer when a notice replaces the status
     editor.cursor = draft.len;
     const small = try input.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 5), small.size.height);
-    try std.testing.expectEqualStrings("s", small.children[0].surface.readCell(2, 1).char.grapheme);
+    try std.testing.expectEqualStrings("s", small.children[0].surface.readCell(3, 1).char.grapheme);
     try std.testing.expectEqualStrings("n", small.children[1].surface.readCell(0, 0).char.grapheme);
     try std.testing.expectEqualStrings("N", small.children[2].surface.readCell(0, 0).char.grapheme);
 }

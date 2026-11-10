@@ -739,6 +739,8 @@ class ObservationDeadlineTests(unittest.TestCase):
                     with self.subTest(caller=name, late=late, boundary=boundary), tempfile.TemporaryDirectory() as temporary:
                         clock = [100.0]  # Readiness/setup are outside the result budget.
                         observations = [0]
+                        # Only this caller withholds its result until the test releases it.
+                        released = [name != "isolated_terminal_stream"]
                         start = 100.0
                         clean = {"custody_occupied": "0", "scratch_used_bytes": "0", "dispatch_fenced": False}
                         endpoint = SimpleNamespace(server_address=("localhost", 1), observed_shape=False,
@@ -747,7 +749,8 @@ class ObservationDeadlineTests(unittest.TestCase):
                             resets=[1], stream_ids={"isolation-target": 1, "held-0": 1}, answers={},
                             held=SimpleNamespace(wait=lambda timeout: True),
                             held_prefix_bytes=0, held_prefixes={"held-0": 0},
-                            release=SimpleNamespace(set=lambda: None, is_set=lambda: False))
+                            release=SimpleNamespace(set=lambda: None, is_set=lambda: False),
+                            isolation_release=SimpleNamespace(set=lambda: released.__setitem__(0, True)))
                         if name == "round_trip":
                             endpoint.answers = {f"h2-2-0-{i}": b"answer" for i in range(2)}
                         elif name in ("held_streams", "write_failure_isolated"):
@@ -795,7 +798,7 @@ class ObservationDeadlineTests(unittest.TestCase):
                             if (resource, operation) == ("session", "inspect"):
                                 if "timeout" not in kwargs:
                                     return {"execution": {**clean, "custody_occupied": str(population) if name == "held_streams" else "1"}}
-                                if late == "release":
+                                if late == "release" and released[0]:
                                     clock[0] = start + budget + boundary
                                 return {"execution": clean}
                             return {"answer": {"status": "accepted", "session": "abc123"}}

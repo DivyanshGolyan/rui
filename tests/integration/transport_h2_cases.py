@@ -18,7 +18,7 @@ import time
 
 import model_fixture as dispatch
 from product_defaults import compaction_trigger
-from host_process import HostDiagnostics, TestHTTPServer, TRANSPORT_EXCHANGE_LIMIT, _failure_destination, preserve_failure_metadata, wait_for_execution_release as wait_for_drain
+from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, TRANSPORT_EXCHANGE_LIMIT, _failure_destination, preserve_failure_metadata, wait_for_execution_release as wait_for_drain
 import os_semantics
 from h2_fixture import Endpoint, closed_host_request
 
@@ -606,6 +606,49 @@ def refused_stream(root, endpoint, phase):
         dispatch.stop_host(host)
 
 
+def flow_while_execution_held(root, endpoint):
+    """While the execution owner is held between one sealed answer and its
+    settlement, as a slow Store round holds it, a sibling stream on the same
+    connection still receives far more than its window and answers PING."""
+    store = root / "flow-store"
+    gate = ReleaseGate(root / "flow-settlement-gate")
+    host = dispatch.start_host(
+        store, f"https://localhost:{endpoint.server_address[1]}/responses",
+        "--provider-ca-file", str(root / "cert.pem"),
+        "--test-phase-trace", "--test-model-result-gate-path", str(gate.path), active_capacity=2,
+    )
+    try:
+        diagnostics = HostDiagnostics(host)
+        sessions = {}
+        for name in ("quick", "flow"):
+            sessions[name] = dispatch.configure(root, store, f"flow-{name}-config", None, "gpt-6-sol")
+            dispatch.message(root, store, f"flow-{name}-message", sessions[name], name)
+        assert endpoint.ready.wait(20), "both flow-probe streams did not become live"
+        quick = dispatch.observe(store, "flow-quick-message")["binding"]
+        diagnostics.wait("sealed_before_settlement", timeout=20, operation=quick["operation"])
+        endpoint.flow_release.set()
+        assert endpoint.flow_ping_acked.wait(10), "no PING answer while execution was held"
+        assert endpoint.flow_body_sent.wait(10), "the sibling stream stalled while execution was held"
+        # Execution was held the whole time: the quick answer is still unsettled.
+        gate.assert_held()
+        assert dispatch.observe(store, "flow-quick-message").get("result") is None
+        gate.release()
+        result_deadline = time.monotonic() + 20
+        for name in ("quick", "flow"):
+            result = dispatch.wait_for(
+                lambda name=name: dispatch.observe(store, f"flow-{name}-message", deadline=result_deadline).get("result"),
+                f"flow-probe {name} completion", deadline=result_deadline,
+            )
+            assert result["status"] == "completed", result
+            assert dispatch.read_result(store, f"flow-{name}-message", deadline=result_deadline) == endpoint.answers[name]
+        assert len(endpoint.connections) == 1, endpoint.connections
+        print(json.dumps({"case": "flow_while_execution_held", "streams": 2, "connections": 1,
+                          "held_body_bytes": len(endpoint.answers["flow"]), "ping_answered": True}), flush=True)
+    finally:
+        gate.release()
+        dispatch.stop_host(host)
+
+
 def dead_reused_connection(root, endpoint):
     store = root / "dead-reuse-store"
     host = dispatch.start_host(
@@ -705,6 +748,17 @@ def isolated_terminal_stream(root, endpoint, mode):
             ("cancelled", "cancelled") if mode == "cancel" else ("failed", "response_scratch_exhausted")
         ), target
         result_deadline = target_deadline
+        # The transport thread reads on while execution settles the target, so
+        # the sibling's answer waits until the target's custody, and with it
+        # its scratch charge, is released; until then the shared limit may
+        # refuse it too.
+        dispatch.wait_for(
+            lambda: dispatch.command("session", "inspect", "--store", store, "--session", sessions["target"],
+                                     timeout=max(result_deadline - time.monotonic(), 0.1),
+                                     )["execution"]["custody_occupied"] in ("0", "1"),
+            f"{mode} target custody released", deadline=result_deadline,
+        )
+        endpoint.isolation_release.set()
         sibling = dispatch.wait_for(
             lambda: dispatch.observe(
                 store, f"{mode}-sibling-message", deadline=result_deadline,
@@ -952,12 +1006,24 @@ def held_case(root, tls, case):
         thread.join(timeout=5)
 
 
+def flow_case(root, tls):
+    endpoint = Endpoint(tls, 2, sse=True, flow_probe=True)
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    try:
+        flow_while_execution_held(root, endpoint)
+    finally:
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+
+
 def main():
     observed_only = len(sys.argv) == 3 and sys.argv[2] == "--observed-shape-only"
     churn = len(sys.argv) == 3 and sys.argv[2] == "--observed-shape-churn"
     selected = sys.argv[2].removeprefix("--case=") if len(sys.argv) == 3 and sys.argv[2].startswith("--case=") else None
     held_cases = ("held-before", "held-progress", "write-failure")
-    assert len(sys.argv) == 2 or observed_only or churn or selected in held_cases
+    assert len(sys.argv) == 2 or observed_only or churn or selected in held_cases or selected == "flow"
     if churn and not os_semantics.FOOTPRINT:
         raise RuntimeError("Observed-shape churn footprint qualification requires macOS")
     with tempfile.TemporaryDirectory(prefix="rui-h2-") as tmp:
@@ -972,6 +1038,9 @@ def main():
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(root / "cert.pem", root / "key.pem")
         tls.set_alpn_protocols(["h2"])
+        if selected == "flow":
+            flow_case(root, tls)
+            return
         if selected is not None:
             held_case(root, tls, selected)
             return
@@ -1031,6 +1100,7 @@ def main():
             endpoint.shutdown()
             endpoint.server_close()
             thread.join(timeout=5)
+        flow_case(root, tls)
         for mode in ("cancel", "capture"):
             endpoint = Endpoint(tls, 2, isolation=mode)
             thread = threading.Thread(target=endpoint.serve_forever, daemon=True)

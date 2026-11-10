@@ -30,7 +30,6 @@ on:
       - 'tests/ci/renderer_mutation*'
       - 'tests/integration/session_sequence_model*'
       - 'tests/integration/input_equivalence.py'
-      - 'tests/integration/terminal_input_replay.py'
       - 'tests/integration/terminal_restoration_*'
       - 'tests/qualification/direct-pty/**'
       - '.github/workflows/renderer-contracts.yml'
@@ -67,7 +66,7 @@ jobs:
         with:
           targets: '["terminal-restoration-integration"]'
           check-part: renderer-contracts
-      - name: Self-tests, direct-PTY, Ghostty, controls, recovery encodings, input replay and sequence models
+      - name: Self-tests, direct-PTY, Ghostty, controls, recovery encodings and sequence models
         # Each contract's only copy. Every one runs even after another fails;
         # steps.py records the failed ones for a promotion to replay.
         run: |
@@ -77,7 +76,6 @@ jobs:
             'ghostty=zig build direct-pty -j2 --summary all -- --output "$STEP_OUTPUT" --jobs 2 --vectors "$PWD/tests/qualification/direct-pty/ghostty.json"' \
             'controls=zig build direct-pty-controls -j2 --summary all -- --output "$STEP_OUTPUT"' \
             'recovery=zig build input-equivalence -j2 --summary all -- --output "$STEP_OUTPUT"' \
-            'replay=zig build terminal-restoration-integration -j2 --summary all -- input-replay' \
             'sequence=ulimit -Sn 256; zig build sequence-model -j2 --summary all -- --output "$STEP_OUTPUT"'
       - name: Bisect the promotion batch with each failed step
         if: ${{ failure() && inputs.batch-base }}

@@ -192,17 +192,13 @@ Artificial shared setup or pair deadlines and prelaunch fit reserves are not rou
 
 ### Renderer contracts
 
-[Renderer contracts](.github/workflows/renderer-contracts.yml) run nonblocking build targets on pull requests that touch renderer, frontend, terminal or `src/os` owners, `build.zig` or the harnesses, and on manual dispatch: `renderer-contracts-selftest`, the synthetic `direct-pty` key matrix and Ghostty vectors, `direct-pty-controls`, `input-equivalence`, unattended input replay and `sequence-model`.
+[Renderer contracts](.github/workflows/renderer-contracts.yml) run nonblocking build targets on pull requests that touch renderer, frontend, terminal or `src/os` owners, `build.zig` or the harnesses, and on manual dispatch: `renderer-contracts-selftest`, the synthetic `direct-pty` key matrix and Ghostty vectors, `direct-pty-controls`, `input-equivalence` and `sequence-model`.
 No gate root imports their sources, and neither Selected checks nor merging requires them; a red result is a defect to fix, not a waiver.
 Every promotion requires them, and a failing contract bisects the batch.
 Manual dispatch adds the [renderer mutation runner](tests/ci/renderer_mutation.py) for `test`, `test-logic` and `sequence-model`.
 PR failures remain visible in workflow results; there is no scheduled campaign, and only a promotion files issues.
 Its anchors are checked per change: [`renderer_mutation_test.py`](tests/ci/renderer_mutation_test.py), run by the Selected `policy` job, requires each mutation's anchor exactly once in current source, so moving a protection re-anchors its mutation in the same change.
 
-Run decoded-input replay with `zig build terminal-restoration-integration -- input-replay`; the default restoration gate excludes it.
-Its native actor drives production `SessionTerminal`, `TerminalInput` and `TerminalEditor` without a Host and requires exact keys, modifiers, paste provenance, editor outcomes, draft bytes and carets for Shift+Enter `ESC CR`, Opt+Enter forms, Kitty, modifyOtherKeys, marked paste and Ctrl-C.
-`ESC CR` becomes `ESC LF` under ICRNL and inserts a newline, never a submission.
-Every case checks cleanup bytes, saved terminal configuration and descriptor flags after reap.
 [Input equivalence tests](src/terminal_input_equivalence_test.zig) own exhaustive fragmentation.
 Injected PTYs are not physical keyboard, terminal-emulator or display qualification.
 
