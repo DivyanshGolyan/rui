@@ -329,9 +329,9 @@ while True:
         break
 os.set_blocking(1, True)
 os.write(held, str(count).encode())
-# Main-screen bytes, then the committed frame that offers the choice.
+# Main-screen bytes, then the committed frame of the card's choice row.
 tail = (b't' * 65536 + b'\\x1b[?2026h\\x1b[H\\x1b[2J? probe\\r\\n'
-        b'  \\xe2\\x80\\xba Allow once      Deny\\r\\n\\x1b[?2026l')
+        b'\\xe2\\x94\\x82  Allow once    Deny\\r\\n\\x1b[?2026l')
 while tail:
     tail = tail[os.write(1, tail):]
 termios.tcdrain(1)
@@ -356,7 +356,7 @@ os.read(release, 1)
         assert caller.poll() is None
         output = action_ready(ready_read, master, timeout=5)
         owner = sys.modules[action_ready.__module__]
-        assert "› Allow once" in output, output
+        assert owner.CHOICE in output, output
         assert owner.terminal_capture(master).plain.startswith(
             "q" * count + "t" * 65536 + "? probe\n"), "final presentation bytes lost"
         assert os.read(ready_read, 1) == b"x", "collector consumed future readiness"

@@ -98,7 +98,7 @@ runs:
       if: ${{ inputs.cold != 'true' && inputs.compiled != 'true' }}
       shell: bash
       env:
-        DEPS: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'screen-emulator/build.zig.zon', 'src/build_*', 'src/*.patch') }}-
+        DEPS: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'screen-emulator/build.zig.zon', 'src/build_*') }}-
         SOURCES: ${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-
         CHECK_PART: ${{ inputs.check-part }}
       run: |

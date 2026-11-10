@@ -73,6 +73,15 @@ class ListTest(unittest.TestCase):
             "an upgrade test": dict(FLAKE, path="tests/integration/upgrade_integration.py",
                                     signature="tests/integration/upgrade_integration.py: x raised E"),
             "a Store unit test": dict(FLAKE, path="src/store/tests.zig", signature="zig test 'store x' failed (E)"),
+            "a Store test named outside src/store": dict(FLAKE, path="src/tests.zig",
+                                                         signature="zig test 'store.tests.x' failed (E)"),
+            "a Store test whose name has apostrophes": dict(FLAKE, path="src/launch_frame.zig", signature=(
+                "zig test 'launch_frame.test.a launched Host's start failure is refused with its Store's "
+                "codes only' failed (TestUnexpectedResult)")),
+            "a crashed Store test": dict(FLAKE, path="src/tests.zig",
+                                         signature="zig test 'store.tests.x' terminated with signal SIGABRT"),
+            "a Store fixture": dict(FLAKE, path="tests/integration/store_rounds_cases.py",
+                                    signature="tests/integration/store_rounds_cases.py: x raised E"),
             "the fixture's path first": dict(FLAKE, signature="assert x raised AssertionError"),
             "an existing file": dict(FLAKE, path="tests/integration/gone.py",
                                      signature="tests/integration/gone.py: x raised E"),
@@ -83,6 +92,12 @@ class ListTest(unittest.TestCase):
                 self.assertNotEqual(quarantine.problems([entry], ROOT), [])
         self.assertNotEqual(quarantine.problems([FLAKE, FLAKE], ROOT), [], "a signature is listed once")
         self.assertEqual(quarantine.problems([FLAKE], ROOT), [])
+
+    def test_a_failing_line_that_mentions_a_store_does_not_make_a_store_test(self):
+        restoration = "tests/integration/terminal_restoration_integration.py"
+        entry = dict(FLAKE, path=restoration, signature=f'{restoration}: caller = spawn([str(fixture.RUI), '
+                     '"session", "resume", "--store", str(store), "--", session]) raised PermissionError')
+        self.assertEqual(quarantine.problems([entry], ROOT), [])
 
 
 class ListedTest(unittest.TestCase):

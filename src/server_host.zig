@@ -1,5 +1,6 @@
 const std = @import("std");
-const cli_args = @import("cli_args.zig");
+const cli_grammar = @import("cli_grammar.zig");
+const serve_grammar = @import("serve_grammar.zig");
 const core_tools = @import("core_tools.zig");
 const TestObservation = @import("TestObservation.zig");
 const trace_native = @import("posix");
@@ -252,7 +253,7 @@ pub const Tuning = struct {
     /// `models_dev_env` is RUI_TEST_MODELS_DEV_URL, read when no option
     /// names the catalog fixture. The `host serve` grammar bounds every
     /// number, so `parsed` holds only values a Host accepts.
-    pub fn fromOptions(parsed: *const cli_args.Parsed, models_dev_env: ?[]const u8) !Tuning {
+    pub fn fromOptions(parsed: *const cli_grammar.Parsed, models_dev_env: ?[]const u8) !Tuning {
         var tuning: Tuning = .{};
         const limits = &tuning.limits;
         const hooks = &tuning.hooks;
@@ -328,8 +329,8 @@ fn parseRetryWaits(value: []const u8) !retry_policy.Waits {
 fn tuningFor(args: []const []const u8, models_dev_env: ?[]const u8) !Tuning {
     var storage: [1024]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&storage);
-    var refusal: cli_args.Refusal = undefined;
-    const parsed = try cli_args.Command.host_serve.definition().parse(args, fixed.allocator(), &refusal);
+    var refusal: cli_grammar.Refusal = undefined;
+    const parsed = try serve_grammar.definition.parse(args, fixed.allocator(), &refusal);
     return Tuning.fromOptions(&parsed, models_dev_env);
 }
 

@@ -6,6 +6,7 @@ const core_boundary = @import("core_boundary.zig");
 /// each one listed here and runs its tests, and selector tests require each
 /// to select test-logic.
 const cores = .{
+    .{ "ActionConsent.zig", @import("ActionConsent.zig") },
     .{ "activity_facts.zig", @import("activity_facts.zig") },
     .{ "activity_read.zig", @import("activity_read.zig") },
     .{ "activity_reply.zig", @import("activity_reply.zig") },
@@ -21,6 +22,9 @@ const cores = .{
     .{ "caller_exit.zig", @import("caller_exit.zig") },
     .{ "caller_error.zig", @import("caller_error.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
+    .{ "cli_grammar.zig", @import("cli_grammar.zig") },
+    .{ "cli_option_names.zig", @import("cli_option_names.zig") },
+    .{ "serve_grammar.zig", @import("serve_grammar.zig") },
     .{ "client_defaults.zig", @import("client_defaults.zig") },
     .{ "cli_value.zig", @import("cli_value.zig") },
     .{ "codec_abi.zig", @import("codec_abi.zig") },
@@ -109,6 +113,7 @@ const cores = .{
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_ending.zig", @import("turn_ending.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
+    .{ "ViewportPosition.zig", @import("ViewportPosition.zig") },
     .{ "wire_field.zig", @import("wire_field.zig") },
     .{ "wire_version.zig", @import("wire_version.zig") },
     .{ "work_line.zig", @import("work_line.zig") },
@@ -190,6 +195,7 @@ test "the HTTP/2 client's policy stays within the core boundary" {
 }
 
 const overview_view = @import("overview_view.zig");
+const GroupedList = @import("GroupedList.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
 
@@ -338,7 +344,7 @@ fn nanosecondsNow() u64 {
     return @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds);
 }
 
-test "overview benchmark: merging a 10,000-row listing, and rendering 200x60 over it" {
+test "overview benchmark: merging a 10,000-row listing, and building a 200x60 frame's rows over it" {
     const total = 10_000;
     const runs = 5;
     const now_s = 1_792_937_000;
@@ -350,6 +356,7 @@ test "overview benchmark: merging a 10,000-row listing, and rendering 200x60 ove
     var merge_allocations: usize = 0;
     var render_allocations: usize = 0;
     for (0..runs) |run| {
+        var list: GroupedList = .{};
         var counting: CountingAllocator = .{ .child = std.heap.smp_allocator };
         var state: overview_view.State = undefined;
         try state.init(counting.allocator(), .{ .cwd = "/home/d/code/project-0", .home = "/home/d" });
@@ -370,15 +377,30 @@ test "overview benchmark: merging a 10,000-row listing, and rendering 200x60 ove
         _ = try overview_view.step(&state, .{ .resized = .{ .width = 200, .height = 60 } });
         counting.count = 0;
         const render_start = nanosecondsNow();
-        var screen = try overview_view.render(counting.allocator(), &state, .{}, .{}, 0);
+        // What App's overview builds each frame: the header, the list's
+        // rows on screen through GroupedList, the facts and the status.
+        var frame: std.heap.ArenaAllocator = .init(counting.allocator());
+        _ = try overview_view.headerSegments(frame.allocator(), &state, 200, .{});
+        const Source = struct {
+            fn row(userdata: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!GroupedList.Row {
+                const shown: *const overview_view.State = @ptrCast(@alignCast(userdata));
+                const built = try overview_view.listSegments(arena, shown, overview_view.listItem(shown, index).?, 200, .{}, 0);
+                return .{ .segments = built.segments, .heading = built.heading };
+            }
+        };
+        list.rows = .{ .userdata = &state, .count = @intCast(overview_view.listLength(&state)), .rowFn = Source.row };
+        list.selected = if (overview_view.selectedLine(&state)) |at| @intCast(at) else null;
+        _ = try list.widget().draw(.{ .arena = frame.allocator(), .min = .{}, .max = .{ .width = 200, .height = 53 }, .cell_size = .{} });
+        _ = try overview_view.factsSegments(frame.allocator(), &state, 200, .{});
+        _ = try overview_view.statusSegments(frame.allocator(), &state, .{}, 200, .{});
         render_ns[run] = nanosecondsNow() - render_start;
         render_allocations = @max(render_allocations, counting.count);
-        screen.deinit();
+        frame.deinit();
     }
     std.mem.sortUnstable(u64, &merge_ns, {}, std.sort.asc(u64));
     std.mem.sortUnstable(u64, &listing_ns, {}, std.sort.asc(u64));
     std.mem.sortUnstable(u64, &render_ns, {}, std.sort.asc(u64));
-    std.debug.print("overview benchmark, {d} rows: merging step {d}us median ({d}-{d}); whole listing {d}us median ({d}-{d}), {d} allocations; render 200x60 {d}us median ({d}-{d}), {d} allocations\n", .{
+    std.debug.print("overview benchmark, {d} rows: merging step {d}us median ({d}-{d}); whole listing {d}us median ({d}-{d}), {d} allocations; frame rows 200x60 {d}us median ({d}-{d}), {d} allocations\n", .{
         total,
         merge_ns[runs / 2] / 1000,
         merge_ns[0] / 1000,

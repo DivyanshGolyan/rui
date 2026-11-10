@@ -98,7 +98,7 @@ FIXTURES = {
                                  ("src/launch_frame.zig", "src/mysql_url.zig", "src/mcp/Running.zig", "src/mcp/servers.zig")),
     "ts-client": ((I + "host_process.py",), (), ("src/launch_frame.zig",)),
     "request-wait-integration": ((I + "request_wait_integration.py",), (),
-                                 (CALLER, "src/request_wait.zig", "src/server_host.zig", "src/cli_args.zig",
+                                 (CALLER, "src/request_wait.zig", "src/server_host.zig", "src/cli_args.zig", "src/serve_grammar.zig",
                                   "src/caller_error.zig", "src/caller_exit.zig")),
     "current-facts-integration": ((I + "current_facts_integration.py",), (), ()),
     "server-delivery-integration": ((I + "server_delivery_integration.py",), (), ()),
@@ -110,7 +110,7 @@ FIXTURES = {
     "host-stop-integration": ((I + "host_stop_integration.py",), (I + "host_status_actor.zig",),
                               (CALLER, "src/HostLifecycle.zig", "src/server_host.zig")),
     "host-launch-integration": ((I + "host_launch_integration.py",), (),
-                                ("src/HostLifecycle.zig", "src/descriptor_capacity.zig", "src/os/descriptor_limit.zig")),
+                                ("src/HostLifecycle.zig", "src/descriptor_capacity.zig", "src/os/descriptor_limit.zig", "src/serve_grammar.zig")),
     "descriptor-capacity-integration": ((I + "descriptor_capacity_integration.py",), (),
                                         ("src/descriptor_capacity.zig", "src/os/descriptor_limit.zig")),
     "host-allocator-integration": ((I + "host_allocator_test.py",), (), ("src/os/process.zig",)),
@@ -262,11 +262,16 @@ def tree_graph():
     return Graph([name for name in tracked if name and (ROOT / name).is_file()], lambda name: (ROOT / name).read_text())
 
 
+# The option grammar cli_args.zig used to hold: rules that name cli_args.zig
+# name these too. Path rules, not fixture owners, so the Host importing them
+# does not dispatch into the human CLI.
+CLI_GRAMMAR = ("src/cli_grammar.zig", "src/cli_option_names.zig", "src/serve_grammar.zig")
+
 # The upgrade fixture is standalone, including when a composed gate is selected.
 UPGRADE_PATHS = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
                  "src/upgrade_process.zig", "src/HostLifecycle.zig", "src/host_identity.zig",
                  "src/host_identity.c", "src/UpgradePanel.zig", "src/host_launch.c",
-                 "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/slash_commands.zig",
+                 "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/client.zig", "src/slash_commands.zig",
                  "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
                  "tests/integration/upgrade_integration.py", "tests/ci/test_upgrade_fixture.py", "release/*", "install.sh", "build.zig")
 
@@ -276,7 +281,7 @@ INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_
                    "tests/ci/test_install.py", "tests/ci/test_installer_boundary.py", "tests/ci/test_release.py",
                    "tests/ci/release.py", "tests/ci/release_publication.py", "tests/ci/test_release_publication.py", "tests/ci/release_numbers.py", "tests/ci/qualification.py",
                    "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
-                   "src/cli.zig", "src/cli_args.zig", "src/store/schema.zig",
+                   "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/store/schema.zig",
                    "src/fetch_dependencies.sh", "release/*", "install.sh", "build.zig", "build.zig.zon")
 
 # Ready PRs run the previous installed-release upgrade only when they change
@@ -366,8 +371,7 @@ CONTENT_RULES = {
 }
 
 # Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
-RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py",
-                      "tests/integration/terminal_input_replay.py")
+RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py")
 
 # What the import graph cannot see: inputs no literal import names (C
 # sources, generators, non-Zig consumers) and owners whose checks a test
@@ -378,6 +382,8 @@ RULES = (
      "Installer: real publication and PATH boundary"),
     (UPGRADE_PATHS, ("upgrade-integration",), ("upgrade-integration",),
      "Stable upgrade: installed binary, lifecycle and installer boundary"),
+    (CLI_GRAMMAR[:2], ("human-cli-integration", "request-wait-integration"), ("human-cli-integration", "request-wait-integration"),
+     "The option grammar engine every human CLI command and request wait parse with"),
     (("src/models_dev.zig", "src/model_catalog*.zig"), ("test-logic",), ("test-logic",),
      "Shipped model facts and the models.dev token-walk parser, without production callers"),
     (("src/model_list.zig",), ("codex-h2-integration",), ("codex-h2-integration",),
@@ -420,13 +426,13 @@ RULES = (
      ("transport-h2-integration", "codex-h2-integration", "current-facts-integration",
       "server-delivery-integration", "measurement-check"),
      "Shared model context prose: fixture consumers and Go request oracles"),
-    (("src/server*.zig", "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/caller_*.zig", "src/cli_value.zig",
+    (("src/server*.zig", "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/client.zig", "src/caller_*.zig", "src/cli_value.zig",
       "src/slash_commands.zig", "src/protocol_reply.zig", "src/ResponseTiming.zig", "src/preferences.zig",
       "src/provider_selection.zig", "src/client_defaults.zig", "src/configure_input.zig", "src/new_session_selection.zig",
       "src/preference_values.zig", "src/product_defaults.zig", "tests/integration/product_defaults.py"),
      ("admission-debug-integration",), ("admission-debug-integration",),
      "Admission, capture and CLI selection: the complete Debug recovery matrix"),
-    (("src/cli.zig", "src/cli_args.zig", "src/cli_value.zig", "src/client.zig", "src/client_defaults.zig",
+    (("src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/cli_value.zig", "src/client.zig", "src/client_defaults.zig",
       "src/configure_input.zig", "src/product_defaults.zig", "src/protocol.zig", "src/store/domain/configuration.zig", "openapi.json"),
      ("measurement-check",), ("measurement-check",),
      "CLI configuration surface: the measurement runners' configure call against the current CLI"),
