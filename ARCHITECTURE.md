@@ -1476,7 +1476,8 @@ It checks (`Checking for updates…`), then installs a found release at once, wi
 Esc cancels while it checks or prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting the Host…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
 A release the running client cannot use leaves `Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave` on the status bar until another `/upgrade`; longer text, such as PATH warnings, the full check and retained cleanup paths, prints with the departure message.
 Esc cancels the check as it cancels an install still preparing, and so does leaving rui.
-One pure core, `upgrade_status`, holds the run's steps and lines for both screens.
+The Upgrade worker says where the whole run stands (checking, installing and its step, cancelling, ended) each time that changes, and the overview stores that one value: Host requests wait, Esc is the run's and another `/upgrade` is a no-op by it alone.
+One pure core, `upgrade_status`, turns that value into the status bar's line for both screens.
 Divyansh chose this on 2026-11-09 (TUI rework plan, "/upgrade without a page"), replacing the `UpgradePanel` page and its Install step.
 It retains the draft, selected Session and unresolved capture handles through handoff and never replays indeterminate effects.
 Restart can interrupt work in every Session in that Store, not other Stores.
