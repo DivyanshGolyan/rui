@@ -139,12 +139,16 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
     var installation: Installation.InstallationOutcome = undefined;
     const selected = checked.selected.released;
     if (selected.version.order(checked.candidate.version) != .lt) {
+        // Reselecting the installed build publishes too.
+        Progress.send(progress, .publishing);
+        try process.check(cancellation);
         installation = try Installation.publishExistingWithReporter(allocator, init.io, checked.home, selected.build, .released_upgrade, cancellation, cleanup.reporter(.publication));
     } else {
         Progress.send(progress, .preparing);
         var prepared = try Installation.prepareWithReporter(allocator, init.io, checked.home, &checked.candidate, cancellation, cleanup.reporter(.preparation));
         defer prepared.disposeWithReporter(allocator, init.io, cleanup.reporter(.disposal)) catch {};
         Progress.send(progress, .publishing);
+        try process.check(cancellation);
         installation = try Installation.publishWithReporter(allocator, init.io, checked.home, &prepared, .released_upgrade, cancellation, cleanup.reporter(.publication));
     }
     errdefer installation.deinit(allocator);

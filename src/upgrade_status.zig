@@ -79,6 +79,9 @@ pub const Upgrade = struct {
         switch (self.state) {
             .installing => |*install| if (@backingInt(next) > @backingInt(install.step)) {
                 install.step = next;
+                // The run published before Esc reached it; the worker
+                // refused that cancel, so the row says what happens.
+                install.cancelling = false;
             },
             else => {},
         }
@@ -211,6 +214,14 @@ test "a found release installs at once, saying what the restart will do, and Esc
     try expectLine(&run, &buffer, "Upgrading to 0.60.1 · restarts the Host (1 Session working) · esc cancels", .normal, .until_done);
     run.step(.publishing);
     try expectLine(&run, &buffer, "Publishing; cancelling no longer rolls back", .normal, .until_done);
+    // Esc while preparing, but the worker published first: the row says
+    // what happened, not the cancel it refused.
+    var raced: Upgrade = .{};
+    raced.begin();
+    raced.found(.{ .version = .{ .schema = 60, .patch = 0 }, .host = .none });
+    try std.testing.expect(raced.escape());
+    raced.step(.publishing);
+    try expectLine(&raced, &buffer, "Publishing; cancelling no longer rolls back", .normal, .until_done);
     try std.testing.expect(!run.escape());
     run.step(.restarting);
     try expectLine(&run, &buffer, "Restarting the Host…", .normal, .until_done);

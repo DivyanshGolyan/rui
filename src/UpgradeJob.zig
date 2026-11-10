@@ -19,6 +19,9 @@ store: []const u8 = "",
 allocator: std.mem.Allocator = undefined,
 task: ClientTask = .{},
 phase: std.atomic.Value(upgrade.Phase) = .init(.checking),
+/// Who decided the run first: Esc cancelling it, or the worker committing
+/// to publication. The one owner of whether Esc may still cancel.
+gate: std.atomic.Value(enum(u8) { open, cancelled, committed }) = .init(.open),
 operation: Operation = .check,
 checked: ?upgrade.Check = null,
 result: ?upgrade.Result = null,
@@ -56,6 +59,14 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
 
 fn progress(raw: *anyopaque, phase: upgrade.Phase) void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (phase == .publishing) {
+        // Publication commits the run unless Esc closed the gate first;
+        // then the worker stops itself before it publishes.
+        if (self.gate.cmpxchgStrong(.open, .committed, .acq_rel, .acquire) != null) {
+            self.task.cancellation.requestStop();
+            return;
+        }
+    }
     self.phase.store(phase, .release);
 }
 
@@ -100,9 +111,19 @@ fn finish(self: *Self) void {
     self.finished = true;
 }
 
-/// Cancellation is a request, never a promise that publication rolled back.
-/// One made before `begin` holds: the run then ends without checking.
+/// Esc: cancels only while nothing is published. The worker and Esc race
+/// on `gate`, so whichever comes first holds; once publication committed,
+/// Esc is refused and the status row hears the publication. One made
+/// before `begin` holds: the run then ends without checking.
 pub fn cancel(self: *Self) void {
+    if (self.finished) return;
+    if (self.gate.cmpxchgStrong(.open, .cancelled, .acq_rel, .acquire)) |gate| if (gate == .committed) return;
+    self.cancelling = true;
+    if (self.started) self.task.cancel();
+}
+
+/// Leaving the overview: stops the run wherever it is, publication or not.
+fn abandon(self: *Self) void {
     if (self.finished) return;
     self.cancelling = true;
     if (self.started) self.task.cancel();
@@ -112,7 +133,7 @@ pub fn cancel(self: *Self) void {
 /// deinit. The caller retains its own primary error independently.
 pub fn settle(self: *Self) void {
     if (!self.started or self.finished) return;
-    self.cancel();
+    self.abandon();
     self.joinWorker();
     self.finish();
 }
@@ -375,6 +396,36 @@ test "settle requests cancellation and joins before returning the failure" {
     try std.testing.expect(job.finished and job.task.thread == null);
     try std.testing.expectEqual(error.Cancelled, job.failure.?);
     job.deinit();
+}
+
+test "Esc and publication race on one gate: whichever comes first holds" {
+    // Esc after the worker reached publication: refused, nothing stops.
+    {
+        var job: Self = .{ .started = true, .operation = .install };
+        progress(&job, .preparing);
+        progress(&job, .publishing);
+        job.cancel();
+        try std.testing.expect(!job.cancelling);
+        try std.testing.expect(!job.task.cancellation.stopped.load(.acquire));
+        try std.testing.expectEqual(upgrade.Phase.publishing, job.phase.load(.acquire));
+    }
+    // Esc first: the worker's next step to publication stops itself.
+    {
+        var job: Self = .{ .started = true, .operation = .install };
+        progress(&job, .preparing);
+        job.cancel();
+        try std.testing.expect(job.cancelling);
+        progress(&job, .publishing);
+        try std.testing.expect(job.task.cancellation.stopped.load(.acquire));
+        try std.testing.expectEqual(upgrade.Phase.preparing, job.phase.load(.acquire));
+    }
+    // Leaving the overview still cancels after publication.
+    {
+        var job: Self = .{ .started = true, .operation = .install };
+        progress(&job, .publishing);
+        job.abandon();
+        try std.testing.expect(job.cancelling);
+    }
 }
 
 test "a cancel before the worker starts ends the run cancelled without checking" {
