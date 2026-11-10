@@ -129,8 +129,8 @@ pub const Heard = struct { found: bool = false, step: upgrade_status.Step = .pre
 
 /// The next thing the core should hear, given what it has heard, or null
 /// when it is up to date. `working` counts the Host's Sessions at work.
-/// A release the selected build already is installs quietly: the check
-/// goes on until it ends up to date, or the Host restarts onto it.
+/// A release the selected build already is, with no older Host to restart,
+/// installs quietly: the check goes on until it ends up to date.
 pub fn news(self: *const Self, heard: *Heard, working: usize) ?UpgradeStep {
     if (heard.ended) return null;
     if (self.operation == .install and !heard.found) if (self.checked) |*checked| if (!current(checked)) {
@@ -153,8 +153,12 @@ pub fn news(self: *const Self, heard: *Heard, working: usize) ?UpgradeStep {
     return .{ .ended = self.ending() };
 }
 
+/// The selected build already is the release and no running Host would
+/// restart onto it, so the run has nothing to show until it ends.
 fn current(checked: *const upgrade.Check) bool {
-    return checked.selected == .released and checked.selected.released.version.order(checked.candidate.version) == .eq;
+    const selected = checked.selected == .released and checked.selected.released.version.order(checked.candidate.version) == .eq;
+    const restarts = checked.host == .managed and checked.host.managed.version.order(checked.candidate.version) == .lt;
+    return selected and !restarts;
 }
 
 fn version(of: @FieldType(@FieldType(upgrade.Check, "candidate"), "version")) upgrade_status.Version {
@@ -498,6 +502,31 @@ test "the core hears a found release once, then each restart step forward, then 
     try std.testing.expectEqual(@as(usize, 0), heardAll(&job, &heard, 2, &out).len);
     job.result = null;
     job.checked = null;
+}
+
+test "a release already selected but not yet running in the Host is found, so its restart shows" {
+    var entries: [0][]const u8 = .{};
+    var private: [0]u8 = .{};
+    const snapshot: @import("host_identity.zig").Snapshot = .{ .pid = 0, .started = 0, .executable = private[0..0], .argv = entries[0..0], .environment = &entries, .storage = &private, .entries = &entries };
+    for ([_]struct { host: u16, found: bool }{ .{ .host = 0, .found = true }, .{ .host = 1, .found = false } }) |case| {
+        var job: Self = .{ .started = true, .operation = .install, .checked = news_check };
+        job.checked.?.selected = .{ .released = .{ .build = "/synthetic/build", .version = .{ .schema = 60, .patch = 1 } } };
+        job.checked.?.host = .{ .managed = .{ .observed = undefined, .launch = .{ .options = &.{} }, .version = .{ .schema = 60, .patch = case.host }, .snapshot = snapshot } };
+        job.phase.store(.preparing, .release);
+        var heard: Heard = .{};
+        var out: [8]UpgradeStep = undefined;
+        const said = heardAll(&job, &heard, 3, &out);
+        if (case.found) {
+            // An older Host restarts onto it: the status row says so.
+            try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .found = .{ .version = .{ .schema = 60, .patch = 1 }, .host = .{ .running = 3 } } }}), said);
+            job.phase.store(.stopping, .release);
+            try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .step = .restarting }}), heardAll(&job, &heard, 3, &out));
+        } else {
+            // The Host already runs it: nothing to show until it ends.
+            try std.testing.expectEqual(@as(usize, 0), said.len);
+        }
+        job.checked = null;
+    }
 }
 
 test "how a run ends, as the status bar names it" {
