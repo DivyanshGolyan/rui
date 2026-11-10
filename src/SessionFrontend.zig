@@ -593,6 +593,71 @@ test "App Session retains the draft across a permission card arriving during pas
     try std.testing.expectEqual(null, self.submission.task.thread);
 }
 
+test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps the hidden draft" {
+    for ([_][]const u8{ "\x03", "\x04", "\x1b[99;5u", "\x1b[100;5u" }) |bytes| {
+        errdefer std.debug.print("bytes={x}\n", .{bytes});
+        var environ = try std.testing.environ.createMap(std.testing.allocator);
+        defer environ.deinit();
+        const screen = try std.testing.allocator.create(Screen);
+        defer std.testing.allocator.destroy(screen);
+        try screen.init(std.testing.io, &environ, false);
+        defer screen.deinit();
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const page = try tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+        defer page.close(std.testing.io);
+        try page.writeStreamingAll(std.testing.io, "$ echo safe\n");
+        var init: std.process.Init = undefined;
+        init.io = std.testing.io;
+        init.gpa = std.testing.allocator;
+        init.environ_map = &environ;
+        var interrupted: client.Cancellation = .{};
+        const self = try std.testing.allocator.create(Self);
+        defer std.testing.allocator.destroy(self);
+        self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
+        const Hooks = struct {
+            var left: ?Outcome = null;
+            fn leave(_: *anyopaque, _: *vxfw.EventContext, outcome: Outcome) !void {
+                left = outcome;
+            }
+            fn upgrade(_: *anyopaque, _: *vxfw.EventContext) !void {
+                return error.UnexpectedUpgrade;
+            }
+            fn copy(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
+                return error.UnexpectedCopy;
+            }
+        };
+        Hooks.left = null;
+        var root: Root = .{ .overview = empty_app_text.widget() };
+        const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .upgrade = Hooks.upgrade, .copy = Hooks.copy }, .{ .depth = .none });
+        self.reading.opening = false;
+        self.poll_at = std.math.maxInt(i96);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        // A hidden draft with its caret at the start: leaving never deletes
+        // what the card hides.
+        _ = self.input.append("kept");
+        self.input.editors[self.input.active].cursor = 0;
+        self.reading.prepared_action = 17;
+        self.live.work.first_action = 17;
+        try widget_.handleEvent(&ctx, .tick);
+        _ = try widget_.draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
+        try std.testing.expectEqual(@as(?u64, 17), self.app_consent.request);
+        // The key as App decodes it: the focused card first, then the Session.
+        var parser: vaxis.Parser = .{};
+        const key = (try parser.parse(bytes, null)).event.?.key_press;
+        ctx.consume_event = false;
+        try self.app_card.widget().handleEvent(&ctx, .{ .key_press = key });
+        if (!ctx.consume_event) try widget_.handleEvent(&ctx, .{ .key_press = key });
+        try std.testing.expectEqual(@as(?Outcome, .detached), Hooks.left);
+        try std.testing.expect(self.app_consent.request == null);
+        try std.testing.expectEqualStrings("kept", self.input.composition().bytes);
+        _ = self.submission.join();
+        self.submission.close();
+    }
+}
+
 /// A Session's input starts empty, and no frame of it has drawn a list yet:
 /// the screen's list was the previous Session's, at revisions this input
 /// counts again.
