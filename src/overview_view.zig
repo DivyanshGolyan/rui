@@ -30,6 +30,7 @@ const overview_style = @import("overview_style.zig");
 const provider_name = @import("provider_name.zig");
 const session_work = @import("session_work.zig");
 const session_upgrade = @import("session_upgrade.zig");
+const upgrade_status = @import("upgrade_status.zig");
 const slash_commands = @import("slash_commands.zig");
 const skill_completion = @import("skill_completion.zig");
 const skill_suggestions = @import("skill_suggestions.zig");
@@ -306,10 +307,8 @@ pub const FirstLine = struct {
 /// Bytes in a mebibyte, the unit memory shows in below a gibibyte.
 pub const mib = 1024 * 1024;
 
-/// Live physical memory, as the shell reads it about once a second:
-/// `rui` is this TUI plus its Host; `tools` the tool processes the Host
-/// runs, null while none runs.
-pub const Memory = struct { rui: u64, tools: ?u64 };
+/// Live physical memory, as the shell reads it about once a second.
+pub const Memory = @import("process_memory.zig").Memory;
 
 pub const Host = struct {
     /// Unix seconds.
@@ -377,6 +376,8 @@ pub const Event = union(enum) {
     memory: Memory,
     /// A needs-you row's command read ended.
     command: CommandText,
+    /// Where the run /upgrade started stands now.
+    upgrade: upgrade_status.Run,
     conversed: Conversed,
     /// A model-list read ended.
     models: ModelsRead,
@@ -386,12 +387,60 @@ pub const Event = union(enum) {
     observed: Observed,
     /// The command `step` asked the shell to run ended.
     ran: Ran,
+    /// A pointer press on something a click acts on.
+    clicked: Click,
     /// Esc left a conversation whose original is unconfirmed. The shell
     /// sends it only while `canHoldSend` says the ledger has room.
     unconfirmed: Unconfirmed,
 };
 
+/// What a click lands on: a Sessions list line `listItem` names, or the
+/// counts line's view name, which shows only off the default view.
+pub const Click = union(enum) { line: usize, view };
+
 pub const Unconfirmed = struct { reference: Reference, recovery: submission.Recovery };
+
+/// Bytes `unconfirmedLine` takes at most.
+pub const max_unconfirmed_line_bytes = 80;
+
+/// What the status bar says while a send Esc left unconfirmed waits for
+/// the person: the newest one, with its recover key when it has one. Every
+/// one prints on departure. Null while none waits.
+pub fn unconfirmedLine(state: *const State, buffer: *[max_unconfirmed_line_bytes]u8) ?[]const u8 {
+    var at = state.request_count;
+    while (at > 0) {
+        at -= 1;
+        const request = &state.requests[at];
+        if (request.kind != .send or request.status != .unknown) continue;
+        // Fits 80 columns whole, key included.
+        return switch (request.sent) {
+            .saved => |saved| std.fmt.bufPrint(buffer, "! Not confirmed · rui request recover {s}", .{&saved.original.key}),
+            else => std.fmt.bufPrint(buffer, "! {s}: send not confirmed; details on exit", .{&request.session.?}),
+        } catch unreachable;
+    }
+    return null;
+}
+
+pub const StatusBuffer = [@max(upgrade_status.max_line_bytes, max_unconfirmed_line_bytes)]u8;
+
+/// What fills the list's lines; `State.listArea` says which.
+pub const ListArea = enum { sessions, panel, picker };
+
+pub const StatusLine = struct { text: []const u8, colour: Colour };
+
+/// The overview's status bar: an Upgrade while it runs, since its line is
+/// where Esc is offered; else the newest notice; else an Upgrade that
+/// holds; else the newest unconfirmed send; null when all is quiet.
+/// Borrows `state` and `buffer`.
+pub fn statusLine(state: *const State, caps: Caps, buffer: *StatusBuffer) ?StatusLine {
+    const upgrade: ?upgrade_status.Line = if (state.upgrade) |run| upgrade_status.line(run, buffer[0..upgrade_status.max_line_bytes], if (caps.unicode) .unicode else .ascii) else null;
+    if (upgrade) |line| if (line.lasts == .until_done) return .{ .text = line.text, .colour = .normal };
+    if (state.notice) |*notice| return .{ .text = notice.firstLine(), .colour = notice.colour };
+    if (upgrade) |line| if (line.lasts == .persistent)
+        return .{ .text = line.text, .colour = if (line.tone == .attention) .attention else .normal };
+    const unconfirmed = unconfirmedLine(state, buffer[0..max_unconfirmed_line_bytes]) orelse return null;
+    return .{ .text = unconfirmed, .colour = .attention };
+}
 
 /// The ledger can hold a conversation's unconfirmed original.
 pub fn canHoldSend(state: *const State) bool {
@@ -608,7 +657,8 @@ pub const Effect = union(enum) {
     /// Save the person's default for new Sessions, as `rui defaults
     /// configure --provider --model` does, and answer with `saved`.
     save_default: Default,
-    upgrade,
+    /// Esc asked the running Upgrade to cancel before it publishes.
+    cancel_upgrade,
     /// Empty the line editor.
     clear_draft,
     /// Put this in place of part of the draft, as Tab does.
@@ -921,12 +971,11 @@ pub const State = struct {
     /// The Workspace the composer starts Sessions in, as an index in `workspaces`.
     cwd: u32,
     now_ms: u64 = 0,
-    /// The selected Rui does not speak this Host's protocol: Host intents
-    /// wait for /upgrade or a new terminal.
-    upgrade_blocked: bool = false,
-    /// An Upgrade is under way or the listing has not yet been read again
-    /// under the selected Rui: Host intents wait.
-    upgrade_pending: bool = false,
+    /// What the last Upgrade left Host intents: open, held until the
+    /// listing is read again under the selected Rui, or blocked, since the
+    /// selected Rui does not speak this Host's protocol, until /upgrade or
+    /// a new terminal.
+    upgrade_after: session_upgrade.After = .open,
     /// The terminal's own last successful `rui auth login`, Unix seconds.
     login_at: ?u64 = null,
 
@@ -970,6 +1019,9 @@ pub const State = struct {
     host: ?Host = null,
     /// The latest memory read; null before the first.
     memory: ?Memory = null,
+    /// The run /upgrade started, as its worker last said it stands; null
+    /// before the first.
+    upgrade: ?upgrade_status.Run = null,
 
     /// The person's default for new Sessions. A pick replaces it at once,
     /// and a save follows it to the preferences file. `nextBinding` says
@@ -1056,6 +1108,15 @@ pub const State = struct {
             .compose => .edit,
             .frozen => .frozen,
         };
+    }
+
+    /// What fills the list's lines: the model picker over a panel, a panel
+    /// over the Sessions. The frame draws this and a click lands on it, so
+    /// neither decides it again.
+    pub fn listArea(self: *const State) ListArea {
+        if (self.picker != null) return .picker;
+        if (self.panel != null) return .panel;
+        return .sessions;
     }
 
     /// The picker remains actionable even on a screen too small to show it.
@@ -1157,26 +1218,42 @@ pub const State = struct {
         return at;
     }
 
-    /// An Upgrade ended with `outcome`: an unchanged panel leaves the block
+    /// /upgrade's run has not ended: the shell runs and polls its worker.
+    pub fn upgrading(self: *const State) bool {
+        return if (self.upgrade) |run| run.going() else false;
+    }
+
+    /// Host intents wait: an Upgrade runs, or the last one left them held.
+    /// The one rule every Host intent and the shell's lending ask.
+    pub fn holdsHost(self: *const State) bool {
+        return self.upgrading() or self.upgrade_after != .open;
+    }
+
+    /// An Upgrade ended with `outcome`: an unchanged one leaves the block
     /// as it was, and unless blocked the overview lists again before Host
     /// intents resume.
     pub fn upgraded(self: *State, outcome: session_upgrade.Outcome) void {
-        switch (outcome) {
-            .unchanged => {},
-            .compatible => self.upgrade_blocked = false,
-            .incompatible => self.upgrade_blocked = true,
-        }
-        self.upgrade_pending = !self.upgrade_blocked;
+        self.upgrade_after = switch (outcome) {
+            .unchanged => if (self.upgrade_after == .blocked) .blocked else .reobserving,
+            .compatible => .reobserving,
+            .incompatible => .blocked,
+        };
         self.next_list_ms = 0;
     }
 
+    /// A conversation's Upgrade began: Host intents wait until it says how
+    /// it ended and the listing is read again. A block stays.
+    pub fn holdForSessionUpgrade(self: *State) void {
+        if (self.upgrade_after == .open) self.upgrade_after = .reobserving;
+    }
+
     /// How long the shell may wait for input, in milliseconds, -1 for ever:
-    /// until the next `tick`, every `upgrade_poll_ms` while an Upgrade holds
-    /// the overview or is asked for, and while the screen spins no later than
+    /// until the next `tick`, every `upgrade_poll_ms` while an Upgrade runs
+    /// or blocks the overview, and while the screen spins no later than
     /// its next frame. `now_ms` is wall-clock time, as ticks are; `awake_ms`
     /// is the monotonic clock frames count on.
-    pub fn waitMs(self: *const State, upgrading: bool, now_ms: u64, awake_ms: u64, spins: bool) i32 {
-        const next: i32 = if (self.upgrade_blocked or upgrading) upgrade_poll_ms else if (self.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
+    pub fn waitMs(self: *const State, now_ms: u64, awake_ms: u64, spins: bool) i32 {
+        const next: i32 = if (self.upgrade_after == .blocked or self.upgrading()) upgrade_poll_ms else if (self.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
         if (!spins) return next;
         const frame: i32 = @intCast(spin_interval_ms - awake_ms % spin_interval_ms);
         return if (next < 0) frame else @min(next, frame);
@@ -1582,15 +1659,19 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             },
         },
         .first_line => |result| try firstLine(state, result),
+        // A click is input as a key is: the screen that takes no key takes
+        // no click, wherever it lands.
+        .clicked => |clicked| if (state.inputMode() != .frozen) switch (clicked) {
+            .line => |line| try click(state, line, &effects),
+            // As `/sessions` does; the default view shows no name.
+            .view => if (state.archive != .active) try changeArchiveView(state, .active, &effects),
+        },
         .unconfirmed => |left| {
             std.debug.assert(canHoldSend(state));
             state.requests[state.request_count] = .{ .kind = .send, .session = left.reference, .status = .unknown, .sent = left.recovery };
             state.request_count += 1;
-            switch (left.recovery) {
-                // Fits 80 columns whole, key included.
-                .saved => |saved| state.say(.attention, "! Not confirmed · rui request recover {s}", .{&saved.original.key}),
-                else => state.say(.attention, "! {s}: send not confirmed; details on exit", .{&left.reference}),
-            }
+            // `unconfirmedLine` says it until the overview ends.
+            state.notice = null;
         },
         .conversed => |input| {
             switch (input.input) {
@@ -1686,6 +1767,19 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .host => |facts| state.host = facts,
         .memory => |memory| state.memory = memory,
         .command => |answer| try commandRead(state, answer),
+        .upgrade => |run| {
+            // The shell reports only the run /upgrade asked for.
+            std.debug.assert(state.upgrading());
+            state.upgrade = run;
+            if (run == .ended) {
+                // An ending that is only news is a notice, which the next
+                // key clears; one that holds stays as the Upgrade's line.
+                var said: [upgrade_status.max_line_bytes]u8 = undefined;
+                const line = upgrade_status.line(run, &said, .unicode);
+                if (line.lasts == .notice) state.say(if (line.tone == .attention) .attention else .normal, "{s}", .{line.text});
+                state.upgraded(run.ended.outcome);
+            }
+        },
         .models => |read| readModels(state, read),
         .picker_action => |input| if (state.picker) |*shown| {
             syncPicker(state, input.draft);
@@ -1886,7 +1980,7 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
         effects.add(.{ .notify = .{ .name = title(state, row).text, .kind = found.kind, .more = found.more } });
     }
     state.listing = false;
-    state.upgrade_pending = false;
+    if (state.upgrade_after == .reobserving) state.upgrade_after = .open;
     try readFirstLines(state, effects);
     readCommands(state, effects);
 }
@@ -2226,11 +2320,15 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             } else select(state, pressed),
             .select_previous => select(state, .previous),
             .select_next => select(state, .next),
-            // Esc closes the picker; else a shown command list closes, then a
-            // panel, each keeping the draft.
+            // Esc closes the picker; else it cancels an Upgrade that can
+            // still change nothing, as the status row offers, even while the
+            // draft still lists `/upgrade`; else a shown command list closes,
+            // then a panel, each keeping the draft.
             .clear => if (picker != null) {
                 state.closePicker();
                 effects.add(.clear_draft);
+            } else if (state.upgrade != null and state.upgrade.?.takesEscape()) {
+                effects.add(.cancel_upgrade);
             } else if (shownCommands(state, value.draft)) |shown| {
                 shown.close();
             } else if (state.panel != null) state.closePanel() else if (value.draft.bytes.len != 0) effects.add(.clear_draft) else {
@@ -2341,6 +2439,23 @@ fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *co
     return if (state.openStop(row.reference) != null) work_line.stopping else work_line.of(words, &row.state, null, state.now_ms);
 }
 
+/// One click on a row opens it, as selecting it and Enter on a blank draft
+/// do. A folded group's "more" line opens the group at its first hidden
+/// row, as moving into them does. Headings and gaps take no click.
+fn click(state: *State, line: usize, effects: *Effects) error{OutOfMemory}!void {
+    // Only the Sessions list's lines are Sessions.
+    if (state.listArea() != .sessions) return;
+    const item = listItem(state, line) orelse return;
+    const at = switch (item) {
+        .gap, .heading, .empty => return,
+        .row => |at| at,
+        .more => |more| state.runs.get(more.group).start + fold_rows,
+    };
+    state.unfolded.insert(state.rows.items[state.order.items[at]].group());
+    state.selected = state.rows.items[state.order.items[at]].reference;
+    if (item == .row) try enter(state, "", effects);
+}
+
 /// Moves the selection where the Sessions show.
 fn select(state: *State, action: Action) void {
     state.closePanel();
@@ -2351,9 +2466,19 @@ pub const upgrade_recovery = "! Host requests paused after Upgrade; draft retain
 
 /// Admission applies only to new Host intents, never to their completions.
 fn admitHostRequest(state: *State) bool {
-    if (!state.upgrade_blocked and !state.upgrade_pending) return true;
+    if (!state.holdsHost()) return true;
     state.say(.attention, upgrade_recovery, .{});
     return false;
+}
+
+/// /upgrade checks at once; Host intents wait until it ends. The shell
+/// runs the worker for as long as `upgrading` says.
+fn startUpgrade(state: *State) void {
+    // The run going on keeps its progress and its Esc.
+    if (state.upgrading()) return;
+    // An ending that holds is newer than any notice.
+    state.notice = null;
+    state.upgrade = .checking;
 }
 
 fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
@@ -2366,17 +2491,17 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         },
         else => {},
     };
-    if (!admitHostRequest(state)) {
-        if (parsed) |result| switch (result) {
-            .command => |command| switch (command.name) {
-                .upgrade => return effects.add(.upgrade),
-                .exit => return effects.add(.exit),
-                else => {},
-            },
+    // The Upgrade's own command and leaving are no Host requests, so no
+    // hold refuses them.
+    if (parsed) |result| switch (result) {
+        .command => |command| switch (command.name) {
+            .upgrade => return startUpgrade(state),
+            .exit => return effects.add(.exit),
             else => {},
-        };
-        return;
-    }
+        },
+        else => {},
+    };
+    if (!admitHostRequest(state)) return;
     // As in a conversation, the draft is sent byte for byte; only a blank
     // draft opens the selected row instead.
     if (std.mem.trim(u8, text, " \t\r\n").len == 0) {
@@ -2412,10 +2537,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
             try changeArchiveView(state, filter, effects);
         },
         .exit => effects.add(.exit),
-        .upgrade => {
-            state.upgrade_pending = true;
-            effects.add(.upgrade);
-        },
+        .upgrade => startUpgrade(state),
         .model => unreachable, // The draft-backed picker takes /model before submission.
         .configure => if (configure(state, command.argument)) effects.add(.clear_draft),
         .help => {
@@ -3017,7 +3139,7 @@ fn caretName(draft: Draft) ?[]const u8 {
 /// `skillsRead`. Its prefix borrows the state until then.
 pub fn askSkills(state: *State, draft: Draft) ?skill_completion.Ask {
     // The Host may not speak this protocol while an Upgrade is under way.
-    if (state.inputMode() != .compose or state.upgrade_blocked or state.upgrade_pending) return null;
+    if (state.inputMode() != .compose or state.holdsHost()) return null;
     // A Message binds the skills of the Workspace its Session starts in:
     // a held `/configure --workspace`, else the overview's. When that
     // changes, nothing held or in flight answers.
@@ -3048,64 +3170,44 @@ fn shownCommands(state: *State, draft: Draft) ?*slash_commands.Shown {
     return slash_commands.Shown.drawnNow(&state.commands, nextCommands(state, draft));
 }
 
-/// Builds one line's spans left to right, sanitizing and clipping text:
-/// the span builder behind the App rows' segment functions, until PR 3
-/// replaces it.
-const Painter = struct {
+/// One line's spans, placed left to right at their columns, its text made
+/// terminal-safe and clipped to the room it has. Each span keeps the role
+/// it was given, as `plain` leaves it without colour; the widget that
+/// draws the line makes the role a colour through `widget_style`.
+const Spans = struct {
     arena: Allocator,
     caps: Caps,
     glyphs: Glyphs,
     width: u16,
-    frame: u64,
     spans: [24]Span = undefined,
     count: usize = 0,
     column: usize = 0,
-    /// The selection's ground across the line, inside its margins.
-    selected: bool = false,
+
+    fn of(arena: Allocator, caps: Caps, width: u16) Spans {
+        return .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width };
+    }
 
     /// The glyph set `work_line` draws this screen's clocks with.
-    fn script(self: *const Painter) work_line.Script {
+    fn script(self: *const Spans) work_line.Script {
         return if (self.caps.unicode) .unicode else .ascii;
     }
 
-    fn begin(self: *Painter, selected: bool) void {
+    fn begin(self: *Spans) void {
         self.count = 0;
         self.column = 0;
-        self.selected = selected;
     }
 
-    fn finish(self: *Painter) error{OutOfMemory}![]const Span {
-        if (self.selected) try self.pad(self.width -| self.inset(), .{});
+    fn finish(self: *Spans) error{OutOfMemory}![]const Span {
         return self.arena.dupe(Span, self.spans[0..self.count]);
     }
 
-    /// The selection's margin: one cell when painted, as in the mock; none
-    /// without colour, where it is reverse video across the line.
-    fn inset(self: *const Painter) usize {
-        return @intFromBool(self.caps.depth != .none);
-    }
-
-    /// The style drawn. Without colour, only bold and reverse remain: the
-    /// band and the selection reverse, and every other ground is the
-    /// terminal's own.
-    fn style(self: *const Painter, wanted: Style) Style {
-        var result = wanted;
-        if (self.selected) result.background = .selection;
-        if (self.caps.depth == .none) return .{
-            .bold = result.bold or result.background == .band,
-            .reverse = result.background == .band or result.background == .selection,
-        };
-        return result;
-    }
-
-    /// Moves to `column`, filling the cells passed when they show a ground
-    /// of their own.
-    fn pad(self: *Painter, column: usize, wanted: Style) error{OutOfMemory}!void {
+    /// Moves to `column`, filling the cells passed when `wanted` shows a
+    /// ground of its own.
+    fn pad(self: *Spans, column: usize, wanted: Style) error{OutOfMemory}!void {
         const to = @min(column, self.width);
         if (to <= self.column) return;
-        const drawn = self.style(wanted);
-        if (self.selected and self.column == 0) self.column = self.inset();
-        if (to > self.column and (drawn.reverse or drawn.background != .ground)) {
+        const drawn = plain(self.caps, wanted);
+        if (drawn.reverse or drawn.background != .ground) {
             const blank = try self.arena.alloc(u8, to - self.column);
             @memset(blank, ' ');
             self.push(blank, to - self.column, wanted);
@@ -3113,91 +3215,110 @@ const Painter = struct {
         self.column = to;
     }
 
-    fn push(self: *Painter, bytes: []const u8, cells: usize, wanted: Style) void {
+    fn push(self: *Spans, bytes: []const u8, cells: usize, wanted: Style) void {
         if (self.count == self.spans.len or cells == 0) return;
-        self.spans[self.count] = .{ .column = @intCast(self.column), .cells = @intCast(cells), .text = bytes, .style = self.style(wanted) };
+        self.spans[self.count] = .{ .column = @intCast(self.column), .cells = @intCast(cells), .text = bytes, .style = plain(self.caps, wanted) };
         self.count += 1;
         self.column += cells;
     }
 
     /// Puts `bytes` at `column` within `limit` cells, ending in an ellipsis
     /// when cut. Returns the cells it took.
-    fn put(self: *Painter, column: usize, bytes: []const u8, limit: usize, wanted: Style) error{OutOfMemory}!usize {
-        try self.pad(column, wanted);
-        const room = @min(limit, self.width -| self.column);
-        if (room == 0) return 0;
-        const shown = try self.clean(bytes, room, .head);
-        self.push(shown.bytes, shown.cells, wanted);
-        return shown.cells;
+    fn put(self: *Spans, column: usize, bytes: []const u8, limit: usize, wanted: Style) error{OutOfMemory}!usize {
+        return self.putKept(column, bytes, limit, wanted, .head);
     }
 
     /// Like `put`, keeping the end of `bytes` when it is cut.
-    fn putTail(self: *Painter, column: usize, bytes: []const u8, limit: usize, wanted: Style) error{OutOfMemory}!usize {
+    fn putTail(self: *Spans, column: usize, bytes: []const u8, limit: usize, wanted: Style) error{OutOfMemory}!usize {
+        return self.putKept(column, bytes, limit, wanted, .tail);
+    }
+
+    fn putKept(self: *Spans, column: usize, bytes: []const u8, limit: usize, wanted: Style, keep: Keep) error{OutOfMemory}!usize {
         try self.pad(column, wanted);
         const room = @min(limit, self.width -| self.column);
         if (room == 0) return 0;
-        const shown = try self.clean(bytes, room, .tail);
+        const shown = try fitted(self.arena, self.caps, self.glyphs, bytes, room, keep);
         self.push(shown.bytes, shown.cells, wanted);
         return shown.cells;
     }
 
     /// Puts `bytes` so they end at `end`.
-    fn putRight(self: *Painter, end: usize, bytes: []const u8, wanted: Style) error{OutOfMemory}!void {
+    fn putRight(self: *Spans, end: usize, bytes: []const u8, wanted: Style) error{OutOfMemory}!void {
         const cells = self.measure(bytes);
         if (cells > end or end - cells < self.column) return;
         _ = try self.put(end - cells, bytes, cells, wanted);
     }
 
-    /// Terminal-safe text clipped to `room` cells, as `Pieces` shows it.
-    fn clean(self: *Painter, bytes: []const u8, room: usize, keep: enum { head, tail }) error{OutOfMemory}!Piece {
-        const total = self.measure(bytes);
-        const ellipsis = self.glyphs.ellipsis;
-        const budget = if (total <= room) total else room - 1;
-        var out = try self.arena.alloc(u8, bytes.len * 3 + ellipsis.len);
-        var used: usize = 0;
-        var cells: usize = 0;
-        if (keep == .tail and total > room) {
-            @memcpy(out[0..ellipsis.len], ellipsis);
-            used = ellipsis.len;
-        }
-        var skip = if (keep == .tail) total - budget else 0;
-        var pieces: Pieces = .{ .bytes = bytes, .painter = self };
-        while (pieces.next()) |piece| {
-            if (skip > 0) {
-                skip -|= piece.cells;
-                continue;
-            }
-            if (cells + piece.cells > budget) break;
-            @memcpy(out[used..][0..piece.bytes.len], piece.bytes);
-            used += piece.bytes.len;
-            cells += piece.cells;
-        }
-        if (keep == .head and total > room) {
-            @memcpy(out[used..][0..ellipsis.len], ellipsis);
-            used += ellipsis.len;
-        }
-        return .{ .bytes = out[0..used], .cells = cells + @intFromBool(total > room) };
-    }
-
-    fn measure(self: *const Painter, bytes: []const u8) usize {
-        var total: usize = 0;
-        var pieces: Pieces = .{ .bytes = bytes, .painter = self };
-        while (pieces.next()) |piece| total += piece.cells;
-        return total;
-    }
-
-    /// The glyph shown for a code point that cannot reach the terminal: a
-    /// control character or an invalid byte, or without Unicode anything
-    /// past ASCII.
-    fn standIn(self: *const Painter, codepoint: u21) ?[]const u8 {
-        if (codepoint == '\n') return self.glyphs.newline;
-        // A tab shows as one space, as in a conversation.
-        if (codepoint == '\t') return " ";
-        if (TerminalText.isControl(codepoint) or codepoint == replacement) return "?";
-        if (!self.caps.unicode and codepoint > 0x7e) return "?";
-        return null;
+    fn measure(self: *const Spans, bytes: []const u8) usize {
+        return measured(self.caps, self.glyphs, bytes);
     }
 };
+
+const Keep = enum { head, tail };
+
+/// `wanted` as a terminal without colour shows it: only bold and reverse
+/// remain, the band and the selection reverse, and every other ground is
+/// the terminal's own.
+fn plain(caps: Caps, wanted: Style) Style {
+    if (caps.depth != .none) return wanted;
+    return .{
+        .bold = wanted.bold or wanted.background == .band,
+        .reverse = wanted.reverse or wanted.background == .band or wanted.background == .selection,
+    };
+}
+
+/// `bytes` made terminal-safe and clipped to `room` cells, as `Pieces`
+/// shows it, with an ellipsis where it was cut: at the end, or at the
+/// start when keeping the tail.
+fn fitted(arena: Allocator, caps: Caps, glyphs: Glyphs, bytes: []const u8, room: usize, keep: Keep) error{OutOfMemory}!Piece {
+    const total = measured(caps, glyphs, bytes);
+    const ellipsis = glyphs.ellipsis;
+    const budget = if (total <= room) total else room - 1;
+    var out = try arena.alloc(u8, bytes.len * 3 + ellipsis.len);
+    var used: usize = 0;
+    var cells: usize = 0;
+    if (keep == .tail and total > room) {
+        @memcpy(out[0..ellipsis.len], ellipsis);
+        used = ellipsis.len;
+    }
+    var skip = if (keep == .tail) total - budget else 0;
+    var pieces: Pieces = .{ .bytes = bytes, .caps = caps, .glyphs = glyphs };
+    while (pieces.next()) |piece| {
+        if (skip > 0) {
+            skip -|= piece.cells;
+            continue;
+        }
+        if (cells + piece.cells > budget) break;
+        @memcpy(out[used..][0..piece.bytes.len], piece.bytes);
+        used += piece.bytes.len;
+        cells += piece.cells;
+    }
+    if (keep == .head and total > room) {
+        @memcpy(out[used..][0..ellipsis.len], ellipsis);
+        used += ellipsis.len;
+    }
+    return .{ .bytes = out[0..used], .cells = cells + @intFromBool(total > room) };
+}
+
+/// The cells `bytes` takes as `Pieces` shows it.
+fn measured(caps: Caps, glyphs: Glyphs, bytes: []const u8) usize {
+    var total: usize = 0;
+    var pieces: Pieces = .{ .bytes = bytes, .caps = caps, .glyphs = glyphs };
+    while (pieces.next()) |piece| total += piece.cells;
+    return total;
+}
+
+/// The glyph shown for a code point that cannot reach the terminal: a
+/// control character or an invalid byte, or without Unicode anything past
+/// ASCII.
+fn standIn(caps: Caps, glyphs: Glyphs, codepoint: u21) ?[]const u8 {
+    if (codepoint == '\n') return glyphs.newline;
+    // A tab shows as one space, as in a conversation.
+    if (codepoint == '\t') return " ";
+    if (TerminalText.isControl(codepoint) or codepoint == replacement) return "?";
+    if (!caps.unicode and codepoint > 0x7e) return "?";
+    return null;
+}
 
 const Piece = struct { bytes: []const u8, cells: usize };
 
@@ -3206,20 +3327,21 @@ const Piece = struct { bytes: []const u8, cells: usize };
 /// that cannot reach it.
 const Pieces = struct {
     bytes: []const u8,
-    painter: *const Painter,
+    caps: Caps,
+    glyphs: Glyphs,
     at: usize = 0,
 
     fn next(self: *Pieces) ?Piece {
         if (self.at == self.bytes.len) return null;
         const rest = self.bytes[self.at..];
         const first = decode(rest);
-        if (self.painter.standIn(first.codepoint)) |glyph| {
+        if (standIn(self.caps, self.glyphs, first.codepoint)) |glyph| {
             self.at += first.len;
             return .{ .bytes = glyph, .cells = 1 };
         }
         // Printable ASCII before ASCII or the end is a whole cluster of one
         // cell under every method; this keeps long ASCII text cheap.
-        if (!self.painter.caps.unicode or (first.codepoint < 0x80 and (rest.len == 1 or rest[1] < 0x80))) {
+        if (!self.caps.unicode or (first.codepoint < 0x80 and (rest.len == 1 or rest[1] < 0x80))) {
             self.at += 1;
             return .{ .bytes = rest[0..1], .cells = 1 };
         }
@@ -3228,11 +3350,11 @@ const Pieces = struct {
         var end = first.len;
         while (end < cluster) {
             const decoded = decode(rest[end..]);
-            if (self.painter.standIn(decoded.codepoint) != null) break;
+            if (standIn(self.caps, self.glyphs, decoded.codepoint) != null) break;
             end += decoded.len;
         }
         self.at += end;
-        return .{ .bytes = rest[0..end], .cells = gwidth.gwidth(rest[0..end], self.painter.caps.width) };
+        return .{ .bytes = rest[0..end], .cells = gwidth.gwidth(rest[0..end], self.caps.width) };
     }
 };
 
@@ -3256,42 +3378,42 @@ fn decode(bytes: []const u8) struct { codepoint: u21, len: usize } {
 
 /// The list's line while it has no rows: loading, or what the view holds
 /// and where the rest are.
-fn emptyLine(painter: *Painter, state: *const State) error{OutOfMemory}![]const Span {
-    painter.begin(false);
+fn emptyLine(built: *Spans, state: *const State) error{OutOfMemory}![]const Span {
+    built.begin();
     const text = if (state.listed_at_ms == null)
-        try std.fmt.allocPrint(painter.arena, "Loading{s}", .{painter.glyphs.ellipsis})
+        try std.fmt.allocPrint(built.arena, "Loading{s}", .{built.glyphs.ellipsis})
     else if (state.archive == .archived)
         "No archived Sessions. /sessions changes the view."
     else if (state.archive == .all)
         "No Sessions yet. Type a task below."
     else
         "No unarchived Sessions. /sessions archived shows the archive.";
-    _ = try painter.put(1, text, painter.width -| 2, .{ .colour = .quiet });
-    return painter.finish();
+    _ = try built.put(1, text, built.width -| 2, .{ .colour = .quiet });
+    return built.finish();
 }
 
 /// A full-width alarm line, dark on yellow.
-fn bandLine(painter: *Painter, text: []const u8) error{OutOfMemory}![]const Span {
-    painter.begin(false);
+fn bandLine(built: *Spans, text: []const u8) error{OutOfMemory}![]const Span {
+    built.begin();
     const style: Style = .{ .colour = .on_band, .background = .band, .bold = true };
-    try painter.pad(1, style);
-    _ = try painter.put(1, text, painter.width -| 2, style);
-    try painter.pad(painter.width, style);
-    return painter.finish();
+    try built.pad(1, style);
+    _ = try built.put(1, text, built.width -| 2, style);
+    try built.pad(built.width, style);
+    return built.finish();
 }
 
-fn providerBand(painter: *Painter, trouble: Band, now_ms: u64) error{OutOfMemory}![]const Span {
+fn providerBand(built: *Spans, trouble: Band, now_ms: u64) error{OutOfMemory}![]const Span {
     var buffer: [8]u8 = undefined;
-    return bandLine(painter, switch (trouble.trouble) {
+    return bandLine(built, switch (trouble.trouble) {
         // A row does not carry its provider, so each names the one provider
         // with that kind of credential.
         .sign_in => "Sign-in expired. Run " ++ comptime Provider.onlyWith(.sign_in).login() ++ ".",
         .api_key => comptime Provider.onlyWith(.api_key).shown() ++ " API key rejected. Run " ++ Provider.onlyWith(.api_key).login() ++ ", then rui host pause.",
         .quota => if (trouble.resets_at) |at|
-            try std.fmt.allocPrint(painter.arena, "Quota used up. Resets in {s}.", .{ageText(&buffer, at -| now_ms / 1000)})
+            try std.fmt.allocPrint(built.arena, "Quota used up. Resets in {s}.", .{ageText(&buffer, at -| now_ms / 1000)})
         else
             "Quota used up.",
-        .rate_limit => try std.fmt.allocPrint(painter.arena, "Rate limited. {d} Session{s} will retry.", .{ trouble.sessions, if (trouble.sessions == 1) "" else "s" }),
+        .rate_limit => try std.fmt.allocPrint(built.arena, "Rate limited. {d} Session{s} will retry.", .{ trouble.sessions, if (trouble.sessions == 1) "" else "s" }),
     });
 }
 
@@ -3340,42 +3462,45 @@ const DraftPieces = struct {
 };
 
 /// The line under the input. `listed`: this frame shows the command list.
-fn hints(painter: *Painter, state: *const State, draft: Draft, listed: bool) error{OutOfMemory}![]const Span {
-    painter.begin(false);
-    const room = painter.width -| 2;
-    const dot = painter.glyphs.dot;
+fn hints(built: *Spans, state: *const State, draft: Draft, listed: bool) error{OutOfMemory}![]const Span {
+    built.begin();
+    const room = built.width -| 2;
+    const dot = built.glyphs.dot;
     // What Esc does here, as `compose` reads it: a list or a panel closes
     // before the draft and the held settings clear.
+    var status: StatusBuffer = undefined;
     const esc_does: ?[]const u8 = if (listed or state.panel != null) "esc close" else if (draft.bytes.len != 0 or !state.settings.empty()) "esc clear" else null;
     if (state.shownPicker() != null) {
-        _ = try painter.put(1, if (painter.caps.unicode) "←→ effort · tab sign-in" else "<> effort - tab sign-in", room, .{ .colour = .quiet });
-    } else if (state.notice) |*notice| {
-        _ = try painter.put(1, notice.firstLine(), room, .{ .colour = notice.colour });
+        _ = try built.put(1, if (built.caps.unicode) "←→ effort · tab sign-in" else "<> effort - tab sign-in", room, .{ .colour = .quiet });
+    } else if (statusLine(state, built.caps, &status)) |line| {
+        // A notice, else the Upgrade at work or held, else an unconfirmed
+        // send: each says what the keys below cannot.
+        _ = try built.put(1, line.text, room, .{ .colour = line.colour });
     } else if (state.starting()) {
-        _ = try painter.put(1, try std.fmt.allocPrint(painter.arena, "Starting{s}", .{painter.glyphs.ellipsis}), room, .{ .colour = .quiet });
+        _ = try built.put(1, try std.fmt.allocPrint(built.arena, "Starting{s}", .{built.glyphs.ellipsis}), room, .{ .colour = .quiet });
     } else if (!state.settings.empty()) {
-        var text: std.Io.Writer.Allocating = .init(painter.arena);
+        var text: std.Io.Writer.Allocating = .init(built.arena);
         text.writer.writeAll("start settings:") catch return error.OutOfMemory;
         writeSettings(&state.settings, &text.writer) catch return error.OutOfMemory;
         // Long settings are cut so the way out stays on screen.
-        const suffix = try std.fmt.allocPrint(painter.arena, " {s} {s}", .{ dot, esc_does.? });
-        const used = try painter.put(1, text.written(), room -| painter.measure(suffix), .{ .colour = .quiet });
-        _ = try painter.put(1 + used, suffix, room -| used, .{ .colour = .quiet });
+        const suffix = try std.fmt.allocPrint(built.arena, " {s} {s}", .{ dot, esc_does.? });
+        const used = try built.put(1, text.written(), room -| built.measure(suffix), .{ .colour = .quiet });
+        _ = try built.put(1 + used, suffix, room -| used, .{ .colour = .quiet });
     } else if (draft.bytes.len != 0) {
         // What Enter and Esc do to this draft, as `enter` and `compose` read it.
         const slashed = draft.bytes[0] == '/' and !std.mem.startsWith(u8, draft.bytes, "//");
         const enter_does: []const u8 = if (!slashed) (if (listed) "enter pick " else "enter start ") else if (commands.parse(draft.bytes) == .command) "enter run " else "";
-        const text = try std.fmt.allocPrint(painter.arena, "{s}{s}{s}", .{ enter_does, if (enter_does.len != 0) try std.fmt.allocPrint(painter.arena, "{s} ", .{dot}) else "", esc_does.? });
-        _ = try painter.put(1, text, room, .{ .colour = .quiet });
+        const text = try std.fmt.allocPrint(built.arena, "{s}{s}{s}", .{ enter_does, if (enter_does.len != 0) try std.fmt.allocPrint(built.arena, "{s} ", .{dot}) else "", esc_does.? });
+        _ = try built.put(1, text, room, .{ .colour = .quiet });
     } else if (state.selectedRow()) |row| {
-        const stop = if (stoppable(state, row.reference, row.state.asOf(state.now_ms))) try std.fmt.allocPrint(painter.arena, " {s} " ++ session_line.stop_hint, .{dot}) else "";
-        const close = if (esc_does) |does| try std.fmt.allocPrint(painter.arena, " {s} {s}", .{ dot, does }) else "";
-        const text = try std.fmt.allocPrint(painter.arena, "{s} select {s} enter open{s}{s}", .{ painter.glyphs.arrows, dot, stop, close });
-        _ = try painter.put(1, text, room, .{ .colour = .quiet });
+        const stop = if (stoppable(state, row.reference, row.state.asOf(state.now_ms))) try std.fmt.allocPrint(built.arena, " {s} " ++ session_line.stop_hint, .{dot}) else "";
+        const close = if (esc_does) |does| try std.fmt.allocPrint(built.arena, " {s} {s}", .{ dot, does }) else "";
+        const text = try std.fmt.allocPrint(built.arena, "{s} select {s} enter open{s}{s}", .{ built.glyphs.arrows, dot, stop, close });
+        _ = try built.put(1, text, room, .{ .colour = .quiet });
     } else if (esc_does) |does| {
-        _ = try painter.put(1, does, room, .{ .colour = .quiet });
+        _ = try built.put(1, does, room, .{ .colour = .quiet });
     }
-    return painter.finish();
+    return built.finish();
 }
 
 /// ` --name value` per held setting, quoting values the /configure grammar
@@ -3394,8 +3519,6 @@ pub fn writeSettings(settings: *const StartSettings, writer: *std.Io.Writer) std
 pub const Item = union(enum) { gap, heading: Group, row: usize, more: More, empty };
 pub const More = struct { group: Group, hidden: usize };
 
-/// The Sessions list's line `line`, counted from its first, or null past
-/// its end. The list draws these lines, and a click names one.
 /// How many lines the Sessions list has; `listItem` names each.
 pub fn listLength(state: *const State) usize {
     if (state.rows.items.len == 0) return 1;
@@ -3416,6 +3539,8 @@ pub fn selectedLine(state: *const State) ?usize {
     return ListLines.of(state).lineOf(state, at);
 }
 
+/// The Sessions list's line `line`, counted from its first, or null past
+/// its end. The list draws these lines, and a click names one.
 pub fn listItem(state: *const State, line: usize) ?Item {
     if (state.rows.items.len == 0) return if (line == 0) .empty else null;
     return ListLines.of(state).item(state, line);
@@ -3424,28 +3549,28 @@ pub fn listItem(state: *const State, line: usize) ?Item {
 /// The panel in the Sessions' rows: its heading, with the way back at the
 /// right, then its lines. When more lines come than rows, the last row
 /// counts the rest.
-fn panelLines(painter: *Painter, panel: *const Panel, lines: [][]const Span) error{OutOfMemory}!void {
-    painter.begin(false);
+fn panelLines(built: *Spans, panel: *const Panel, lines: [][]const Span) error{OutOfMemory}!void {
+    built.begin();
     const name = switch (panel.*) {
         .help => "Help",
-        .output => |output| try std.fmt.allocPrint(painter.arena, "/{s}", .{@tagName(output.name)}),
+        .output => |output| try std.fmt.allocPrint(built.arena, "/{s}", .{@tagName(output.name)}),
     };
-    _ = try painter.put(1, name, painter.width -| 2, .{ .colour = .ink, .bold = true });
-    try painter.putRight(painter.width -| 1, "Esc returns", .{ .colour = .quiet });
-    lines[0] = try painter.finish();
+    _ = try built.put(1, name, built.width -| 2, .{ .colour = .ink, .bold = true });
+    try built.putRight(built.width -| 1, "Esc returns", .{ .colour = .quiet });
+    lines[0] = try built.finish();
     const total = panel.rows() - 1;
     const room = lines.len - 1;
     const shown = if (total <= room) total else room -| 1;
     var texts = std.mem.splitScalar(u8, panel.text(), '\n');
     for (lines[1..][0..shown]) |*line| {
-        painter.begin(false);
-        _ = try painter.put(1, texts.next().?, painter.width -| 2, .{});
-        line.* = try painter.finish();
+        built.begin();
+        _ = try built.put(1, texts.next().?, built.width -| 2, .{});
+        line.* = try built.finish();
     }
     if (shown == total or room == 0) return;
-    painter.begin(false);
-    _ = try painter.put(1, try std.fmt.allocPrint(painter.arena, "+{d} more lines", .{total - shown}), painter.width -| 2, .{ .colour = .quiet });
-    lines[1 + shown] = try painter.finish();
+    built.begin();
+    _ = try built.put(1, try std.fmt.allocPrint(built.arena, "+{d} more lines", .{total - shown}), built.width -| 2, .{ .colour = .quiet });
+    lines[1 + shown] = try built.finish();
 }
 
 /// Lines of the list, group by group: a gap before each group but the
@@ -3493,22 +3618,22 @@ const ListLines = struct {
 
 /// A group's heading: its title and how many Sessions it holds, folded
 /// ones included.
-fn heading(painter: *Painter, group: Group, count: usize) error{OutOfMemory}![]const Span {
-    painter.begin(false);
+fn heading(built: *Spans, group: Group, count: usize) error{OutOfMemory}![]const Span {
+    built.begin();
     const info = groups.get(group);
-    var column = 1 + try painter.put(1, info.title, painter.width -| 2, .{ .colour = .ink, .bold = true });
+    var column = 1 + try built.put(1, info.title, built.width -| 2, .{ .colour = .ink, .bold = true });
     var buffer: [32]u8 = undefined;
-    const counted = try std.fmt.allocPrint(painter.arena, " {s} {s}", .{ painter.glyphs.dot, grouped(&buffer, count) });
-    column += try painter.put(column, counted, painter.width -| column -| 1, .{ .colour = .quiet });
-    if (info.help.len != 0) _ = try painter.put(column + 2, info.help, painter.width -| column -| 3, .{ .colour = .quiet });
-    return painter.finish();
+    const counted = try std.fmt.allocPrint(built.arena, " {s} {s}", .{ built.glyphs.dot, grouped(&buffer, count) });
+    column += try built.put(column, counted, built.width -| column -| 1, .{ .colour = .quiet });
+    if (info.help.len != 0) _ = try built.put(column + 2, info.help, built.width -| column -| 3, .{ .colour = .quiet });
+    return built.finish();
 }
 
-fn moreLine(painter: *Painter, hidden: usize) error{OutOfMemory}![]const Span {
-    painter.begin(false);
-    const text = try std.fmt.allocPrint(painter.arena, "{d} more", .{hidden});
-    _ = try painter.put(3, text, painter.width -| 4, .{ .colour = .quiet });
-    return painter.finish();
+fn moreLine(built: *Spans, hidden: usize) error{OutOfMemory}![]const Span {
+    built.begin();
+    const text = try std.fmt.allocPrint(built.arena, "{d} more", .{hidden});
+    _ = try built.put(3, text, built.width -| 4, .{ .colour = .quiet });
+    return built.finish();
 }
 
 /// Row columns, as the Khadi mock sets them: the mark at 2, the title at 4,
@@ -3540,18 +3665,18 @@ const Columns = struct {
     }
 };
 
-fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) error{OutOfMemory}![]const Span {
+fn rowLine(built: *Spans, state: *const State, at: usize, columns: Columns, frame: u64) error{OutOfMemory}![]const Span {
     const row = &state.rows.items[state.order.items[at]];
-    painter.begin(false);
+    built.begin();
     const kind = shownKind(state, row);
     const rule = rules.get(kind);
     var words: [work_line.max_words_bytes]u8 = undefined;
     const line = workLine(&words, state, row);
     const faded = state.unreachable_since_ms != null;
     const mark = marks.get(rule.mark);
-    const spins = markSpins(state, .{ .row = at }, painter.caps);
-    const glyph = if (spins) spinner[painter.frame % spinner.len] else if (painter.caps.unicode) mark.unicode else mark.ascii;
-    _ = try painter.put(2, glyph, 1, .{ .colour = if (faded) .quiet else if (line) |shown| toneColour(shown.tone, rule.colour) else rule.colour });
+    const spins = markSpins(state, .{ .row = at }, built.caps);
+    const glyph = if (spins) spinner[frame % spinner.len] else if (built.caps.unicode) mark.unicode else mark.ascii;
+    _ = try built.put(2, glyph, 1, .{ .colour = if (faded) .quiet else if (line) |shown| toneColour(shown.tone, rule.colour) else rule.colour });
 
     // Yours in the brightest ink, then named work; unnamed and ended grey.
     const yours = row.group() == .yours;
@@ -3559,47 +3684,47 @@ fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) 
     const named = title(state, row);
     const row_title = switch (row.archive_state) {
         .active => named.text,
-        .archiving => try std.fmt.allocPrint(painter.arena, "[Archiving] {s}", .{named.text}),
-        .archived => try std.fmt.allocPrint(painter.arena, "[Archived] {s}", .{named.text}),
+        .archiving => try std.fmt.allocPrint(built.arena, "[Archiving] {s}", .{named.text}),
+        .archived => try std.fmt.allocPrint(built.arena, "[Archived] {s}", .{named.text}),
     };
     const title_colour: Colour = if (faded) .quiet else if (yours) .strong else if (named.hint or ended) .quiet else .ink;
     // Only a row outside the working directory names its Workspace, at the
     // end of its title's room.
     const workspace: []const u8 = if (columns.workspace != 0 and row.workspace != state.cwd) workspace: {
         const path = shortPath(state.home, state.workspaces.items[row.workspace]);
-        break :workspace try std.mem.concat(painter.arena, u8, &.{ path.prefix, path.rest });
+        break :workspace try std.mem.concat(built.arena, u8, &.{ path.prefix, path.rest });
     } else "";
     // A word longer than its column, such as a retry's countdown, starts
     // early and takes from the title's room, down to `min_title` cells.
     var word_bytes: [max_word_bytes]u8 = undefined;
-    const text = if (columns.word != columns.end) word(&word_bytes, state, row, rule, line, painter.script()) else "";
+    const text = if (columns.word != columns.end) word(&word_bytes, state, row, rule, line, built.script()) else "";
     const word_end = columns.end -| Columns.age_cells -| 1;
-    const overflow = painter.measure(text) -| (word_end -| columns.word);
+    const overflow = built.measure(text) -| (word_end -| columns.word);
     const word_column = @max(columns.word -| overflow, @min(columns.word, Columns.title + Columns.min_title + 2));
-    const workspace_cells = if (word_column < columns.word) 0 else @min(painter.measure(workspace), columns.workspace);
+    const workspace_cells = if (word_column < columns.word) 0 else @min(built.measure(workspace), columns.workspace);
     // Without a detail column the title still leaves the age its room.
     const title_end = @min((word_column -| 2) -| (if (workspace_cells == 0) 0 else workspace_cells + 2), word_end -| 1);
-    _ = try painter.put(Columns.title, row_title, title_end -| Columns.title, .{ .colour = title_colour, .bold = yours and !faded });
-    _ = try painter.putTail(title_end + 2, workspace, workspace_cells, .{ .colour = if (faded) .quiet else .normal });
+    _ = try built.put(Columns.title, row_title, title_end -| Columns.title, .{ .colour = title_colour, .bold = yours and !faded });
+    _ = try built.putTail(title_end + 2, workspace, workspace_cells, .{ .colour = if (faded) .quiet else .normal });
 
     if (columns.word != columns.end) {
         // Colour only for what needs the person, or quiet as the work asks.
         const settled: Colour = if (rule.colour == .failure) .failure else .normal;
         // A needs-you row's command is plain: the mark already asks.
         const tone = if (faded) .quiet else if (row.needsYou()) .normal else if (line) |shown| toneColour(shown.tone, .normal) else settled;
-        _ = try painter.put(word_column, text, word_end -| word_column, .{ .colour = tone });
+        _ = try built.put(word_column, text, word_end -| word_column, .{ .colour = tone });
     }
     var buffer: [8]u8 = undefined;
-    try painter.putRight(columns.end, ageText(&buffer, (state.now_ms / 1000) -| row.state.since()), .{ .colour = .quiet });
-    return painter.finish();
+    try built.putRight(columns.end, ageText(&buffer, (state.now_ms / 1000) -| row.state.since()), .{ .colour = .quiet });
+    return built.finish();
 }
 
 /// The Session row at `at` in screen order, laid out for `width` cells as
 /// segments that fill the width, so a list draws it as given. The list
 /// marks the selection; the segments never do. Allocates from `arena`.
 pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}![]const Segment {
-    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = frame };
-    const spans = try rowLine(&painter, state, at, Columns.of(width));
+    var built: Spans = .of(arena, caps, width);
+    const spans = try rowLine(&built, state, at, Columns.of(width), frame);
     return segmentsOf(arena, spans, width, .{});
 }
 
@@ -3615,18 +3740,25 @@ pub fn markSpins(state: *const State, item: Item, caps: Caps) bool {
 
 /// Counts and any actionable Host/provider warnings, above the list.
 pub fn headerSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
+    return (try header(arena, state, width, caps)).segments;
+}
+
+/// The header's lines, and where its first line, the counts line, shows
+/// the view name a click takes back to the default view.
+pub fn header(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!CountsLine {
+    const top = try countsLine(arena, state, width, caps);
     var lines: [3][]const Segment = undefined;
-    lines[0] = try countsSegments(arena, state, width, caps);
+    lines[0] = top.segments;
     var count: usize = 1;
-    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
+    var built: Spans = .of(arena, caps, width);
     if (state.unreachable_since_ms) |since| {
         var buffer: [16]u8 = undefined;
         const text = try std.fmt.allocPrint(arena, "Host stopped {s} ago. Run rui host start.", .{spanText(&buffer, (state.now_ms -| since) / 1000)});
-        lines[count] = try segmentsOf(arena, try bandLine(&painter, text), width, .{});
+        lines[count] = try segmentsOf(arena, try bandLine(&built, text), width, .{});
         count += 1;
     }
     if (band(state.rows.items, state.now_ms, state.login_at)) |trouble| {
-        lines[count] = try segmentsOf(arena, try providerBand(&painter, trouble, state.now_ms), width, .{});
+        lines[count] = try segmentsOf(arena, try providerBand(&built, trouble, state.now_ms), width, .{});
         count += 1;
     }
     var length = count - 1;
@@ -3641,7 +3773,7 @@ pub fn headerSegments(arena: Allocator, state: *const State, width: u16, caps: C
         @memcpy(segments[offset..][0..line.len], line);
         offset += line.len;
     }
-    return segments;
+    return .{ .segments = segments, .view = top.view };
 }
 
 pub const ListRow = struct { segments: []const Segment, heading: bool, selected: bool };
@@ -3651,22 +3783,22 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
         const row = &state.rows.items[state.order.items[item.row]];
         return .{ .segments = try rowSegments(arena, state, item.row, width, caps, frame), .heading = false, .selected = if (state.selected) |selected| std.mem.eql(u8, &selected, &row.reference) else false };
     }
-    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = frame };
+    var built: Spans = .of(arena, caps, width);
     const spans = switch (item) {
         .gap => &.{},
-        .heading => |group| try heading(&painter, group, state.runs.get(group).len),
-        .more => |more| try moreLine(&painter, more.hidden),
-        .empty => try emptyLine(&painter, state),
+        .heading => |group| try heading(&built, group, state.runs.get(group).len),
+        .more => |more| try moreLine(&built, more.hidden),
+        .empty => try emptyLine(&built, state),
         .row => unreachable,
     };
     return .{ .segments = try segmentsOf(arena, spans, width, .{}), .heading = true, .selected = false };
 }
 
 pub fn statusSegments(arena: Allocator, state: *const State, draft: Draft, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
-    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
+    var built: Spans = .of(arena, caps, width);
     // An open list is the one Esc closes; a closed one leaves Esc the draft.
     const listed = if (state.commands) |shown| shown.seen != .closed else false;
-    const first = try segmentsOf(arena, try hints(&painter, state, draft, listed), width, .{});
+    const first = try segmentsOf(arena, try hints(&built, state, draft, listed), width, .{});
     // A notice's later lines follow on lines of their own.
     const rows = hintRows(state);
     if (rows == 1) return first;
@@ -3676,9 +3808,9 @@ pub fn statusSegments(arena: Allocator, state: *const State, draft: Draft, width
     var lines = std.mem.splitScalar(u8, state.notice.?.text(), '\n');
     _ = lines.next();
     for (shown[1..rows]) |*line| {
-        painter.begin(false);
-        _ = try painter.put(1, lines.next().?, width -| 2, .{ .colour = state.notice.?.colour });
-        line.* = try segmentsOf(arena, try painter.finish(), width, .{});
+        built.begin();
+        _ = try built.put(1, lines.next().?, width -| 2, .{ .colour = state.notice.?.colour });
+        line.* = try segmentsOf(arena, try built.finish(), width, .{});
         length += 1 + line.len;
     }
     const segments = try arena.alloc(Segment, length);
@@ -3695,8 +3827,8 @@ pub fn statusSegments(arena: Allocator, state: *const State, draft: Draft, width
 }
 
 pub fn factsSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
-    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
-    painter.begin(false);
+    var built: Spans = .of(arena, caps, width);
+    built.begin();
     const path = shortPath(state.home, state.workspaces.items[state.cwd]);
     const binding = state.nextBinding();
     const model = binding.model orelse "no model";
@@ -3705,10 +3837,10 @@ pub fn factsSegments(arena: Allocator, state: *const State, width: u16, caps: Ca
     const applied = (StartEffort{ .held = held, .model = binding.model }).applied(saved);
     const effort = held orelse if (applied) |value| @tagName(value) else null;
     const sign_in = if (state.default_sign_in_shown) state.nextBinding().signIn() else null;
-    const text = try std.fmt.allocPrint(arena, "new Session {s} {s}{s}{s}{s}{s} {s} {s}{s}", .{ painter.glyphs.dot, model, if (effort != null) " · " else "", effort orelse "", if (sign_in != null) " · " else "", sign_in orelse "", painter.glyphs.dot, path.prefix, path.rest });
+    const text = try std.fmt.allocPrint(arena, "new Session {s} {s}{s}{s}{s}{s} {s} {s}{s}", .{ built.glyphs.dot, model, if (effort != null) " · " else "", effort orelse "", if (sign_in != null) " · " else "", sign_in orelse "", built.glyphs.dot, path.prefix, path.rest });
     const facts_style: Style = .{ .colour = .quiet, .background = .bar };
-    _ = try painter.put(1, text, width -| 2, facts_style);
-    return segmentsOf(arena, try painter.finish(), width, painter.style(facts_style));
+    _ = try built.put(1, text, width -| 2, facts_style);
+    return segmentsOf(arena, try built.finish(), width, plain(caps, facts_style));
 }
 
 /// A panel or model picker supplies its own rows instead of Session groups.
@@ -3716,9 +3848,9 @@ pub fn factsSegments(arena: Allocator, state: *const State, width: u16, caps: Ca
 /// list; null while no panel shows.
 pub fn panelItems(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!?[]const ListRow {
     const panel = if (state.panel) |*shown| shown else return null;
-    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
+    var built: Spans = .of(arena, caps, width);
     const spans = try arena.alloc([]const Span, @min(panel.rows(), layout(state).list.len()));
-    if (spans.len != 0) try panelLines(&painter, panel, spans);
+    if (spans.len != 0) try panelLines(&built, panel, spans);
     return try rowsOf(arena, spans, width);
 }
 
@@ -3754,14 +3886,25 @@ fn segmentsOf(arena: Allocator, spans: []const Span, width: u16, fill: Style) er
 /// right, live memory and the archive view when it is not the default.
 /// Memory drops first on a narrow screen, `rui` before `tools`.
 pub fn countsSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
-    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
-    painter.begin(false);
+    return (try countsLine(arena, state, width, caps)).segments;
+}
+
+/// The counts line, and the columns its view name takes, `start` up to
+/// `end`, when it shows one: a click there returns to the default view.
+pub const CountsLine = struct { segments: []const Segment, view: ?struct { start: u16, end: u16 } = null };
+
+pub fn countsLine(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!CountsLine {
+    var result: CountsLine = .{ .segments = &.{} };
+    var built: Spans = .of(arena, caps, width);
+    built.begin();
     const bar: Style = .{ .background = .bar };
-    const end = painter.width -| 1;
+    const end = built.width -| 1;
     var column: usize = 1;
+    // रुई beside rui, as on a station board, where the terminal draws it;
+    // elsewhere rui alone.
     const wordmark: Style = .{ .colour = .strong, .background = .bar };
-    if (caps.unicode and caps.devanagari) column += try painter.put(column, "रुई", end -| column, .{ .colour = .ink, .background = .bar }) + 1;
-    column += try painter.put(column, "rui", end -| column, wordmark);
+    if (caps.unicode and caps.devanagari) column += try built.put(column, "रुई", end -| column, .{ .colour = .ink, .background = .bar }) + 1;
+    column += try built.put(column, "rui", end -| column, wordmark);
     const counts_ = state.summary.counts;
     const shown = [_]struct { Mark, usize, Colour }{
         .{ .needs_you, counts_.needs_you, .attention },
@@ -3775,10 +3918,10 @@ pub fn countsSegments(arena: Allocator, state: *const State, width: u16, caps: C
         const glyph = if (caps.unicode) marks.get(mark).unicode else marks.get(mark).ascii;
         var number: [32]u8 = undefined;
         const text = if (mark == .queued and state.host != null)
-            try std.fmt.allocPrint(arena, "{s} {s} {s} slots {d}/{d}", .{ glyph, grouped(&number, count), painter.glyphs.dot, state.host.?.slots_in_use, state.host.?.slots })
+            try std.fmt.allocPrint(arena, "{s} {s} {s} slots {d}/{d}", .{ glyph, grouped(&number, count), built.glyphs.dot, state.host.?.slots_in_use, state.host.?.slots })
         else
             try std.fmt.allocPrint(arena, "{s} {s}", .{ glyph, grouped(&number, count) });
-        column = column + 2 + try painter.put(column + 2, text, end -| (column + 2), .{ .colour = colour, .background = .bar });
+        column = column + 2 + try built.put(column + 2, text, end -| (column + 2), .{ .colour = colour, .background = .bar });
     }
     // The right side, widest first, dropping what does not fit.
     const view: []const u8 = if (state.archive == .active) "" else archiveViewName(state.archive);
@@ -3787,18 +3930,20 @@ pub fn countsSegments(arena: Allocator, state: *const State, width: u16, caps: C
     const choices: [3][]const u8 = if (state.memory) |memory| choices: {
         const rui = try std.fmt.allocPrint(arena, "rui {s}", .{sizeText(&rui_buffer, memory.rui)});
         const tools = if (memory.tools) |bytes| try std.fmt.allocPrint(arena, "tools {s}", .{sizeText(&tools_buffer, bytes)}) else "";
-        break :choices if (tools.len == 0) .{ rui, "", "" } else .{ try std.fmt.allocPrint(arena, "{s} {s} {s}", .{ rui, painter.glyphs.dot, tools }), tools, "" };
+        break :choices if (tools.len == 0) .{ rui, "", "" } else .{ try std.fmt.allocPrint(arena, "{s} {s} {s}", .{ rui, built.glyphs.dot, tools }), tools, "" };
     } else .{ "", "", "" };
     for (choices) |memory| {
         const text = if (memory.len == 0) view else if (view.len == 0) memory else try std.fmt.allocPrint(arena, "{s}  {s}", .{ memory, view });
-        const cells = painter.measure(text);
+        const cells = built.measure(text);
         if (text.len != 0 and column + 2 + cells > end) continue;
-        try painter.pad(end -| cells, bar);
-        try painter.putRight(end, text, bar);
+        try built.pad(end -| cells, bar);
+        try built.putRight(end, text, bar);
+        if (view.len != 0) result.view = .{ .start = @intCast(end - built.measure(view)), .end = @intCast(end) };
         break;
     }
-    try painter.pad(painter.width, bar);
-    return segmentsOf(arena, try painter.finish(), width, bar);
+    try built.pad(built.width, bar);
+    result.segments = try segmentsOf(arena, try built.finish(), width, bar);
+    return result;
 }
 
 /// Memory in whole mebibytes, or gibibytes to a tenth, as `42 MB` or `1.8 GB`.
@@ -4060,7 +4205,7 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                     try std.testing.expectEqual(x.action, y.action);
                 }
             },
-            .list_models, .clear_draft, .upgrade, .exit => {},
+            .list_models, .clear_draft, .cancel_upgrade, .exit => {},
         }
     }
 }
@@ -4512,9 +4657,8 @@ fn expectLine(segments: []const Segment, width: u16, expected: []const []const u
     var line: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer line.deinit();
     var cells: usize = 0;
-    const measurer: Painter = .{ .arena = undefined, .caps = .{}, .glyphs = unicode_glyphs, .width = 0, .frame = 0 };
     for (segments) |segment| {
-        cells += measurer.measure(segment.text);
+        cells += measured(.{}, unicode_glyphs, segment.text);
         try line.writer.writeAll(segment.text);
     }
     var said: usize = 0;
@@ -4825,6 +4969,7 @@ test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
 }
 
 test "an original Esc left unconfirmed is named at once and recovered on departure, until the ledger is full" {
+    var line: [max_unconfirmed_line_bytes]u8 = undefined;
     const refs = [_]Reference{ "k7m2qx".*, "r4t9vw".* };
     var rows: [refs.len]Listed = undefined;
     for (&rows, &refs, 0..) |*row, *ref, n| row.* = session(ref, .{ .working = ago(10 * (n + 1)) }, .{});
@@ -4832,11 +4977,18 @@ test "an original Esc left unconfirmed is named at once and recovered on departu
     defer state.deinit();
     const saved_key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
     const reserved_key: [36]u8 = "fedcba98-7654-4321-8fed-cba987654321".*;
+    try std.testing.expectEqual(null, unconfirmedLine(&state, &line));
     try expectEffects(&.{}, try step(&state, .{ .unconfirmed = .{ .reference = refs[0], .recovery = .{ .saved = .{ .original = .{ .kind = .decision, .key = saved_key }, .rejected = false } } } }));
-    try std.testing.expectEqualStrings("! Not confirmed · rui request recover " ++ saved_key, state.notice.?.text());
-    // A capture that may not be published has no key to recover yet.
+    // It needs the person, so it lives on the status bar, not as a notice
+    // the next key clears.
+    try std.testing.expectEqualStrings("! Not confirmed · rui request recover " ++ saved_key, unconfirmedLine(&state, &line).?);
+    try std.testing.expectEqual(null, state.notice);
+    _ = try press(&state, .{}, .next);
+    try std.testing.expectEqualStrings("! Not confirmed · rui request recover " ++ saved_key, unconfirmedLine(&state, &line).?);
+    // A capture that may not be published has no key to recover yet; the
+    // newest unconfirmed send is the one named.
     try expectEffects(&.{}, try step(&state, .{ .unconfirmed = .{ .reference = refs[1], .recovery = .{ .uncertain = reserved_key } } }));
-    try std.testing.expectEqualStrings("! r4t9vw: send not confirmed; details on exit", state.notice.?.text());
+    try std.testing.expectEqualStrings("! r4t9vw: send not confirmed; details on exit", unconfirmedLine(&state, &line).?);
     // Each takes a ledger slot, so the shell asks before the last one.
     while (canHoldSend(&state)) try expectEffects(&.{}, try step(&state, .{ .unconfirmed = .{ .reference = refs[0], .recovery = .{ .saved = .{ .original = .{ .kind = .message, .key = saved_key }, .rejected = false } } } }));
     try std.testing.expectEqual(@as(usize, max_requests), state.request_count);
@@ -5194,9 +5346,9 @@ test "the composer's /word asks the Workspace's skills, but not while an Upgrade
     defer state.deinit();
     const draft: Draft = .{ .bytes = "use /re", .cursor = "use /re".len, .edits = 1 };
     try std.testing.expectEqual(@as(?skill_completion.Ask, null), askSkills(&state, .{ .bytes = "use it", .cursor = 3, .edits = 1 }));
-    state.upgrade_pending = true;
+    state.upgrade_after = .reobserving;
     try std.testing.expectEqual(@as(?skill_completion.Ask, null), askSkills(&state, draft));
-    state.upgrade_pending = false;
+    state.upgrade_after = .open;
     const read = askSkills(&state, draft).?;
     try std.testing.expectEqualStrings("re", read.prefix);
     // Its page, owned by the state, lists over the draft once a frame draws it.
@@ -5653,6 +5805,153 @@ test "moving into a folded group's hidden rows opens it" {
     try std.testing.expect(!folded(&state, .finished));
     _ = try press(&state, .{}, .first);
     try expectSelected(&state, "r4t9vw");
+}
+
+/// The list line `listItem` names the row `ref` on, as a click finds it.
+fn lineOfRow(state: *const State, ref: *const [6]u8) !usize {
+    var line: usize = 0;
+    while (listItem(state, line)) |item| : (line += 1) switch (item) {
+        .row => |at| if (std.mem.eql(u8, ref, &state.rows.items[state.order.items[at]].reference)) return line,
+        else => {},
+    };
+    return error.TestUnexpectedResult;
+}
+
+test "one click on a row opens it, under Enter's rules" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    try expectEffects(&.{.{ .open = "b2c3d4".* }}, try step(&state, .{ .clicked = .{ .line = try lineOfRow(&state, "b2c3d4") } }));
+    try expectSelected(&state, "b2c3d4");
+    // While Host requests wait on an Upgrade, the click selects but does
+    // not open, as Enter would not.
+    state.upgrade = .checking;
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = try lineOfRow(&state, "g7h8j9") } }));
+    try expectSelected(&state, "g7h8j9");
+}
+
+test "a click while a start waits changes nothing, as keys do, and the start then opens" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const selected = state.selected.?;
+    _ = try submit(&state, try typeText(&state, "go"));
+    try std.testing.expectEqual(InputMode.frozen, state.inputMode());
+    const row = try lineOfRow(&state, "b2c3d4");
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = row } }));
+    try expectSelected(&state, &selected);
+    try expectEffects(&.{ .clear_draft, .{ .open = "z9y8x7".* } }, try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } }));
+}
+
+test "a click on a folded group's more line opens it at its first hidden row" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    try std.testing.expect(folded(&state, .finished));
+    var line: usize = 0;
+    const more = while (listItem(&state, line)) |item| : (line += 1) {
+        if (item == .more) break item.more;
+    } else return error.TestUnexpectedResult;
+    // Seven finished rows show five, then "2 more".
+    try std.testing.expectEqual(More{ .group = .finished, .hidden = 2 }, more);
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = line } }));
+    try std.testing.expect(!folded(&state, .finished));
+    try expectSelected(&state, "v8w9x0");
+}
+
+test "a click on a heading, a gap or past the list changes nothing" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    _ = try press(&state, .{}, .first);
+    try std.testing.expectEqual(Item{ .heading = .needs_you }, listItem(&state, 0).?);
+    var line: usize = 0;
+    while (listItem(&state, line)) |item| : (line += 1) if (item == .gap) break;
+    try std.testing.expectEqual(Item.gap, listItem(&state, line).?);
+    const selected = state.selected.?;
+    for ([_]usize{ 0, line, line + 1000 }) |clicked| {
+        try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = clicked } }));
+        try expectSelected(&state, &selected);
+    }
+}
+
+test "a click on a line while a panel shows changes nothing: its lines are not Sessions" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const line = try lineOfRow(&state, "b2c3d4");
+    const selected = state.selected.?;
+    state.panel = .help;
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = line } }));
+    try expectSelected(&state, &selected);
+    try std.testing.expect(state.panel != null and state.panel.? == .help);
+}
+
+test "a click lands on what fills the list and obeys the input mode, whatever combination shows" {
+    const ref = "b2c3d4";
+    for ([_]ListArea{ .sessions, .panel, .picker }) |area| for ([_]bool{ false, true }) |frozen| for ([_]bool{ false, true }) |on_view| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        const line = try lineOfRow(&state, ref);
+        if (on_view) {
+            _ = try submit(&state, .{ .bytes = "/sessions archived" });
+            _ = try respond(&state, .full, testToken(2), &.{});
+        }
+        if (frozen) {
+            _ = try submit(&state, try typeText(&state, "go"));
+            try std.testing.expectEqual(InputMode.frozen, state.inputMode());
+        }
+        switch (area) {
+            .sessions => {},
+            .panel => state.panel = .help,
+            .picker => state.picker = .{},
+        }
+        defer state.picker = null;
+        try std.testing.expectEqual(area, state.listArea());
+        const selected = state.selected;
+        const effects = try step(&state, .{ .clicked = if (on_view) .view else .{ .line = line } });
+        if (frozen) {
+            // No key moves a frozen screen, and no click does.
+            try expectEffects(&.{}, effects);
+            try std.testing.expectEqual(selected, state.selected);
+            try std.testing.expectEqual(on_view, state.archive == .archived);
+        } else if (on_view) {
+            // The counts line is above the list: its click is the same
+            // whatever the list shows.
+            try expectEffects(&.{.{ .list = null }}, effects);
+            try std.testing.expectEqual(ArchiveFilter.active, state.archive);
+        } else if (area == .sessions) {
+            try expectEffects(&.{.{ .open = ref.* }}, effects);
+        } else {
+            // A panel's or the picker's line is no Session.
+            try expectEffects(&.{}, effects);
+            try std.testing.expectEqual(selected, state.selected);
+        }
+    };
+}
+
+test "a click on the empty list's one line changes nothing, loading or listed empty" {
+    // Still loading: the listing has not answered.
+    var loading = try testState();
+    defer loading.deinit();
+    try std.testing.expectEqual(Item.empty, listItem(&loading, 0).?);
+    try expectEffects(&.{}, try step(&loading, .{ .clicked = .{ .line = 0 } }));
+    try std.testing.expectEqual(null, loading.selected);
+    // Listed, with nothing in the view.
+    var empty = try opened(&.{});
+    defer empty.deinit();
+    try std.testing.expectEqual(Item.empty, listItem(&empty, 0).?);
+    try std.testing.expectEqual(null, listItem(&empty, 1));
+    try expectEffects(&.{}, try step(&empty, .{ .clicked = .{ .line = 0 } }));
+    try std.testing.expectEqual(null, empty.selected);
+}
+
+test "a click on the counts line's view name returns to the default view, as /sessions does" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    // The default view names nothing to click.
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .view }));
+    try std.testing.expectEqual(ArchiveFilter.active, state.archive);
+    _ = try submit(&state, .{ .bytes = "/sessions archived" });
+    try std.testing.expectEqual(ArchiveFilter.archived, state.archive);
+    _ = try respond(&state, .full, testToken(2), &.{});
+    try expectEffects(&.{.{ .list = null }}, try step(&state, .{ .clicked = .view }));
+    try std.testing.expectEqual(ArchiveFilter.active, state.archive);
 }
 
 /// Each row once in `rows`, `by_reference` and `order`.
@@ -6505,6 +6804,17 @@ fn pickerState(default: ?Default) !State {
     return state;
 }
 
+test "a click while the model picker shows opens no Session: its rows are models" {
+    var state = try pickerState(null);
+    defer state.deinit();
+    const line = try lineOfRow(&state, "f1n1sh");
+    try openPicker(&state, &.{chatgpt});
+    const selected = state.selected.?;
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = line } }));
+    try expectSelected(&state, &selected);
+    try std.testing.expect(state.picker != null);
+}
+
 fn highlightModel(state: *State, draft: Draft, model: []const u8) !void {
     const index = state.menu.find(model) orelse return error.TestModelNotOffered;
     try expectEffects(&.{}, try step(state, .{ .picker_action = .{ .draft = draft, .action = .{ .select = index } } }));
@@ -7122,7 +7432,7 @@ test "upgrade emits only its local effect and preserves selection settings and u
     state.answer(0, .unknown, "01234567-89ab-4cde-8012-0123456789ab");
     const request = state.requests[0];
     const draft = try typeText(&state, "/upgrade");
-    try expectEffects(&.{.upgrade}, try submit(&state, draft));
+    try expectEffects(&.{}, try submit(&state, draft));
     try std.testing.expectEqual(selected, state.selected);
     try std.testing.expect(std.meta.eql(settings, state.settings));
     try std.testing.expectEqual(@as(usize, 1), state.request_count);
@@ -7131,10 +7441,218 @@ test "upgrade emits only its local effect and preserves selection settings and u
     try std.testing.expect(state.command == null);
 }
 
+test "/upgrade runs inline: Esc cancels it before the draft, checking or preparing, and its end sets the Host hold" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try std.testing.expectEqualStrings("Checking for updates…", upgrade_status.line(state.upgrade.?, &buffer, .unicode).text);
+    // Esc cancels the check too, keeping the draft, even while the draft
+    // is still `/upgrade` and lists its command: the status row says esc
+    // cancels.
+    const typed = try typeText(&state, "/upgrade");
+    try std.testing.expect(shownCommands(&state, typed) != null);
+    try expectEffects(&.{.cancel_upgrade}, try press(&state, typed, .clear));
+    const draft = try typeText(&state, "keep me");
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } });
+    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", state.notice.?.text());
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
+    // Esc cancels the Upgrade and keeps the draft.
+    try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
+    // The worker says whether the stop held; until then the line stands.
+    try std.testing.expectEqualStrings("Upgrading to 0.60.0 · no Host running · esc cancels", upgrade_status.line(state.upgrade.?, &buffer, .unicode).text);
+    _ = try step(&state, .{ .upgrade = .cancelling });
+    // A second Esc is still the Upgrade's while it winds down.
+    try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
+    try std.testing.expectEqualStrings("Cancelling…", upgrade_status.line(state.upgrade.?, &buffer, .unicode).text);
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } });
+    try std.testing.expectEqual(session_upgrade.After.reobserving, state.upgrade_after);
+    // Once it ended, Esc clears the draft again.
+    try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
+
+    // Past publishing Esc is the draft's, and an incompatible end holds.
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .{ .running = 1 } }, .step = .publishing } } });
+    try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
+    try std.testing.expectEqual(session_upgrade.After.blocked, state.upgrade_after);
+    try std.testing.expectEqual(upgrade_status.Lasts.persistent, upgrade_status.line(state.upgrade.?, &buffer, .unicode).lasts);
+
+    // A retry that installs nothing keeps the hold unless the job found
+    // the Host it left usable, though both say up to date.
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 61, .patch = 0 } }, .outcome = .unchanged } } });
+    try std.testing.expectEqual(session_upgrade.After.blocked, state.upgrade_after);
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 61, .patch = 0 } }, .outcome = .compatible } } });
+    try std.testing.expect(state.upgrade_after == .reobserving);
+
+    // Another /upgrade that upgrades lifts the hold until the next listing.
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 1 }, .host = .{ .running = 0 } } } } });
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 61, .patch = 1 }, .restarted = true } }, .outcome = .compatible } } });
+    try std.testing.expect(state.upgrade_after == .reobserving);
+}
+
+test "every place an Upgrade run can stand decides the hold, Esc and another /upgrade from that one value" {
+    const found: upgrade_status.Found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .{ .running = 2 } };
+    const Case = struct { run: ?upgrade_status.Run, going: bool, escape: bool };
+    const cases = [_]Case{
+        .{ .run = null, .going = false, .escape = false },
+        .{ .run = .checking, .going = true, .escape = true },
+        .{ .run = .{ .installing = .{ .found = found, .step = .preparing } }, .going = true, .escape = true },
+        .{ .run = .{ .installing = .{ .found = found, .step = .publishing } }, .going = true, .escape = false },
+        .{ .run = .{ .installing = .{ .found = found, .step = .restarting } }, .going = true, .escape = false },
+        .{ .run = .cancelling, .going = true, .escape = true },
+        .{ .run = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } }, .going = false, .escape = false },
+        .{ .run = .{ .ended = .{ .how = .superseded, .outcome = .unchanged } }, .going = false, .escape = false },
+        .{ .run = .{ .ended = .{ .how = .{ .incompatible = found.version }, .outcome = .incompatible } }, .going = false, .escape = false },
+    };
+    for (cases) |case| {
+        var state = try opened(&.{});
+        defer state.deinit();
+        state.upgrade = case.run;
+        // With nothing left held by an earlier run, the run alone holds
+        // Host intents and keeps the shell polling its worker.
+        try std.testing.expectEqual(case.going, state.upgrading());
+        try std.testing.expectEqual(case.going, state.holdsHost());
+        try std.testing.expectEqual(case.going, state.waitMs(0, 0, false) == upgrade_poll_ms);
+        // Esc is the run's exactly while it can still change nothing.
+        const draft = try typeText(&state, "keep me");
+        try expectEffects(if (case.escape) &.{.cancel_upgrade} else &.{.clear_draft}, try press(&state, draft, .clear));
+        try std.testing.expectEqual(case.run, state.upgrade);
+        // Another /upgrade starts a check only when none is going.
+        try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+        if (case.going) try std.testing.expectEqual(case.run, state.upgrade) else try std.testing.expect(state.upgrade.? == .checking);
+        try std.testing.expect(state.holdsHost());
+    }
+}
+
+test "another /upgrade while one runs changes nothing: its progress and Esc stay" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
+    const preparing = try std.testing.allocator.dupe(u8, upgrade_status.line(state.upgrade.?, &buffer, .unicode).text);
+    defer std.testing.allocator.free(preparing);
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try std.testing.expectEqualStrings(preparing, upgrade_status.line(state.upgrade.?, &buffer, .unicode).text);
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none }, .step = .publishing } } });
+    const publishing = try std.testing.allocator.dupe(u8, upgrade_status.line(state.upgrade.?, &buffer, .unicode).text);
+    defer std.testing.allocator.free(publishing);
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try std.testing.expectEqualStrings(publishing, upgrade_status.line(state.upgrade.?, &buffer, .unicode).text);
+    // Past publishing Esc is still the draft's: nothing cancels.
+    try expectEffects(&.{.clear_draft}, try press(&state, try typeText(&state, "x"), .clear));
+}
+
+test "the status bar says the Upgrade at work, else the newest notice, else an Upgrade that holds, else an unconfirmed send" {
+    var state = try opened(&.{session("k7m2qx", .{ .working = ago(10) }, .{})});
+    defer state.deinit();
+    var buffer: StatusBuffer = undefined;
+    try std.testing.expectEqual(null, statusLine(&state, .{}, &buffer));
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    _ = try step(&state, .{ .unconfirmed = .{ .reference = "k7m2qx".*, .recovery = .{ .saved = .{ .original = .{ .kind = .message, .key = key }, .rejected = false } } } });
+    try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    try expectStatus(&state, "Checking for updates…", .normal);
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
+    try expectStatus(&state, "Upgrading to 0.60.0 · no Host running · esc cancels", .normal);
+    // A notice never hides the run's line, where Esc is offered.
+    state.say(.attention, "! Select a Session first.", .{});
+    try expectStatus(&state, "Upgrading to 0.60.0 · no Host running · esc cancels", .normal);
+    _ = try press(&state, .{}, .next);
+    // An ending that is news is a notice: it goes with the next key and
+    // the unconfirmed send shows again.
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 0 }, .restarted = false } }, .outcome = .compatible } } });
+    try expectStatus(&state, "Upgraded to 0.60.0", .normal);
+    _ = try press(&state, .{}, .next);
+    try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
+    // A release this client cannot use stays until another /upgrade.
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none } } } });
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
+    _ = try press(&state, .{}, .next);
+    try expectStatus(&state, "Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave", .attention);
+    // ASCII spells the line's dots.
+    var ascii: StatusBuffer = undefined;
+    try std.testing.expectEqualStrings("Rui 0.61.0 installed - restart rui to continue - your draft is kept until you leave", statusLine(&state, .{ .unicode = false }, &ascii).?.text);
+}
+
+test "the status row under the input says the status bar's line" {
+    var state = try opened(&.{session("k7m2qx", .{ .working = ago(10) }, .{})});
+    defer state.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    _ = try step(&state, .{ .unconfirmed = .{ .reference = "k7m2qx".*, .recovery = .{ .saved = .{ .original = .{ .kind = .message, .key = key }, .rejected = false } } } });
+    const unconfirmed = try segmentText(arena.allocator(), try statusSegments(arena.allocator(), &state, .{}, 120, .{}));
+    try std.testing.expect(std.mem.startsWith(u8, unconfirmed, " ! Not confirmed · rui request recover " ++ key));
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
+    const upgrading = try segmentText(arena.allocator(), try statusSegments(arena.allocator(), &state, .{}, 120, .{ .unicode = false }));
+    try std.testing.expect(std.mem.startsWith(u8, upgrading, " Upgrading to 0.60.0 - no Host running - esc cancels"));
+}
+
+test "/upgrade is never refused as a Host request: the status bar shows its run at first, while it runs and after a hold" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectStatus(&state, "Checking for updates…", .normal);
+    // Enter again while it runs starts nothing and hides nothing.
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectStatus(&state, "Checking for updates…", .normal);
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none } } } });
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
+    try std.testing.expectEqual(session_upgrade.After.blocked, state.upgrade_after);
+    // A Host request is refused in words; the retry shows its own progress.
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "start this")));
+    try expectStatus(&state, upgrade_recovery, .attention);
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectStatus(&state, "Checking for updates…", .normal);
+}
+
+fn expectStatus(state: *const State, text: []const u8, colour: Colour) !void {
+    var buffer: StatusBuffer = undefined;
+    const line = statusLine(state, .{}, &buffer).?;
+    try std.testing.expectEqualStrings(text, line.text);
+    try std.testing.expectEqual(colour, line.colour);
+}
+
+test "the counts line says where its view name sits, for a click" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqual(null, (try countsLine(arena.allocator(), &state, 100, .{ .unicode = false })).view);
+    state.archive = .archived;
+    state.memory = .{ .rui = 42 * mib, .tools = null };
+    for ([_]u16{ 100, 40 }) |width| {
+        const line = try countsLine(arena.allocator(), &state, width, .{ .unicode = false });
+        const text = try segmentText(arena.allocator(), line.segments);
+        const view = line.view.?;
+        // ASCII text, so a column is a byte.
+        try std.testing.expectEqualStrings("Archived", text[view.start..view.end]);
+        try std.testing.expectEqual(@as(u16, width - 1), view.end);
+    }
+    // Too narrow for the name: nothing to click.
+    try std.testing.expectEqual(null, (try countsLine(arena.allocator(), &state, 12, .{ .unicode = false })).view);
+}
+
+fn segmentText(arena: Allocator, segments: []const Segment) ![]const u8 {
+    var texts = try arena.alloc([]const u8, segments.len);
+    for (segments, 0..) |segment, n| texts[n] = segment.text;
+    return std.mem.concat(arena, u8, texts);
+}
+
 test "upgrade protocol hold refuses starts opens stops and Host commands but permits local recovery" {
     var state = try pickerState(Default.of("codex", "gpt-6-luna"));
     defer state.deinit();
-    state.upgrade_blocked = true;
+    state.upgrade_after = .blocked;
     const selected = state.selected;
     for ([_][]const u8{ "new model work", "", "/rename new name", "/setup --model gpt-5.5" }) |text| {
         try expectEffects(&.{}, try submit(&state, try typeText(&state, text)));
@@ -7144,7 +7662,7 @@ test "upgrade protocol hold refuses starts opens stops and Host commands but per
     }
     try expectEffects(&.{}, try press(&state, try typeText(&state, "draft"), .stop));
     try std.testing.expectEqual(@as(usize, 0), state.request_count);
-    try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
     try expectEffects(&.{.exit}, try submit(&state, try typeText(&state, "/exit")));
 }
 
@@ -7359,8 +7877,7 @@ test "upgrade holds admit no archive surface before draft or ledger mutation" {
                     _ = try step(&state, .{ .tick = test_now_s * 1000 });
                     _ = try respond(&state, .full, testToken(1), &.{row});
                     try std.testing.expectEqual(@as(?Reference, ref), state.selected);
-                    state.upgrade_blocked = blocked;
-                    state.upgrade_pending = !blocked;
+                    state.upgrade_after = if (blocked) .blocked else .reobserving;
                     state.last_archived = "bbbbbb".*;
                     state.panel = .help;
                     // Preserve both an unknown handle and accepted in-flight work.
@@ -7400,15 +7917,13 @@ test "upgrade holds share stop admission for both screens, and the stop goes onc
         for (events) |event| {
             var state = try opened(&.{session(&ref, .{ .working = ago(1) }, .{})});
             defer state.deinit();
-            state.upgrade_blocked = blocked;
-            state.upgrade_pending = !blocked;
+            state.upgrade_after = if (blocked) .blocked else .reobserving;
             state.panel = .help;
             try expectEffects(&.{}, try step(&state, event));
             try std.testing.expectEqual(@as(usize, 0), state.request_count);
             try std.testing.expect(state.panel != null and state.panel.? == .help);
             try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
-            state.upgrade_blocked = false;
-            state.upgrade_pending = false;
+            state.upgrade_after = .open;
             try expectEffects(&.{.{ .stop = ref }}, try step(&state, event));
         }
     }
@@ -7420,17 +7935,18 @@ test "upgrade holds refuse archive until admitted and allow local draft recovery
     for ([_]bool{ false, true }) |blocked| {
         var state = try opened(&.{session(&ref, .{ .working = ago(1) }, .{})});
         defer state.deinit();
-        state.upgrade_blocked = blocked;
-        state.upgrade_pending = !blocked;
+        state.upgrade_after = if (blocked) .blocked else .reobserving;
         try expectEffects(&.{}, try press(&state, draft, .archive));
         try std.testing.expectEqual(@as(usize, 0), state.request_count);
         // Edits stay local; existing local exit and recovery commands still
         // bypass the hold.
         try expectEffects(&.{}, try step(&state, .{ .composed = .{ .draft = draft, .input = .{ .composer = .redraw } } }));
-        try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
         try expectEffects(&.{.exit}, try submit(&state, try typeText(&state, "/exit")));
-        state.upgrade_blocked = false;
-        state.upgrade_pending = false;
+        try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+        try std.testing.expect(state.upgrading());
+        // That run ends having changed nothing, and the overview lists again.
+        try expectEffects(&.{}, try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } }));
+        state.upgrade_after = .open;
         try expectEffects(&.{.{ .archive = .{ .reference = ref } }}, try press(&state, draft, .archive));
         try std.testing.expectEqual(@as(usize, 1), state.request_count);
     }
@@ -7449,8 +7965,7 @@ test "upgrade holds settle accepted archive restore and stop completions without
                 // Admit before the hold, then deliver the worker's answer.
                 try std.testing.expect(state.request(if (archived) .archive else .unarchive, ref));
                 state.left = left;
-                state.upgrade_blocked = blocked;
-                state.upgrade_pending = !blocked;
+                state.upgrade_after = if (blocked) .blocked else .reobserving;
                 try expectEffects(&.{}, try step(&state, .{ .archive = .{ .request = .{ .reference = ref, .archived = archived }, .outcome = outcome } }));
                 // A confirmed answer retires from the attached ledger; only
                 // unknown outcomes or departure custody retain a record.
@@ -7473,8 +7988,7 @@ test "upgrade holds settle accepted archive restore and stop completions without
             defer state.deinit();
             try std.testing.expect(state.request(.stop, ref));
             state.left = left;
-            state.upgrade_blocked = blocked;
-            state.upgrade_pending = !blocked;
+            state.upgrade_after = if (blocked) .blocked else .reobserving;
             try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref, .outcome = outcome } }));
             const retained = left or outcome == .unconfirmed;
             try std.testing.expectEqual(@as(usize, if (retained) 1 else 0), state.request_count);
@@ -7497,24 +8011,26 @@ test "the overview waits until its next tick, polls while an Upgrade holds it, a
     defer state.deinit();
     state.listing = false;
     state.next_list_ms = 10_000;
-    try std.testing.expectEqual(@as(i32, 2_500), state.waitMs(false, 7_500, 0, false));
+    try std.testing.expectEqual(@as(i32, 2_500), state.waitMs(7_500, 0, false));
     // A tick already due waits nothing; one far off is capped, not wrapped.
-    try std.testing.expectEqual(@as(i32, 0), state.waitMs(false, 12_000, 0, false));
+    try std.testing.expectEqual(@as(i32, 0), state.waitMs(12_000, 0, false));
     state.next_list_ms = std.math.maxInt(u64);
-    try std.testing.expectEqual(@as(i32, std.math.maxInt(i32)), state.waitMs(false, 0, 0, false));
+    try std.testing.expectEqual(@as(i32, std.math.maxInt(i32)), state.waitMs(0, 0, false));
     // A listing in flight wakes the loop only through its answer.
     state.listing = true;
-    try std.testing.expectEqual(@as(i32, -1), state.waitMs(false, 0, 0, false));
+    try std.testing.expectEqual(@as(i32, -1), state.waitMs(0, 0, false));
     // The spinner's next frame on the monotonic clock comes first.
-    try std.testing.expectEqual(@as(i32, spin_interval_ms - 30), state.waitMs(false, 0, 1_030, true));
+    try std.testing.expectEqual(@as(i32, spin_interval_ms - 30), state.waitMs(0, 1_030, true));
     state.listing = false;
     state.next_list_ms = 10_010;
-    try std.testing.expectEqual(@as(i32, 10), state.waitMs(false, 10_000, 1_030, true));
-    // An Upgrade asked for, or one that left the overview blocked, polls.
-    try std.testing.expectEqual(@as(i32, upgrade_poll_ms), state.waitMs(true, 0, 0, false));
-    state.upgrade_blocked = true;
-    try std.testing.expectEqual(@as(i32, upgrade_poll_ms), state.waitMs(false, 0, 0, false));
-    try std.testing.expectEqual(@as(i32, 10), state.waitMs(false, 0, 190, true));
+    try std.testing.expectEqual(@as(i32, 10), state.waitMs(10_000, 1_030, true));
+    // An Upgrade that runs, or one that left the overview blocked, polls.
+    state.upgrade = .checking;
+    try std.testing.expectEqual(@as(i32, upgrade_poll_ms), state.waitMs(0, 0, false));
+    state.upgrade = null;
+    state.upgrade_after = .blocked;
+    try std.testing.expectEqual(@as(i32, upgrade_poll_ms), state.waitMs(0, 0, false));
+    try std.testing.expectEqual(@as(i32, 10), state.waitMs(0, 190, true));
 }
 
 test "a model list Rui cannot read says so; any other failure is no answer" {
@@ -7530,15 +8046,15 @@ test "an Upgrade holds Host intents until the overview lists again under the sel
     defer state.deinit();
     state.next_list_ms = 10_000;
     state.upgraded(.unchanged);
-    try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending and state.next_list_ms == 0);
+    try std.testing.expect(state.upgrade_after == .reobserving and state.next_list_ms == 0);
     state.upgraded(.incompatible);
-    try std.testing.expect(state.upgrade_blocked and !state.upgrade_pending);
+    try std.testing.expect(state.upgrade_after == .blocked);
     // An unchanged panel keeps the block; a compatible one lifts it.
     state.next_list_ms = 10_000;
     state.upgraded(.unchanged);
-    try std.testing.expect(state.upgrade_blocked and !state.upgrade_pending and state.next_list_ms == 0);
+    try std.testing.expect(state.upgrade_after == .blocked and state.next_list_ms == 0);
     state.upgraded(.compatible);
-    try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending);
+    try std.testing.expect(state.upgrade_after == .reobserving);
 }
 
 test "the one-pick model flow leaves typing with the composer" {

@@ -3,6 +3,7 @@
 #else
 #define _GNU_SOURCE
 #endif
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -16,6 +17,7 @@
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <libproc.h>
+#include <sys/resource.h>
 #include <sys/proc_info.h>
 #include <sys/sysctl.h>
 #include <sys/un.h>
@@ -274,6 +276,94 @@ int rui_process_generation(int pid, unsigned long long *started) {
     if (directory >= 0) close(directory);
     if (!error) *started = value;
     return error;
+#else
+    return ENOTSUP;
+#endif
+}
+
+/* Live memory for the overview's counts line. Observation only. */
+
+#if defined(__linux__)
+/* Adds one "Name:   N kB" line's value to *total when it names `field`. */
+static void status_field(const char *line, const char *field, unsigned long long *total) {
+    size_t length = strlen(field);
+    if (strncmp(line, field, length) != 0 || line[length] != ':') return;
+    unsigned long long kb = 0;
+    if (sscanf(line + length + 1, "%llu kB", &kb) == 1) *total += kb * 1024;
+}
+#endif
+
+/* What Activity Monitor calls Memory on macOS (phys_footprint). Linux has no
+ * footprint; anonymous and shared resident pages plus swap come closest, as
+ * plain RSS also counts shared file pages. */
+int rui_process_footprint(int pid, unsigned long long *bytes) {
+    if (!bytes) return EINVAL;
+    *bytes = 0;
+    if (pid <= 0) return EINVAL;
+#if defined(__APPLE__)
+    struct rusage_info_v4 info;
+    if (proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&info) != 0) return errno ? errno : ESRCH;
+    *bytes = info.ri_phys_footprint;
+    return 0;
+#elif defined(__linux__)
+    char path[64];
+    int count = snprintf(path, sizeof(path), "/proc/%d/status", pid);
+    if (count <= 0 || (size_t)count >= sizeof(path)) return EINVAL;
+    FILE *file = fopen(path, "re");
+    if (!file) return errno;
+    char line[256];
+    unsigned long long total = 0;
+    while (fgets(line, sizeof(line), file)) {
+        status_field(line, "RssAnon", &total);
+        status_field(line, "RssShmem", &total);
+        status_field(line, "VmSwap", &total);
+    }
+    int error = ferror(file) ? EIO : 0;
+    fclose(file);
+    if (!error) *bytes = total;
+    return error;
+#else
+    return ENOTSUP;
+#endif
+}
+
+/* The direct children of `pid`, up to `cap` of them in `pids`. */
+int rui_process_children(int pid, int *pids, size_t cap, size_t *count) {
+    if (!pids || !count) return EINVAL;
+    *count = 0;
+    if (pid <= 0) return EINVAL;
+#if defined(__APPLE__)
+    /* macOS releases disagree on whether the answer counts bytes or pids,
+     * so count the filled slots of a zeroed buffer instead. */
+    memset(pids, 0, cap * sizeof(int));
+    if (proc_listchildpids(pid, pids, (int)(cap * sizeof(int))) < 0) return errno ? errno : ESRCH;
+    while (*count < cap && pids[*count] > 0) (*count)++;
+    return 0;
+#elif defined(__linux__)
+    /* Each thread lists the children it forked. */
+    char path[64];
+    int length = snprintf(path, sizeof(path), "/proc/%d/task", pid);
+    if (length <= 0 || (size_t)length >= sizeof(path)) return EINVAL;
+    int tasks = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (tasks < 0) return errno;
+    DIR *directory = fdopendir(tasks);
+    if (!directory) { int error = errno; close(tasks); return error; }
+    struct dirent *entry;
+    while ((entry = readdir(directory)) && *count < cap) {
+        if (entry->d_name[0] == '.') continue;
+        char children[96];
+        int written = snprintf(children, sizeof(children), "%s/children", entry->d_name);
+        if (written <= 0 || (size_t)written >= sizeof(children)) continue;
+        int fd = openat(tasks, children, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue; /* The thread ended. */
+        FILE *file = fdopen(fd, "re");
+        if (!file) { close(fd); continue; }
+        int child;
+        while (*count < cap && fscanf(file, "%d", &child) == 1) pids[(*count)++] = child;
+        fclose(file);
+    }
+    closedir(directory);
+    return 0;
 #else
     return ENOTSUP;
 #endif

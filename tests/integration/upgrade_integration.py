@@ -14,8 +14,11 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
+import signal
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -563,7 +566,10 @@ class TerminalScreen:
 
     def observe(self):
         self.read_output()
-        assert self.process.poll() is None, (self.process.returncode, self.capture.completed)
+        if self.process.poll() is not None:
+            # A crash writes its message after the last frame: show it.
+            self.read_output()
+            raise AssertionError(self.process.returncode, self.capture.completed, bytes(self.tail[-4096:]).decode(errors="replace"))
         return self.capture.completed
 
     def contains(self, marker):
@@ -597,66 +603,258 @@ def terminal_setup(c):
     return configured["answer"]["session"], credential.read_bytes()
 
 
+def overview_args(binary, c):
+    """Inline /upgrade runs from the overview; a Session's /upgrade is PR 2's."""
+    return [str(binary), "--store", str(c.store), "--provider", "codex", "--model", "gpt-6-luna"]
+
+
+def exit_on_sigint(screen, process, description):
+    process.send_signal(signal.SIGINT)
+
+    def exited():
+        screen.read_output()
+        return process.poll() is not None
+
+    wait_for(exited, description)
+    output = bytes(screen.tail)
+    restored = output.rfind(b"\x1b[?1049l")
+    assert restored >= 0, f"{description}: terminal not restored"
+    assert b"\x1b[?25h" in output, f"{description}: cursor not restored"
+    return output[restored:]
+
+
 def terminal_cases(root, binary, releases, artifacts):
-    # PR 1: /upgrade names the shell command at both entry points; it checks,
-    # installs and restarts nothing, and the Session is untouched.
-    for entry in ("overview", "conversation"):
-        with case(root, binary, releases, f"terminal-{entry}") as c:
-            c.old_selection()
-            old_host, previous = c.start_host()
-            session, credential = terminal_setup(c)
-            before = c.json("session", "inspect", "--store", c.store, "--session", session)
-            request_directory = c.home / ".config/rui/requests"
-            captures = {p.name: p.read_bytes() for p in request_directory.glob("*.json")}
-            start = len(releases.requests)
-            args = ([str(binary), "--store", str(c.store), "--provider", "codex", "--model", "gpt-6-luna"]
-                    if entry == "overview" else [str(binary), "session", "resume", "--store", str(c.store), "--", session])
-            with terminal_process(args, env=c.env, cwd=c.root) as (process, master):
+    """/upgrade on the overview: the status bar says each step; Esc cancels
+    while preparing; a second /upgrade installs and restarts the Host."""
+    with case(root, binary, releases, "terminal-overview") as c:
+        c.old_selection()
+        old_host, previous = c.start_host()
+        session, credential = terminal_setup(c)
+        before = c.json("session", "inspect", "--store", c.store, "--session", session)
+        request_directory = c.home / ".config/rui/requests"
+        captures = {p.name: p.read_bytes() for p in request_directory.glob("*.json")}
+        gate = releases.gate_archive()
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+            screen = TerminalScreen(master, process)
+            screen.contains("›")
+            screen.send("/upgrade\r")
+            screen.until(gate.entered.is_set, "terminal installation archive gate")
+            screen.contains(f"Upgrading to {releases.version}")
+            screen.contains("esc cancels")
+            screen.save(artifacts, "overview-preparing")
+            assert c.link.resolve() == c.original and c.status()["instance"] == previous["instance"]
+            # Escape interrupts the running download; nothing waits on the
+            # fixture server.
+            screen.send("\x1b")
+            screen.contains("Upgrade cancelled; nothing changed")
+            gate.release.set()
+            c.assert_unchanged()
+            assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
+            # Again, explicitly; nothing retries on its own.
+            screen.send("\x15/upgrade\r")
+            screen.contains(f"Upgraded to {releases.version}")
+            screen.save(artifacts, "overview-installed")
+            proof_ready(c, previous, old_host)
+            screen.send("\x15unsent fixture draft")
+            screen.contains("unsent fixture draft")
+            screen.save(artifacts, "overview-returned")
+        after = c.json("session", "inspect", "--store", c.store, "--session", session)
+        assert after["session"] == before["session"], "Upgrade submitted work or changed selected Session"
+        assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+        assert {p.name: p.read_bytes() for p in request_directory.glob("*.json")} == captures, "local Upgrade captured a Host command"
+
+
+def escape_after_publication(root, binary, releases, artifacts):
+    """Once publishing starts, Esc no longer cancels: it cannot roll back."""
+    with case(root, binary, releases, "terminal-escape-after-publication") as c:
+        c.old_selection()
+        old_host, previous = c.start_host()
+        _, credential = terminal_setup(c)
+        gate = c.root / "after-publication.gate"
+        gate.touch()
+        c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(gate)
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+            screen = TerminalScreen(master, process)
+            screen.contains("›")
+            screen.send("/upgrade\r")
+            screen.until(lambda: c.link.resolve() != c.original, "publication before terminal Escape")
+            installed = c.link.resolve()
+            screen.contains("Publishing; cancelling no longer rolls back")
+            screen.send("\x1b")
+            screen.contains("Publishing; cancelling no longer rolls back")
+            screen.save(artifacts, "escape-after-publication")
+            assert c.link.resolve() == installed and installed.exists()
+            assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
+            gate.unlink()
+            screen.contains(f"Upgraded to {releases.version}")
+            proof_ready(c, previous, old_host)
+            assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+
+
+def signal_during_check(root, binary, releases, artifacts):
+    with case(root, binary, releases, "terminal-signal-during-check") as c:
+        c.old_selection()
+        host, previous = c.start_host()
+        _, credential = terminal_setup(c)
+        gate = releases.gates["/latest"] = Gate()
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+            screen = TerminalScreen(master, process)
+            screen.contains("›")
+            screen.send("/upgrade\r")
+            screen.until(gate.entered.is_set, "metadata check held before terminal signal")
+            screen.contains("Checking for updates")
+            screen.save(artifacts, "signal-during-check")
+            exit_on_sigint(screen, process, "terminal exit during held upgrade check")
+            assert not gate.release.is_set(), "terminal required metadata peer release before exiting"
+            c.assert_unchanged()
+            assert host.poll() is None and c.status()["instance"] == previous["instance"]
+            assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+
+
+def signal_after_publication(root, binary, releases, artifacts):
+    with case(root, binary, releases, "terminal-signal-after-publication") as c:
+        c.old_selection()
+        host, previous = c.start_host()
+        _, credential = terminal_setup(c)
+        gate = c.root / "after-publication.gate"
+        gate.touch()
+        c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(gate)
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+            screen = TerminalScreen(master, process)
+            screen.contains("›")
+            screen.send("/upgrade\r")
+            screen.until(lambda: c.link.resolve() != c.original, "publication before SIGINT")
+            installed = c.link.resolve()
+            assert installed.exists() and gate.exists()
+            assert host.poll() is None and c.status()["instance"] == previous["instance"]
+            receipt = exit_on_sigint(screen, process, "joined publication receipt and terminal exit after SIGINT")
+            assert b"Installed Rui. Complete build:" in receipt, ("joined installation receipt was lost after interruption", receipt.decode())
+            assert b"cancelled after installation; publication was not rolled back" in receipt, receipt.decode()
+            assert os.fsencode(installed.parent.parent) in receipt, "receipt lost the published build identity"
+            assert gate.exists(), "signal exit required releasing the post-publication gate"
+            assert c.link.resolve() == installed and installed.exists(), "signal rolled back publication"
+            assert host.poll() is None and c.status()["instance"] == previous["instance"]
+            assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+            if artifacts is not None:
+                (artifacts / "signal-after-publication.txt").write_text(screen.capture.plain)
+
+
+def cancel_selected_version_check(root, binary, releases, artifacts):
+    """Esc during the check cancels it, and its --version probe is reaped
+    before release discovery starts."""
+    with case(root, binary, releases, "selected-version-cancel-escape") as c:
+        c.old_selection()
+        host, previous = c.start_host()
+        _, credential = terminal_setup(c)
+        gate = c.root / "selected-version.fifo"
+        os.mkfifo(gate, mode=0o600)
+        receipt = c.root / "selected-version.pid"
+        # This is only the selected release's metadata/version fixture.
+        # Its real runtime Host remains the separately copied native actor.
+        c.original.write_text(
+            '#!/bin/sh\n[ "$1" = --version ] || exit 91\n'
+            f'printf "%s\\n" "$$" > {shlex.quote(str(receipt))}\n'
+            f'IFS= read -r released < {shlex.quote(str(gate))}\n'
+            "printf '%s\\n' 'rui 0.1.0 (synthetic gated metadata fixture)'\n")
+        start = len(releases.requests)
+
+        def release_version():
+            descriptor = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+            try:
+                os.write(descriptor, b"continue\n")
+            finally:
+                os.close(descriptor)
+
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+            try:
                 screen = TerminalScreen(master, process)
                 screen.contains("›")
                 screen.send("/upgrade\r")
-                screen.contains("Run rui upgrade in the shell")
-                screen.save(artifacts, f"{entry}-shell-instruction")
-                screen.send("unsent fixture draft")
-                screen.contains("unsent fixture draft")
-            assert releases.requests[start:] == [], "/upgrade checked for a release"
-            c.assert_unchanged()
-            assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
-            after = c.json("session", "inspect", "--store", c.store, "--session", session)
-            assert after["session"] == before["session"], "Upgrade submitted work or changed selected Session"
-            assert (c.home / ".config/rui/codex.json").read_bytes() == credential
-            assert {p.name: p.read_bytes() for p in request_directory.glob("*.json")} == captures, "local Upgrade captured a Host command"
+
+                def child_started():
+                    return receipt.exists() and receipt.read_text().strip().isdigit()
+
+                screen.until(child_started, "selected --version child receipt before discovery")
+                child_pid = int(receipt.read_text().strip())
+
+                def alive():
+                    running = subprocess.run(["ps", "-p", str(child_pid), "-o", "stat="],
+                                             env=c.env, capture_output=True, text=True, timeout=5)
+                    return running.returncode == 0 and not running.stdout.strip().startswith("Z")
+
+                assert alive()
+                screen.contains("Checking for updates")
+                assert releases.requests[start:] == [], "latest discovery ran before selected probe completed"
+                screen.send("\x1b")
+                screen.contains("Upgrade cancelled; nothing changed")
+                screen.save(artifacts, "selected-version-escape")
+
+                def reaped():
+                    observed = subprocess.run(["ps", "-p", str(child_pid), "-o", "stat="],
+                                              env=c.env, capture_output=True, text=True, timeout=5)
+                    if observed.returncode == 1 and not observed.stdout and not observed.stderr:
+                        return True
+                    assert observed.returncode == 0 and observed.stdout.strip(), observed
+                    return False  # A zombie is not a reaped version child.
+
+                wait_for(reaped, "cancelled exact selected --version child reap")
+                assert releases.requests[start:] == [], "cancelled check reached latest discovery"
+                assert c.link.resolve() == c.original
+                assert host.poll() is None and c.status()["instance"] == previous["instance"]
+                assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+            finally:
+                # Failure disposal can unblock the child, but never supplies
+                # credit before the cancellation/reap assertions above.
+                dispose_all(release_version)
 
 
-
-
-
-
-
-
-
-
-def stop_tmux(base, env, server_pid):
-    """Retire this fixture's observed server; unsuccessful kills are not success."""
-    result = subprocess.run([*base, "kill-server"], env=env, capture_output=True,
-                            text=True, timeout=5)
-    assert server_pid is not None, ("tmux server identity was not observed; disposal unconfirmed", result)
-
-    def retired():
-        observed = subprocess.run(["ps", "-p", str(server_pid), "-o", "stat="],
-                                  env=env, capture_output=True, text=True, timeout=5)
-        if observed.returncode == 1 and not observed.stdout and not observed.stderr:
-            return True  # The independently observed server PID is absent.
-        assert observed.returncode == 0 and observed.stdout.strip(), ("tmux server census failed", observed)
-        # An exited orphan may await its OS reaper but owns no live resources.
-        return observed.stdout.strip().startswith("Z")
-
-    if result.returncode != 0:
-        assert retired(), ("tmux kill-server failed with a live server", result)
-    else:
-        wait_for(retired, "exact tmux server retirement")
-
-
+def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
+    """The status bar says the run failed; the retained cleanup path and both
+    failures print once the terminal is restored."""
+    with case(root, binary, releases, "terminal-dual-failure") as c:
+        c.old_selection()
+        host, previous = c.start_host()
+        _, credential = terminal_setup(c)
+        parent = c.home / ".local/lib/rui"
+        original_mode = stat.S_IMODE(parent.stat().st_mode)
+        original_digest = releases.digest
+        releases.digest = "0" * 64
+        gate = releases.gate_archive()
+        try:
+            with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+                screen = TerminalScreen(master, process)
+                screen.contains("›")
+                screen.send("/upgrade\r")
+                screen.until(gate.entered.is_set, "real archive request after stage creation")
+                stages = list(parent.glob("install.*"))
+                assert len(stages) == 1 and stages[0].is_dir(), stages
+                retained = stages[0]
+                # The stage remains writable for curl, but its parent cannot
+                # remove that directory after checksum validation rejects it.
+                parent.chmod(0o500)
+                gate.release.set()
+                screen.contains("Upgrade failed; nothing changed")
+                screen.save(artifacts, "dual-failure-status")
+                assert retained.is_dir(), "cleanup receipt did not identify an existing retained stage"
+                assert c.link.resolve() == c.original
+                assert host.poll() is None and c.status()["instance"] == previous["instance"]
+                receipt = exit_on_sigint(screen, process, "restored primary and retained cleanup receipt after SIGINT")
+                assert b"ReleaseChecksumMismatch" in receipt, receipt.decode()
+                assert b"cleanup also failed (AccessDenied)" in receipt, receipt.decode()
+                # Rui names the stage by its real path: macOS's temporary
+                # directory sits under the /var -> /private/var link.
+                assert os.fsencode(retained.resolve()) in receipt, ("restored output lost retained cleanup custody", receipt.decode())
+                assert retained.is_dir() and c.link.resolve() == c.original
+                assert host.poll() is None and c.status()["instance"] == previous["instance"]
+                assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+                if artifacts is not None:
+                    (artifacts / "dual-failure-restored.txt").write_text(screen.capture.plain)
+        finally:
+            # Restore the real permission cut even when the body fails; neither
+            # cleanup nor the next fixture may inherit the intended denial.
+            dispose_all(lambda: parent.chmod(original_mode),
+                        gate.release.set,
+                        lambda: setattr(releases, "digest", original_digest))
 
 
 def main():
@@ -682,8 +880,18 @@ def main():
         for suite in (discovery_cases, install_cases, lifecycle_cases):
             suite(root, binary, releases)
             print(f"upgrade native: {suite.__name__} passed", flush=True)
+        cancel_selected_version_check(root, binary, releases, artifacts)
+        print("upgrade native: Esc cancelled the check and reaped the selected version probe before discovery", flush=True)
         terminal_cases(root, binary, releases, artifacts)
-        print("upgrade native: both terminal /upgrade entry points name the shell command", flush=True)
+        print("upgrade native: overview /upgrade cancelled while preparing, then installed inline", flush=True)
+        escape_after_publication(root, binary, releases, artifacts)
+        print("upgrade native: Esc after publication changed nothing and the Upgrade finished", flush=True)
+        terminal_cleanup_dual_failure(root, binary, releases, artifacts)
+        print("upgrade native: real checksum/cleanup dual failure printed retained custody on exit", flush=True)
+        signal_after_publication(root, binary, releases, artifacts)
+        print("upgrade native: SIGINT after publication preserved and reported the installed receipt", flush=True)
+        signal_during_check(root, binary, releases, artifacts)
+        print("upgrade native: terminal signal restored during held release check", flush=True)
         complete = True
     finally:
         retired = False
