@@ -76,7 +76,7 @@ pub fn send(status: ?[]const u8, in_flight: bool, sent: bool) Send {
 
 test "a send is progress while in flight or just accepted, and needs the person once unresolved" {
     try std.testing.expectEqualDeep(Send{ .progress = "Sending…" }, send("Sending…", true, false));
-    try std.testing.expectEqualDeep(Send{ .needs = "! Not confirmed · Ctrl-R retries original" }, send("! Not confirmed · Ctrl-R retries original", false, true));
+    try std.testing.expectEqualDeep(Send{ .needs = "! Not confirmed · ctrl+r retries original" }, send("! Not confirmed · ctrl+r retries original", false, true));
     try std.testing.expectEqualDeep(Send{ .progress = "Sent" }, send(null, false, true));
     try std.testing.expectEqualDeep(Send{}, send("", false, true));
     try std.testing.expectEqualDeep(Send{}, send(null, false, false));
@@ -90,19 +90,65 @@ test "a send is progress while in flight or just accepted, and needs the person 
 /// Bytes `factsRow` writes at most.
 pub const facts_bytes = session_line.capacity + " · ".len + "Stopping and archiving".len;
 
-/// The facts row after `‹ `: the Session line's facts, else the Session's
-/// name, then the archive badge (`status_page.archiveBadge`) while it has
-/// one. A standing fact, so it sits here, never in place of a notice; on a
-/// short row the facts give way and the badge stays.
+/// The facts row after `‹ `: the Session's facts in the plan's priority
+/// order (name · model · effort · context, then `asks` in ask mode), else
+/// the Session's name, then the archive badge (`status_page.archiveBadge`)
+/// while it has one. A standing fact, so it sits here, never in place of a
+/// notice. On a short row the badge stays whole and the facts give way:
+/// whole facts drop from the low-priority end, marked ` · …`, and a name
+/// too long alone ends at a word with `…`.
 pub fn factsRow(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []const u8, badge: ?[]const u8, width: usize, method: Method) []const u8 {
-    const tail = if (badge) |text| session_line.cells(text, method) + " · ".len else 0;
+    const tail = if (badge) |text| session_line.cells(session_line.separator, method) + session_line.cells(text, method) else 0;
+    const room = width -| tail;
     var out = std.Io.Writer.fixed(buffer);
+    var percent: [session_line.left_text.len]u8 = undefined;
+    var parts: [5][]const u8 = undefined;
+    var count: usize = 0;
     if (facts) |value| {
-        var line: [session_line.capacity]u8 = undefined;
-        out.writeAll(session_line.write(&line, value, width -| tail, method)) catch unreachable;
-    } else out.writeAll(name[0..@min(name.len, session_line.capacity)]) catch unreachable;
-    if (badge) |text| out.print(" · {s}", .{text}) catch unreachable;
+        for ([_]?[]const u8{
+            value.name,
+            value.model,
+            if (value.effort) |effort| @tagName(effort) else null,
+            if (value.left) |left| std.fmt.bufPrint(&percent, "{d}% left", .{left}) catch unreachable else null,
+            if (value.asks) session_line.asks_text else null,
+        }) |part| if (part) |text| {
+            parts[count] = text;
+            count += 1;
+        };
+    } else {
+        parts[0] = name[0..@min(name.len, session_line.max_name_bytes)];
+        count = 1;
+    }
+    const dropped = session_line.separator ++ session_line.ellipsis;
+    var kept = count;
+    while (kept > 0) : (kept -= 1) {
+        var cells: usize = if (kept < count) session_line.cells(dropped, method) else 0;
+        for (parts[0..kept], 0..) |part, index| cells += session_line.cells(part, method) + if (index == 0) 0 else session_line.cells(session_line.separator, method);
+        if (cells > room) continue;
+        for (parts[0..kept], 0..) |part, index| {
+            if (index != 0) out.writeAll(session_line.separator) catch unreachable;
+            out.writeAll(part) catch unreachable;
+        }
+        if (kept < count) out.writeAll(dropped) catch unreachable;
+        break;
+    } else words(&out, parts[0], room, method);
+    if (badge) |text| out.print("{s}{s}", .{ session_line.separator, text }) catch unreachable;
     return out.buffered();
+}
+
+/// `text` within `room` cells, ending at a word with `…` when it is cut.
+/// Only a word wider than the room is cut inside itself. Text that fits
+/// is never cut, even with no room left to mark what dropped after it.
+fn words(out: *std.Io.Writer, text: []const u8, room: usize, method: Method) void {
+    if (session_line.cells(text, method) <= room) return out.writeAll(text) catch unreachable;
+    const mark = session_line.cells(session_line.ellipsis, method);
+    if (room <= mark) return;
+    const fits = session_line.fit(text, room - mark, method).len;
+    var end = fits;
+    if (text[fits] != ' ') end = std.mem.lastIndexOfScalar(u8, text[0..fits], ' ') orelse fits;
+    end = std.mem.trimEnd(u8, text[0..end], " ").len;
+    if (end == 0) end = fits;
+    out.print("{s}{s}", .{ text[0..end], session_line.ellipsis }) catch unreachable;
 }
 
 test "the facts row ends with the archive badge, which stays when the row is short" {
@@ -115,6 +161,28 @@ test "the facts row ends with the archive badge, which stays when the row is sho
     const short = factsRow(&buffer, facts, "k7m2qx", "Archived · /unarchive", 40, .unicode);
     try std.testing.expect(std.mem.endsWith(u8, short, " · Archived · /unarchive"));
     try std.testing.expect(session_line.cells(short, .unicode) <= 40);
+}
+
+test "a short facts row drops whole facts from the low-priority end, marks it with …, and never cuts a word" {
+    var buffer: [facts_bytes]u8 = undefined;
+    const facts: session_line.Facts = .{ .name = "Fix flaky store test that fails on CI under heavy load", .model = "gpt-6-sol", .effort = .low, .left = 100 };
+    // Name · model · effort · context: the context goes first, not the effort.
+    try std.testing.expectEqualStrings("Fix flaky store test that fails on CI under heavy load · gpt-6-sol · low · 100% left", factsRow(&buffer, facts, "k7m2qx", null, 84, .unicode));
+    try std.testing.expectEqualStrings("Fix flaky store test that fails on CI under heavy load · gpt-6-sol · low · …", factsRow(&buffer, facts, "k7m2qx", null, 83, .unicode));
+    try std.testing.expectEqualStrings("Fix flaky store test that fails on CI under heavy load · gpt-6-sol · …", factsRow(&buffer, facts, "k7m2qx", null, 75, .unicode));
+    try std.testing.expectEqualStrings("Fix flaky store test that fails on CI under heavy load · …", factsRow(&buffer, facts, "k7m2qx", null, 69, .unicode));
+    // The name alone is too long: it ends at a word, never inside one.
+    try std.testing.expectEqualStrings("Fix flaky store test that fails on CI…", factsRow(&buffer, facts, "k7m2qx", null, 38, .unicode));
+    try std.testing.expectEqualStrings("Fix flaky store test that fails on…", factsRow(&buffer, facts, "k7m2qx", null, 37, .unicode));
+    // A name that fits alone is never cut, even with no room to mark the rest.
+    try std.testing.expectEqualStrings("Fix flaky store test that fails on CI under heavy load", factsRow(&buffer, facts, "k7m2qx", null, 55, .unicode));
+    // The badge stays whole; the facts give way before it.
+    try std.testing.expectEqualStrings("Fix flaky store test · … · Archived · /unarchive", factsRow(&buffer, .{ .name = "Fix flaky store test", .model = "gpt-6-sol" }, "k7m2qx", "Archived · /unarchive", 50, .unicode));
+    // One word wider than the row can only be cut inside itself.
+    const xs: [100]u8 = @splat('X');
+    const cut = factsRow(&buffer, .{ .name = &xs, .model = "gpt-6-sol", .effort = .low, .left = 100 }, "k7m2qx", null, 30, .unicode);
+    try std.testing.expectEqualStrings(xs[0..29], cut[0..29]);
+    try std.testing.expectEqualStrings("…", cut[29..]);
 }
 
 /// The key that ends what needs the person, which the status bar makes
@@ -412,7 +480,7 @@ test "the stop key shows on the right while work can be stopped, and drops first
 }
 
 test "the key that ends what needs the person is the part after its last separator" {
-    try std.testing.expectEqualStrings("Ctrl-R retries original", needsKey("! Not confirmed · Ctrl-R retries original"));
+    try std.testing.expectEqualStrings("ctrl+r retries original", needsKey("! Not confirmed · ctrl+r retries original"));
     try std.testing.expectEqualStrings("/discard", needsKey("Rejected · /discard"));
     try std.testing.expectEqualStrings("", needsKey("Sending…"));
 }

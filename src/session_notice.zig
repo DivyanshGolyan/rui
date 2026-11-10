@@ -16,9 +16,9 @@ pub fn status(opening: bool, waiting: bool, held: ?Held) ?[]const u8 {
     if (waiting) return "";
     const original = held orelse return null;
     return switch (original.state) {
-        .not_started => "Not sent · Ctrl-R retries original",
+        .not_started => "Not sent · ctrl+r retries original",
         .submitting => "Sending…",
-        .unconfirmed => if (original.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
+        .unconfirmed => if (original.kind == .decision) "! Decision not confirmed · ctrl+r retries original" else "! Not confirmed · ctrl+r retries original",
         .rejected => "Rejected · /discard",
     };
 }
@@ -110,8 +110,10 @@ test "the status says the opening first, nothing over a waiting Action, then the
     try std.testing.expectEqualStrings("Opening…", status(true, true, unconfirmed).?);
     try std.testing.expectEqualStrings("", status(false, true, unconfirmed).?);
     try std.testing.expectEqual(@as(?[]const u8, null), status(false, false, null));
-    try std.testing.expectEqualStrings("! Decision not confirmed · Ctrl-R retries original", status(false, false, unconfirmed).?);
-    try std.testing.expectEqualStrings("! Not confirmed · Ctrl-R retries original", status(false, false, .{ .kind = .message, .state = .unconfirmed }).?);
+    // Keys read as the rest of the last row writes them: lowercase, joined by +.
+    try std.testing.expectEqualStrings("! Decision not confirmed · ctrl+r retries original", status(false, false, unconfirmed).?);
+    try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries original", status(false, false, .{ .kind = .message, .state = .unconfirmed }).?);
+    try std.testing.expectEqualStrings("Not sent · ctrl+r retries original", status(false, false, .{ .kind = .message, .state = .not_started }).?);
     try std.testing.expectEqualStrings("Rejected · /discard", status(false, false, .{ .kind = .decision, .state = .rejected }).?);
 }
 

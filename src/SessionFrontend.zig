@@ -672,7 +672,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .needs_key = if (send.needs) |needs| session_chrome.needsKey(needs) else "",
         .progress = send.progress,
         .stoppable = said.stoppable,
-        .facts = session_chrome.factsRow(facts_buffer, self.line.facts(&self.hint, self.session), self.session, status_page.archiveBadge(self.line.archive_state), ctx.max.width.? -| 2, self.app_caps.width),
+        .facts = session_chrome.factsRow(facts_buffer, self.line.facts(&self.hint, self.session), self.session, status_page.archiveBadge(self.line.archive_state), ctx.max.width.? -| @import("FactsRow.zig").text_column, self.app_caps.width),
         .notice = said.text orelse self.shown_notice.current(now_ms),
         .shortcuts = self.shortcuts_open,
         .overlay = palette,
@@ -4626,6 +4626,20 @@ test "App Session's facts row ends with the archive badge while the Session is a
     try std.testing.expectEqualStrings("Copied 3 lines", shown[23]);
 }
 
+test "App Session's facts fit the row after ‹ whole: a fact that would not fit drops, marked …" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    // 48 cells of name and 30 of the rest: 78 cells, one more than the 77
+    // after ` ‹ ` on an 80-column row.
+    self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .low, .left = 100, .label = .{} };
+    try self.line.label.?.set("Port the overview to vxfw and keep its key table");
+    try self.line.model.set("gpt-6-sol");
+    const shown = try fixture.rows();
+    try std.testing.expectEqualStrings("‹ Port the overview to vxfw and keep its key table · gpt-6-sol · low · …", shown[22]);
+}
+
 test "App Session's last row offers ctrl+x stop at the right while work runs, beside the overview's notice" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
@@ -4656,8 +4670,8 @@ test "App Session's last row says the send state, which stays past a key and fiv
     self.shown_notice.show("Copied 3 lines", ChromeFixture.now() - 6_000);
     try fixture.press(.{ .codepoint = 'a', .text = "a" });
     const unconfirmed = try fixture.rows();
-    try std.testing.expectEqualStrings("! Not confirmed · Ctrl-R retries original", unconfirmed[23]);
-    try std.testing.expectEqualStrings("Ctrl-R retries original", self.chrome.status.key.label);
+    try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries original", unconfirmed[23]);
+    try std.testing.expectEqualStrings("ctrl+r retries original", self.chrome.status.key.label);
 }
 
 test "App Session shows work under way at the transcript's tail, and the ↓ marker in its place while scrolled back" {

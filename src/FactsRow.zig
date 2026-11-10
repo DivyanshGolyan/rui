@@ -6,6 +6,10 @@ const vxfw = vaxis.vxfw;
 const Chip = @import("Chip.zig");
 const Self = @This();
 
+/// The column the facts start at: one cell of margin, `‹`, then a space.
+/// A shell measures the facts for the columns from here to the edge.
+pub const text_column = 3;
+
 back: Chip,
 /// The facts after `‹ `: `Fix flaky store test · gpt-6.1-sol · high · 62% left`.
 text: []const u8 = "",
@@ -31,7 +35,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     // One cell of margin, as the mocks set it; the chip is the `‹` alone.
     children[0] = .{ .origin = .{ .row = 0, .col = 1 }, .surface = try self.back.widget().draw(ctx.withConstraints(.{}, .{ .width = 1, .height = 1 })) };
     surface.children = children;
-    _ = Chip.print(surface, self.method, 3, 0, self.text, self.style, surface.size.width);
+    _ = Chip.print(surface, self.method, text_column, 0, self.text, self.style, surface.size.width);
     return surface;
 }
 
