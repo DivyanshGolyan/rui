@@ -3606,6 +3606,35 @@ test "Alt-A archives the open conversation at once without submitting or changin
     };
 }
 
+test "Alt-A while the card is up archives and decides nothing" {
+    for ([_]bool{ false, true }) |draft| for ([_][]const u8{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" }) |chord| {
+        errdefer std.debug.print("draft={} chord={s}\n", .{ draft, chord[1..] });
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer overview.state.deinit();
+        held.self.lender = overview.lender();
+        held.self.live.work.state = .{ .approval = .{ .since = 1 } };
+        if (draft) try sendKeys(&held.self, "permission reason\x1b[D");
+        const file = try held.adopt(3);
+        defer file.close(std.testing.io);
+        try std.testing.expectEqual(@as(?u64, 0xa), held.self.app_consent.request);
+        const before = held.self.input.composition();
+        const revision = held.self.input.revision;
+        try sendKeys(&held.self, chord);
+        try std.testing.expectEqual(@as(usize, 1), overview.archives);
+        // The card still waits for its own choice.
+        try std.testing.expectEqual(@as(?u64, 0xa), held.self.app_consent.request);
+        try std.testing.expect(held.self.app_input.permission != null);
+        try std.testing.expect(held.self.submission.view() == null);
+        try std.testing.expect(held.self.input.submitted == null);
+        try std.testing.expectEqualStrings(if (draft) "permission reason" else "", held.self.input.composition().bytes);
+        try std.testing.expectEqual(before.cursor, held.self.input.composition().cursor);
+        try std.testing.expectEqual(revision, held.self.input.revision);
+    };
+}
+
 test "Alt-A and Ctrl-X during opening forward no intent and keep the draft" {
     for ([_][]const u8{ "\x1ba", "\x18" }) |chord| {
         const held = try HeldFrontend.create();

@@ -40,10 +40,11 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         .key_release => return ctx.consumeEvent(),
         .key_press => |key| key: {
             // These keep the screen's meaning, Ctrl-D leaving as Ctrl-C does
-            // whatever the hidden draft holds; every other typed key belongs
-            // to this card, never the hidden composer.
+            // whatever the hidden draft holds and Alt-A archiving without
+            // deciding; every other typed key belongs to this card, never the
+            // hidden composer.
             if (!self.pasting.*) if (@import("TerminalEditor.zig").named(key)) |named| switch (named) {
-                .escape, .ctrl_c, .ctrl_d, .ctrl_x, .page_up, .page_down, .shift_up, .shift_down => return,
+                .escape, .ctrl_c, .ctrl_d, .ctrl_x, .alt_a, .page_up, .page_down, .shift_up, .shift_down => return,
                 else => {},
             };
             if (key.matchExact(vaxis.Key.enter, .{})) break :key .enter;
