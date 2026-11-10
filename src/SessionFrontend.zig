@@ -31,6 +31,7 @@ const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const reader_policy = @import("session_reading.zig");
 const session_notice = @import("session_notice.zig");
+const session_id = @import("session_id.zig");
 const session_keys = @import("session_keys.zig");
 const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
@@ -343,7 +344,7 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .screen = screen, .interrupted = interrupted, .lender = lender, .colour = screen.colour };
     self.startInput();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
-    self.app_content = .{ .document = &screen.live, .colour = self.colour, .handler = .{ .userdata = self, .on_notice = appNotice, .on_scroll = appDragScroll } };
+    self.app_content = .{ .document = &screen.live, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll } };
     self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
     self.app_screen = .{ .content = &self.app_content, .input = &self.app_input, .userdata = self, .on_event = appEvent };
 }
@@ -354,6 +355,9 @@ pub const AppHooks = struct {
     leave: *const fn (*anyopaque, *vxfw.EventContext, Outcome) anyerror!void,
     upgrade: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
     copy: *const fn (*anyopaque, std.Io.File, u64, u64) anyerror!void,
+    /// A Session link was clicked and this Session is about to be left:
+    /// the linked Session's ID, opened once `leave` returns to the overview.
+    on_open: *const fn (*anyopaque, *vxfw.EventContext, *const [session_id.bytes]u8) anyerror!void,
 };
 
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
@@ -376,6 +380,27 @@ fn appNotice(raw: *anyopaque, ctx: *vxfw.EventContext, text: []const u8) !void {
     @memcpy(self.notice_buffer[0..length], text[0..length]);
     self.notice = self.notice_buffer[0..length];
     ctx.redraw = true;
+}
+
+/// A click on a peer's name: leave for that Session where Esc would leave,
+/// else say what keeps this one open. The draft and Session stay as they are.
+fn appOpen(raw: *anyopaque, ctx: *vxfw.EventContext, id: []const u8) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.leaving != null or id.len != session_id.bytes or !session_id.valid(id) or std.mem.eql(u8, id, self.session)) return;
+    const screen = self.screen;
+    const action = screen.action_view != null or self.live.work.first_action != null or self.reading.prepared_action != null;
+    const original: ?Submission.State = if (self.submission.view()) |submission| submission.state else null;
+    switch (session_notice.follow(original, self.submission.published(), self.input.composition().bytes.len == 0, action, self.commandActive())) {
+        .stay => |why| {
+            self.notice = why;
+            ctx.redraw = true;
+        },
+        .leave => {
+            try self.app_hooks.on_open(self.app_hooks.context, ctx, id[0..session_id.bytes]);
+            self.leaving = .returned;
+            try self.depart(ctx);
+        },
+    }
 }
 
 fn appDragScroll(raw: *anyopaque, _: *vxfw.EventContext, up: bool) !void {
@@ -469,6 +494,11 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
     try self.screen.browsing.prepare();
     try self.screen.staging.prepare();
     self.app_input.composer.editor = &self.input.editors[self.input.active];
+    try self.depart(ctx);
+}
+
+/// Hands the Session back to the overview once it is leaving.
+fn depart(self: *Self, ctx: *vxfw.EventContext) !void {
     if (self.leaving) |outcome| {
         const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.pasting, false);
         if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
@@ -565,9 +595,12 @@ test "App Session retains the draft across a permission card arriving during pas
         fn copy(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
             return error.UnexpectedCopy;
         }
+        fn open(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {
+            return error.UnexpectedOpen;
+        }
     };
     var root: Root = .{ .overview = empty_app_text.widget() };
-    const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .upgrade = Hooks.upgrade, .copy = Hooks.copy }, .{ .depth = .none });
+    const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .upgrade = Hooks.upgrade, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
     self.reading.opening = false;
     self.poll_at = std.math.maxInt(i96);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -639,9 +672,12 @@ test "App Session drag copies the live rows it crosses once, says so and clears"
         fn copy(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
             return error.UnexpectedCopy;
         }
+        fn open(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {
+            return error.UnexpectedOpen;
+        }
     };
     var root: Root = .{ .overview = empty_app_text.widget() };
-    const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .upgrade = Hooks.upgrade, .copy = Hooks.copy }, .{ .depth = .none });
+    const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .upgrade = Hooks.upgrade, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
     self.reading.opening = false;
     self.poll_at = std.math.maxInt(i96);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -711,6 +747,81 @@ test "App Session drag copies the live rows it crosses once, says so and clears"
     try std.testing.expect(self.idleReader().at_top);
     try content.handleEvent(&ctx, press(.press, 0, 0));
     try std.testing.expect(!self.idleReader().at_top);
+}
+
+test "App Session link click leaves for the peer only where Esc would leave" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const page = try tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+    defer page.close(std.testing.io);
+    var init: std.process.Init = undefined;
+    init.io = std.testing.io;
+    init.gpa = std.testing.allocator;
+    init.environ_map = &environ;
+    var interrupted: client.Cancellation = .{};
+    const self = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(self);
+    self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
+    const Hooks = struct {
+        var opened: ?[session_id.bytes]u8 = null;
+        var left: ?Outcome = null;
+        fn leave(_: *anyopaque, _: *vxfw.EventContext, outcome: Outcome) !void {
+            // The overview hears which Session to open before the leave.
+            std.debug.assert(opened != null);
+            left = outcome;
+        }
+        fn upgrade(_: *anyopaque, _: *vxfw.EventContext) !void {
+            return error.UnexpectedUpgrade;
+        }
+        fn copy(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
+            return error.UnexpectedCopy;
+        }
+        fn open(_: *anyopaque, _: *vxfw.EventContext, id: *const [session_id.bytes]u8) !void {
+            opened = id.*;
+        }
+    };
+    Hooks.opened = null;
+    Hooks.left = null;
+    var root: Root = .{ .overview = empty_app_text.widget() };
+    const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .upgrade = Hooks.upgrade, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
+    self.reading.opening = false;
+    self.poll_at = std.math.maxInt(i96);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
+    defer ctx.cmds.deinit(std.testing.allocator);
+    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+    try screen.live.append("\x1b[2;8m← Received message from " ++ TerminalText.link_open ++ TerminalText.session_link ++ "m3n4p5" ++ TerminalText.link_end ++ "\x1b[4mPlan" ++ TerminalText.link_close ++ "\x1b[0m\x1b[2;8m\x1b[0m\n");
+    _ = try widget_.draw(draw_context);
+    const content = self.app_content.widget();
+    const click = struct {
+        fn on(context: *vxfw.EventContext, target: vxfw.Widget, col: i16) !void {
+            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try target.handleEvent(context, .{ .mouse = .{ .col = col, .row = 0, .button = .left, .mods = .{}, .type = kind } });
+        }
+    }.on;
+    // "Plan" is at columns 24 to 27. With a draft, the click is refused as
+    // Esc is, and the Session and its draft stay as they were.
+    _ = self.input.append("keep me");
+    try click(&ctx, content, 25);
+    try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", self.notice.?);
+    try std.testing.expectEqual(@as(?[session_id.bytes]u8, null), Hooks.opened);
+    try std.testing.expectEqual(@as(?Outcome, null), self.leaving);
+    try std.testing.expectEqualStrings("keep me", self.input.composition().bytes);
+    // Beside the name nothing opens.
+    self.input.init();
+    self.notice = null;
+    try click(&ctx, content, 10);
+    try std.testing.expectEqual(@as(?[session_id.bytes]u8, null), Hooks.opened);
+    // On the name, with nothing to lose, the Session leaves for the peer.
+    try click(&ctx, content, 25);
+    try std.testing.expectEqualStrings("m3n4p5", &Hooks.opened.?);
+    try std.testing.expectEqual(Outcome.returned, Hooks.left.?);
 }
 
 /// A Session's input starts empty, and no frame of it has drawn a list yet:

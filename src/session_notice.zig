@@ -88,6 +88,23 @@ pub fn close(held: ?submission.State, published: bool, draft_empty: bool) Close 
     return if (draft_empty) .leave else .{ .stay = "Esc returns to the overview once the draft is empty." };
 }
 
+/// A click on a Session link leaves this Session as Esc does, under the
+/// same rule; a waiting Action or a running command keeps it here too,
+/// where Esc would show them rather than leave.
+pub fn follow(held: ?submission.State, published: bool, draft_empty: bool, action: bool, command: bool) Close {
+    if (action) return .{ .stay = "Links open once the Action is decided." };
+    if (command) return .{ .stay = "Links open once the command ends." };
+    return close(held, published, draft_empty);
+}
+
+test "a Session link leaves only where Esc would, and never past a waiting Action or command" {
+    try std.testing.expectEqual(Close.leave, follow(null, false, true, false, false));
+    try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", follow(null, false, false, false, false).stay);
+    try std.testing.expectEqualStrings("Esc returns to the overview once the original is confirmed.", follow(.submitting, false, true, false, false).stay);
+    try std.testing.expectEqualStrings("Links open once the Action is decided.", follow(null, false, true, true, true).stay);
+    try std.testing.expectEqualStrings("Links open once the command ends.", follow(null, false, true, false, true).stay);
+}
+
 test "the status says the opening first, nothing over a waiting Action, then the original's progress" {
     const unconfirmed: Held = .{ .kind = .decision, .state = .unconfirmed };
     try std.testing.expectEqualStrings("Opening…", status(true, true, unconfirmed).?);

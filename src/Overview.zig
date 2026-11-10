@@ -35,6 +35,7 @@ const SessionFrontend = @import("SessionFrontend.zig");
 const session_reads = @import("session_reads.zig");
 const SessionInput = @import("SessionInput.zig");
 const SessionScreen = @import("SessionScreen.zig");
+const session_id = @import("session_id.zig");
 const SessionTerminal = @import("SessionTerminal.zig");
 const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalInput = @import("TerminalInput.zig");
@@ -313,6 +314,8 @@ app_width: u16 = 0,
 app_panel: ?[]const view.ListRow = null,
 session_screen: *SessionScreen = undefined,
 app_session: ?Left = null,
+/// Where leaving a Session goes when Session links are followed.
+follow: @import("session_follow.zig").Follow = .{},
 retired: std.ArrayList(struct { left: Left, frame: u64 }) = .empty,
 interrupted: *client.Cancellation,
 /// The composer's line editor, the conversation's, which owns the draft.
@@ -495,7 +498,7 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     const frontend = try self.init.gpa.create(SessionFrontend);
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeHandoff };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
-    const child = frontend.attach(.{ .root = &self.root, .context = self, .leave = appSessionLeft, .upgrade = appSessionUpgrade, .copy = appCopy }, self.caps);
+    const child = frontend.attach(.{ .root = &self.root, .context = self, .leave = appSessionLeft, .upgrade = appSessionUpgrade, .copy = appCopy, .on_open = appSessionFollow }, self.caps);
     // Custody transfers before focus delivery: on failure the exit
     // path cancels and joins the same frontend before freeing it.
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
@@ -506,6 +509,7 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
 fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFrontend.Outcome) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const left = &self.app_session.?;
+    const from = left.session;
     left.ended = outcome;
     if (outcome == .returned) switch (left.frontend.?.back(view.canHoldSend(&self.state))) {
         .ended => |ended| left.ended = ended,
@@ -516,10 +520,22 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
             try self.root.closeSession(ctx);
             // App's last frame can still point at the old widgets. Dispose
             // only after the next frame replaces that focus/hit-test tree.
-            return;
+            return self.followNext(ctx, from);
         },
     };
     ctx.quit = true;
+}
+
+/// A clicked Session link: open it once the current Session has left.
+fn appSessionFollow(raw: *anyopaque, _: *vxfw.EventContext, target: *const [session_id.bytes]u8) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    self.follow.pending = target.*;
+}
+
+/// After leaving `from`, opens the Session a link named, or the one a
+/// followed link left, as opening it from the overview does.
+fn followNext(self: *Self, ctx: *vxfw.EventContext, from: view.Reference) !void {
+    if (self.follow.next(from)) |target| try self.appNext(ctx, try self.event(.{ .open = target }));
 }
 
 fn appSessionUpgrade(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
@@ -3782,4 +3798,50 @@ test "a draft past its cap scrolls inside the composer, and the rule counts what
     var ascii = try rig.shown(40, 40);
     defer ascii.deinit();
     try ascii.expectLines(26, &.{ "------------ v 3 more lines ------------", " > 1" });
+}
+
+test "a followed Session link opens the peer, Esc reopens the Session it left, then the overview" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    // A link in k7m2qx names m3n4p5; k7m2qx then leaves.
+    overview.follow.pending = "m3n4p5".*;
+    try overview.followNext(&ctx, "k7m2qx".*);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
+    try std.testing.expectEqualStrings("m3n4p5", &Seen.now.conversed);
+    // Esc in m3n4p5 reopens k7m2qx; Esc there reaches the overview.
+    try overview.followNext(&ctx, "m3n4p5".*);
+    try std.testing.expectEqual(@as(usize, 2), Seen.now.conversations);
+    try std.testing.expectEqualStrings("k7m2qx", &Seen.now.conversed);
+    try overview.followNext(&ctx, "k7m2qx".*);
+    try std.testing.expectEqual(@as(usize, 2), Seen.now.conversations);
+    try std.testing.expect(!ctx.quit);
+}
+
+test "a Session link that no longer opens ends as any failed open, naming that Session" {
+    var ops = fake_operations;
+    ops.open = struct {
+        fn open(_: *Self, _: *vxfw.EventContext) !void {
+            return error.SessionNotFound;
+        }
+    }.open;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    overview.follow.pending = "m3n4p5".*;
+    try overview.followNext(&ctx, "k7m2qx".*);
+    try std.testing.expect(ctx.quit);
+    const unopened = overview.app_session.?;
+    try std.testing.expectEqualStrings("m3n4p5", &unopened.session);
+    try std.testing.expectError(error.SessionNotFound, unopened.ended);
+    // The way back names the Session the person left, never the failed one.
+    try std.testing.expectEqualStrings("k7m2qx", &overview.follow.return_to.?);
+    try std.testing.expectEqual(@as(?view.Reference, null), overview.follow.pending);
+    overview.app_session = null;
 }

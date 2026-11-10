@@ -132,6 +132,7 @@ test {
     _ = @import("ResponseTiming.zig");
     _ = @import("ConversationViewport.zig");
     _ = @import("transcript_selection.zig");
+    _ = @import("session_follow.zig");
     _ = @import("SessionInput.zig");
     _ = @import("TerminalFrame.zig");
     _ = @import("TerminalInput.zig");
