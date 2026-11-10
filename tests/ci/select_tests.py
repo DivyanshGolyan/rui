@@ -450,6 +450,10 @@ BUILD_MODULES = {
     # The PTY screen observer: what check-full and these fixtures load to read
     # the terminal. Its renderer harnesses are nonblocking (renderer-contracts.yml).
     "build/screen.zig": ("check-full", "skills-integration", "upgrade-integration"),
+    # The unit roots, their runners and filters, the deadline witness and the
+    # portable logic root. check and check-full run the same unit binaries,
+    # and test runs them alone.
+    "build/unit.zig": ("test", "test-full", "test-logic"),
     # Darwin linking, the screen library's name and the Mac unit-root limits.
     # The unit roots and one screen fixture link and load what it names; it is
     # a Mac path, so ready PRs run these on Mac too.
