@@ -686,9 +686,13 @@ const historical_settings = rsql.Read(.{
         "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE member.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
         "o.reasoning_effort,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
-        "(SELECT first.reasoning_effort FROM model_operation first WHERE first.session_ref=o.session_ref ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent " ++
+        "(SELECT first.reasoning_effort FROM model_operation first WHERE first.session_ref=o.session_ref ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
+        "instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest,instructions.private AS instructions_private," ++
+        "output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest,output_schema.private AS output_schema_private " ++
         "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref JOIN session_revision r ON r.session_ref=o.session_ref " ++
-        "AND r.revision=o.settings_revision JOIN tool_set ON tool_set.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
+        "AND r.revision=o.settings_revision JOIN tool_set ON tool_set.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 " ++
+        "JOIN content instructions ON instructions.content_id=baseline.instructions_content_id " ++
+        "LEFT JOIN content output_schema ON output_schema.content_id=r.output_schema_content_id WHERE o.operation_id=?1",
     .Args = struct { operation: u64 },
     .Row = struct {
         model: *Bounded(model_capability.max_model_bytes),
@@ -708,13 +712,20 @@ const historical_settings = rsql.Read(.{
         purpose: u8,
         starting_effort: ?model_capability.ReasoningEffort,
         catalogs_consistent: bool,
+        instructions_length: u64,
+        instructions_digest: [32]u8,
+        instructions_private: bool,
+        output_schema_length: ?u64,
+        output_schema_digest: ?[32]u8,
+        output_schema_private: ?bool,
     },
     .cardinality = .optional,
 });
 
-/// Round 1 reads the settings, the Operation's purpose with them; round 2
-/// the instructions' and output schema's metadata. A failed step is
-/// `CorruptStore`, main's answer for both.
+/// One round reads the settings, the Operation's purpose and the
+/// instructions' and output schema's metadata. A failed step is
+/// `CorruptStore`, main's answer for each; so is a content row the
+/// settings name and the Store lacks.
 fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !void {
     var row: historical_settings.Row = undefined;
     row.model = &out.model;
@@ -730,13 +741,16 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
     view.provider_tool_count = row.provider_count;
     view.next_tool = 0;
     out.tool_count = row.member_count;
-    var instructions: content_metadata.Row = undefined;
-    var output_schema: content_metadata.Row = undefined;
-    a.read(content_metadata, .{ .content_id = row.instructions_content_id.get() }, &instructions);
-    if (row.output_schema_content_id) |id| a.read(content_metadata, .{ .content_id = id.get() }, &output_schema);
-    try store_access.runAs(a, error.CorruptStore);
+    const instructions: content_metadata.Row = .{ .byte_length = row.instructions_length, .digest = row.instructions_digest, .private = row.instructions_private };
     out.baseline_instructions = try viewContent(view, row.instructions_content_id.get(), &instructions, false);
-    out.output_schema = if (row.output_schema_content_id) |id| try viewContent(view, id.get(), &output_schema, false) else null;
+    out.output_schema = if (row.output_schema_content_id) |id| schema: {
+        const output_schema: content_metadata.Row = .{
+            .byte_length = row.output_schema_length orelse return error.CorruptStore,
+            .digest = row.output_schema_digest orelse return error.CorruptStore,
+            .private = row.output_schema_private orelse return error.CorruptStore,
+        };
+        break :schema try viewContent(view, id.get(), &output_schema, false);
+    } else null;
     out.store = a.store.selector;
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update("rui/session-affinity/v1");

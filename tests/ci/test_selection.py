@@ -592,7 +592,7 @@ class SelectionTest(unittest.TestCase):
         for path in ("src/BashLifecycle.zig", "src/deadline.zig"):
             result = select([path], "review", AVAILABLE)
             native = sorted(["bash-integration", "bash-lifecycle-integration", "bash-owner-integration",
-                             "bash-recovery-integration", "test" if path == "src/deadline.zig" else "test-native", "test-logic"])
+                             "bash-recovery-integration", "test-native", "test-logic"])
             self.assertEqual(result["native_targets"], native, path)
             self.assertEqual(result["targets"], sorted(native + ["stack-frames"]), path)
 

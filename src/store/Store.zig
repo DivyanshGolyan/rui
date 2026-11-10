@@ -753,7 +753,7 @@ pub const Store = struct {
         defer entry.release();
         var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopSession(&access, command, faults))) catch .infrastructure_failure;
+        return self.noteControl(entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopSession(&access, command, faults))) catch .infrastructure_failure);
     }
 
     pub fn archiveSession(self: *Store, command: *const command_input.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
@@ -766,7 +766,7 @@ pub const Store = struct {
         defer entry.release();
         var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.archiveSession(&access, command, faults))) catch .infrastructure_failure;
+        return self.noteControl(entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.archiveSession(&access, command, faults))) catch .infrastructure_failure);
     }
 
     /// The stop an attached child owes (D38), as `nextCoreWork` names it.
@@ -779,7 +779,7 @@ pub const Store = struct {
         defer entry.release();
         var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopOwedSession(&access, command, faults))) catch .infrastructure_failure;
+        return self.noteControl(entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopOwedSession(&access, command, faults))) catch .infrastructure_failure);
     }
 
     pub fn interruptModel(
@@ -800,7 +800,7 @@ pub const Store = struct {
         defer entry.release();
         var access: Access(.write, error{InterruptionTargetChanged}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.interruptModel(&access, command, faults))) catch .infrastructure_failure;
+        return self.noteControl(entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.interruptModel(&access, command, faults))) catch .infrastructure_failure);
     }
 
     pub fn decidePermission(
@@ -821,7 +821,7 @@ pub const Store = struct {
         defer entry.release();
         var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.decidePermission(&access, command, faults))) catch .infrastructure_failure;
+        return self.noteControl(entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.decidePermission(&access, command, faults))) catch .infrastructure_failure);
     }
 
     /// Tier 1: atomics only, with no holder or connection access.
@@ -1459,6 +1459,17 @@ pub const Store = struct {
         return self.commit_generation.load(.acquire);
     }
 
+    /// Read before the control reads it may let the dispatch loop skip.
+    pub fn controlGeneration(self: *const Store) u64 {
+        return @as(*OutOfLine, @fieldParentPtr("ring", self.changes)).control_generation.load(.acquire);
+    }
+
+    /// Advances `OutOfLine.control_generation` after an accepted control's commit.
+    fn noteControl(self: *Store, reply: anytype) @TypeOf(reply) {
+        if (reply == .accepted) _ = @as(*OutOfLine, @fieldParentPtr("ring", self.changes)).control_generation.fetchAdd(1, .release);
+        return reply;
+    }
+
     pub fn operationSupersededByControl(self: *Store, binding: AttemptBinding) !?SupersedingControl {
         return self.queue().run(operationSupersededByControlHeld, .{ self, binding });
     }
@@ -1705,6 +1716,11 @@ const OutOfLine = struct {
     queue: Queue,
     ids: HostValues,
     tools: HostTools,
+    /// Advances after each accepted control (a stop, archive, model
+    /// interruption, permission decision or owed stop), before its entry
+    /// point releases the Store. The dispatch loop reads controls again
+    /// only when it moved, so a lost control hint delays nothing.
+    control_generation: std.atomic.Value(u64),
     scratch: Scratch align(scratch_align),
 };
 
@@ -1745,7 +1761,9 @@ comptime {
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
     const bytes = std.heap.page_allocator.rawAlloc(@sizeOf(OutOfLine), .of(OutOfLine), @returnAddress()) orelse return error.OutOfMemory;
-    const ring: *change_ring.Ring = &@as(*OutOfLine, @ptrCast(@alignCast(bytes))).ring;
+    const owned: *OutOfLine = @ptrCast(@alignCast(bytes));
+    owned.control_generation = .init(0);
+    const ring: *change_ring.Ring = &owned.ring;
     // Every scalar takes Ring's own default; the columns stay unwritten, since
     // only entries below `len` are read.
     const info = @typeInfo(change_ring.Ring).@"struct";
