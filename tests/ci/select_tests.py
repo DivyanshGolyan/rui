@@ -550,7 +550,8 @@ BUILD_MODULES = {
     # a Mac path, so ready PRs run these on Mac too.
     "build/darwin.zig": ("test", "host-launch-integration"),
 }
-RULES += tuple(((module,), targets, targets, "Build module: the targets it defines or builds for")
+RULES += tuple(((module,), targets, tuple(target for target in targets if target not in LINUX_ONLY),
+                "Build module: the targets it defines or builds for")
                for module, targets in BUILD_MODULES.items() if targets != BUILD_HUB)
 
 

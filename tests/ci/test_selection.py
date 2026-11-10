@@ -119,7 +119,7 @@ class BuildModuleTest(unittest.TestCase):
                 ("added row", before.replace(row, row + new_row), {"new-integration"}, {"new-integration"}),
                 ("removed row", before.replace(row, ""), set(), set()),
                 ("outside the rows", before.replace("run.addArgs(fixture.args);", "run.addArgs(fixture.args);\n        run.has_side_effects = true;"),
-                 everything, None)):
+                 everything, everything - {"login-signal-integration"})):  # Mac never runs Linux-only fixtures.
             with self.subTest(name):
                 self.assertNotEqual(before, after)
                 result = select([table], "review", AVAILABLE | {"new-integration"}, contents={table: (before, after)})
