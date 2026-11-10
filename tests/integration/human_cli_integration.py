@@ -5891,10 +5891,15 @@ def provider_line_cases():
 def main(selected="all"):
     import canonical_failure_cases
     import canonical_fixture
+    import session_chrome_cases
     import terminal_restoration_cases
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "persistent-opening", "incomplete-input", "session-ids", "empty-answers", "copy", "notifications", "command-entry", "provider-lines"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "persistent-opening", "incomplete-input", "session-ids", "empty-answers", "copy", "notifications", "command-entry", "provider-lines", "session-chrome"), selected
+    if selected in ("all", "renderer", "session-chrome"):
+        session_chrome_cases.main()
+    if selected == "session-chrome":
+        return
     if selected in ("all", "callers", "caller-core", "provider-lines"):
         provider_line_cases()
     if selected == "provider-lines":
