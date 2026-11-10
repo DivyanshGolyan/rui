@@ -3938,6 +3938,28 @@ test "malformed UTF-8 rejects its line, and typing after it reaches the draft" {
     }
 }
 
+test "a malformed key sequence rejects its line like malformed text: kept until Enter reports and clears it" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try held.settle();
+    // Kitty and modifyOtherKeys keys past U+10FFFF: vaxis reports each as
+    // an invalid key.
+    for ([_][]const u8{ "\x1b[1114112u", "\x1b[27;3;1114112~" }) |invalid| {
+        errdefer std.debug.print("invalid={any}\n", .{invalid});
+        try held.keys("kept");
+        try held.keys(invalid);
+        try held.settle();
+        try std.testing.expectEqualStrings("kept", held.self.input.composition().bytes);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "› kept") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Input rejected") == null);
+        try held.keys("\r");
+        try held.settle();
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Input rejected; nothing sent.") != null);
+        try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+        try std.testing.expectEqual(null, held.self.input.submitted);
+    }
+}
+
 test "a card taller than the screen says how many lines it hides and Shift-Down shows them" {
     const held = try HeldFrontend.create();
     defer held.destroy();
