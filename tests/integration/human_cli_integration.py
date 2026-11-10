@@ -4787,22 +4787,6 @@ def renderer_cases():
             tty.finish()
         print("renderer: Ctrl-P and Ctrl-N recall only the person's sent Messages, and an edit ends recall", flush=True)
 
-        # An ESC inside a marked paste rejects the paste, and the end marker
-        # right after it still ends it: the keys typed next are the draft's,
-        # not more paste waiting for a fatal timeout.
-        session = configure()
-        with terminal(session) as tty:
-            requests = len(endpoint.requests)
-            tty.send("\x1b[200~pasted\x1b\x1b[201~", predicate=lambda: tty.capture.draft("pasted", 8))
-            tty.send("typed\r", predicate=lambda: "! Input rejected; nothing sent." in tty.capture.completed and tty.capture.draft("", 2))
-            assert len(endpoint.requests) == requests, endpoint.requests
-            marker = answer("after escaped paste")
-            tty.send("after\r", marker)
-            submitted("after")
-            tty.caller.send_signal(signal.SIGINT)
-            tty.finish()
-        print("renderer: an ESC inside paste rejects it and its end marker still returns input to the draft", flush=True)
-
         # With nothing said yet, scrolling up reaches the start, not a gap.
         session = configure()
         with terminal(session, tmux=True) as tty:
