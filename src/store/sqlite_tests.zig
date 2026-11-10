@@ -7473,10 +7473,10 @@ test "a Current report's presentation reads answer their list's name" {
     }
 }
 
-test "admission's context read answers CorruptStore, as admission names it" {
-    // Main checked whether the context changed in a statement of its own,
-    // whose failed step went through as StatementFailed, and named the
-    // estimate's CorruptStore; `admission_context` reads both. The second
+test "a failed context read answers its reader's name and fences" {
+    // The report's `admission_context` names a failed step CorruptStore,
+    // as main named the estimate's. Admission reads the context within
+    // `admission_facts`, whose failed step is SessionReadFailed. The second
     // Message follows a Turn with usage under a trigger, so admission
     // weighs the context, and the report estimates it.
     for ([_]bool{ false, true }) |report| {
@@ -7496,13 +7496,16 @@ test "admission's context read answers CorruptStore, as admission names it" {
         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two");
         try settleCallsForTestingWithFaults(&storage, &tmp, first, "context-fold-output", &.{}, .{}, "{\"input_tokens\":10,\"output_tokens\":0}");
-        var fault: TestingStatementFault = .{ .sql = namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT") };
+        var fault: TestingStatementFault = .{ .sql = if (report)
+            namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT")
+        else
+            model_admission_domain.admission_facts_sql };
         fault.arm(storage.sqliteDatabase());
         defer fault.disarm(storage.sqliteDatabase());
         if (report)
             try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024))
         else
-            try std.testing.expectError(error.CorruptStore, storage.admitNextModelAttempt(.{}));
+            try std.testing.expectError(error.SessionReadFailed, storage.admitNextModelAttempt(.{}));
         try std.testing.expect(fault.failed > 0);
         try std.testing.expect(storage.isFenced());
     }

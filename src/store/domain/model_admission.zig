@@ -286,10 +286,10 @@ fn previousTurn(compaction: bool, resolution: []const u8, active: bool, latest_f
     };
 }
 
-/// `admission_context`'s row into `compaction`: whether the context
+/// A `ContextRow`'s columns into `compaction`: whether the context
 /// changed, and only when it did, the usage's pressure and the bytes it
 /// does not cover.
-fn takeContext(compaction: *turn_policy.CompactionFacts, context: *const admission_context.Row) !void {
+fn takeContext(compaction: *turn_policy.CompactionFacts, context: anytype) !void {
     compaction.context_changed = context.changed;
     if (!context.changed) return;
     if (context.uncached) |uncached| {
@@ -402,18 +402,24 @@ fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []con
 }
 
 /// What admission decides from, inside its transaction: the Session's head
-/// and settings, its latest Turn as `previousTurn` reads it, and how many
-/// instruction updates `project_instructions` would project.
+/// and settings, its latest Turn as `previousTurn` reads it, how many
+/// instruction updates `project_instructions` would project, and the
+/// context automatic compaction weighs before the position ?2, the
+/// Session's next position (`contextCtesSql`). The context rides along
+/// even where `turn_policy.forcedPurpose` decides without it: reading it
+/// costs the Store work, while a round of its own cost a round trip.
 const admission_facts = rsql.Read(.{
-    .sql = "SELECT " ++ rsql.session_head_columns ++ ",s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation,s.reasoning_effort," ++
+    .sql = "WITH " ++ contextCtesSql("(SELECT provider FROM session WHERE session_ref=?1)", "(SELECT model FROM session WHERE session_ref=?1)") ++
+        " SELECT " ++ rsql.session_head_columns ++ ",s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation,s.reasoning_effort," ++
         configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
         "current.operation_id AS latest_operation,current.purpose AS latest_compaction,current.resolution_code AS latest_resolution," ++
-        "(SELECT count(*) FROM session_revision r WHERE " ++ pendingInstructionsSql("?1", "s.revision") ++ ") AS instructions " ++
+        "(SELECT count(*) FROM session_revision r WHERE " ++ pendingInstructionsSql("?1", "s.revision") ++ ") AS instructions," ++
+        context_columns_sql ++ " " ++
         "FROM session s LEFT JOIN turn latest ON latest.turn_id=(SELECT t.turn_id FROM turn t @index(turn_session_latest) " ++
         "WHERE t.session_ref=?1 ORDER BY t.turn_id DESC LIMIT 1) " ++
-        "LEFT JOIN model_operation current ON current.operation_id=latest.operation_id WHERE s.session_ref=?1",
-    .Args = struct { session: []const u8 },
+        "LEFT JOIN model_operation current ON current.operation_id=latest.operation_id CROSS JOIN measured WHERE s.session_ref=?1",
+    .Args = struct { session: []const u8, boundary: u64 },
     .Row = struct {
         session: rsql.SessionHead,
         revision: rsql.Positive,
@@ -430,38 +436,6 @@ const admission_facts = rsql.Read(.{
         latest_compaction: ?bool,
         latest_resolution: ?Bounded(outcome_code.max_bytes),
         instructions: u64,
-    },
-    .cardinality = .one,
-});
-
-/// The facts automatic compaction weighs, in one statement before the
-/// position ?2: whether the context changed since the newest compaction
-/// base (`context_changed`), and, only when it did, the newest usage
-/// after that base (`latestUsageSql`) and the bytes it does not cover
-/// (`uncoveredBytesSql`). Otherwise the usage is NULL and the bytes 0.
-/// Admission and the Current report (`CompactionRead`) read it only when
-/// `turn_policy.forcedPurpose` leaves the purpose open. `since`
-/// and `latest_usage` are each named once, so SQLite need not materialize them.
-/// `base` is `context_changed`'s and named twice: a one-row `base` named
-/// once measured 5 steps cheaper here and 11 dearer in `context_changed`.
-/// The newest usage at or after the base is the newest
-/// usage, when that one is at or after the base, and none otherwise; so
-/// `latest_usage` reads the newest, and the join holds it to the base. `provider`
-/// and `model` are the Session's settings, as `admission_facts` read them.
-const admission_context = rsql.Read(.{
-    .sql = "WITH " ++ compaction_base_sql ++ "," ++
-        "since AS (SELECT " ++ changed_since_base_sql ++ " AS changed,coalesce((SELECT admission_position FROM base),0) AS frontier)," ++
-        "latest_usage AS (" ++ latestUsageSql("0", "?3", "?4") ++ ")," ++
-        "measured AS (SELECT since.changed,since.frontier,latest_usage.uncached,latest_usage.cache_read,latest_usage.cache_write,latest_usage.output," ++
-        "latest_usage.usage_position,latest_usage.result_admission," ++
-        "CASE WHEN latest_usage.uncached IS NULL THEN 0 ELSE latest_usage.usage_position END AS covered," ++
-        "CASE WHEN latest_usage.uncached IS NULL THEN since.frontier ELSE latest_usage.result_admission END AS results " ++
-        "FROM since LEFT JOIN latest_usage ON since.changed AND latest_usage.result_admission>=since.frontier) " ++
-        "SELECT measured.changed,measured.uncached,measured.cache_read,measured.cache_write,measured.output,measured.usage_position,measured.result_admission," ++
-        "CASE WHEN measured.changed THEN " ++ uncoveredBytesSql("measured.covered", "measured.frontier", "measured.results") ++ " ELSE 0 END AS uncovered_bytes " ++
-        "FROM measured",
-    .Args = struct { session: []const u8, boundary: u64, provider: provider_name.Provider, model: []const u8 },
-    .Row = struct {
         changed: bool,
         uncached: ?u64,
         cache_read: ?u64,
@@ -471,6 +445,56 @@ const admission_context = rsql.Read(.{
         result_admission: ?rsql.Positive,
         uncovered_bytes: u64,
     },
+    .cardinality = .one,
+});
+/// `admission_facts` as SQLite runs it.
+pub const admission_facts_sql = admission_facts.sql;
+
+/// The facts automatic compaction weighs, in one statement before the
+/// position ?2: whether the context changed since the newest compaction
+/// base (`context_changed`), and, only when it did, the newest usage
+/// after that base (`latestUsageSql`) and the bytes it does not cover
+/// (`uncoveredBytesSql`). Otherwise the usage is NULL and the bytes 0.
+/// The Current report (`CompactionRead`) reads it only when
+/// `turn_policy.forcedPurpose` leaves the purpose open; admission reads
+/// its CTEs within `admission_facts`. `since`
+/// and `latest_usage` are each named once, so SQLite need not materialize them.
+/// `base` is `context_changed`'s and named twice: a one-row `base` named
+/// once measured 5 steps cheaper here and 11 dearer in `context_changed`.
+/// The newest usage at or after the base is the newest
+/// usage, when that one is at or after the base, and none otherwise; so
+/// `latest_usage` reads the newest, and the join holds it to the base. `provider`
+/// and `model` name the Session's settings.
+fn contextCtesSql(comptime provider: []const u8, comptime model: []const u8) []const u8 {
+    return compaction_base_sql ++ "," ++
+        "since AS (SELECT " ++ changed_since_base_sql ++ " AS changed,coalesce((SELECT admission_position FROM base),0) AS frontier)," ++
+        "latest_usage AS (" ++ latestUsageSql("0", provider, model) ++ ")," ++
+        "measured AS (SELECT since.changed,since.frontier,latest_usage.uncached,latest_usage.cache_read,latest_usage.cache_write,latest_usage.output," ++
+        "latest_usage.usage_position,latest_usage.result_admission," ++
+        "CASE WHEN latest_usage.uncached IS NULL THEN 0 ELSE latest_usage.usage_position END AS covered," ++
+        "CASE WHEN latest_usage.uncached IS NULL THEN since.frontier ELSE latest_usage.result_admission END AS results " ++
+        "FROM since LEFT JOIN latest_usage ON since.changed AND latest_usage.result_admission>=since.frontier)";
+}
+
+/// The columns `contextCtesSql` measures, as `ContextRow` names them.
+const context_columns_sql = "measured.changed,measured.uncached,measured.cache_read,measured.cache_write,measured.output,measured.usage_position,measured.result_admission," ++
+    "CASE WHEN measured.changed THEN " ++ uncoveredBytesSql("measured.covered", "measured.frontier", "measured.results") ++ " ELSE 0 END AS uncovered_bytes";
+
+const ContextRow = struct {
+    changed: bool,
+    uncached: ?u64,
+    cache_read: ?u64,
+    cache_write: ?u64,
+    output: ?u64,
+    usage_position: ?rsql.Positive,
+    result_admission: ?rsql.Positive,
+    uncovered_bytes: u64,
+};
+
+const admission_context = rsql.Read(.{
+    .sql = "WITH " ++ contextCtesSql("?3", "?4") ++ " SELECT " ++ context_columns_sql ++ " FROM measured",
+    .Args = struct { session: []const u8, boundary: u64, provider: provider_name.Provider, model: []const u8 },
+    .Row = ContextRow,
     .cardinality = .one,
 });
 
@@ -567,11 +591,10 @@ const insert_operation = rsql.Write(.{
 /// idle checks, the disagreeing continuations with whether any Operation
 /// is blocked, and only then the blocked calls' outcomes, and answers
 /// null. The write Access `writer` reads
-/// `admission_facts` after its BEGIN; when `turn_policy.forcedPurpose`
-/// leaves the purpose open, it reads `admission_context` in a round of its
-/// own. Then it writes the Turn, binds and projects the Messages and
+/// `admission_facts`, the context compaction weighs included, after its
+/// BEGIN. Then it writes the Turn, binds and projects the Messages and
 /// instructions, inserts the Operation, claims their positions and
-/// commits: three rounds on a forced path, four otherwise. The held Store
+/// commits: three rounds. The held Store
 /// mutex excludes every other writer, so what the selection read still
 /// holds; a moved head is `SelectionChanged`.
 pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
@@ -597,7 +620,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
     const first_admission = selection.first_admission.get();
 
     var facts: admission_facts.Result = undefined;
-    writer.read(admission_facts, .{ .session = session_ref }, &facts);
+    writer.read(admission_facts, .{ .session = session_ref, .boundary = selection.session.next_position.get() }, &facts);
     try store_access.runAs(writer, error.SessionReadFailed);
     if (facts.session.next_position != selection.session.next_position) return error.SelectionChanged;
 
@@ -615,17 +638,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         const resolution: []const u8 = if (facts.latest_resolution) |*code| code.slice() else "";
         compaction.previous = previousTurn(facts.latest_compaction orelse return error.CorruptStore, resolution, facts.latest_active, latest_first.get(), first_admission);
     }
-    if (turn_policy.forcedPurpose(compaction.previous, compaction.trigger) == null) {
-        var context: admission_context.Result = undefined;
-        writer.read(admission_context, .{
-            .session = session_ref,
-            .boundary = selection.session.next_position.get(),
-            .provider = facts.provider,
-            .model = facts.model.slice(),
-        }, &context);
-        try store_access.runAs(writer, error.CorruptStore);
-        try takeContext(&compaction, &context);
-    }
+    if (turn_policy.forcedPurpose(compaction.previous, compaction.trigger) == null) try takeContext(&compaction, &facts);
     const purpose = turn_policy.nextPurpose(compaction);
     // A compaction after one that overflowed makes room: settlement let
     // the Turn go on only because a deeper floor exists (D217).
