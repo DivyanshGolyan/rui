@@ -66,13 +66,21 @@ class Relay:
         self.queries = []
         self.lock = threading.Lock()
         self.ready = threading.Event()
+        self.failure = None
         threading.Thread(target=self._run, daemon=True).start()
-        self.ready.wait()
+        assert self.ready.wait(10), "the MySQL relay did not start within 10 s"
+        if self.failure is not None:
+            raise RuntimeError(f"the MySQL relay could not listen on {listen}") from self.failure
 
     def _run(self):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(asyncio.start_unix_server(self._serve, path=self.listen))
+        try:
+            loop.run_until_complete(asyncio.start_unix_server(self._serve, path=self.listen))
+        except BaseException as error:
+            self.failure = error
+            self.ready.set()
+            return
         self.ready.set()
         loop.run_forever()
 
