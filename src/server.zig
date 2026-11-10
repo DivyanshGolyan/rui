@@ -150,8 +150,6 @@ const Intake = struct {
         /// spends it.
         environment: ?SessionEnvironments.Offer = null,
         environment_received: usize = 0,
-        /// The checked environment, while `environment` holds it.
-        environment_value: ?environment.Value = null,
 
         fn retireUnhanded(self: *Exchange) void {
             // Capture handoff retains files, but grants no admission authority.
@@ -459,13 +457,11 @@ const Intake = struct {
         fn checkEnvironment(self: *Exchange) !void {
             const offer = &self.environment.?;
             offer.settle((try environment.received(self.host.allocator, offer.room())).len);
-            self.environment_value = offer.value();
         }
 
         fn releaseEnvironment(self: *Exchange) void {
             if (self.environment) |*offer| offer.deinit(self.host.allocator);
             self.environment = null;
-            self.environment_value = null;
         }
 
         fn receive(self: *Exchange, bytes: []const u8) !State {
@@ -4146,7 +4142,7 @@ test "a Message's environment header and entries are checked before admission" {
         const read = exchange.read();
         if (case.result) |expected| {
             try read;
-            try std.testing.expectEqualStrings(expected.?, exchange.environment_value.?);
+            try std.testing.expectEqualStrings(expected.?, exchange.environment.?.value().?);
             // The request's own bytes follow, unchanged.
             try std.testing.expectEqualStrings(request, exchange.input.items);
         } else |expected| try std.testing.expectError(expected, read);
