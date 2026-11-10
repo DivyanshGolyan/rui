@@ -28,6 +28,7 @@ const model_picker = @import("model_picker.zig");
 const provider_name = @import("provider_name.zig");
 const session_work = @import("session_work.zig");
 const session_upgrade = @import("session_upgrade.zig");
+const upgrade_status = @import("upgrade_status.zig");
 const slash_commands = @import("slash_commands.zig");
 const submission = @import("submission_state.zig");
 pub const commands = slash_commands.overview;
@@ -398,6 +399,8 @@ pub const Event = union(enum) {
     memory: Memory,
     /// A needs-you row's command read ended.
     command: CommandText,
+    /// The Upgrade /upgrade started moved on.
+    upgrade: UpgradeStep,
     conversed: Conversed,
     /// A model-list read ended.
     models: ModelsRead,
@@ -593,6 +596,13 @@ pub const Commands = struct {
     }
 };
 
+/// What the Upgrade worker reports, in the order it happens.
+pub const UpgradeStep = union(enum) {
+    found: upgrade_status.Found,
+    step: upgrade_status.Step,
+    ended: upgrade_status.Ended,
+};
+
 /// A command read's answer: the Action's command, or null when the read
 /// failed or its tool has no command to show.
 pub const CommandText = struct {
@@ -629,6 +639,8 @@ pub const Effect = union(enum) {
     /// configure --provider --model` does, and answer with `saved`.
     save_default: Default,
     upgrade,
+    /// Esc asked the running Upgrade to cancel before it publishes.
+    cancel_upgrade,
     /// Empty the line editor.
     clear_draft,
     /// Add these static bytes at the draft's end, as Tab does.
@@ -983,6 +995,8 @@ pub const State = struct {
     host: ?Host = null,
     /// The latest memory read; null before the first.
     memory: ?Memory = null,
+    /// The inline /upgrade run and what the status bar says of it.
+    upgrade: upgrade_status.Upgrade = .{},
 
     /// The person's default for new Sessions. A pick replaces it at once,
     /// and a save follows it to the preferences file. `nextBinding` says
@@ -1693,6 +1707,18 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .host => |facts| state.host = facts,
         .memory => |memory| state.memory = memory,
         .command => |answer| try commandRead(state, answer),
+        .upgrade => |reported| switch (reported) {
+            .found => |release| state.upgrade.found(release),
+            .step => |next| state.upgrade.step(next),
+            .ended => |how| {
+                state.upgrade.ended(how);
+                state.upgraded(switch (how) {
+                    .upgraded => .compatible,
+                    .incompatible => .incompatible,
+                    .up_to_date, .refused, .cancelled, .failed => .unchanged,
+                });
+            },
+        },
         .models => |read| readModels(state, read),
         .ran => |ran| try ranCommand(state, ran),
         .saved => |answer| {
@@ -2256,6 +2282,9 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
                 .models => state.closePicker(),
             } else if (shownCommands(state, value.draft)) |shown| {
                 shown.close();
+            } else if (state.upgrade.escape()) {
+                // The status bar offers it while the Upgrade can roll back.
+                effects.add(.cancel_upgrade);
             } else if (state.panel != null) state.closePanel() else if (value.draft.bytes.len != 0) effects.add(.clear_draft) else {
                 state.settings = .{};
             },
@@ -2369,6 +2398,13 @@ fn admitHostRequest(state: *State) bool {
     return false;
 }
 
+/// /upgrade checks at once; Host intents wait until it ends.
+fn startUpgrade(state: *State, effects: *Effects) void {
+    state.upgrade_pending = true;
+    state.upgrade.begin();
+    effects.add(.upgrade);
+}
+
 fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
     const parsed: ?commands.Parsed = if (text.len != 0 and text[0] == '/' and !std.mem.startsWith(u8, text, "//")) commands.parse(text) else null;
     if (parsed) |result| switch (result) {
@@ -2382,7 +2418,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
     if (!admitHostRequest(state)) {
         if (parsed) |result| switch (result) {
             .command => |command| switch (command.name) {
-                .upgrade => return effects.add(.upgrade),
+                .upgrade => return startUpgrade(state, effects),
                 .exit => return effects.add(.exit),
                 else => {},
             },
@@ -2425,10 +2461,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
             try changeArchiveView(state, filter, effects);
         },
         .exit => effects.add(.exit),
-        .upgrade => {
-            state.upgrade_pending = true;
-            effects.add(.upgrade);
-        },
+        .upgrade => startUpgrade(state, effects),
         .model => {
             state.picker = .{};
             // Visible equals actionable: a picker the screen cannot show never opens.
@@ -4482,7 +4515,7 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                     try std.testing.expectEqual(x.action, y.action);
                 }
             },
-            .list_models, .clear_draft, .upgrade, .exit => {},
+            .list_models, .clear_draft, .upgrade, .cancel_upgrade, .exit => {},
         }
     }
 }
@@ -8259,6 +8292,38 @@ test "upgrade emits only its local effect and preserves selection settings and u
     try std.testing.expect(std.meta.eql(request, state.requests[0]));
     try std.testing.expectEqualStrings("/upgrade", draft.bytes);
     try std.testing.expect(state.command == null);
+}
+
+test "/upgrade runs inline: Esc cancels it before the draft, until publishing, and its end sets the Host hold" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
+    try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
+    try std.testing.expectEqualStrings("Checking for updates…", state.upgrade.line(&buffer, .unicode).?.text);
+    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } });
+    // Esc cancels the Upgrade and keeps the draft.
+    const draft = try typeText(&state, "keep me");
+    try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
+    try std.testing.expectEqualStrings("Cancelling…", state.upgrade.line(&buffer, .unicode).?.text);
+    _ = try step(&state, .{ .upgrade = .{ .ended = .cancelled } });
+    try std.testing.expect(!state.upgrade_blocked);
+    // Once it ended, Esc clears the draft again.
+    try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
+
+    // Past publishing Esc is the draft's, and an incompatible end holds.
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .{ .running = 1 } } } });
+    _ = try step(&state, .{ .upgrade = .{ .step = .publishing } });
+    try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .incompatible = .{ .schema = 61, .patch = 0 } } } });
+    try std.testing.expect(state.upgrade_blocked);
+    try std.testing.expectEqual(upgrade_status.Lasts.persistent, state.upgrade.line(&buffer, .unicode).?.lasts);
+
+    // Another /upgrade that upgrades lifts the hold until the next listing.
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 61, .patch = 1 }, .host = .{ .running = 0 } } } });
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .upgraded = .{ .version = .{ .schema = 61, .patch = 1 }, .restarted = true } } } });
+    try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending);
 }
 
 test "upgrade protocol hold refuses starts opens stops and Host commands but permits local recovery" {

@@ -593,6 +593,9 @@ fn event(self: *Self, value: view.Event) !?Next {
         .read_commands => |reads| self.queue(.{ .commands = reads }),
         .start => |request| self.queue(.{ .start = try request.own(self.init.gpa) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
+        // The Upgrade panel runs its own loop and takes Esc itself, so the
+        // core never offers a cancel here; the App shell runs it inline.
+        .cancel_upgrade => {},
         .upgrade => {
             self.upgrade_requested = true;
             self.state.upgrade_pending = true;
