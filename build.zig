@@ -659,8 +659,11 @@ pub fn build(b: *std.Build) void {
 
     // check runs these cases among its process integrations; each step runs
     // the same case alone, so selection can name only the ones a change reaches.
-    b.step("peer-integration", "Run the peer round trip through Rui-launched Bash")
-        .dependOn(&addFixture(b, "tests/integration/peer_integration.py", ci.path(release_safe)).step);
+    // Its Session link journey reads the screen, as check's run of it does.
+    const peer_integration = screenCommand(b, screen, &.{"python3"});
+    peer_integration.addFileArg(b.path("tests/integration/peer_integration.py"));
+    peer_integration.addFileArg(ci.path(release_safe));
+    b.step("peer-integration", "Run the peer round trip through Rui-launched Bash").dependOn(&peer_integration.step);
     b.step("sender-identity-integration", "Run Action sender authority through the installed CLI, exit, stop and restart")
         .dependOn(&addFixture(b, "tests/integration/sender_identity_integration.py", ci.path(release_safe)).step);
     b.step("conversation-page-integration", "Run public Conversation wire reads against a real Host and canonical Store")

@@ -2396,6 +2396,16 @@ def persistent_copy_case():
             terminal_step(master, "/copy code", "No answer to copy yet.", composer=True)
             assert capture.clipboard == [] and not any(here.iterdir()), capture.clipboard
             terminal_step(master, "Copy request", "Done.", composer=True)
+            # A left drag over the answer's last word copies exactly the text
+            # it covered, in one OSC 52 sequence, once the button is released.
+            lines = current_screen(master).split("\n")
+            row = next(index for index, line in enumerate(lines) if line.strip() == "Done.")
+            column = lines[row].index("Done.")
+            capture.clipboard.clear()
+            drag = (f"\x1b[<0;{column + 1};{row + 1}M\x1b[<32;{column + 3};{row + 1}M"
+                    f"\x1b[<32;{column + 5};{row + 1}M\x1b[<0;{column + 5};{row + 1}m")
+            command_frame(master, drag, lambda frame: "Copied 1 line" in frame, end="")
+            assert capture.clipboard == ["\x1b]52;c;" + base64.b64encode(b"Done.").decode() + "\x1b\\"], capture.clipboard
 
             def sent(command):
                 before = len(capture.clipboard)
