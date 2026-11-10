@@ -298,6 +298,17 @@ def terminal_exit(caller, master, timeout=5):
                 pending.remove(fd)
 
 
+def detach(caller, master, keys=b"/exit\r", timeout=5):
+    """Send `keys`, which leave App, own both streams through exit, and
+    return the detach notice. App writes it to stderr once it has released
+    the terminal; for a caller whose stderr is a pipe, it is all of stderr."""
+    os.write(master, keys)
+    _, errors = terminal_exit(caller, master, timeout)
+    notice = errors.decode()
+    assert caller.returncode == 0 and notice.startswith("\nDetached. Host work continues.\n"), (caller.returncode, errors)
+    return notice
+
+
 def terminal_gate(caller, master, reached, context, timeout=10):
     """Own startup output until the public metadata gate, not a silent wait."""
     capture = terminal_capture(master)

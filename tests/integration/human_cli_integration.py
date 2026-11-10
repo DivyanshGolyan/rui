@@ -71,7 +71,7 @@ from terminal_process import answers_to, open_pty, spawn, terminal_process
 import model_fixture as fixture
 import codex_fixture
 import os_semantics
-from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, _captures, action_ready, admit, await_screen, command_frame, composer_ready, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, status_page, terminal_capture, terminal_exit, terminal_gate, terminal_step
+from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, _captures, action_ready, admit, await_screen, command_frame, detach, composer_ready, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, status_page, terminal_capture, terminal_exit, terminal_gate, terminal_step
 
 
 def terminal_safe_json(text):
@@ -1082,20 +1082,16 @@ def overview_cases():
         os.write(master, b"\r")
         read_terminal(master, "Flaky test fixed.", composer=True)
         overview_frame(master, lambda frame: "lane four" in frame, keys=b"\x1b")
-        notice = leave_overview(master)
-        assert "Detached. Host work continues." in notice and "Resume:" not in notice, notice
+        notice = detach(caller, master, b"\x04")
+        assert "Resume:" not in notice and notice.count("\n") == 3, notice
         assert overview_store(notice) == str(store.resolve()), notice
-        _, errors = terminal_exit(caller, master)
-        assert caller.returncode == 0 and not errors, errors
         assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
         # Resume opens the Session inside the overview: Esc returns to it.
         caller = spawn([str(fixture.RUI), "session", "resume", started], cwd=workspace, env=env,
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "Flaky test fixed.", composer=True)
         overview_frame(master, lambda frame: "lane four" in frame, keys=b"\x1b")
-        leave_overview(master)
-        _, errors = terminal_exit(caller, master)
-        assert caller.returncode == 0 and not errors, errors
+        assert detach(caller, master, b"\x04").count("\n") == 3
         assert len(endpoint.requests) == 1, "opening, returning or resuming submitted work"
         # Enter on a row that needs approval opens its Session on the Action,
         # with the choice already in the input row. The Action stays pending.
@@ -1164,9 +1160,7 @@ def overview_cases():
         overview_frame(master, lambda frame: re.search(r"[■#] Hold in the conversation", frame), keys=b"\x1b")
         held_release.set()
         conversation_release.set()
-        leave_overview(master)
-        _, errors = terminal_exit(caller, master)
-        assert caller.returncode == 0 and not errors, errors
+        assert detach(caller, master, b"\x04").count("\n") == 3
         completed = True
         print("Overview: empty Store hint, composer start with /configure settings, Enter and Esc, resume inside the overview, recovery of a start never sent and Ctrl-X stop from a row and a conversation passed", flush=True)
     finally:
@@ -1286,9 +1280,7 @@ def notification_cases():
         raw = raw_output(master, finished_row("muted lane"))
         assert b"\x1b]9;" not in raw, raw
         defaults(home, "--notifications", "on")
-        leave_overview(master)
-        _, errors = terminal_exit(caller, master)
-        assert caller.returncode == 0 and not errors, errors
+        assert detach(caller, master, b"\x04").count("\n") == 3
         # The conversation, away, notifies of its own Session's Action; the
         # report reaches no editor, so the choice stays offered.
         session = lanes["notify lane"]
@@ -1394,9 +1386,7 @@ def command_entry_cases():
         request = json.loads(endpoint.requests[0])
         user = [item for item in request["input"] if item.get("role") == "user"]
         assert user[-1]["content"][0]["text"] == prompt, user
-        terminal_step(master, "/exit", "Resume: ")
-        _, errors = terminal_exit(caller, master)
-        assert caller.returncode == 0 and not errors, errors
+        assert "\nResume: " in detach(caller, master)
         actual = termios.tcgetattr(slave)
         assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
         assert json.loads(run(home, "session", "list", "--all"))["sessions"][0]["reference"] == initial_session
@@ -1432,9 +1422,7 @@ def command_entry_cases():
             assert prompt_cell is not None and coloured == (no_colour == ""), (prompt_cell, opening)
             status = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {initial_session}\n" in status and status_row(status, "Name", "Folder") == "not set", status
-            terminal_step(master, "/exit", "Resume: ")
-            _, errors = terminal_exit(caller, master)
-            assert caller.returncode == 0 and not errors, errors
+            assert "\nResume: " in detach(caller, master)
             actual = termios.tcgetattr(slave)
             assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
         assert len(endpoint.requests) == 2, "resume submitted or restarted work"
@@ -1552,9 +1540,7 @@ def command_entry_cases():
         read_terminal(master, "› ")
         status = terminal_step(master, "/status", " Status · ", composer=True)
         assert f" Status · {allocated_entry}\n" in status, status
-        terminal_step(master, "/exit", "Resume: ")
-        _, resumed_errors = terminal_exit(caller, master)
-        assert caller.returncode == 0 and not resumed_errors, resumed_errors
+        assert "\nResume: " in detach(caller, master)
         caller.stderr.close()
         assert set(records.glob("*.json")) == before_entry | added, "resume created a replacement Session"
         assert len(endpoint.requests) == 7, "entry recovery submitted provider work"
@@ -1615,9 +1601,7 @@ def command_entry_cases():
         # The path wraps at the screen edge, so compare it without layout spaces.
         assert "".join(status_row(status, "Store", "Instructions").split()) == "".join((home_path(home, store) + "fixed for this Session").split()), status
         assert "gpt-5.6-luna" not in status, status
-        terminal_step(master, "/exit", "Resume: ")
-        _, errors = terminal_exit(caller, master)
-        assert caller.returncode == 0 and not errors, errors
+        assert "\nResume: " in detach(caller, master)
         caller.stderr.close()
         assert set(records.glob("*.json")) == before_resume
         assert len(endpoint.requests) == 9, "entry recovery submitted provider work"
@@ -1815,10 +1799,7 @@ def persistent_opening_case():
         assert "Provider:" not in output and "Workspace (Bash cwd):" not in output, ("opening is not compact", output)
         assert "OPENING-COMPLETE" in output, "opening applied the historical omission limit"
         assert len(endpoint.requests) == 1, "opening restarted saved work"
-        os.write(master, b"\x03")
-        read_terminal(master, "Detached.")
-        _, errors = terminal_exit(caller, master)
-        assert caller.returncode == 0, errors
+        detach(caller, master, b"\x03")
         actual = termios.tcgetattr(slave)
         assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "opening terminal configuration was not restored"
         os.close(master)
@@ -2057,10 +2038,7 @@ def persistent_opening_case():
         assert "Start of conversation" in current_screen(master), current_screen(master)
         assert len(proxy.exchanges) == reads, "history read past the start"
         assert len(endpoint.requests) == 12, "history caused provider work"
-        os.write(master, b"\x03")
-        read_terminal(master, "Detached.")
-        _, errors = terminal_exit(caller, master)
-        assert caller.returncode == 0, errors
+        detach(caller, master, b"\x03")
         completed = True
         print("persistent opening/history: exact chronological frozen replay, assistant-only Markdown, whole-page failure/retry, no cursor loss/late append/repeated work passed", flush=True)
     finally:
@@ -2125,10 +2103,7 @@ def persistent_pending_case():
         assert any(row.startswith("› late queued beyond snapshot") and row.endswith(" 25 queued") for row in output.split("\n")), output
         assert "queued behind" not in frames and "Queued" not in frames and "queued-" not in output, frames
         assert len(endpoint.requests) == 1, "opening dispatched queued work"
-        os.write(master, b"\x03")
-        read_terminal(master, "Detached.")
-        _, errors = terminal_exit(caller, master)
-        assert caller.returncode == 0, errors
+        detach(caller, master, b"\x03")
         completed = True
         print("persistent pending: 24 waiting beyond the newest 16 and one admitted later are one counted row passed", flush=True)
     finally:
@@ -2312,9 +2287,10 @@ def persistent_input_cases():
         left_record, = set(records.glob("*.json")) - before_left
         left_key = left_record.stem
         overview_frame(master, lambda frame: f"! Not confirmed · rui request recover {left_key}" in frame, keys=b"\x1b")
-        leave_overview(master)
-        _, errors = caller.communicate(timeout=5)
-        assert caller.returncode == 0, errors
+        # App writes its detach notice to stderr beside the recovery line.
+        os.write(master, b"\x04")
+        _, errors = terminal_exit(caller, master)
+        assert caller.returncode == 0 and b"\nDetached. Host work continues.\nOverview: rui --store " in errors, errors
         assert f"rui: Message not confirmed. Use rui request recover {left_key} to retry the exact original".encode() in errors, errors
         actual = termios.tcgetattr(slave)
         # NOW restores user configuration, not kernel-owned history flags.
@@ -2898,10 +2874,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 assert "› live cafXé!" in wrapped, wrapped
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
                 read_terminal(master, "+1 more calls · /status", composer=True)
-                terminal_step(master, "\x01\x0b/exit", "Detached.")
                 # Read the screen until exit: restoring the terminal drains it.
-                _, errors = terminal_exit(caller, master)
-                assert caller.returncode == 0, errors
+                detach(caller, master, b"\x01\x0b/exit\r")
                 forget_terminal(master)  # The next caller's screen starts at its first byte.
                 caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
                     "--", reference], env={**os.environ, "HOME": str(home), "TERM": "xterm-256color", "NO_COLOR": ""},
@@ -3234,14 +3208,14 @@ def store_selection_cases(state, workspace, valid_store):
             if not case.startswith("saved"):
                 greeting = overview_frame(master, overview_title)
                 assert "Session:" not in greeting and "request:" not in greeting, greeting
-                notice = leave_overview(master)
+                notice = detach(caller, master, b"\x04")
                 assert overview_store(notice) == str(explicit.resolve()), (case, notice)
-            _, errors = caller.communicate(timeout=settlement_timeout)
+            else:
+                _, errors = caller.communicate(timeout=settlement_timeout)
             if case.startswith("saved"):
                 assert caller.returncode == 6 and b"[store_unavailable]" in errors, (case, errors)
                 assert not destination.exists() and not (home / ".config/rui/requests").exists()
             else:
-                assert caller.returncode == 0, (case, errors)
                 # The overview starts nothing until its composer is used.
                 assert not list((home / ".config/rui/requests").glob("*.json")), case
                 assert json.loads(run(home, "host", "status", "--store", explicit))["status"] == "ready"
@@ -6545,8 +6519,9 @@ def main(selected="all"):
             # Keep the slave alive until all output is collected: Darwin can
             # discard unread PTY bytes when the last slave closes.
             output, errors = terminal_exit(blocked, master, timeout=20)
-            assert blocked.returncode == 0 and errors == b"", (output, errors)
-            assert b"Detached. Host work continues." in output and b"request: " not in output, output
+            # App writes its detach notice, and only that, to stderr.
+            assert blocked.returncode == 0 and errors.startswith(b"\nDetached. Host work continues.\nOverview: ") and errors.count(b"\n") == 3, (output, errors)
+            assert b"request: " not in output, output
             assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original_mode)
             assert (blocked_config / "requests").read_text() == "not a directory"
             assert run(preferences_home, "session", "list", "--store", store, "--all") == sessions_before
