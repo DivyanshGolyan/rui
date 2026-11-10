@@ -3069,6 +3069,20 @@ test "a paste past the editor's capacity leaves the draft unchanged" {
     try expectStarted(rig, "\r", "kept");
 }
 
+test "a command word wrapped past the composer's rows shows no list, and Esc clears it" {
+    const rig = try openListed();
+    defer rig.close();
+    _ = try rig.press("/configure");
+    // At 8x6 the composer shows two of the word's three rows.
+    var shown = try rig.shown(8, 6);
+    defer shown.deinit();
+    try shown.expectLines(1, &.{ "  config", "  ure" });
+    for (0..6) |row| try std.testing.expect(std.mem.indexOf(u8, try shown.line(@intCast(row)), "/configu") == null);
+    // With no list drawn, Esc clears the draft rather than closing one.
+    _ = try rig.press("\x1b");
+    try std.testing.expectEqualStrings("", rig.overview.composerDraft().bytes);
+}
+
 test "a full-capacity draft of spaces keeps the composer's caret on screen" {
     const rig = try openComposer();
     defer rig.close();
