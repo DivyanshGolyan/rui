@@ -315,7 +315,7 @@ fn serviceSkills(self: *Self) !void {
         const job = &self.skill_job;
         if (outcome) |_| {
             const draft = self.input.composition();
-            const word = skill_completion.atCaret(draft.bytes, draft.cursor);
+            const word = skill_completion.skillWordAt(draft.bytes, draft.cursor);
             if (self.skills.answer(job.read, job.page.?, if (word) |at| at.name(draft.bytes) else null)) |unheld| {
                 var freed = unheld;
                 freed.deinit(self.init.gpa);
@@ -329,7 +329,7 @@ fn serviceSkills(self: *Self) !void {
     }
     if (self.upgrade.held()) return;
     const draft = self.input.composition();
-    const word = skill_completion.atCaret(draft.bytes, draft.cursor) orelse return;
+    const word = skill_completion.skillWordAt(draft.bytes, draft.cursor) orelse return;
     const ask = self.skills.ask(word.name(draft.bytes)) orelse return;
     self.skill_job = .{ .run = self.skill_read, .gpa = self.init.gpa, .store = self.store, .session = self.session, .read = ask.read };
     self.skill_job.prefix.set(ask.prefix) catch unreachable; // The core asks for no longer name.
@@ -1126,6 +1126,12 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     defer held.destroy();
     held.self.session = "k7m2qx";
     held.self.skill_read = Fake.read;
+    // The draft's first word makes it a command line, which Enter runs:
+    // no skill is read or listed there.
+    try held.keys("/re");
+    try std.testing.expect(held.self.skill_task.thread == null);
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "/recap") == null);
+    try held.keys("\x15");
     // The draft Q2 typed in a real terminal: the caret moved back to just
     // after `/re`, in the middle of a Message. The page comes in while the
     // caret is in the word; one that came in after it left would be
@@ -1159,6 +1165,58 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     try std.testing.expectEqualStrings("please /review now and /recap ", held.self.input.composition().bytes);
     try std.testing.expect(held.self.submission.view() == null);
     try std.testing.expectEqual(@as(usize, 1), Fake.calls);
+}
+
+test "a Session's /reload-skills drops the skills it listed, and the next read lists the reloaded catalog" {
+    const Fake = struct {
+        var reloaded = false;
+        var calls: usize = 0;
+        fn read(_: client.Requests, gpa: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !skill_suggestions.Page {
+            calls += 1;
+            const entries = try gpa.alloc(skill_suggestions.Entry, 1);
+            entries[0] = .{ .name = try gpa.dupe(u8, if (reloaded) "release" else "recap"), .description = try gpa.dupe(u8, "") };
+            return .{ .entries = entries, .total = 1 };
+        }
+        fn done(self: *Self) bool {
+            return self.skill_task.completed();
+        }
+        fn command(_: *anyopaque, _: *Task) !void {}
+    };
+    Fake.reloaded = false;
+    Fake.calls = 0;
+    const io = std.testing.io;
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    held.self.skill_read = Fake.read;
+    try held.keys("use /r");
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &held.self, Fake.done);
+    try held.settle();
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "/recap") != null);
+    // `/reload-skills` settles as its command read does, with a short
+    // reply, after the catalog changed.
+    Fake.reloaded = true;
+    const reply = try held.tmp.dir.createFile(io, "reloaded", .{ .read = true });
+    defer reply.close(io);
+    try reply.writePositionalAll(io, "Skills reloaded.\n", 0);
+    held.self.files.inspection = reply;
+    held.self.reading.phase = .inspection;
+    held.self.inspection.kind = .command;
+    held.self.inspection.command_running = true;
+    const line = "/reload-skills";
+    @memcpy(held.self.job.command_text[0..line.len], line);
+    held.self.job.command_text_length = line.len;
+    try held.self.reader.start(io, &held.self, Fake.command);
+    while (!held.self.reader.completed()) std.Thread.yield() catch {};
+    try held.self.settleReader();
+    // The caret still in `/r` reads the reloaded catalog, which replaces
+    // the rows.
+    try held.settle();
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &held.self, Fake.done);
+    try held.settle();
+    try std.testing.expectEqual(@as(usize, 2), Fake.calls);
+    const shown = try held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, shown, "/release") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "/recap") == null);
 }
 
 test "frontend lists the efforts of the Session's model once it is read, the one in force marked" {
@@ -2226,6 +2284,12 @@ fn settleReader(self: *Self) !void {
     };
     // Shown, or never written: exit no longer prints it.
     if (reader_policy.commandSettled(end == .complete, phase)) self.inspection.command_running = false;
+    // A reload changed what this Session's Messages bind: its held skills
+    // are stale.
+    if (end == .complete and phase == .inspection and inspection == .command) switch (slash_commands.parse(self.job.command_text[0..self.job.command_text_length])) {
+        .command => |command| if (command.name == .@"reload-skills") self.dropSkills(),
+        else => {},
+    };
     if (end == .complete and reader_policy.defaultsChanged(phase, inspection, self.statusShown())) {
         self.inspection.defaults = savedDefaults(self.home);
         try self.refreshStatusPage();
@@ -3691,6 +3755,8 @@ test "a change run from the /status page replies under the page, which shows the
         held.self.inspection.kind = .command;
         held.self.inspection.command_running = true;
         held.self.reading.phase = .inspection;
+        @memcpy(held.self.job.command_text[0..text.len], text);
+        held.self.job.command_text_length = text.len;
         Reply.text = if (configured) "Rui: Configured.\n" else long;
         try held.self.reader.start(std.testing.io, &held.self, Reply.write);
         try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &held.self, struct {

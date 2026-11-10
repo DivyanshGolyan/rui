@@ -3073,7 +3073,7 @@ pub fn nextCommands(state: *State, draft: Draft) ?slash_commands.Shown {
 
 /// The name of the `/word` the caret is in, or null.
 fn caretName(draft: Draft) ?[]const u8 {
-    const at = skill_completion.atCaret(draft.bytes, draft.cursor) orelse return null;
+    const at = skill_completion.skillWordAt(draft.bytes, draft.cursor) orelse return null;
     return at.name(draft.bytes);
 }
 
@@ -5398,7 +5398,7 @@ test "/configure holds start settings for the Session the next Enter starts" {
     // Alone, /configure waits for an option: Enter on it in the list adds
     // the space that shows them.
     draft = try typeText(&state, "/configure");
-    try expectEffects(&.{.{ .replace = .{ .start = 1, .end = "/configure".len, .text = "configure " } }}, try submit(&state, draft));
+    try expectEffects(&.{.{ .replace = .{ .start = "/configure".len, .end = "/configure".len, .text = " " } }}, try submit(&state, draft));
     // A model Rui does not list is held, with a quiet word on its limits.
     draft = try typeText(&state, "/configure --model unlisted-model");
     try expectEffects(&.{.clear_draft}, try submit(&state, draft));

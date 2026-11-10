@@ -1879,6 +1879,17 @@ test "a /word reads the Workspace's skills on the worker, lists them over the dr
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
     defer rig.close();
     const overview = rig.overview;
+    // The draft's first word makes it a command line, which Enter runs:
+    // no skill is read or listed there.
+    try std.testing.expect(try rig.press("/re") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.skill_reads);
+    {
+        var shown = try rig.shown(60, 24);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "/recap") == null);
+    }
+    try std.testing.expect(try rig.press("\x15") == null);
     try std.testing.expect(try rig.press("use /re") == null);
     try std.testing.expect(try rig.settle() == null);
     // The read went out at the bare `/`, for every skill.

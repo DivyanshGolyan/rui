@@ -38,6 +38,13 @@ pub fn atCaret(draft: []const u8, caret: usize) ?Word {
     return .{ .slash = slash, .end = end };
 }
 
+/// The `/word` at `caret` a skill can fill: any but the draft's first,
+/// which makes the draft a command line that Enter runs, not a Message.
+pub fn skillWordAt(draft: []const u8, caret: usize) ?Word {
+    const word = atCaret(draft, caret) orelse return null;
+    return if (word.slash == 0) null else word;
+}
+
 /// The longest name prefix the Host reads suggestions for.
 pub const max_prefix_bytes = 64;
 
@@ -130,17 +137,15 @@ pub const Reads = struct {
     /// word. Anywhere else, `commands` alone, as a command's later words
     /// list. Null when nothing matches.
     pub fn shown(self: *const Reads, rows: *Rows, draft: []const u8, caret: usize, revision: u64, commands: ?slash_commands.List, previous: ?slash_commands.Shown) ?slash_commands.Shown {
-        const word = atCaret(draft, caret) orelse return slash_commands.Shown.next(previous, revision, commands);
+        const word = skillWordAt(draft, caret) orelse return slash_commands.Shown.next(previous, revision, commands);
         const typed = word.name(draft);
-        // The command list is the word's only while the draft is the word.
-        const listed = if (word.slash == 0 and word.end == draft.len) commands else null;
         const held = if (self.held) |*kept| (if (std.mem.startsWith(u8, typed, kept.prefix.slice())) kept else null) else null;
         const none: skill_suggestions.Page = .{};
         const page = if (held) |kept| &kept.page else &none;
         // The read in the high half, the word's `/` in the low: a draft
         // holds far fewer than 2^32 bytes, and reads count from 1.
         const source = if (held) |kept| (kept.read << 32) | @as(u32, @intCast(word.slash)) else 0;
-        return slash_commands.Shown.nextOf(previous, revision, source, rows.list(typed, listed, page));
+        return slash_commands.Shown.nextOf(previous, revision, source, rows.list(typed, page));
     }
 };
 
@@ -149,12 +154,10 @@ pub const Reads = struct {
 pub const Rows = struct {
     text: [slash_commands.List.capacity][1 + 64 + 1]u8 = undefined,
 
-    /// The rows for a word whose name is `typed`: `commands` first, when
-    /// the word starts the draft, then the held page's skills `typed`
-    /// starts, as many as the list holds. Null when nothing matches.
-    pub fn list(self: *Rows, typed: []const u8, commands: ?slash_commands.List, page: *const skill_suggestions.Page) ?slash_commands.List {
-        var rows: slash_commands.List = commands orelse .{ .typed = typed };
-        std.debug.assert(std.mem.eql(u8, rows.typed, typed));
+    /// The rows for a word whose name is `typed`: the held page's skills
+    /// `typed` starts, as many as the list holds. Null when nothing matches.
+    pub fn list(self: *Rows, typed: []const u8, page: *const skill_suggestions.Page) ?slash_commands.List {
+        var rows: slash_commands.List = .{ .typed = typed };
         for (page.entries) |entry| {
             if (rows.count == slash_commands.List.capacity) break;
             if (!std.mem.startsWith(u8, entry.name, typed)) continue;
@@ -189,7 +192,7 @@ pub fn complete(draft: []const u8, word: Word, entry: slash_commands.Entry) Repl
 /// word in place of the caret's `/word` name, else, for a command's later
 /// word, the rest of the row's word at the draft's end.
 pub fn edit(draft: []const u8, caret: usize, shown: *const slash_commands.Shown) Replacement {
-    if (atCaret(draft, caret)) |word| return complete(draft, word, shown.list.entries[shown.highlight]);
+    if (skillWordAt(draft, caret)) |word| return complete(draft, word, shown.list.entries[shown.highlight]);
     return .{ .start = draft.len, .end = draft.len, .text = shown.completion() };
 }
 
@@ -238,7 +241,7 @@ test "skill completion agrees with the Host on every name the Host binds" {
     }
 }
 
-test "skill completion lists commands first, then the page's skills the name starts" {
+test "skill completion lists the page's skills the name starts" {
     const entries = [_]skill_suggestions.Entry{
         .{ .name = "recap", .description = "Summarise" },
         .{ .name = "review", .description = "Review a change" },
@@ -246,20 +249,14 @@ test "skill completion lists commands first, then the page's skills the name sta
     };
     const page: skill_suggestions.Page = .{ .entries = &entries, .revision = 3, .total = entries.len };
     var rows: Rows = .{};
-    const mid = rows.list("re", null, &page).?;
+    const mid = rows.list("re", &page).?;
     try std.testing.expectEqual(@as(usize, 2), mid.count);
     try std.testing.expectEqualStrings("/recap", mid.entries[0].shown);
     try std.testing.expectEqualStrings("recap ", mid.entries[0].word);
     try std.testing.expectEqualStrings("/review", mid.entries[1].shown);
     try std.testing.expectEqualStrings("Review a change", mid.entries[1].description);
     try std.testing.expect(!mid.entries[1].runs);
-    // At the draft's start the conversation's commands come first.
-    const commands = slash_commands.conversation.suggest("/re", .{}).?;
-    const start = rows.list("re", commands, &page).?;
-    try std.testing.expectEqual(commands.count + 2, start.count);
-    for (commands.shown(), start.entries[0..commands.count]) |command, row| try std.testing.expectEqualStrings(command.shown, row.shown);
-    try std.testing.expectEqualStrings("/review", start.entries[commands.count + 1].shown);
-    try std.testing.expectEqual(@as(?slash_commands.List, null), rows.list("zz", null, &page));
+    try std.testing.expectEqual(@as(?slash_commands.List, null), rows.list("zz", &page));
 }
 
 test "skill completion stops at the list's capacity" {
@@ -273,7 +270,7 @@ test "skill completion stops at the list's capacity" {
     }
     const page: skill_suggestions.Page = .{ .entries = &entries, .total = entries.len };
     var rows: Rows = .{};
-    const listed = rows.list("", null, &page).?;
+    const listed = rows.list("", &page).?;
     try std.testing.expectEqual(slash_commands.List.capacity, listed.count);
     try std.testing.expectEqualStrings("/skill-23", listed.entries[23].shown);
 }
@@ -291,17 +288,6 @@ test "skill completion replaces the caret's name, spacing only at the draft's en
     try expectReplacement(.{ .start = "use /".len, .end = "use /re".len, .text = "review" }, inner);
     const last = "use /re";
     try expectReplacement(.{ .start = "use /".len, .end = last.len, .text = "review " }, complete(last, atCaret(last, last.len).?, entry));
-    // A command row at the draft's end makes the bytes Tab always made.
-    const draft = "/st";
-    const commands = slash_commands.conversation.suggest(draft, .{}).?;
-    var rows: Rows = .{};
-    const empty: skill_suggestions.Page = .{};
-    const listed = rows.list("st", commands, &empty).?;
-    const replacement = complete(draft, atCaret(draft, 1).?, listed.entries[0]);
-    var made: [32]u8 = undefined;
-    const after = try std.fmt.bufPrint(&made, "{s}{s}{s}", .{ draft[0..replacement.start], replacement.text, draft[replacement.end..] });
-    var before: [32]u8 = undefined;
-    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&before, "{s}{s}", .{ draft, commands.completion(0) }), after);
 }
 
 test "skill rows give way to the command's own list where the caret is in no /word" {
@@ -317,18 +303,21 @@ test "skill rows give way to the command's own list where the caret is in no /wo
     try std.testing.expectEqualStrings(plain.list.entries[0].word, shown.list.entries[0].word);
 }
 
-test "a draft's first /word lists its commands only while the draft is that word" {
-    const entries = [_]skill_suggestions.Entry{.{ .name = "configure-ci", .description = "" }};
+test "a draft's first /word is the command's: it lists commands, never skills" {
+    const entries = [_]skill_suggestions.Entry{.{ .name = "status-report", .description = "" }};
     var reads: Reads = .{};
     var rows: Rows = .{};
-    _ = reads.ask("configure").?;
-    _ = reads.answer(1, testPage(&entries), "configure");
-    // The caret is back in `/configure`, with an option after it: that
-    // option's list is not this word's, so only skills list.
-    const draft = "/configure --";
-    const shown = reads.shown(&rows, draft, 2, 1, slash_commands.conversation.suggest(draft, .{}), null).?;
-    try std.testing.expectEqual(@as(usize, 1), shown.list.count);
-    try std.testing.expectEqualStrings("/configure-ci", shown.list.entries[0].shown);
+    _ = reads.ask("sta").?;
+    _ = reads.answer(1, testPage(&entries), "sta");
+    // Enter runs a draft that starts with `/` as a command, so a skill
+    // chosen there would never be sent: the word lists its commands alone.
+    const draft = "/sta";
+    const commands = slash_commands.conversation.suggest(draft, .{});
+    const shown = reads.shown(&rows, draft, draft.len, 1, commands, null).?;
+    try std.testing.expectEqual(slash_commands.Shown.next(null, 1, commands).?.list.count, shown.list.count);
+    for (shown.list.shown()) |entry| try std.testing.expect(!std.mem.eql(u8, entry.shown, "/status-report"));
+    // A later word lists the skill.
+    try std.testing.expectEqualStrings("/status-report", reads.shown(&rows, "x /sta", "x /sta".len, 2, null, null).?.list.entries[0].shown);
 }
 
 test "a caret moved to another /word is another list, which no key takes until drawn" {
@@ -443,14 +432,11 @@ test "skill rows are the held page's, numbered by the read that made them" {
     try std.testing.expect(shown.source != 0);
     try std.testing.expectEqual(.hidden, shown.seen);
     try std.testing.expectEqualStrings("/review", shown.list.entries[1].shown);
-    // The caret in no `/word` shows nothing; a word the page does not
-    // cover shows only commands, which the draft's first word lists.
+    // The caret in no `/word` shows nothing; the draft's first word lists
+    // only its commands.
     try std.testing.expectEqual(@as(?slash_commands.Shown, null), reads.shown(&rows, "use it", 3, 2, null, null));
     const commands = slash_commands.conversation.suggest("/st", .{}).?;
     const start = reads.shown(&rows, "/st", 3, 3, commands, null).?;
     try std.testing.expectEqual(commands.count, start.list.count);
     try std.testing.expectEqual(@as(u64, 0), start.source);
-    // At the draft's start, commands first, then the page's skills.
-    const both = reads.shown(&rows, "/re", 3, 4, slash_commands.conversation.suggest("/re", .{}), null).?;
-    try std.testing.expectEqualStrings("/review", both.list.entries[both.list.count - 1].shown);
 }
