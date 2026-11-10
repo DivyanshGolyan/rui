@@ -566,7 +566,10 @@ class TerminalScreen:
 
     def observe(self):
         self.read_output()
-        assert self.process.poll() is None, (self.process.returncode, self.capture.completed)
+        if self.process.poll() is not None:
+            # A crash writes its message after the last frame: show it.
+            self.read_output()
+            raise AssertionError(self.process.returncode, self.capture.completed, bytes(self.tail[-4096:]).decode(errors="replace"))
         return self.capture.completed
 
     def contains(self, marker):
