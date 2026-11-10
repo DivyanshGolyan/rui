@@ -2,7 +2,6 @@
 const std = @import("std");
 const engine = @import("../engine.zig");
 const Store = @import("../Store.zig");
-const protocol = @import("../../protocol.zig");
 const provider_route = @import("../../provider_route.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const rsql = @import("../rsql.zig");

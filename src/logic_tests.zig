@@ -7,7 +7,9 @@ const core_boundary = @import("core_boundary.zig");
 /// to select test-logic.
 const cores = .{
     .{ "ActionConsent.zig", @import("ActionConsent.zig") },
+    .{ "activity_facts.zig", @import("activity_facts.zig") },
     .{ "activity_read.zig", @import("activity_read.zig") },
+    .{ "activity_reply.zig", @import("activity_reply.zig") },
     .{ "request_wait.zig", @import("request_wait.zig") },
     .{ "word_search.zig", @import("word_search.zig") },
     .{ "attempt.zig", @import("attempt.zig") },

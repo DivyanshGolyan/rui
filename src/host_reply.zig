@@ -7,17 +7,18 @@ const change_ring = @import("change_ring.zig");
 const command_reply = @import("command_reply.zig");
 const AttemptBinding = @import("attempt.zig").AttemptBinding;
 const skill_suggestions = @import("skill_suggestions.zig");
+const activity_reply = @import("activity_reply.zig");
 
 pub fn activityPageBytes(page: *const protocol.ActivityFacts) usize {
-    return if (page.not_modified) protocol.shapeBytes(protocol.ActivityFacts.unchanged) else protocol.max_activity_page_response_bytes;
+    return if (page.not_modified) protocol.shapeBytes(activity_reply.page_reply.unchanged) else activity_reply.max_page_bytes;
 }
 
 pub fn renderActivityPage(out: protocol.JsonOut, page: *const protocol.ActivityFacts) error{BufferTooLarge}!void {
-    page.writeJson(out.writer) catch return error.BufferTooLarge;
+    activity_reply.writePage(out.writer, page) catch return error.BufferTooLarge;
 }
 
 pub fn renderActivitySearch(out: protocol.JsonOut, page: *const protocol.ActivitySearchFacts) error{BufferTooLarge}!void {
-    page.writeJson(out.writer) catch return error.BufferTooLarge;
+    activity_reply.writeSearch(out.writer, page) catch return error.BufferTooLarge;
 }
 
 /// The HTTP status of a mutation reply: the same four outcomes for each.
@@ -69,7 +70,7 @@ pub fn renderConversationPage(response: protocol.JsonOut, page: *const command_r
             inline else => |kind| try response.appendShape(shapes.item(kind), .{ item.position, item.ordinal, item.content.length, item.content.digest }),
         }
         switch (item.kind) {
-            .user => if (item.admitted_at) |second| try response.appendShape(shapes.admission, .{ second, item.sender }),
+            .user => if (item.admitted_at) |second| try response.appendShape(shapes.admission, .{ second, protocol.NamedPeerJson.optional(item.sender) }),
             .tool_result, .hosted_call => if (item.presentation) |presentation| try response.appendShape(shapes.presentation, .{protocol.ToolPresentationJson{ .value = presentation }}),
             .assistant => {},
         }
@@ -445,15 +446,15 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var longest_item_bytes: usize = 0;
     for (values) |value| {
         const item: protocol.ActivityItem = .{ .position = max, .ordinal = max, .at = max, .value = value };
-        var buffer: [protocol.ActivityItem.max_json_bytes]u8 = undefined;
+        var buffer: [activity_reply.ItemJson.max_json_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
-        try item.writeJson(&writer);
+        try (activity_reply.ItemJson{ .item = &item }).writeJson(&writer);
         if (writer.end > longest_item_bytes) {
             longest_item_bytes = writer.end;
             longest_item = item;
         }
     }
-    try std.testing.expectEqual(protocol.ActivityItem.max_json_bytes, longest_item_bytes);
+    try std.testing.expectEqual(activity_reply.ItemJson.max_json_bytes, longest_item_bytes);
     var facts: protocol.ActivityFacts = .{ .end = max, .direction = Worst.tag(@FieldType(protocol.ActivityPage, "direction")), .count = 16, .more = false };
     @memset(&facts.items, longest_item);
     facts.call_activity = .{ .total = max, .count = 3 };
@@ -481,10 +482,10 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     facts.work = .{ .work = .{ .state = longest_state, .turn = max, .operation = max, .first_action = max }, .revision = max };
     @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);
     facts.work.workspace.len = protocol.max_workspace_bytes;
-    var page_buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+    var page_buffer: [activity_reply.max_page_bytes]u8 = undefined;
     var page_writer = std.Io.Writer.fixed(&page_buffer);
-    try facts.writeFullJson(&page_writer, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)));
-    try std.testing.expectEqual(protocol.max_activity_page_response_bytes, page_writer.end);
+    try activity_reply.writeFullPage(&page_writer, &facts, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)));
+    try std.testing.expectEqual(activity_reply.max_page_bytes, page_writer.end);
 
     const longest_name = @as([64]u8, @splat(1));
     const longest_description = @as([4096]u8, @splat(1));

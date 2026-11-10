@@ -4,6 +4,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
+const activity_reply = @import("activity_reply.zig");
 const protocol = @import("protocol.zig");
 const Input = @import("SessionInput.zig");
 const TerminalInput = @import("TerminalInput.zig");
@@ -2077,8 +2078,8 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         // History, footer, status, Sent and /status change together, in one frame.
         const result = &self.job.result;
         self.admission.delivered = @max(self.admission.delivered, result.delivered);
-        observed = .{ .work = result.work.work.core(), .opening = self.reading.opening };
-        self.live.work = result.work.work;
+        observed = .{ .work = result.work.work, .opening = self.reading.opening };
+        self.live.work = .fromCore(result.work.work);
         // A taken Message leaves the queued row in the frame that shows it.
         self.live.queued = result.queued;
         if (result.queued_line) |shown| self.live.queued_line = shown;
@@ -3516,7 +3517,7 @@ test "permission resolved between the activity scan and Current keeps the fronte
     try facts.work.workspace.set("/w");
     var page_buffer: [4096]u8 = undefined;
     var page = std.Io.Writer.fixed(&page_buffer);
-    try facts.writeJson(&page);
+    try activity_reply.writePage(&page, &facts);
     try Host.respond(&listener, "/v1/activity-page", page.buffered());
     // Another client denies the selected Action (or its Turn stops/finishes)
     // before the next read: Current no longer has that unresolved row.
@@ -3541,7 +3542,7 @@ test "permission resolved between the activity scan and Current keeps the fronte
     try self.launch(self.freeze(.activity), reads.scan);
     facts.work.work = .{ .state = .{ .idle = .{ .since = 1 } } };
     page = std.Io.Writer.fixed(&page_buffer);
-    try facts.writeJson(&page);
+    try activity_reply.writePage(&page, &facts);
     try Host.respond(&listener, "/v1/activity-page", page.buffered());
     try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), self, struct {
         fn completed(frontend: *Self) !bool {

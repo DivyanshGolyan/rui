@@ -6,7 +6,7 @@ const std = @import("std");
 const command_reply = @import("../command_reply.zig");
 const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
-const protocol = @import("../protocol.zig");
+const activity_facts = @import("../activity_facts.zig");
 const conversation_read = @import("../conversation_read.zig");
 const session_list = @import("../session_list.zig");
 const activity_read = @import("../activity_read.zig");
@@ -932,7 +932,7 @@ pub const Store = struct {
         return entry.finish(Ordinary.public_content, reads_domain.openPublicConversationContent(&access, request));
     }
 
-    pub fn activityPage(self: *Store, request: *const activity_read.ActivityPage, out: *protocol.ActivityFacts) !void {
+    pub fn activityPage(self: *Store, request: *const activity_read.ActivityPage, out: *activity_facts.Page) !void {
         try request.validate();
         if (self.unchangedSession(activitySince(request))) |token| {
             out.not_modified = true;
@@ -942,7 +942,7 @@ pub const Store = struct {
         return self.queue().run(activityPageHeld, .{ self, request, out });
     }
 
-    fn activityPageHeld(self: *Store, request: *const activity_read.ActivityPage, out: *protocol.ActivityFacts) !void {
+    fn activityPageHeld(self: *Store, request: *const activity_read.ActivityPage, out: *activity_facts.Page) !void {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
@@ -967,11 +967,11 @@ pub const Store = struct {
         };
     }
 
-    pub fn searchActivity(self: *Store, request: *const activity_read.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+    pub fn searchActivity(self: *Store, request: *const activity_read.ActivitySearch, out: *activity_facts.Search) !void {
         return self.queue().run(searchActivityHeld, .{ self, request, out });
     }
 
-    fn searchActivityHeld(self: *Store, request: *const activity_read.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+    fn searchActivityHeld(self: *Store, request: *const activity_read.ActivitySearch, out: *activity_facts.Search) !void {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
@@ -1008,16 +1008,16 @@ pub const Store = struct {
 
     /// Authenticates the Session/Operation/Attempt before reading optional
     /// diagnostics. Diagnostic faults never fence canonical state.
-    pub fn failedResponseBinding(self: *Store, request: *const protocol.InspectSession) !AttemptBinding {
-        return self.queue().run(failedResponseBindingHeld, .{ self, request.session.slice(), request.failed_response.? });
+    pub fn failedResponseBinding(self: *Store, session_ref: []const u8, operation: u64, attempt_ordinal: u64) !AttemptBinding {
+        return self.queue().run(failedResponseBindingHeld, .{ self, session_ref, operation, attempt_ordinal });
     }
 
-    fn failedResponseBindingHeld(self: *Store, session_ref: []const u8, selection: protocol.FailedResponseExport) !AttemptBinding {
+    fn failedResponseBindingHeld(self: *Store, session_ref: []const u8, operation: u64, attempt_ordinal: u64) !AttemptBinding {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.content, report_domain.failedResponseBinding(&access, session_ref, selection.operation, selection.attempt));
+        return entry.finish(Ordinary.content, report_domain.failedResponseBinding(&access, session_ref, operation, attempt_ordinal));
     }
 
     /// Reads the report of `session_ref` under one Entry and hands it to
@@ -2077,8 +2077,8 @@ pub fn readSessionForTesting(self: *Store, session_ref: []const u8) !?CurrentCon
     return current;
 }
 
-pub fn activityPageForTesting(self: *Store, request: activity_read.ActivityPage) !protocol.ActivityFacts {
-    var page: protocol.ActivityFacts = undefined;
+pub fn activityPageForTesting(self: *Store, request: activity_read.ActivityPage) !activity_facts.Page {
+    var page: activity_facts.Page = undefined;
     try self.activityPage(&request, &page);
     return page;
 }
