@@ -18,6 +18,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import build_files
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("host_process", ROOT / "tests/integration/host_process.py")
@@ -601,11 +603,11 @@ def fixture_imports(root):
     fixtures = {path.relative_to(root).as_posix() for path in directory.glob("*.py")
                 if any(isinstance(node, ast.If) and ast.unparse(node.test) == "__name__ == '__main__'"
                        for node in ast.parse(path.read_text()).body)}
-    for launcher, launched in (("build.zig", r'"(tests/integration/\w+\.py)"'),
-                               ("tests/integration/check.sh", r'\$directory/(\w+\.py)')):
-        if (root / launcher).exists():
-            fixtures |= {name if name.startswith("tests/") else f"tests/integration/{name}"
-                         for name in re.findall(launched, (root / launcher).read_text())}
+    check = root / "tests/integration/check.sh"
+    for source, launched in ((build_files.source(root) if (root / "build.zig").exists() else "", r'"(tests/integration/\w+\.py)"'),
+                             (check.read_text() if check.exists() else "", r'\$directory/(\w+\.py)')):
+        fixtures |= {name if name.startswith("tests/") else f"tests/integration/{name}"
+                     for name in re.findall(launched, source)}
     fixtures -= FIXTURE_LIBRARY_ENTRIES.keys()
     found = set()
     for path in sorted([*directory.glob("*.py"), *directory.glob("*.sh"),
@@ -755,7 +757,7 @@ class FixtureEntryTest(unittest.TestCase):
                              {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "TERM": "xterm-256color", "RUI_TEST_MODELS_DEV_URL": ""})
 
     def test_go_measurements_run_through_the_exec_entry(self):
-        build = (ROOT / "build.zig").read_text()
+        build = build_files.source()
         steps = re.findall(r'const (\w+)_step = b\.step\(\s*"measure-', build)
         self.assertGreaterEqual(len(steps), 10)
         for name in steps:

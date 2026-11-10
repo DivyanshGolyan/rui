@@ -360,7 +360,7 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
     self.app_hooks = hooks;
     self.app_caps = caps;
     self.screen.setWidth(caps.width);
-    self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour };
+    self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = "shift+↓" };
     self.app_card = .{ .consent = &self.app_consent, .pasting = &hooks.root.pasting, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
     return self.widget();
 }
@@ -3909,4 +3909,32 @@ test "malformed UTF-8 rejects its line, and typing after it reaches the draft" {
         try held.keys("\x15");
         try held.settle();
     }
+}
+
+test "a card taller than the screen says how many lines it hides and Shift-Down shows them" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    held.size = .{ .width = 100, .height = 30 };
+    const file = try held.adopt(32);
+    defer file.close(std.testing.io);
+    for (0..40) |press| {
+        errdefer std.debug.print("press={d}\n{s}\n", .{ press, held.shown() catch "" });
+        const shown = try held.shown();
+        // The last command row in view, and the rows of the 32 after it.
+        var last: ?usize = null;
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, shown, at, "row ")) |found| : (at = found + 4) last = try std.fmt.parseInt(usize, shown[found + 4 ..][0..3], 10);
+        const hidden = 31 - last.?;
+        var expected: [64]u8 = undefined;
+        const hint = try std.fmt.bufPrint(&expected, "{d} more lines · shift+↓", .{hidden});
+        if (hidden == 0) {
+            try std.testing.expect(std.mem.indexOf(u8, shown, "more lines") == null);
+            try std.testing.expect(press > 0);
+            break;
+        }
+        try std.testing.expect(std.mem.indexOf(u8, shown, hint) != null);
+        try std.testing.expect(std.mem.indexOf(u8, shown, " Allow once ") != null);
+        try stepKeys(held, "\x1b[1;2B");
+        try held.settle();
+    } else return error.TestUnexpectedResult;
 }

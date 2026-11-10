@@ -394,10 +394,16 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !void {
     self.app = &app;
     self.attention = &app.attention;
     const ended = app.run(self.root.widget());
-    if (self.app_session) |left| left.frontend.?.stop();
-    self.worker.cancel();
+    self.stopApp();
     app.deinit();
     return self.finishApp(ended);
+}
+
+/// Stops the open Session's workers and the overview's before App releases
+/// the terminal. A Session that failed to open has no frontend to stop.
+fn stopApp(self: *Self) void {
+    if (self.app_session) |left| if (left.frontend) |frontend| frontend.stop();
+    self.worker.cancel();
 }
 
 fn initScreen(self: *Self, screen: *SessionScreen) !void {
@@ -887,6 +893,9 @@ fn event(self: *Self, value: view.Event) !?Next {
 fn sendStatuses(self: *Self) void {
     if (self.state.left) return;
     const out = self.attention;
+    // Nothing to report or clear: every event ends here, so a keystroke
+    // never reads the preferences file.
+    if (self.state.statusesSettled() and !out.statuses_shown) return;
     if (!(preferences.load(self.options.home) catch preferences.Values{}).notifications) {
         out.clear() catch return;
         self.state.statusesCleared();
@@ -2987,6 +2996,8 @@ test "a conversation that fails to open still names the unconfirmed start on dep
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(?Ending, .overview), try rig.press("\x1b[H\r"));
     try std.testing.expect(rig.overview.app_session.?.frontend == null);
+    // App's exit path stops what opened; nothing did.
+    rig.overview.stopApp();
     var buffer: [1024]u8 = undefined;
     const written = try finishedWith(rig, {}, error.AccessDenied, &buffer);
     try std.testing.expectEqualStrings("rui: Not sure the new Session started. Check with: rui request recover lost-handle\n" ++

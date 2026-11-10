@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 
+import build_files
 from caller_errors import (
     CATALOG, ROOT, allowance_growth, check, error_sites, inventory_path, lex, mapped_names,
     needs_bootstrap, pending_names, production, read_sources, standard_names, toolchain_version,
@@ -173,7 +174,7 @@ fn live() anyerror!void { return error.NewCallerError; }
 
     def test_gate_is_explicitly_wired_before_development_builds(self):
         import prepush
-        available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', (ROOT / "build.zig").read_text()))
+        available = set(build_files.steps())
         commands = list(prepush.checks(["src/cli_args.zig"], available, "HEAD"))
         names = [name for name, _ in commands]
         self.assertLess(names.index("caller errors"), names.index("development selection"))

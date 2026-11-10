@@ -13,6 +13,9 @@ size: vxfw.Size = .{},
 method: vaxis.gwidth.Method = .unicode,
 colour: bool = true,
 style: vaxis.Style = .{},
+/// The key that scrolls this view. When set and the text runs past the
+/// view, the last row says how many rows lie below and names the key.
+more: ?[]const u8 = null,
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = draw };
@@ -22,7 +25,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     const surface = try vxfw.Surface.init(ctx.arena, self.widget(), ctx.max.size());
     self.size = surface.size;
-    self.first = self.document.first(.{ .width = @max(1, self.size.width), .method = self.method }, self.size.height);
+    const layout: viewport.Layout = .{ .width = @max(1, self.size.width), .method = self.method };
+    self.first = self.document.first(layout, self.size.height);
     @memset(surface.buffer, .{ .style = self.style });
     var screen: vaxis.Screen = .{
         .width = surface.size.width,
@@ -39,7 +43,19 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .height = screen.height,
         .screen = &screen,
     };
-    self.next = self.document.draw(window, self.first, true, self.colour, self.style).next;
+    const below = if (self.more == null or self.size.height < 2) 0 else self.document.measure(layout, self.first, std.math.maxInt(u16)).rows;
+    if (below <= self.size.height) {
+        self.next = self.document.draw(window, self.first, true, self.colour, self.style).next;
+        return surface;
+    }
+    var text = window;
+    text.height -= 1;
+    const drawn = self.document.draw(text, self.first, true, self.colour, self.style);
+    self.next = drawn.next;
+    var dim = self.style;
+    dim.dim = true;
+    const hint = try std.fmt.allocPrint(ctx.arena, "{d} more lines · {s}", .{ below - drawn.rows, self.more.? });
+    _ = window.child(.{ .y_off = text.height, .height = 1 }).print(&.{.{ .text = hint, .style = dim }}, .{ .wrap = .none });
     return surface;
 }
 

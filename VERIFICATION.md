@@ -46,7 +46,8 @@ A capture made with no `reply` is a silent terminal, for a fixture that answers 
 | Build or dependency | Linux `check-full`, `typecheck-macos` and mapped checks before merge; macOS `check-full` in promotion; manual empty-cache acceptance |
 | Resource owner | Comparable measurements and lifecycle evidence on applicable runners |
 
-The executable minimum is [select_tests.py](tests/ci/select_tests.py), using targets from [build.zig](build.zig).
+The executable minimum is [select_tests.py](tests/ci/select_tests.py), using targets from [build.zig](build.zig) and its modules under `build/`.
+An edit to `build.zig`, `build.zig.zon` or a hub module (`build/product.zig`, the Rui every target builds, and `build/ci.zig`, the CI artifact handoff) selects the full build gate; an edit to another module under `build/` selects only the targets its `BUILD_MODULES` entry names, which include every target it defines.
 CI runs `python3 tests/ci/select_tests.py --base origin/main --phase review` on the pushed head.
 Run it locally only to diagnose a CI red; [Evidence](CODING_STANDARDS.md#evidence) lists the pre-push checks.
 The selector reads the import graph of the tree it runs on: Zig `@import` and `@embedFile`, and the Python imports and `src/` reads of `tests/integration`.
@@ -83,7 +84,7 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 | Standalone Current, reply-delivery and login-signal oracles | Owning integration target; login signal on Linux only | Neither composed gate runs them. Changes to their helpers keep these targets |
 | Canonical-failure oracle | `canonical-failure-integration` on both systems | Skip it when a composed gate is selected; the human CLI fixture runs all cases |
 | Build, dependencies or bootstrap | `check-full`, full Debug admission, long timeout and churn witnesses, relevant H2 and standalone targets, manual empty-cache evidence | Transport build, dependency pins and bootstrap select both H2 targets |
-| Main admission, every ready PR | Successful plan and Linux aggregate on the immutable merge candidate: compile and format, `typecheck-macos`, `stack-frames` and the selected unit roots and integration targets. Normal changes also require policy. Native Mac runs only for [Mac paths](tests/ci/platform_boundary.py), the code Linux never executes as a Mac does; build plumbing is not one. The [upgrade check](.github/workflows/previous-release-upgrade.yml) runs on hosted Linux only for upgrade, installer and Store-format paths | The conservative documentation lane requires explicit empty product selections and skipped policy, native, upgrade and cache jobs. Admission requires the exact Mac and upgrade results the plan selected: success when selected, skipped otherwise. Required admission runs before main |
+| Main admission, every ready PR | Successful plan and Linux aggregate on the immutable merge candidate: compile and format, `typecheck-macos` for compile inputs, `stack-frames` and the selected unit roots and integration targets. Normal changes also require policy. Native Mac runs only for [Mac paths](tests/ci/platform_boundary.py), the code Linux never executes as a Mac does; build plumbing is not one. The [upgrade check](.github/workflows/previous-release-upgrade.yml) runs on hosted Linux only for upgrade, installer and Store-format paths | The conservative documentation lane requires explicit empty product selections and skipped policy, native, upgrade and cache jobs. Admission requires the exact Mac and upgrade results the plan selected: success when selected, skipped otherwise. Required admission runs before main |
 | Promotion, manual | [Promote](.github/workflows/promote.yml) on main HEAD: Linux and macOS `check-full`, `test-logic` and `admission-debug-integration` with the batch's selected targets, `stack-frames`, the upgrade check on both systems, [renderer contracts](#renderer-contracts), then cold release builds | A failing job bisects each failed step over the batch since `stable` and files one `promotion-red` issue per cause. Only a fully green promotion publishes a release and advances `stable` |
 | Host stack frames (Zig the Host compiles: `server.zig` and the `host_modules` closure; other `src/` inputs, `build.zig`, `tests/ci/stack_frames.*`) | `stack-frames` on x86-64 Linux; `check` runs it, `check-full` does not | [stack_frames.py](tests/ci/stack_frames.py) reads the ReleaseSafe binary's prologues and direct calls. It fails on a frame over 8 KiB reachable from a Host thread or a function of a module in `host_modules` unless an exception in [stack_frames.json](tests/ci/stack_frames.json) names its cause, and on a thread whose deepest chain passes its `chain_ceiling`. Exceptions and ceilings only shrink. Calls through function pointers outside `host_modules` are not followed, and no other platform is measured |
 | Caller error coverage (`cli.zig`, `cli_args.zig`, `client.zig`, `preferences.zig` and root `caller_*.zig` under `src/`) | `python3 tests/ci/caller_errors.py`, the prepush driver and CI policy | Caller-facing CLI modules cannot use raw `@errorName`; every literal production error reference or declaration in that inventory needs a catalog mapping or an existing pending entry. The trusted `origin/main` pending set only shrinks; first rollout bootstraps from the same trusted CLI-owned sources and the exact pinned Zig standard library. Closed inferred sets also fail compilation through `caller_error.of`; unmapped errors widened from other owners remain `internal_unexpected`, exit 1 (unclassified), without extending the CLI inventory. |
@@ -116,11 +117,12 @@ Two PRs that pass alone but break together are caught by promotion, which qualif
 A changed head requires current candidate checks before merge.
 
 [Selected checks](.github/workflows/check.yml) qualify each ready PR's immutable merge candidate.
-For normal changes, Linux runs the affected targets from [select_tests.py](tests/ci/select_tests.py), `typecheck-macos` and, when selected, the `stack-frames` oracle.
+For normal changes, Linux runs the affected targets from [select_tests.py](tests/ci/select_tests.py), `typecheck-macos` when the change touches what it compiles (Zig, C, the build, patches and embedded files), and, when selected, the `stack-frames` oracle.
 Native macOS runs the affected targets, or `check`, only when the change touches a [Mac path](tests/ci/platform_boundary.py): Darwin branches, C and shell sources, the PTY launcher, the HTTP/2 client, release and install scripts, and the Mac workflow.
 Darwin-only linking and settings live in `build/darwin.zig`, a Mac path.
 Other build plumbing (`build.zig`, `build.zig.zon`, the setup action, `tests/ci/qualification.py`) is not a Mac path: Linux runs it, `typecheck-macos` compiles Rui for Darwin, and promotion links and runs it on a Mac.
-The [previous installed-release upgrade](.github/workflows/previous-release-upgrade.yml) runs on Linux against that same candidate only for upgrade, installer and Store-format paths and the check itself; promotion runs it on both systems.
+The [previous installed-release upgrade](.github/workflows/previous-release-upgrade.yml) runs on Linux against that same candidate only for upgrade, installer and migration paths, the check itself, and a `schema.zig` edit that changes the Store format: its `schema_version`, a `bootstrap_digests` row or a migration step.
+Promotion runs it on both systems.
 Renderer contracts run nonblocking only for renderer and frontend owners.
 The documentation lane skips heavyweight policy, product builds and suites, and prior-release upgrades.
 It requires a successful plan with canonical empty product outputs and a successful Linux aggregate that verifies all product producers were skipped.
@@ -192,8 +194,9 @@ Artificial shared setup or pair deadlines and prelaunch fit reserves are not rou
 
 ### Renderer contracts
 
-[Renderer contracts](.github/workflows/renderer-contracts.yml) run nonblocking build targets on pull requests that touch renderer, frontend, terminal or `src/os` owners, `build.zig` or the harnesses, and on manual dispatch: `renderer-contracts-selftest`, the synthetic `direct-pty` key matrix and Ghostty vectors, `direct-pty-controls`, `input-equivalence` and `sequence-model`.
+[Renderer contracts](.github/workflows/renderer-contracts.yml) run nonblocking build targets on pull requests that touch renderer, frontend or terminal owners, `build.zig` or the harnesses, and on manual dispatch: `renderer-contracts-selftest`, the synthetic `direct-pty` key matrix and Ghostty vectors, `direct-pty-controls`, `input-equivalence` and `sequence-model`.
 No gate root imports their sources, and neither Selected checks nor merging requires them; a red result is a defect to fix, not a waiver.
+`src/os` holds no PTY or terminal code, so its edits run the Selected fixtures that reach them, not these contracts.
 Every promotion requires them, and a failing contract bisects the batch.
 Manual dispatch adds the [renderer mutation runner](tests/ci/renderer_mutation.py) for `test`, `test-logic` and `sequence-model`.
 PR failures remain visible in workflow results; there is no scheduled campaign, and only a promotion files issues.
@@ -226,6 +229,7 @@ The release publisher is serialized and never treats cancelled acceptance as a p
 Build caches hold compilation inputs and outputs, not acceptance.
 All Zig unit Run steps bypass Zig acceptance caching, and Go tests use `-count=1`.
 Cache-policy changes run [the fixed-seed execution regression](tests/ci/cache_execution.py) on Linux before main, and on macOS in promotion when the batch changed cache policy.
+Cache policy is the proof and the prune script themselves, and changed non-comment lines that name a Zig build cache or `has_side_effects` in the build, the workflows and the setup action, whose caches are all build caches; any change to the `cache_execution` job counts too.
 The required `admission` aggregate includes this job when selected.
 Build-cache keys separate native tools, Apple SDK, architecture, dependency pins, scripts, source inputs and shard.
 Only `main` saves caches; PR jobs restore main's snapshots and save none, so PR caches never feed a privileged workflow or evict main's.

@@ -149,11 +149,12 @@ pub const Engine = union(Kind) {
         };
     }
 
-    /// A sink on the payload of `content_id`, whose row holds `length` bytes.
-    pub inline fn openSink(e: *Engine, content_id: u64, length: u64) Failure!ContentSink {
+    /// A sink on the payload of `content_id`, whose row holds `length`
+    /// bytes. On MySQL its chunks ride `host`'s batches.
+    pub inline fn openSink(e: *Engine, content_id: u64, length: u64, host: Mysql.ContentHost) Failure!ContentSink {
         return switch (e.*) {
             .sqlite => |*s| .{ .sqlite = try s.openSink(content_id, length) },
-            .mysql => |*s| .{ .mysql = try s.openSink(content_id, length) },
+            .mysql => |*s| .{ .mysql = try s.openSink(content_id, length, host) },
         };
     }
 
