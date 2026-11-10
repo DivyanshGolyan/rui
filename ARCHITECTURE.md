@@ -1472,7 +1472,8 @@ MySQL schema application and backup remain operator-owned.
 `/upgrade` runs inline on the status bar, with no page, without sending `/upgrade` to the model or adding an updater service.
 It checks (`Checking for updates…`), then installs a found release at once, with no Enter step even while Sessions work, and its first line says what the restart will do: `Upgrading to 0.60.0 · restarts the Host (2 Sessions working) · esc cancels`.
 Esc cancels while it prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting the Host…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
-A release the running client cannot use leaves `Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave` on the status bar until another `/upgrade`; longer text, such as PATH warnings, prints with the departure message.
+A release the running client cannot use leaves `Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave` on the status bar until another `/upgrade`; longer text, such as PATH warnings, the full check and retained cleanup paths, prints with the departure message.
+The check is read-only and Esc leaves it running; leaving rui cancels it, as it cancels an install still preparing.
 One pure core, `upgrade_status`, holds the run's steps and lines for both screens.
 Divyansh chose this on 2026-11-09 (TUI rework plan, "/upgrade without a page"), replacing the `UpgradePanel` page and its Install step.
 It retains the draft, selected Session and unresolved capture handles through handoff and never replays indeterminate effects.

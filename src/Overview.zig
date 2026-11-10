@@ -31,7 +31,7 @@ const test_poll = @import("test_poll");
 const app_events = @import("testing/app_events.zig");
 const view = @import("overview_view.zig");
 const ClientTask = @import("ClientTask.zig");
-const UpgradePanel = @import("UpgradePanel.zig");
+const UpgradeJob = @import("UpgradeJob.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const session_reads = @import("session_reads.zig");
 const SessionInput = @import("SessionInput.zig");
@@ -329,6 +329,11 @@ done: [2]c_int = .{ -1, -1 },
 
 worker: ClientTask = .{},
 upgrade_requested: bool = false,
+/// The /upgrade run, its news so far, and the receipts runs left, which
+/// print on exit.
+upgrade_job: UpgradeJob = .{},
+upgrade_heard: UpgradeJob.Heard = .{},
+upgrade_report: ?std.Io.Writer.Allocating = null,
 jobs: [max_jobs]Job = undefined,
 job_count: usize = 0,
 /// The job the worker runs or last ran, and its output.
@@ -438,14 +443,16 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     ctx.redraw = true;
                 }
                 const now = self.realMs();
-                if (self.state.wakeAt()) |at| if (now >= at) {
-                    try self.appNext(ctx, try self.event(.{ .tick = now }));
-                    ctx.redraw = true;
-                };
+                // An Upgrade holds Host work until it ends.
+                if (self.upgrade_requested) try self.appUpgrade(ctx) else {
+                    if (self.state.wakeAt()) |at| if (now >= at) {
+                        try self.appNext(ctx, try self.event(.{ .tick = now }));
+                        ctx.redraw = true;
+                    };
+                    try self.dispatch(.all);
+                }
                 if (self.wantsFrame()) ctx.redraw = true;
-                try self.dispatch(.all);
             }
-            if (self.upgrade_requested) try self.appUpgrade(ctx);
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
             const selected = TerminalEditor.selectEvent(view.keys, input, self.root.pasting);
@@ -552,13 +559,37 @@ fn appCopy(raw: *anyopaque, file: std.Io.File, start: u64, length: u64) !void {
     try app.vx.copyToSystemClipboard(app.tty.writer(), bytes, self.init.gpa);
 }
 
+/// Runs /upgrade inline: once the overview's own Host work has settled,
+/// the check and install run on their worker, and the core hears each step.
 fn appUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
+    if (!self.upgrade_job.started) {
+        if (!try self.quiesceUpgrade()) return;
+        self.upgrade_heard = .{};
+        // A failed start finishes the run, which the core hears below.
+        self.upgrade_job.begin(self.init, self.options.store) catch {};
+    }
+    const done = try self.upgrade_job.advance();
+    while (self.upgrade_job.news(&self.upgrade_heard, self.state.summary.counts.working)) |step| {
+        try self.appNext(ctx, try self.event(.{ .upgrade = step }));
+        ctx.redraw = true;
+    }
+    if (!done) return;
+    try self.keepUpgrade();
     self.upgrade_requested = false;
-    self.state.upgrade_pending = false;
-    const text = "Run rui upgrade in the shell";
-    self.state.notice = .{ .colour = .quiet, .len = text.len };
-    @memcpy(self.state.notice.?.bytes[0..text.len], text);
-    ctx.redraw = true;
+}
+
+/// Keeps a finished run's receipt for exit, the full report when it
+/// failed, retained cleanup or left an unusable Host, and frees the run.
+fn keepUpgrade(self: *Self) !void {
+    const job = &self.upgrade_job;
+    if (!job.started) return;
+    const detailed = job.failure != null or job.cleanup.any() or job.outcome == .incompatible;
+    if (detailed or job.result != null) {
+        if (self.upgrade_report == null) self.upgrade_report = .init(self.init.gpa);
+        const writer = &self.upgrade_report.?.writer;
+        if (detailed) try job.writeReport(writer) else try job.writeReceipt(writer);
+    }
+    job.deinit();
 }
 
 fn disposeSession(self: *Self, left: Left) void {
@@ -574,6 +605,11 @@ fn finishApp(self: *Self, ended: anyerror!void) !void {
         for (self.retired.items) |retired| self.disposeSession(retired.left);
         self.retired.deinit(self.init.gpa);
     }
+    // A run still going is cancelled and joined; what it published and
+    // the full check print with the departure.
+    self.upgrade_job.settle();
+    const kept = self.keepUpgrade();
+    if (self.upgrade_report) |*report| _ = stderr.write(report.written());
     self.worker.cancel();
     const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
     const saved = self.flushSaves();
@@ -590,12 +626,16 @@ fn finishApp(self: *Self, ended: anyerror!void) !void {
         saved catch |err| {
             left.ended = err;
         };
+        kept catch |err| {
+            left.ended = err;
+        };
         return self.leave(left, {});
     }
     TerminalApp.detached(self.options.store, null, null);
     try ended;
     _ = try answered;
     try saved;
+    try kept;
 }
 
 /// The list's row `index` this frame: a panel's line, or the Sessions
@@ -767,6 +807,8 @@ fn closePipes(self: *Self) void {
 
 fn destroy(self: *Self) void {
     std.debug.assert(self.worker.thread == null);
+    self.upgrade_job.deinit();
+    if (self.upgrade_report) |*report| report.deinit();
     self.job.deinit(self.init.gpa);
     for (self.jobs[0..self.job_count]) |job| job.deinit(self.init.gpa);
     if (self.scratch) |file| file.close(self.init.io);
@@ -805,9 +847,7 @@ fn event(self: *Self, value: view.Event) !?Next {
         .read_commands => |reads| self.queue(.{ .commands = reads }),
         .start => |request| self.queue(.{ .start = try request.own(self.init.gpa) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
-        // The Upgrade panel runs its own loop and takes Esc itself, so the
-        // core never offers a cancel here; the App shell runs it inline.
-        .cancel_upgrade => {},
+        .cancel_upgrade => self.upgrade_job.cancel(),
         .upgrade => {
             self.upgrade_requested = true;
             self.state.upgrade_pending = true;
