@@ -124,6 +124,9 @@ FIXTURES = {
                                          ("src/SessionFrontend.zig", "src/SessionTerminal.zig", "src/TerminalEditor.zig")),
     "canonical-failure-integration": ((I + "canonical_failure_integration.py",), (),
                                       (CALLER, "src/SessionFrontend.zig", "src/failure_class.zig", "src/model_adapter.zig")),
+    "model-picker-integration": ((I + "model_picker_integration.py", I + "model_picker_signin_integration.py",
+                                  I + "model_picker_failure_integration.py"), (),
+                                 ("src/Overview.zig", "src/SessionFrontend.zig", "src/model_picker_view.zig")),
     "human-cli-integration": ((I + "human_cli_integration.py",), ("src/terminal_notice_test.zig",),
                               (CALLER, "src/SessionFrontend.zig", "src/Overview.zig", "src/request_wait.zig",
                                "src/cli_args.zig", "src/slash_commands.zig")),
@@ -519,6 +522,15 @@ BUILD_MODULES = {
     # The PTY screen observer: what check-full and these fixtures load to read
     # the terminal. Its renderer harnesses are nonblocking (renderer-contracts.yml).
     "build/screen.zig": ("check-full", "skills-integration", "upgrade-integration"),
+    # The unit roots, their runners and filters, the deadline witness and the
+    # portable logic root. check and check-full run the same unit binaries,
+    # and test runs them alone.
+    "build/unit.zig": ("test", "test-full", "test-logic"),
+    # The Go measurement packages and the macOS measure-* campaigns, which no PR runs.
+    "build/measurement.zig": ("measurement-check",),
+    # Cross-compiles and the Darwin type-check. The typecheck-macos job runs it
+    # on every Zig edit (TYPECHECK_INPUTS); promotion builds every cross target.
+    "build/cross.zig": (),
     # Darwin linking, the screen library's name and the Mac unit-root limits.
     # The unit roots and one screen fixture link and load what it names; it is
     # a Mac path, so ready PRs run these on Mac too.
@@ -541,7 +553,7 @@ CHECK_COVERS = {
     "descriptor-capacity-integration", "request-wait-integration",
     "activity-integration", "preference-policy-integration", "session-list-integration",
     "peer-integration", "sender-identity-integration", "conversation-page-integration",
-    "host-allocator-integration", "host-process-test", "human-cli-integration",
+    "host-allocator-integration", "host-process-test", "human-cli-integration", "model-picker-integration",
     "canonical-failure-integration",  # human_cli_integration.main executes all cases.
     "terminal-restoration-integration",  # Same full fixture in the human CLI gate.
 }
@@ -574,7 +586,7 @@ POLICY_SELF_CHECKS = (
 # test-only package in screen-emulator: setup fetches its packages for these only.
 # A step missing here still builds, fetching them on demand.
 SCREEN_TARGETS = frozenset({"check", "check-full", "terminal-restoration-integration", "canonical-failure-integration",
-                            "host-launch-integration", "upgrade-integration", "human-cli-integration",
+                            "host-launch-integration", "upgrade-integration", "human-cli-integration", "model-picker-integration",
                             "skills-integration", "bash-recovery-integration", "renderer-contracts-selftest",
                             "direct-pty", "direct-pty-controls", "input-equivalence", "screen-emulator"})
 
