@@ -99,8 +99,24 @@ class TerminalProcessTest(unittest.TestCase):
                         lambda: human.draining(master, lambda: len(received), received.extend)()):
             received.clear()
             with patch("terminal_process.select.select", return_value=([master], [], [])), \
-                 patch("terminal_process.os.read", side_effect=[b"x"] * 10 + [b""]):
-                self.assertEqual(observe(), 1)
+                 patch("terminal_process.os.read", side_effect=[b"x"] * 32 + [b""]):
+                self.assertEqual(observe(), 16)
+
+    def test_short_terminal_reads_make_progress_between_observations(self):
+        master, slave = open_pty()
+        received = bytearray()
+        register_capture(master, type("Capture", (), {"feed": received.extend})())
+        observations = []
+
+        def observe():
+            observations.append(len(received))
+            return len(received) >= 65536
+
+        # Darwin can return small chunks even with a much larger read buffer.
+        with patch("terminal_process.select.select", return_value=([master], [], [])), \
+             patch("terminal_process.os.read", return_value=b"x" * 128):
+            wait_for(observe, "short terminal reads", interval=0)
+        self.assertLessEqual(len(observations), 32)
 
     def test_reused_pipe_is_not_drained(self):
         master, slave = open_pty()

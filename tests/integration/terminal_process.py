@@ -49,12 +49,15 @@ def register_capture(master, capture):
 
 
 def drain_ready(master, feed):
-    """Feed at most one ready chunk, then yield to the waiting observer."""
+    """Feed a bounded batch, then yield to the waiting observer."""
     try:
-        if select.select([master], [], [], 0)[0]:
+        for _ in range(16):
+            if not select.select([master], [], [], 0)[0]:
+                break
             chunk = os.read(master, 65536)
-            if chunk:
-                feed(chunk)
+            if not chunk:
+                break
+            feed(chunk)
     except OSError as error:
         if error.errno != errno.EIO:
             raise
