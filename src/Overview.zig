@@ -638,8 +638,10 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const size = ctx.max.size();
     _ = try view.step(&self.state, .{ .resized = .{ .width = size.width, .height = size.height } });
     self.caps.width = self.attention.vx.caps.unicode;
+    self.caps.devanagari = std.mem.eql(u8, @import("theme.zig").wordmark(self.caps.unicode, self.attention.vx.terminalVersion(), self.init.environ_map.get("TERM_PROGRAM")), "रुई rui");
     const normal = @import("widget_style.zig").of(self.caps, .{});
     const quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
+    self.app_screen.style = normal;
     self.app_input.composer.style = normal;
     self.app_input.composer.quiet = quiet;
     self.app_input.composer.method = self.caps.width;
@@ -1718,6 +1720,44 @@ const Rig = struct {
         return error.TestUnexpectedResult;
     }
 };
+
+test "App overview paints its ground and both selvedge rows" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    for ([_]struct { caps: view.Caps, ground: vaxis.Color, band: vaxis.Color }{
+        .{ .caps = .{}, .ground = .{ .rgb = .{ 0x12, 0x19, 0x33 } }, .band = .{ .rgb = .{ 0x1a, 0x22, 0x46 } } },
+        .{ .caps = .{ .background = .{ 255, 255, 255 } }, .ground = .{ .rgb = .{ 0xf3, 0xee, 0xe2 } }, .band = .{ .rgb = .{ 0xe6, 0xdd, 0xc8 } } },
+        .{ .caps = .{ .depth = .indexed }, .ground = .{ .index = 234 }, .band = .{ .index = 236 } },
+        .{ .caps = .{ .depth = .none }, .ground = .default, .band = .default },
+    }) |case| {
+        rig.overview.caps = case.caps;
+        var shown = try rig.shown(80, 24);
+        defer shown.deinit();
+        try std.testing.expectEqual(case.band, shown.screen.readCell(79, 0).?.style.bg);
+        try std.testing.expectEqual(case.ground, shown.screen.readCell(79, 10).?.style.bg);
+        try std.testing.expectEqual(case.band, shown.screen.readCell(79, 22).?.style.bg);
+        try std.testing.expectEqual(case.ground, shown.screen.readCell(79, 23).?.style.bg);
+    }
+}
+
+test "App overview wordmark follows the reported terminal identity" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    rig.overview.caps = .{};
+    var unknown = try rig.shown(80, 24);
+    defer unknown.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try unknown.text(), "रुई") == null);
+    rig.screen.vx.setTerminalVersion("kitty(0.35)");
+    var kitty = try rig.shown(80, 24);
+    defer kitty.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try kitty.text(), "रुई") != null);
+    rig.screen.vx.setTerminalVersion("unknown 1");
+    var other = try rig.shown(80, 24);
+    defer other.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try other.text(), "रुई") == null);
+}
 
 test "each effect runs its client operation and each result reaches the core" {
     var cancellation: client.Cancellation = .{};

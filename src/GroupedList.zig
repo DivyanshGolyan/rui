@@ -235,12 +235,12 @@ test "GroupedList selection preserves each segment foreground" {
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 12, .height = 2 }, .cell_size = .{} };
     const surface = try list.widget().draw(ctx);
     const cells = surface.children[0].surface;
-    try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0xff, 0x8f, 0x7d } }, cells.readCell(0, 0).style.fg);
+    try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0xf0, 0x8b, 0x74 } }, cells.readCell(0, 0).style.fg);
     try std.testing.expect(cells.readCell(0, 0).style.bold);
     try std.testing.expect(!cells.readCell(2, 0).style.bold);
     try std.testing.expect(!std.meta.eql(cells.readCell(0, 0).style.fg, cells.readCell(2, 0).style.fg));
     for ([_]u16{ 0, 2, 11 }) |column| {
-        try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0x2b, 0x35, 0x68 } }, cells.readCell(column, 0).style.bg);
+        try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0x2a, 0x34, 0x67 } }, cells.readCell(column, 0).style.bg);
     }
     list.caps.depth = .none;
     const plain = try list.widget().draw(ctx);
