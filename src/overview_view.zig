@@ -408,6 +408,8 @@ pub const Event = union(enum) {
     observed: Observed,
     /// The command `step` asked the shell to run ended.
     ran: Ran,
+    /// A pointer press on the Sessions list's line `listItem` names.
+    clicked: usize,
     /// Esc left a conversation whose original is unconfirmed. The shell
     /// sends it only while `canHoldSend` says the ledger has room.
     unconfirmed: Unconfirmed,
@@ -1622,6 +1624,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             },
         },
         .first_line => |result| try firstLine(state, result),
+        .clicked => |line| try click(state, line, &effects),
         .unconfirmed => |left| {
             std.debug.assert(canHoldSend(state));
             state.requests[state.request_count] = .{ .kind = .send, .session = left.reference, .status = .unknown, .sent = left.recovery };
@@ -2400,6 +2403,22 @@ fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *co
 }
 
 /// Moves the selection where the Sessions show.
+/// A click selects its row; on the selected row it opens it, as Enter on
+/// a blank draft does. A folded group's "more" line opens the group at its
+/// first hidden row, as moving into them does.
+fn click(state: *State, line: usize, effects: *Effects) error{OutOfMemory}!void {
+    const at = switch (listItem(state, line) orelse return) {
+        .gap, .heading => return,
+        .row => |at| at,
+        .more => |more| state.runs.get(more.group).start + fold_rows,
+    };
+    const ref = state.rows.items[state.order.items[at]].reference;
+    if (state.selected) |selected| if (std.mem.eql(u8, &selected, &ref)) return enter(state, "", effects);
+    state.closePanel();
+    state.unfolded.insert(state.rows.items[state.order.items[at]].group());
+    state.selected = ref;
+}
+
 fn select(state: *State, action: Action) void {
     state.closePanel();
     move(state, action);
@@ -3998,12 +4017,22 @@ fn list(painter: *Painter, state: *const State, lines: [][]const Span) error{Out
             .gap => &.{},
             .heading => |group| try heading(painter, group, state.runs.get(group).len),
             .row => |at| try rowLine(painter, state, at, columns, .painted),
-            .more => |more| try moreLine(painter, more),
+            .more => |more| try moreLine(painter, more.hidden),
         };
     }
 }
 
-const Item = union(enum) { gap, heading: Group, row: usize, more: usize };
+/// A line of the Sessions list: the gap before a group, its heading, the
+/// row at an index of `order`, or the line that counts a folded group's
+/// hidden rows.
+pub const Item = union(enum) { gap, heading: Group, row: usize, more: More };
+pub const More = struct { group: Group, hidden: usize };
+
+/// The Sessions list's line `line`, counted from its first, or null past
+/// its end. The list draws these lines, and a click names one.
+pub fn listItem(state: *const State, line: usize) ?Item {
+    return ListLines.of(state).item(state, line);
+}
 
 /// The panel in the Sessions' rows: its heading, with the way back at the
 /// right, then its lines. When more lines come than rows, the last row
@@ -4068,7 +4097,7 @@ const ListLines = struct {
             const shown = self.shown.get(group);
             if (line == first) return .{ .heading = group };
             if (line <= first + shown) return .{ .row = run.start + (line - first - 1) };
-            if (shown < run.len and line == first + shown + 1) return .{ .more = run.len - shown };
+            if (shown < run.len and line == first + shown + 1) return .{ .more = .{ .group = group, .hidden = run.len - shown } };
             previous_end = first + 1 + shown + @intFromBool(shown < run.len);
         }
         return null;
@@ -6147,6 +6176,62 @@ test "moving into a folded group's hidden rows opens it" {
     try std.testing.expect(!folded(&state, .finished));
     _ = try press(&state, .{}, .first);
     try expectSelected(&state, "k7m2qx");
+}
+
+/// The list line `listItem` names the row `ref` on, as a click finds it.
+fn lineOfRow(state: *const State, ref: *const [6]u8) !usize {
+    var line: usize = 0;
+    while (listItem(state, line)) |item| : (line += 1) switch (item) {
+        .row => |at| if (std.mem.eql(u8, ref, &state.rows.items[state.order.items[at]].reference)) return line,
+        else => {},
+    };
+    return error.TestUnexpectedResult;
+}
+
+test "a click selects its row, and a click on the selected row opens it" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const line = try lineOfRow(&state, "b2c3d4");
+    try expectEffects(&.{}, try step(&state, .{ .clicked = line }));
+    try expectSelected(&state, "b2c3d4");
+    try expectEffects(&.{.{ .open = "b2c3d4".* }}, try step(&state, .{ .clicked = line }));
+    // While Host requests wait on an Upgrade, the click selects but does
+    // not open, as Enter would not.
+    state.upgrade_pending = true;
+    const other = try lineOfRow(&state, "g7h8j9");
+    _ = try step(&state, .{ .clicked = other });
+    try expectEffects(&.{}, try step(&state, .{ .clicked = other }));
+    try expectSelected(&state, "g7h8j9");
+}
+
+test "a click on a folded group's more line opens it at its first hidden row" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    try std.testing.expect(folded(&state, .finished));
+    var line: usize = 0;
+    const more = while (listItem(&state, line)) |item| : (line += 1) {
+        if (item == .more) break item.more;
+    } else return error.TestUnexpectedResult;
+    // Seven finished rows show five, then "2 more".
+    try std.testing.expectEqual(More{ .group = .finished, .hidden = 2 }, more);
+    try expectEffects(&.{}, try step(&state, .{ .clicked = line }));
+    try std.testing.expect(!folded(&state, .finished));
+    try expectSelected(&state, "v8w9x0");
+}
+
+test "a click on a heading, a gap or past the list changes nothing" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    _ = try press(&state, .{}, .first);
+    try std.testing.expectEqual(Item{ .heading = .needs_you }, listItem(&state, 0).?);
+    var line: usize = 0;
+    while (listItem(&state, line)) |item| : (line += 1) if (item == .gap) break;
+    try std.testing.expectEqual(Item.gap, listItem(&state, line).?);
+    const selected = state.selected.?;
+    for ([_]usize{ 0, line, line + 1000 }) |clicked| {
+        try expectEffects(&.{}, try step(&state, .{ .clicked = clicked }));
+        try expectSelected(&state, &selected);
+    }
 }
 
 /// Each row once in `rows`, `by_reference` and `order`.
