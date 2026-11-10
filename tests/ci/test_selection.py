@@ -1295,13 +1295,52 @@ fi
                                AVAILABLE)["typecheck_macos"])
 
     def test_cache_proof_tracks_cache_policy_not_every_runtime_edit(self):
-        for path in ("build.zig", ".github/actions/setup/action.yml", "tests/ci/cache_execution.py",
-                     ".github/workflows/cache-maintenance.yml", ".github/workflows/qualify-macos.yml",
-                     ".github/scripts/prune-caches.cjs"):
-            self.assertTrue(select([path], "review", AVAILABLE)["cache_execution_checks"])
-        self.assertEqual([path for path in CACHE_POLICY if not Path(path).is_file()], [])
-        for path in ("src/store.zig", ".github/main-ruleset.json", ".github/workflows/renderer-contracts.yml"):
-            self.assertFalse(select([path], "review", AVAILABLE)["cache_execution_checks"])
+        def cache(path, before=None, after=None):
+            contents = {} if after is None else {path: (before, after)}
+            return select([path], "review", AVAILABLE, contents=contents)["cache_execution_checks"]
+
+        for path in CACHE_POLICY:
+            self.assertTrue(Path(path).is_file(), path)
+            self.assertTrue(cache(path), path)
+        # Without both revisions, a build or workflow file counts as cache policy.
+        for path in ("build.zig", "build/darwin.zig", ".github/actions/setup/action.yml",
+                     ".github/workflows/cache-maintenance.yml", ".github/workflows/qualify-macos.yml"):
+            self.assertTrue(cache(path), path)
+        for path in ("src/store.zig", ".github/main-ruleset.json", "tests/ci/select_tests.py"):
+            self.assertFalse(cache(path), path)
+
+        build = "    const run = b.addRunArtifact(tests);\n    run.has_side_effects = true;\n"
+        self.assertFalse(cache("build.zig", build, build + "    // A build comment.\n    const other = b.step(\"x\", \"y\");\n"))
+        self.assertTrue(cache("build.zig", build, build.replace("    run.has_side_effects = true;\n", "")))
+        action = Path(".github/actions/setup/action.yml").read_text()
+        self.assertFalse(cache(".github/actions/setup/action.yml", action,
+                               action.replace("name: Select fixture dependencies", "name: Select the fixture dependencies")))
+        self.assertTrue(cache(".github/actions/setup/action.yml", action, action.replace("~/.cache/zig", "~/.cache/zig2", 1)))
+        check = Path(".github/workflows/check.yml").read_text()
+        policy_step = "Reject undefined fixture names before native builds"
+        self.assertFalse(cache(".github/workflows/check.yml", check, check.replace(policy_step, policy_step + " here")))
+        job = re.search(r"(?ms)^  cache_execution:\n.*?timeout-minutes: (\d+)", check)
+        edited = check[:job.start(1)] + "21" + check[job.end(1):]
+        self.assertNotEqual(edited, check)
+        self.assertTrue(cache(".github/workflows/check.yml", check, edited))
+        # Comments, another tool's cache and a new build module without cache lines are not cache policy.
+        comment = re.search(r"(?m)^  cache_execution:\n(    #.*\n)", check)[1]
+        self.assertFalse(cache(".github/workflows/check.yml", check, check.replace(comment, comment.replace("#", "# Note:"), 1)))
+        actionlint = "key: rui-actionlint-1.7.7-linux-amd64"
+        self.assertIn(actionlint, check)
+        self.assertFalse(cache(".github/workflows/check.yml", check, check.replace(actionlint, actionlint + "-2")))
+        self.assertFalse(cache("build/new.zig", None, 'const std = @import("std");\n'))
+        # A value inside a cache step or input counts, though the line names no cache.
+        deps = re.search(r"(?m)^\s+DEPS: rui-build-v2-", action)[0]
+        self.assertTrue(cache(".github/actions/setup/action.yml", action, action.replace(deps, deps.replace("v2", "v3"))))
+        default = re.search(r"(?ms)^  publish-caches:\n.*?default: (.*?)$", action)
+        self.assertTrue(cache(".github/actions/setup/action.yml", action,
+                              action[:default.start(1)] + "'false'" + action[default.end(1):]))
+        upgrade = Path(".github/workflows/previous-release-upgrade.yml").read_text()
+        self.assertIn("key: rui-previous-release-", upgrade)
+        self.assertTrue(cache(".github/workflows/previous-release-upgrade.yml", upgrade,
+                              upgrade.replace("key: rui-previous-release-", "key: rui-previous-release-2-")))
+        self.assertTrue(cache("build/new.zig", None, "    run.has_side_effects = true;\n"))
 
     def test_cache_maintenance_preserves_unowned_and_current_caches(self):
         result = subprocess.run(["node", "--test", "tests/ci/cache_maintenance.test.cjs"],
