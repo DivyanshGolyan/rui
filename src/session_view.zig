@@ -99,18 +99,19 @@ test "peer Messages render as one dim line each, named, grouped with tool rows, 
     const S = Mark.summary;
     const N = Mark.sidenote;
     const R = Mark.reset;
+    const L = peerLink;
     var sink: Sink = .{};
     var compact = false;
     try peerLine(&sink, .inbound, peer, 1_800_000_000, &compact);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "← Received message from 9f8e7d" ++ N ++ "08:00" ++ R ++ "\n", sink.bytes[0..sink.length]);
+    try std.testing.expectEqualStrings("\n" ++ S ++ "← Received message from " ++ comptime L("9f8e7d", "9f8e7d") ++ N ++ "08:00" ++ R ++ "\n", sink.bytes[0..sink.length]);
     // Without a time the margin stays empty.
     sink = .{};
     compact = false;
     try peerLine(&sink, .outbound, peer, std.math.maxInt(u64), &compact);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "→ Messaged 9f8e7d" ++ R ++ "\n", sink.bytes[0..sink.length]);
+    try std.testing.expectEqualStrings("\n" ++ S ++ "→ Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ R ++ "\n", sink.bytes[0..sink.length]);
     var failed: Sink = .{};
     try sendFailed(&failed, peer, &compact);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "! Messaged 9f8e7d — Failed" ++ R ++ "\n", failed.bytes[0..failed.length]);
+    try std.testing.expectEqualStrings("\n" ++ S ++ "! Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ " — Failed" ++ R ++ "\n", failed.bytes[0..failed.length]);
     try std.testing.expect(!compact);
     // A named peer shows by its name, escaped as a label is, and rows in a
     // row share one group with no blank line between them.
@@ -119,8 +120,13 @@ test "peer Messages render as one dim line each, named, grouped with tool rows, 
     var group: Sink = .{};
     try peerLine(&group, .outbound, named, 1_800_000_000, &compact);
     try peerLine(&group, .inbound, named, 1_800_000_000, &compact);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "→ Messaged Review\\x1b[2m the WAL" ++ N ++ "08:00" ++ R ++ "\n" ++
-        S ++ "← Received message from Review\\x1b[2m the WAL" ++ N ++ "08:00" ++ R ++ "\n", group.bytes[0..group.length]);
+    try std.testing.expectEqualStrings("\n" ++ S ++ "→ Messaged " ++ comptime L("9f8e7d", "Review\\x1b[2m the WAL") ++ N ++ "08:00" ++ R ++ "\n" ++
+        S ++ "← Received message from " ++ L("9f8e7d", "Review\\x1b[2m the WAL") ++ N ++ "08:00" ++ R ++ "\n", group.bytes[0..group.length]);
+}
+
+/// A peer's name as its row writes it: a link to its Session.
+fn peerLink(comptime id: []const u8, comptime name: []const u8) []const u8 {
+    return Text.link_open ++ Text.session_link ++ id ++ Text.link_end ++ "\x1b[4m" ++ name ++ Text.link_close ++ Mark.reset ++ Mark.summary;
 }
 
 test "failed peer Messages distinguish absent targets and reset grouping without changing named output" {
@@ -138,8 +144,8 @@ test "failed peer Messages distinguish absent targets and reset grouping without
     try named.label.set("Review\x1b[2m the WAL");
     const cases = [_]struct { target: ?protocol.NamedPeer, line: []const u8 }{
         .{ .target = null, .line = "! Message rejected — No valid target reference" },
-        .{ .target = peer, .line = "! Messaged k7m2qx — Failed" },
-        .{ .target = named, .line = "! Messaged Review\\x1b[2m the WAL — Failed" },
+        .{ .target = peer, .line = "! Messaged " ++ comptime peerLink("k7m2qx", "k7m2qx") ++ " — Failed" },
+        .{ .target = named, .line = "! Messaged " ++ comptime peerLink("k7m2qx", "Review\\x1b[2m the WAL") ++ " — Failed" },
     };
     for (cases) |case| {
         for ([_]bool{ false, true }) |grouped| {
@@ -155,7 +161,7 @@ test "failed peer Messages distinguish absent targets and reset grouping without
             const boundary = sink.length;
             try peerLine(&sink, .outbound, peer, std.math.maxInt(u64), &compact);
             try std.testing.expect(compact);
-            try std.testing.expectEqualStrings("\n" ++ Mark.summary ++ "→ Messaged k7m2qx" ++ Mark.reset ++ "\n", sink.bytes[boundary..sink.length]);
+            try std.testing.expectEqualStrings("\n" ++ Mark.summary ++ "→ Messaged " ++ comptime peerLink("k7m2qx", "k7m2qx") ++ Mark.reset ++ "\n", sink.bytes[boundary..sink.length]);
         }
     }
 }
@@ -193,11 +199,24 @@ pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer, compact: *bool) !v
     try sink.feed(Mark.reset ++ "\n");
 }
 
-/// A peer's label, escaped as any label is, or its ID when it has none.
+/// A peer's label, escaped as any label is, or its ID when it has none,
+/// underlined as a link to its Session. The view keeps the ID as the link's
+/// hidden address. The row's dim summary style resumes after the name.
 fn peerName(sink: anytype, peer: protocol.NamedPeer) !void {
+    const id = peer.session.slice();
+    // An ID that could end the sequence it rides in is shown, not linked.
+    const linked = id.len != 0 and for (id) |byte| {
+        if (byte <= ' ' or byte >= 0x7f or byte == '\\') break false;
+    } else true;
+    if (linked) {
+        try sink.feed(Text.link_open ++ Text.session_link);
+        try sink.feed(id);
+        try sink.feed(Text.link_end ++ "\x1b[4m");
+    }
     var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .label } };
     try escaped.feed(peer.name());
     try escaped.finish();
+    if (linked) try sink.feed(Text.link_close ++ Mark.reset ++ Mark.summary);
 }
 
 /// Size as a reader says it: thousands of bytes, one decimal below 9.95,

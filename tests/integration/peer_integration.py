@@ -207,6 +207,36 @@ def allocated(response):
     return session
 
 
+def session_link_journey(installed, store, home, session_a):
+    """In A, B's name on its peer row is a Session link: a click opens B, Esc
+    returns to A, Ctrl-O on the same name opens B and stays there, Esc returns
+    to A again, and the next Esc reaches the overview. B bypasses permissions,
+    so no waiting Action refuses its Esc."""
+    from human_cli_fixture import current_screen, keyed_frame, overview_title, read_terminal
+    from terminal_process import terminal_process
+    env = {"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}
+
+    def showing(label):
+        # The facts row under the composer starts with the open Session's Label.
+        return lambda frame, x, y: f"\n ‹ {label} · " in frame
+
+    with terminal_process([str(installed), "session", "resume", "--store", str(store), session_a], env=env) as (_, master):
+        read_terminal(master, f"Received message from {B_LABEL}")
+        frame = keyed_frame(master, b"", showing(A_LABEL))
+        rows = frame.split("\n")
+        row = next(index for index, line in enumerate(rows) if f"Received message from {B_LABEL}" in line)
+        # SGR mouse cells count from 1: this clicks the name's second letter.
+        column = rows[row].index(B_LABEL) + 2
+        click = f"\x1b[<0;{column};{row + 1}M\x1b[<0;{column};{row + 1}m".encode()
+        keyed_frame(master, click, showing(B_LABEL))
+        keyed_frame(master, b"\x1b", showing(A_LABEL))
+        # Ctrl-O follows the lowest name in view. A leaves once, so B is
+        # drawn and stays open with A as the way back; leaving twice in one
+        # event would close B before any frame showed it.
+        keyed_frame(master, b"\x0f", showing(B_LABEL))
+        keyed_frame(master, b"\x1b", showing(A_LABEL))
+        keyed_frame(master, b"\x1b", lambda frame, x, y: overview_title(frame))
+
 def main(report_source):
     # Rui reports resolved paths (its executable's directory on PATH, the
     # canonical Store); macOS temporary roots are symlinks under /private.
@@ -456,6 +486,8 @@ def main(report_source):
         assert rows[session_a]["peers"]["from_person_at"] is not None, rows[session_a]
         assert rows[session_b]["peers"]["from_person_at"] is None, rows[session_b]
         assert B_LABEL not in json.dumps(b_requests), b_requests
+        if report_source == "stdin":
+            session_link_journey(installed, store, home, session_a)
         assert all(request["instructions"] == model_instructions(workspace, session_b) for request in b_requests)
         assert run(installed, "host", "status", "--store", store, home=home)["instance"] == instance
         # The census's own controls: a process named rui running another image
