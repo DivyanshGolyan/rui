@@ -3635,8 +3635,8 @@ A running MySQL Store that fences writes the same envelope with
 When the connection is lost around a COMMIT, the Store first reconnects, up to three times a second apart: it ends the old server session with `KILL`, takes `GET_LOCK` again once that session is gone, and reads `store_owner.commit_seq`.
 Every write transaction advances it by exactly one, so the value says whether the COMMIT landed.
 Landed is success and the Store carries on.
-Not landed means nothing was saved: the Store keeps the new connection, gives back the ids the attempt took, and runs the attempt again once, a batch whole and in order, so its callers never see the loss.
-A second loss in that rerun fences, as does a loss outside a queued attempt.
+Not landed means nothing was saved: the Store keeps the new connection, gives back the ids the batch took, and runs the batch's writes again once, in order, so its writers never see the loss.
+A second loss in that rerun fences, as does a lost read, which may already have streamed part of its answer.
 Only when no reconnect succeeds does the outcome stay unknown (`CommitOutcomeUnknown`).
 
 Host information is a read-only, bounded `/v1/host-info` exchange for the canonical selected Store.

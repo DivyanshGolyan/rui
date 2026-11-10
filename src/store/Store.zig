@@ -1934,7 +1934,9 @@ pub const Entry = struct {
 /// `.requested` before it queued. A test may open an Entry without an entry
 /// point, which holds the Store until `release`.
 pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
-    if (self.isFenced()) return error.StoreFenced;
+    // A batch that lost its connection runs nothing more: either it runs
+    // again whole on a new one, or the Store fences.
+    if (self.isFenced() or self.batch == .lost) return error.StoreFenced;
     const borrowed = if (@import("builtin").is_test) borrowed: {
         const off = !self.queue().owned();
         if (off) self.queue().borrow();
@@ -2048,7 +2050,7 @@ fn armRerun(context: *anyopaque, on: bool) void {
     if (self.engine == .mysql) self.engine.mysql.state.armed = on;
 }
 
-/// `Queue.Batch.recover`: after an attempt, whether it lost its connection
+/// `Queue.Batch.recover`: after a batch, whether it lost its connection
 /// with nothing saved and runs again on a new one. A loss that cannot be
 /// recovered fences now.
 fn recoverRerun(context: *anyopaque) bool {

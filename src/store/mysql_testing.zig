@@ -816,6 +816,39 @@ test "store.mysql live a write whose connection was lost with nothing saved runs
     }
 }
 
+test "store.mysql live a batch that loses its connection mid-pass runs every write again" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch {};
+    const state = storage.engine.mysql.state;
+    const Writer = struct {
+        result: anyerror!void = {},
+        fn hold() error{}!void {}
+        fn write(self: *@This(), s: *Store, id: u64) void {
+            self.result = s.queue().write(insertHeld, .{ s, id });
+        }
+    };
+    // Two writes queue behind a holder, so they run as one batch.
+    try storage.queue().callHeld(Writer.hold, .{});
+    var writers: [2]Writer = .{ .{}, .{} };
+    var threads: [2]std.Thread = undefined;
+    for (&threads, &writers, 0..) |*thread, *writer, index| {
+        thread.* = try std.Thread.spawn(.{}, Writer.write, .{ writer, &storage, 9000300 + index });
+        @import("queue.zig").waitQueued(storage.queue(), index + 1);
+    }
+    // The first write's statements lose the connection; the second must
+    // not run on the lost batch, and both run again on the new one.
+    state.testing_drop = .next_pass;
+    storage.queue().release();
+    for (threads) |thread| thread.join();
+    for (writers) |writer| try writer.result;
+    try std.testing.expectEqual(@as(u64, 1), state.testing_shape.reconnects);
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectEqual(@as(u64, 2), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id IN (9000300,9000301)", .{}));
+}
+
 test "store.mysql live a write that loses its connection twice fences" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

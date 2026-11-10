@@ -11,9 +11,10 @@
 //! hears its answer before that COMMIT, and when it fails every writer in
 //! the batch hears the failure.
 //!
-//! An attempt whose connection was lost with nothing saved runs once more
-//! on a new one (`Batch.recover`), so its callers never see the loss: a
-//! batch reruns every write in it, in order, in one new transaction.
+//! A batch whose connection was lost with nothing saved runs once more on
+//! a new one (`Batch.recover`), so its writers never see the loss: every
+//! write in it reruns, in order, in one new transaction. Only writes: a
+//! read may already have streamed part of its answer to its caller.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -36,10 +37,11 @@ pub const Queue = struct {
         context: *anyopaque,
         start: *const fn (*anyopaque) void,
         finish: *const fn (*anyopaque) bool,
-        /// Whether what runs until the next `arm(false)` may run again:
-        /// while armed, a lost connection defers its fence to `recover`.
+        /// Whether the batch that runs until the next `arm(false)` may run
+        /// again: while armed, a lost connection defers its fence to
+        /// `recover`.
         arm: *const fn (*anyopaque, bool) void,
-        /// After an armed attempt: whether its connection was lost with
+        /// After an armed batch: whether its connection was lost with
         /// nothing saved and a new one replaced it, so it runs again. A
         /// loss it cannot recover fences the Store.
         recover: *const fn (*anyopaque) bool,
@@ -86,16 +88,6 @@ pub const Queue = struct {
         var job: Job = .{ .run = null, .own = true };
         std.debug.assert(self.take(&job));
         defer self.release();
-        return self.attempt(body, args);
-    }
-
-    /// Runs `body(args...)`, and once more when its connection was lost
-    /// with nothing saved.
-    fn attempt(self: *Queue, comptime body: anytype, args: anytype) Answer(body) {
-        self.batch.arm(self.batch.context, true);
-        const answer = @call(.auto, body, args);
-        self.batch.arm(self.batch.context, false);
-        if (!self.batch.recover(self.batch.context)) return answer;
         return @call(.auto, body, args);
     }
 
@@ -118,7 +110,7 @@ pub const Queue = struct {
     pub noinline fn callHeld(self: *Queue, comptime body: anytype, args: anytype) Answer(body) {
         var job: Job = .{ .run = null, .own = true };
         std.debug.assert(self.take(&job));
-        const answer = self.attempt(body, args);
+        const answer = @call(.auto, body, args);
         if (answer) |_| {} else |_| self.release();
         return answer;
     }
@@ -348,7 +340,7 @@ const Probe = struct {
     }
 };
 
-fn waitQueued(queue: *Queue, count: usize) void {
+pub fn waitQueued(queue: *Queue, count: usize) void {
     while (true) {
         queue.mutex.lockUncancelable(queue.io);
         defer queue.mutex.unlock(queue.io);
@@ -417,7 +409,7 @@ const Batches = struct {
         if (on) self.armed += 1;
     }
 
-    /// Reports a recoverable loss for the next `rerun` attempts.
+    /// Reports a recoverable loss for the next `rerun` batches.
     fn recover(context: *anyopaque) bool {
         const self: *Batches = @ptrCast(@alignCast(context));
         if (self.rerun == 0) return false;
@@ -469,16 +461,15 @@ test "writes queued behind the holder share one batch and hear it fail together"
     try std.testing.expectError(error.StoreFenced, queue.write(Probe.note, .{ &probe, 'f' }));
 }
 
-test "an attempt that lost its connection with nothing saved runs once more, a batch whole and in order" {
+test "a batch that lost its connection with nothing saved runs once more, whole and in order" {
     const io = std.testing.io;
     var batches: Batches = .{};
     var queue: Queue = .init(io, batches.hooks());
     queue.opened();
     var probe: Probe = .{ .io = io };
-    // A read runs again, and only once.
-    batches.rerun = 1;
+    // A read never runs again: it may have streamed part of its answer.
     try queue.run(Probe.note, .{ &probe, 'r' });
-    try std.testing.expectEqualStrings("rr", probe.logged());
+    try std.testing.expectEqual(@as(u32, 0), batches.armed);
     // Writes queued behind a held read rerun as one batch, in order.
     try queue.callHeld(Probe.note, .{ &probe, 'h' });
     var threads: [3]std.Thread = undefined;
@@ -490,10 +481,10 @@ test "an attempt that lost its connection with nothing saved runs once more, a b
     const started = batches.started;
     queue.release();
     for (threads) |thread| thread.join();
-    try std.testing.expectEqualStrings("rrhbcdbcd", probe.logged());
+    try std.testing.expectEqualStrings("rhbcdbcd", probe.logged());
     try std.testing.expectEqual(started + 2, batches.started);
     // The holder's own write reruns with its batch.
     batches.rerun = 1;
     try queue.write(Probe.note, .{ &probe, 'w' });
-    try std.testing.expectEqualStrings("rrhbcdbcdww", probe.logged());
+    try std.testing.expectEqualStrings("rhbcdbcdww", probe.logged());
 }
