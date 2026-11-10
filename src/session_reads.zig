@@ -273,8 +273,6 @@ pub const Job = struct {
         // `status_taken` holds /status from one Current capture, which
         // differs from the shown page.
         status: bool = false,
-        // The newest Message admission this page holds, for Sent.
-        delivered: u64 = 0,
         // Where a transcript may begin in this read's output (see Marks),
         // oldest first, as offsets into the output.
         boundaries: Boundaries = .{},
@@ -500,13 +498,6 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         job.result.hint = try readHint(requests, job, position);
     };
     job.result.live = View.Live.init(page.facts.call_activity);
-    // Selection and a stop take admission-order prefixes, so a row or a
-    // stop takes every earlier Message too.
-    for (page.facts.items[0..page.facts.count]) |item| switch (item.value) {
-        .user => |message| job.result.delivered = @max(job.result.delivered, message.admission),
-        .stop => |stop| job.result.delivered = @max(job.result.delivered, stop.cutoff),
-        else => {},
-    };
     if (job.opening) {
         var mark: ?protocol_reply.ConversationCursor = if (page.facts.more) .{ .end = page.facts.end } else null;
         if (page.facts.more) for (page.facts.items[0..page.facts.count]) |item| {
@@ -530,8 +521,6 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     // read: queued input joins the work at its next input boundary, so that
     // is at most one model step back, never the history.
     job.drawn = try View.render(requests, job.store, job.session, &page, if (job.result.line) |line| line.provider else job.provider, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued) }, job.home);
-    // One shown at its Admission is delivered too.
-    job.result.delivered = @max(job.result.delivered, job.drawn.admission);
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;

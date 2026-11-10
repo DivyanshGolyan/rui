@@ -133,14 +133,8 @@ inspection: struct {
     // carry recovery warnings.
     command_running: bool = false,
 } = .{},
-// Messages sent and what live output has delivered of them.
+// Messages sent.
 admission: struct {
-    // The newest accepted Message admission not yet in delivered output.
-    // Admission order is Session order, so it stands for every earlier one.
-    echo: ?u64 = null,
-    // The newest Message admission live pages have taken: shown as its
-    // conversation row, or at the stop that excluded it.
-    delivered: u64 = 0,
     /// Messages begun; a /details read begun before the latest one never covers it.
     sent: u64 = 0,
     details_sent: u64 = 0,
@@ -1709,8 +1703,6 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
     switch (end) {
         .accepted => |accepted| {
             self.poll_at = 0;
-            // A page may have delivered it before this acceptance joined.
-            if (accepted.admission) |admission| self.admission.echo = if (admission > self.admission.delivered) admission else null;
             if (accepted.confirmed) self.notice = if (accepted.kind == .decision) "  • Decision confirmed." else "  • Original confirmed.";
         },
         .rejected => |rejected| {
@@ -2033,18 +2025,14 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
     } else if (self.reading.phase == .details or self.reading.phase == .inspection) {
         // showInspection selected the notice.
     } else {
-        // History, footer, status, Sent and /status change together, in one frame.
+        // History, footer, status and /status change together, in one frame.
         const result = &self.job.result;
-        self.admission.delivered = @max(self.admission.delivered, result.delivered);
         observed = .{ .work = result.work.work, .opening = self.reading.opening };
         self.live.work = .fromCore(result.work.work);
         // A taken Message leaves the queued row in the frame that shows it.
         self.live.queued = result.queued;
         if (result.queued_line) |shown| self.live.queued_line = shown;
         self.live.drawn = self.job.drawn;
-        if (self.admission.echo) |admission| if (admission <= self.admission.delivered) {
-            self.admission.echo = null;
-        };
         if (self.job.open_status or self.job.watch_status) try self.applyStatus();
         if (result.line) |*line| self.line = line.*;
         if (result.hint) |*hint| self.hint = hint.*;
