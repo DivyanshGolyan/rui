@@ -408,7 +408,12 @@ class CandidatePlanTest(unittest.TestCase):
                 for event, phase in (('pull_request', 'review'), ('pull_request', 'development'),
                                      ('workflow_dispatch', 'review')):
                     with self.subTest(path=path, event=event, phase=phase):
-                        selection = select([path], phase, available)
+                        try:
+                            before = fixture.git('show', f'{fixture.base}:{path}')
+                        except subprocess.CalledProcessError:
+                            before = None
+                        # The plan judges content-keyed paths by both revisions, as here.
+                        selection = select([path], phase, available, contents={path: (before, content.rstrip('\n'))})
                         output = fixture.plan(self, candidate=candidate, event=event, phase=phase)
                         docs = event == 'pull_request' and path in (
                             'README.md', 'docs/guide.md', 'docs/assets/diagram.svg')
