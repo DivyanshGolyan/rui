@@ -34,12 +34,15 @@ pub const Settled = struct {
     restored: anyerror!void,
     reader: ReadEnd,
     admission_error: ?anyerror,
+    /// A skills read's canonical Store failure; it reports nothing else.
+    skills_error: ?anyerror = null,
 
     pub fn failure(self: Settled, mode: Mode, cause: ?anyerror) ?anyerror {
         self.restored catch |err| return err;
         const reader_error = self.reader.failure(mode);
         if (reader_error) |err| if (err == error.CanonicalStoreFailure) return err;
         if (self.admission_error) |err| if (err == error.CanonicalStoreFailure) return err;
+        if (self.skills_error) |err| return err;
         if (cause) |err| if (err != error.InteractiveInterrupted) return err;
         if (reader_error) |err| return err;
         if (mode == .final_exit) if (self.admission_error) |err| if (err != error.Cancelled) return err;
