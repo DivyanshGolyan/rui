@@ -863,6 +863,62 @@ test "store.mysql live a connection lost after COMMIT's OK keeps the commit and 
     try std.testing.expectEqual(seq + 1, try queryU64(&storage, "SELECT commit_seq FROM store_owner WHERE owner_key=1", .{}));
 }
 
+test "store.mysql live a COMMIT lost with reads after it answers them once it landed, and saves nothing otherwise" {
+    const Case = struct { drop: Drop, armed: bool };
+    for ([_]Case{
+        .{ .drop = .before_commit, .armed = false },
+        .{ .drop = .before_commit, .armed = true },
+        .{ .drop = .after_commit, .armed = false },
+        .{ .drop = .after_commit, .armed = true },
+    }, 0..) |case, index| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try openLive(&storage, &tmp);
+        defer storage.close() catch {};
+        const mysql = &storage.engine.mysql;
+        const state = mysql.state;
+        const id: u64 = 9000420 + index;
+        state.armed = case.armed;
+        try mysql.control(.begin);
+        _ = try liveWrite(&storage, live_insert, .{ .id = id, .digest = protocol.contentDigest("lost with reads") });
+        const seq = state.commit_seq;
+        state.testing_drop = case.drop;
+        const got = commitThenCount(&storage, id);
+        try std.testing.expectEqual(@as(u64, 1), state.testing_shape.reconnects);
+        switch (case.drop) {
+            // COMMIT never left: nothing landed, and the reads fail with it.
+            .before_commit => {
+                try std.testing.expectError(error.StoreConnectionLost, got);
+                try std.testing.expectEqual(seq, state.commit_seq);
+                try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{id}));
+                // Only an armed batch runs again, and then it saves once.
+                try std.testing.expectEqual(case.armed, mysql.defersFence());
+                try std.testing.expectEqual(case.armed, mysql.recover());
+                if (!case.armed) continue;
+                try mysql.control(.begin);
+                _ = try liveWrite(&storage, live_insert, .{ .id = id, .digest = protocol.contentDigest("lost with reads") });
+                try std.testing.expectEqual(@as(u64, 1), try commitThenCount(&storage, id));
+            },
+            // The server committed and only the answers were lost: the
+            // reads run again on the new connection, the writes never.
+            .after_commit => {
+                try std.testing.expectEqual(@as(u64, 1), try got);
+                try std.testing.expect(!mysql.defersFence());
+                try std.testing.expect(!mysql.recover());
+            },
+            .none, .next_pass => unreachable,
+        }
+        try std.testing.expectEqual(seq + 1, state.commit_seq);
+        try std.testing.expectEqual(seq + 1, try queryU64(&storage, "SELECT commit_seq FROM store_owner WHERE owner_key=1", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{id}));
+        try std.testing.expect(!mysql.inTransaction());
+        // The Store carries on writing on its new connection.
+        try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
+        try std.testing.expect(!storage.isFenced());
+    }
+}
+
 /// A queued write of one content row, as an entry point runs one.
 fn insertHeld(storage: *Store, id: u64) !void {
     const entry = try store_core.enter(storage, .none);
