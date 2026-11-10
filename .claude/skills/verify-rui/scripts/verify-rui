@@ -699,7 +699,7 @@ def cmd_new(args):
                              input=f"verify-rui opened {session}")
         if result.returncode != 0:
             die(f"start {session} failed: {result.stderr}")
-        meta["sessions"][session] = result.stdout.strip()
+        meta["sessions"][session] = json.loads(result.stdout)["answer"]["session"]
         handle = re.search(r"request: (\S+)", result.stderr)
         if handle:
             wait_request(run, handle.group(1))
