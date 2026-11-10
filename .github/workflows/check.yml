@@ -50,6 +50,7 @@ jobs:
       quarantine: ${{ steps.select.outputs.quarantine }}
       linux_memory: ${{ steps.select.outputs.linux_memory }}
       cache_execution: ${{ steps.select.outputs.cache_execution }}
+      typecheck_macos: ${{ steps.select.outputs.typecheck_macos }}
       linux_matrix: ${{ steps.select.outputs.linux_matrix }}
       linux_split: ${{ steps.select.outputs.linux_split }}
       linux_codegen: ${{ steps.select.outputs.linux_codegen }}
@@ -87,7 +88,8 @@ jobs:
                   else ChangeKind.NORMAL)
           # Future selector obligations must not be erased by the path allowlist.
           if any(p[key] for key in ('targets', 'native_targets', 'native_required', 'mac_required', 'upgrade_required',
-                                    'server_targets', 'cache_execution_checks', 'linux_memory_checks', 'manual_checks')):
+                                    'server_targets', 'cache_execution_checks', 'typecheck_macos', 'linux_memory_checks',
+                                    'manual_checks')):
               kind = ChangeKind.NORMAL
           p['change_kind'] = kind.value
           ready_pr = os.environ['EVENT_NAME'] == 'pull_request' and p['phase'] == 'review'
@@ -99,6 +101,7 @@ jobs:
               p['targets'] = []
               p['native_targets'] = []
               p['cache_execution_checks'] = False
+              p['typecheck_macos'] = False
               p['linux_memory_checks'] = False
               p['retry'] = False
           elif os.environ['PROMOTION'] == 'true':
@@ -142,6 +145,7 @@ jobs:
               print('quarantine=' + quarantine, file=f)
               print('linux_memory=' + str(p['linux_memory_checks']).lower(), file=f)
               print('cache_execution=' + str(p['cache_execution_checks']).lower(), file=f)
+              print('typecheck_macos=' + str(p['typecheck_macos']).lower(), file=f)
               print('policy_skips=' + json.dumps(p['policy_skips']), file=f)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               print('Selection (not acceptance):\n```json\n' + json.dumps(p, indent=2) + '\n```', file=f)
@@ -288,9 +292,10 @@ jobs:
           retention-days: 1
   macos_typecheck:
     # Linux predicts Mac only while Mac compiles. Type-check the product and
-    # unit tests for Apple Silicon on Linux: no SDK, link or run.
+    # unit tests for Apple Silicon on Linux: no SDK, link or run. Only a
+    # change to what it compiles can change its result (TYPECHECK_INPUTS).
     needs: plan
-    if: ${{ needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' }}
+    if: ${{ needs.plan.outputs.typecheck_macos == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -495,7 +500,7 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = x86_64
           echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
-          zig fmt --check --ast-check build.zig src
+          zig fmt --check --ast-check build.zig build src
           python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --quarantine "$QUARANTINE" $RETRY
       - name: Require that the live MySQL dialect check ran
         # Fails when the unit binary left no record or PREPAREd nothing, so
@@ -553,6 +558,7 @@ jobs:
           CODEGEN: ${{ needs.plan.outputs.linux_codegen }}
           CODEGEN_RESULT: ${{ needs.linux_codegen.result }}
           NATIVE_RESULT: ${{ needs.linux_suites.result }}
+          TYPECHECK: ${{ needs.plan.outputs.typecheck_macos }}
           TYPECHECK_RESULT: ${{ needs.macos_typecheck.result }}
         run: |
           test "$PLAN_RESULT" = success
@@ -562,6 +568,7 @@ jobs:
               test "$TARGETS" = '[]'
               test "$SPLIT" = false
               test "$CODEGEN" = false
+              test "$TYPECHECK" = false
               for result in "$BUILD_RESULT" "$UNIT_RESULT" "$CODEGEN_RESULT" "$NATIVE_RESULT" "$TYPECHECK_RESULT"; do
                 test "$result" = skipped
               done
@@ -572,14 +579,17 @@ jobs:
           test "$POLICY_RESULT" = success
           if [ "$CODEGEN" = true ]; then test "$CODEGEN_RESULT" = success; else test "$CODEGEN_RESULT" = skipped; fi
           if [ "$SPLIT" = true ]; then test "$UNIT_RESULT" = success; else test "$UNIT_RESULT" = skipped; fi
+          case "$TYPECHECK" in
+            true) test "$TYPECHECK_RESULT" = success ;;
+            false) test "$TYPECHECK_RESULT" = skipped ;;
+            *) echo 'Missing or invalid typecheck selection' >&2; exit 1 ;;
+          esac
           if [ -n "$TARGETS" ] && [ "$TARGETS" != '[]' ]; then
             test "$BUILD_RESULT" = success
             test "$NATIVE_RESULT" = success
-            test "$TYPECHECK_RESULT" = success
           else
             test "$BUILD_RESULT" = skipped
             test "$NATIVE_RESULT" = skipped
-            test "$TYPECHECK_RESULT" = skipped
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ failure() }}

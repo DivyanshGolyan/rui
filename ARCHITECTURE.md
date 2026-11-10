@@ -856,12 +856,12 @@ Large scans and many small items must therefore yield.
 Every turn gives preparation a bounded progress opportunity, so finite work drains without a completion burst or large history monopolizing orchestration.
 
 Control publication is a hint.
-The lifecycle owner also reconciles canonical control facts on its bounded fallback cadence, so a lost or coalesced hint can delay but cannot suppress cancellation.
-The Store advances an in-memory commit generation whenever a locked entry point changed rows, before releasing its lock; the fallback skips its control reads, and each turn skips its Bash, message and tool-continuation admission scans, while the generation (and, for the scans, the free-slot count and which shared preparation owners are open) is unchanged since the last read found nothing.
+The Store also advances an in-memory control generation after each accepted control commits, before releasing its lock, and the lifecycle owner reconciles canonical control facts whenever that generation moved, so a lost or coalesced hint cannot suppress cancellation or delay it past the next lifecycle service, and the loop's own commits read no controls.
+The Store advances an in-memory commit generation whenever a locked entry point changed rows, before releasing its lock; each turn skips its Bash, message and tool-continuation admission scans while the generation, the free-slot count and which shared preparation owners are open are unchanged since the last read found nothing.
 An Action Attempt loses custody without a saved outcome only after dispatch is fenced or the Host is shutting down, and neither admits work again, so uncertain Actions come only from an earlier Host; the lifecycle owner stops scanning for them once a scan after startup finds none.
 Retry admission depends on time and keeps its one-second poll.
 Nothing wakes the lifecycle owner for new work, so it waits at most 100 ms between turns, 25 ms while Bash runs; transport readiness and the HTTP/2 Client's own timers end a wait sooner.
-A control always commits before its hint, so a lost hint still moves the generation.
+A control always commits before its hint, so a lost hint still moves the control generation.
 Before transport handoff it rechecks superseding controls; stop or shutdown cancels preparation, closes readers and prevents launch.
 Canonical read faults fence dispatch.
 Ordinary read, encode, write or seal failure settles the admitted Attempt under existing policy.
@@ -3602,7 +3602,9 @@ Parsing wipes all JSON allocations, including failed
 parses; the connection handshake wipes the password and authentication
 buffer as soon as login finishes or fails.
 
-MySQL's `GET_LOCK` owns the Store.
+On MySQL the `store_owner` row owns the Store: open raises its `epoch`, and every write transaction first advances `commit_seq` only where both match what this Host last saw, so a Host that lost the Store fails its next write.
+`GET_LOCK` only refuses early a second Host on the same database.
+Every message the Host sends starts with its session settings, so no message relies on settings an earlier one left on the server connection.
 There is no `host.lock`: the runtime's
 `rui.lock` reserves only its socket, preventing two different Stores from
 reclaiming each other's endpoint.

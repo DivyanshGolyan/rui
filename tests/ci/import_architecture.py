@@ -12,6 +12,8 @@ from pathlib import Path
 import re
 import subprocess
 
+import build_files
+
 
 ROOT = Path(__file__).resolve().parents[2]
 ROOTS = ("src/cli.zig",)
@@ -120,9 +122,9 @@ def graph(root, roots=ROOTS, read_source=None):
 def tests_reached(root, test_only=TEST_ONLY_ROOTS, modules=MODULE_TEST_ROOTS):
     """Every Zig file under src/ and tests/ that declares tests is named by a
     test reached from a test root, so its tests cannot silently stop running."""
-    build = (root / "build.zig").read_text()
+    build = build_files.source(root)
     if stale := [name for name in (*test_only, *modules) if f'b.path("{name}")' not in build]:
-        raise ValueError(f"build.zig no longer builds test roots {stale}; update TEST_ONLY_ROOTS/MODULE_TEST_ROOTS")
+        raise ValueError(f"The build no longer builds test roots {stale}; update TEST_ONLY_ROOTS/MODULE_TEST_ROOTS")
     scanned = {path.resolve(): scoped_imports(path.read_text())
                for directory in ("src", "tests") for path in (root / directory).rglob("*.zig")}
     reached = set()

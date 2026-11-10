@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import build_files
 import prepush
 
 ROOT = prepush.ROOT
@@ -24,7 +25,7 @@ FIXTURE_CHECKS = {"tests/ci: test_wire_version.py", "tests/ci: test_harness_cont
 
 WHITESPACE = [sys.executable, "-B", "tests/ci/prepush.py", "--fix-whitespace", "BASE"]
 
-AVAILABLE = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', (prepush.ROOT / "build.zig").read_text()))
+AVAILABLE = set(build_files.steps())
 
 
 class PrepushTest(unittest.TestCase):

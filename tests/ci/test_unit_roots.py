@@ -8,6 +8,8 @@ import sys
 import tempfile
 import unittest
 
+import build_files
+
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("unit_test_runner", ROOT / "tests/ci/unit_test_runner.py")
 runner = importlib.util.module_from_spec(SPEC)
@@ -113,14 +115,14 @@ class BuildWiringTest(unittest.TestCase):
         members = re.search(r"pub const Root = enum\s*\{([^}]+)\}", partition).group(1)
         self.assertEqual([name.strip() for name in members.split(",") if name.strip()],
                          ["native", "store"])
-        build = (ROOT / "build.zig").read_text()
+        build = build_files.source()
         self.assertIn("run.step.dependOn(&run_tests.step)", build)
         self.assertNotIn("compile.step.dependOn(&run_tests.step)", build)
         self.assertIn("run.has_side_effects = true", build)
         self.assertIn('run.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0")', build)
 
     def test_full_execution_overlaps_native_but_unsplit_stays_serial(self):
-        build = (ROOT / "build.zig").read_text()
+        build = build_files.source()
         gate = build.split("    const native_gate =", 1)[1].split("    if (!pr_ci)", 1)[0]
         self.assertTrue(gate.startswith(" if (check_part == .execution) full_check_step else &process_integrations.step;"))
         self.assertIn("if (check_part != .callers)", gate)
@@ -131,7 +133,7 @@ class BuildWiringTest(unittest.TestCase):
         self.assertIn("full_check_step.dependOn(&process_integrations.step)", build)
 
     def test_filtered_runs_keep_single_stock_aggregate(self):
-        build = (ROOT / "build.zig").read_text()
+        build = build_files.source()
         self.assertIn("if (test_filters.len == 0) unit_partition.roots.len else 1", build)
         self.assertIn('if (test_filters.len != 0) "test"', build)
         self.assertIn('.root_source_file = b.path("src/tests.zig")', build)
@@ -142,7 +144,7 @@ class BuildWiringTest(unittest.TestCase):
         self.assertIn('generate.addArg("--filtered")', build)
 
     def test_standalone_roots_do_not_inherit_the_serial_chain(self):
-        build = (ROOT / "build.zig").read_text()
+        build = build_files.source()
         self.assertIn('b.step("test-native",', build)
         self.assertIn('b.step("test-store",', build)
         self.assertIn('(if (root == .native) native_step else store_step).dependOn(&standalone.step)', build)
@@ -152,7 +154,7 @@ class BuildWiringTest(unittest.TestCase):
             self.assertIn(f'native_step.dependOn(&{dependency}.step)', build)
 
     def test_ci_classifies_all_unit_compiles_and_filters_track_sources(self):
-        build = (ROOT / "build.zig").read_text()
+        build = build_files.source()
         self.assertIn("unit: []const *std.Build.Step.Compile", build)
         self.assertIn("collection.unit, compile", build)
         self.assertIn("unit_partition.owner(prefix)", build)

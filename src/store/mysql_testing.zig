@@ -509,6 +509,12 @@ test "store.mysql live abandoning an Access drains an already-sent large content
         defer entry.release();
         var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
         defer access.deinit();
+        // A batch as small as a server with small packets leaves, so a
+        // chunk's INSERT streams as a statement of its own.
+        const wire_connection = &storage.engine.mysql.state.connection;
+        const limit = wire_connection.batch_limit;
+        defer wire_connection.batch_limit = limit;
+        wire_connection.batch_limit = 16 * 1024;
         const bytes = try std.testing.allocator.alloc(u8, 32 * 1024);
         defer std.testing.allocator.free(bytes);
         @memset(bytes, 'x');
@@ -535,29 +541,134 @@ test "store.mysql live abandoning an Access drains an already-sent large content
     }
 }
 
-test "store.mysql live midchunk stop pads its frame and rollback leaves connection usable" {
+test "store.mysql live content chunks ride the round of their row, and a stop midchunk sends nothing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
     try openLive(&storage, &tmp);
     defer storage.close() catch unreachable;
-    const mysql = &storage.engine.mysql;
-    defer if (mysql.inTransaction()) mysql.control(.rollback) catch unreachable;
-    try mysql.control(.begin);
     const length = @import("engine/mysql_content.zig").chunk_bytes + 17;
-    _ = try liveWrite(&storage, live_insert, .{ .id = 9000020, .digest = protocol.contentDigest("stopped-midchunk"), .length = length });
-    const sink = try mysql.openSink(9000020, length);
-    const before = mysql.state.connection.queries;
-    try sink.write("partial", 0);
-    // The source stops here. close must finish only the current framed
-    // chunk, not send the second chunk or fence this ordinary input stop.
-    sink.close();
-    try std.testing.expectEqual(@as(u64, 1), mysql.state.connection.queries - before);
-    try std.testing.expect(mysql.state.connection.isReady());
-    try std.testing.expect(mysql.state.failure == null);
-    try mysql.control(.rollback);
-    try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000020", .{}));
-    try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content_chunk WHERE content_id=9000020", .{}));
+    const bytes = try std.testing.allocator.alloc(u8, length);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 'y');
+    for ([_]bool{ false, true }) |stopped| {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+        defer access.deinit();
+        const before = storage.engine.mysql.state.connection.queries;
+        const id = try access.identity(.content_id);
+        access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest(bytes), .length = length });
+        access.recordContentRow(id);
+        const sink = try access.contentSink(id, length);
+        if (stopped) {
+            // The source stops here: close pads the chunk begun, and the
+            // abandoned batch is never sent.
+            try sink.write(bytes[0..7], 0);
+            sink.close();
+            const shape = storage.engine.mysql.state.testing_shape;
+            try access.abandon(.{});
+            // No batch and no ROLLBACK went out: only the identity reload
+            // a rolled-back transaction that took ids costs.
+            const after = storage.engine.mysql.state.testing_shape;
+            try std.testing.expectEqual(shape.access_passes, after.access_passes);
+            try std.testing.expectEqual(shape.controls, after.controls);
+            try std.testing.expectEqual(before + 1, storage.engine.mysql.state.connection.queries);
+            try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content_chunk WHERE content_id=?1", .{id}));
+        } else {
+            try sink.write(bytes, 0);
+            sink.close();
+            try access.commit();
+            // The row, both chunks and the position checks in one round,
+            // then COMMIT.
+            try std.testing.expectEqual(before + 2, storage.engine.mysql.state.connection.queries);
+            try std.testing.expectEqual(@as(u64, 2), try queryU64(&storage, "SELECT count(*) FROM content_chunk WHERE content_id=?1", .{id}));
+            try std.testing.expectEqual(@as(u64, length), try queryU64(&storage, "SELECT sum(length(bytes)) FROM content_chunk WHERE content_id=?1", .{id}));
+        }
+    }
+    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "store.mysql live content chunks keep each batch within a small max_allowed_packet" {
+    if (!try available()) return error.SkipZigTest;
+    const old = old: {
+        mutex.lockUncancelable(std.testing.io);
+        defer mutex.unlock(std.testing.io);
+        _ = try connection();
+        const old = try globalValue("max_allowed_packet");
+        try setGlobal("max_allowed_packet", "262144");
+        break :old old;
+    };
+    defer {
+        mutex.lockUncancelable(std.testing.io);
+        defer mutex.unlock(std.testing.io);
+        setGlobal("max_allowed_packet", old.slice()) catch @panic("cannot restore max_allowed_packet");
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    // A failed close must not skip restoring the server's packet limit.
+    defer storage.close() catch {};
+    // Each value's chunk fits a 256 KiB packet; the two together do not.
+    const length = 64 * 1024;
+    const bytes = try std.testing.allocator.alloc(u8, length);
+    defer std.testing.allocator.free(bytes);
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+    defer access.deinit();
+    errdefer access.abandon(.{}) catch {};
+    const before = storage.engine.mysql.state.connection.queries;
+    var ids: [2]u64 = undefined;
+    for (&ids, 0..) |*id, i| {
+        // Distinct values: content rows are unique by digest.
+        @memset(bytes, 'a' + @as(u8, @intCast(i)));
+        id.* = try access.identity(.content_id);
+        access.write(live_insert, .{ .id = id.*, .digest = protocol.contentDigest(bytes), .length = length });
+        access.recordContentRow(id.*);
+        const sink = try access.contentSink(id.*, length);
+        try sink.write(bytes, 0);
+        sink.close();
+    }
+    try access.commit();
+    // The first row and chunk, then the second row and chunk, then COMMIT.
+    try std.testing.expectEqual(before + 3, storage.engine.mysql.state.connection.queries);
+    for (ids) |id| try std.testing.expectEqual(@as(u64, length), try queryU64(&storage, "SELECT sum(length(bytes)) FROM content_chunk WHERE content_id=?1", .{id}));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "store.mysql live every message carries the session settings, so none relies on the last" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const conn = &storage.engine.mysql.state.connection;
+    // What a proxy handing the next message to a fresh server connection
+    // looks like: the session the last message left is gone.
+    try conn.query("SET SESSION sql_mode='',SESSION group_concat_max_len=4");
+    while (!conn.isReady()) switch (try conn.next()) {
+        .ok => {},
+        else => return error.TestUnexpectedResult,
+    };
+    try conn.query("SELECT @@session.group_concat_max_len,INSTR(@@session.sql_mode,'NO_BACKSLASH_ESCAPES')>0");
+    const Row = struct { len: u64, escapes_off: u64 };
+    var columns: rows.Columns(Row) = undefined;
+    var got: ?Row = null;
+    while (!conn.isReady()) switch (try conn.next()) {
+        .columns => |n| columns = try rows.readColumns(Row, conn, n),
+        .row => {
+            var row: Row = undefined;
+            try rows.decodeRow(Row, &columns, conn, &row);
+            got = row;
+        },
+        .rows_end => {},
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(got.?.len > 4);
+    try std.testing.expectEqual(@as(u64, 1), got.?.escapes_off);
     try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
     try std.testing.expect(!storage.isFenced());
 }

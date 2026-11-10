@@ -18,6 +18,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import build_files
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("host_process", ROOT / "tests/integration/host_process.py")
@@ -755,7 +757,7 @@ class FixtureEntryTest(unittest.TestCase):
                              {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "TERM": "xterm-256color", "RUI_TEST_MODELS_DEV_URL": ""})
 
     def test_go_measurements_run_through_the_exec_entry(self):
-        build = (ROOT / "build.zig").read_text()
+        build = build_files.source()
         steps = re.findall(r'const (\w+)_step = b\.step\(\s*"measure-', build)
         self.assertGreaterEqual(len(steps), 10)
         for name in steps:

@@ -251,22 +251,23 @@ fn adoptInserted(a: anytype, value: *Import) void {
 pub fn importSlot(a: anytype, value: *Import) !ContentSlot {
     adoptInserted(a, value);
     if (value.found) |row| return .{ .id = @intCast(row.content_id.get()), .existing = true };
-    const id = try a.identity(.content_id);
-    a.write(insert_content, .{ .content_id = id, .digest = value.digest, .length = value.length, .private = value.private });
+    const id = try insertRow(a, value);
     a.recordInserted(&value.digest, value.length, value.private, id);
     value.found = .{ .content_id = .of(id) };
     return .{ .id = @intCast(id), .existing = false };
 }
 
 /// Queues a new row for `value`'s identity with a Host identity and a
-/// zeroed payload, and returns its id. It records nothing on the Access:
-/// it is for a caller that keeps its own table of the identities it
+/// zeroed payload, and returns its id. It records on the Access only that
+/// the row is queued (`recordContentRow`), so a sink may open on it, not
+/// its identity: it is for a caller that keeps its own table of the identities it
 /// imports, as model settlement's batches do, where `importSlot` records
 /// each row in the Access's `max_inserted` table for an entry point's few
 /// values. Its `found` is not read.
 pub fn insertRow(a: anytype, value: *const Import) !u64 {
     const id = try a.identity(.content_id);
     a.write(insert_content, .{ .content_id = id, .digest = value.digest, .length = value.length, .private = value.private });
+    a.recordContentRow(id);
     return id;
 }
 

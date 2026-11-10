@@ -3,7 +3,7 @@
 //! I/O and waits on it; it starts no thread.
 //!
 //! Memory is fixed when the connection is made: a 16 KiB receive buffer, a
-//! send buffer that holds one 16 KiB batch, the client's 2 KiB handshake
+//! send buffer that holds one 4 MiB batch, the client's 2 KiB handshake
 //! buffer, and two TLS record buffers. Nothing grows with a row or a
 //! statement: rows stream from the receive buffer (an event's slices stay
 //! valid until the next call), and a statement longer than a batch streams
@@ -15,7 +15,10 @@
 //! connection: each later call returns `error.ConnectionLost`, and its
 //! owner closes it.
 //!
-//! Session settings (`schema.mysql_session`) are the owner's to send.
+//! Every COM_QUERY starts with the owner's session settings
+//! (`useSettings`), whose results `next` consumes: a message never relies
+//! on what an earlier one set, so a proxy may send each on a different
+//! server connection.
 const std = @import("std");
 const tls_client = @import("tls_client");
 pub const mysql = @import("mysql.zig");
@@ -26,8 +29,10 @@ pub const tls = @import("tls.zig");
 /// error rather than a lost connection.
 pub const round_deadline_ms: u32 = 60_000;
 
-/// The statement text one COM_QUERY batch holds.
-pub const batch_bytes = 16 * 1024;
+/// The statement text one COM_QUERY batch holds at most: room for a
+/// step's writes and its content chunks in one round trip. A server whose
+/// `max_allowed_packet` is smaller lowers it (`limitBatch`).
+pub const batch_bytes = 4 * 1024 * 1024;
 
 const prefix_len = 5;
 
@@ -96,6 +101,15 @@ pub const Connection = struct {
     /// Bytes of a streamed statement still due, the buffered ones included;
     /// null while a batch fills, which never drains.
     stream_left: ?usize,
+    /// The text a batch may hold: `batch_bytes`, or less for a server
+    /// whose packets are smaller (`limitBatch`), the settings included.
+    batch_limit: usize,
+    /// Statements, each ending in `;`, that begin every COM_QUERY.
+    settings: []const u8,
+    /// How many statements `settings` holds.
+    settings_count: u8,
+    /// Results of the last COM_QUERY's settings not yet consumed.
+    settings_due: u8,
     context: ?tls.Context,
     session: ?tls.Session,
     /// After `.start_tls`: every later byte crosses TLS.
@@ -120,6 +134,10 @@ pub const Connection = struct {
         self.in_end = 0;
         self.writer = .{ .vtable = &.{ .drain = drain }, .buffer = &self.send_buffer };
         self.stream_left = null;
+        self.batch_limit = batch_bytes;
+        self.settings = "";
+        self.settings_count = 0;
+        self.settings_due = 0;
         self.context = null;
         self.session = null;
         self.tls_active = false;
@@ -175,26 +193,54 @@ pub const Connection = struct {
             if (step.event) |event| switch (event) {
                 .send => |n| try self.transmit(self.handshake[0..n]),
                 .start_tls => |n| try self.startTls(n),
-                else => return event,
+                // A setting the server refuses leaves the message's
+                // statements on a session unlike the one they were written for.
+                .ok => if (self.settings_due != 0) {
+                    self.settings_due -= 1;
+                } else return event,
+                else => if (self.settings_due != 0) return error.ConnectionLost else return event,
             } else if (step.consumed == 0) try self.fill();
         }
     }
 
     /// Room left for text in the open batch.
     pub fn batchRoom(self: *const Connection) usize {
-        return self.send_buffer.len - @max(self.writer.end, prefix_len);
+        return (prefix_len + self.batch_limit) -| @max(self.writer.end, self.headLen());
     }
 
-    /// Text in the open batch.
+    /// Makes `settings`, `count` statements each ending in `;`, the start
+    /// of every later COM_QUERY. Borrowed for the connection's life. No
+    /// batch may be open.
+    pub fn useSettings(self: *Connection, settings: []const u8, count: u8) void {
+        std.debug.assert(self.writer.end == 0 and settings.len < self.batch_limit);
+        self.settings = settings;
+        self.settings_count = count;
+    }
+
+    fn headLen(self: *const Connection) usize {
+        return prefix_len + self.settings.len;
+    }
+
+    /// Keeps every batch within the server's `max_allowed_packet`, less
+    /// room for the packet's own framing. No batch may be open.
+    pub fn limitBatch(self: *Connection, max_allowed_packet: u64) void {
+        std.debug.assert(self.writer.end == 0);
+        self.batch_limit = @intCast(@min(batch_bytes, max_allowed_packet -| 1024));
+    }
+
+    /// Text in the open batch, the settings not included.
     pub fn batchLen(self: *const Connection) usize {
-        return self.writer.end -| prefix_len;
+        return self.writer.end -| self.headLen();
     }
 
     /// The writer of the open batch, opening one if none is. The caller
     /// writes at most `batchRoom()` bytes: a batch never drains.
     pub fn batch(self: *Connection) *std.Io.Writer {
         std.debug.assert(self.isReady() and self.stream_left == null);
-        if (self.writer.end == 0) self.writer.end = prefix_len;
+        if (self.writer.end == 0) {
+            @memcpy(self.send_buffer[prefix_len..][0..self.settings.len], self.settings);
+            self.writer.end = self.headLen();
+        }
         return &self.writer;
     }
 
@@ -209,6 +255,7 @@ pub const Connection = struct {
         // A batch is far below the single-packet limit.
         self.send_buffer[0..prefix_len].* = self.client.query(end - prefix_len) catch unreachable;
         self.queries += 1;
+        self.settings_due = self.settings_count;
         try self.transmit(self.send_buffer[0..end]);
     }
 
@@ -219,10 +266,13 @@ pub const Connection = struct {
     pub fn beginQuery(self: *Connection, text_len: usize) (Error || mysql.QueryError)!*std.Io.Writer {
         if (self.lost) return error.ConnectionLost;
         std.debug.assert(self.isReady() and self.writer.end == 0);
-        self.send_buffer[0..prefix_len].* = try self.client.query(text_len);
+        const len = self.settings.len + text_len;
+        self.send_buffer[0..prefix_len].* = try self.client.query(len);
         self.queries += 1;
-        self.writer.end = prefix_len;
-        self.stream_left = prefix_len + text_len;
+        self.settings_due = self.settings_count;
+        @memcpy(self.send_buffer[prefix_len..][0..self.settings.len], self.settings);
+        self.writer.end = self.headLen();
+        self.stream_left = prefix_len + len;
         return &self.writer;
     }
 
