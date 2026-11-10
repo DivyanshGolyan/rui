@@ -295,32 +295,30 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, onl
         error.FileNotFound => {},
         else => return err,
     }
-    const file = try dir.createFile(io, "preferences.tmp", .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
-    var open = true;
-    var published = false;
-    defer {
-        if (open) file.close(io);
-        if (!published) dir.deleteFile(io, "preferences.tmp") catch {};
+    {
+        const file = try dir.createFile(io, "preferences.tmp", .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
+        // Until rename succeeds the temporary name is ours to remove.
+        errdefer dir.deleteFile(io, "preferences.tmp") catch {};
+        {
+            defer file.close(io);
+            if (std.c.fchmod(file.handle, 0o600) != 0) return error.PreferencePermissionsFailed;
+            var bytes: [max_file_bytes]u8 = undefined;
+            // Each file is the lowest version that holds its values, so an older
+            // Rui still reads it unless a choice it cannot hold was made: version 1
+            // says notifications are on, version 2 turns them off, version 3 adds
+            // the new-Session effort.
+            const fields = .{ values.store.slice(), values.provider.slice(), values.model.slice() };
+            const encoded = (if (values.reasoning_effort) |effort|
+                std.fmt.bufPrint(&bytes, "version=3\nstore={s}\nprovider={s}\nmodel={s}\nnotifications={s}\n" ++ effort_key ++ "{s}\n", fields ++ .{ if (values.notifications) "on" else "off", @tagName(effort) })
+            else if (values.notifications)
+                std.fmt.bufPrint(&bytes, "version=1\nstore={s}\nprovider={s}\nmodel={s}\n", fields)
+            else
+                std.fmt.bufPrint(&bytes, "version=2\nstore={s}\nprovider={s}\nmodel={s}\nnotifications=off\n", fields)) catch return error.InvalidPreferences;
+            try file.writeStreamingAll(io, encoded);
+            try file.sync(io);
+        }
+        try dir.rename("preferences.tmp", dir, "preferences", io);
     }
-    if (std.c.fchmod(file.handle, 0o600) != 0) return error.PreferencePermissionsFailed;
-    var bytes: [max_file_bytes]u8 = undefined;
-    // Each file is the lowest version that holds its values, so an older
-    // Rui still reads it unless a choice it cannot hold was made: version 1
-    // says notifications are on, version 2 turns them off, version 3 adds
-    // the new-Session effort.
-    const fields = .{ values.store.slice(), values.provider.slice(), values.model.slice() };
-    const encoded = (if (values.reasoning_effort) |effort|
-        std.fmt.bufPrint(&bytes, "version=3\nstore={s}\nprovider={s}\nmodel={s}\nnotifications={s}\n" ++ effort_key ++ "{s}\n", fields ++ .{ if (values.notifications) "on" else "off", @tagName(effort) })
-    else if (values.notifications)
-        std.fmt.bufPrint(&bytes, "version=1\nstore={s}\nprovider={s}\nmodel={s}\n", fields)
-    else
-        std.fmt.bufPrint(&bytes, "version=2\nstore={s}\nprovider={s}\nmodel={s}\nnotifications=off\n", fields)) catch return error.InvalidPreferences;
-    try file.writeStreamingAll(io, encoded);
-    try file.sync(io);
-    file.close(io);
-    open = false;
-    try dir.rename("preferences.tmp", dir, "preferences", io);
-    published = true;
     if (directory_sync.sync(dir.handle) != 0) return error.PreferenceDirectorySyncFailed;
     return values;
 }

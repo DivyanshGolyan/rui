@@ -290,29 +290,27 @@ const Owner = struct {
             else => return err,
         }
 
-        const file = try self.parent.createFile(io, temp_name, .{
-            .read = true,
-            .exclusive = true,
-            .permissions = .fromMode(0o600),
-        });
-        var file_open = true;
-        var published = false;
-        defer {
-            if (file_open) file.close(io);
-            if (!published) self.parent.deleteFile(io, temp_name) catch {};
+        {
+            const file = try self.parent.createFile(io, temp_name, .{
+                .read = true,
+                .exclusive = true,
+                .permissions = .fromMode(0o600),
+            });
+            // Until rename succeeds the temporary name is ours to remove.
+            errdefer self.parent.deleteFile(io, temp_name) catch {};
+            {
+                defer file.close(io);
+                if (fault == .write) {
+                    try file.writeStreamingAll(io, encoded[0..@min(4, encoded.len)]);
+                    return error.InjectedCredentialWriteFailure;
+                }
+                try file.writeStreamingAll(io, encoded);
+                if (fault == .file_sync) return error.InjectedCredentialFileSyncFailure;
+                try file.sync(io);
+            }
+            if (fault == .rename) return error.InjectedCredentialRenameFailure;
+            try self.parent.rename(temp_name, self.parent, self.finalName(), io);
         }
-        if (fault == .write) {
-            try file.writeStreamingAll(io, encoded[0..@min(4, encoded.len)]);
-            return error.InjectedCredentialWriteFailure;
-        }
-        try file.writeStreamingAll(io, encoded);
-        if (fault == .file_sync) return error.InjectedCredentialFileSyncFailure;
-        try file.sync(io);
-        file.close(io);
-        file_open = false;
-        if (fault == .rename) return error.InjectedCredentialRenameFailure;
-        try self.parent.rename(temp_name, self.parent, self.finalName(), io);
-        published = true;
         // After rename the new value is visible and committed at file level. If
         // this fails, callers receive DirectorySyncFailed and must inspect on
         // restart; blindly repeating a refresh is unsafe because publication is
@@ -630,6 +628,9 @@ test "each replacement failure leaves only a complete old or new credential" {
         try std.testing.expectError(case[1], owner.publishWithFault(&replacement, case[0], &scratch.file));
         lock.close(io);
         owner.close();
+        // The next publish would clear a leftover, so check that each cut
+        // already removed the secret-bearing temporary name.
+        try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "private/.auth.tmp", .{}));
         var observed: Record = undefined;
         try loadInto(path, &observed, &scratch);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&observed));

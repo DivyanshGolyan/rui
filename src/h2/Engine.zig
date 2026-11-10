@@ -808,6 +808,25 @@ pub fn gather(self: *Engine, connection: *Connection, record: *Record, bytes: []
 // ---------------------------------------------------------------------- wait
 
 pub fn wait(self: *Engine, timeout_ms: u32) h2.DriveError!void {
+    return self.armWait(timeout_ms).block();
+}
+
+/// The poll set and timeout of one wait, read from the Engine. Blocking on
+/// it reads only `pollfds`, which only `drive` and `armWait` write, and the
+/// waker's descriptor.
+pub const Armed = struct {
+    pollfds: []std.c.pollfd,
+    timeout_ms: u32,
+    waker: *Waker,
+
+    pub fn block(self: Armed) h2.DriveError!void {
+        const result = std.c.poll(self.pollfds.ptr, @intCast(self.pollfds.len), @intCast(@min(self.timeout_ms, std.math.maxInt(c_int))));
+        if (result < 0 and std.posix.errno(result) != .INTR) return error.PollFailed;
+        if (result > 0 and self.pollfds[0].revents != 0) self.waker.drain();
+    }
+};
+
+pub fn armWait(self: *Engine, timeout_ms: u32) Armed {
     std.debug.assert(self.receiver == null);
     const count = self.fillPollfds();
     self.pollfds[0] = .{ .fd = self.waker.read_fd, .events = std.c.POLL.IN, .revents = 0 };
@@ -820,9 +839,7 @@ pub fn wait(self: *Engine, timeout_ms: u32) h2.DriveError!void {
         const until = std.math.divCeil(u64, deadline -| time, std.time.ns_per_ms) catch unreachable;
         timeout = @intCast(@min(timeout, until));
     }
-    const result = std.c.poll(self.pollfds.ptr, @intCast(count + 1), @intCast(@min(timeout, std.math.maxInt(c_int))));
-    if (result < 0 and std.posix.errno(result) != .INTR) return error.PollFailed;
-    if (result > 0 and self.pollfds[0].revents != 0) self.waker.drain();
+    return .{ .pollfds = self.pollfds[0 .. count + 1], .timeout_ms = timeout, .waker = &self.waker };
 }
 
 fn nextDeadline(self: *Engine) ?u64 {

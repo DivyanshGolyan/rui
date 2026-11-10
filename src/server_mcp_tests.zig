@@ -245,7 +245,7 @@ fn run(case: Case) !void {
     try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
     const view = try allocator.create(store.HistoricalView);
     defer allocator.destroy(view);
-    try storage.openHistoricalView(continuation, view);
+    _ = try storage.openHistoricalView(continuation, view);
     defer if (view.isActive()) view.close();
     var position: u64 = 0;
     var found: usize = 0;
@@ -284,7 +284,7 @@ fn expectNextRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: s
     defer if (retained) |*owner| {
         _ = owner.reclaim(root) catch unreachable;
     };
-    try storage.openHistoricalView(binding, &preparation.view);
+    _ = try storage.openHistoricalView(binding, &preparation.view);
     try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     // A runaway guard on bounded nonblocking work, not a scheduler wait.

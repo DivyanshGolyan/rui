@@ -274,13 +274,6 @@ pub const HistoricalView = struct {
         };
     }
 
-    /// Each preparation advance checks the Attempt once. Its steps read only
-    /// history below the admission boundary, and the handoff checks again.
-    pub fn checkAttempt(self: *HistoricalView) !void {
-        std.debug.assert(self.active);
-        _ = try model_settlement_domain.checkAttempt(self.store, self.binding);
-    }
-
     /// Fills `out` with the next function tool `declaration` declares, in
     /// set order, and says whether there was one. `coverage` must have run.
     pub fn nextDeclaredTool(self: *HistoricalView, declaration: *Declaration, out: *HistoricalTool) !bool {

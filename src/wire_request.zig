@@ -238,7 +238,8 @@ const ContentCapture = struct {
     path: [protocol.max_store_bytes + "/scratch/request-".len + 20 + 1 + 3 + ".tmp".len]u8 = undefined,
     path_len: usize,
     sink: ContentSink,
-    writer_open: bool = true,
+    /// The read-only reopen. Seal closes the writer as it sets this, so this
+    /// is the only open descriptor once set; while null, `sink.file` is.
     sealed: ?std.Io.File = null,
     transferred: bool = false,
 
@@ -257,7 +258,6 @@ const ContentCapture = struct {
         self.options = options;
         self.path_len = path.len;
         self.sink = .{ .io = options.io, .file = writer, .scratch_budget = options.scratch_budget };
-        self.writer_open = true;
         self.sealed = null;
         self.transferred = false;
     }
@@ -268,7 +268,6 @@ const ContentCapture = struct {
         if (self.options.content_faults.seal) return error.InjectedContentSealFailure;
         self.sealed = try std.Io.Dir.openFileAbsolute(self.options.io, self.path[0..self.path_len], .{});
         self.sink.file.close(self.options.io);
-        self.writer_open = false;
         try std.Io.Dir.deleteFileAbsolute(self.options.io, self.path[0..self.path_len]);
         self.transferred = true;
         return .{
@@ -288,16 +287,15 @@ const ContentCapture = struct {
             else => false,
         };
         if (removed) {
-            if (self.writer_open) self.sink.file.close(self.options.io);
-            if (self.sealed) |file| file.close(self.options.io);
+            (self.sealed orelse self.sink.file).close(self.options.io);
             if (self.sink.scratch_budget) |budget| budget.release(self.sink.charged);
         } else {
             const retained = self.options.retained_scratch;
             std.debug.assert(retained.* == null);
             retained.* = named_scratch.Owner.init(
                 self.options.io,
-                if (self.writer_open) self.sink.file else self.sealed.?,
-                if (self.writer_open) self.sealed else null,
+                self.sealed orelse self.sink.file,
+                null,
                 std.fs.path.basename(self.path[0..self.path_len]),
                 self.sink.scratch_budget,
                 self.sink.charged,
