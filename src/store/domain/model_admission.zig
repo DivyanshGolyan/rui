@@ -707,6 +707,54 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
     return .{ .permit = .{ .binding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 } } };
 }
 
+/// Which of the dispatch loop's commit-driven scans would find work now.
+/// A hint: each admission still selects for itself, so a stale one costs
+/// an empty scan or a pass's delay, never a wrong write. The retry scans
+/// are not here; they also skip what execution slots hold.
+pub const DispatchWork = struct {
+    /// An owed stop, an owed ending, a feed hop or a core tool call.
+    core: bool,
+    mcp: bool,
+    bash: bool,
+    /// Waiting input a Turn can take: any Session's, or while new Turns
+    /// are held (`paused`) only an open Turn's.
+    message: bool,
+    tool_continuation: bool,
+
+    /// Before the first read, and what a loop with no Store assumes.
+    pub const unknown: DispatchWork = .{ .core = true, .mcp = true, .bash = true, .message = true, .tool_continuation = true };
+};
+
+/// Reads `DispatchWork` in one round: the selections the slot-free, Bash,
+/// message and tool-continuation scans each open with. When no model
+/// admission has work, the round also holds the checks an empty admission
+/// scan runs before the Store counts as idle, and blocked Operations cost
+/// one more round, as there.
+pub fn dispatchWork(reader: anytype, paused: bool) !DispatchWork {
+    var actions: action_domain.WorkProbe = .{};
+    var message: runnable_selection.Result = undefined;
+    var continuation: tool_continuation_selection.Result = undefined;
+    var disagreeing: disagreeing_continuation.Result = undefined;
+    var blocked: reads_domain.First(blocked_operation.Row) = .{};
+    actions.queue(reader);
+    if (paused) reader.read(open_turn_selection, .{}, &message) else reader.read(runnable_selection, .{}, &message);
+    reader.read(tool_continuation_selection, .{}, &continuation);
+    reader.read(disagreeing_continuation, .{}, &disagreeing);
+    reader.readEach(blocked_operation, .{}, 1, &blocked);
+    try store_access.runNamed(reader, .{.{ blocked_operation, error.CallReadFailed }}, error.TurnReadFailed);
+    if (message == null or continuation == null) {
+        if (disagreeing != null) return error.CorruptStore;
+        if (blocked.row != null) try validateBlockedToolCalls(reader);
+    }
+    return .{
+        .core = actions.core(),
+        .mcp = actions.mcp(),
+        .bash = actions.bash(),
+        .message = message != null,
+        .tool_continuation = continuation != null,
+    };
+}
+
 /// Due retries in id order after `after`, with their Session: one page.
 const due_retries = rsql.Read(.{
     .sql = retry_admission_select_text,

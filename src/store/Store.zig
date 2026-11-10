@@ -70,6 +70,7 @@ const CurrentConfiguration = configuration_domain.CurrentConfiguration;
 const HistoricalView = historical_domain.HistoricalView;
 const MessageReply = command_domain.MessageReply;
 const ModelAdmissionKind = model_admission_domain.ModelAdmissionKind;
+const DispatchWork = model_admission_domain.DispatchWork;
 const ModelFailure = model_settlement_domain.ModelFailure;
 const ModelFailureClass = model_settlement_domain.ModelFailureClass;
 const ModelInterruptionReply = command_domain.ModelInterruptionReply;
@@ -557,6 +558,12 @@ pub const Store = struct {
 
     /// The one thread that touches `engine`, the scratch and `ids`,
     /// beside the change ring (`OutOfLine`).
+    /// The event set after each commit, null while no dispatch loop waits.
+    pub fn commitWake(self: *Store) *std.atomic.Value(?*std.Io.Event) {
+        const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+        return &owned.commit_wake;
+    }
+
     pub fn queue(self: *Store) *Queue {
         const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
         return &owned.queue;
@@ -1281,6 +1288,20 @@ pub const Store = struct {
         return self.nextCoreWorkForHost(true);
     }
 
+    /// Which of the dispatch loop's commit-driven scans would find work,
+    /// in one round; `paused` is whether new Turns are held.
+    pub fn dispatchWork(self: *Store, paused: bool) !DispatchWork {
+        return self.queue().run(dispatchWorkHeld, .{ self, paused });
+    }
+
+    fn dispatchWorkHeld(self: *Store, paused: bool) !DispatchWork {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: store_access.Access(.survey, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, model_admission_domain.dispatchWork(&access, paused));
+    }
+
     pub fn nextCoreWorkForHost(self: *Store, include_mcp: bool) !?CoreWork {
         return self.queue().run(nextCoreWorkHeld, .{ self, include_mcp });
     }
@@ -1727,6 +1748,10 @@ const OutOfLine = struct {
     /// point releases the Store. The dispatch loop reads controls again
     /// only when it moved, so a lost control hint delays nothing.
     control_generation: std.atomic.Value(u64),
+    /// Set after each advance of `commit_generation`, when given: the
+    /// dispatch loop waits on it, so a commit from any thread ends that
+    /// wait at once. Its owner outlives every entry point.
+    commit_wake: std.atomic.Value(?*std.Io.Event),
     scratch: Scratch align(scratch_align),
 };
 
@@ -1769,6 +1794,7 @@ fn createRing() error{OutOfMemory}!*change_ring.Ring {
     const bytes = std.heap.page_allocator.rawAlloc(@sizeOf(OutOfLine), .of(OutOfLine), @returnAddress()) orelse return error.OutOfMemory;
     const owned: *OutOfLine = @ptrCast(@alignCast(bytes));
     owned.control_generation = .init(0);
+    owned.commit_wake = .init(null);
     const ring: *change_ring.Ring = &owned.ring;
     // Every scalar takes Ring's own default; the columns stay unwritten, since
     // only entries below `len` are read.
@@ -1909,6 +1935,7 @@ pub const Entry = struct {
                 std.debug.panic("rows of Session {s} changed, but the entry point that changed them did not touch it", .{&id});
             const generation = store.commit_generation.fetchAdd(1, .release) + 1;
             store.changes.record(generation, &store.touched);
+            if (store.commitWake().load(.acquire)) |wake| wake.set(store.io);
         }
         self.trace.mark(.complete);
         if (@import("builtin").is_test) if (self.borrowed) store.queue().giveBack();

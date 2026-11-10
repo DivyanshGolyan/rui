@@ -209,6 +209,41 @@ pub fn owedStopKey(buffer: []u8, child: []const u8, cause: []const u8, position:
     return std.fmt.bufPrint(buffer, "rui.core/stop/{s}/{s}/{d}", .{ child, cause, position });
 }
 
+/// The reads that say whether `nextCoreWork` and `admitNextActionAttempt`
+/// would find work, queued into one round the dispatch loop shares with
+/// the model admission reads (`model_admission.dispatchWork`).
+pub const WorkProbe = struct {
+    stop: owed_stop.Result = undefined,
+    ending: owed_ending.Result = undefined,
+    forward: forward_domain.next.Result = undefined,
+    core_action: next_core_action.Result = undefined,
+    mcp_action: next_mcp_action.Result = undefined,
+    bash_action: next_action_attempt.Result = undefined,
+
+    pub fn queue(probe: *WorkProbe, a: anytype) void {
+        const names: CoreNames = .of();
+        a.read(owed_stop, .{}, &probe.stop);
+        a.read(next_mcp_action, .{}, &probe.mcp_action);
+        a.read(owed_ending, .{}, &probe.ending);
+        a.read(forward_domain.next, .{}, &probe.forward);
+        a.read(next_core_action, .{ .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &probe.core_action);
+        a.read(next_action_attempt, .{ .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &probe.bash_action);
+    }
+
+    /// An owed stop, an owed ending, a feed hop or a core tool call.
+    pub fn core(probe: *const WorkProbe) bool {
+        return probe.stop != null or probe.ending != null or probe.forward != null or probe.core_action != null;
+    }
+
+    pub fn mcp(probe: *const WorkProbe) bool {
+        return probe.mcp_action != null;
+    }
+
+    pub fn bash(probe: *const WorkProbe) bool {
+        return probe.bash_action != null;
+    }
+};
+
 pub fn nextCoreWork(a: anytype, include_mcp: bool) !?CoreWork {
     var stop: owed_stop.Result = undefined;
     var next: next_core_action.Result = undefined;

@@ -25,6 +25,21 @@ pub const Outcome = union(enum) {
 /// reads whether new Turns are held, which a resume moves.
 const AdmissionKey = struct { generation: u64, slot_changes: u64, paused: bool };
 
+/// Which commit-driven scans would find work, as one Store round read it
+/// (`Store.dispatchWork`). A hint: each scan still selects for itself.
+pub const Work = struct {
+    /// An owed stop, an owed ending, a feed hop or a core tool call.
+    core: bool = true,
+    mcp: bool = true,
+    bash: bool = true,
+    message: bool = true,
+    tool_continuation: bool = true,
+};
+
+/// `Work` reads only Store rows, which a commit moves, and whether new
+/// Turns are held, which picks the message selection.
+const WorkKey = struct { generation: u64, paused: bool };
+
 /// The retry scans read Store rows, which a commit moves, and skip the
 /// Operations execution slots hold, which a slot change moves. A scheduled
 /// retry also falls due by time alone (`State.next_retry_unix_ms`).
@@ -67,6 +82,9 @@ pub const State = struct {
     idle_admission: ?AdmissionKey = null,
     /// The commit generation of the last slot-free core work scan that found nothing.
     idle_core_generation: ?u64 = null,
+    /// The last work read and the facts before it. It stands until a
+    /// commit or a pause moves the key, so slot changes reuse it.
+    work: ?struct { key: WorkKey, found: Work } = null,
     retained_cleanup_at: ?std.Io.Clock.Timestamp = null,
     capacity_was_full: bool = false,
 };
@@ -130,23 +148,43 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
     }
     const scanned = if (state.idle_admission) |previous| std.meta.eql(previous, admission_key) else false;
     var found_nothing = true;
+    const core_due = state.idle_core_generation != admission_key.generation;
+    // One round says which of the scans below would find work, so a commit
+    // costs that round rather than an empty scan of each kind.
+    const work_key: WorkKey = .{ .generation = admission_key.generation, .paused = admission_key.paused };
+    const work_stands = if (state.work) |kept| std.meta.eql(kept.key, work_key) else false;
+    if (!work_stands and (core_due or !scanned)) {
+        state.work = null;
+        state.work = .{ .key = work_key, .found = try context.scanWork(admission_key.paused) };
+    }
+    const work: Work = if (state.work) |kept| kept.found else .{};
     // Core calls, owed stops and MCP admission take no execution slot.
     // Their shared empty scan reruns only once a commit moves the generation.
-    if (state.idle_core_generation != admission_key.generation) switch (context.runCoreAction()) {
-        .admitted => {
-            state.idle_core_generation = null;
-            state.idle_admission = null;
-            return true;
-        },
-        .retry_later => state.idle_core_generation = null,
-        .no_work => state.idle_core_generation = admission_key.generation,
-    };
+    if (core_due) {
+        if (!work.core and !work.mcp) {
+            state.idle_core_generation = admission_key.generation;
+        } else switch (context.runCoreAction()) {
+            .admitted => {
+                state.idle_core_generation = null;
+                state.idle_admission = null;
+                return true;
+            },
+            .retry_later => state.idle_core_generation = null,
+            .no_work => state.idle_core_generation = admission_key.generation,
+        }
+    }
     for (state.preference, 0..) |kind, index| {
         if (context.dispatchFenced() or context.freeSlots() == 0) {
             found_nothing = false;
             break;
         }
         if (scanned and kind != .retry) continue;
+        switch (kind) {
+            .bash => if (!work.bash) continue,
+            .message => if (!work.message) continue,
+            .tool_continuation => if (!work.tool_continuation) continue,
+            .retry => {},
+        }
         const admission = switch (kind) {
             .bash => if (context.bashPreparationOpen()) context.admitBash() else continue,
             .retry, .message, .tool_continuation => blk: {
@@ -279,6 +317,10 @@ const Recording = struct {
     retry_admission: Admission = .no_work,
     scheduled_retry: ScheduledRetry = .none,
     unix_ms: ?u64 = 1_000_000,
+    work: Work = .{},
+    work_fence: bool = false,
+    work_scans: usize = 0,
+    work_paused: ?bool = null,
     new_admission: Admission = .no_work,
     continuation_admission: Admission = .no_work,
     completions_available: usize = 0,
@@ -432,6 +474,13 @@ const Recording = struct {
     fn admitRetry(self: *Recording) Admission {
         self.record(.admit_retry);
         return self.retry_admission;
+    }
+
+    fn scanWork(self: *Recording, paused: bool) error{Fence}!Work {
+        self.work_scans += 1;
+        self.work_paused = paused;
+        if (self.work_fence) return error.Fence;
+        return self.work;
     }
 
     fn scheduledRetry(self: *const Recording) ScheduledRetry {
@@ -978,6 +1027,68 @@ test "a retry admission that ran no scan keeps the retry scans due" {
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 2), context.count(.recover_retry));
     try std.testing.expectEqual(@as(usize, 2), context.count(.admit_retry));
+}
+
+test "one work read per commit or pause says which scans run" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .work = .{ .core = false, .mcp = false, .bash = false, .message = false, .tool_continuation = false } };
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    // Nothing to find: the read replaces every commit-driven scan.
+    try std.testing.expectEqual(@as(usize, 1), context.work_scans);
+    try std.testing.expectEqual(@as(usize, 0), context.count(.run_core));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_bash));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_continuation));
+    // The retry scans read what slots hold, so they keep their own rule.
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
+    // A slot change moves no Store row: the read stands.
+    context.slot_changes += 1;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.work_scans);
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
+    // A commit moves it, and only the kinds it names scan.
+    context.generation += 1;
+    context.work.message = true;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.work_scans);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_bash));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.run_core));
+    // A pause picks another message selection, with no commit.
+    context.paused = true;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.work_scans);
+    try std.testing.expectEqual(@as(?bool, true), context.work_paused);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_new));
+    // Core work or an MCP call alone runs the slot-free scan.
+    context.generation += 1;
+    context.work = .{ .core = false, .mcp = true, .bash = false, .message = false, .tool_continuation = false };
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.run_core));
+}
+
+test "a kind that stays named keeps its own empty-scan rule within one work read" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0 };
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.work_scans);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+    // The slot change rescans the named kinds without reading work again.
+    context.slot_changes += 1;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.work_scans);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_new));
+}
+
+test "a work read that fails ends the turn before any scan" {
+    var context = Recording{ .provider = true, .free = 1, .work_fence = true, .new_admission = .admitted };
+    var state: State = .{};
+    try std.testing.expectEqual(Outcome.terminate, run(&state, &context));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.run_core));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
 }
 
 test "MCP resolution runs before execution slot admission even at capacity" {

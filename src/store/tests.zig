@@ -2921,6 +2921,13 @@ test "production turn preserves skipped continuation preference through actual S
                     self.action = admission.permit.consume() catch unreachable;
                     return .admitted;
                 }
+                pub fn scanWork(self: *@This(), paused: bool) error{Fence}!turn.Work {
+                    const found = self.storage.dispatchWork(paused) catch |err| {
+                        self.failure = err;
+                        return error.Fence;
+                    };
+                    return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation };
+                }
                 pub fn scheduledRetry(_: *const @This()) turn.ScheduledRetry {
                     return .unknown;
                 }
@@ -6561,6 +6568,25 @@ test "retryable stream rejections retain only the settling Attempt diagnostic th
     }.run);
 }
 
+test "an entry point that changed rows sets the commit wake, and a read leaves it unset" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var wake: std.Io.Event = .unset;
+            storage.commitWake().store(&wake, .release);
+            defer storage.commitWake().store(null, .release);
+            _ = try storage.dispatchWork(false);
+            try std.testing.expect(!wake.isSet());
+            _ = try configureTestSession(&storage, "wake-config");
+            try std.testing.expect(wake.isSet());
+        }
+    }.run);
+}
+
 test "retry settlement adds actual entropy after the provider deadline" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -9091,6 +9117,7 @@ const EntryPoint = enum {
     settleActionAttempt,
     recoverOneUncertainAction,
     tryAdmitNextModelRetry,
+    dispatchWork,
     operationSupersededByControl,
     withDispatchHandoff,
     claimModelAuthRefresh,
@@ -9162,6 +9189,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .settleActionAttempt = 3,
     .recoverOneUncertainAction = 1,
     .tryAdmitNextModelRetry = 1,
+    .dispatchWork = 1,
     .operationSupersededByControl = 1,
     .withDispatchHandoff = 1,
     .claimModelAuthRefresh = 2,
@@ -9883,6 +9911,9 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, null) == null);
             meter.stop(.tryAdmitNextModelRetry);
+            meter.start();
+            _ = try storage.dispatchWork(false);
+            meter.stop(.dispatchWork);
             meter.start();
             try std.testing.expect(!try storage.recoverOneExhaustedModelAttempt(ActiveOperationFilter.empty()));
             meter.stop(.recoverOneExhaustedModelAttempt);
