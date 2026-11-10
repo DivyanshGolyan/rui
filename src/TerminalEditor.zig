@@ -178,7 +178,10 @@ const Selection = keymap.Selection;
 pub fn selectEvent(comptime keys: anytype, event: vaxis.vxfw.Event, pasting: bool) Selection(@TypeOf(keys).Action) {
     return switch (event) {
         .paste_start => .text,
-        .paste_end, .invalid_key => .refused,
+        .paste_end => .refused,
+        // A malformed key sequence is malformed text: the composer rejects
+        // its line.
+        .invalid_key => .text,
         .key_press => |pressed| if (pasting) .text else selectKey(keys, pressed),
         else => .none,
     };
@@ -300,7 +303,12 @@ pub fn appEvent(self: *Editor, comptime keys: anytype, event: vaxis.vxfw.Event, 
             self.reject(.invalid);
             break :blk .none;
         } else self.key(pressed, pasting),
-        .invalid_key => .{ .refused = .invalid },
+        // A malformed key sequence rejects the line as malformed text does;
+        // the line stays shown until Enter reports and clears it.
+        .invalid_key => blk: {
+            self.reject(.invalid);
+            break :blk .none;
+        },
         else => .none,
     };
     const Outcome = keymap.Outcome(@TypeOf(keys).Action);
@@ -471,7 +479,7 @@ fn classify(value: vaxis.Key) Press {
     if (value.matchExact(vaxis.Key.tab, .{})) return .{ .edit = .tab };
     // Alt-Enter adds a line in every form: Ghostty and other terminals send
     // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.
-    if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .alt = true }) or value.matchExact('j', .{ .ctrl = true })) return .{ .edit = .newline };
+    if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .ctrl = true })) return .{ .edit = .newline };
     if (value.matchExact(vaxis.Key.left, .{}) or value.matchExact('b', .{ .ctrl = true })) return .{ .edit = .left };
     if (value.matchExact(vaxis.Key.right, .{}) or value.matchExact('f', .{ .ctrl = true })) return .{ .edit = .right };
     if (value.matchExact('a', .{ .ctrl = true })) return .{ .edit = .line_start };
@@ -1007,7 +1015,7 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
     // Bound chords, plain text and marked paste keep their meaning.
     var editor: Editor = .{ .buffer = &storage };
     var stream: Typing = .{};
-    _ = stream.send(&editor, "a. b\x1bb\x1bj\x1b[200~c. d\x1b[201~");
+    _ = stream.send(&editor, "a. b\x1bb\n\x1b[200~c. d\x1b[201~");
     try std.testing.expectEqualStrings("a. \nc. db", storage[0..editor.length]);
     try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "\r"));
 }

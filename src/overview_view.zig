@@ -472,6 +472,7 @@ pub const Panel = union(enum) {
 /// commands, which its table lists.
 const help_text = "Up/Down select · Shift-Up/Down always · Home/End first/last on empty draft\n" ++
     "Enter opens · Alt-A archives · Ctrl-X twice stops · Type a task to start\n" ++
+    "Shift-Enter or Ctrl-J adds a line\n" ++
     "/ lists commands · Up/Down choose · Tab or Enter takes it\n" ++
     "Esc/Ctrl-G closes list, panel, draft, settings · Ctrl-C/Ctrl-D leaves\n" ++
     "\n" ++ std.mem.trimEnd(u8, commands.help, "\n");
@@ -6722,6 +6723,7 @@ test "/help shows the overview's keys and commands in the Sessions' rows until E
     for ([_][]const u8{
         " Up/Down select · Shift-Up/Down always · Home/End first/last on empty draft",
         " Enter opens · Alt-A archives · Ctrl-X twice stops · Type a task to start",
+        " Shift-Enter or Ctrl-J adds a line",
         " / lists commands · Up/Down choose · Tab or Enter takes it",
         " Esc/Ctrl-G closes list, panel, draft, settings · Ctrl-C/Ctrl-D leaves",
         "",

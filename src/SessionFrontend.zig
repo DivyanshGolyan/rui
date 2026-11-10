@@ -2363,7 +2363,10 @@ const HeldFrontend = struct {
     }
 
     fn destroy(held: *HeldFrontend) void {
-        held.self.submission.cancel();
+        // As `settle` does: a read a key started, such as /help's page, may
+        // still be running, and it borrows the frontend freed below.
+        held.self.stop();
+        _ = held.self.joinReader();
         _ = held.self.submission.join();
         held.self.submission.close();
         held.screen.deinit();
@@ -2469,6 +2472,21 @@ const HeldFrontend = struct {
         return file;
     }
 };
+
+test "a held frontend stops a read still running and joins it before it is freed" {
+    const Worker = struct {
+        var stopped: std.atomic.Value(bool) = .init(false);
+        fn read(_: *anyopaque, task: *Task) !void {
+            while (!task.cancellation.stopped.load(.acquire)) std.Thread.yield() catch {};
+            stopped.store(true, .release);
+            return error.Cancelled;
+        }
+    };
+    const held = try HeldFrontend.create();
+    try held.self.reader.start(std.testing.io, &held.self, Worker.read);
+    held.destroy();
+    try std.testing.expect(Worker.stopped.load(.acquire));
+}
 
 /// Terminal bytes into the frontend's App, as `HeldFrontend.keys`.
 fn sendKeys(frontend: *Self, bytes: []const u8) !void {
@@ -3667,6 +3685,56 @@ test "malformed UTF-8 rejects its line, and typing after it reaches the draft" {
         try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "› hi") != null);
         try held.keys("\x15");
         try held.settle();
+    }
+}
+
+test "Alt-J adds no line and keeps the draft; Ctrl-J, Shift-Enter and Alt-Enter each add one" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try held.settle();
+    const Case = struct { key: []const u8, draft: []const u8 };
+    for ([_]Case{
+        // Alt-J: legacy ESC prefix, Kitty and modifyOtherKeys.
+        .{ .key = "\x1bj", .draft = "onetwo" },
+        .{ .key = "\x1b[106;3u", .draft = "onetwo" },
+        .{ .key = "\x1b[27;3;106~", .draft = "onetwo" },
+        // Ctrl-J, Shift-Enter, and Alt-Enter as ESC CR, Kitty and modifyOtherKeys.
+        .{ .key = "\n", .draft = "one\ntwo" },
+        .{ .key = "\x1b[13;2u", .draft = "one\ntwo" },
+        .{ .key = "\x1b\r", .draft = "one\ntwo" },
+        .{ .key = "\x1b[13;3u", .draft = "one\ntwo" },
+        .{ .key = "\x1b[27;3;13~", .draft = "one\ntwo" },
+    }) |case| {
+        errdefer std.debug.print("key={any}\n", .{case.key});
+        held.self.input.clear();
+        try held.keys("one");
+        try held.keys(case.key);
+        try held.keys("two");
+        try held.settle();
+        try std.testing.expectEqualStrings(case.draft, held.self.input.composition().bytes);
+        try std.testing.expectEqual(null, held.self.input.submitted);
+    }
+}
+
+test "a malformed key sequence rejects its line like malformed text: kept until Enter reports and clears it" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try held.settle();
+    // Kitty and modifyOtherKeys keys past U+10FFFF: vaxis reports each as
+    // an invalid key.
+    for ([_][]const u8{ "\x1b[1114112u", "\x1b[27;3;1114112~" }) |invalid| {
+        errdefer std.debug.print("invalid={any}\n", .{invalid});
+        try held.keys("kept");
+        try held.keys(invalid);
+        try held.settle();
+        try std.testing.expectEqualStrings("kept", held.self.input.composition().bytes);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "› kept") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Input rejected") == null);
+        try held.keys("\r");
+        try held.settle();
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Input rejected; nothing sent.") != null);
+        try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+        try std.testing.expectEqual(null, held.self.input.submitted);
     }
 }
 

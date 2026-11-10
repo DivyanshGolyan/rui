@@ -3376,6 +3376,15 @@ test "bytes that are not text reject the composer's line at Enter, as in a conve
     try expectStarted(rig, "typed\xff\r", null);
     // The rejected line is gone; the next one starts alone.
     try expectStarted(rig, "next\r", "next");
+    // A malformed key sequence (Kitty, past U+10FFFF) rejects the line the
+    // same way: it stays as typed until Enter, which reports and clears it.
+    try std.testing.expect(try rig.press("kept\x1b[1114112u") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("kept", rig.overview.composerDraft().bytes);
+    try std.testing.expectEqual(null, rig.overview.state.notice);
+    try expectStarted(rig, "\r", null);
+    try std.testing.expectEqualStrings("! Not valid text; nothing sent.", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("", rig.overview.composerDraft().bytes);
 }
 
 test "Shift-Enter and Alt-Enter add a line in every encoding, and a paste keeps its line ends" {
