@@ -19,6 +19,7 @@
 //! that many from 1; `RUI_H2_FAULT_TRACE=1` names each seed as it starts,
 //! for a crash, which prints none.
 const std = @import("std");
+const test_poll = @import("test_poll");
 const h2 = @import("h2.zig");
 const c = @import("h2_c");
 const Peer = @import("testing/Peer.zig");
@@ -554,7 +555,14 @@ test "seeded faults: a stream the peer reads after queueing GOAWAY above its las
         try peer.pump();
         try client.wait(1);
     }
-    try peer.awaitDelivery();
+    // The HEADERS are in the peer's socket, unread, before the GOAWAY is queued.
+    const Socket = struct {
+        fn readable(socket: std.posix.fd_t) !bool {
+            var poll = [_]std.c.pollfd{.{ .fd = socket, .events = std.c.POLL.IN, .revents = 0 }};
+            return std.c.poll(&poll, 1, 0) > 0;
+        }
+    };
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), peer.connections.items[0].socket, Socket.readable);
     try std.testing.expectEqual(@as(usize, 0), peer.streams.items.len);
     run.goaway(peer, peer.connections.items[0]);
     try std.testing.expectEqual(@as(i32, 0), run.goaways.items[0].last);
