@@ -30,8 +30,14 @@ A PR that merely trails `main` merges as it is.
 
 Before splitting work across lanes and again before opening a PR, compare its changed files with open PRs, including PRs opened since work began.
 `open_pr.py open` runs that comparison on the committed branch; pass `--base PARENT` for a stacked PR.
-The check needs GitHub access and reports shared files, not semantic dependencies or PRs opened afterward.
+It also lists open PRs whose added lines use a top-level or public Zig or Python name the branch renames or removes, which [pr_overlap.py](../../tests/ci/pr_overlap.py) reports alone too.
+The check needs GitHub access and reports shared files and those names, not other semantic dependencies, files GitHub shows no patch for, or PRs opened afterward.
 Git can merge edits to the same file without a conflict even when one removes a name the other uses.
+
+A change that renames, removes or changes the signature of a name other files use lands only when no open PR uses it, or after it fixes those PRs too.
+Before landing one, run `python3 tests/ci/pr_overlap.py` again and search open PRs' diffs for each changed signature, which it does not detect.
+Fix each dependent PR on its branch, with its owner's lane told, or wait until it lands.
+#1180's `screen_build` rename cost four TUI PRs a merge of `main` and a fresh CI run each.
 PRs run independently only when they touch different files.
 Work sharing a file with an open PR stacks on that PR, including across lanes.
 Land a stack in order.
