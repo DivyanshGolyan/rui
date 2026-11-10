@@ -76,12 +76,6 @@ const Fate = enum {
     reset,
     /// REFUSED_STREAM before any answer: proven unprocessed.
     refused,
-    /// Above this connection's GOAWAY last stream id: proven unprocessed.
-    abandoned,
-
-    fn provenUnprocessed(self: Fate) bool {
-        return self == .refused or self == .abandoned;
-    }
 };
 
 const Goaway = struct { connection: *Peer.Connection, last: i32 };
@@ -108,6 +102,15 @@ const Run = struct {
         return &self.fates.items[stream.index];
     }
 
+    /// REFUSED_STREAM, or a stream id above its connection's GOAWAY. Taken
+    /// from the GOAWAY itself, since the peer may read a stream's HEADERS
+    /// after it queued the GOAWAY and before it sent it.
+    fn provenUnprocessed(self: *Run, stream: *const Peer.Stream) bool {
+        if (self.fate(stream).* == .refused) return true;
+        const last = self.goawayLast(stream.connection) orelse return false;
+        return stream.id > last;
+    }
+
     fn goawayLast(self: *Run, connection: *const Peer.Connection) ?i32 {
         for (self.goaways.items) |sent| if (sent.connection == connection) return sent.last;
         return null;
@@ -130,10 +133,8 @@ const Run = struct {
         const self: *Run = @ptrCast(@alignCast(peer.options.context.?));
         const state = self.fate(stream);
         if (state.* != .open) return;
-        if (self.goawayLast(stream.connection)) |last| if (stream.id > last) {
-            state.* = .abandoned;
-            return;
-        };
+        // Above a GOAWAY's last stream id: never processed.
+        if (self.goawayLast(stream.connection)) |last| if (stream.id > last) return;
         const roll = self.random.random().uintLessThan(u8, 100);
         if (roll < 55) {
             peer.respond(stream, 200, self.requestOf(stream).response);
@@ -180,7 +181,7 @@ const Run = struct {
                     state.* = .refused;
                     self.counts.refused += 1;
                 },
-                .answered, .reset, .refused, .abandoned => {},
+                .answered, .reset, .refused => {},
             }
         }
         for (peer.connections.items) |connection| {
@@ -201,7 +202,7 @@ const Run = struct {
             if (stream.connection != connection) continue;
             switch (self.fate(stream).*) {
                 .answered, .head_only, .reset, .deferred => last = @max(last, stream.id),
-                .open, .refused, .abandoned => {},
+                .open, .refused => {},
             }
         }
         // Sometimes also keep an unanswered stream below it, to be answered.
@@ -211,11 +212,6 @@ const Run = struct {
                 break;
             }
         };
-        for (peer.streams.items) |stream| {
-            if (stream.connection != connection or stream.id <= last) continue;
-            const state = self.fate(stream);
-            if (state.* == .open) state.* = .abandoned;
-        }
         const code: u32 = if (self.chance(80)) c.NGHTTP2_NO_ERROR else c.NGHTTP2_INTERNAL_ERROR;
         peer.goaway(connection, last, code);
         self.goaways.append(std.testing.allocator, .{ .connection = connection, .last = last }) catch @panic("OOM");
@@ -424,6 +420,18 @@ fn readyNow(client: *h2.Client) bool {
     return std.c.poll(armed.pollfds.ptr, @intCast(armed.pollfds.len), 0) > 0;
 }
 
+/// The first attempt of request `id` that was followed by another though
+/// the peer never proved it unprocessed.
+fn unprovenResend(run: *Run, peer: *const Peer, id: []const u8) ?*Peer.Stream {
+    var last: ?*Peer.Stream = null;
+    for (peer.streams.items) |stream| {
+        if (!std.mem.eql(u8, stream.test_id.items, id)) continue;
+        if (last) |earlier| if (!run.provenUnprocessed(earlier)) return earlier;
+        last = stream;
+    }
+    return null;
+}
+
 fn check(seed: u64, run: *Run, peer: *Peer) !void {
     for (run.requests, 0..) |*request, index| {
         if (request.finals > 1) return fail(seed, "request {d} saw {d} final heads", .{ index, request.finals });
@@ -437,12 +445,12 @@ fn check(seed: u64, run: *Run, peer: *Peer) !void {
         if (request.retired != 1) return fail(seed, "request {d} retired its body {d} times", .{ index, request.retired });
         const end = request.stream.end().?;
 
+        if (unprovenResend(run, peer, request.id())) |earlier|
+            return fail(seed, "request {d} was sent again after stream {d}, which the peer left {s}", .{ index, earlier.id, @tagName(run.fate(earlier).*) });
         var attempts: usize = 0;
         var last: ?*Peer.Stream = null;
         for (peer.streams.items) |stream| {
             if (!std.mem.eql(u8, stream.test_id.items, request.id())) continue;
-            if (last) |earlier| if (!run.fate(earlier).provenUnprocessed())
-                return fail(seed, "request {d} was sent again after stream {d}, which the peer left {s}", .{ index, earlier.id, @tagName(run.fate(earlier).*) });
             attempts += 1;
             last = stream;
         }
@@ -501,4 +509,67 @@ test "seeded faults: every stream settles once, with true send evidence and no r
     const ran = [_]u64{ totals.faults.short, totals.faults.again, totals.faults.cut, totals.goaway, totals.refused, totals.reset, totals.peer_close, totals.outage, totals.resent, totals.cancelled, totals.retired };
     for (ran) |value| try std.testing.expect(value > 0);
     for ([_]policy.Cause{ .complete, .connection_lost, .reset_by_peer, .connect_failed, .sink_refused }) |cause| try std.testing.expect(totals.causes.get(cause) > 0);
+}
+
+test "seeded faults: a stream the peer reads after queueing GOAWAY above its last id counts as unprocessed" {
+    // macOS delivers loopback segments late, so a pump after `act` queued a
+    // GOAWAY can read a new stream's HEADERS before the GOAWAY goes out.
+    // Scripted here in that order, with a body larger than the stream
+    // window so the request never completes at the peer.
+    const allocator = std.testing.allocator;
+    var requests: [1]Request = .{.{}};
+    requests[0].id_len = 1;
+    requests[0].id_text[0] = '0';
+    requests[0].body = try allocator.alloc(u8, 90_000);
+    defer allocator.free(requests[0].body);
+    fill(requests[0].body, 0);
+    var sink: [8]u8 = undefined;
+    var run: Run = .{ .random = .init(1), .requests = &requests, .max_streams = 100 };
+    defer run.fates.deinit(allocator);
+    defer run.goaways.deinit(allocator);
+    const peer = try Peer.start(allocator, .{ .on_request = Run.onRequest, .context = &run });
+    defer peer.stop();
+    var client: h2.Client = undefined;
+    try client.init(allocator, std.testing.io, .{ .stream_capacity = 4, .inactivity_ns = 60 * std.time.ns_per_s, .connect_timeout_ns = 30 * std.time.ns_per_s });
+    defer client.deinit();
+    defer if (Record.of(&requests[0].stream).state != .idle) {
+        client.cancel(&requests[0].stream);
+        requests[0].stream.deinit();
+    };
+    const endpoint = try client.addEndpoint(peer.url());
+    try client.prepare(&requests[0].stream, .{
+        .endpoint = endpoint,
+        .fields = &.{.{ .name = "x-test-id", .value = requests[0].id() }},
+        .body = .{ .bytes = requests[0].body },
+        .sink = .{ .buffer = &sink },
+    });
+    client.launch(&requests[0].stream);
+
+    // Until the client is ready and has sent HEADERS the peer has not read.
+    var steps: u32 = 0;
+    while (Engine.of(&client).connections_len == 0 or Engine.of(&client).connections[0].streams == 0) : (steps += 1) {
+        if (steps > 2000) return error.Timeout;
+        try client.drive(&run);
+        if (Engine.of(&client).connections_len > 0 and Engine.of(&client).connections[0].streams > 0) break;
+        try peer.pump();
+        try client.wait(1);
+    }
+    try peer.awaitDelivery();
+    try std.testing.expectEqual(@as(usize, 0), peer.streams.items.len);
+    run.goaway(peer, peer.connections.items[0]);
+    try std.testing.expectEqual(@as(i32, 0), run.goaways.items[0].last);
+    // Reads stream 1's HEADERS, then sends the GOAWAY.
+    try peer.pump();
+    try std.testing.expectEqual(@as(usize, 1), peer.streams.items.len);
+
+    // The client replays stream 1 on a new connection, as GOAWAY proves it may.
+    steps = 0;
+    while (peer.streams.items.len < 2) : (steps += 1) {
+        if (steps > 2000) return error.Timeout;
+        try client.drive(&run);
+        try peer.pump();
+        try client.wait(1);
+    }
+    try std.testing.expectEqual(peer.streams.items[0].test_id.items.len, 1);
+    try std.testing.expectEqual(@as(?*Peer.Stream, null), unprovenResend(&run, peer, requests[0].id()));
 }
