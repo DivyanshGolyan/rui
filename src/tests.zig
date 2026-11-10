@@ -1,4 +1,14 @@
 test {
+    _ = @import("AppScreen.zig");
+    _ = @import("PermissionCard.zig");
+    _ = @import("widget_style.zig");
+    _ = @import("InputArea.zig");
+    _ = @import("GroupedList.zig");
+    _ = @import("Palette.zig");
+    _ = @import("Composer.zig");
+    _ = @import("Transcript.zig");
+    _ = @import("Root.zig");
+    _ = @import("TerminalApp.zig");
     _ = @import("Installation.zig");
     _ = @import("release_candidate.zig");
     _ = @import("upgrade_process.zig");
@@ -83,6 +93,9 @@ test {
     _ = @import("client.zig");
     _ = @import("cli.zig");
     _ = @import("cli_args.zig");
+    _ = @import("cli_grammar.zig");
+    _ = @import("cli_option_names.zig");
+    _ = @import("serve_grammar.zig");
     _ = @import("TerminalText.zig");
     _ = @import("SessionInput.zig");
     _ = @import("SessionSubmission.zig");

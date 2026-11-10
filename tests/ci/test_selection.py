@@ -442,6 +442,20 @@ class SelectionTest(unittest.TestCase):
                 for family in ("targets", "native_targets"):
                     self.assertNotIn("check", landing[family])
 
+    def test_host_serve_grammar_does_not_select_human_cli_for_host_edits(self):
+        result = select(["src/server_host.zig"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertNotIn("human-cli-integration", result[family])
+        result = select(["src/serve_grammar.zig"], "review", AVAILABLE)
+        for target in ("host-launch-integration", "request-wait-integration"):
+            self.assertTrue(covered(target, set(result["targets"])), target)
+        # The grammar engine keeps every gate that cli_args.zig selected.
+        for path in ("src/cli_grammar.zig", "src/cli_option_names.zig"):
+            targets = set(select([path], "review", AVAILABLE)["targets"])
+            for target in ("human-cli-integration", "request-wait-integration", "admission-debug-integration",
+                           "measurement-check", "upgrade-integration", "installer-integration"):
+                self.assertTrue(covered(target, targets), (path, target))
+
     def test_strict_paths_never_retry(self):
         # Each of these selected retryable suites before strictness decided retries.
         for paths in (["tests/integration/bash_integration.py"], ["src/store.zig"], ["src/server.zig"],
@@ -785,8 +799,8 @@ class SelectionTest(unittest.TestCase):
         # reaches every case check runs; a fixture script selects only the
         # targets that run it.
         for path, owners in (("host_process.py", {"check", "launch-frame-integration", "ts-client"}),
-                             ("control_fixture.py", {"control-integration", "human-cli-integration",
-                                                     "dispatch-integration", "transport-h2-integration"}),
+                             ("control_fixture.py", {"control-integration", "dispatch-integration",
+                                                     "transport-h2-integration"}),
                              ("canonical_fixture.py", {"human-cli-integration", "request-wait-integration"})):
             with self.subTest(path=path):
                 result = select([f"tests/integration/{path}"], "review", AVAILABLE)
@@ -866,9 +880,6 @@ class SelectionTest(unittest.TestCase):
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 self.assertEqual(result["targets"] + result["native_targets"], [])
-        # A blocking fixture that imports a harness runs when it changes.
-        self.assertIn("human-cli-integration",
-                      select(["tests/integration/terminal_input_replay.py"], "review", AVAILABLE)["targets"])
 
     def test_missing_required_target_is_an_error_not_a_skip(self):
         with self.assertRaisesRegex(ValueError, "absent"):

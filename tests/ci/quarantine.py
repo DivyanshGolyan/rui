@@ -24,8 +24,19 @@ FIELDS = {"signature", "path", "issue", "owner", "added", "expires"}
 MAX_DAYS = 14
 # Strict paths fail for real and are never rerun; so are these suites wherever they live.
 NEVER = re.compile(r"store|recovery|upgrade", re.IGNORECASE)
+# report_issue.py's Zig suffixes; a test name may hold apostrophes, so the suffix ends it.
+ZIG_TEST = re.compile(r"zig test '(.*)' (?:failed(?: \(\w+\))?|terminated with signal \w+)")
 SUMMARY = re.compile(r"^Build Summary: \d+/\d+ steps succeeded \((\d+) failed\)", re.M)
 OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
+
+
+def subject(signature):
+    """The test a signature names: a Zig test's name or a fixture's path, not
+    the failing line, whose call text may mention a Store (`--store`)."""
+    if signature.startswith("zig test "):
+        zig = ZIG_TEST.fullmatch(signature)
+        return zig[1] if zig else signature  # Unparsed: judge all of it.
+    return signature.split(": ", 1)[0]
 
 
 def entries(path=LIST):
@@ -45,7 +56,7 @@ def problems(listed, root):
         seen.add(entry["signature"])
         if not (root / entry["path"]).is_file():
             found.append(f"{name} names {entry['path']}, which does not exist")
-        if strict([entry["path"]]) or NEVER.search(entry["path"]) or NEVER.search(entry["signature"]):
+        if strict([entry["path"]]) or NEVER.search(entry["path"]) or NEVER.search(subject(entry["signature"])):
             found.append(f"{name} is a Store, recovery or upgrade test, which always fails for real")
         if entry["path"].startswith("tests/integration/") and not entry["signature"].startswith(entry["path"] + ": "):
             found.append(f"{name}: a fixture's signature starts with its path, as report_issue.py names it")

@@ -138,7 +138,7 @@ MUTATIONS = (
              model("pages")),
     Mutation("send-latest-view", "sending leaves a frozen inspection for latest conversation", "67f80e38",
              "src/SessionFrontend.zig",
-             "self.dropMessageRequest();\n    try self.terminal.screen.latest();\n}",
+             "self.dropMessageRequest();\n    try self.screen.latest();\n}",
              "self.dropMessageRequest();\n}",
              model("pages")),
     Mutation("ack-frontier", "older captures cannot decrease delivered admission frontier", "3c690817",

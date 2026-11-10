@@ -180,7 +180,6 @@ pub const pending = .{
     "InvalidSince",
     "InvalidTarget",
     "InvalidTemporaryDirectory",
-    "InvalidTerminalInput",
     "InvalidToolName",
     "InvalidUtf8",
     "IsDir",

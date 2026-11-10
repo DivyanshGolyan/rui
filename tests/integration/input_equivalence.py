@@ -30,7 +30,10 @@ def vectors():
             "scenario": "recovery",
             "chunks": [{"hex": data.hex(), "delay_before": 0}],
         }
-        for split in range(1, len(data)):
+        # A lone ESC is the Escape key under App: no window joins it to a
+        # later write (decided, audit 4). Splits after the introducer still
+        # decode once the sequence completes.
+        for split in range(2, len(data)):
             yield {
                 "name": f"TD2-recovery-{encoding}-split-{split}",
                 "scenario": "recovery",

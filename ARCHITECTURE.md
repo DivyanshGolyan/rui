@@ -2393,19 +2393,20 @@ Terminal input and output are required; redirection rejects rather than silently
 Exit, interruption or a disconnected caller never cancels Host work.
 
 **Bounded CLI editor (native terminal-display qualification pending):** The editor owns draft bytes, grapheme cursor and rendering within the frontend's terminal lifetime.
-One terminal byte stream per invocation owns keyboard and paste decoding: draft resets, bank switches and an Action's choice never replace it, terminal replies reach the screen before any editor, an X10 mouse report is framed whole, the sequence that interrupts an OSC is kept, and an editor that did not see a paste begin rejects its remainder.
+App owns keyboard and paste decoding for the invocation; draft resets, bank switches and a permission card never replace its input runtime.
+Terminal replies reach App rather than the editor, and an editor that did not see a paste begin rejects its remainder.
 Its caller supplies storage: up to 65,536 UTF-8 bytes for a Message.
 Validated submission borrows complete bytes; [staged persistent input](#staged-persistent-input) owns sealing, next-draft custody and Admission.
 The editor retains no message history or approval.
 Strict UTF-8 and stateful extended-grapheme segmentation govern edits, including deletion joining previously separate clusters; byte count governs the limit, and uncertain cell widths cannot justify cursor movement.
 Ctrl-D exits only an empty draft; otherwise it deletes the following grapheme or does nothing at the end.
 Marked multiline paste is one Message; ordinary Enter submits when permitted by the submission owner.
-An over-limit, malformed or unsafe draft rejects in full even if later shortened.
-Incomplete UTF-8 or marked paste times out and ends the caller after restoration, preventing delayed tails from becoming another Message or decision.
-The stream, not either terminal reader, owns these deadlines: 80 ms after a bare ESC and 2 s after other incomplete input, counted from the last byte read.
-Once a deadline passes, the input expires before another byte is read, even one already queued.
+A paste that would exceed the draft's byte limit is rejected whole with a notice, preserving the preceding draft and caret.
+Typed text over the limit, or malformed or unsafe input, rejects the draft at its line end even if later shortened.
+App owns incomplete-input handling; Rui imposes no separate decoder deadlines or byte-fragment ordering contract.
 If cursor placement cannot be established safely, decline the edit explicitly without a request and direct the caller to one-shot `session send --to ID < FILE`.
-Restore terminal settings and reset each owned mode independently on all exits, reporting unconfirmed cleanup rather than success after I/O failure.
+The persistent UI uses `vxfw.App` restoration on every exit path and `vaxis.Panic` on a Zig panic.
+Rui does not attest terminal restoration through its exit status; vaxis logs a failed termios restore.
 Only a fresh Enter at an Action's Allow once / Deny choice may decide it; the Host alone validates that exact target.
 Input custody prevents pre-choice typeahead or marked paste from authorizing it while preserving the next draft.
 The provider chooser remains a separate terminal reader, decoding through the same stream and editor.
@@ -2446,18 +2447,15 @@ A malformed key in a supported form is a key whose meaning was lost, so it fails
 A sequence naming a key Rui does not know is still ignored.
 Inside marked paste any ESC other than the end marker rejects the paste, and an end marker beginning at a later ESC, as in ESC ESC `[201~`, still ends it.
 
-The separate provider-choice reader finalizes its prompt by attempting bracketed-paste disable with stdout drainage and exact saved-attribute restoration independently, then reports restoration failure before disable/drain failure before the original input result.
-Input and output may be different terminals: drain stdout after writing its disable sequence, retrying interrupted drainage, then attempt input restoration even if that cleanup effect failed.
-Restoration uses `TCSAFLUSH`: discard unread input from the completed prompt before restoring canonical mode.
-Immediate restoration on Darwin can instead set `PENDIN`, leaving the saved attributes unequal.
-Neither accepted provider input nor a new provider prompt is released while cleanup is unconfirmed.
-Output drainage confirms kernel transmission, not emulator interpretation, and can block; input decoding deadlines do not bound that reader's cleanup.
-It retains its separate post-render fresh-choice drain/flush.
-Conversation consent and restoration instead use the persistent owner below.
+The provider chooser remains a shell prompt before App opens.
+It reads one line through the terminal's ordinary canonical input, leaving echo, editing and signals to the terminal.
+After writing the prompt, it drains stdout and discards queued input before accepting a choice.
+It changes no terminal modes and uses no keyboard decoder or bracketed-paste protocol.
+The caller accepts exactly one provider letter or `d`; EOF defers, and any other line keeps the existing invalid-choice wording, changes no preference and asks again.
+Esc followed by Enter is an invalid choice; there is no immediate Esc notice.
+The terminal owns Ctrl-C and its normal interrupted outcome.
+Conversation consent and restoration use App below; hidden API-key input retains its separate unechoed reader and secret cleanup.
 
-The provider chooser applies every decoded key through the editor and repaints its short line after each edit; Backspace in any encoding deletes a grapheme.
-An unbound chord or a combining mark with nothing to join prints a notice, then shows the prompt and the unchanged choice again.
-A malformed key rejects the choice at Enter.
 The editor does not promise linear total work for arbitrary Unicode editing.
 
 #### Desktop notifications
@@ -2760,19 +2758,25 @@ Each collapsed block keeps its Message's identity while it stays in the copy; a 
 A page asked for before a send, Esc, Ctrl-G or a newer Ctrl-O never opens.
 A Message page never shows or decides an Action.
 Display eviction does not delete saved work.
-Wheel motion arrives as arrow keys through alternate scroll mode 1007, which Rui enables only when the terminal reports it present and reset, and restores on exit; opening never waits for that report. libvaxis `Window.print` lays out and wraps all text: words wrap at spaces, and continuation rows hang under leading spaces and a list or role marker, up to half the width.
+App enables mouse reporting, and wheel events scroll the visible widget.
+Rui does not enable alternate scroll mode 1007.
+libvaxis `Window.print` lays out and wraps text: words wrap at spaces, and continuation rows hang under leading spaces and a list or role marker, up to half the width.
 Rui's pinned vaxis patch keeps wide clusters, window-wide words and words crossing a style change off the row edge.
-`ConversationViewport` keeps retained bytes, styles and the first row in view as a logical line and row within it; `TerminalFrame` budgets regions and counts the Action rows a frame delivers; `SessionScreen` owns libvaxis cells and bounded allocations; and `SessionTerminal` alone owns terminal modes and output. libvaxis's own TTY owner is not used: restoration must attempt every step without waiting on a drain, wait at most one bounded second for output credit, and restore descriptor flags exactly.
+`ConversationViewport` keeps retained bytes, styles and the first row in view as a logical line and row within it.
+The Transcript draws only visible rows, and the Composer shares the draft layout across both screens.
+One `vxfw.App` owns terminal input, modes, output and cell allocation for the Root and its screens.
+Switching screens does not restore or lend the terminal.
 Resize keeps the first browsed line in view and preserves draft bytes and logical cursor; an Action restarts from its top.
 Text uses existing width behavior unless a terminal reports Unicode mode 2027 already enabled.
-The renderer neither enables that mode nor requires Kitty graphics, mouse reporting or a particular emulator.
+The renderer neither enables that mode nor requires Kitty graphics or a particular emulator.
 
-The interface supports at most 49,152 terminal cells, including 24 × 2048 and 192 × 256.
-It checks geometry before allocating grids.
-Larger startup or resize geometry reports `TerminalTooLarge`, restores terminal configuration and gives shrink guidance.
-Cells, retained grapheme allocations and frame bytes share 32 MiB, raised from the extraction's initial 16-MiB limit to accommodate dense Unicode and per-cell SGR at that geometry.
-Resize retires old grids before allocating replacements; the native allocation high-water includes transient frame and resize allocations and platform page rounding.
-Content that exceeds the budget fails explicitly without changing saved work.
+The interface has no cell-count ceiling and follows the window size reported to App.
+There is no minimum window size: shrinking to one cell keeps the draft, its logical caret, any held original and a waiting request.
+Widgets clip their content or omit lower-priority rows; a zero-width or zero-height widget draws nothing.
+Growing the window restores the content without a recovery step, and a waiting request remains answerable without a reading gate.
+App uses an ordinary allocator; 32 MiB is a regression target, not a runtime allocation ceiling.
+The regression test uses 49,152 cells, at 24 × 2048 and 192 × 256, and measures peak backing storage for grids, retained graphemes and a rendered Unicode widget surface, including resize allocations and platform page rounding.
+The test fails above 32 MiB; crossing that target does not terminate the app.
 Standalone zero-width output clusters, clusters wider than eight cells and clusters longer than 64 bytes become visible Unicode escapes in the display copy; a run of one repeated scalar is escaped once with its count.
 Unrepresentable input edits are declined explicitly; an unrepresentable marked paste rolls back to the preceding draft and caret.
 Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab displays as one space.
@@ -2987,71 +2991,34 @@ MCP displays `? <rui_call_description>` (at most 200 decoded bytes), `Tool`, `Se
 A missing, non-string or oversized description falls back to the tool name with those arguments, not a Bash parse.
 The client extracts the label with bounded streaming scratch; it does not interpret the server's schema.
 `/inspect-action` shares this MCP presentation; raw one-shot inspection stays exact.
-A whole Action ends right above the rule; a taller one pages from its top.
-Bash and MCP use the same 256 KiB viewport bound: an oversized Action file is a preview and cannot be approved.
+A permission request replaces the composer's two rules and input rows with a focused card.
+The draft stays hidden, with its bytes and caret intact, until the request is answered or withdrawn.
+A taller command shows `N more lines · shift+↓`; Allow once acts even when some command rows are off screen.
+Bash and MCP use the same bounded viewport for the preview, without an approval veto for content outside it.
 The description is the model's label, never a substitute for the command or MCP arguments.
 Every later line of the command, and every line of stdin, starts with the content mark `│`, and every row such a line, the `?` line or the `$` line wraps onto starts with `┆`, so description, command or stdin text can never pass for the `$`, `Time limit` or `stdin:` lines and a wrapped row never reads as a new line.
 Every line of MCP arguments starts with the same content mark and uses terminal escaping, so JSON cannot impersonate the Tool or Server labels.
-The input row becomes an Allow once / Deny choice with Allow once highlighted.
-One rule decides when it acts.
-Each frame records the option Enter would decide on it: the highlighted option its choice shows, Deny when it shows the draft beside the Action as a reason and the line under the draft says `enter denies the call and sends this`, or none.
-A notice that takes that line without saying so offers nothing; the refusal of an early Enter there says it: `! Not ready; nothing denied · enter denies the call and sends this`.
-Once that frame is delivered and input is then serviced empty, with no key since it was issued, no pending decoder state, no command and nothing left to draw, that frame is offered; this is the only place an offer is made.
-The offer is the decision that frame showed: it stands while nothing has changed since and every later frame shows that same decision.
-A redraw that leaves the choice as it was, such as the clock's minute, keeps it, since the key was sent at the choice it still shows.
-Every input spends the offer first, whatever it does.
-Left, Right and Enter act only when the offer they spent still stands and the option it showed is the Action's current decision; Enter in the draft acts only when that frame showed the draft as the reason and said Enter denies.
-So Enter never confirms an option that is not on screen: a frame that shows another decision, or none, retires the offer even before it is delivered, and after an arrow Enter waits for a frame that shows the move.
-An arrow or Enter that cannot act says why, as does a refused key; a key the choice has no use for, such as Tab, Home, Backspace, Delete or Ctrl-X, does nothing and says nothing.
-A page, resize, width change, completed reading, or a withdrawn, successor or re-adopted Action spends nothing but retires the offer: no Enter decides until a frame drawn after that change is delivered and input is then serviced empty.
-The run loop does that for every frame it draws, so a quick second Enter after a refused one may decide.
-Spending never revokes or forces a frame, so a paste costs no frame per byte.
-There are no letter shortcuts.
-Typing or pasting beside the Action moves the input row to the retained draft, and the line under it says `enter denies the call and sends this · esc back to the choice`.
-Typing a message denies the call and sends the reason to the agent: Enter there, under the same offer rule, sends the draft as a Message and then denies the Action.
-A slash command runs as anywhere else and denies nothing.
-A draft that is exactly one of `a`, `d`, `y` or `n` in either case, ignoring surrounding whitespace, is a keystroke meant for some other prompt, not a reason: its Enter is refused with `! Use ←→ and Enter to choose; a message denies the call.` and decides nothing.
-While a command runs, or while a page hides the Action, the draft is no reason and its Enter decides nothing.
-The input row belongs to the waiting Action: Esc, Ctrl-G, Ctrl-End, or End on an empty draft returns it to the choice, and a slash command, which empties the draft, keeps it at the draft.
-An Action that arrives while the draft holds text keeps the draft as its input row, so an Enter meant for that line can never approve; once a frame shows the Action and the reason line, it denies the Action and sends the line.
-One that arrives to an empty draft shows its choice.
-While a command runs, typing at the choice is ignored.
-Queued chat, chords and marked paste grant no authority and do not repeat the command.
-The draft retains its bytes, grapheme cursor and pending paste decoder custody.
-The request block and choice follow the front-end plan's PR 4 row (plan GdWXmymnhM6zDEcd64xPMs, mock CFWmXwCYELhK15T7LnR6ZF), which Divyansh approved on 2026-10-31, Allow once highlighted by default.
-He chose on 2026-11-01 that typing while the choice shows pauses it and the text goes to the draft.
-The same approved row says "Typing a message denies the call and sends the reason to the agent."
-A fragmented pre-prompt paste must finish under the existing incomplete-input deadline before any offer.
-Complete framing and argument validation precede any offer; no successful partial proposal is possible.
+Allow once is highlighted for each new request.
+Left and Right select Allow once or Deny, and Enter decides.
+Other typed keys are ignored silently while the card holds focus, with no letter shortcuts or denial reason.
+Esc, Ctrl-C and Ctrl-X keep their normal navigation, exit and stop meanings.
+Marked paste never decides, including when a request changes during the paste.
+Malformed authorization keys are refused, never interpreted as Enter.
+The existing draft returns with its caret when the card closes; typing at the card neither changes nor sends that draft.
+This design follows Divyansh's 2026-11-09 decision to trust the person using the tool, without requiring them to prove they read the command.
 
-An offer is made only after stdout has accepted every Action and choice-prompt byte and nonblocking input service has observed no queued bytes or pending decoder state.
-Pre-boundary input is consumed through the shared stream at the choice, where it cannot decide, preserving raw Ctrl-C and fragmented paste meaning, not by a blind flush.
-A bounded service batch that exhausts its budget does not establish empty input.
-No blocking output drain occurs on this UI owner.
-This is a complete-write/input-custody boundary, not physical transmission or emulator acknowledgment; neither it nor `tcdrain` proves that the user read the command.
-The Host still requires the exact explicit decision and revalidates its applicability.
-
-`session_consent` owns what the input row shows, as values: the exact Action, its highlighted option and its input row.
-`SessionScreen` owns the offer: each frame's shown option, the offer of the latest delivered frame, and the judgement of every arrow and Enter against it.
-`SessionFrontend` owns decoding and I/O, distinguishing actual empty input from decoder expiry, pending input and exhausted service budget.
-A queued or running command, pending decoder state or a frame left to draw prevents an offer.
-Prompt completion uses post-write state because terminal writes may service input.
-Any input spends the offer, a moved highlight included, and any change, or a frame showing another decision or none, retires it, while an unchanged redraw keeps it; a new or re-entered Action starts at Allow once.
-A confirmed choice, or a sent reason, consumes the target before starting Admission.
+`ActionConsent` owns the current request, the request the card last drew and the highlighted choice.
+Adopting a successor clears the drawn request, so a key or click cannot decide a request the card has not drawn.
+`RUI_TEST_ACTION_READY_FD` fires when the card first draws that request.
+Drawing is not a flush receipt: there is no one-frame delay, contiguous-row reading gate or per-key offer spending.
+App owns decoding and terminal I/O; the Session shell routes input to the focused card before the composer.
+A decision consumes the drawn target before starting Admission.
 
 The existing Admission owner captures and sends the Permission Decision through `/v1/control/permission-decision`, pinning Store, Session, Action, decision and reserved key.
 Ctrl-R recovers those exact bytes after uncertain delivery; it cannot create a second effect or retarget another Action.
-A reason is one original: the Message is sent first and the denial begins only once the Message is accepted.
-Sending the Message first is what puts both in front of the model together: the Host holds a Message admitted while an Action of the call group awaits its decision, then hands it to the model in the same continuation request as the group's results, after `Permission denied.`; a denial sent first would let the continuation start before the Message arrives.
-A rejected Message denies nothing, and the Action stays pending to be read and shown again once `/discard` releases the original.
-An unconfirmed one keeps its denial: Ctrl-R retries the Message and the denial follows its acceptance.
-Leaving the conversation once the Message is accepted still sends the denial and waits for its outcome, and a denial that cannot start is reported as not sent; leaving before the Message is accepted leaves the Action pending.
-If another client decided the Action meanwhile, the Host rejects the denial as for any stale decision and the Message stands as an ordinary queued one.
-With sibling Actions in one call group, the reason denies only the Action shown, the next sibling is shown in turn, and the reason reaches the model only once every call in the group has an outcome, including a sibling allowed and run.
+Plain Deny sends only that Permission Decision, with no Message or deferred denial on exit.
 The Host revalidates that exact Action at admission, even if an external decision resolved it while displayed.
 Observation continues while a choice is shown: once Current no longer names that Action, because another client decided it or its Turn ended, the choice leaves without a key and the outcome follows in the conversation.
-A read that would hide or withdraw the Action waits for a sequence the choice is decoding, so it keeps its meaning.
-Text typed beside the Action is the draft's and outlives it: once the Action leaves it is an ordinary draft, and beside a next Action it denies that Action only once a frame showing both is offered.
 A definite stale-target rejection remains the original until explicit `/discard`; a subsequent distinct Action receives its own fresh presentation.
 The next draft and cursor survive choice and recovery.
 `/details` and `/history` return to the same choice without moving its target.
@@ -3075,26 +3042,28 @@ A null cursor before that join is not evidence of exhaustion.
 
 Exit ends input consumption before terminal restoration discards queued suffix bytes.
 Cleanup collects independent reader and Admission outcomes after restoration, cancellation, both joins and output-loan retirement, then selects error precedence.
-Restoration failure wins; an already-consumed substantive failure is not replaced by an external interruption.
+An already-consumed substantive failure is not replaced by an external interruption.
 Ordinary history/details preparation failure remains recoverable while active, but reportable on final exit; rendering failure remains fatal.
 Deliberate exit retires cancelled output without resuming or replaying it.
 An already-started synchronous command is not preemptible; interruption takes effect when it returns.
 
-Exit, Ctrl-C and external INT or TERM restore terminal user configuration and descriptor flags before cancelling or joining borrowers.
-Input is discarded independently with `TCIFLUSH`; immediate `TCSANOW` restoration avoids waiting for output credit while raw mode is active.
+Exit, Ctrl-C and external INT, TERM or HUP leave through `App.deinit`.
+Signal handlers set a flag; the Root's next tick requests `ctx.quit` without writing from signal context.
+App resets enabled terminal modes, and its TTY owner restores the saved terminal attributes with `TCSAFLUSH`.
 Darwin kernel-maintained `PENDIN` and `FLUSHO` are not saved user configuration.
-The terminal owner independently attempts ANSI reset and paste-disable nonblockingly, without a drain promise.
-A key that leaves while a frame still fills the terminal (Darwin's PTY holds 1 KiB) finds no room yet, so restoration and the notice share one deadline, `SessionTerminal.release_wait_ms` (one second): each nonblocking write resumes when the terminal takes more output.
-Delivery unconfirmed by that deadline reports cleanup failure.
-Restoration failure takes precedence.
+If initialization fails after opening the TTY, App releases the TTY and its signal thread before returning the error.
+App opens `/dev/tty`; it requires a controlling terminal and does not fall back to stdin or stdout.
+Restoration follows App's behavior rather than a Rui-specific output deadline or confirmation protocol.
+Vaxis logs a failed termios restore; neither an exit code of zero nor a saved request proves that restoration succeeded.
 The optional detached notice includes an executable resume command with exact Store and Session selectors; changed defaults cannot retarget it.
-Its best-effort nonblocking write cannot hold cleanup on output credit past that deadline.
+Its write remains best effort and nonblocking.
 Capture filesystem work and synchronous command work are not preemptible, so cleanup may still await their return after restoration.
 Cancellation affects local exchanges only and never stops Host work.
 The separate provider reader retains its own drain/flush contract.
 
 Alternate-screen disposal also ends synchronized output, shows the cursor and leaves the alternate screen.
-This is orderly error/signal cleanup, not a crash supervisor: SIGKILL, a fatal native crash or emulator loss cannot execute restoration.
+`vaxis.Panic` attempts restoration before the default Zig panic handler.
+SIGKILL, a fatal native crash or emulator loss cannot execute orderly restoration.
 If the shell is left raw or hidden, run `stty sane; printf '\033[?2026l\033[0m\033[?2004l\033[?25h\033[?1049l'` or the terminal's reset command.
 Host work and captured-request recovery are independent of terminal state; unsent drafts remain invocation-local and are lost on exit or crash.
 
@@ -3630,8 +3599,9 @@ The frame requires a private
 The URL travels only in stdin, never in argv, environment, files or
 refusal messages.
 Parsing wipes all JSON allocations, including failed
-parses; the connection handshake wipes the password and authentication
-buffer as soon as login finishes or fails.
+parses; the connection handshake wipes its authentication buffer as soon as
+login finishes or fails.
+The Store keeps its own copy of the login in Host memory for the Host's life, wiped when the Store closes, so it can reconnect.
 
 On MySQL the `store_owner` row owns the Store: open raises its `epoch`, and every write transaction first advances `commit_seq` only where both match what this Host last saw, so a Host that lost the Store fails its next write.
 `GET_LOCK` only refuses early a second Host on the same database.
@@ -3661,7 +3631,11 @@ Admission refusals use a single stdout
 or `mysql_binlog_unsafe`.
 Messages are static, never server diagnostics.
 A running MySQL Store that fences writes the same envelope with
-`store_fenced` before draining and exits 1 (D211); it does not reconnect.
+`store_fenced` before draining and exits 1 (D211).
+When the connection is lost around a COMMIT, the Store first reconnects, up to three times a second apart: it ends the old server session with `KILL`, takes `GET_LOCK` again once that session is gone, and reads `store_owner.commit_seq`.
+Every write transaction advances it by exactly one, so the value says whether the COMMIT landed.
+Landed is success and the Store carries on; not landed is reported as a lost connection, which still fences.
+Only when no reconnect succeeds does the outcome stay unknown (`CommitOutcomeUnknown`).
 
 Host information is a read-only, bounded `/v1/host-info` exchange for the canonical selected Store.
 A client first probes the existing `host.lock` with a nonblocking shared lock, without creating a Store or lock: no owner means unavailable even if a stale socket exists; an exclusive owner permits a protected socket request.

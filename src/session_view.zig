@@ -881,6 +881,31 @@ pub fn renderPermissionArguments(io: std.Io, scratch: std.Io.File, sink: anytype
     };
 }
 
+/// The leading bytes of the command a Bash Action's captured arguments
+/// hold, as many as `buffer` takes; null for every other tool, whatever
+/// its arguments look like, and for arguments that are not a command.
+pub fn bashCommand(io: std.Io, scratch: std.Io.File, tool: *const ActionTool, buffer: []u8) !?[]const u8 {
+    if (try tool.runner() != .bash) return null;
+    var read_buffer: [4096]u8 = undefined;
+    var reader = scratch.reader(io, &read_buffer);
+    var source: ArgumentSource = .{ .reader = &reader.interface };
+    const Leading = struct {
+        bytes: []u8,
+        len: usize = 0,
+        pub fn writeAll(sink: *@This(), bytes: []const u8) !void {
+            const kept = @min(sink.bytes.len - sink.len, bytes.len);
+            @memcpy(sink.bytes[sink.len..][0..kept], bytes[0..kept]);
+            sink.len += kept;
+        }
+    };
+    var leading: Leading = .{ .bytes = buffer };
+    const shown = tools.writeBashCommand(&source, &leading) catch |err| {
+        if (tools.isBashDescriptorError(err)) return null;
+        return err;
+    };
+    return if (shown) buffer[0..leading.len] else null;
+}
+
 /// Arguments remain exact JSON, not a Bash command or a schema interpretation.
 /// Like Bash, render to the Action file in full: SessionScreen applies its
 /// viewport bound and refuses consent when that file is only a preview.
@@ -1711,6 +1736,35 @@ test "MCP approval renders object arguments and adopts the same Allow once and D
         projection = Consent.project(pending, .{ .action_page = true, .read = true }, false);
         try std.testing.expect(Consent.offered(pending, projection.approval).? == .deny);
     }
+}
+
+test "only a Bash Action names a command for its row, whatever another tool's arguments look like" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });
+    defer scratch.close(std.testing.io);
+    var bash: ActionTool = .{ .name = .{} };
+    try bash.name.set("bash");
+    var mcp: ActionTool = .{ .name = .{}, .server = .{} };
+    try mcp.name.set("run");
+    try mcp.server.?.set("shell");
+    var other: ActionTool = .{ .name = .{} };
+    try other.name.set("web_search");
+    // Arguments every one of the three would accept as Bash's.
+    const arguments = "{\"cmd\":\"rm -rf build\\nzig build\",\"description\":\"Clean and build\"}";
+    try scratch.writePositionalAll(std.testing.io, arguments, 0);
+    var buffer: [8]u8 = undefined;
+    // Bash: the command's leading bytes, as many as the buffer holds.
+    try std.testing.expectEqualStrings("rm -rf b", (try bashCommand(std.testing.io, scratch, &bash, &buffer)).?);
+    var wide: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("rm -rf build\nzig build", (try bashCommand(std.testing.io, scratch, &bash, &wide)).?);
+    // An MCP call or another built-in tool names none.
+    try std.testing.expectEqual(null, try bashCommand(std.testing.io, scratch, &mcp, &wide));
+    try std.testing.expectEqual(null, try bashCommand(std.testing.io, scratch, &other, &wide));
+    // Bash arguments that are not a command name none either.
+    try scratch.setLength(std.testing.io, 0);
+    try scratch.writePositionalAll(std.testing.io, "{\"description\":\"No command\"}", 0);
+    try std.testing.expectEqual(null, try bashCommand(std.testing.io, scratch, &bash, &wide));
 }
 
 test "MCP approval marks argument lines escapes controls and refuses a viewport preview" {
