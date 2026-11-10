@@ -1,4 +1,4 @@
-"""Overview clicks cases; see overview_integration.py.
+"""Overview clicks cases; run by overview_integration.py, built on overview_fixture.py.
 
 A click on the overview acts as the frame shows it: a Session row opens
 that Session, a folded group's "N more" line unfolds the group at its first
@@ -14,10 +14,10 @@ import json
 import pathlib
 import re
 import shlex
-import time
 
 import model_fixture as fixture
-from overview_integration import world
+from host_process import wait_for
+from overview_fixture import world
 
 MODEL = "gpt-6-luna"
 WIDTH = 100
@@ -58,13 +58,8 @@ class FanOutReplies(dict):
 
 
 def wait_for_host(w, sessions, predicate, description, timeout=60):
-    deadline = time.monotonic() + timeout
-    while True:
-        reports = [w.inspect(session) for session in sessions]
-        if all(predicate(report) for report in reports):
-            return
-        assert time.monotonic() < deadline, (description, [report["work"]["state"] for report in reports])
-        time.sleep(0.05)
+    wait_for(lambda: [w.inspect(session) for session in sessions], description, timeout,
+             ready=lambda reports: all(predicate(report) for report in reports))
 
 
 def finished(report):

@@ -1,4 +1,4 @@
-"""Overview counts cases; see overview_integration.py.
+"""Overview counts cases; run by overview_integration.py, built on overview_fixture.py.
 
 The counts line (the screen's top row) and the status row under the input,
 as a real terminal shows them. Rules: src/overview_view.zig countsLine,
@@ -12,7 +12,7 @@ import signal
 import threading
 
 import model_fixture as fixture
-from overview_integration import world
+from overview_fixture import world
 from terminal_process import ROWS
 
 WORDMARK = " रुई rui"

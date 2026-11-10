@@ -1,4 +1,4 @@
-"""Overview groups cases; see overview_integration.py.
+"""Overview groups cases; run by overview_integration.py, built on overview_fixture.py.
 
 Each case drives a real Host into a work state, opens bare `rui` on a PTY
 and reads the rows as the terminal shows them: the group headings, each
@@ -11,7 +11,7 @@ import shlex
 import threading
 
 import model_fixture as fixture
-from overview_integration import world
+from overview_fixture import world
 
 PEER_PREFIX = (pathlib.Path(__file__).resolve().parents[2] / "src" / "peer_message.txt").read_text().split("{}", 1)[0]
 
@@ -90,8 +90,10 @@ def needs_you():
             assert mark.fg == screen.style("? 1").fg, (mark, screen.style("? 1"), frame)
             # The list opens on the waiting row: Enter opens that Session.
             screen.keys(b"\r")
-            opened = screen.contains("please run the command")
-            assert "just say hi" not in opened, opened
+            # Its conversation's status line names it; the card may fill
+            # the view before its Message row shows.
+            opened = screen.contains("Asks before running · gpt-6-luna")
+            assert "Answered already" not in opened, opened
     print("overview groups: an Action's wait leads in Needs you, `?` in the attention colour, selected, with its command's first line", flush=True)
 
 
