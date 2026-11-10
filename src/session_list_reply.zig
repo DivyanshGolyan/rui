@@ -4,6 +4,7 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const session_list = @import("session_list.zig");
 const tool_name = @import("tool_name.zig");
+const appendShape = @import("session_report_reply.zig").appendShape;
 
 /// The visitor that writes one list page into `capture`, a Session report
 /// capture the caller created (`store.SessionReportCapture`). Its tools
@@ -16,7 +17,7 @@ pub fn Reply(comptime Capture: type) type {
         tools_json: [protocol.max_tool_names_json_bytes]u8 = undefined,
 
         pub fn head(reply: *@This()) !void {
-            try reply.capture.appendShape(protocol.session_list_reply.head, .{});
+            try appendShape(reply.capture, protocol.session_list_reply.head, .{});
         }
 
         pub fn row(reply: *@This(), values: *const session_list.Row) !void {
@@ -42,16 +43,16 @@ pub fn Reply(comptime Capture: type) type {
                 .peers = &peers,
             };
             if (reply.rows != 0) try reply.capture.append(",");
-            try reply.capture.appendShape(.{protocol.Hole{ .json = protocol.SessionRow.Fields }}, .{&fields});
+            try appendShape(reply.capture, .{protocol.Hole{ .json = protocol.SessionRow.Fields }}, .{&fields});
             reply.rows += 1;
         }
 
         pub fn tail(reply: *@This(), values: session_list.Tail) !void {
             const shapes = protocol.session_list_reply;
             switch (values) {
-                .full => |full| try reply.capture.appendShape(shapes.full_tail, .{ session_list.ListDelta.full, full.since, full.after, full.ceiling }),
-                .changed => |changed| try reply.capture.appendShape(shapes.changed_tail, .{ session_list.ListDelta.changed, changed.since, changed.through, changed.after_reference }),
-                .last => |last| try reply.capture.appendShape(shapes.last_tail, .{ last.delta, last.since }),
+                .full => |full| try appendShape(reply.capture, shapes.full_tail, .{ session_list.ListDelta.full, full.since, full.after, full.ceiling }),
+                .changed => |changed| try appendShape(reply.capture, shapes.changed_tail, .{ session_list.ListDelta.changed, changed.since, changed.through, changed.after_reference }),
+                .last => |last| try appendShape(reply.capture, shapes.last_tail, .{ last.delta, last.since }),
             }
             std.debug.assert(reply.capture.length + reply.capture.buffered <= shapes.max_bytes);
         }

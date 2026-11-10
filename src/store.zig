@@ -80,8 +80,6 @@ pub const schema_version = store_schema.schema_version;
 pub const minimum_schema_version = store_schema.migration_baseline;
 pub const SessionReport = report_domain.SessionReport;
 pub const SessionReportCapture = report_domain.SessionReportCapture;
-/// The Full report's history shape, which the Store still writes.
-pub const SessionReportFull = @import("store/domain/report_full_shape.zig").Full;
 pub const checkSessionReportsForTesting = @import("store/tests.zig").checkSessionReportsForTesting;
 pub const SessionStopReply = command_domain.SessionStopReply;
 pub const SessionArchiveReply = command_domain.SessionArchiveReply;

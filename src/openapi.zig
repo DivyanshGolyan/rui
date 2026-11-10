@@ -842,7 +842,7 @@ pub const Document = struct {
                     const shapes = session_report_reply.shapes;
                     try d.schemas.put(d.arena, reply_name, try d.anyOf(&.{
                         try d.shapeSchema(shapes.current),
-                        try d.shapeSchema(shapes.full_head ++ .{ ",\"full\":", Hole{ .json = store.SessionReportFull } } ++ shapes.tail),
+                        try d.shapeSchema(shapes.full),
                         try d.shapeSchema(shapes.missing_current),
                         try d.shapeSchema(shapes.missing_full),
                     }));
@@ -1488,7 +1488,7 @@ test "catalog full report schema represents turnless catalog source facts" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var document: Document = .init(arena.allocator());
-    const shape = try document.shapeSchema(store.SessionReportFull.Conversation.json_shape);
+    const shape = try document.shapeSchema(session_report_reply.FullJson.Conversation.json_shape);
     const json = try std.json.parseFromSliceLeaky(
         Value,
         arena.allocator(),
