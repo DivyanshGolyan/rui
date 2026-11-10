@@ -326,17 +326,17 @@ attention: *TerminalApp.Attention = undefined,
 root: Root = undefined,
 app_screen: AppScreen.Overview = undefined,
 app_input: InputArea = undefined,
-app_list: GroupedList = .{},
+/// What can fill the list's place, each its own widget: the screen shows
+/// the one the core names. Only the Sessions hear a press.
+app_sessions: GroupedList = .{},
+app_panel: GroupedList = .{},
+app_picker: GroupedList = .{},
 /// The counts line and its bands, which take the view-name click.
 app_header: OverviewLines.Header = undefined,
 app_palette: Palette = undefined,
 app_frame: u64 = 0,
 /// Whether the latest frame showed a mark that spins.
 app_spins: bool = false,
-/// The frame's width, and the panel in the list's place, for `appRow`.
-app_width: u16 = 0,
-app_panel: ?[]const view.ListRow = null,
-app_models: ?model_picker_view.Rows = null,
 session_screen: *SessionScreen = undefined,
 app_session: ?Left = null,
 /// Where leaving a Session goes when Session links are followed.
@@ -533,11 +533,6 @@ fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerro
     ctx.redraw = true;
 }
 
-/// A press on the list's line `index`; the core decides what it means.
-fn appPressed(raw: *anyopaque, ctx: *vxfw.EventContext, index: u32) anyerror!void {
-    try appClick(raw, ctx, .{ .line = index });
-}
-
 fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
     switch (next orelse return) {
         .leave => ctx.quit = true,
@@ -717,18 +712,42 @@ fn finishApp(self: *Self, ended: anyerror!void) !void {
     try kept;
 }
 
-/// The list's row `index` this frame: a panel's line, or the Sessions
-/// list's line as the core draws it.
-fn appRow(raw: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!GroupedList.Row {
-    const self: *const Self = @ptrCast(@alignCast(raw));
-    if (self.app_models) |models| {
-        const row = try models.row(arena, index);
-        return .{ .segments = row.segments, .heading = row.heading };
+/// The Sessions list's rows for one frame, each with what a click on it
+/// names.
+const SessionRows = struct {
+    state: *const view.State,
+    width: u16,
+    caps: view.Caps,
+    frame: u64,
+
+    fn row(raw: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!GroupedList.Row {
+        const self: *const SessionRows = @ptrCast(@alignCast(raw));
+        const item = view.listItem(self.state, index).?;
+        const built = try view.listSegments(arena, self.state, item, self.width, self.caps, self.frame);
+        return .{ .segments = built.segments, .heading = built.heading, .target = view.clickOf(self.state, item) };
     }
-    if (self.app_panel) |items| return .{ .segments = items[index].segments, .heading = items[index].heading };
-    const row = try view.listSegments(arena, &self.state, view.listItem(&self.state, index).?, self.app_width, self.caps, self.app_frame);
-    return .{ .segments = row.segments, .heading = row.heading };
-}
+};
+
+/// A panel's lines for one frame.
+const PanelRows = struct {
+    items: []const view.ListRow,
+
+    fn row(raw: *const anyopaque, index: usize, _: std.mem.Allocator) std.mem.Allocator.Error!GroupedList.Row {
+        const self: *const PanelRows = @ptrCast(@alignCast(raw));
+        return .{ .segments = self.items[index].segments, .heading = self.items[index].heading };
+    }
+};
+
+/// The model picker's rows for one frame.
+const PickerRows = struct {
+    models: model_picker_view.Rows,
+
+    fn row(raw: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!GroupedList.Row {
+        const self: *const PickerRows = @ptrCast(@alignCast(raw));
+        const built = try self.models.row(arena, index);
+        return .{ .segments = built.segments, .heading = built.heading };
+    }
+};
 
 fn rich(ctx: vxfw.DrawContext, caps: view.Caps, segments: []const view.Segment) !vxfw.Widget {
     const spans = try ctx.arena.alloc(vaxis.Segment, segments.len);
@@ -764,31 +783,35 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_input.composer.caret = self.state.inputMode() != .frozen;
     const frame = self.animationFrame();
     self.app_frame = frame;
-    self.app_width = size.width;
     if (self.state.picker != null) view.syncPicker(&self.state, self.composerDraft());
-    // The core says what fills the list; this frame draws only that.
-    switch (self.state.listArea()) {
-        .picker => {
+    // The core says what fills the list; this frame draws that widget.
+    const list: *GroupedList = switch (self.state.listArea()) {
+        .picker => picker: {
             const defaults = view.pickerDefaults(&self.state);
             const words = view.pickerWords(self.composerDraft().bytes);
             const choice = self.state.picker.?.choice orelse model_picker_view.open(&self.state.menu, words, defaults);
-            const models = try model_picker_view.rows(ctx.arena, &self.state.menu, words, defaults, choice, size.width, self.caps.width, self.caps.unicode, self.state.menu_read);
-            self.app_models = models;
-            self.app_list.selected = models.selected;
-            self.app_list.rows = .{ .userdata = self, .count = @intCast(models.count), .rowFn = appRow };
+            const rows = try ctx.arena.create(PickerRows);
+            rows.* = .{ .models = try model_picker_view.rows(ctx.arena, &self.state.menu, words, defaults, choice, size.width, self.caps.width, self.caps.unicode, self.state.menu_read) };
+            self.app_picker.selected = rows.models.selected;
+            self.app_picker.rows = .{ .userdata = rows, .count = @intCast(rows.models.count), .rowFn = PickerRows.row };
+            break :picker &self.app_picker;
         },
-        .panel => {
-            const items = (try view.panelItems(ctx.arena, &self.state, size.width, self.caps)).?;
-            self.app_panel = items;
-            self.app_list.selected = null;
-            self.app_list.rows = .{ .userdata = self, .count = @intCast(items.len), .rowFn = appRow };
+        .panel => panel: {
+            const rows = try ctx.arena.create(PanelRows);
+            rows.* = .{ .items = (try view.panelItems(ctx.arena, &self.state, size.width, self.caps)).? };
+            self.app_panel.rows = .{ .userdata = rows, .count = @intCast(rows.items.len), .rowFn = PanelRows.row };
+            break :panel &self.app_panel;
         },
-        .sessions => {
-            self.app_list.selected = if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
-            self.app_list.rows = .{ .userdata = self, .count = @intCast(view.listLength(&self.state)), .rowFn = appRow };
+        .sessions => sessions: {
+            const rows = try ctx.arena.create(SessionRows);
+            rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
+            self.app_sessions.selected = if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
+            self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row };
+            break :sessions &self.app_sessions;
         },
-    }
-    self.app_list.caps = self.caps;
+    };
+    list.caps = self.caps;
+    self.app_screen.content = list;
     self.state.commands = view.nextCommands(&self.state, self.composerDraft());
     self.app_header.caps = self.caps;
     self.app_screen.header = self.app_header.widget();
@@ -801,9 +824,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         self.app_screen.overlay = self.app_palette.widget();
     }
     defer {
-        self.app_list.rows = .none;
-        self.app_panel = null;
-        self.app_models = null;
+        list.rows = .none;
         self.app_screen.header = null;
         self.app_screen.tail = null;
         self.app_input.facts = app_empty.widget();
@@ -812,7 +833,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     var surface = try self.app_screen.widget().draw(ctx);
     surface.widget = self.widget();
     self.app_spins = false;
-    if (self.state.listArea() == .sessions) for (self.app_list.shown.first..self.app_list.shown.end) |at| {
+    if (list == &self.app_sessions) for (list.shown.first..list.shown.end) |at| {
         if (view.markSpins(&self.state, view.listItem(&self.state, at).?, self.caps)) self.app_spins = true;
     };
     return surface;
@@ -861,9 +882,9 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.composer = self.emptyComposer(0);
     self.root = .{ .overview = self.widget() };
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" } };
-    self.app_screen = .{ .content = &self.app_list, .input = &self.app_input, .userdata = self, .on_event = appEvent };
+    self.app_screen = .{ .content = &self.app_sessions, .input = &self.app_input, .userdata = self, .on_event = appEvent };
     self.app_header = .{ .state = &self.state, .userdata = self, .on_click = appClick };
-    self.app_list.on_press = .{ .userdata = self, .pressed = appPressed };
+    self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     if (self.state.default) |*binding| binding.effort = self.savedEffort() catch null;
@@ -4609,6 +4630,22 @@ test "a click on a group heading, as a terminal sends it, opens nothing" {
     try std.testing.expect(try rig.click(3, heading, 60, 16) == null);
     try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
     try std.testing.expectEqualStrings(&selected, &rig.overview.state.selected.?);
+}
+
+test "a click on a panel's or the model picker's lines, as a terminal sends it, opens no Session: only the Sessions hear a press" {
+    for ([_][]const u8{ "/help\r", "/model " }) |typed| {
+        const rig = try openListed();
+        defer rig.close();
+        try std.testing.expect(try rig.press(typed) == null);
+        try std.testing.expect(rig.overview.state.listArea() != .sessions);
+        const selected = rig.overview.state.selected.?;
+        // Every row the list's place holds, the ones Sessions showed on
+        // included.
+        for (1..20) |row| try std.testing.expect(try rig.click(10, @intCast(row), 80, 24) == null);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+        try std.testing.expectEqualStrings(&selected, &rig.overview.state.selected.?);
+        try std.testing.expect(rig.overview.state.listArea() != .sessions);
+    }
 }
 
 test "a followed Session link opens the peer, Esc reopens the Session it left, then the overview" {

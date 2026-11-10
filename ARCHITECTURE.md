@@ -1471,7 +1471,8 @@ MySQL schema application and backup remain operator-owned.
 
 `rui upgrade` replaces an eligible managed released selection with the latest published stable release and conditionally activates it for the selected Store only when its Host was already running.
 `rui upgrade --check` is read-only and starts no Host.
-`/upgrade` runs inline on the status bar, with no page, without sending `/upgrade` to the model or adding an updater service.
+On the overview, `/upgrade` runs inline on the status bar, with no page, without sending `/upgrade` to the model or adding an updater service.
+In a conversation, `/upgrade` says `Run rui upgrade in the shell` and never reaches the model, until the conversation reuses the inline status row.
 It checks (`Checking for updates…`), then installs a found release at once, with no Enter step even while Sessions work, and its first line says what the restart will do: `Upgrading to 0.60.0 · restarts the Host (2 Sessions working) · esc cancels`.
 Esc cancels while it checks or prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting the Host…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
 A release the running client cannot use leaves `Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave` on the status bar until another `/upgrade`; longer text, such as PATH warnings, the full check and retained cleanup paths, prints with the departure message.
@@ -2267,7 +2268,9 @@ A needs-you row reads its waiting Action's tool, then its arguments, once per Ac
 A narrow screen drops this detail column first and keeps the mark, title and age.
 Divyansh chose marks that hold still on 2026-11-02, replacing the 2026-10-30 pulse on every mark change, and the command and cause on 2026-11-09 (TUI rework plan, "What changes" O6), replacing the starter's name.
 Enter on a row opens that Session's conversation, and so does one click on the row, under Enter's rules; a click on a folded group's `N more` opens the group at its first hidden row, as moving into it does; headings, marks, counts, memory and row words take no click (Divyansh, 2026-11-09, TUI rework plan, "Click targets on the final screens").
-One line map, `listItem` in `src/overview_view.zig`, names each list line for drawing and for clicks.
+One line map, `listItem` in `src/overview_view.zig`, names each list line for drawing, and `clickOf` says what a click on one names: the Session to open or the group to unfold.
+Each drawn row keeps that name, so a click means what the person saw even when the list changed since the frame, and a Session gone by then opens nothing.
+The Sessions list, a panel and the model picker are three widgets in the list's place; the screen shows the one the core names (`State.listArea`), and only the Sessions hear a press.
 Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
 Every input takes one route, the one the core's input mode (`State.inputMode`: compose, frozen or choice) names, and the core steps once with what it made and the draft as it then stands.
 In compose mode the shell's line editor applies the input with the overview's one key table (`keys` in `src/overview_view.zig`); no key is caught ahead of the editor.
