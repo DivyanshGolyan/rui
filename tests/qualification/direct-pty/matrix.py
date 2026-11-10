@@ -56,7 +56,9 @@ def inventory():
         row("kitty-shift-enter", b"one t\x1b[13;2uZwo!\r", "one t\nZwo!"),
         row("kitty-ctrl-a-e", b"bc\x1b[97;5ua\x1b[101;5uZ\r", "abcZ"),
         row("kitty-alt-j", b"one\x1b[106;3utwo\r", "one\ntwo"),
-        row("double-esc-arrow", b"ac\x1b\x1b[Db\r", "abc"),
+        # rxvt's Alt-Left (ESC before the Left sequence) moves a word left;
+        # plain Left would give "one tXw", and a leaked tail "one tw[DX".
+        row("double-esc-arrow", b"one tw\x1b\x1b[DX\r", "one Xtw"),
         row("double-esc-paste", b"a\x1b\x1b[200~b\x1b[201~\r", "ab"),
         row("paste", b"\x1b[200~line1\nline2\x1b[201~\r", "line1\nline2"),
         row("alt-j", b"line1\x1bjline2\r", "line1\nline2"),
