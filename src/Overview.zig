@@ -859,6 +859,13 @@ fn askSkills(self: *Self) void {
     const ask = view.askSkills(&self.state, self.composerDraft()) orelse return;
     var prefix: protocol.Bounded(skill_completion.max_prefix_bytes) = .{};
     prefix.set(ask.prefix) catch unreachable; // The core asks for no longer name.
+    // The core asks again only once it forgot the earlier read, as when the
+    // Workspace changed: a read still queued answers nothing, so it goes. One
+    // the worker runs settles on its own.
+    var index: usize = 0;
+    while (index < self.job_count) {
+        if (self.jobs[index] == .skills) _ = self.take(index) else index += 1;
+    }
     self.queue(.{ .skills = .{ .read = ask.read, .workspace = self.state.skills_workspace, .prefix = prefix } });
 }
 
@@ -1946,6 +1953,26 @@ test "the composer's /word reads skills in the Workspace the next Session starts
     try std.testing.expect(std.mem.indexOf(u8, text, "/release") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "/recap") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "/review") == null);
+}
+
+test "changing Workspace while a skills read waits keeps one skills read queued" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    // The worker runs nothing until the rig settles, so each read waits.
+    for (0..2 * max_jobs) |index| {
+        var line: [64]u8 = undefined;
+        const configure = try std.fmt.bufPrint(&line, "\x15/configure --workspace /w{d}\r", .{index});
+        try std.testing.expect(try rig.press(configure) == null);
+        try std.testing.expect(try rig.press("use /re") == null);
+        var skills: usize = 0;
+        for (rig.overview.jobs[0..rig.overview.job_count]) |job| skills += @intFromBool(job == .skills);
+        try std.testing.expectEqual(@as(usize, 1), skills);
+    }
+    // The one left reads the latest Workspace.
+    try std.testing.expect(try rig.settle() == null);
+    var last: [16]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&last, "/w{d}", .{2 * max_jobs - 1}), Seen.now.skill_workspace.slice());
 }
 
 test "the selected Session stays on screen above an open /model picker, at any height" {

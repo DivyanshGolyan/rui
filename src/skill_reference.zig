@@ -47,8 +47,7 @@ pub const References = struct {
                 }
             } else {
                 self.follow(byte);
-                const ends = std.ascii.isWhitespace(byte) or std.mem.indexOfScalar(u8, ".,;:!?)", byte) != null;
-                if (ends and validName(self.name[0..self.len])) return self.name[0..self.len];
+                if (ends(byte) and validName(self.name[0..self.len])) return self.name[0..self.len];
             },
             .prose => self.follow(byte),
         }
@@ -58,6 +57,12 @@ pub const References = struct {
     /// The name the text's end completes.
     pub fn finish(self: *const References) ?[]const u8 {
         return if (self.state == .name and validName(self.name[0..self.len])) self.name[0..self.len] else null;
+    }
+
+    /// Whether `byte` after a name ends it as a reference rather than
+    /// making the word prose.
+    pub fn ends(byte: u8) bool {
+        return std.ascii.isWhitespace(byte) or std.mem.indexOfScalar(u8, ".,;:!?)", byte) != null;
     }
 
     fn follow(self: *References, byte: u8) void {

@@ -35,6 +35,8 @@ pub fn atCaret(draft: []const u8, caret: usize) ?Word {
         _ = scanner.feed(draft[end]);
         if (scanner.state != .name) break;
     }
+    // A name the Host would read as prose, as in `/re/file`, is no word.
+    if (end < draft.len and !skill_reference.References.ends(draft[end])) return null;
     return .{ .slash = slash, .end = end };
 }
 
@@ -214,6 +216,12 @@ test "skill completion finds the /word the caret is in by the Host's rule" {
     // Glued to other text, a path, a doubled slash, or before the slash.
     try expectWord("a/re", 4, null);
     try expectWord("/tmp/x", 6, null);
+    // A name followed by a byte the Host does not end a reference with is
+    // prose, wherever the caret is in it.
+    try expectWord("use /re/file", "use /re".len, null);
+    try expectWord("use /re/file", "use /r".len, null);
+    try expectWord("use /re_name", "use /re".len, null);
+    try expectWord("use /re). ok", "use /re".len, "re");
     try expectWord("//c", 3, null);
     try expectWord("x /re", "x ".len, null);
     try expectWord("/Re", 3, null);
