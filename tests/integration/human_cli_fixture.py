@@ -376,25 +376,15 @@ def await_screen(master, marker, *, composer=False, timeout=15):
     return read_terminal(master, marker, timeout, composer=composer)
 
 
-def return_to_live(master, key=b"\x1b", timeout=15, *, input_fd=None):
-    """Leave browsing or an inspection; wait until live output is drawn.
+def return_to_live(master, live, key=b"\x1b", timeout=15):
+    """Leave a page with `key`; return the first frame after it that shows
+    the composer ready and that `live(screen)` accepts.
 
-    A lone Esc completes only after the decoder's deadline, so the next
-    bytes must wait for this frame or they would join it as Alt-<key>.
+    App draws no page heading, so the key is always sent; the caller names
+    what the live view shows. Esc at the live view would leave the Session.
     """
-    capture = terminal_capture(master)
-    shown = capture.completed
-    if not shown.startswith("Browsing") and composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y):
-        return shown  # Already live: Esc would draw nothing to wait for.
-    os.write(master if input_fd is None else input_fd, key)
-    deadline = time.monotonic() + timeout
-    while True:
-        shown = capture.completed
-        if (not shown.startswith("Browsing")
-                and composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y)):
-            return shown
-        remaining = deadline - time.monotonic()
-        assert remaining > 0 and next_frame(master, remaining) is not None, ("did not return to live", shown)
+    return keyed_frame(master, key,
+        lambda screen, x, y: composer_ready(screen, x, y) and live(screen), timeout)
 
 
 # The clock that ends a live line ("• Waiting · 12s") redraws every second
