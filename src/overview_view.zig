@@ -4315,7 +4315,7 @@ const Frame = struct {
         var self: Frame = .{ .arena = .init(std.testing.allocator), .lines = &.{}, .list = &.{}, .caps = caps, .width = width };
         errdefer self.arena.deinit();
         const gpa = self.arena.allocator();
-        var lines: std.ArrayList([]const Segment) = .empty;
+        var lines: Vec([]const Segment) = .{};
         const top = try headerSegments(gpa, state, width, caps);
         var start: usize = 0;
         for (top, 0..) |segment, at| if (std.mem.eql(u8, segment.text, "\n")) {
@@ -5978,22 +5978,9 @@ test "the band derives provider trouble from rows, in priority order" {
     try std.testing.expectEqual(Trouble.quota, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
 }
 
-/// Renders `state` at 80x24 and 200x60 and compares both screens.
 /// Renders `state` at 80x24 and 200x60 and compares both screens, and the
 /// 80x24 screen's styles.
-const regen = false;
-
 fn expectScreens(state: *State, caps: Caps, small: []const u8, small_styles: []const u8, large: []const u8) !void {
-    if (regen) {
-        const a = try screenText(state, 80, 24, caps);
-        defer std.testing.allocator.free(a);
-        std.debug.print("REGEN-SMALL\n{s}\nREGEN-END\n", .{a});
-        try expectStyles(state, 80, 24, caps, small_styles);
-        const b = try screenText(state, 200, 60, caps);
-        defer std.testing.allocator.free(b);
-        std.debug.print("REGEN-LARGE\n{s}\nREGEN-END\n", .{b});
-        return;
-    }
     try expectScreen(state, 80, 24, caps, small);
     try expectStyles(state, 80, 24, caps, small_styles);
     try expectScreen(state, 200, 60, caps, large);
@@ -6030,7 +6017,6 @@ fn expectStyles(state: *State, width: u16, height: u16, caps: Caps, expected: []
         text.shrinkRetainingCapacity(start + std.mem.trimEnd(u8, text.written()[start..], ".").len);
         try text.writer.writeByte('\n');
     }
-    if (regen) return std.debug.print("REGEN-STYLES\n{s}REGEN-END\n", .{text.written()});
     try std.testing.expectEqualStrings(expected, text.written());
 }
 
