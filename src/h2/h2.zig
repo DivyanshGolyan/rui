@@ -4,11 +4,12 @@
 //! reaches it only as `@import("h2")`. A file belongs to one module, so a
 //! path import of these files from Rui fails the build.
 //!
-//! Shape: a polled engine for one owner thread. The owner calls `drive` to
-//! do all ready work and `wait` to block until there is some; nothing here
-//! runs on its own. Other threads may only call `Client.wake`. `exchange`
-//! is one blocking request on a private Client, for callers that send one
-//! request at a time.
+//! Shape: a polled engine for one owner at a time. The owner calls `drive`
+//! to do all ready work and `wait` to block until there is some; nothing
+//! here runs on its own. Other threads may only call `Client.wake`, unless
+//! the owner shares the Client under its own lock (`Client.armWait`).
+//! `exchange` is one blocking request on a private Client, for callers that
+//! send one request at a time.
 //!
 //! What the engine owns, so its caller does not:
 //! - one connection pool per origin, opening another connection only when
@@ -476,6 +477,19 @@ pub const Client = extern struct {
     pub fn wait(self: *Client, timeout_ms: u32) DriveError!void {
         return Engine.of(self).wait(timeout_ms);
     }
+
+    /// `wait` in two halves, for an owner that guards the Client with its
+    /// own lock so another thread can call it between drives. `armWait`
+    /// reads the Client, so it runs under that lock; the `Armed.block` it
+    /// returns reads only the poll set it filled, so the thread that armed
+    /// it may block with the lock released. Every other thread's call that
+    /// gives `drive` work (launch, cancel, retireConnections) is followed by
+    /// `wake`, so the block ends and the next arm sees it.
+    pub fn armWait(self: *Client, timeout_ms: u32) Armed {
+        return Engine.of(self).armWait(timeout_ms);
+    }
+
+    pub const Armed = Engine.Armed;
 
     /// Ends the current or next `wait` early. The one call any thread may make.
     pub fn wake(self: *Client) void {
