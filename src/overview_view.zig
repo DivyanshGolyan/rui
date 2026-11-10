@@ -2403,8 +2403,9 @@ fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *co
 /// do. A folded group's "more" line opens the group at its first hidden
 /// row, as moving into them does. Headings and gaps take no click.
 fn click(state: *State, line: usize, effects: *Effects) error{OutOfMemory}!void {
-    // A shown panel fills the list's lines; none of them is a Session.
-    if (state.panel != null) return;
+    // A shown panel or the model picker fills the list's lines; none of
+    // them is a Session.
+    if (state.panel != null or state.shownPicker() != null) return;
     // While a start waits, keys move nothing and Enter opens nothing.
     if (state.inputMode() == .frozen) return;
     const item = listItem(state, line) orelse return;
@@ -6647,6 +6648,17 @@ fn pickerState(default: ?Default) !State {
     state.default = default;
     try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 24 } }));
     return state;
+}
+
+test "a click while the model picker shows opens no Session: its rows are models" {
+    var state = try pickerState(null);
+    defer state.deinit();
+    const line = try lineOfRow(&state, "f1n1sh");
+    try openPicker(&state, &.{chatgpt});
+    const selected = state.selected.?;
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = line } }));
+    try expectSelected(&state, &selected);
+    try std.testing.expect(state.picker != null);
 }
 
 fn highlightModel(state: *State, draft: Draft, model: []const u8) !void {
