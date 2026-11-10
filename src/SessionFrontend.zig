@@ -683,6 +683,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const visible = if (self.app_consent.request != null) &self.app_preview else &self.app_content;
     screen.height = visible.size.height;
     screen.browsing_height = screen.height;
+    screen.marker_rows = @intFromBool(self.app_screen.marker != null);
     screen.vx.screen.width = visible.size.width;
     screen.drawn = .{ .first = visible.first, .rows = screen.height };
     surface.widget = self.widget();
@@ -4696,6 +4697,46 @@ test "App Session shows work under way at the transcript's tail, and the ↓ mar
     _ = try fixture.draw();
     try std.testing.expect(self.app_screen.marker == null);
     try std.testing.expect(self.app_screen.tail != null);
+}
+
+test "App Session's ↓ marker takes a row of its own while scrolled back, so no Message's time hides under it" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    // Messages whose time ends at the last column, each telling its row.
+    var timed: [40 * 48]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&timed);
+    for (0..40) |number| try writer.print("\x1b[94m›\x1b[39m \x1b[8m14:{d:0>2}\x1b[0mRow {d:0>2}\n", .{ number, number });
+    try fixture.screen.live.append(writer.buffered());
+    const live = try fixture.rows();
+    try std.testing.expect(std.mem.startsWith(u8, live[18], "› Row 39") and std.mem.endsWith(u8, live[18], "14:39"));
+    try fixture.press(.{ .codepoint = vaxis.Key.up, .mods = .{ .shift = true } });
+    const shown = try fixture.rows();
+    // The marker alone at the right of the row above the input's rule.
+    try std.testing.expectEqualStrings("↓", std.mem.trim(u8, shown[18], " "));
+    try std.testing.expect(std.mem.startsWith(u8, shown[19], "─"));
+    // Every Message the transcript drew keeps its whole time.
+    var drawn: usize = 0;
+    for (shown[0..18]) |row| if (std.mem.startsWith(u8, row, "› Row ")) {
+        try std.testing.expectEqualStrings(row["› Row ".len..][0..2], row[row.len - 2 ..]);
+        drawn += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 18), drawn);
+}
+
+test "App Session's Shift-↓ returns to the latest once it reaches where the latest view starts, the marker's row included" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    const latest = try fixture.rows();
+    try fixture.press(.{ .codepoint = vaxis.Key.up, .mods = .{ .shift = true } });
+    _ = try fixture.draw();
+    try std.testing.expect(self.app_screen.marker != null);
+    try fixture.press(.{ .codepoint = vaxis.Key.down, .mods = .{ .shift = true } });
+    const returned = try fixture.rows();
+    try std.testing.expect(self.app_screen.marker == null);
+    try std.testing.expectEqualDeep(latest, returned);
 }
 
 test "App Session's End no longer returns to the latest; Esc and the marker do" {

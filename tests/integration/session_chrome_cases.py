@@ -352,7 +352,7 @@ def opening_case():
             master, caller, _ = chrome.open(session, lambda screen: "HELD-DONE" in screen)
             folded = chrome.frame(master, b"\x1b[5~\x1b[5~", lambda screen: "┄ 38 more lines" in screen)
             whole = chrome.frame(master, b"\x0f", lambda screen: rows(screen)[0].startswith("Message · 40 lines"))
-            assert "LONG line 12" in whole and marker(whole) == "↓", whole
+            assert "LONG line 11" in whole and marker(whole) == "↓", whole
             chrome.frame(master, b"\x1b", lambda screen: "Message · 40 lines" not in screen)
             chrome.leave(master, caller)
             assert folded

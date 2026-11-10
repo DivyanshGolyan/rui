@@ -108,6 +108,10 @@ drawn: struct { first: Position = .{}, rows: u16 = 0 } = .{},
 // list's keys act on (`slash_commands.Shown`).
 commands: ?slash_commands.Shown = null,
 height: u16 = 1,
+// Rows a scrolled-back view gives up below the transcript, where the `↓`
+// marker sits; the latest view shows text there. Scrolling down returns to
+// the latest once the view reaches where the latest one starts.
+marker_rows: u16 = 0,
 colour: bool,
 
 pub fn init(self: *Self, io: std.Io, environ: *std.process.Environ.Map, colour: bool) !void {
@@ -393,13 +397,14 @@ pub fn beginTranscript(self: *Self, front: u64) !void {
 pub fn browse(self: *Self, down: bool, page: bool) bool {
     std.debug.assert(self.view != .live);
     const document = self.viewed();
-    const end = document.atBottom(self.textLayout(), self.height);
+    const latest_rows = self.height + self.marker_rows;
+    const end = document.atBottom(self.textLayout(), latest_rows);
     const moves: usize = if (page) self.height else 1;
     if (self.view == .transcript) self.overscroll = if (down) 0 else if (document.atTop(self.textLayout(), self.height)) @min(self.overscroll + moves, 4 * @as(usize, self.height)) else 0;
     document.browse(self.textLayout(), down, moves, self.height, null);
     if (self.view != .transcript or !down) return false;
     // Untrimmed transcript ends where live output continues.
-    return (end and self.newer_trimmed) or (!self.newer_trimmed and document.atBottom(self.textLayout(), self.height));
+    return (end and self.newer_trimmed) or (!self.newer_trimmed and document.atBottom(self.textLayout(), latest_rows));
 }
 
 /// A drag held at the top or bottom row moves the view one row through

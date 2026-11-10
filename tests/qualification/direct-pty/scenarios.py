@@ -215,18 +215,19 @@ def navigation(fixture, row):
         # 24 terminal rows minus the composer between its two rules, the
         # facts and the status line leave 19 transcript rows. At the latest
         # the answer's last line takes the bottom one, so 18 history lines
-        # show; scrolled back, 19 do. These literal fixture anchors are
-        # independent of Rui's viewport.
-        expected = [f"History line {number:03d}" for number in range(first, min(first + (19 if browsing else 18), 100))]
+        # show; scrolled back, the `↓` marker takes it, so 18 do too. These
+        # literal fixture anchors are independent of Rui's viewport.
+        expected = [f"History line {number:03d}" for number in range(first, min(first + 18, 100))]
         lines = tty.screen.completed.splitlines()
         actual = [found.group(0) for found in (re.match(r"History line \d{3}", line.strip()) for line in lines) if found]
         assert actual == expected, ("navigation history anchor/distance", actual, expected)
-        # Scrolled back, the `↓` marker sits at the right of the transcript's
-        # bottom row, and nothing new arrived below; at the latest it is gone.
-        marked = [line for line in lines if re.search(r"↓( \d+ new)?\s*$", line)]
+        # Scrolled back, the `↓` marker sits alone at the right of the row
+        # under the last history line, and nothing new arrived below; at the
+        # latest it is gone.
+        marked = [number for number, line in enumerate(lines) if re.search(r"↓( \d+ new)?\s*$", line)]
         assert len(marked) == (1 if browsing else 0), ("navigation marker", marked)
-        assert not browsing or (expected[-1] in marked[0] and marked[0].rstrip().endswith(" ↓")), \
-            ("navigation marker row", marked, expected[-1])
+        assert not browsing or (lines[marked[0]].strip() == "↓" and expected[-1] in lines[marked[0] - 1]), \
+            ("navigation marker row", lines[marked[0]], lines[marked[0] - 1], expected[-1])
         tty.send(b"\x15")
         tty.draft("", 2)
     history(82, False)

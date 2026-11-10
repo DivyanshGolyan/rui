@@ -52,16 +52,23 @@ fn Screen(comptime Content: type) type {
                 children[used] = .{ .origin = .{ .row = content_end, .col = 0 }, .surface = drawn };
                 used += 1;
             }
+            // The marker owns the row under the content, so nothing the
+            // content draws, such as a Message's time, hides under it.
+            if (content_end > top) if (self.marker) |marker| {
+                content_end -= 1;
+                var row = try vxfw.Surface.init(ctx.arena, marker, .{ .width = size.width, .height = 1 });
+                const drawn = try marker.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 }));
+                const at = try ctx.arena.alloc(vxfw.SubSurface, 1);
+                at[0] = .{ .origin = .{ .row = 0, .col = size.width - drawn.size.width }, .surface = drawn };
+                row.children = at;
+                children[used] = .{ .origin = .{ .row = content_end, .col = 0 }, .surface = row, .z_index = 1 };
+                used += 1;
+            };
             const content_max: vxfw.MaxSize = .{ .width = size.width, .height = content_end - top };
             children[used] = .{ .origin = .{ .row = top, .col = 0 }, .surface = try self.content.widget().draw(ctx.withConstraints(.{}, content_max)) };
             used += 1;
             children[used] = .{ .origin = .{ .row = input_row, .col = 0 }, .surface = input };
             used += 1;
-            if (content_end > top) if (self.marker) |marker| {
-                const drawn = try marker.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 }));
-                children[used] = .{ .origin = .{ .row = content_end - 1, .col = size.width - drawn.size.width }, .surface = drawn, .z_index = 1 };
-                used += 1;
-            };
             if (self.overlay) |overlay| {
                 const drawn = try overlay.draw(ctx.withConstraints(.{}, above_input));
                 children[used] = .{ .origin = .{ .row = input_row - drawn.size.height, .col = 0 }, .surface = drawn, .z_index = 2 };
@@ -122,15 +129,18 @@ test "App screens compose content input facts status and an overlay without owni
     const active = try session.widget().draw(ctx);
     try std.testing.expectEqual(@as(usize, 6), active.children.len);
     try std.testing.expectEqual(@as(i17, 17), active.children[1].origin.row);
-    try std.testing.expectEqual(@as(u16, 16), active.children[2].surface.size.height);
-    try std.testing.expectEqual(@as(i17, 19), active.children[3].origin.row);
-    try std.testing.expectEqual(vxfw.RelativePoint{ .row = 16, .col = 78 }, active.children[4].origin);
-    try std.testing.expectEqual(@as(u8, 1), active.children[4].z_index);
+    // The marker owns a whole row above the tail; the content ends above it.
+    try std.testing.expectEqual(vxfw.RelativePoint{ .row = 16, .col = 0 }, active.children[2].origin);
+    try std.testing.expectEqual(@as(u16, 80), active.children[2].surface.size.width);
+    try std.testing.expectEqual(@as(i17, 78), active.children[2].surface.children[0].origin.col);
+    try std.testing.expectEqual(@as(u8, 1), active.children[2].z_index);
+    try std.testing.expectEqual(@as(u16, 15), active.children[3].surface.size.height);
+    try std.testing.expectEqual(@as(i17, 19), active.children[4].origin.row);
     try std.testing.expectEqual(@as(u8, 2), active.children[5].z_index);
     session.tail = null;
     const browsing = try session.widget().draw(ctx);
-    try std.testing.expectEqual(@as(u16, 18), browsing.children[1].surface.size.height);
-    try std.testing.expectEqual(vxfw.RelativePoint{ .row = 18, .col = 78 }, browsing.children[3].origin);
+    try std.testing.expectEqual(vxfw.RelativePoint{ .row = 18, .col = 0 }, browsing.children[1].origin);
+    try std.testing.expectEqual(@as(u16, 17), browsing.children[2].surface.size.height);
     for ([_]vxfw.Size{ .{ .width = 1, .height = 1 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 0 } }) |size| {
         const tiny = try session.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height }));
         try std.testing.expect(tiny.size.width <= size.width and tiny.size.height <= size.height);
