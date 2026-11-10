@@ -663,4 +663,6 @@ test {
     _ = @import("proxy.zig");
     _ = @import("tls.zig");
     _ = @import("tests.zig");
+    _ = @import("fault_tests.zig");
+    _ = @import("testing/Faults.zig");
 }

@@ -31,6 +31,9 @@ bio_method: ?*openssl.BIO_METHOD,
 tmp: ?std.testing.TmpDir,
 ca_path_buffer: [96]u8,
 ca_path_len: usize,
+/// Close each connection as it is accepted, as a restarting server does.
+/// A test may flip it between pumps.
+refuse_connections: bool = false,
 
 pub const Options = struct {
     tls: enum { none, h2, no_alpn } = .none,
@@ -63,6 +66,8 @@ pub const Seen = struct {
     pings_received: u32 = 0,
     /// The largest credit the client ever had open to the peer on one stream.
     max_stream_window: i32 = 0,
+    /// The largest credit the client ever had open to the peer on one connection.
+    max_connection_window: i32 = 0,
 };
 
 pub const Connection = struct {
@@ -83,6 +88,8 @@ pub const Stream = struct {
     content_length: std.ArrayList(u8),
     authorization: std.ArrayList(u8),
     accept_encoding: std.ArrayList(u8),
+    /// The request's `x-test-id`, which names it across resends.
+    test_id: std.ArrayList(u8),
     body: std.ArrayList(u8),
     complete: bool,
     closed: bool,
@@ -273,6 +280,7 @@ pub fn stop(self: *Peer) void {
         stream.content_length.deinit(self.allocator);
         stream.authorization.deinit(self.allocator);
         stream.accept_encoding.deinit(self.allocator);
+        stream.test_id.deinit(self.allocator);
         stream.body.deinit(self.allocator);
         self.allocator.destroy(stream);
     }
@@ -291,6 +299,10 @@ pub fn pump(self: *Peer) !void {
     while (true) {
         const fd = std.c.accept(self.listener, null, null);
         if (fd < 0) break;
+        if (self.refuse_connections) {
+            _ = std.c.close(fd);
+            continue;
+        }
         try nonblocking(fd);
         if (builtin.os.tag.isDarwin()) {
             // A client that went away must not SIGPIPE the test process.
@@ -424,6 +436,7 @@ fn flush(self: *Peer, connection: *Connection) void {
         batched += length;
     }
     if (!self.sendAll(connection, batch[0..batched])) return;
+    self.seen.max_connection_window = @max(self.seen.max_connection_window, c.nghttp2_session_get_remote_window_size(connection.session));
     for (self.streams.items) |stream| {
         if (stream.connection != connection or stream.closed) continue;
         const window = c.nghttp2_session_get_stream_remote_window_size(connection.session, stream.id);
@@ -541,6 +554,7 @@ fn onBeginHeaders(session: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame
         .content_length = .empty,
         .authorization = .empty,
         .accept_encoding = .empty,
+        .test_id = .empty,
         .body = .empty,
         .complete = false,
         .closed = false,
@@ -571,6 +585,8 @@ fn onHeader(session: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, name
         &stream.authorization
     else if (std.mem.eql(u8, field, "accept-encoding"))
         &stream.accept_encoding
+    else if (std.mem.eql(u8, field, "x-test-id"))
+        &stream.test_id
     else
         return 0;
     target.appendSlice(allocator, value_vec.base[0..value_vec.len]) catch return c.NGHTTP2_ERR_CALLBACK_FAILURE;
