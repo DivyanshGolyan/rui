@@ -164,7 +164,7 @@ def unconfirmed_status():
                 screen.keys(b"lost")
                 screen.contains("lost")
                 screen.keys(b"\r")
-                screen.contains("! Not confirmed · Ctrl-R retries original", timeout=30)
+                screen.contains("! Not confirmed · ctrl+r retries original", timeout=30)
             finally:
                 os.kill(w.host.pid, signal.SIGCONT)
             saved = requests(w) - before
