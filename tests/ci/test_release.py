@@ -375,7 +375,8 @@ class InstallerTemplateTest(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_publish_fragment_reads_the_database_the_build_names(self):
-        self.assertIn('pub const database_suffix = "/rui.sqlite3";', (ROOT / "src/platform.zig").read_text())
+        self.assertIn('pub const database_suffix = "/rui.sqlite3";', (ROOT / "src/store_path.zig").read_text())
+        self.assertIn('pub const database_suffix = store_path.database_suffix;', (ROOT / "src/platform.zig").read_text())
         self.assertIn('"$1/rui.sqlite3"', PUBLISH)
 
     def test_only_installers_call_the_fragment(self):

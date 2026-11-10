@@ -10,7 +10,7 @@ const session_id = @import("../../session_id.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const model_capability = @import("../../model_capability.zig");
 const provider_name = @import("../../provider_name.zig");
-const tool_catalog = @import("../../tools.zig");
+const tool_catalog = @import("../../tool_record.zig");
 const output_format = @import("../../output_format.zig");
 const prefix_seal = @import("../../prefix_seal.zig");
 const store_core = @import("../Store.zig");
@@ -19,6 +19,7 @@ const historical_domain = @This();
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const skills_domain = @import("skills.zig");
+const history_floor_domain = @import("history_floor.zig");
 const reads_domain = @import("reads.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
@@ -95,7 +96,8 @@ pub const HistoricalTool = struct {
 };
 
 /// `operation` is an earlier Operation's admission, with the effort it froze.
-pub const HistoricalEntryKind = enum { user, instruction, provider_output, tool_results, operation };
+/// `skill` is a skill a Message's `/name` word bound, right after it.
+pub const HistoricalEntryKind = enum { user, instruction, provider_output, tool_results, operation, skill };
 
 pub const HistoricalEntry = struct {
     position: u64,
@@ -1014,13 +1016,14 @@ fn entryAfter(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*con
 /// admission, the first `HistoricalView.entry_batch` of them in position
 /// order.
 const historical_entries = rsql.Read(.{
-    .sql = "SELECT e.session_position,e.entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AS consistent," ++
+    .sql = "SELECT e.session_position,CASE WHEN e.entry_kind=4 THEN 5 ELSE e.entry_kind END AS entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AS consistent," ++
         "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender,NULL AS effort," ++
         "NULL AS tool_set_id,NULL AS declares " ++
         "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
         "LEFT JOIN content ON content.content_id=e.content_id " ++
         "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
-        "AND e.entry_kind IN (1,2) AND (e.entry_kind=2 OR e.session_position>?3 OR e.session_position=?4) UNION ALL " ++
+        "AND e.entry_kind IN (1,2,4) AND (e.entry_kind=2 OR e.session_position>?3 OR e.session_position=?4" ++
+        " OR " ++ history_floor_domain.firstMessageSkillSql("e", "?4") ++ ") UNION ALL " ++
         "SELECT item.session_position,3,NULL,NULL,NULL,NULL,r.model,r.provider,item.item_kind,item.item_id_digest," ++
         store_schema.oneOf("owner.resolution_code", &accepted_resolutions) ++ " AND owner.session_ref=item.session_ref " ++
         "AND owner_turn.session_ref=item.session_ref " ++
@@ -1149,6 +1152,7 @@ fn historicalEntry(view: *HistoricalView, row: *const historical_entries.Row) er
         2 => .instruction,
         3 => .provider_output,
         4 => .operation,
+        5 => .skill,
         else => return error.CorruptStore,
     };
     if (kind == .operation) return .{

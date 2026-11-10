@@ -3174,13 +3174,15 @@ test "Shift-Enter and Alt-Enter add a line in every encoding, and a paste keeps 
     try std.testing.expectEqual(@as(usize, 10), Seen.now.starts);
 }
 
-test "a draft past the editor's capacity starts nothing" {
+test "a paste past the editor's capacity leaves the draft unchanged" {
     const rig = try openComposer();
     defer rig.close();
-    const pasted = "\x1b[200~" ++ @as([SessionInput.capacity + 1]u8, @splat('x')) ++ "\x1b[201~\r";
+    const pasted = "\x1b[200~" ++ @as([SessionInput.capacity + 1]u8, @splat('x')) ++ "\x1b[201~";
+    try expectStarted(rig, "kept", null);
     try expectStarted(rig, pasted, null);
-    try std.testing.expectEqualStrings("! Too long to send.", rig.overview.state.notice.?.text());
-    try expectStarted(rig, "next\r", "next");
+    try std.testing.expectEqualStrings("! Paste too long; draft unchanged.", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("kept", rig.overview.composerDraft().bytes);
+    try expectStarted(rig, "\r", "kept");
 }
 
 test "the composer edits at its caret, as a conversation's draft does" {

@@ -12,6 +12,7 @@ import os
 import pathlib
 import select
 import socket
+import os_semantics
 import struct
 import subprocess
 import sys
@@ -1865,7 +1866,7 @@ def prove_one_reply():
                 + b"x" * padding + b"\r\n\r\n")
 
     def connect(path):
-        client = socket.socket(socket.AF_UNIX)
+        client = os_semantics.unix_stream()
         client.settimeout(2)
         client.connect(str(path))
         assert accepted.wait(2), "one-reply worker never accepted"

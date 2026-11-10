@@ -10,7 +10,6 @@ from terminal_process import COLUMNS, ROWS, open_pty, spawn
 from terminal_screen import ScreenCapture, shown
 import select
 import shutil
-import socket
 import socketserver
 import sqlite3
 import subprocess
@@ -817,7 +816,7 @@ def proxy_swap_cases(state):
             probe("installed")
             try:
                 # Exchanges forward through the backend name: it reaches the Host.
-                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                with os_semantics.unix_stream() as client:
                     client.connect(str(proxy.backend))
             finally:
                 proxy.close()

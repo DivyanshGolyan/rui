@@ -259,7 +259,7 @@ def case(root, binary, releases, name):
 
 def peer_pid(path):
     """Independent OS receipt of the exact listening native process."""
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+    with os_semantics.unix_stream() as connection:
         connection.connect(path)
         return os_semantics.socket_peer_pid(connection)
 

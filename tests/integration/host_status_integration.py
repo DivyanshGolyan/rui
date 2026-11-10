@@ -98,7 +98,7 @@ def raw_info(sock, store, instance=None, *, kind="host_info", route="host-info",
     header = b"X-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\n"
     if instance is not None:
         header += f"X-Rui-Host-Instance: {instance}\r\n".encode()
-    with socket.socket(socket.AF_UNIX) as stream:
+    with os_semantics.unix_stream() as stream:
         stream.settimeout(5)
         stream.connect(str(sock))
         stream.sendall(
@@ -123,7 +123,7 @@ def wait_for_descriptors(pid, expected=None, timeout=5):
 
 
 def held_request(store, route, length=512, *, complete_headers=True):
-    stream = socket.socket(socket.AF_UNIX)
+    stream = os_semantics.unix_stream()
     stream.settimeout(2)
     stream.connect(str(socket_path(store)))
     stream.sendall(f"POST /v1/{route} HTTP/1.1\r\n".encode())
@@ -364,7 +364,7 @@ def main():
             fifo_lock.unlink()
         stale = socket_path(store)
         stale.parent.mkdir(mode=0o700, exist_ok=True)
-        with socket.socket(socket.AF_UNIX) as endpoint:
+        with os_semantics.unix_stream() as endpoint:
             endpoint.bind(str(stale))
         assert status(store) == "unavailable", "stale socket claimed readiness"
         stale.unlink()
@@ -374,7 +374,7 @@ def main():
             assert status(store) == "owned_unavailable"
             assert cli_status(home, "--store", store)["status"] == "owned_unavailable"
             for partial in (b"", b"HTTP/1.1 200 OK\r\n", b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\n\r\n{"):
-                with socket.socket(socket.AF_UNIX) as endpoint:
+                with os_semantics.unix_stream() as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(1)
                     release = threading.Event()
@@ -398,7 +398,7 @@ def main():
                         stalled.join(timeout=3)
                     assert not stalled.is_alive()
                 stale.unlink()
-            with socket.socket(socket.AF_UNIX) as endpoint:
+            with os_semantics.unix_stream() as endpoint:
                 endpoint.bind(str(stale))
                 endpoint.listen(1)
                 def incompatible_peer():
@@ -421,7 +421,7 @@ def main():
                 assert not peer.is_alive()
             stale.unlink()
             if os_semantics.SOCKET_MODE_ENFORCED:
-                with socket.socket(socket.AF_UNIX) as endpoint:
+                with os_semantics.unix_stream() as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(1)
                     stale.chmod(0)
@@ -471,7 +471,7 @@ def main():
                 *((f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n"
                    f"X-Rui-Wire-Version: {host_process.WIRE_VERSION}\r\n\r\n").encode() + body for body in ambiguous_bodies),
             ):
-                with socket.socket(socket.AF_UNIX) as endpoint:
+                with os_semantics.unix_stream() as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(2)
 
@@ -495,7 +495,7 @@ def main():
                 body = json.dumps({"version": host_process.WIRE_VERSION, "type": kind, "code": code}).encode()
                 response = (f"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n"
                             f"Content-Length: {len(body)}\r\nX-Rui-Wire-Version: {host_process.WIRE_VERSION}\r\n\r\n").encode() + body
-                with socket.socket(socket.AF_UNIX) as endpoint:
+                with os_semantics.unix_stream() as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(2)
 

@@ -38,4 +38,7 @@ Include repository-wide health only when it affects that task or the user asks f
 
 Standing grant: merge each small, coherent change once its PR is green, without further approval, lane completion or review signoff.
 Changes reach `main` only by merging their PR.
+The admin bypass in [the main ruleset](.github/main-ruleset.json) is a last resort, used only for changes on the critical path.
+Use it only when every red or missing check is a macOS job that GitHub never assigned a runner, every check that ran passed, and an infra-retry also failed to get a runner.
+State why in the merge commit or a PR comment.
 For PR publication, stacking, landing or CI-failure ownership, read [Landing procedures](docs/agents/landing.md).

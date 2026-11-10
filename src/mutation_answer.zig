@@ -46,7 +46,7 @@ pub const ContentReference = struct { bytes: u64, digest: [32]u8 };
 /// observation spelling; `rui request recover --kind` uses the hyphenated spelling.
 pub const Target = union(CommandKind) {
     configure,
-    message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false, invokes_skill: bool = false },
+    message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false },
     session_stop,
     session_archive: struct { archived: bool },
     model_interruption: struct { turn: u64, operation: u64 },
@@ -180,7 +180,7 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
                 _ = std.fmt.hexToBytes(&digest, input.sha256.slice()) catch return error.InvalidResponse;
                 const input_bytes = try decimalId(input.bytes, true);
                 confirmed_input = .{ .bytes = input_bytes, .digest = digest };
-                if (!expected.invokes_skill and (input_bytes != expected.bytes or !std.mem.eql(u8, &digest, &expected.digest))) return error.RequestBindingMismatch;
+                if (input_bytes != expected.bytes or !std.mem.eql(u8, &digest, &expected.digest)) return error.RequestBindingMismatch;
                 if (accepted) {
                     const admission = try decimalId(answer.admission.value orelse return error.InvalidResponse, false);
                     const queue = wire.queue.value orelse return error.InvalidResponse;
@@ -268,9 +268,6 @@ test "a mutation answer binds its request and its queue" {
     var body: [1024]u8 = undefined;
     const valid = try std.fmt.bufPrint(&body, "{s}{s}", .{ prefix, suffix });
     try std.testing.expectEqual(@as(u64, 7), (try decodeForTest(200, valid, "k7m2qx", target).answer).result.accepted.message.admission);
-    const captured = try decodeForTest(200, valid, "k7m2qx", .{ .message = .{ .bytes = 0, .digest = @splat(0), .invokes_skill = true } }).answer;
-    try std.testing.expectEqual(@as(u64, 4), captured.input.?.bytes);
-    try std.testing.expectEqualSlices(u8, &digest, &captured.input.?.digest);
     try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(200, valid, "09azvw", target).answer);
     var changed = target;
     changed.message.bytes = 5;

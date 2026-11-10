@@ -89,7 +89,7 @@ Cleanup is an owner transition: reclamation must be retry-safe, distinguish conf
 
 ### Zig and errors
 
-Follow the [Zig 0.17.0 style guide](https://ziglang.org/documentation/0.17.0/#Style-Guide) and installed standard-library APIs: `TitleCase` for types/type-producing functions and files with top-level instance fields, `camelCase` for other functions, `snake_case` for values and namespace files.
+Follow the [Zig 0.17.1 style guide](https://ziglang.org/documentation/0.17.1/#Style-Guide) and installed standard-library APIs: `TitleCase` for types/type-producing functions and files with top-level instance fields, `camelCase` for other functions, `snake_case` for values and namespace files.
 Name declarations in their full namespace without redundant prefixes or miscellaneous utility buckets.
 Keep helpers with their consumer until a shared responsibility warrants extraction.
 

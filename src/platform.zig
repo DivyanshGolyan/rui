@@ -1,11 +1,12 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const named_scratch = @import("named_scratch.zig");
+const store_path = @import("store_path.zig");
 const c = @import("posix");
 
-pub const database_suffix = "/rui.sqlite3";
+pub const database_suffix = store_path.database_suffix;
 pub const scratch_suffix = "/scratch";
-pub const max_database_path_bytes = protocol.max_store_bytes + database_suffix.len;
+pub const max_database_path_bytes = store_path.max_database_path_bytes;
 pub const max_scratch_path_bytes = protocol.max_store_bytes + scratch_suffix.len;
 const runtime_prefix = "/tmp/rui-";
 const max_uid_bytes = "4294967295".len;

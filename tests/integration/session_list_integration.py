@@ -4,7 +4,7 @@
 import json
 import os
 import pathlib
-import socket
+import os_semantics
 import subprocess
 import sys
 import tempfile
@@ -17,7 +17,7 @@ from session_list_fixture import assert_empty_full, assert_resources, released_r
 
 def exchange(socket_path, route, request):
     body = json.dumps(request, ensure_ascii=True, separators=(",", ":")).encode()
-    with socket.socket(socket.AF_UNIX) as client:
+    with os_semantics.unix_stream() as client:
         client.connect(socket_path)
         client.sendall(
             f"POST /v1/{route} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\n"

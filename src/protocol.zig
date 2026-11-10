@@ -143,6 +143,7 @@ pub const Kind = enum {
     activity_page,
     activity_search,
     activity_content,
+    skill_suggestions,
     model_list,
 };
 
@@ -505,6 +506,12 @@ pub const ActivityItem = struct {
     }
 };
 pub const ReadActivityContent = activity_read.ReadActivityContent;
+pub const ReadSkillSuggestions = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: ?Bounded(max_session_bytes) = null,
+    workspace: ?Bounded(max_workspace_bytes) = null,
+    prefix: Bounded(64) = .{},
+};
 
 pub const CallActivity = struct {
     pub const Entry = struct { operation: u64, ordinal: u64, presentation: ToolPresentation };
@@ -668,6 +675,16 @@ pub const FirstMessage = struct {
     /// Holes: position, admission, admitted at, sender, content.
     pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = ActivityItem.Content }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
+
+    pub fn fromCore(first: session_list.FirstMessage) FirstMessage {
+        return .{
+            .position = first.position,
+            .admission = first.admission,
+            .admitted_at = first.admitted_at,
+            .sender = if (first.sender) |sender| .{ .session = sender } else null,
+            .content = .{ .length = first.length, .digest = first.digest },
+        };
+    }
 
     pub fn writeJson(self: *const FirstMessage, out: *std.Io.Writer) !void {
         try writeShape(out, json_shape, .{ self.position, self.admission, self.admitted_at, self.sender, self.content });
@@ -856,13 +873,14 @@ fn RequestOf(comptime Custody: type) type {
         activity_page: ActivityPage,
         activity_search: ActivitySearch,
         activity_content: ReadActivityContent,
+        skill_suggestions: ReadSkillSuggestions,
         model_list: struct { store: Bounded(max_store_bytes) = .{} },
 
         pub fn removeTemporaryContent(self: *Request, io: Custody.Io) !void {
             switch (self.*) {
                 .configure => |*command| try command.removeTemporaryContent(io),
                 .message => |*command| try command.removeTemporaryContent(io),
-                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .model_list => {},
+                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .skill_suggestions, .model_list => {},
             }
         }
 
@@ -1011,6 +1029,25 @@ fn ParserOf(comptime Custody: type) type {
                 .activity_content => {
                     out.* = .{ .activity_content = .{ .store = store } };
                     try self.parseActivityContent(&out.activity_content, &members);
+                },
+                .skill_suggestions => {
+                    out.* = .{ .skill_suggestions = .{ .store = store } };
+                    const Field = enum { session, workspace, prefix };
+                    var seen: std.enums.EnumSet(Field) = .empty;
+                    while (try self.nextCommandField(Field, &members, &seen)) |field| switch (field) {
+                        .session => {
+                            out.skill_suggestions.session = .{};
+                            try self.readSmallString(&out.skill_suggestions.session.?);
+                        },
+                        .workspace => {
+                            out.skill_suggestions.workspace = .{};
+                            try self.readSmallString(&out.skill_suggestions.workspace.?);
+                        },
+                        .prefix => try self.readSmallString(&out.skill_suggestions.prefix),
+                    };
+                    if (seen.contains(.session) == seen.contains(.workspace) or !seen.contains(.prefix)) return error.MissingField;
+                    if (out.skill_suggestions.session) |session| if (!validSessionId(session.slice())) return error.InvalidSession;
+                    if (out.skill_suggestions.workspace) |workspace| if (workspace.len == 0) return error.InvalidWorkspace;
                 },
             }
             if (!self.source.atEnd()) {
@@ -1266,7 +1303,7 @@ fn ParserOf(comptime Custody: type) type {
         }
 
         fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
-            const Field = enum { key, session, sender, sender_handle, configuration, text, require_model, skill };
+            const Field = enum { key, session, sender, sender_handle, configuration, text, require_model };
             var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readCommandKey(&out.key),
@@ -1285,22 +1322,16 @@ fn ParserOf(comptime Custody: type) type {
                     try self.parseConfiguration(false, &out.configuration.?);
                 },
                 .text => try self.readContent(&out.text, false, true),
-                .skill => {
-                    out.skill = .{};
-                    try self.readSmallString(&out.skill.?);
-                },
                 .require_model => out.require_model = try self.readBoolean(),
             };
-            try require(Field, seen, &.{ .key, .session, .sender, .sender_handle });
-            if (seen.contains(.text) == seen.contains(.skill)) return error.InvalidMessage;
-            if (out.skill != null and (out.skill.?.len == 0 or out.configuration != null)) return error.InvalidMessage;
+            try require(Field, seen, &.{ .key, .session, .sender, .sender_handle, .text });
             // Only a creating Message, one with no Session yet, carries a
             // configuration and a capability condition, and it must carry the
             // configuration.
             if (out.session.len == 0 and out.configuration == null) return error.MissingField;
             if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
             if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
-            if (out.skill == null and out.text.state != .value) return error.InvalidMessage;
+            if (out.text.state != .value) return error.InvalidMessage;
             if (seen.contains(.require_model) and out.configuration == null) return error.InvalidMessage;
         }
 
@@ -1819,31 +1850,7 @@ fn ParserOf(comptime Custody: type) type {
     };
 }
 
-pub const Utf8State = struct {
-    bytes: [4]u8 = undefined,
-    used: u3 = 0,
-    expected: u3 = 0,
-
-    pub fn feed(self: *Utf8State, input: []const u8) !void {
-        for (input) |byte| {
-            if (self.used == 0) {
-                if (byte < 0x80) continue;
-                self.expected = std.unicode.utf8ByteSequenceLength(byte) catch return error.InvalidUtf8;
-            }
-            self.bytes[self.used] = byte;
-            self.used += 1;
-            if (self.used == self.expected) {
-                _ = std.unicode.utf8Decode(self.bytes[0..self.expected]) catch return error.InvalidUtf8;
-                self.used = 0;
-                self.expected = 0;
-            }
-        }
-    }
-
-    pub fn complete(self: *const Utf8State) bool {
-        return self.used == 0;
-    }
-};
+pub const Utf8State = @import("utf8_validation.zig").State;
 
 // Shared by the synchronous metadata grammar and suspended content ingestion.
 // The opening quote belongs to the caller; feed consumes through the closing
@@ -2093,6 +2100,14 @@ pub const observe_command_request = .{ "{\"version\":\"" ++ wire_version ++ "\",
 /// Holes: Store.
 pub const host_info_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_info\",\"store\":", store_hole, "}" };
 /// Holes: Store.
+pub const skill_suggestions_session_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"skill_suggestions\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"prefix\":", Hole{ .string = 64 }, "}" };
+pub const skill_suggestions_workspace_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"skill_suggestions\",\"store\":", store_hole, ",\"workspace\":", Hole{ .string = max_workspace_bytes }, ",\"prefix\":", Hole{ .string = 64 }, "}" };
+pub const skill_suggestions_reply = struct {
+    pub const entry = .{ "{\"name\":", Hole{ .string = 64 }, ",\"description\":", Hole{ .string = 4096 }, "}" };
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"skill_suggestions\",\"revision\":\"", Hole.decimal, "\",\"total\":\"", Hole.decimal, "\",\"entries\":[" };
+    pub const tail = "]}";
+    pub const max_bytes = shapeBytes(head) + jsonListBytes(24, shapeBytes(entry)) + tail.len;
+};
 pub const model_list_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"model_list\",\"store\":", store_hole, "}" };
 /// Holes: Store, paused.
 pub const host_pause_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_pause\",\"store\":", store_hole, ",\"paused\":", Hole.boolean, "}" };
@@ -2154,7 +2169,6 @@ pub const message_request = struct {
     pub const sender_head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"sender\":{\"store\":", store_hole, ",\"session\":", session_hole, "},\"sender_handle\":", Hole{ .optional_string = max_sender_handle_bytes } };
     /// The configuration object of a creating Message follows.
     pub const configuration = .{",\"configuration\":"};
-    pub const skill = .{ ",\"skill\":", Hole{ .string = 64 }, "}" };
     /// The text, as a JSON string, follows.
     pub const text = .{",\"text\":{\"state\":\"value\",\"value\":"};
     pub const tail = .{"}}"};
@@ -2185,11 +2199,12 @@ pub const max_activity_content_request_bytes = shapeBytes(activity_content_reque
 /// Every request the client writes into a `RequestBuffer`. Control requests
 /// are captured to a record file instead.
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
-    observe_command_request,       host_info_request,           host_stop_request,
-    host_pause_request,            read_result_request,         list_sessions_changed_request,
-    read_action_arguments_request, read_action_call_id_request, conversation_content_request,
-    conversation_page_request,     activity_search_request,     activity_page_since_request,
-    activity_content_request,      model_list_request,
+    observe_command_request,       host_info_request,                 host_stop_request,
+    host_pause_request,            read_result_request,               list_sessions_changed_request,
+    read_action_arguments_request, read_action_call_id_request,       conversation_content_request,
+    conversation_page_request,     activity_search_request,           activity_page_since_request,
+    activity_content_request,      skill_suggestions_session_request, skill_suggestions_workspace_request,
+    model_list_request,
 }));
 
 /// Separated by commas, `count` JSON values of at most `item_bytes` each.
@@ -3162,9 +3177,8 @@ test "the request parser refuses what each command's grammar forbids" {
         .{ .json = message ++ "\"text\":" ++ value ++ "}" },
         .{ .json = message ++ "\"text\":" ++ value ++ ",\"configuration\":{}}", .failure = error.UnexpectedField },
         .{ .json = message ++ "\"text\":" ++ value ++ ",\"require_model\":true}", .failure = error.InvalidMessage },
-        .{ .json = message ++ "\"skill\":\"review\"}" },
-        .{ .json = message ++ "\"skill\":\"\"}", .failure = error.InvalidMessage },
-        .{ .json = message ++ "\"skill\":\"review\",\"text\":" ++ value ++ "}", .failure = error.InvalidMessage },
+        // Skills are named only as `/name` words in the text.
+        .{ .json = message ++ "\"skill\":\"review\"}", .failure = error.UnexpectedField },
         .{ .json = message ++ "\"sender_handle\":null}", .failure = error.UnexpectedField },
         // An inspection reads from a token, or selects a profile or one
         // failed response stream named by positive i64 identities.
@@ -3303,37 +3317,54 @@ test "session archive digest binds the domain session and intent not transport i
     try std.testing.expect(!std.mem.eql(u8, &digest, &stop.semanticDigest()));
 }
 
-test "skills native wire preserves explicit invoke and reload intent" {
-    const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,";
-    const configure_prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",";
-    for ([_][]const u8{
-        prefix ++ "\"skill\":\"demo\"}",
-        configure_prefix ++ "\"configuration\":{},\"reload_skills\":true}",
-    }, 0..) |json, index| {
-        var source: MetadataSource = .{ .input = json };
-        var parser: Tested.Parser = .{ .source = &source };
-        const request = try parseForTest(&parser);
-        if (index == 0) {
-            try std.testing.expectEqualStrings("demo", request.message.skill.?.slice());
-            const digest = request.message.semanticDigest();
-            var plain = request.message;
-            plain.skill = null;
-            try std.testing.expect(!std.mem.eql(u8, &digest, &plain.semanticDigest()));
-        } else {
-            try std.testing.expect(request.configure.reload_skills);
-            const digest = request.configure.semanticDigest();
-            var plain = request.configure;
-            plain.reload_skills = false;
-            try std.testing.expect(!std.mem.eql(u8, &digest, &plain.semanticDigest()));
-        }
+test "skills native wire preserves explicit reload intent and has no skill request field" {
+    const reload = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"configuration\":{},\"reload_skills\":true}";
+    var source: MetadataSource = .{ .input = reload };
+    var parser: Tested.Parser = .{ .source = &source };
+    const request = try parseForTest(&parser);
+    try std.testing.expect(request.configure.reload_skills);
+    const digest = request.configure.semanticDigest();
+    var plain = request.configure;
+    plain.reload_skills = false;
+    try std.testing.expect(!std.mem.eql(u8, &digest, &plain.semanticDigest()));
+    // A Message names skills only as `/name` words in its text; the Host
+    // binds them. No request field lists skills.
+    const message = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,";
+    for ([_][]const u8{ message ++ "\"skill\":\"demo\"}", message ++ "\"skills\":[\"demo\"]}" }) |removed| {
+        source = .{ .input = removed };
+        parser = .{ .source = &source };
+        try std.testing.expectError(error.UnexpectedField, parseForTest(&parser));
     }
-    for ([_][]const u8{
-        prefix ++ "\"skill\":\"\"}",
-        prefix ++ "\"skill\":\"demo\",\"text\":{\"state\":\"omitted\"}}",
-        prefix ++ "\"skill\":\"demo\",\"configuration\":{}}",
-    }) |json| {
-        var source: MetadataSource = .{ .input = json };
-        var parser: Tested.Parser = .{ .source = &source };
-        try std.testing.expectError(error.InvalidMessage, parseForTest(&parser));
+}
+
+test "inline skills leave every existing canonical mutation digest unchanged" {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"store\":\"s\",\"key\":\"old\",";
+    const Case = struct { body: []const u8, digest: []const u8 };
+    // Independent SHA-256 expectations over the grammars without a skills vector.
+    const cases = [_]Case{
+        .{ .body = head ++ "\"kind\":\"configure\",\"session\":\"k7m2qx\",\"configuration\":{}}", .digest = "db4015965f28197d8bfae4b13f61edb8b1047904643d764a7cc8ce10f9680e30" },
+        .{ .body = head ++ "\"kind\":\"configure\",\"session\":\"k7m2qx\",\"configuration\":{},\"reload_skills\":true}", .digest = "14764e8bb9e20125961c2b950bac15e919dfc6653fe2cc7359b027faa0ee89b5" },
+        .{ .body = head ++ "\"kind\":\"message\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"\"}}", .digest = "e8cea677d75e3de98bcb68ccbbfcc6cda23fe42bd180da1c742f741f8c73975f" },
+        .{ .body = head ++ "\"kind\":\"session_stop\",\"session\":\"k7m2qx\"}", .digest = "f8e8c1514a14cc72fe18bad111508cffa2b5b55812f6ba2deaed959740940d48" },
+        .{ .body = head ++ "\"kind\":\"session_archive\",\"session\":\"k7m2qx\",\"archived\":true}", .digest = "ab777e65fc2476bbadf1d8eb793e2bf4d7d3bd49334bd79b4ca15a0f0c536d6b" },
+        .{ .body = head ++ "\"kind\":\"session_archive\",\"session\":\"k7m2qx\",\"archived\":false}", .digest = "07e24427f9ec75478b887d3d2e5bd3a072bcc57a587c6d0826eb5bf0f6aa86df" },
+        .{ .body = head ++ "\"kind\":\"model_interruption\",\"target\":{\"session\":\"k7m2qx\",\"turn\":\"7\",\"operation\":\"9\"}}", .digest = "0fd58dfc4f6ddff0f7f9da78e88e4fa50d596a623e161646c0c5082ba4350bf4" },
+        .{ .body = head ++ "\"kind\":\"permission_decision\",\"session\":\"k7m2qx\",\"action\":\"11\",\"decision\":\"allow_once\"}", .digest = "58a41dbeb05f94c0a10bf02ec6dc5bf3b39a50dbfa4af591364f001c4008be79" },
+    };
+    for (cases) |case| {
+        var source: MetadataSource = .{ .input = case.body };
+        const captured: Tested.ContentField = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
+        var parser: Tested.Parser = .{ .source = &source, .captured = &.{captured} };
+        const request = try parseForTest(&parser);
+        const digest = switch (request) {
+            .configure => |*command| command.semanticDigest(),
+            .message => |*command| command.semanticDigest(),
+            .session_stop => |*command| command.semanticDigest(),
+            .session_archive => |*command| command.semanticDigest(),
+            .model_interruption => |*command| command.semanticDigest(),
+            .permission_decision => |*command| command.semanticDigest(),
+            else => unreachable,
+        };
+        try std.testing.expectEqualStrings(case.digest, &std.fmt.bytesToHex(digest, .lower));
     }
 }

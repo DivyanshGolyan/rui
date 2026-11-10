@@ -3,7 +3,7 @@
 //! them. A statement steps in process, so a pass is never a round trip.
 
 const std = @import("std");
-const platform = @import("../../platform.zig");
+const store_path = @import("../../store_path.zig");
 const provider_route = @import("../../provider_route.zig");
 const content_string = @import("../../content_string.zig");
 const change_ring = @import("../../change_ring.zig");
@@ -75,7 +75,7 @@ pub noinline fn open(io: std.Io, database_path: []const u8, selector: []const u8
         break :blk stat.size != 0;
     };
 
-    var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+    var path_buffer: [store_path.max_database_path_bytes + 1:0]u8 = undefined;
     const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database_path}, 0);
     var database: ?*c.sqlite3 = null;
     const open_result = c.sqlite3_open_v2(

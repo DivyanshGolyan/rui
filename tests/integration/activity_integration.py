@@ -7,7 +7,7 @@ import json
 import os
 import pathlib
 import shutil
-import socket
+import os_semantics
 import sqlite3
 import subprocess
 import sys
@@ -118,7 +118,7 @@ def main():
             assert empty == []
             baseline = host_resources(process.pid)
             if baseline is not None:
-                with socket.socket(socket.AF_UNIX) as held:
+                with os_semantics.unix_stream() as held:
                     held.connect(fields["socket"])
                     wait_for(lambda: idle_resources(process.pid, fields["socket"]) is None, "held peer excluded from idle census")
                 baseline = wait_for(lambda: idle_resources(process.pid, fields["socket"]), "idle reader baseline")

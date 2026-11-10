@@ -2013,7 +2013,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     if (configuration == null and !protocol.validSessionId(destination)) {
         return error.InvalidSession;
     }
-    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .skill = parsed.get("skill"), .configuration = if (configuration) |value| value.input else null };
+    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = if (configuration) |value| value.input else null };
     // Peer context names a Session in its own Store, so it signs only sends
     // to that Store; an explicit --store naming another Store is a plain
     // caller's send there (#957). Incomplete or malformed context never falls
@@ -2378,12 +2378,6 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
                 if (err == error.CanonicalStoreFailure) return err;
                 stderr.diagnostic("rui: result: {s}\n", .{@tagName(caller_error.of(err))});
             };
-        },
-        .skill => {
-            var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            var captured = try client.captureMessage(init.io, .{ .store = destination, .session = reference, .text_path = "", .skill = argument }, .{ .generated = try requestDirectory(init, &directory_buffer) }).get();
-            var step: ?client.Step = null;
-            try sendCapturedMutation(requests_context, &captured, .{ .map = init.environ_map }, &step, .json);
         },
         .@"reload-skills" => {
             _ = try liveConfigure(init, requests_context, live, &.{"--reload-skills"}, "Usage: /reload-skills\n");
@@ -3439,19 +3433,6 @@ test "session start mutation receipt adds configuration without changing send" {
     reply.target.message.creates_session = false;
     try writeMutationJson(&writer, reply, null);
     try std.testing.expectEqualStrings(context ++ tail, writer.buffered());
-}
-
-test "skills native receipt uses Host captured input rather than the intent placeholder" {
-    const digest = protocol.contentDigest("complete skill body");
-    const wire = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"}},\"input\":{{\"type\":\"text\",\"bytes\":\"19\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"7\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{std.fmt.bytesToHex(digest, .lower)});
-    defer std.testing.allocator.free(wire);
-    const reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "k7m2qx", .{ .message = .{ .bytes = 0, .digest = protocol.contentDigest(""), .invokes_skill = true } });
-    var buffer: [2048]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    try writeMutationJson(&writer, reply, null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"bytes\":\"19\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), &std.fmt.bytesToHex(digest, .lower)) != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"bytes\":\"0\"") == null);
 }
 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {

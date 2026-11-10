@@ -7,7 +7,8 @@ const tool_proposal = @import("../../tool_proposal.zig");
 const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
-const tool_catalog = @import("../../tools.zig");
+const tool_catalog = @import("../../call_classification.zig");
+const tool_record = @import("../../tool_record.zig");
 const tool_set = @import("tool_set.zig");
 const output_format = @import("../../output_format.zig");
 const retry_policy = @import("../../retry_policy.zig");
@@ -730,7 +731,7 @@ const insert_item = rsql.Write(.{
         extras_content_id: u64,
         part_count: u64,
         message_content_id: ?u64,
-        description: ?tool_catalog.Description,
+        description: ?tool_record.Description,
         call_failed: bool,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
@@ -758,7 +759,7 @@ const insert_call = rsql.Write(.{
         rejection_content_id: ?u64,
         acceptance_position: ?u64,
         action_kind: ?u64,
-        description: ?tool_catalog.Description,
+        description: ?tool_record.Description,
         field_metadata: [120]u8,
         session: rsql.SessionHead,
     },
@@ -886,7 +887,7 @@ const historical_mcp = rsql.Read(.{
         "JOIN tool_set_member member ON member.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE o.operation_id=?1 AND tool.owner='mcp' AND tool.name IN (" ++ parameters(2, batch_items) ++ ") GROUP BY tool.name",
     .Args = NameArgs(),
-    .Row = struct { name: Bounded(tool_catalog.max_name_bytes), offered: bool },
+    .Row = struct { name: Bounded(tool_record.max_name_bytes), offered: bool },
     .cardinality = .each,
 });
 
@@ -897,7 +898,7 @@ fn NameArgs() type {
     types[0] = u64;
     for (0..batch_items) |index| {
         names[index + 1] = std.fmt.comptimePrint("n{d}", .{index});
-        types[index + 1] = Bounded(tool_catalog.max_name_bytes);
+        types[index + 1] = Bounded(tool_record.max_name_bytes);
     }
     return @Struct(.auto, null, &names, &types, &@splat(.{}));
 }
@@ -947,9 +948,9 @@ pub const Batch = struct {
     duplicates: DuplicateVisitor,
 
     /// The fixed SQL fields also own the stable names selected call facts borrow.
-    fn names(batch: *Batch) *[batch_items]Bounded(tool_catalog.max_name_bytes) {
+    fn names(batch: *Batch) *[batch_items]Bounded(tool_record.max_name_bytes) {
         @setEvalBranchQuota(20_000);
-        const Name = Bounded(tool_catalog.max_name_bytes);
+        const Name = Bounded(tool_record.max_name_bytes);
         comptime {
             std.debug.assert(@sizeOf(historical_mcp.Args) == @sizeOf(u64) + batch_items * @sizeOf(Name));
             for (0..batch_items) |index| {
@@ -1146,7 +1147,7 @@ fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
 /// each call's name, call_id and arguments, and, when the catalog rejects
 /// it, its rejection text. A call imports at most four identities, so
 /// `batch_items` calls always fit `batch_identities`.
-fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, offered: *const tool_catalog.Offered) void {
+fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, offered: *const tool_record.Offered) void {
     @setEvalBranchQuota(20_000);
     comptime std.debug.assert(batch_identities >= 4 * batch_items);
     batch.reset(.calls, start);
@@ -1186,9 +1187,9 @@ fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
                         } else |_| {}
                     };
                 } else |_| {}
-                var name_buffer: [tool_catalog.max_name_bytes]u8 = undefined;
+                var name_buffer: [tool_record.max_name_bytes]u8 = undefined;
                 const call_name = excerpt(io, output.source, name_record, &name_buffer) catch |err| return batch.stop(err, record_start);
-                if (name_record.decoded_length <= tool_catalog.max_name_bytes) {
+                if (name_record.decoded_length <= tool_record.max_name_bytes) {
                     batch.names()[batch.digest_count].set(call_name) catch unreachable;
                 }
                 batch.ids.digests[batch.digest_count] = call_id_record.content_digest;
@@ -1210,7 +1211,7 @@ fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
 /// which reports them in call order rather than during speculative collection.
 /// Noinline: inspection scratch must not grow the import frame that drains
 /// queued writes and opens SQLite content sinks.
-noinline fn collectFinalRejections(batch: *Batch, output: *const ValidatedOutput, io: std.Io, offered: *const tool_catalog.Offered) void {
+noinline fn collectFinalRejections(batch: *Batch, output: *const ValidatedOutput, io: std.Io, offered: *const tool_record.Offered) void {
     var reader = OutputMetadataReader.init(io, output.metadata, output.item_count) catch return;
     reader.offset = batch.start;
     var name: ?OutputMetadataRecord = null;
@@ -1370,7 +1371,7 @@ fn Settlement(comptime A: type) type {
         positions: *store_access.Positions,
         first_item_position: u64,
         purpose: ModelOperationKind,
-        tools: tool_catalog.Offered,
+        tools: tool_record.Offered,
         settling: success_facts.Row,
         imported_items: u64 = 0,
         imported_calls: u64 = 0,
@@ -1474,7 +1475,7 @@ fn Settlement(comptime A: type) type {
                 if (record.ordinal != s.imported_items) return error.CorruptOutputMetadata;
                 if (index == batch.digest_count) return error.CorruptOutputMetadata;
                 if (batch.duplicate(index)) return error.InvalidProviderEnvelope;
-                var description: tool_catalog.Description = .{};
+                var description: tool_record.Description = .{};
                 const neutral = try s.importItem(batch, record, region_start, reader.offset, &description);
                 s.a.write(insert_item, .{
                     .operation_id = s.binding.operation_id,
@@ -1539,7 +1540,7 @@ fn Settlement(comptime A: type) type {
         /// provider bags and, for a message, its text (every text part's
         /// decoded text back to back, one row its parts are lengths of).
         /// A hosted call's description goes to `description`.
-        fn importItem(s: *Self, batch: *Batch, item: OutputMetadataRecord, metadata_start: u64, metadata_end: u64, description: *tool_catalog.Description) !ImportedNeutral {
+        fn importItem(s: *Self, batch: *Batch, item: OutputMetadataRecord, metadata_start: u64, metadata_end: u64, description: *tool_record.Description) !ImportedNeutral {
             var metadata = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
             metadata.offset = metadata_start;
             metadata.length = metadata_end;
@@ -1775,7 +1776,7 @@ const ImportedNeutral = struct { bag: u64, part_count: u64, text: ?u64, text_len
 
 /// A hosted call's description from its action and pattern records.
 /// noinline: its excerpt windows live in this frame only.
-noinline fn describeWebSearch(io: std.Io, source: std.Io.File, call: OutputMetadataRecord, pattern: ?OutputMetadataRecord) !tool_catalog.Description {
+noinline fn describeWebSearch(io: std.Io, source: std.Io.File, call: OutputMetadataRecord, pattern: ?OutputMetadataRecord) !tool_record.Description {
     var target: [tool_catalog.WebSearchCall.excerpt_bytes]u8 = undefined;
     var found: [tool_catalog.WebSearchCall.excerpt_bytes]u8 = undefined;
     return tool_catalog.describe(.{ .web_search = .{
@@ -1892,11 +1893,11 @@ fn writeDecoded(io: std.Io, output: *const ValidatedOutput, sink: store_access.C
 
 /// Noinline: description rendering does not retain its bounded scratch on
 /// the import frame while that frame opens SQLite content sinks.
-noinline fn callDescription(facts: *const tool_catalog.CallFacts) !?tool_catalog.Description {
+noinline fn callDescription(facts: *const tool_catalog.CallFacts) !?tool_record.Description {
     if (facts.tool) |*tool| if (tool.runner() == .mcp) {
         // Keep the existing 100-byte description; the richer 200-byte MCP
         // projection is deferred. The raw arguments remain unchanged.
-        var fallback: tool_catalog.Description = .{ .len = 0 };
+        var fallback: tool_record.Description = .{ .len = 0 };
         try fallback.set(tool.name);
         return fallback;
     };
@@ -1906,7 +1907,7 @@ noinline fn callDescription(facts: *const tool_catalog.CallFacts) !?tool_catalog
 /// One function call's catalog facts: its name and, for bash, its
 /// arguments. noinline: the arguments' content window lives in this frame
 /// only, not in the settlement frame that walks the output's metadata.
-noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetadataRecord, arguments: OutputMetadataRecord, offered: *const tool_catalog.Offered) !tool_catalog.CallFacts {
+noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetadataRecord, arguments: OutputMetadataRecord, offered: *const tool_record.Offered) !tool_catalog.CallFacts {
     var call_name: output_format.NameReader = .{ .io = io, .file = source, .position = name.start, .end = try name.end() };
     var encoded: output_format.JsonStringSource = .{
         .encoded = .{ .io = io, .file = source, .position = arguments.start, .end = try arguments.end() },

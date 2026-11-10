@@ -97,6 +97,20 @@ def simulate(platform_name):
     return mock.patch.multiple(_module, **semantics(platform_name))
 
 
+def unix_stream():
+    """A Unix stream with Darwin-shaped send capacity on Linux (#605, #619)."""
+    stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        if _module.PROC_FS:
+            # Linux doubles SO_SNDBUF. With 4096 set, a nonblocking send with
+            # no reader accepted 8064 bytes on x86-64 Linux in this orb.
+            stream.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        return stream
+    except BaseException:
+        stream.close()
+        raise
+
+
 TRUST_VARIABLES = ("SSL_CERT_FILE", "SSL_CERT_DIR")
 
 

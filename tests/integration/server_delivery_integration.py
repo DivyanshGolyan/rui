@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 import pathlib
-import socket
+import os_semantics
 import subprocess
 import sys
 import tempfile
@@ -30,7 +30,7 @@ def exchange(sock, store, route, kind, **fields):
 
 def hold_reply(sock, store, route, kind, **fields):
     body = json.dumps({"version": host_process.WIRE_VERSION, "kind": kind, "store": str(store), **fields}).encode()
-    peer = socket.socket(socket.AF_UNIX)
+    peer = os_semantics.unix_stream()
     try:
         peer.settimeout(5)
         peer.connect(sock)
