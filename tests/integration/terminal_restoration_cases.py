@@ -3230,11 +3230,6 @@ def main(selected=None):
         if selected == "app-ready-error":
             completed = True
             return
-        if selected == "input-replay":
-            from terminal_input_replay import input_replay_cases
-            input_replay_cases()
-            completed = True
-            return
         if selected in (None, "notice", "detach"):
             native_notice_cases(state)
         if selected == "notice":

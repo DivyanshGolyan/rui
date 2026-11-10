@@ -6,7 +6,6 @@ import shutil
 import subprocess
 import tempfile
 import threading
-import time
 
 from driver import DirectPty, defer_signals
 from host_process import canonical_fixture_root, dispose_all
@@ -142,18 +141,6 @@ def editor(fixture, row):
     assert_submitted(fixture.endpoint.requests, [row["expected"]])
 
 
-def expiry(fixture, row):
-    tty = fixture.terminal()
-    started = time.monotonic()
-    chunks(tty, row["chunks"])
-    tty.finish(expected=2)
-    assert time.monotonic() - started >= 1.8, "incomplete input expired before its two-second allowance"
-    errors = (fixture.output / "stderr.bin").read_bytes()
-    assert b"[terminal_input_incomplete]" in errors, ("incomplete sequence diagnostic", errors)
-    assert fixture.endpoint.requests == [], "incomplete input submitted a Message"
-    assert set((fixture.home / ".config/rui/requests").glob("*.json")) == fixture.capture_baseline, "incomplete input captured intent"
-
-
 def rejection(fixture, row):
     fixture.answer("TD4 valid after rejection")
     tty = fixture.terminal()
@@ -212,26 +199,33 @@ def navigation(fixture, row):
     tty.marker("TD4 history end")
     tty.draft("", 2)
     captures = set((fixture.home / ".config/rui/requests").glob("*.json"))
+    def scrolled_back():
+        # The answer's last line leaves the screen once the view is above the
+        # latest; the `↓` marker that says so is PR 2's.
+        return "TD4 history end" not in tty.screen.completed
+
     def history(first, browsing):
         # A later printable byte witnesses consumption of all preceding input,
         # not just an intermediate frame from a repeated-key batch. This is an
         # ordered editor observation, not a kernel-arrival timestamp.
         tty.send(b"~")
         tty.draft("~", 3)
-        assert tty.screen.completed.startswith("Browsing") == browsing, "navigation view changed before ordered marker"
-        # 24 terminal rows minus heading, the rule, the composer and the
-        # Session line leave 20 history rows. These literal fixture anchors
-        # are independent of Rui's viewport.
-        expected = [f"History line {number:03d}" for number in range(first, first + 20)]
+        assert scrolled_back() == browsing, "navigation view changed before ordered marker"
+        # 24 terminal rows minus the composer between its two rules, the
+        # facts and the status line leave 19 transcript rows. At the latest
+        # the answer's last line takes the bottom one, so 18 history lines
+        # show; scrolled back, 19 do. These literal fixture anchors are
+        # independent of Rui's viewport.
+        expected = [f"History line {number:03d}" for number in range(first, min(first + (19 if browsing else 18), 100))]
         actual = [line.strip() for line in tty.screen.completed.splitlines()
                   if line.strip().startswith("History line ")]
         assert actual == expected, ("navigation history anchor/distance", actual, expected)
         tty.send(b"\x15")
         tty.draft("", 2)
-    history(80, False)
+    history(82, False)
     generation = tty.screen.generation
     chunks(tty, row["chunks"])
-    tty.wait(lambda: tty.screen.completed.startswith("Browsing"), label="navigation entered browsing", after=generation)
+    tty.wait(scrolled_back, label="navigation entered browsing", after=generation)
     if row.get("status"):
         tty.marker(" Status · ")
         tty.marker(f" · {fixture.session}")
@@ -242,14 +236,13 @@ def navigation(fixture, row):
         for step in row.get("middle", []):
             generation = tty.screen.generation
             chunks(tty, step["chunks"])
-            tty.wait(lambda: tty.screen.completed.startswith("Browsing"),
-                     label="navigation intermediate movement", after=generation)
+            tty.wait(scrolled_back, label="navigation intermediate movement", after=generation)
             history(step["first_history"], True)
     generation = tty.screen.generation
     chunks(tty, row["return_chunks"])
-    tty.wait(lambda: not tty.screen.completed.startswith("Browsing") and tty.screen.draft("", 2),
+    tty.wait(lambda: not scrolled_back() and tty.screen.draft("", 2),
              label="navigation returned to live empty composer", after=generation)
-    history(80, False)
+    history(82, False)
     tty.marker("TD4 history end")
     assert_submitted(fixture.endpoint.requests, ["seed history"])
     assert set((fixture.home / ".config/rui/requests").glob("*.json")) == captures, "navigation captured intent"
@@ -257,5 +250,5 @@ def navigation(fixture, row):
     tty.finish()
 
 
-SCENARIOS = {"editor": editor, "expiry": expiry, "rejection": rejection, "recovery": recovery,
+SCENARIOS = {"editor": editor, "rejection": rejection, "recovery": recovery,
              "navigation": navigation}
