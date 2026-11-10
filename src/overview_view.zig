@@ -77,8 +77,8 @@ pub const upgrade_poll_ms = 16;
 /// A generated request handle, as `rui request recover` takes it.
 pub const max_handle_bytes = 36;
 
-pub const Group = enum { yours, active, queued, idle, finished, ended };
-pub const Mark = enum { active, queued, waiting, finished, failed, stopped };
+pub const Group = enum { needs_you, yours, active, idle, finished, ended };
+pub const Mark = enum { needs_you, active, queued, waiting, finished, failed, stopped };
 /// Text roles. Each skin's `palettes` entry gives each its colour; without
 /// colour every role draws in the terminal's own.
 pub const Colour = enum {
@@ -116,9 +116,8 @@ pub const Rule = struct {
     /// The model or a tool is at work, so your own row's mark turns the
     /// spinner. A retry counting down or a stop holds still.
     spins: bool = false,
-    /// A failed or stopped row names the Session that sent its first
-    /// Message, by Label, else reference.
-    starter: bool = false,
+    /// A failed row names its failure's cause.
+    cause: bool = false,
     /// Ctrl-X may stop a Session in this state.
     stoppable: bool,
 };
@@ -126,18 +125,19 @@ pub const Rule = struct {
 /// The one per-kind table. `step` and `render` read it and switch on no kind.
 pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
     .idle = .{ .group = .idle, .mark = .waiting, .colour = .normal, .word = "idle", .stoppable = false },
-    .pending = .{ .group = .queued, .mark = .queued, .colour = .normal, .stoppable = true },
+    .pending = .{ .group = .active, .mark = .queued, .colour = .quiet, .stoppable = true },
     .working = .{ .group = .active, .mark = .active, .colour = .ink, .spins = true, .stoppable = true },
     .retrying = .{ .group = .active, .mark = .active, .colour = .ink, .says = true, .stoppable = true },
     .bash = .{ .group = .active, .mark = .active, .colour = .ink, .says = true, .spins = true, .stoppable = true },
-    .approval = .{ .group = .active, .mark = .waiting, .colour = .normal, .says = true, .stoppable = true },
+    .approval = .{ .group = .needs_you, .mark = .needs_you, .colour = .attention, .stoppable = true },
     .stopping = .{ .group = .active, .mark = .active, .colour = .ink, .says = true, .stoppable = false },
     .finished = .{ .group = .finished, .mark = .finished, .colour = .mark, .word = "finished", .stoppable = false },
-    .failed = .{ .group = .ended, .mark = .failed, .colour = .failure, .word = "failed", .starter = true, .stoppable = false },
-    .stopped = .{ .group = .ended, .mark = .stopped, .colour = .normal, .word = "stopped", .starter = true, .stoppable = false },
+    .failed = .{ .group = .ended, .mark = .failed, .colour = .failure, .word = "failed", .cause = true, .stoppable = false },
+    .stopped = .{ .group = .ended, .mark = .stopped, .colour = .normal, .word = "stopped", .stoppable = false },
 });
 
 pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii: []const u8 }).init(.{
+    .needs_you = .{ .unicode = "?", .ascii = "?" },
     .active = .{ .unicode = "●", .ascii = "*" },
     .queued = .{ .unicode = "◌", .ascii = ":" },
     .waiting = .{ .unicode = "○", .ascii = "o" },
@@ -151,9 +151,9 @@ pub const spinner = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 
 /// `under_way`: its rows' work is under way, so the headline says "Running."
 pub const groups = std.enums.EnumArray(Group, struct { title: []const u8, help: []const u8 = "", folds: bool, under_way: bool = false }).init(.{
+    .needs_you = .{ .title = "Needs you", .folds = false },
     .yours = .{ .title = "Yours", .folds = false },
     .active = .{ .title = "Active", .folds = false, .under_way = true },
-    .queued = .{ .title = "Queued", .folds = false, .under_way = true },
     .idle = .{ .title = "Idle", .folds = false },
     .finished = .{ .title = "Finished", .folds = true },
     .ended = .{ .title = "Stopped or failed", .folds = true },
@@ -325,6 +325,14 @@ pub const FirstLine = struct {
 };
 
 /// What host-info says of the serving Host.
+/// Bytes in a mebibyte, the unit memory shows in below a gibibyte.
+pub const mib = 1024 * 1024;
+
+/// Live physical memory, as the shell reads it about once a second:
+/// `rui` is this TUI plus its Host; `tools` the tool processes the Host
+/// runs, null while none runs.
+pub const Memory = struct { rui: u64, tools: ?u64 };
+
 pub const Host = struct {
     /// Unix seconds.
     started_at: u64,
@@ -386,6 +394,10 @@ pub const Event = union(enum) {
     open: Reference,
     /// The Host's facts, read as a listing starts; null when it gave none.
     host: ?Host,
+    /// A memory read ended.
+    memory: Memory,
+    /// A needs-you row's command read ended.
+    command: CommandText,
     conversed: Conversed,
     /// A model-list read ended.
     models: ModelsRead,
@@ -568,6 +580,28 @@ pub const ConversationInput = union(enum) { other, stop, archive: ArchiveState, 
 pub const Conversed = struct { reference: Reference, work: Kind, input: ConversationInput };
 
 pub const Read = struct { reference: Reference, position: u64, admission: u64 };
+
+/// A needs-you row's waiting Action, whose command the shell reads with
+/// `read_action_arguments`.
+pub const CommandRead = struct { reference: Reference, action: u64 };
+pub const Commands = struct {
+    items: [max_first_line_reads]CommandRead = undefined,
+    len: usize = 0,
+
+    pub fn slice(self: *const Commands) []const CommandRead {
+        return self.items[0..self.len];
+    }
+};
+
+/// A command read's answer: the Action's command, or null when the read
+/// failed or its tool has no command to show.
+pub const CommandText = struct {
+    reference: Reference,
+    action: u64,
+    text: ?[]const u8,
+    /// No answer came, as when the Host is down: the next listing asks again.
+    unanswered: bool = false,
+};
 pub const Reads = struct {
     items: [max_first_line_reads]Read = undefined,
     len: usize = 0,
@@ -582,6 +616,9 @@ pub const Effect = union(enum) {
     /// from the last completed listing's token.
     list: ?Token,
     read_first_lines: Reads,
+    /// Read the commands of these needs-you rows' waiting Actions, and
+    /// answer each with `command`.
+    read_commands: Commands,
     start: StartRequest,
     open: Reference,
     stop: Reference,
@@ -676,7 +713,7 @@ pub const Alert = struct { name: []const u8, kind: attention.Kind, more: usize }
 
 /// Each event brings at most two effects today; the shell runs them in order.
 pub const Effects = struct {
-    items: [2]Effect = undefined,
+    items: [3]Effect = undefined,
     len: usize = 0,
 
     pub fn slice(self: *const Effects) []const Effect {
@@ -863,14 +900,29 @@ pub const Row = struct {
     first: ?First,
     from_person_at: ?u64,
     line: Line = .unread,
+    /// The command of the Action `first_action` names, while the row
+    /// needs you.
+    command: Line = .unread,
 
     /// What the listing said of the row's work, as `attention.observe` reads it.
     fn work(self: *const Row) session_work.Work {
         return .{ .state = self.state, .turn = self.turn, .first_action = self.first_action };
     }
 
+    /// An Action waiting on the person leads, whoever started the
+    /// Session; Yours keeps the rest of your own.
     pub fn group(self: *const Row) Group {
+        if (self.needsYou()) return .needs_you;
         return if (self.from_person_at != null) .yours else rules.get(self.state).group;
+    }
+
+    /// An Action awaits a decision: alone, or beside running Bash.
+    pub fn needsYou(self: *const Row) bool {
+        return switch (self.state) {
+            .approval => true,
+            .bash => |bash| bash.approvals != 0,
+            else => false,
+        };
     }
 };
 
@@ -929,6 +981,8 @@ pub const State = struct {
     left: bool = false,
     /// The serving Host's facts, from the latest host-info read.
     host: ?Host = null,
+    /// The latest memory read; null before the first.
+    memory: ?Memory = null,
 
     /// The person's default for new Sessions. A pick replaces it at once,
     /// and a save follows it to the preferences file. `nextBinding` says
@@ -1027,7 +1081,7 @@ pub const State = struct {
     /// The picker shows only over an empty draft, one row.
     pub fn shownPicker(self: *const State) ?*const Picker {
         const picker = if (self.picker) |*open| open else return null;
-        return if (layout(self, 1, 0).picker.len() != 0) picker else null;
+        return if (layout(self).picker.len() != 0) picker else null;
     }
 
     /// What the next Session starts on: what `/configure` holds, else the
@@ -1391,7 +1445,11 @@ pub const State = struct {
     }
 };
 
+/// What the counts line shows, one count per mark.
+pub const Counts = struct { needs_you: usize = 0, working: usize = 0, queued: usize = 0, failed: usize = 0 };
+
 pub const Summary = struct {
+    counts: Counts = .{},
     /// A row works: its state's group has work under way, whatever its section.
     working: bool = false,
     approvals: usize = 0,
@@ -1633,6 +1691,8 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             effects.add(.{ .open = ref });
         },
         .host => |facts| state.host = facts,
+        .memory => |memory| state.memory = memory,
+        .command => |answer| try commandRead(state, answer),
         .models => |read| readModels(state, read),
         .ran => |ran| try ranCommand(state, ran),
         .saved => |answer| {
@@ -1843,6 +1903,7 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
     state.listing = false;
     state.upgrade_pending = false;
     try readFirstLines(state, effects);
+    readCommands(state, effects);
 }
 
 const Newsworthy = struct { reference: Reference, kind: attention.Kind, more: usize };
@@ -1947,6 +2008,8 @@ fn carry(state: *State, incoming: *Row, old: *const Row) void {
     // unreadable or asked for, still holds.
     const same = if (incoming.first) |first| if (old.first) |known| first.admission == known.admission else false else false;
     if (same) incoming.line = old.line;
+    // The same waiting Action has the same command.
+    if (incoming.first_action != null and incoming.first_action == old.first_action) incoming.command = old.command;
     retitle(state, incoming, title(state, old).text);
 }
 
@@ -2013,14 +2076,18 @@ fn arrange(state: *State) error{OutOfMemory}!void {
         state.summary.approvals += @intFromBool(row.state == .approval);
         state.summary.latest = @max(state.summary.latest, row.state.since());
         if (row.group() == .yours and row.state != .finished) state.summary.answered = false;
-        const age: u128 = latest - @min(row.state.since(), latest);
-        key.* = .{ .key = @as(u128, @backingInt(row.group())) << 82 | age << 48 | referenceKey(row.reference), .index = @intCast(at) };
+        const queued = shownKind(state, row) == .pending;
+        // Work first, newest first; then queued rows, longest wait first.
+        const since = @min(shownSince(state, row), latest);
+        const age: u128 = if (queued) since else latest - since;
+        key.* = .{ .key = @as(u128, @backingInt(row.group())) << 83 | @as(u128, @intFromBool(queued)) << 82 | age << 48 | referenceKey(row.reference), .index = @intCast(at) };
     }
     std.mem.sortUnstable(SortKey, state.sort_keys.items, {}, struct {
         fn less(_: void, a: SortKey, b: SortKey) bool {
             return a.key < b.key;
         }
     }.less);
+    state.summary.counts = counts(state);
     state.order.items.len = rows.len;
     state.runs = .initFill(.{});
     for (state.order.items, state.sort_keys.items, 0..) |*slot, key, at| {
@@ -2032,6 +2099,19 @@ fn arrange(state: *State) error{OutOfMemory}!void {
     if (state.selectedRow()) |row| {
         if (!visible(state, position(state, row.reference).?)) state.unfolded.insert(row.group());
     } else if (state.selected == null and rows.len != 0) state.selected = rows[state.order.items[0]].reference;
+}
+
+/// How many rows show each mark the counts line counts.
+fn counts(state: *const State) Counts {
+    var result: Counts = .{};
+    for (state.rows.items) |*row| switch (rules.get(shownKind(state, row)).mark) {
+        .needs_you => result.needs_you += 1,
+        .active => result.working += 1,
+        .queued => result.queued += 1,
+        .failed => result.failed += 1,
+        .waiting, .finished, .stopped => {},
+    };
+    return result;
 }
 
 fn folded(state: *const State, group: Group) bool {
@@ -2061,6 +2141,38 @@ fn readFirstLines(state: *State, effects: *Effects) error{OutOfMemory}!void {
         reads.len += 1;
     }
     if (reads.len != 0) effects.add(.{ .read_first_lines = reads });
+}
+
+/// Asks for the commands of up to eight needs-you rows not yet read.
+fn readCommands(state: *State, effects: *Effects) void {
+    var reads: Commands = .{};
+    for (state.order.items) |at| {
+        if (reads.len == reads.items.len) break;
+        const row = &state.rows.items[at];
+        if (!row.needsYou() or row.command != .unread) continue;
+        const action = row.first_action orelse continue;
+        row.command = .requested;
+        reads.items[reads.len] = .{ .reference = row.reference, .action = action };
+        reads.len += 1;
+    }
+    if (reads.len != 0) effects.add(.{ .read_commands = reads });
+}
+
+/// Keeps a command's first line for the row still waiting on that Action.
+fn commandRead(state: *State, answer: CommandText) error{OutOfMemory}!void {
+    const at = lookup(state.by_reference.items, answer.reference) orelse return;
+    const row = &state.rows.items[at];
+    if (row.command != .requested or row.first_action != answer.action) return;
+    if (answer.unanswered) {
+        row.command = .unread;
+        return;
+    }
+    const bytes = answer.text orelse {
+        row.command = .unavailable;
+        return;
+    };
+    try state.lines.append(state.gpa, session_line.cut(max_line_bytes, session_line.firstLine(bytes)));
+    row.command = .{ .read = @intCast(state.lines.items.len - 1) };
 }
 
 fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
@@ -2176,6 +2288,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             switch (why) {
                 .invalid => state.say(.attention, "! Not valid text; nothing sent.", .{}),
                 .overflow => state.say(.attention, "! Too long to send.", .{}),
+                .paste_overflow => state.say(.attention, "! Paste too long; draft unchanged.", .{}),
                 .edit_rejected => state.say(.attention, "! Can't add that character alone.", .{}),
                 .unbound => state.say(.attention, "! That key does nothing here.", .{}),
             }
@@ -2225,7 +2338,14 @@ fn stoppable(state: *const State, ref: Reference, work: Kind) bool {
 /// The kind a row shows, with a retry that has fallen due as the work it
 /// became.
 fn shownKind(state: *const State, row: *const Row) Kind {
+    if (state.openStop(row.reference) == null and row.needsYou()) return .approval;
     return kindShown(state, row.reference, row.state.asOf(state.now_ms));
+}
+
+/// When the row's shown state began: a retry that has fallen due waits
+/// from its due time.
+fn shownSince(state: *const State, row: *const Row) u64 {
+    return row.state.asOf(state.now_ms).since();
 }
 
 /// What a row's work is doing now, as `shownKind` reads it; null for idle or
@@ -2324,7 +2444,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         .help => {
             const help: Panel = .help;
             // As for /model, a panel the screen cannot show whole never opens.
-            if (layout(state, 1, 0).list.len() < help.rows()) return state.say(.attention, "! Screen too small for /help", .{});
+            if (layout(state).list.len() < help.rows()) return state.say(.attention, "! Screen too small for /help", .{});
             state.showPanel(help);
             effects.add(.clear_draft);
         },
@@ -2779,7 +2899,7 @@ pub fn nearestIndex(rgb: Rgb) u8 {
 }
 
 /// The same tables as 256-colour entries.
-const indexed = blk: {
+pub const indexed = blk: {
     @setEvalBranchQuota(400_000);
     var tables = std.enums.EnumArray(Skin, struct { colours: std.enums.EnumArray(Colour, u8), backgrounds: std.enums.EnumArray(Background, u8) }).initUndefined();
     for (std.enums.values(Skin)) |skin| {
@@ -2854,6 +2974,11 @@ pub const Style = struct {
     reverse: bool = false,
 };
 
+pub const Segment = struct {
+    text: []const u8,
+    style: Style,
+};
+
 pub const Span = struct {
     column: u16,
     /// Display cells `text` takes.
@@ -2862,162 +2987,20 @@ pub const Span = struct {
     style: Style,
 };
 
-/// The screen as lines of styled spans, top to bottom, each span at its
-/// column. Every byte lives in the screen's arena.
-pub const Screen = struct {
-    arena: std.heap.ArenaAllocator,
-    width: u16,
-    lines: []const []const Span,
-    /// Where the terminal's cursor shows: the composer's caret, unless the
-    /// composer is locked.
-    cursor: ?Cursor = null,
-    /// The byte the composer's first shown line starts at, for the next
-    /// frame's `Draft.anchor`.
-    draft_anchor: usize = 0,
-    /// The command list it built for the draft, for the shell to keep as
-    /// `State.commands`: Esc closes only a list the person saw.
-    commands: ?slash_commands.Shown = null,
-    /// It drew the spinner, which changes with the frame: the shell draws
-    /// the next one in `spin_interval_ms`.
-    spins: bool = false,
-    depth: Caps.Depth = .none,
-    skin: Skin = .night,
-
-    pub const Cursor = struct { row: u16, column: u16 };
-
-    pub fn deinit(self: *Screen) void {
-        self.arena.deinit();
-    }
-
-    /// The text alone, one line per row with trailing blanks trimmed.
-    pub fn write(self: *const Screen, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        for (self.lines) |spans| {
-            var end = spans.len;
-            while (end > 0 and std.mem.trimEnd(u8, spans[end - 1].text, " ").len == 0) end -= 1;
-            var column: usize = 0;
-            for (spans[0..end], 1..) |span, count| {
-                if (span.column > column) try writer.splatByteAll(' ', span.column - column);
-                try writer.writeAll(if (count == end) std.mem.trimEnd(u8, span.text, " ") else span.text);
-                column = @max(column, span.column) + span.cells;
-            }
-            try writer.writeByte('\n');
-        }
-    }
-
-    /// The terminal bytes that turn `shown`, the screen the terminal holds,
-    /// into this one: one synchronized update, then the cursor at the caret
-    /// or hidden. Without `shown`, or at another size, depth or skin, every
-    /// line is cleared and drawn. Otherwise a line laid out as before writes
-    /// only the spans that changed, and any other changed line is cleared
-    /// and drawn. An unchanged screen writes nothing. With colour each
-    /// cleared line takes the skin's ground and the frame ends in a reset,
-    /// so the terminal's own colours hold between frames and whatever draws
-    /// next starts from them.
-    pub fn writeFrame(self: *const Screen, shown: ?*const Screen, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        const before = if (shown) |held| if (held.width == self.width and held.lines.len == self.lines.len and held.depth == self.depth and held.skin == self.skin) held else null else null;
-        if (before) |held| if (self.sameAs(held)) return;
-        try writer.writeAll("\x1b[?2026h\x1b[?25l");
-        for (self.lines, 1..) |spans, row| {
-            // With colour the pen carries, so a span in the last one's
-            // style writes no SGR.
-            var pen: ?Style = null;
-            const old = if (before) |held| held.lines[row - 1] else null;
-            if (old) |was| if (sameSpans(spans, was, .layout)) {
-                for (spans, was) |span, prior| if (!sameSpan(span, prior, .all)) try self.writeSpan(writer, row, span, &pen);
-                continue;
-            };
-            try writer.print("\x1b[{d};1H", .{row});
-            if (self.depth != .none) {
-                try writer.writeAll("\x1b[0");
-                try self.writeColour(writer, 48, .{ .background = .ground });
-                try writer.writeByte('m');
-            }
-            try writer.writeAll("\x1b[2K");
-            for (spans) |span| try self.writeSpan(writer, row, span, &pen);
-        }
-        if (self.depth != .none) try writer.writeAll("\x1b[0m");
-        if (self.cursor) |at| try writer.print("\x1b[{d};{d}H\x1b[?25h", .{ at.row + 1, at.column + 1 });
-        try writer.writeAll("\x1b[?2026l");
-    }
-
-    fn sameAs(self: *const Screen, other: *const Screen) bool {
-        if (!std.meta.eql(self.cursor, other.cursor)) return false;
-        for (self.lines, other.lines) |a, b| if (!sameSpans(a, b, .all)) return false;
-        return true;
-    }
-
-    const Same = enum { layout, all };
-
-    /// Spans in the same cells, and with `.all` the same style and text too.
-    fn sameSpan(a: Span, b: Span, same: Same) bool {
-        if (a.column != b.column or a.cells != b.cells) return false;
-        return same == .layout or (std.meta.eql(a.style, b.style) and std.mem.eql(u8, a.text, b.text));
-    }
-
-    fn sameSpans(a: []const Span, b: []const Span, same: Same) bool {
-        if (a.len != b.len) return false;
-        for (a, b) |x, y| if (!sameSpan(x, y, same)) return false;
-        return true;
-    }
-
-    /// Places `span` by its own column, so a terminal that measures a
-    /// grapheme differently shifts only that span.
-    fn writeSpan(self: *const Screen, writer: *std.Io.Writer, row: usize, span: Span, pen: *?Style) std.Io.Writer.Error!void {
-        try writer.print("\x1b[{d};{d}H", .{ row, span.column + 1 });
-        if (self.depth == .none or !std.meta.eql(pen.*, span.style)) {
-            try writer.writeAll("\x1b[0");
-            if (span.style.bold) try writer.writeAll(";1");
-            if (span.style.reverse) try writer.writeAll(";7");
-            try self.writeColour(writer, 38, .{ .colour = span.style.colour });
-            try self.writeColour(writer, 48, .{ .background = span.style.background });
-            try writer.writeByte('m');
-        }
-        try writer.writeAll(span.text);
-        if (self.depth == .none) try writer.writeAll("\x1b[0m");
-        pen.* = span.style;
-    }
-
-    fn writeColour(self: *const Screen, writer: *std.Io.Writer, comptime layer: u8, role: union(enum) { colour: Colour, background: Background }) std.Io.Writer.Error!void {
-        switch (self.depth) {
-            .none => {},
-            .indexed => try writer.print(";{d};5;{d}", .{ layer, switch (role) {
-                .colour => |colour| indexed.get(self.skin).colours.get(colour),
-                .background => |background| indexed.get(self.skin).backgrounds.get(background),
-            } }),
-            .direct => {
-                const rgb = switch (role) {
-                    .colour => |colour| palettes.get(self.skin).colours.get(colour),
-                    .background => |background| palettes.get(self.skin).backgrounds.get(background),
-                };
-                try writer.print(";{d};2;{d};{d};{d}", .{ layer, rgb[0], rgb[1], rgb[2] });
-            },
-        }
-    }
-
-    /// The style at `column` of line `row`, if a span covers it.
-    pub fn styleAt(self: *const Screen, row: usize, column: usize) ?Style {
-        for (self.lines[row]) |span| if (column >= span.column and column < span.column + span.cells) return span.style;
-        return null;
-    }
-};
-
 const Glyphs = struct { prompt: []const u8, dot: []const u8, rule: []const u8, ellipsis: []const u8, arrows: []const u8, sides: []const u8, up: []const u8, down: []const u8, newline: []const u8 };
 const unicode_glyphs: Glyphs = .{ .prompt = "›", .dot = work_line.glyphs.get(.unicode).dot, .rule = "─", .ellipsis = work_line.glyphs.get(.unicode).ellipsis, .arrows = "↑↓", .sides = "←→", .up = "↑", .down = "↓", .newline = "↵" };
 const ascii_glyphs: Glyphs = .{ .prompt = ">", .dot = work_line.glyphs.get(.ascii).dot, .rule = "-", .ellipsis = work_line.glyphs.get(.ascii).ellipsis, .arrows = "^v", .sides = "<>", .up = "^", .down = "v", .newline = "|" };
 
-/// Where the screen's rows go: the top from row 0, a gap, the list, the
-/// picker right above the input, then the input's rule, composer rows and
-/// hints. The core reads it to know what shows; `render` draws from it.
+/// Where App's rows go: the counts line and any bands from row 0, the
+/// list, the picker right above the input, then the input area. The core
+/// reads it to know what shows, and the overview's widgets draw by it.
 pub const Layout = struct {
     top: u16 = 0,
     list: Rows = .{},
     /// Empty while the picker is closed or the screen leaves it no row.
     picker: Rows = .{},
-    /// The rule's row; `size.height` when the screen is too small for the
-    /// input.
+    /// The input area's first row: the composer's top rule.
     input: u16 = 0,
-    /// The command list, between the rule and the draft.
-    commands: Rows = .{},
 
     pub const Rows = struct {
         start: u16 = 0,
@@ -3029,26 +3012,24 @@ pub const Layout = struct {
     };
 };
 
-/// The rows of `state`'s screen when the draft takes `draft_rows` rows and
-/// `command_rows` commands match its command word. As in a conversation,
-/// the commands list between the rule and the draft, in rows the draft's
-/// cap leaves. The picker takes the rows right above the input, as many as
-/// it needs; the Sessions keep the rest, and at least the selected
-/// Session's row, which Ctrl-X stops.
-pub fn layout(state: *const State, draft_rows: u16, command_rows: usize) Layout {
+/// The rows of `state`'s screen. The input area is the composer's rules
+/// around its draft row, the facts row and the status. The picker takes
+/// the rows right above the input, as many as it needs; the Sessions keep
+/// the rest, and at least the selected Session's row, which Ctrl-X stops.
+pub fn layout(state: *const State) Layout {
     const height = state.size.height;
     if (height == 0 or state.size.width == 0) return .{};
     const top: u16 = @intCast(@min(topRows(state), height));
+    const input = @max(top, height -| (3 + 1 + hintRows(state)));
     const kept: u16 = @intFromBool(state.selected != null and state.rows.items.len != 0);
-    const fits = height >= 6 and state.size.width >= 6;
-    const below = if (fits) height - 1 - hintRows(state) - draft_rows else height;
-    const listed: u16 = if (fits) @intCast(@min(command_rows, draft_layout.cap(height) -| draft_rows, below -| (top + 1 + kept))) else 0;
-    const input = below - listed;
     var picker: Layout.Rows = .{ .start = input, .end = input };
-    if (state.picker != null and top + 1 + kept < input) {
-        picker.start = input - @as(u16, @intCast(pickerFit(state, input - (top + 1 + kept)).used()));
+    if (state.picker != null and top + kept < input) {
+        // At the sign-in step, the choice takes a row under its model.
+        const room = input - (top + kept);
+        const choice = @intFromBool(state.picker.?.step == .sign_in and room > 1);
+        picker.start = input - @as(u16, @intCast(pickerFit(state, room - choice).used() + choice));
     }
-    return .{ .top = top, .list = if (top + 1 < picker.start) .{ .start = top + 1, .end = picker.start } else .{}, .picker = picker, .input = input, .commands = .{ .start = input + 1, .end = below + 1 } };
+    return .{ .top = top, .list = .{ .start = top, .end = picker.start }, .picker = picker, .input = input };
 }
 
 /// Rows the line under the input takes: one, or as many as a notice has
@@ -3059,83 +3040,9 @@ fn hintRows(state: *const State) u16 {
     return @intCast(@min(1 + std.mem.count(u8, notice.text(), "\n"), slash_commands.short_result_lines));
 }
 
+/// The counts line and its bands, as `headerSegments` draws them.
 fn topRows(state: *const State) usize {
-    const bands = @as(usize, @intFromBool(state.unreachable_since_ms != null)) + @intFromBool(band(state.rows.items, state.now_ms, state.login_at) != null);
-    return 1 + @max(bands, 1) + 1;
-}
-
-/// Draws the overview at `state.size`. `frame` picks the spinner's glyph.
-pub fn render(gpa: Allocator, state: *const State, draft: Draft, caps: Caps, frame: u64) error{OutOfMemory}!Screen {
-    const width = state.size.width;
-    const height = state.size.height;
-    var screen: Screen = .{ .arena = .init(gpa), .width = width, .lines = &.{}, .depth = caps.depth, .skin = caps.skin() };
-    errdefer screen.deinit();
-    var painter: Painter = .{ .arena = screen.arena.allocator(), .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = frame };
-    const lines = try painter.arena.alloc([]const Span, height);
-    @memset(lines, &.{});
-    screen.lines = lines;
-    if (height == 0 or width == 0) return screen;
-    var top: [4][]const Span = undefined;
-    var count: usize = 0;
-    top[count] = try header(&painter, state);
-    count += 1;
-    var buffer: [16]u8 = undefined;
-    if (state.unreachable_since_ms) |since| {
-        top[count] = try bandLine(&painter, try std.fmt.allocPrint(painter.arena, "Host stopped {s} ago. Run rui host start.", .{spanText(&buffer, (state.now_ms -| since) / 1000)}));
-        count += 1;
-    }
-    if (band(state.rows.items, state.now_ms, state.login_at)) |trouble| {
-        top[count] = try providerBand(&painter, trouble, state.now_ms);
-        count += 1;
-    }
-    // Without a band, the headline.
-    if (count == 1) {
-        top[count] = try headline(&painter, state);
-        count += 1;
-    }
-    // The health line keeps its row before the first host-info read, so
-    // the list does not move when it comes.
-    top[count] = try healthLine(&painter, state);
-    count += 1;
-    std.debug.assert(count == topRows(state));
-    // The bottom: the rule, the composer's rows and the hints, in the same
-    // rows a conversation gives its input.
-    var input: ComposerLayout = undefined;
-    const fits = height >= 6 and width >= 6;
-    if (fits) input.plan(&painter, draft, height);
-    // The picker shows only over an empty draft, as `shownPicker` assumes.
-    std.debug.assert(state.picker == null or draft.bytes.len == 0);
-    screen.commands = nextCommands(state, draft);
-    const at = layout(state, if (fits) @intCast(input.view.rows) else 0, if (screen.commands) |shown| shown.rows() else 0);
-    if (screen.commands) |*shown| shown.drew(at.commands.len() != 0);
-    @memcpy(lines[0..at.top], top[0..at.top]);
-    if (fits) {
-        lines[at.input] = try ruleLine(&painter, input.view);
-        if (at.commands.len() != 0) try commandLines(&painter, &screen.commands.?, lines[at.commands.start..at.commands.end]);
-        const hinted = height - hintRows(state);
-        try composer(&painter, state, draft, &input, lines[at.commands.end..hinted]);
-        lines[hinted] = try hints(&painter, state, draft, at.commands.len() != 0);
-        // A notice's further lines follow its first.
-        if (hinted + 1 < height) {
-            const notice = &state.notice.?;
-            var rest = std.mem.splitScalar(u8, notice.text(), '\n');
-            _ = rest.next();
-            for (lines[hinted + 1 ..]) |*line| {
-                painter.begin(false);
-                _ = try painter.put(1, rest.next().?, width -| 2, .{ .colour = notice.colour });
-                line.* = try painter.finish();
-            }
-        }
-        screen.draft_anchor = input.lines[0].start;
-        if (state.inputMode() == .compose) screen.cursor = .{ .row = @intCast(at.commands.end + input.shape.caret_line - input.view.first), .column = @intCast(@min(width - 1, 3 + input.shape.caret_column)) };
-    }
-    if (at.picker.len() != 0) try pickerLines(&painter, state, &state.picker.?, lines[at.picker.start..at.picker.end]);
-    if (at.list.len() != 0) {
-        const rows = lines[at.list.start..at.list.end];
-        if (state.panel) |*panel| try panelLines(&painter, panel, rows) else try list(&painter, state, rows);
-    }
-    screen.spins = painter.spun;
-    return screen;
+    return 1 + @as(usize, @intFromBool(state.unreachable_since_ms != null)) + @intFromBool(band(state.rows.items, state.now_ms, state.login_at) != null);
 }
 
 /// The list between the rule and the draft as it is now, while the person
@@ -3157,38 +3064,15 @@ fn shownCommands(state: *State, draft: Draft) ?*slash_commands.Shown {
     return slash_commands.Shown.drawnNow(&state.commands, nextCommands(state, draft));
 }
 
-/// One row per entry, as a conversation lists them: its text, then its
-/// description, quiet, at one column, the highlighted row on the selection
-/// ground. When more match than rows fit, the last row counts the rest and
-/// the rows follow the highlight.
-fn commandLines(painter: *Painter, drawn: *const slash_commands.Shown, lines: [][]const Span) error{OutOfMemory}!void {
-    const listed = &drawn.list;
-    const highlight = drawn.highlight;
-    const shown = slash_commands.named(listed.count, lines.len);
-    const first = listed.firstShown(highlight, lines.len);
-    const room = painter.width -| 2;
-    const column = listed.descriptionColumn();
-    for (lines[0..shown], listed.shown()[first..][0..shown], first..) |*line, entry, index| {
-        painter.begin(index == highlight);
-        _ = try painter.put(1, entry.shown, room, .{ .colour = .strong });
-        if (entry.description.len != 0 and room > column) _ = try painter.put(1 + column, entry.description, room - column, .{ .colour = .quiet });
-        line.* = try painter.finish();
-    }
-    if (shown == lines.len) return;
-    painter.begin(false);
-    _ = try painter.put(1, try std.fmt.allocPrint(painter.arena, slash_commands.more, .{listed.count - shown}), room, .{ .colour = .quiet });
-    lines[shown] = try painter.finish();
-}
-
-/// Builds one line's spans left to right, sanitizing and clipping text.
+/// Builds one line's spans left to right, sanitizing and clipping text:
+/// the span builder behind the App rows' segment functions, until PR 3
+/// replaces it.
 const Painter = struct {
     arena: Allocator,
     caps: Caps,
     glyphs: Glyphs,
     width: u16,
     frame: u64,
-    /// It drew the spinner, which changes with `frame`.
-    spun: bool = false,
     spans: [24]Span = undefined,
     count: usize = 0,
     column: usize = 0,
@@ -3386,80 +3270,19 @@ fn decode(bytes: []const u8) struct { codepoint: u21, len: usize } {
     return .{ .codepoint = codepoint, .len = len };
 }
 
-fn header(painter: *Painter, state: *const State) error{OutOfMemory}![]const Span {
+/// The list's line while it has no rows: loading, or what the view holds
+/// and where the rest are.
+fn emptyLine(painter: *Painter, state: *const State) error{OutOfMemory}![]const Span {
     painter.begin(false);
-    const bar: Style = .{ .colour = .strong, .background = .bar, .bold = true };
-    var column: usize = 1;
-    // रुई beside rui, as on a station board; ASCII has rui alone.
-    if (painter.caps.unicode) column += try painter.put(column, "रुई", painter.width, bar) + 1;
-    column += try painter.put(column, "rui", 3, bar) + 2;
-    const path = shortPath(state.home, state.workspaces.items[state.cwd]);
-    const joined = try std.mem.concat(painter.arena, u8, &.{ path.prefix, path.rest });
-    const view_name = try std.fmt.allocPrint(painter.arena, "{s} {s} /sessions", .{ archiveViewName(state.archive), painter.glyphs.dot });
-    const view_cells = painter.measure(view_name);
-    _ = try painter.putTail(column, joined, painter.width -| column -| view_cells -| 3, .{ .background = .bar });
-    try painter.pad(@max(painter.column, painter.width -| 1 -| view_cells), .{ .background = .bar });
-    try painter.putRight(painter.width -| 1, view_name, .{ .background = .bar, .colour = .ink });
-    try painter.pad(painter.width, .{ .background = .bar });
-    return painter.finish();
-}
-
-/// One sentence under the title: whether anything works, and what needs
-/// the person.
-fn headline(painter: *Painter, state: *const State) error{OutOfMemory}![]const Span {
-    painter.begin(false);
-    if (state.listed_at_ms == null) {
-        _ = try painter.put(1, try std.fmt.allocPrint(painter.arena, "Loading{s}", .{painter.glyphs.ellipsis}), painter.width -| 2, .{ .colour = .quiet });
-        return painter.finish();
-    }
-    if (state.rows.items.len == 0) {
-        _ = try painter.put(1, if (state.archive == .archived) "No archived Sessions. /sessions changes the view." else if (state.archive == .all) "No Sessions yet. Type a task below." else "No unarchived Sessions. /sessions archived shows the archive.", painter.width -| 2, .{ .colour = .quiet });
-        return painter.finish();
-    }
-    var span: [16]u8 = undefined;
-    var number: [32]u8 = undefined;
-    const summary = state.summary;
-    const failed = state.summary.failed;
-    const yours = state.runs.get(.yours).len;
-    const sessions = state.rows.items.len;
-    // Failures are counted. Waits for approval are not named, but they
-    // keep the sentence from claiming calm; they count as working.
-    const opening = if (summary.working) "Running." else try std.fmt.allocPrint(painter.arena, "Quiet for {s}.", .{spanText(&span, (state.now_ms / 1000) -| summary.latest)});
-    const rest = if (summary.working)
-        try std.fmt.allocPrint(painter.arena, "{s} Session{s}.{s}", .{ grouped(&number, sessions), if (sessions == 1) "" else "s", if (failed != 0 or summary.approvals != 0) "" else " Nothing needs you." })
-    else if (failed != 0)
-        ""
-    else if (yours == 1 and summary.answered)
-        "Your conversation has answered."
-    else if (yours != 0 and summary.answered)
-        try std.fmt.allocPrint(painter.arena, "All {s} of your conversations have answered.", .{grouped(&number, yours)})
+    const text = if (state.listed_at_ms == null)
+        try std.fmt.allocPrint(painter.arena, "Loading{s}", .{painter.glyphs.ellipsis})
+    else if (state.archive == .archived)
+        "No archived Sessions. /sessions changes the view."
+    else if (state.archive == .all)
+        "No Sessions yet. Type a task below."
     else
-        "Nothing is working or waiting.";
-    var failures: [32]u8 = undefined;
-    const tail = if (failed == 0) rest else try std.fmt.allocPrint(painter.arena, "{s}{s}{s} failed.", .{ rest, if (rest.len == 0) "" else " ", grouped(&failures, failed) });
-    const used = try painter.put(1, opening, painter.width -| 2, .{ .colour = .strong, .bold = true });
-    _ = try painter.put(2 + used, tail, painter.width -| used -| 3, .{});
-    return painter.finish();
-}
-
-fn healthLine(painter: *Painter, state: *const State) error{OutOfMemory}![]const Span {
-    painter.begin(false);
-    var span: [16]u8 = undefined;
-    var column: usize = 1;
-    if (state.unreachable_since_ms != null) {
-        const text = if (state.listed_at_ms) |at|
-            try std.fmt.allocPrint(painter.arena, "Host not responding. Last update {s} ago.", .{spanText(&span, (state.now_ms -| at) / 1000)})
-        else
-            "Host not responding.";
-        column += try painter.put(column, text, painter.width -| column -| 1, .{ .colour = .failure }) + 3;
-    } else if (state.host) |host| {
-        const text = try std.fmt.allocPrint(painter.arena, "Host up {s}", .{spanText(&span, (state.now_ms / 1000) -| host.started_at)});
-        column += try painter.put(column, text, painter.width -| column -| 1, .{}) + 3;
-    }
-    if (state.host) |host| {
-        const text = try std.fmt.allocPrint(painter.arena, "slots {d}/{d}", .{ host.slots_in_use, host.slots });
-        _ = try painter.put(column, text, painter.width -| column -| 1, .{ .colour = if (host.slots_in_use >= host.slots) .ink else .normal });
-    }
+        "No unarchived Sessions. /sessions archived shows the archive.";
+    _ = try painter.put(1, text, painter.width -| 2, .{ .colour = .quiet });
     return painter.finish();
 }
 
@@ -3514,46 +3337,6 @@ pub fn grouped(buffer: *[32]u8, count: u64) []const u8 {
     return buffer[0..used];
 }
 
-/// The rule above the composer. It names the draft lines hidden above or
-/// below the composer when there are any.
-fn ruleLine(painter: *Painter, view: draft_layout.View) error{OutOfMemory}![]const Span {
-    painter.begin(false);
-    const cells = painter.width -| 2;
-    var buffer: [64]u8 = undefined;
-    const label = draft_layout.label(&buffer, view, .{ .up = painter.glyphs.up, .down = painter.glyphs.down, .dot = painter.glyphs.dot });
-    const label_cells = painter.measure(label);
-    try painter.pad(1, .{});
-    const left = draft_layout.labelColumn(label_cells, cells) orelse {
-        try ruleRun(painter, cells);
-        return painter.finish();
-    };
-    try ruleRun(painter, left);
-    _ = try painter.put(1 + left, label, label_cells, .{ .colour = .quiet });
-    try ruleRun(painter, cells - left - label_cells);
-    return painter.finish();
-}
-
-fn ruleRun(painter: *Painter, cells: usize) error{OutOfMemory}!void {
-    if (cells == 0) return;
-    const text = try painter.arena.alloc(u8, cells * painter.glyphs.rule.len);
-    for (0..cells) |at| @memcpy(text[at * painter.glyphs.rule.len ..][0..painter.glyphs.rule.len], painter.glyphs.rule);
-    painter.push(text, cells, .{ .colour = .rule });
-}
-
-/// The composer's lines as `draft_layout` breaks them, at three cells in.
-const ComposerLayout = struct {
-    shape: draft_layout.Shape,
-    view: draft_layout.View,
-    lines: [draft_layout.max_rows]draft_layout.Line,
-
-    fn plan(self: *ComposerLayout, painter: *const Painter, draft: Draft, height: u16) void {
-        const width = painter.width - 4;
-        const pieces: DraftPieces = .{ .pieces = .{ .bytes = draft.bytes, .painter = painter }, .width = width };
-        self.shape = draft_layout.shape(pieces, width, draft.cursor, draft.anchor);
-        self.view = draft_layout.fit(pieces, width, draft.cursor, self.shape, draft_layout.cap(height), &self.lines);
-    }
-};
-
 /// The draft as the composer draws it, for `draft_layout`: a newline breaks
 /// the line, and every other piece is what `Pieces` draws. A cluster wider
 /// than the line counts as filling it, which `put` shortens it to.
@@ -3571,30 +3354,6 @@ const DraftPieces = struct {
         return .{ .len = self.pieces.at - before, .cells = @intCast(@min(piece.cells, self.width)), .kind = draft_layout.kindOf(piece.bytes) };
     }
 };
-
-/// The draft's shown lines, one per row of `rows`, the prompt on its first.
-fn composer(painter: *Painter, state: *const State, draft: Draft, input: *const ComposerLayout, rows: [][]const Span) error{OutOfMemory}!void {
-    std.debug.assert(rows.len == input.view.rows);
-    const room = painter.width -| 4;
-    if (state.inputMode() == .choice) {
-        rows[0] = try signInChoice(painter, state.menu.entries[state.highlighted().?].providers, state.picker.?.step.sign_in);
-        return;
-    }
-    if (draft.bytes.len == 0) {
-        painter.begin(false);
-        _ = try painter.put(1, painter.glyphs.prompt, 1, .{});
-        _ = try painter.put(3, "Type a task to start a Session", room, .{ .colour = .quiet });
-        rows[0] = try painter.finish();
-        return;
-    }
-    const style: Style = .{ .colour = if (state.starting()) .quiet else .strong };
-    for (input.lines[0..rows.len], rows, 0..) |line, *out, index| {
-        painter.begin(false);
-        if (input.view.first + index == 0) _ = try painter.put(1, painter.glyphs.prompt, 1, .{});
-        _ = try painter.put(3, draft.bytes[line.start..line.end], room, style);
-        out.* = try painter.finish();
-    }
-}
 
 /// The line under the input. `listed`: this frame shows the command list.
 fn hints(painter: *Painter, state: *const State, draft: Draft, listed: bool) error{OutOfMemory}![]const Span {
@@ -3810,26 +3569,38 @@ fn signInChoice(painter: *Painter, providers: model_picker.Providers, highlight:
     return painter.finish();
 }
 
-/// The list region: group headings, rows and "more" lines, scrolled so the
-/// selection shows.
-fn list(painter: *Painter, state: *const State, lines: [][]const Span) error{OutOfMemory}!void {
-    if (state.rows.items.len == 0) return;
+/// A line of the Sessions list: the gap before a group, its heading, the
+/// row at an index of `order`, or the line that counts a folded group's
+/// hidden rows; with no rows, the one line that says why.
+pub const Item = union(enum) { gap, heading: Group, row: usize, more: More, empty };
+pub const More = struct { group: Group, hidden: usize };
+
+/// The Sessions list's line `line`, counted from its first, or null past
+/// its end. The list draws these lines, and a click names one.
+/// How many lines the Sessions list has; `listItem` names each.
+pub fn listLength(state: *const State) usize {
+    if (state.rows.items.len == 0) return 1;
     const lines_of = ListLines.of(state);
-    const selected_line = if (state.selected) |ref| if (position(state, ref)) |at| lines_of.lineOf(state, at) else null else null;
-    const offset = if (selected_line) |line| (line + 1) -| lines.len else 0;
-    const columns = Columns.of(painter.width);
-    for (lines, offset..) |*line, number| {
-        const item = lines_of.item(state, number) orelse break;
-        line.* = switch (item) {
-            .gap => &.{},
-            .heading => |group| try heading(painter, group, state.runs.get(group).len),
-            .row => |at| try rowLine(painter, state, at, columns),
-            .more => |more| try moreLine(painter, more),
-        };
+    var end: usize = 0;
+    for (std.enums.values(Group)) |group| {
+        const run = state.runs.get(group);
+        if (run.len == 0) continue;
+        const shown = lines_of.shown.get(group);
+        end = lines_of.first_line.get(group) + 1 + shown + @intFromBool(shown < run.len);
     }
+    return end;
 }
 
-const Item = union(enum) { gap, heading: Group, row: usize, more: usize };
+/// The list line of the selected Session, when one is listed.
+pub fn selectedLine(state: *const State) ?usize {
+    const at = position(state, state.selected orelse return null) orelse return null;
+    return ListLines.of(state).lineOf(state, at);
+}
+
+pub fn listItem(state: *const State, line: usize) ?Item {
+    if (state.rows.items.len == 0) return if (line == 0) .empty else null;
+    return ListLines.of(state).item(state, line);
+}
 
 /// The panel in the Sessions' rows: its heading, with the way back at the
 /// right, then its lines. When more lines come than rows, the last row
@@ -3894,7 +3665,7 @@ const ListLines = struct {
             const shown = self.shown.get(group);
             if (line == first) return .{ .heading = group };
             if (line <= first + shown) return .{ .row = run.start + (line - first - 1) };
-            if (shown < run.len and line == first + shown + 1) return .{ .more = run.len - shown };
+            if (shown < run.len and line == first + shown + 1) return .{ .more = .{ .group = group, .hidden = run.len - shown } };
             previous_end = first + 1 + shown + @intFromBool(shown < run.len);
         }
         return null;
@@ -3952,19 +3723,14 @@ const Columns = struct {
 
 fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) error{OutOfMemory}![]const Span {
     const row = &state.rows.items[state.order.items[at]];
-    const selected = if (state.selected) |*ref| std.mem.eql(u8, ref, &row.reference) else false;
-    painter.begin(selected);
+    painter.begin(false);
     const kind = shownKind(state, row);
     const rule = rules.get(kind);
     var words: [work_line.max_words_bytes]u8 = undefined;
     const line = workLine(&words, state, row);
     const faded = state.unreachable_since_ms != null;
     const mark = marks.get(rule.mark);
-    // Your own Session at work turns the spinner, every one in step; any
-    // other mark holds still. Only Unicode in colour spins, and a faded
-    // row's state is stale, so it holds still.
-    const spins = !faded and painter.caps.unicode and painter.caps.depth != .none and rule.spins and row.group() == .yours;
-    painter.spun = painter.spun or spins;
+    const spins = markSpins(state, .{ .row = at }, painter.caps);
     const glyph = if (spins) spinner[painter.frame % spinner.len] else if (painter.caps.unicode) mark.unicode else mark.ascii;
     _ = try painter.put(2, glyph, 1, .{ .colour = if (faded) .quiet else if (line) |shown| toneColour(shown.tone, rule.colour) else rule.colour });
 
@@ -3992,19 +3758,253 @@ fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) 
     const overflow = painter.measure(text) -| (word_end -| columns.word);
     const word_column = @max(columns.word -| overflow, @min(columns.word, Columns.title + Columns.min_title + 2));
     const workspace_cells = if (word_column < columns.word) 0 else @min(painter.measure(workspace), columns.workspace);
-    const title_end = (word_column -| 2) -| (if (workspace_cells == 0) 0 else workspace_cells + 2);
+    // Without a detail column the title still leaves the age its room.
+    const title_end = @min((word_column -| 2) -| (if (workspace_cells == 0) 0 else workspace_cells + 2), word_end -| 1);
     _ = try painter.put(Columns.title, row_title, title_end -| Columns.title, .{ .colour = title_colour, .bold = yours and !faded });
     _ = try painter.putTail(title_end + 2, workspace, workspace_cells, .{ .colour = if (faded) .quiet else .normal });
 
     if (columns.word != columns.end) {
         // Colour only for what needs the person, or quiet as the work asks.
         const settled: Colour = if (rule.colour == .failure) .failure else .normal;
-        const tone = if (faded) .quiet else if (line) |shown| toneColour(shown.tone, .normal) else settled;
+        // A needs-you row's command is plain: the mark already asks.
+        const tone = if (faded) .quiet else if (row.needsYou()) .normal else if (line) |shown| toneColour(shown.tone, .normal) else settled;
         _ = try painter.put(word_column, text, word_end -| word_column, .{ .colour = tone });
     }
     var buffer: [8]u8 = undefined;
     try painter.putRight(columns.end, ageText(&buffer, (state.now_ms / 1000) -| row.state.since()), .{ .colour = .quiet });
     return painter.finish();
+}
+
+/// The Session row at `at` in screen order, laid out for `width` cells as
+/// segments that fill the width, so a list draws it as given. The list
+/// marks the selection; the segments never do. Allocates from `arena`.
+pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}![]const Segment {
+    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = frame };
+    const spans = try rowLine(&painter, state, at, Columns.of(width));
+    return segmentsOf(arena, spans, width, .{});
+}
+
+/// Whether `item`'s mark turns with the frame. Your own Session at work
+/// turns the spinner, every one in step; any other mark holds still. Only
+/// Unicode in colour spins, and a faded row's state is stale, so it holds
+/// still.
+pub fn markSpins(state: *const State, item: Item, caps: Caps) bool {
+    if (item != .row or state.unreachable_since_ms != null or !caps.unicode or caps.depth == .none) return false;
+    const row = &state.rows.items[state.order.items[item.row]];
+    return row.group() == .yours and rules.get(shownKind(state, row)).spins;
+}
+
+/// Counts and any actionable Host/provider warnings, above the list.
+pub fn headerSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
+    var lines: [3][]const Segment = undefined;
+    lines[0] = try countsSegments(arena, state, width, caps);
+    var count: usize = 1;
+    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
+    if (state.unreachable_since_ms) |since| {
+        var buffer: [16]u8 = undefined;
+        const text = try std.fmt.allocPrint(arena, "Host stopped {s} ago. Run rui host start.", .{spanText(&buffer, (state.now_ms -| since) / 1000)});
+        lines[count] = try segmentsOf(arena, try bandLine(&painter, text), width, .{});
+        count += 1;
+    }
+    if (band(state.rows.items, state.now_ms, state.login_at)) |trouble| {
+        lines[count] = try segmentsOf(arena, try providerBand(&painter, trouble, state.now_ms), width, .{});
+        count += 1;
+    }
+    var length = count - 1;
+    for (lines[0..count]) |line| length += line.len;
+    const segments = try arena.alloc(Segment, length);
+    var offset: usize = 0;
+    for (lines[0..count], 0..) |line, at| {
+        if (at != 0) {
+            segments[offset] = .{ .text = "\n", .style = .{} };
+            offset += 1;
+        }
+        @memcpy(segments[offset..][0..line.len], line);
+        offset += line.len;
+    }
+    return segments;
+}
+
+pub const ListRow = struct { segments: []const Segment, heading: bool, selected: bool };
+
+pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u16, caps: Caps, frame: u64) error{OutOfMemory}!ListRow {
+    if (item == .row) {
+        const row = &state.rows.items[state.order.items[item.row]];
+        return .{ .segments = try rowSegments(arena, state, item.row, width, caps, frame), .heading = false, .selected = if (state.selected) |selected| std.mem.eql(u8, &selected, &row.reference) else false };
+    }
+    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = frame };
+    const spans = switch (item) {
+        .gap => &.{},
+        .heading => |group| try heading(&painter, group, state.runs.get(group).len),
+        .more => |more| try moreLine(&painter, more.hidden),
+        .empty => try emptyLine(&painter, state),
+        .row => unreachable,
+    };
+    return .{ .segments = try segmentsOf(arena, spans, width, .{}), .heading = true, .selected = false };
+}
+
+pub fn statusSegments(arena: Allocator, state: *const State, draft: Draft, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
+    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
+    // An open list is the one Esc closes; a closed one leaves Esc the draft.
+    const listed = if (state.commands) |shown| shown.seen != .closed else false;
+    const first = try segmentsOf(arena, try hints(&painter, state, draft, listed), width, .{});
+    // A notice's later lines follow on lines of their own.
+    const rows = hintRows(state);
+    if (rows == 1) return first;
+    var shown: [slash_commands.short_result_lines][]const Segment = undefined;
+    shown[0] = first;
+    var length = first.len;
+    var lines = std.mem.splitScalar(u8, state.notice.?.text(), '\n');
+    _ = lines.next();
+    for (shown[1..rows]) |*line| {
+        painter.begin(false);
+        _ = try painter.put(1, lines.next().?, width -| 2, .{ .colour = state.notice.?.colour });
+        line.* = try segmentsOf(arena, try painter.finish(), width, .{});
+        length += 1 + line.len;
+    }
+    const segments = try arena.alloc(Segment, length);
+    var offset: usize = 0;
+    for (shown[0..rows], 0..) |line, at| {
+        if (at != 0) {
+            segments[offset] = .{ .text = "\n", .style = .{} };
+            offset += 1;
+        }
+        @memcpy(segments[offset..][0..line.len], line);
+        offset += line.len;
+    }
+    return segments;
+}
+
+pub fn factsSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
+    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
+    painter.begin(false);
+    const path = shortPath(state.home, state.workspaces.items[state.cwd]);
+    const model = state.nextBinding().model orelse "no model";
+    const effort = state.heldEffort();
+    const text = try std.fmt.allocPrint(arena, "new Session {s} {s}{s}{s} {s} {s}{s}", .{ painter.glyphs.dot, model, if (effort != null) " " else "", effort orelse "", painter.glyphs.dot, path.prefix, path.rest });
+    _ = try painter.put(1, text, width -| 2, .{ .colour = .quiet });
+    return segmentsOf(arena, try painter.finish(), width, .{});
+}
+
+/// A panel or model picker supplies its own rows instead of Session groups.
+/// A panel's rows in the list's place, as many as `layout` gives the
+/// list; null while no panel shows.
+pub fn panelItems(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!?[]const ListRow {
+    const panel = if (state.panel) |*shown| shown else return null;
+    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
+    const spans = try arena.alloc([]const Span, @min(panel.rows(), layout(state).list.len()));
+    if (spans.len != 0) try panelLines(&painter, panel, spans);
+    return try rowsOf(arena, spans, width);
+}
+
+/// The open picker's rows right above the input, as many as `layout` gives
+/// it; null while it is closed or the screen leaves it none.
+pub fn pickerRows(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!?[]const ListRow {
+    const picker = state.shownPicker() orelse return null;
+    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
+    const height = layout(state).picker.len();
+    const choice = picker.step == .sign_in and height > 1;
+    const count = pickerFit(state, height - @intFromBool(choice)).used();
+    const spans = try arena.alloc([]const Span, count + @intFromBool(choice));
+    if (count != 0) try pickerLines(&painter, state, picker, spans[0..count]);
+    if (choice) spans[count] = try signInChoice(&painter, state.menu.entries[state.highlighted().?].providers, picker.step.sign_in);
+    return try rowsOf(arena, spans, width);
+}
+
+fn rowsOf(arena: Allocator, spans: []const []const Span, width: u16) error{OutOfMemory}![]const ListRow {
+    const items = try arena.alloc(ListRow, spans.len);
+    for (spans, items) |line, *item| item.* = .{ .segments = try segmentsOf(arena, line, width, .{}), .heading = true, .selected = false };
+    return items;
+}
+
+/// `spans` as segments that fill `width` cells, gaps in `fill`.
+fn segmentsOf(arena: Allocator, spans: []const Span, width: u16, fill: Style) error{OutOfMemory}![]const Segment {
+    const segments = try arena.alloc(Segment, spans.len * 2 + 1);
+    var count: usize = 0;
+    var column: usize = 0;
+    for (spans) |span| {
+        if (span.column > column) {
+            segments[count] = .{ .text = try blankCells(arena, span.column - column), .style = fill };
+            count += 1;
+        }
+        segments[count] = .{ .text = span.text, .style = span.style };
+        count += 1;
+        column = @as(usize, span.column) + span.cells;
+    }
+    if (width > column) {
+        segments[count] = .{ .text = try blankCells(arena, width - column), .style = fill };
+        count += 1;
+    }
+    return segments[0..count];
+}
+
+/// The overview's top line: the wordmark, then each mark's count where it
+/// is not zero, with the model slots while a Session waits for one; on the
+/// right, live memory and the archive view when it is not the default.
+/// Memory drops first on a narrow screen, `rui` before `tools`.
+pub fn countsSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
+    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
+    painter.begin(false);
+    const bar: Style = .{ .background = .bar };
+    const end = painter.width -| 1;
+    var column: usize = 1;
+    // रुई beside rui, as on a station board; ASCII has rui alone.
+    const wordmark: Style = .{ .colour = .strong, .background = .bar, .bold = true };
+    if (caps.unicode) column += try painter.put(column, "रुई", end -| column, wordmark) + 1;
+    column += try painter.put(column, "rui", end -| column, wordmark);
+    const counts_ = state.summary.counts;
+    const shown = [_]struct { Mark, usize, Colour }{
+        .{ .needs_you, counts_.needs_you, .attention },
+        .{ .active, counts_.working, .normal },
+        .{ .queued, counts_.queued, .normal },
+        .{ .failed, counts_.failed, .failure },
+    };
+    for (shown) |entry| {
+        const mark, const count, const colour = entry;
+        if (count == 0) continue;
+        const glyph = if (caps.unicode) marks.get(mark).unicode else marks.get(mark).ascii;
+        var number: [32]u8 = undefined;
+        const text = if (mark == .queued and state.host != null)
+            try std.fmt.allocPrint(arena, "{s} {s} {s} slots {d}/{d}", .{ glyph, grouped(&number, count), painter.glyphs.dot, state.host.?.slots_in_use, state.host.?.slots })
+        else
+            try std.fmt.allocPrint(arena, "{s} {s}", .{ glyph, grouped(&number, count) });
+        column = column + 2 + try painter.put(column + 2, text, end -| (column + 2), .{ .colour = colour, .background = .bar });
+    }
+    // The right side, widest first, dropping what does not fit.
+    const view: []const u8 = if (state.archive == .active) "" else archiveViewName(state.archive);
+    var rui_buffer: [16]u8 = undefined;
+    var tools_buffer: [16]u8 = undefined;
+    const choices: [3][]const u8 = if (state.memory) |memory| choices: {
+        const rui = try std.fmt.allocPrint(arena, "rui {s}", .{sizeText(&rui_buffer, memory.rui)});
+        const tools = if (memory.tools) |bytes| try std.fmt.allocPrint(arena, "tools {s}", .{sizeText(&tools_buffer, bytes)}) else "";
+        break :choices if (tools.len == 0) .{ rui, "", "" } else .{ try std.fmt.allocPrint(arena, "{s} {s} {s}", .{ rui, painter.glyphs.dot, tools }), tools, "" };
+    } else .{ "", "", "" };
+    for (choices) |memory| {
+        const text = if (memory.len == 0) view else if (view.len == 0) memory else try std.fmt.allocPrint(arena, "{s}  {s}", .{ memory, view });
+        const cells = painter.measure(text);
+        if (text.len != 0 and column + 2 + cells > end) continue;
+        try painter.pad(end -| cells, bar);
+        try painter.putRight(end, text, bar);
+        break;
+    }
+    try painter.pad(painter.width, bar);
+    return segmentsOf(arena, try painter.finish(), width, bar);
+}
+
+/// Memory in whole mebibytes, or gibibytes to a tenth, as `42 MB` or `1.8 GB`.
+fn sizeText(buffer: *[16]u8, bytes: u64) []const u8 {
+    const gib = 1024 * mib;
+    if (bytes >= gib) {
+        const tenths = (bytes / (gib / 10)) + @intFromBool(bytes % (gib / 10) >= gib / 20);
+        return std.fmt.bufPrint(buffer, "{d}.{d} GB", .{ tenths / 10, tenths % 10 }) catch unreachable;
+    }
+    return std.fmt.bufPrint(buffer, "{d} MB", .{(bytes + mib / 2) / mib}) catch unreachable;
+}
+
+fn blankCells(arena: Allocator, cells: usize) error{OutOfMemory}![]const u8 {
+    const bytes = try arena.alloc(u8, cells);
+    @memset(bytes, ' ');
+    return bytes;
 }
 
 /// The row title: its Label, else the first line of its first Message (a
@@ -4022,34 +4022,47 @@ fn toneColour(tone: work_line.Tone, neutral: Colour) Colour {
     };
 }
 
-/// Bytes the row's word takes at most: work's words and its clock, or an
-/// ended state's word naming its starter by quoted Label or reference.
-const max_word_bytes = max: {
-    var said = 0;
-    for (rules.values) |rule| if (rule.word) |text| {
-        said = @max(said, text.len);
-    };
-    const starter = said + " ".len + work_line.max_dot_bytes + " for ".len + @max("\"\"".len + max_label_bytes, @sizeOf(Reference));
-    break :max @max(work_line.max_words_bytes + work_line.max_clock_bytes, starter);
-};
+/// Bytes the row's word takes at most: work's words and its clock, or a
+/// failure's cause or saved code.
+const max_word_bytes = @max(work_line.max_words_bytes + work_line.max_clock_bytes, session_work.max_code_bytes);
 
-/// What the row says beside its title, only where the mark and the group
-/// leave something out: work that needs the person or explains a wait, in
-/// the conversation's words, or the Session that started a failed or
-/// stopped one. Otherwise nothing.
+/// What the row says in its detail column, only where the mark and the
+/// group leave something out: a wait's countdown, work that explains a
+/// wait, or a failure's cause. Otherwise nothing.
 fn word(buffer: *[max_word_bytes]u8, state: *const State, row: *const Row, rule: Rule, line: ?work_line.Line, script: work_line.Script) []const u8 {
     if (row.archive_state == .archiving) return "Stopping and archiving";
+    // A needs-you row names the command its Action would run, once read.
+    if (row.needsYou() and state.openStop(row.reference) == null) return switch (row.command) {
+        .read => |index| state.lines.items[index].slice(),
+        else => "",
+    };
     if (line) |shown| {
         if (!rule.says) return "";
         var clock: [work_line.max_clock_bytes]u8 = undefined;
         return std.fmt.bufPrint(buffer, "{s}{s}", .{ shown.words, work_line.clockText(&clock, shown.clock, .row, script) }) catch unreachable;
     }
-    if (!rule.starter) return "";
-    const said = rule.word.?;
-    const dot = work_line.glyphs.get(script).dot;
-    const sender = (row.first orelse return "").sender orelse return "";
-    if (state.find(sender)) |starter| if (starter.label) |*text| return std.fmt.bufPrint(buffer, "{s} {s} for \"{s}\"", .{ said, dot, text.slice() }) catch unreachable;
-    return std.fmt.bufPrint(buffer, "{s} {s} for {s}", .{ said, dot, &sender }) catch unreachable;
+    if (!rule.cause) return "";
+    return switch (row.state) {
+        .failed => |*failed| causeOf(failed.code.slice()),
+        else => "",
+    };
+}
+
+/// A failure's cause in a few words, else its saved code.
+fn causeOf(code: []const u8) []const u8 {
+    return switch (failure_class.of(code)) {
+        .policy => "Refused by the provider",
+        .quota => "Out of quota",
+        .plan => "Model not in plan",
+        .model => "Model not served",
+        .sign_in => "Sign-in expired",
+        .api_key => "API key rejected",
+        .overflow => "Context full",
+        .unreachable_provider => "Provider unreachable",
+        .retries_exhausted => "Retries ran out",
+        .interrupted => "Interrupted",
+        .refused, .other => code,
+    };
 }
 
 /// Compact age: 42s, 7m, 3h, 12d.
@@ -4152,11 +4165,6 @@ fn choose(state: *State, side: enum { left, right }) !Effects {
 
 /// Renders `state` at `width` by `height`, which the shell steps before it
 /// draws.
-fn sizedRender(state: *State, draft: Draft, width: u16, height: u16, caps: Caps, frame: u64) !Screen {
-    try expectEffects(&.{}, try step(state, .{ .resized = .{ .width = width, .height = height } }));
-    return render(std.testing.allocator, state, draft, caps, frame);
-}
-
 var test_edits: u32 = 0;
 
 /// Types `text` as the whole draft, its caret at the end, as the shell's
@@ -4180,6 +4188,14 @@ fn drawWithRoom(state: *State, draft: Draft) void {
 fn submit(state: *State, draft: Draft) !Effects {
     const input: Input = if (state.inputMode() == .choice) .{ .choice = .enter } else .{ .composer = .submit };
     return step(state, .{ .composed = .{ .input = input, .draft = draft } });
+}
+
+/// One needs-you row's command read.
+fn commandReadOf(ref: *const [6]u8, action: u64) Effect {
+    var reads: Commands = .{};
+    reads.items[0] = .{ .reference = ref.*, .action = action };
+    reads.len = 1;
+    return .{ .read_commands = reads };
 }
 
 fn expectEffects(expected: []const Effect, actual: Effects) !void {
@@ -4228,6 +4244,13 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                 try std.testing.expectEqualStrings(command.text, got.command.text);
                 try std.testing.expectEqual(command.session, got.command.session);
             },
+            .read_commands => |reads| {
+                try std.testing.expectEqual(reads.len, got.read_commands.len);
+                for (reads.slice(), got.read_commands.slice()) |x, y| {
+                    try std.testing.expectEqualStrings(&x.reference, &y.reference);
+                    try std.testing.expectEqual(x.action, y.action);
+                }
+            },
             .list_models, .clear_draft, .upgrade, .exit => {},
         }
     }
@@ -4252,8 +4275,10 @@ fn expectNoticeAt(state: *State, expected: ?[]const u8, whole_at_40: bool) !void
         if (whole_at_40) {
             const screen = try screenText(state, 40, 24, .{});
             defer std.testing.allocator.free(screen);
+            // The status row ends the screen, a line for each of the
+            // notice's.
             var lines = std.mem.splitScalar(u8, screen, '\n');
-            for (0..24 - (1 + std.mem.count(u8, text, "\n"))) |_| _ = lines.next();
+            for (0..std.mem.count(u8, screen, "\n") - std.mem.count(u8, text, "\n")) |_| _ = lines.next();
             var said = std.mem.splitScalar(u8, text, '\n');
             while (said.next()) |line| try std.testing.expectEqualStrings(line, std.mem.trim(u8, lines.next().?, " "));
         }
@@ -4268,13 +4293,101 @@ fn screenText(state: *State, width: u16, height: u16, caps: Caps) ![]u8 {
     return frameText(state, width, height, caps, 0);
 }
 
+/// What the App overview's rows show at a size, from the segments each of
+/// its widgets draws: the header lines, the list or panel rows, the facts
+/// row and the status row under `draft`. The App lays them out; this keeps
+/// only their order, with the panel given the rows the core's layout gives
+/// it.
+const Frame = struct {
+    arena: std.heap.ArenaAllocator,
+    lines: []const []const Segment,
+    /// The list's or panel's lines.
+    list: []const []const Segment,
+    caps: Caps,
+    width: u16,
+
+    fn of(state: *State, width: u16, height: u16, caps: Caps, frame: u64) !Frame {
+        return drafted(state, .{}, width, height, caps, frame);
+    }
+
+    fn drafted(state: *State, draft: Draft, width: u16, height: u16, caps: Caps, frame: u64) !Frame {
+        try expectEffects(&.{}, try step(state, .{ .resized = .{ .width = width, .height = height } }));
+        var self: Frame = .{ .arena = .init(std.testing.allocator), .lines = &.{}, .list = &.{}, .caps = caps, .width = width };
+        errdefer self.arena.deinit();
+        const gpa = self.arena.allocator();
+        var lines: Vec([]const Segment) = .{};
+        const top = try headerSegments(gpa, state, width, caps);
+        var start: usize = 0;
+        for (top, 0..) |segment, at| if (std.mem.eql(u8, segment.text, "\n")) {
+            try lines.append(gpa, top[start..at]);
+            start = at + 1;
+        };
+        try lines.append(gpa, top[start..]);
+        const first = lines.items.len;
+        if (try panelItems(gpa, state, width, caps)) |items| {
+            for (items) |item| try lines.append(gpa, item.segments);
+        } else {
+            var at: usize = 0;
+            while (listItem(state, at)) |item| : (at += 1) try lines.append(gpa, (try listSegments(gpa, state, item, width, caps, frame)).segments);
+        }
+        const last = lines.items.len;
+        if (try pickerRows(gpa, state, width, caps)) |items| for (items) |item| try lines.append(gpa, item.segments);
+        try lines.append(gpa, try factsSegments(gpa, state, width, caps));
+        try lines.append(gpa, try statusSegments(gpa, state, draft, width, caps));
+        self.lines = lines.items;
+        self.list = lines.items[first..last];
+        return self;
+    }
+
+    fn deinit(self: *Frame) void {
+        self.arena.deinit();
+    }
+
+    fn text(self: *const Frame) ![]u8 {
+        return textOf(self.lines);
+    }
+
+    fn textOf(lines: []const []const Segment) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        errdefer out.deinit();
+        for (lines, 0..) |line, at| {
+            if (at != 0) try out.writer.writeByte('\n');
+            for (line) |segment| try out.writer.writeAll(segment.text);
+        }
+        // A terminal shows trailing blanks as nothing.
+        const all = try out.toOwnedSlice();
+        defer std.testing.allocator.free(all);
+        var trimmed: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        errdefer trimmed.deinit();
+        var rows = std.mem.splitScalar(u8, all, '\n');
+        var first = true;
+        while (rows.next()) |row| : (first = false) {
+            if (!first) try trimmed.writer.writeByte('\n');
+            try trimmed.writer.writeAll(std.mem.trimEnd(u8, row, " "));
+        }
+        return trimmed.toOwnedSlice();
+    }
+
+    /// The style of the cell at `row`, `column`, as the terminal measures
+    /// each segment's text; null for a blank on the ground, which shows no
+    /// style.
+    fn styleAt(self: *Frame, row: usize, column: usize) ?Style {
+        if (row >= self.lines.len) return null;
+        var at: usize = 0;
+        for (self.lines[row]) |segment| {
+            at += gwidth.gwidth(segment.text, self.caps.width);
+            if (column >= at) continue;
+            const blank = std.mem.trim(u8, segment.text, " ").len == 0;
+            return if (blank and std.meta.eql(segment.style, Style{})) null else segment.style;
+        }
+        return null;
+    }
+};
+
 fn frameText(state: *State, width: u16, height: u16, caps: Caps, frame: u64) ![]u8 {
-    var screen = try sizedRender(state, .{}, width, height, caps, frame);
-    defer screen.deinit();
-    var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    errdefer text.deinit();
-    try screen.write(&text.writer);
-    return text.toOwnedSlice();
+    var shown: Frame = try .of(state, width, height, caps, frame);
+    defer shown.deinit();
+    return shown.text();
 }
 
 fn expectScreen(state: *State, width: u16, height: u16, caps: Caps, expected: []const u8) !void {
@@ -4310,14 +4423,14 @@ const mixed = [_]Listed{
 /// One row of each kind, its group heading and its row in Unicode and ASCII.
 const kind_cases = [_]struct { state: WorkState, heading: []const u8, unicode: []const u8, ascii: []const u8, colour: Colour, stoppable: bool }{
     .{ .state = .{ .idle = ago(7200) }, .heading = " Idle", .unicode = "  ○ Write the notes                                                          2h", .ascii = "  o Write the notes                                                          2h", .colour = .normal, .stoppable = false },
-    .{ .state = .{ .pending = ago(5) }, .heading = " Queued", .unicode = "  ◌ Write the notes                                                          5s", .ascii = "  : Write the notes                                                          5s", .colour = .normal, .stoppable = true },
+    .{ .state = .{ .pending = ago(5) }, .heading = " Active", .unicode = "  ◌ Write the notes                                                          5s", .ascii = "  : Write the notes                                                          5s", .colour = .quiet, .stoppable = true },
     .{ .state = .{ .working = ago(40) }, .heading = " Active", .unicode = "  ● Write the notes                                                         40s", .ascii = "  * Write the notes                                                         40s", .colour = .ink, .stoppable = true },
-    .{ .state = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 + 11_500, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .heading = " Active", .unicode = "  ● Write the notes                        Provider error · retry 2 in 12s  30s", .ascii = "  * Write the notes                        Provider error - retry 2 in 12s  30s", .colour = .attention, .stoppable = true },
+    .{ .state = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 + 11_500, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .heading = " Active", .unicode = "  ● Write the notes                          Provider error · retry in 12s  30s", .ascii = "  * Write the notes                          Provider error - retry in 12s  30s", .colour = .attention, .stoppable = true },
     .{ .state = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .heading = " Active", .unicode = "  ● Write the notes                                  Run the logic tests     1m", .ascii = "  * Write the notes                                  Run the logic tests     1m", .colour = .ink, .stoppable = true },
-    .{ .state = .{ .approval = ago(3 * 60) }, .heading = " Active", .unicode = "  ○ Write the notes                                  Needs approval          3m", .ascii = "  o Write the notes                                  Needs approval          3m", .colour = .attention, .stoppable = true },
+    .{ .state = .{ .approval = ago(3 * 60) }, .heading = " Needs you", .unicode = "  ? Write the notes                                                          3m", .ascii = "  ? Write the notes                                                          3m", .colour = .attention, .stoppable = true },
     .{ .state = .{ .stopping = ago(8) }, .heading = " Active", .unicode = "  ● Write the notes                                  Stopping…               8s", .ascii = "  * Write the notes                                  Stopping.               8s", .colour = .quiet, .stoppable = false },
     .{ .state = .{ .finished = ago(12 * 60) }, .heading = " Finished", .unicode = "  ✓ Write the notes                                                         12m", .ascii = "  + Write the notes                                                         12m", .colour = .mark, .stoppable = false },
-    .{ .state = .{ .failed = .{ .since = test_now_s - 3 * 3600, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .heading = " Stopped or failed", .unicode = "  × Write the notes                                                          3h", .ascii = "  x Write the notes                                                          3h", .colour = .failure, .stoppable = false },
+    .{ .state = .{ .failed = .{ .since = test_now_s - 3 * 3600, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .heading = " Stopped or failed", .unicode = "  × Write the notes                                provider_output_invalid   3h", .ascii = "  x Write the notes                                provider_output_invalid   3h", .colour = .failure, .stoppable = false },
     .{ .state = .{ .stopped = .{ .since = test_now_s - 2 * 86400, .cause = .interruption } }, .heading = " Stopped or failed", .unicode = "  ■ Write the notes                                                          2d", .ascii = "  # Write the notes                                                          2d", .colour = .normal, .stoppable = false },
 };
 
@@ -4336,7 +4449,7 @@ test "every work state follows the rules table, in Unicode and ASCII" {
             const text = try screenText(&state, 80, 24, caps);
             defer std.testing.allocator.free(text);
             var lines = std.mem.splitScalar(u8, text, '\n');
-            for (0..4) |_| _ = lines.next();
+            _ = lines.next();
             // The heading counts the one Session.
             const counted = try std.fmt.allocPrint(std.testing.allocator, "{s} {s} 1", .{ case.heading, if (caps.unicode) unicode_glyphs.dot else ascii_glyphs.dot });
             defer std.testing.allocator.free(counted);
@@ -4344,19 +4457,16 @@ test "every work state follows the rules table, in Unicode and ASCII" {
             try std.testing.expectEqualStrings(expected, lines.next().?);
         }
         // The mark takes its colour, and the word one only when it needs
-        // the person or is quiet.
-        var screen = try sizedRender(&state, .{}, 80, 24, .{}, 0);
-        defer screen.deinit();
-        try std.testing.expectEqual(Background.selection, screen.styleAt(5, 1).?.background);
+        // the person or is quiet. (GroupedList paints the selection.)
         state.selected = null;
-        var unselected = try sizedRender(&state, .{}, 80, 24, .{}, 0);
+        var unselected = try Frame.of(&state, 80, 24, .{}, 0);
         defer unselected.deinit();
-        try std.testing.expectEqual(Style{ .colour = case.colour }, unselected.styleAt(5, 2).?);
+        try std.testing.expectEqual(Style{ .colour = case.colour }, unselected.styleAt(2, 2).?);
         const tone: Colour = switch (case.colour) {
             .attention, .failure, .quiet => case.colour,
             else => .normal,
         };
-        if (unselected.styleAt(5, 53)) |style| try std.testing.expectEqual(Style{ .colour = tone }, style);
+        if (unselected.styleAt(2, 53)) |style| try std.testing.expectEqual(Style{ .colour = tone }, style);
     }
 }
 
@@ -4367,7 +4477,7 @@ test "a description's controls read escaped in its row's words, as its call row 
     const text = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(text);
     var lines = std.mem.splitScalar(u8, text, '\n');
-    for (0..5) |_| _ = lines.next();
+    for (0..2) |_| _ = lines.next();
     try std.testing.expectEqualStrings("  ● Write the notes                                Run\\t\\x1b[2J\\u202etests   1m", lines.next().?);
 }
 
@@ -4382,10 +4492,10 @@ test "a retry that has fallen due reads as queued in its group, mark and colour"
     const start = std.mem.lastIndexOfScalar(u8, text[0..at], '\n').? + 1;
     const end = std.mem.indexOfScalarPos(u8, text, at, '\n').?;
     try std.testing.expectEqualStrings("  ◌ Write the notes                                                          2s", text[start..end]);
-    try std.testing.expect(std.mem.indexOf(u8, text, " Queued · 1\n") != null);
-    var screen = try sizedRender(&state, .{}, 80, 24, .{ .depth = .none }, 0);
+    try std.testing.expect(std.mem.indexOf(u8, text, " Active · 1\n") != null);
+    var screen = try Frame.of(&state, 80, 24, .{ .depth = .none }, 0);
     defer screen.deinit();
-    try std.testing.expectEqual(Style{ .colour = .normal }, screen.styleAt(5, 2).?);
+    try std.testing.expectEqual(Style{ .colour = .normal }, screen.styleAt(2, 2).?);
 }
 
 test "each heading counts its group, and Yours takes a Session from the group it would join" {
@@ -4399,12 +4509,323 @@ test "each heading counts its group, and Yours takes a Session from the group it
     defer state.deinit();
     const text = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(text);
-    inline for (.{ " Yours · 1\n", " Active · 2\n", " Queued · 1\n", " Finished · 1\n" }) |heading_line| {
+    inline for (.{ " Needs you · 1\n", " Yours · 1\n", " Active · 2\n", " Finished · 1\n" }) |heading_line| {
         try std.testing.expect(std.mem.indexOf(u8, text, heading_line) != null);
     }
     // A queued row shows its own mark, under Yours too, and no word.
     try std.testing.expect(std.mem.indexOf(u8, text, "  ◌ Mine, waiting                                                            9s\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Waiting for a slot                                                       5s\n") != null);
+}
+
+/// Each group's labels, in screen order.
+fn expectGroups(state: *const State, expected: []const struct { Group, []const []const u8 }) !void {
+    var seen: usize = 0;
+    for (expected) |entry| {
+        const group, const labels = entry;
+        const run = state.runs.get(group);
+        try std.testing.expectEqual(labels.len, run.len);
+        for (labels, state.order.items[run.start..][0..run.len]) |label, index| {
+            try std.testing.expectEqualStrings(label, state.rows.items[index].label.?.slice());
+        }
+        seen += run.len;
+    }
+    try std.testing.expectEqual(state.rows.items.len, seen);
+}
+
+test "a Session waiting on an Action leads in Needs you, yours or not, and Yours keeps the rest" {
+    const beside_bash: WorkState = .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 1 } };
+    const running_bash: WorkState = .{ .bash = .{ .since = test_now_s - 20, .call = 0, .description = bounded(max_label_bytes, "Run the store tests"), .running = 1, .approvals = 0 } };
+    var state = try opened(&.{
+        session("y0urs1", .{ .working = ago(40) }, .{ .label = "Mine, thinking", .yours = true }),
+        session("y0urs2", .{ .approval = ago(9) }, .{ .label = "Mine, asking", .yours = true }),
+        session("a5k1ng", .{ .approval = ago(5) }, .{ .label = "Theirs, asking" }),
+        session("b4sh01", beside_bash, .{ .label = "Theirs, asking beside Bash" }),
+        session("b4sh02", running_bash, .{ .label = "Theirs, running Bash" }),
+        session("f1n1sh", .{ .finished = ago(60) }, .{ .label = "Theirs, finished" }),
+    });
+    defer state.deinit();
+    // Newest wait first, as every group orders its rows; your own wait
+    // leaves Yours for Needs you.
+    try expectGroups(&state, &.{
+        .{ .needs_you, &.{ "Theirs, asking", "Mine, asking", "Theirs, asking beside Bash" } },
+        .{ .yours, &.{"Mine, thinking"} },
+        .{ .active, &.{"Theirs, running Bash"} },
+        .{ .finished, &.{"Theirs, finished"} },
+    });
+    try std.testing.expectEqualStrings("Needs you", groups.get(.needs_you).title);
+    // The list opens on what needs you.
+    try std.testing.expectEqualStrings("a5k1ng", &state.selected.?);
+}
+
+test "queued rows sit last in their group, longest wait first, after work newest first" {
+    // A retry already due waits for a slot as a queued Session does.
+    const due: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 - 2_000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
+    const later: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 18) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
+    var state = try opened(&.{
+        session("q00010", .{ .pending = ago(10) }, .{ .label = "Queued 10s" }),
+        session("w00040", .{ .working = ago(40) }, .{ .label = "Working 40s" }),
+        session("q00040", .{ .pending = ago(40) }, .{ .label = "Queued 40s" }),
+        session("r3try0", later, .{ .label = "Retrying in 18s" }),
+        session("d0e000", due, .{ .label = "Retry due" }),
+        session("q00025", .{ .pending = ago(25) }, .{ .label = "Queued 25s" }),
+        session("s70p00", .{ .stopping = ago(50) }, .{ .label = "Stopping 50s" }),
+        session("y0q070", .{ .pending = ago(70) }, .{ .label = "Mine, queued 70s", .yours = true }),
+        session("y0w050", .{ .working = ago(50) }, .{ .label = "Mine, working 50s", .yours = true }),
+        session("y0f005", .{ .finished = ago(5) }, .{ .label = "Mine, finished 5s", .yours = true }),
+    });
+    defer state.deinit();
+    try expectGroups(&state, &.{
+        .{ .yours, &.{ "Mine, finished 5s", "Mine, working 50s", "Mine, queued 70s" } },
+        .{ .active, &.{ "Retrying in 18s", "Working 40s", "Stopping 50s", "Queued 40s", "Queued 25s", "Queued 10s", "Retry due" } },
+    });
+}
+
+test "the summary counts what the counts line shows by mark: needs you, working, queued and failed" {
+    const beside_bash: WorkState = .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = null, .running = 1, .approvals = 2 } };
+    const due: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 - 2_000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
+    const later: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 18) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
+    var state = try opened(&.{
+        session("a5k1ng", .{ .approval = ago(5) }, .{ .label = "Asking", .yours = true }),
+        session("b4sh01", beside_bash, .{ .label = "Asking beside Bash" }),
+        session("w00001", .{ .working = ago(40) }, .{ .label = "Working", .yours = true }),
+        session("r3try0", later, .{ .label = "Retrying" }),
+        session("s70p00", .{ .stopping = ago(8) }, .{ .label = "Stopping" }),
+        session("q00001", .{ .pending = ago(10) }, .{ .label = "Queued" }),
+        session("q00002", .{ .pending = ago(20) }, .{ .label = "Mine, queued", .yours = true }),
+        session("d0e000", due, .{ .label = "Retry due" }),
+        failedRow("f4iled", 60, "provider_output_invalid", null),
+        session("s70pd0", .{ .stopped = .{ .since = test_now_s - 90, .cause = .stop } }, .{ .label = "Stopped" }),
+        session("f1n1sh", .{ .finished = ago(60) }, .{ .label = "Finished" }),
+        session("1d1e00", .{ .idle = ago(600) }, .{ .label = "Idle" }),
+    });
+    defer state.deinit();
+    try std.testing.expectEqual(Counts{ .needs_you = 2, .working = 3, .queued = 3, .failed = 1 }, state.summary.counts);
+}
+
+/// The row titled `label` as `rowSegments` gives it at `width`, unselected.
+fn rowOf(arena: Allocator, state: *State, label: []const u8, width: u16, caps: Caps) ![]const Segment {
+    for (state.order.items, 0..) |index, at| {
+        const row = &state.rows.items[index];
+        if (row.label != null and std.mem.eql(u8, row.label.?.slice(), label)) return rowSegments(arena, state, at, width, caps, 0);
+    }
+    return error.TestUnexpectedResult;
+}
+
+/// What a row says, as its non-blank segments, and the cells it fills.
+fn expectRow(segments: []const Segment, width: u16, expected: []const struct { []const u8, Colour }) !void {
+    var said: usize = 0;
+    var cells: usize = 0;
+    for (segments) |segment| {
+        // One cell per code point: these rows hold no wide text.
+        for (segment.text) |byte| cells += @intFromBool(byte & 0xc0 != 0x80);
+        const text = std.mem.trim(u8, segment.text, " ");
+        if (text.len == 0) continue;
+        try std.testing.expect(said < expected.len);
+        try std.testing.expectEqualStrings(expected[said][0], text);
+        try std.testing.expectEqual(expected[said][1], segment.style.colour);
+        said += 1;
+    }
+    try std.testing.expectEqual(expected.len, said);
+    // Padded to the width, so a list draws it as one row.
+    try std.testing.expectEqual(@as(usize, width), cells);
+}
+
+test "row segments say each state with its mark, and words only for a cause or a wait's countdown" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const later: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 18) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
+    const beside_bash: WorkState = .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 1 } };
+    const started = First{ .position = 1, .admission = 4, .sender = "a5k1ng".* };
+    var state = try opened(&.{
+        session("a5k1ng", .{ .approval = ago(120) }, .{ .label = "Fix flaky store test" }),
+        session("b4sh01", beside_bash, .{ .label = "Asking beside Bash" }),
+        session("q00001", .{ .pending = ago(10) }, .{ .label = "Check install script" }),
+        session("r3try0", later, .{ .label = "Investigate retry storm" }),
+        session("f4iled", .{ .failed = .{ .since = test_now_s - 20 * 60, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .{ .label = "Benchmark memory", .first = started }),
+        session("0ther0", .{ .failed = .{ .since = test_now_s - 60, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Odd failure", .first = started }),
+        session("s70pd0", .{ .stopped = .{ .since = test_now_s - 90, .cause = .stop } }, .{ .label = "Stopped by me", .first = started }),
+    });
+    defer state.deinit();
+    state.selected = null;
+    const a = arena.allocator();
+    // Needs you: `?` in the attention colour and no word, beside running
+    // Bash too; the command comes from the Action once read.
+    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .ink }, .{ "2m", .quiet } });
+    try expectRow(try rowOf(a, &state, "Asking beside Bash", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Asking beside Bash", .ink }, .{ "1m", .quiet } });
+    // Queued: a dim `◌`, the title and the wait, no word.
+    try expectRow(try rowOf(a, &state, "Check install script", 100, .{}), 100, &.{ .{ "◌", .quiet }, .{ "Check install script", .ink }, .{ "10s", .quiet } });
+    // A rate limit counts down without the attempt number.
+    try expectRow(try rowOf(a, &state, "Investigate retry storm", 100, .{}), 100, &.{ .{ "●", .attention }, .{ "Investigate retry storm", .ink }, .{ "Rate limited · retry in 18s", .attention }, .{ "30s", .quiet } });
+    // A failure names its cause in the failure colour, else its saved
+    // code; a stop says nothing beyond its mark, and neither names the
+    // Session that started it.
+    try expectRow(try rowOf(a, &state, "Benchmark memory", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Benchmark memory", .quiet }, .{ "Sign-in expired", .failure }, .{ "20m", .quiet } });
+    try expectRow(try rowOf(a, &state, "Odd failure", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Odd failure", .quiet }, .{ "provider_output_invalid", .failure }, .{ "1m", .quiet } });
+    try expectRow(try rowOf(a, &state, "Stopped by me", 100, .{}), 100, &.{ .{ "■", .normal }, .{ "Stopped by me", .quiet }, .{ "1m", .quiet } });
+}
+
+test "row segments drop the detail column on a narrow screen and keep mark, title and age" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var state = try opened(&.{
+        session("f4iled", .{ .failed = .{ .since = test_now_s - 20 * 60, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .{ .label = "Benchmark memory" }),
+    });
+    defer state.deinit();
+    state.selected = null;
+    try expectRow(try rowOf(arena.allocator(), &state, "Benchmark memory", 40, .{}), 40, &.{ .{ "×", .failure }, .{ "Benchmark memory", .quiet }, .{ "20m", .quiet } });
+}
+
+/// The style of the segment that holds `needle`.
+fn styleOf(segments: []const Segment, needle: []const u8) !Style {
+    for (segments) |segment| if (std.mem.indexOf(u8, segment.text, needle) != null) return segment.style;
+    return error.TestUnexpectedResult;
+}
+
+/// What a line of segments says, its non-blank pieces in order.
+fn expectLine(segments: []const Segment, width: u16, expected: []const []const u8) !void {
+    var line: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer line.deinit();
+    var cells: usize = 0;
+    const measurer: Painter = .{ .arena = undefined, .caps = .{}, .glyphs = unicode_glyphs, .width = 0, .frame = 0 };
+    for (segments) |segment| {
+        cells += measurer.measure(segment.text);
+        try line.writer.writeAll(segment.text);
+    }
+    var said: usize = 0;
+    var pieces = std.mem.tokenizeSequence(u8, line.written(), "  ");
+    while (pieces.next()) |piece| {
+        const text = std.mem.trim(u8, piece, " ");
+        if (text.len == 0) continue;
+        try std.testing.expect(said < expected.len);
+        try std.testing.expectEqualStrings(expected[said], text);
+        said += 1;
+    }
+    try std.testing.expectEqual(expected.len, said);
+    try std.testing.expectEqual(@as(usize, width), cells);
+}
+
+test "App header preserves simultaneous Host and sign-in recovery instructions" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var state = try opened(&.{failedRow("aaaaaa", 60, "provider_http_401", null)});
+    defer state.deinit();
+    state.unreachable_since_ms = state.now_ms - 5000;
+    const segments = try headerSegments(arena.allocator(), &state, 100, .{});
+    try std.testing.expectEqual(Background.bar, (try styleOf(segments, "rui")).background);
+    try std.testing.expectEqual(Background.band, (try styleOf(segments, "Host stopped 5s ago. Run rui host start.")).background);
+    try std.testing.expectEqual(Background.band, (try styleOf(segments, "Sign-in expired. Run ")).background);
+    var breaks: usize = 0;
+    for (segments) |segment| breaks += std.mem.count(u8, segment.text, "\n");
+    try std.testing.expectEqual(@as(usize, 2), breaks);
+}
+
+test "the counts line counts by mark, leaves zeros out, and colours only needs you and failures" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var state = try opened(&.{
+        session("a5k1ng", .{ .approval = ago(5) }, .{ .label = "Asking" }),
+        session("w00001", .{ .working = ago(40) }, .{ .label = "Working" }),
+        session("w00002", .{ .working = ago(30) }, .{ .label = "Working too" }),
+        failedRow("f4iled", 60, "provider_output_invalid", null),
+    });
+    defer state.deinit();
+    const line = try countsSegments(a, &state, 100, .{});
+    try expectLine(line, 100, &.{ "रुई rui", "? 1", "● 2", "× 1" });
+    try std.testing.expectEqual(Colour.attention, (try styleOf(line, "? 1")).colour);
+    try std.testing.expectEqual(Colour.normal, (try styleOf(line, "● 2")).colour);
+    try std.testing.expectEqual(Colour.failure, (try styleOf(line, "× 1")).colour);
+    // Every cell sits on the bar.
+    for (line) |segment| try std.testing.expectEqual(Background.bar, segment.style.background);
+    // ASCII: rui alone, and the ASCII marks.
+    try expectLine(try countsSegments(a, &state, 100, .{ .unicode = false }), 100, &.{ "rui", "? 1", "* 2", "x 1" });
+}
+
+test "the counts line shows the slots only while something queues, and memory on the right" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var state = try opened(&.{
+        session("w00001", .{ .working = ago(40) }, .{ .label = "Working" }),
+        session("q00001", .{ .pending = ago(10) }, .{ .label = "Queued" }),
+    });
+    defer state.deinit();
+    // No Host facts yet: the queue counts without slots.
+    try expectLine(try countsSegments(a, &state, 100, .{}), 100, &.{ "रुई rui", "● 1", "◌ 1" });
+    _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 60, .slots = 2, .slots_in_use = 2 } });
+    _ = try step(&state, .{ .memory = .{ .rui = 42 * mib, .tools = 1843 * mib } });
+    try expectLine(try countsSegments(a, &state, 100, .{}), 100, &.{ "रुई rui", "● 1", "◌ 1 · slots 2/2", "rui 42 MB · tools 1.8 GB" });
+    // Nothing queued: no slots, and no tools while none run.
+    _ = try refresh(&state, .changed, testToken(2), &.{session("q00001", .{ .working = ago(0) }, .{ .label = "Queued" })});
+    _ = try step(&state, .{ .memory = .{ .rui = 37 * mib, .tools = null } });
+    try expectLine(try countsSegments(a, &state, 100, .{}), 100, &.{ "रुई rui", "● 2", "rui 37 MB" });
+    // Narrow: memory drops before the counts, rui before tools.
+    _ = try step(&state, .{ .memory = .{ .rui = 42 * mib, .tools = 1843 * mib } });
+    try expectLine(try countsSegments(a, &state, 30, .{}), 30, &.{ "रुई rui", "● 2", "tools 1.8 GB" });
+    try expectLine(try countsSegments(a, &state, 16, .{}), 16, &.{ "रुई rui", "● 2" });
+}
+
+test "the counts line names the archive view only off the default" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var state = try opened(&.{});
+    defer state.deinit();
+    try expectLine(try countsSegments(a, &state, 80, .{}), 80, &.{"रुई rui"});
+    state.archive = .archived;
+    try expectLine(try countsSegments(a, &state, 80, .{}), 80, &.{ "रुई rui", "Archived" });
+    state.archive = .all;
+    try expectLine(try countsSegments(a, &state, 80, .{}), 80, &.{ "रुई rui", "All" });
+}
+
+test "a needs-you row reads its waiting Action's command once, and again only when the Action changes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var state = try testState();
+    defer state.deinit();
+    _ = try step(&state, .{ .tick = test_now_s * 1000 });
+    const asking = session("a5k1ng", .{ .approval = ago(120) }, .{ .label = "Fix flaky store test", .turn = 3, .first_action = 41 });
+    const working = session("w00001", .{ .working = ago(40) }, .{ .label = "Working", .turn = 2 });
+    const listed = try respond(&state, .full, testToken(1), &.{ asking, working });
+    // One read, for the row that needs you; none for the working row.
+    var asked: ?Commands = null;
+    for (listed.slice()) |effect| if (effect == .read_commands) {
+        asked = effect.read_commands;
+    };
+    try std.testing.expectEqual(@as(usize, 1), asked.?.len);
+    try std.testing.expectEqualStrings("a5k1ng", &asked.?.items[0].reference);
+    try std.testing.expectEqual(@as(u64, 41), asked.?.items[0].action);
+    // Until it answers, the row says nothing in its detail column.
+    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .ink }, .{ "2m", .quiet } });
+    // A command's first line shows, in the row's normal ink.
+    _ = try step(&state, .{ .command = .{ .reference = "a5k1ng".*, .action = 41, .text = "zig build test-store\n-Dfilter=retry" } });
+    state.selected = null;
+    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .ink }, .{ "zig build test-store", .normal }, .{ "2m", .quiet } });
+    // The same Action listed again asks nothing.
+    for ((try refresh(&state, .changed, testToken(2), &.{asking})).slice()) |effect| try std.testing.expect(effect != .read_commands);
+    // A later Action asks again; an answer for the earlier one is dropped.
+    var next = asking;
+    next.first_action = 42;
+    var again: ?Commands = null;
+    for ((try refresh(&state, .changed, testToken(3), &.{next})).slice()) |effect| if (effect == .read_commands) {
+        again = effect.read_commands;
+    };
+    try std.testing.expectEqual(@as(u64, 42), again.?.items[0].action);
+    _ = try step(&state, .{ .command = .{ .reference = "a5k1ng".*, .action = 41, .text = "stale" } });
+    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .ink }, .{ "2m", .quiet } });
+    // No answer asks again at the next listing.
+    _ = try step(&state, .{ .command = .{ .reference = "a5k1ng".*, .action = 42, .text = null, .unanswered = true } });
+    var retried: ?Commands = null;
+    for ((try refresh(&state, .changed, testToken(4), &.{next})).slice()) |effect| if (effect == .read_commands) {
+        retried = effect.read_commands;
+    };
+    try std.testing.expectEqual(@as(u64, 42), retried.?.items[0].action);
+    // A tool with no command to show keeps the mark and title only, and
+    // is not asked again.
+    _ = try step(&state, .{ .command = .{ .reference = "a5k1ng".*, .action = 42, .text = null } });
+    for ((try refresh(&state, .changed, testToken(5), &.{next})).slice()) |effect| try std.testing.expect(effect != .read_commands);
+    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .ink }, .{ "2m", .quiet } });
 }
 
 /// The rows the picker tests open on: work, ends and an approval.
@@ -4445,15 +4866,15 @@ test "your Sessions at work turn the spinner in step, and every other mark holds
         const turn = spinner[frame % spinner.len];
         try std.testing.expectEqualStrings(turn, markOf(text, "Mine, thinking"));
         try std.testing.expectEqualStrings(turn, markOf(text, "Mine, running"));
-        try std.testing.expectEqualStrings("○", markOf(text, "Mine, asking"));
+        try std.testing.expectEqualStrings("?", markOf(text, "Mine, asking"));
         try std.testing.expectEqualStrings("◌", markOf(text, "Mine, queued"));
         try std.testing.expectEqualStrings("●", markOf(text, "Mine, retrying"));
         try std.testing.expectEqualStrings("●", markOf(text, "Mine, stopping"));
         try std.testing.expectEqualStrings("●", markOf(text, "Theirs, thinking"));
         try std.testing.expectEqualStrings("✓", markOf(text, "Theirs, finished"));
-        var screen = try sizedRender(&state, .{}, 80, 24, .{}, frame);
+        var screen = try Frame.of(&state, 80, 24, .{}, frame);
         defer screen.deinit();
-        try std.testing.expect(screen.spins);
+        try std.testing.expect(anySpins(&state, .{}));
         // The spinner keeps its rule's colour.
         const mine = std.mem.count(u8, text[0..std.mem.indexOf(u8, text, "Mine, thinking").?], "\n");
         try std.testing.expectEqual(Style{ .colour = .ink }, screen.styleAt(mine, 2).?);
@@ -4476,11 +4897,16 @@ test "your Sessions at work turn the spinner in step, and every other mark holds
             const text = try frameText(&state, 80, 24, caps, frame);
             defer std.testing.allocator.free(text);
             try std.testing.expectEqualStrings(first, text);
-            var screen = try sizedRender(&state, .{}, 80, 24, caps, frame);
-            defer screen.deinit();
-            try std.testing.expect(!screen.spins);
+            try std.testing.expect(!anySpins(&state, caps));
         }
     }
+}
+
+/// Whether any list line's mark spins.
+fn anySpins(state: *const State, caps: Caps) bool {
+    var line: usize = 0;
+    while (listItem(state, line)) |item| : (line += 1) if (markSpins(state, item, caps)) return true;
+    return false;
 }
 
 test "the screen asks for frames only while a spinner shows" {
@@ -4491,87 +4917,19 @@ test "the screen asks for frames only while a spinner shows" {
         _ = std.fmt.bufPrint(ref[4..], "{d:0>2}", .{at}) catch unreachable;
         row.* = session(&ref, .{ .idle = ago(7200 + at) }, .{ .label = "Wait for a reply" });
     }
-    const Spins = struct {
-        fn at(from: *State, height: u16) !bool {
-            var screen = try sizedRender(from, .{}, 80, height, .{}, 1);
-            defer screen.deinit();
-            return screen.spins;
-        }
-    };
     {
         var state = try opened(&rows);
         defer state.deinit();
-        try std.testing.expect(try Spins.at(&state, 24));
-        // Scrolled out of sight, the spinning row needs no frames.
-        _ = try press(&state, .{}, .last);
-        try std.testing.expect(!try Spins.at(&state, 24));
-        try std.testing.expect(try Spins.at(&state, 60));
+        try std.testing.expect(anySpins(&state, .{}));
         // Its work ending stops the frames.
         _ = try refresh(&state, .changed, testToken(2), &.{session("w0rk00", .{ .finished = ago(0) }, .{ .label = "Write the notes", .yours = true })});
-        try std.testing.expect(!try Spins.at(&state, 60));
+        try std.testing.expect(!anySpins(&state, .{}));
     }
     // Others' work holds still, so it needs no frames.
     rows[0] = session("w0rk00", .{ .working = ago(0) }, .{ .label = "Write the notes" });
     var state = try opened(&rows);
     defer state.deinit();
-    try std.testing.expect(!try Spins.at(&state, 60));
-}
-
-fn frameBytes(screen: *const Screen, shown: ?*const Screen) ![]u8 {
-    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    errdefer bytes.deinit();
-    try screen.writeFrame(shown, &bytes.writer);
-    return bytes.toOwnedSlice();
-}
-
-test "a frame writes only what changed on the screen the terminal shows" {
-    // Two of your Sessions work, so their marks spin in step.
-    var rows = mixed;
-    rows[1].state = .{ .working = ago(0) };
-    // In colour too: a cleared line takes the ground first, and a span
-    // ends in the next one's SGR instead of a reset.
-    for ([_]Caps{ .{ .depth = .none }, .{} }) |caps| {
-        var state = try opened(&rows);
-        defer state.deinit();
-        state.selected = null;
-        const plain = caps.depth == .none;
-        var still = try sizedRender(&state, .{}, 80, 24, caps, 0);
-        defer still.deinit();
-        var turned = try sizedRender(&state, .{}, 80, 24, caps, 1);
-        defer turned.deinit();
-        var wider = try sizedRender(&state, .{}, 81, 24, caps, 1);
-        defer wider.deinit();
-        // Unknown contents, or another size, clear and draw every line.
-        for ([_]struct { *const Screen, ?*const Screen }{ .{ &still, null }, .{ &wider, &still } }) |case| {
-            const bytes = try frameBytes(case[0], case[1]);
-            defer std.testing.allocator.free(bytes);
-            try std.testing.expectEqual(@as(usize, 24), std.mem.count(u8, bytes, "\x1b[2K"));
-        }
-        const unchanged = try frameBytes(&still, &still);
-        defer std.testing.allocator.free(unchanged);
-        try std.testing.expectEqualStrings("", unchanged);
-        // The next frame writes the two spinners and nothing else; without
-        // colour nothing spins.
-        const spun = try frameBytes(&turned, &still);
-        defer std.testing.allocator.free(spun);
-        if (plain) {
-            try std.testing.expectEqualStrings("", spun);
-        } else {
-            try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, spun, "\x1b[2K"));
-            try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, spun, "H\x1b[0"));
-            try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, spun, "m" ++ spinner[1]));
-        }
-        // A line laid out anew is cleared and drawn whole; the others stay.
-        const draft = try typeText(&state, "hi");
-        var typed = try sizedRender(&state, draft, 80, 24, caps, 0);
-        defer typed.deinit();
-        const composed = try frameBytes(&typed, &still);
-        defer std.testing.allocator.free(composed);
-        // The composer and its hints changed; the list did not.
-        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, composed, "\x1b[2K"));
-        try std.testing.expect(std.mem.indexOf(u8, composed, if (plain) "\x1b[23;1H\x1b[2K" else "\x1b[23;1H\x1b[0;48;2;") != null);
-        try std.testing.expect(std.mem.indexOf(u8, composed, if (plain) "\x1b[24;1H\x1b[2K" else "\x1b[24;1H\x1b[0;48;2;") != null);
-    }
+    try std.testing.expect(!anySpins(&state, .{}));
 }
 
 test "ctrl-x stops at once a row its rule lets it stop, and asks nothing" {
@@ -4701,12 +5059,13 @@ test "enter on a row opens it" {
     var draft: Draft = .{};
     var state = try opened(&mixed);
     defer state.deinit();
+    // Needs you leads; the next row is the first of Yours.
     try expectEffects(&.{}, try press(&state, draft, .next));
-    try expectEffects(&.{.{ .open = "r4t9vw".* }}, try submit(&state, draft));
+    try expectEffects(&.{.{ .open = "k7m2qx".* }}, try submit(&state, draft));
     // A blank draft is no request: Enter still opens the row.
     draft = try typeText(&state, "  ");
-    try expectEffects(&.{ .clear_draft, .{ .open = "r4t9vw".* } }, try submit(&state, draft));
-    try expectSelected(&state, "r4t9vw");
+    try expectEffects(&.{ .clear_draft, .{ .open = "k7m2qx".* } }, try submit(&state, draft));
+    try expectSelected(&state, "k7m2qx");
 }
 
 test "esc clears the draft, then held start settings, and otherwise does nothing" {
@@ -4722,7 +5081,7 @@ test "esc clears the draft, then held start settings, and otherwise does nothing
     try expectEffects(&.{}, try press(&state, draft, .clear));
     try std.testing.expect(state.settings.empty());
     try expectEffects(&.{}, try press(&state, draft, .clear));
-    try expectSelected(&state, "k7m2qx");
+    try expectSelected(&state, "r4t9vw");
     try expectNotice(&state, null);
 }
 
@@ -4777,14 +5136,18 @@ test "the composer starts text with one slash from //, as a conversation does" {
     try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "/home/me/project needs investigating" } }}, try submit(&state, draft));
 }
 
-/// The rendered lines of `state` with `draft` at `width` by `height`.
+/// The lines of `state` with `draft` at `width` by `height`.
 fn draftLines(state: *State, draft: Draft, width: u16, height: u16) ![]u8 {
-    var screen = try sizedRender(state, draft, width, height, .{}, 0);
-    defer screen.deinit();
-    var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    errdefer text.deinit();
-    try screen.write(&text.writer);
-    return text.toOwnedSlice();
+    var shown: Frame = try .drafted(state, draft, width, height, .{}, 0);
+    defer shown.deinit();
+    return shown.text();
+}
+
+/// The status row under `draft` reads `expected`.
+fn expectLastLine(state: *State, draft: Draft, expected: []const u8) !void {
+    const text = try draftLines(state, draft, 80, 24);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(expected, text[std.mem.lastIndexOfScalar(u8, text, '\n').? + 1 ..]);
 }
 
 fn expectLines(text: []const u8, first: usize, expected: []const []const u8) !void {
@@ -4796,23 +5159,10 @@ fn expectLines(text: []const u8, first: usize, expected: []const []const u8) !vo
 test "typing / lists the overview's commands between the rule and the draft, as a conversation does" {
     var state = try opened(&mixed);
     defer state.deinit();
-    const all = try draftLines(&state, try typeText(&state, "/"), 80, 24);
-    defer std.testing.allocator.free(all);
-    try expectLines(all, 15, &.{
-        " /archive              archive the selected Session; stop active work first",
-        " /configure [OPTIONS]  hold settings for the next Session",
-        " /exit                 leave; Host work continues",
-        " /help                 keys and commands",
-        " /model                choose the model new Sessions use",
-        " /rename NAME          name the selected Session",
-        " +4 more · type to narrow",
-        " › /",
-        " esc close",
-    });
+    // App's palette draws the list (Overview's tests); the core keeps it.
+    _ = try typeText(&state, "/");
+    try std.testing.expectEqual(@as(usize, 10), state.commands.?.list.shown().len);
     // Typing narrows the list; Tab completes the one left.
-    const narrowed = try draftLines(&state, try typeText(&state, "/m"), 80, 24);
-    defer std.testing.allocator.free(narrowed);
-    try expectLines(narrowed, 21, &.{ " /model                choose the model new Sessions use", " › /m" });
     _ = try typeText(&state, "/m");
     try std.testing.expectEqualStrings("odel", state.commands.?.list.completion(0));
     _ = try typeText(&state, "/c");
@@ -4902,18 +5252,6 @@ test "arrows move the command list's highlight, and Enter takes it: a word anoth
     try std.testing.expectEqualStrings("bypass", state.settings.get(startOption("permission-mode").?).?);
 }
 
-test "a short screen lists the commands it has rows for and counts the rest" {
-    var state = try opened(&mixed);
-    defer state.deinit();
-    // At 11 rows the draft's cap is 3 rows: the draft and two list rows,
-    // the second counting the rest.
-    const text = try draftLines(&state, try typeText(&state, "/"), 80, 11);
-    defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, " /archive              archive the selected Session; stop active work first") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, " +9 more · type to narrow") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "/exit ") == null);
-}
-
 test "Enter runs a command by the overview's table and names its usage when misused" {
     var state = try opened(&mixed);
     defer state.deinit();
@@ -4934,9 +5272,7 @@ test "Esc closes a shown command list and keeps the draft; a change opens it aga
     try std.testing.expectEqual(.drawn, state.commands.?.seen);
     try expectEffects(&.{}, try press(&state, draft, .clear));
     try std.testing.expectEqual(.closed, state.commands.?.seen);
-    const shown = try draftLines(&state, draft, 80, 24);
-    defer std.testing.allocator.free(shown);
-    try expectLines(shown, 22, &.{ " › /m", " esc clear" });
+    try expectLastLine(&state, draft, " esc clear");
     // With the list closed, Esc clears the draft.
     drawWithRoom(&state, draft);
     try std.testing.expectEqual(.closed, state.commands.?.seen);
@@ -4946,21 +5282,7 @@ test "Esc closes a shown command list and keeps the draft; a change opens it aga
     drawWithRoom(&state, draft);
     try std.testing.expectEqual(.drawn, state.commands.?.seen);
     // The hint says what Enter does to each slash draft.
-    const runs = try draftLines(&state, try typeText(&state, "/exit "), 80, 24);
-    defer std.testing.allocator.free(runs);
-    try expectLines(runs, 23, &.{" enter run · esc clear"});
-}
-
-test "a command word wrapped past the draft's cap shows no list, and Esc clears it" {
-    var state = try opened(&mixed);
-    defer state.deinit();
-    // At 8x9 `/configure` fills the draft's three-row cap.
-    const draft = try typeText(&state, "/configure");
-    var screen = try sizedRender(&state, draft, 8, 9, .{}, 0);
-    defer screen.deinit();
-    try std.testing.expectEqual(.hidden, screen.commands.?.seen);
-    state.commands = screen.commands;
-    try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
+    try expectLastLine(&state, try typeText(&state, "/exit "), " enter run · esc clear");
 }
 
 test "the composer sends its draft byte for byte, as a conversation does" {
@@ -4983,7 +5305,7 @@ test "/configure holds start settings for the Session the next Enter starts" {
     draft = try typeText(&state, "/configure --permission-mode ask --label \"lane four\"");
     try expectEffects(&.{.clear_draft}, try submit(&state, draft));
     try expectNotice(&state, null);
-    try expectScreenLine(&state, 23, " start settings: --permission-mode ask --label \"lane four\" · esc clear");
+    try expectStatusLines(&state, &.{" start settings: --permission-mode ask --label \"lane four\" · esc clear"});
     // A later value replaces an earlier one; the rest stay.
     draft = try typeText(&state, "/configure --label \"lane \\\"five\\\"\" --model gpt-5.5");
     try expectEffects(&.{.clear_draft}, try submit(&state, draft));
@@ -4991,7 +5313,7 @@ test "/configure holds start settings for the Session the next Enter starts" {
     const args = state.settings.args(&buffer);
     try std.testing.expectEqual(@as(usize, 6), args.len);
     for ([_][]const u8{ "--model", "gpt-5.5", "--permission-mode", "ask", "--label", "lane \"five\"" }, args) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
-    try expectScreenLine(&state, 23, " start settings: --model gpt-5.5 --permission-mode ask --label \"la… · esc clear");
+    try expectStatusLines(&state, &.{" start settings: --model gpt-5.5 --permission-mode ask --label \"la… · esc clear"});
 
     var held: StartSettings = .{};
     try held.put(startOption("model").?, "gpt-5.5");
@@ -5036,9 +5358,19 @@ test "start settings are the options session start shares with /configure" {
 }
 
 fn expectStyle(state: *State, row: usize, column: usize, expected: Style) !void {
-    var screen = try sizedRender(state, .{}, 80, 24, .{}, 0);
-    defer screen.deinit();
-    try std.testing.expectEqual(expected, screen.styleAt(row, column).?);
+    var shown: Frame = try .of(state, 80, 24, .{}, 0);
+    defer shown.deinit();
+    try std.testing.expectEqual(expected, shown.styleAt(row, column).?);
+}
+
+/// The status row and the rows a longer notice takes above it read
+/// `expected`, as the bottom of the screen.
+fn expectStatusLines(state: *State, expected: []const []const u8) !void {
+    const text = try screenText(state, 80, 24, .{});
+    defer std.testing.allocator.free(text);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    for (0..std.mem.count(u8, text, "\n") + 1 - expected.len) |_| _ = lines.next();
+    for (expected) |line| try std.testing.expectEqualStrings(line, lines.next().?);
 }
 
 fn expectScreenLine(state: *State, line: usize, expected: []const u8) !void {
@@ -5065,6 +5397,7 @@ test "a line the editor rejects says why once; text it could not take clears" {
     for ([_]struct { keymap.Outcome(Action), []const u8, bool }{
         .{ .{ .refused = .invalid }, "! Not valid text; nothing sent.", true },
         .{ .{ .refused = .overflow }, "! Too long to send.", true },
+        .{ .{ .refused = .paste_overflow }, "! Paste too long; draft unchanged.", false },
         .{ .{ .refused = .edit_rejected }, "! Can't add that character alone.", false },
         .{ .{ .refused = .unbound }, "! That key does nothing here.", false },
     }) |case| {
@@ -5109,7 +5442,7 @@ test "an unconfirmed start clears the composer and names the request that recove
     try std.testing.expect(!state.starting());
     try std.testing.expect(state.settings.empty());
     try expectNotice(&state, "! Start unsure; details on exit");
-    try expectScreenLine(&state, 23, " ! Start unsure; details on exit");
+    try expectStatusLines(&state, &.{" ! Start unsure; details on exit"});
     // The next tick lists at once, so a start that did land shows.
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = state.now_ms + 1 }));
     // A second unconfirmed start keeps the first one's handle.
@@ -5154,84 +5487,6 @@ test "leaving with a start in flight says what became of it" {
     try std.testing.expectEqualStrings("", departure.written());
 }
 
-test "the cursor sits at the composer's caret and hides while a start is pending" {
-    var draft: Draft = .{};
-    var state = try opened(&mixed);
-    defer state.deinit();
-    const Expect = struct {
-        fn cursor(from: *State, typed: Draft, width: u16, expected: ?Screen.Cursor) !void {
-            var screen = try sizedRender(from, typed, width, 24, .{}, 0);
-            defer screen.deinit();
-            try std.testing.expectEqual(expected, screen.cursor);
-        }
-        fn composerLine(from: *State, typed: Draft, expected: []const u8) !void {
-            var screen = try sizedRender(from, typed, 80, 24, .{}, 0);
-            defer screen.deinit();
-            var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
-            defer text.deinit();
-            try screen.write(&text.writer);
-            var lines = std.mem.splitScalar(u8, text.written(), '\n');
-            for (0..22) |_| _ = lines.next();
-            try std.testing.expectEqualStrings(expected, lines.next().?);
-        }
-    };
-    try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 3 });
-    draft = try typeText(&state, "Fix 中");
-    try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 9 });
-    // The caret sits where the editor holds it, with the text after it.
-    draft.cursor = 4;
-    try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 7 });
-    try Expect.composerLine(&state, draft, " › Fix 中");
-    // A draft wider than the composer wraps between words into rows that
-    // grow upward from the bottom: "Fix ", 76 x, then 24 x and " end".
-    const long = "Fix " ++ @as([100]u8, @splat('x')) ++ " end";
-    draft = try typeText(&state, long);
-    try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 31 });
-    // Two cells wide, the space before "end" hangs past the edge: "en",
-    // then "d".
-    try Expect.cursor(&state, draft, 6, .{ .row = 22, .column = 4 });
-    // On the soft break after "Fix ", the caret starts the next row.
-    draft.cursor = 4;
-    try Expect.cursor(&state, draft, 80, .{ .row = 21, .column = 3 });
-    try Expect.composerLine(&state, draft, "   " ++ @as([24]u8, @splat('x')) ++ " end");
-    draft.cursor = long.len;
-    _ = try submit(&state, draft);
-    try Expect.cursor(&state, draft, 80, null);
-}
-
-test "a draft past its cap scrolls inside the composer and the rule counts what it hides" {
-    var state = try opened(&mixed);
-    defer state.deinit();
-    const text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13";
-    const Expect = struct {
-        fn rows(from: *State, typed: Draft, caps: Caps, rule: []const u8, top: []const u8, anchor: usize) !void {
-            var screen = try sizedRender(from, typed, 40, 40, caps, 0);
-            defer screen.deinit();
-            var written: std.Io.Writer.Allocating = .init(std.testing.allocator);
-            defer written.deinit();
-            try screen.write(&written.writer);
-            var lines = std.mem.splitScalar(u8, written.written(), '\n');
-            for (0..28) |_| _ = lines.next();
-            // Ten rows of draft under the rule, the hints on the last row.
-            try std.testing.expectEqualStrings(rule, lines.next().?);
-            try std.testing.expectEqualStrings(top, lines.next().?);
-            try std.testing.expectEqual(anchor, screen.draft_anchor);
-        }
-    };
-    // At the end, the first three lines are hidden above.
-    var draft: Draft = .{ .bytes = text, .cursor = text.len };
-    try Expect.rows(&state, draft, .{}, " ─────────── ↑ 3 more lines ───────────", "   4", 6);
-    // The caret moving up inside the shown lines keeps them.
-    draft = .{ .bytes = text, .cursor = 10, .anchor = 2 };
-    try Expect.rows(&state, draft, .{}, " ──────── ↑ 1 · ↓ 2 more lines ────────", "   2", 2);
-    // Above them, the composer follows the caret to the top.
-    draft = .{ .bytes = text, .cursor = 0, .anchor = 6 };
-    try Expect.rows(&state, draft, .{}, " ─────────── ↓ 3 more lines ───────────", " › 1", 0);
-    // Without Unicode the rule draws in ASCII.
-    draft = .{ .bytes = text, .cursor = text.len };
-    try Expect.rows(&state, draft, .{ .unicode = false }, " ----------- ^ 3 more lines -----------", "   4", 6);
-}
-
 test "caps follow the locale that sets the character set, NO_COLOR and COLORTERM" {
     for ([_]struct { Caps.Environment, Caps }{
         .{ .{}, .{ .depth = .indexed } },
@@ -5274,7 +5529,7 @@ test "a first line arriving titles its unlabelled row" {
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
     try std.testing.expectEqual(Line.unavailable, state.find("f6g7h8".*).?.line);
     try std.testing.expectEqual(Line.requested, state.find("p3q4r5".*).?.line);
-    try expectScreenLine(&state, 7, "  ✓ summarize yesterday's CI failures                                       12m");
+    try expectScreenLine(&state, 6, "  ✓ summarize yesterday's CI failures                                       12m");
     // Lines in flight or unreadable are not asked for again, and a refresh
     // that replaces a row keeps the line of its unchanged first Message.
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(2), &.{session("h8q2mz", .{ .working = ago(0) }, .{ .yours = true })}));
@@ -5318,7 +5573,7 @@ test "a first line with no answer is asked for again by the next listing" {
     try expectEffects(&.{.{ .read_first_lines = reads }}, try refresh(&state, .not_modified, testToken(1), &.{}));
 }
 
-test "Host facts give the health line, and a row from before a restart still says working" {
+test "Host facts change only the counts line, and a row from before a restart still says working" {
     var state = try opened(&.{
         session("k7m2qx", .{ .working = ago(40) }, .{ .label = "Admitted before the restart" }),
         session("h8q2mz", .{ .working = ago(5) }, .{ .label = "Admitted after it" }),
@@ -5327,17 +5582,13 @@ test "Host facts give the health line, and a row from before a restart still say
     defer state.deinit();
     const before = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(before);
-    try expectScreenLine(&state, 2, "");
+    try expectScreenLine(&state, 0, " रुई rui  ● 2  ◌ 1");
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 20, .slots = 2, .slots_in_use = 2 } });
-    try expectScreenLine(&state, 2, " Host up 20s   slots 2/2");
-    try expectStyle(&state, 2, 15, .{ .colour = .ink });
+    try expectScreenLine(&state, 0, " रुई rui  ● 2  ◌ 1 · slots 2/2");
     const after = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualStrings(before[std.mem.indexOf(u8, before, " Active").?..], after[std.mem.indexOf(u8, after, " Active").?..]);
-    // Full slots draw in ink, free ones in the normal colour.
-    _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 20, .slots = 2, .slots_in_use = 1 } });
-    try expectScreenLine(&state, 2, " Host up 20s   slots 1/2");
-    try expectStyle(&state, 2, 15, .{});
+    try std.testing.expect(std.mem.indexOf(u8, after, "  ● Admitted before the restart") != null);
 }
 
 test "a row from another Workspace keeps its title at every width" {
@@ -5367,7 +5618,10 @@ test "the selection stays on its Session when it moves from active to finished" 
     try expectSelected(&state, "e5f6g7");
     try std.testing.expectEqual(Group.finished, state.find("e5f6g7".*).?.group());
     try expectEffects(&.{.{ .open = "e5f6g7".* }}, try submit(&state, .{}));
-    try expectScreenLine(&state, 20, "  ✓ List unused build steps                                                  1s");
+    // It leads the finished, newest first.
+    const text = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, " Finished · 8\n  ✓ List unused build steps                                                  1s\n") != null);
     // Moving on goes to the next row on screen, not the next old index.
     _ = try press(&state, .{}, .next);
     try expectSelected(&state, "m1n2p3");
@@ -5394,7 +5648,8 @@ test "a listing notifies once of each Session that newly finished, failed or nee
     try expectEffects(&.{.{ .notify = .{ .name = "Fix the flaky resize test", .kind = .finished, .more = 0 } }}, try refresh(&state, .changed, testToken(5), &.{next_turn}));
     // Approval outranks a failure and a finish listed before it; a stop and
     // work under way are no news; an unseen Session's finish is.
-    try expectEffects(&.{.{ .notify = .{ .name = "Find why store tests fail", .kind = .approval, .more = 2 } }}, try refresh(&state, .changed, testToken(6), &.{
+    // The new wait also asks for its command.
+    try expectEffects(&.{ .{ .notify = .{ .name = "Find why store tests fail", .kind = .approval, .more = 2 } }, commandReadOf("a1b2c3", 1) }, try refresh(&state, .changed, testToken(6), &.{
         session("b2c3d4", .{ .failed = .{ .since = test_now_s, .code = bounded(session_work.max_code_bytes, "provider_http_500"), .resets_at = null } }, .{ .label = "Profile the curl send queue" }),
         session("e5f6g7", .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .{ .label = "List unused build steps" }),
         session("d4e5f6", .{ .working = ago(0) }, .{ .label = "Trace Host shutdown order" }),
@@ -5405,7 +5660,7 @@ test "a listing notifies once of each Session that newly finished, failed or nee
     try expectEffects(&.{.{ .notify = .{ .name = "yy8yy8", .kind = .finished, .more = 0 } }}, try refresh(&state, .changed, testToken(7), &.{session("yy8yy8", .{ .finished = ago(0) }, .{ .first = null })}));
     // The next Action to wait, once the first is decided, is a new wait.
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(8), &.{session("a1b2c3", .{ .approval = ago(0) }, .{ .label = "Find why store tests fail", .first_action = 1 })}));
-    try expectEffects(&.{.{ .notify = .{ .name = "Find why store tests fail", .kind = .approval, .more = 0 } }}, try refresh(&state, .changed, testToken(9), &.{session("a1b2c3", .{ .approval = ago(0) }, .{ .label = "Find why store tests fail", .first_action = 2 })}));
+    try expectEffects(&.{ .{ .notify = .{ .name = "Find why store tests fail", .kind = .approval, .more = 0 } }, commandReadOf("a1b2c3", 2) }, try refresh(&state, .changed, testToken(9), &.{session("a1b2c3", .{ .approval = ago(0) }, .{ .label = "Find why store tests fail", .first_action = 2 })}));
 }
 
 /// Takes every program status record waiting for the shell, as sent.
@@ -5518,7 +5773,7 @@ test "the listing and the open conversation read one record, so each news comes 
     // the conversation notified it, is no news to the listing either.
     const started = session("n3w5es", .{ .approval = ago(0) }, .{ .label = "Start the notes", .first = null, .first_action = 3 });
     try expectEffects(&.{}, try step(&state, .{ .observed = .{ .reference = "n3w5es".*, .work = .{ .state = .{ .approval = ago(0) }, .first_action = 3 }, .name = "Start the notes", .opening = true } }));
-    try expectEffects(&.{}, try refresh(&state, .changed, testToken(4), &.{started}));
+    try expectEffects(&.{commandReadOf("n3w5es", 3)}, try refresh(&state, .changed, testToken(4), &.{started}));
     try expectEffects(&.{.{ .notify = .{ .name = "Start the notes", .kind = .finished, .more = 0 } }}, try step(&state, .{ .observed = .{ .reference = "n3w5es".*, .work = .{ .state = .{ .finished = ago(0) }, .turn = 1 }, .name = "Start the notes", .opening = false } }));
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(5), &.{session("n3w5es", .{ .finished = ago(0) }, .{ .label = "Start the notes", .first = null, .turn = 1 })}));
 }
@@ -5537,7 +5792,7 @@ test "moving into a folded group's hidden rows opens it" {
     try expectSelected(&state, "v8w9x0");
     try std.testing.expect(!folded(&state, .finished));
     _ = try press(&state, .{}, .first);
-    try expectSelected(&state, "k7m2qx");
+    try expectSelected(&state, "r4t9vw");
 }
 
 /// Each row once in `rows`, `by_reference` and `order`.
@@ -5660,12 +5915,12 @@ test "the overview lists once a second, one listing at a time" {
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = start + 3 * list_interval_ms }));
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
     try expectScreenLine(&state, 1, " Host stopped 0s ago. Run rui host start.");
-    try expectScreenLine(&state, 2, " Host not responding. Last update 1s ago.");
-    var screen = try sizedRender(&state, .{}, 80, 24, .{}, 0);
+    var screen = try Frame.of(&state, 80, 24, .{}, 0);
     defer screen.deinit();
-    try std.testing.expectEqual(Style{ .colour = .quiet }, screen.styleAt(7, 2).?);
+    try expectScreenLine(&state, 3, "  ? Review PR 412                                                            3m");
+    try std.testing.expectEqual(Style{ .colour = .quiet }, screen.styleAt(3, 2).?);
     _ = try refresh(&state, .not_modified, testToken(1), &.{});
-    try expectScreenLine(&state, 1, " Running. 20 Sessions. 2 failed.");
+    try expectScreenLine(&state, 1, " Needs you · 1");
 }
 
 test "a tick moves a retry that fell due to pending" {
@@ -5723,7 +5978,6 @@ test "the band derives provider trouble from rows, in priority order" {
     try std.testing.expectEqual(Trouble.quota, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
 }
 
-/// Renders `state` at 80x24 and 200x60 and compares both screens.
 /// Renders `state` at 80x24 and 200x60 and compares both screens, and the
 /// 80x24 screen's styles.
 fn expectScreens(state: *State, caps: Caps, small: []const u8, small_styles: []const u8, large: []const u8) !void {
@@ -5736,15 +5990,18 @@ fn expectScreens(state: *State, caps: Caps, small: []const u8, small_styles: []c
 /// `m`ark, ru`l`e, `a`ttention, `f`ailure or `b`and colour; `r` selected or
 /// reversed. Capitals are bold.
 fn expectStyles(state: *State, width: u16, height: u16, caps: Caps, expected: []const u8) !void {
-    var screen = try sizedRender(state, .{}, width, height, caps, 0);
-    defer screen.deinit();
+    var shown: Frame = try .of(state, width, height, caps, 0);
+    defer shown.deinit();
     var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer text.deinit();
-    for (screen.lines) |line| {
-        var cells: [512]u8 = @splat('.');
-        var end: usize = 0;
-        for (line) |span| {
-            const letter: u8 = if (span.style.reverse or span.style.background == .selection) 'r' else switch (span.style.colour) {
+    for (0..shown.lines.len) |row| {
+        const start = text.written().len;
+        for (0..width) |column| {
+            const style = shown.styleAt(row, column) orelse {
+                try text.writer.writeByte('.');
+                continue;
+            };
+            const letter: u8 = if (style.reverse or style.background == .selection) 'r' else switch (style.colour) {
                 .strong => 's',
                 .ink => 'i',
                 .normal => 'n',
@@ -5755,10 +6012,10 @@ fn expectStyles(state: *State, width: u16, height: u16, caps: Caps, expected: []
                 .failure => 'f',
                 .on_band => 'b',
             };
-            @memset(cells[span.column..][0..span.cells], if (span.style.bold) std.ascii.toUpper(letter) else letter);
-            end = @max(end, span.column + span.cells);
+            try text.writer.writeByte(if (style.bold) std.ascii.toUpper(letter) else letter);
         }
-        try text.writer.print("{s}\n", .{cells[0..end]});
+        text.shrinkRetainingCapacity(start + std.mem.trimEnd(u8, text.written()[start..], ".").len);
+        try text.writer.writeByte('\n');
     }
     try std.testing.expectEqualStrings(expected, text.written());
 }
@@ -5769,10 +6026,10 @@ fn expectBand(rows: []const Listed, small: []const u8, small_styles: []const u8,
     try expectScreens(&state, .{}, small, small_styles, large);
     // The band spans the line, in its colour or, without colour, reversed.
     for ([_]Caps{ .{}, .{ .depth = .none } }, [_]Style{ .{ .colour = .on_band, .background = .band, .bold = true }, .{ .bold = true, .reverse = true } }) |caps, style| {
-        var screen = try sizedRender(&state, .{}, 80, 24, caps, 0);
-        defer screen.deinit();
-        try std.testing.expectEqual(style, screen.styleAt(1, 0).?);
-        try std.testing.expectEqual(style, screen.styleAt(1, 79).?);
+        var shown: Frame = try .of(&state, 80, 24, caps, 0);
+        defer shown.deinit();
+        try std.testing.expectEqual(style, shown.styleAt(1, 0).?);
+        try std.testing.expectEqual(style, shown.styleAt(1, 79).?);
     }
 }
 
@@ -5782,548 +6039,209 @@ test "a quota reset far in the future still draws its band" {
     try expectScreenLine(&state, 1, " Quota used up. Resets in 999d.");
 }
 
-test "render draws each band" {
+test "the overview's rows draw each band" {
     const done = session("ffffff", .{ .finished = ago(600) }, .{ .label = "Summarize the CI failures" });
     try expectBand(&.{ done, failedRow("aaaaaa", 60, "provider_sign_in_refresh_token_expired", null) },
-        \\ रुई rui  ~/code/rui                                      Unarchived · /sessions
+        \\ रुई rui  × 1
         \\ Sign-in expired. Run rui auth login codex.
-        \\
-        \\
         \\ Finished · 1
         \\  ✓ Summarize the CI failures                                               10m
         \\
         \\ Stopped or failed · 1
-        \\  × Ask the model                                                            1m
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\ ──────────────────────────────────────────────────────────────────────────────
-        \\ › Type a task to start a Session
+        \\  × Ask the model                                    Sign-in expired         1m
+        \\ new Session · no model · ~/code/rui
         \\ ↑↓ select · enter open
-        \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnniiiiiiiiiiiiiiiiiiiiiin
+        \\SSSSSSSfffffnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
-        \\
-        \\
         \\.IIIIIIIIqqqq
-        \\.rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
+        \\..m.qqqqqqqqqqqqqqqqqqqqqqqqq...............................................qqq
         \\
         \\.IIIIIIIIIIIIIIIIIqqqq
-        \\..f.qqqqqqqqqqqqq............................................................qq
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\.llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
-        \\.n.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\..f.qqqqqqqqqqqqq....................................fffffffffffffff.........qq
+        \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\.qqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  ~/code/rui                                                                                                                                                              Unarchived · /sessions
+        \\ रुई rui  × 1
         \\ Sign-in expired. Run rui auth login codex.
-        \\
-        \\
         \\ Finished · 1
         \\  ✓ Summarize the CI failures                                                                                                                                                                       10m
         \\
         \\ Stopped or failed · 1
-        \\  × Ask the model                                                                                                                                                                                    1m
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-        \\ › Type a task to start a Session
+        \\  × Ask the model                                                                                                                                    Sign-in expired                                 1m
+        \\ new Session · no model · ~/code/rui
         \\ ↑↓ select · enter open
-        \\
     );
     try expectBand(&.{ done, failedRow("aaaaaa", 60, "provider_quota", test_now_s + 20 * 60) },
-        \\ रुई rui  ~/code/rui                                      Unarchived · /sessions
+        \\ रुई rui  × 1
         \\ Quota used up. Resets in 20m.
-        \\
-        \\
         \\ Finished · 1
         \\  ✓ Summarize the CI failures                                               10m
         \\
         \\ Stopped or failed · 1
-        \\  × Ask the model                                                            1m
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\ ──────────────────────────────────────────────────────────────────────────────
-        \\ › Type a task to start a Session
+        \\  × Ask the model                                    Out of quota            1m
+        \\ new Session · no model · ~/code/rui
         \\ ↑↓ select · enter open
-        \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnniiiiiiiiiiiiiiiiiiiiiin
+        \\SSSSSSSfffffnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
-        \\
-        \\
         \\.IIIIIIIIqqqq
-        \\.rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
+        \\..m.qqqqqqqqqqqqqqqqqqqqqqqqq...............................................qqq
         \\
         \\.IIIIIIIIIIIIIIIIIqqqq
-        \\..f.qqqqqqqqqqqqq............................................................qq
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\.llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
-        \\.n.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\..f.qqqqqqqqqqqqq....................................ffffffffffff............qq
+        \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\.qqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  ~/code/rui                                                                                                                                                              Unarchived · /sessions
+        \\ रुई rui  × 1
         \\ Quota used up. Resets in 20m.
-        \\
-        \\
         \\ Finished · 1
         \\  ✓ Summarize the CI failures                                                                                                                                                                       10m
         \\
         \\ Stopped or failed · 1
-        \\  × Ask the model                                                                                                                                                                                    1m
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-        \\ › Type a task to start a Session
+        \\  × Ask the model                                                                                                                                    Out of quota                                    1m
+        \\ new Session · no model · ~/code/rui
         \\ ↑↓ select · enter open
-        \\
     );
     try expectBand(&.{ retryRow("aaaaaa", "provider_temporary_http_429", 10), retryRow("bbbbbb", "provider_temporary_http_429", 20) },
-        \\ रुई rui  ~/code/rui                                      Unarchived · /sessions
+        \\ रुई rui  ● 2
         \\ Rate limited. 2 Sessions will retry.
-        \\
-        \\
         \\ Active · 2
-        \\  ● Ask the model again                      Rate limited · retry 1 in 10s   5s
-        \\  ● Ask the model again                      Rate limited · retry 1 in 20s   5s
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\ ──────────────────────────────────────────────────────────────────────────────
-        \\ › Type a task to start a Session
+        \\  ● Ask the model again                        Rate limited · retry in 10s   5s
+        \\  ● Ask the model again                        Rate limited · retry in 20s   5s
+        \\ new Session · no model · ~/code/rui
         \\ ↑↓ select · enter open · ctrl+x stop
-        \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnniiiiiiiiiiiiiiiiiiiiiin
+        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
-        \\
-        \\
         \\.IIIIIIqqqq
-        \\.rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
-        \\..a.iiiiiiiiiiiiiiiiiii......................aaaaaaaaaaaaaaaaaaaaaaaaaaaaa...qq
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\.llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
-        \\.n.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\..a.iiiiiiiiiiiiiiiiiii........................aaaaaaaaaaaaaaaaaaaaaaaaaaa...qq
+        \\..a.iiiiiiiiiiiiiiiiiii........................aaaaaaaaaaaaaaaaaaaaaaaaaaa...qq
+        \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  ~/code/rui                                                                                                                                                              Unarchived · /sessions
+        \\ रुई rui  ● 2
         \\ Rate limited. 2 Sessions will retry.
-        \\
-        \\
         \\ Active · 2
-        \\  ● Ask the model again                                                                                                                              Rate limited · retry 1 in 10s                   5s
-        \\  ● Ask the model again                                                                                                                              Rate limited · retry 1 in 20s                   5s
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-        \\ › Type a task to start a Session
+        \\  ● Ask the model again                                                                                                                              Rate limited · retry in 10s                     5s
+        \\  ● Ask the model again                                                                                                                              Rate limited · retry in 20s                     5s
+        \\ new Session · no model · ~/code/rui
         \\ ↑↓ select · enter open · ctrl+x stop
-        \\
     );
 }
 
-test "render draws an empty Store" {
+test "the overview's rows draw an empty Store" {
     var state = try opened(&.{});
     defer state.deinit();
     try expectScreens(&state, .{},
-        \\ रुई rui  ~/code/rui                                      Unarchived · /sessions
+        \\ रुई rui
         \\ No unarchived Sessions. /sessions archived shows the archive.
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\ ──────────────────────────────────────────────────────────────────────────────
-        \\ › Type a task to start a Session
-        \\
+        \\ new Session · no model · ~/code/rui
         \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnniiiiiiiiiiiiiiiiiiiiiin
+        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\.llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
-        \\.n.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\
         \\
     ,
-        \\ रुई rui  ~/code/rui                                                                                                                                                              Unarchived · /sessions
+        \\ रुई rui
         \\ No unarchived Sessions. /sessions archived shows the archive.
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-        \\ › Type a task to start a Session
-        \\
+        \\ new Session · no model · ~/code/rui
         \\
     );
 }
 
-test "render draws twenty mixed rows" {
+test "the overview's rows draw twenty mixed rows" {
     var state = try opened(&mixed);
     defer state.deinit();
     try expectScreens(&state, .{},
-        \\ रुई rui  ~/code/rui                                      Unarchived · /sessions
-        \\ Running. 20 Sessions. 2 failed.
+        \\ रुई rui  ? 1  ● 6  ◌ 1  × 2
+        \\ Needs you · 1
+        \\  ? Review PR 412                                                            3m
         \\
-        \\
-        \\ Yours · 3
+        \\ Yours · 2
         \\  ⠋ Fix the flaky resize test                                               40s
-        \\  ○ Review PR 412                                    Needs approval          3m
         \\  ✓ h8q2mz                                                                  12m
         \\
-        \\ Active · 5
+        \\ Active · 6
         \\  ● List unused build steps                          Stopping…               8s
-        \\  ● Audit permission paths                 Provider error · retry 2 in 12s  30s
+        \\  ● Audit permission paths                   Provider error · retry in 12s  30s
         \\  ● Find why store tests fail                        Run the logic tests     1m
         \\  ● f6g7h8                             ~/code/other                          1m
         \\  ● Profile the curl send queue                                              2m
-        \\
-        \\ Queued · 1
         \\  ◌ Trace Host shutdown order                                                5s
         \\
         \\ Idle · 1
         \\  ○ Check macOS socket cleanup                                               2h
-        \\ ──────────────────────────────────────────────────────────────────────────────
-        \\ › Type a task to start a Session
+        \\
+        \\ Finished · 7
+        \\  ✓ Explain provider output parsing                                         20m
+        \\  ✓ Find the commit that broke WAL                                          45m
+        \\  ✓ p3q4r5                                                                   1h
+        \\  ✓ Summarize the build cache study                                          3h
+        \\  ✓ Check the release notes               /srv/work                          2d
+        \\   2 more
+        \\
+        \\ Stopped or failed · 3
+        \\  × Bisect the WAL regression                      provider_output_invalid  15m
+        \\  ■ Rename the session tables                                               30m
+        \\  × Retry the flaky upload                           provider_http_500      50m
+        \\ new Session · no model · ~/code/rui
         \\ ↑↓ select · enter open · ctrl+x stop
-        \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnniiiiiiiiiiiiiiiiiiiiiin
-        \\.SSSSSSSS.nnnnnnnnnnnnnnnnnnnnnn
-        \\
+        \\SSSSSSSaaaaannnnnnnnnnfffffnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\.IIIIIIIIIqqqq
+        \\..a.iiiiiiiiiiiii............................................................qq
         \\
         \\.IIIIIqqqq
-        \\.rrRRRRRRRRRRRRRRRRRRRRRRRRRRrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
-        \\..a.SSSSSSSSSSSSS....................................aaaaaaaaaaaaaa..........qq
+        \\..i.SSSSSSSSSSSSSSSSSSSSSSSSS...............................................qqq
         \\..m.SSSSSS..................................................................qqq
         \\
         \\.IIIIIIqqqq
         \\..q.iiiiiiiiiiiiiiiiiiiiiii..........................qqqqqqqqq...............qq
-        \\..a.iiiiiiiiiiiiiiiiiiiiii.................aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..qqq
+        \\..a.iiiiiiiiiiiiiiiiiiiiii...................aaaaaaaaaaaaaaaaaaaaaaaaaaaaa..qqq
         \\..i.iiiiiiiiiiiiiiiiiiiiiiiii........................nnnnnnnnnnnnnnnnnnn.....qq
         \\..i.qqqqqq.............................nnnnnnnnnnnn..........................qq
         \\..i.iiiiiiiiiiiiiiiiiiiiiiiiiii..............................................qq
-        \\
-        \\.IIIIIIqqqq
-        \\..n.iiiiiiiiiiiiiiiiiiiiiiiii................................................qq
+        \\..q.iiiiiiiiiiiiiiiiiiiiiiiii................................................qq
         \\
         \\.IIIIqqqq
         \\..n.iiiiiiiiiiiiiiiiiiiiiiiiii...............................................qq
-        \\.llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
-        \\.n.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\
+        \\.IIIIIIIIqqqq
+        \\..m.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq.........................................qqq
+        \\..m.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq..........................................qqq
+        \\..m.qqqqqq...................................................................qq
+        \\..m.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq..........................................qq
+        \\..m.qqqqqqqqqqqqqqqqqqqqqqq...............nnnnnnnnn..........................qq
+        \\...qqqqqq
+        \\
+        \\.IIIIIIIIIIIIIIIIIqqqq
+        \\..f.qqqqqqqqqqqqqqqqqqqqqqqqq......................fffffffffffffffffffffff..qqq
+        \\..n.qqqqqqqqqqqqqqqqqqqqqqqqq...............................................qqq
+        \\..f.qqqqqqqqqqqqqqqqqqqqqq...........................fffffffffffffffff......qqq
+        \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  ~/code/rui                                                                                                                                                              Unarchived · /sessions
-        \\ Running. 20 Sessions. 2 failed.
+        \\ रुई rui  ? 1  ● 6  ◌ 1  × 2
+        \\ Needs you · 1
+        \\  ? Review PR 412                                                                                                                                                                                    3m
         \\
-        \\
-        \\ Yours · 3
+        \\ Yours · 2
         \\  ⠋ Fix the flaky resize test                                                                                                                                                                       40s
-        \\  ○ Review PR 412                                                                                                                                    Needs approval                                  3m
         \\  ✓ h8q2mz                                                                                                                                                                                          12m
         \\
-        \\ Active · 5
+        \\ Active · 6
         \\  ● List unused build steps                                                                                                                          Stopping…                                       8s
-        \\  ● Audit permission paths                                                                                                                           Provider error · retry 2 in 12s                30s
+        \\  ● Audit permission paths                                                                                                                           Provider error · retry in 12s                  30s
         \\  ● Find why store tests fail                                                                                                                        Run the logic tests                             1m
         \\  ● f6g7h8                                                                                                                             ~/code/other                                                  1m
         \\  ● Profile the curl send queue                                                                                                                                                                      2m
-        \\
-        \\ Queued · 1
         \\  ◌ Trace Host shutdown order                                                                                                                                                                        5s
         \\
         \\ Idle · 1
@@ -6338,114 +6256,103 @@ test "render draws twenty mixed rows" {
         \\   2 more
         \\
         \\ Stopped or failed · 3
-        \\  × Bisect the WAL regression                                                                                                                        failed · for "Fix the flaky resize test"       15m
-        \\  ■ Rename the session tables                                                                                                                        stopped · for zzzzzz                           30m
-        \\  × Retry the flaky upload                                                                                                                                                                          50m
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-        \\ › Type a task to start a Session
+        \\  × Bisect the WAL regression                                                                                                                        provider_output_invalid                        15m
+        \\  ■ Rename the session tables                                                                                                                                                                       30m
+        \\  × Retry the flaky upload                                                                                                                           provider_http_500                              50m
+        \\ new Session · no model · ~/code/rui
         \\ ↑↓ select · enter open · ctrl+x stop
-        \\
     );
 }
 
-test "render draws ASCII without colour" {
+test "the overview's rows draw ASCII without colour" {
     var state = try opened(&mixed);
     defer state.deinit();
     _ = try step(&state, .{ .first_line = .{ .reference = "h8q2mz".*, .admission = 4, .line = "résumé the naïve café ☕ notes" } });
     const caps: Caps = .{ .unicode = false, .depth = .none };
     try expectScreens(&state, caps,
-        \\ rui  ~/code/rui                                         Unarchived - /sessions
-        \\ Running. 20 Sessions. 2 failed.
+        \\ rui  ? 1  * 6  : 1  x 2
+        \\ Needs you - 1
+        \\  ? Review PR 412                                                            3m
         \\
-        \\
-        \\ Yours - 3
+        \\ Yours - 2
         \\  * Fix the flaky resize test                                               40s
-        \\  o Review PR 412                                    Needs approval          3m
         \\  + r?sum? the na?ve caf? ? notes                                           12m
         \\
-        \\ Active - 5
+        \\ Active - 6
         \\  * List unused build steps                          Stopping.               8s
-        \\  * Audit permission paths                 Provider error - retry 2 in 12s  30s
+        \\  * Audit permission paths                   Provider error - retry in 12s  30s
         \\  * Find why store tests fail                        Run the logic tests     1m
         \\  * f6g7h8                             ~/code/other                          1m
         \\  * Profile the curl send queue                                              2m
-        \\
-        \\ Queued - 1
         \\  : Trace Host shutdown order                                                5s
         \\
         \\ Idle - 1
         \\  o Check macOS socket cleanup                                               2h
-        \\ ------------------------------------------------------------------------------
-        \\ > Type a task to start a Session
+        \\
+        \\ Finished - 7
+        \\  + Explain provider output parsing                                         20m
+        \\  + Find the commit that broke WAL                                          45m
+        \\  + p3q4r5                                                                   1h
+        \\  + Summarize the build cache study                                          3h
+        \\  + Check the release notes               /srv/work                          2d
+        \\   2 more
+        \\
+        \\ Stopped or failed - 3
+        \\  x Bisect the WAL regression                      provider_output_invalid  15m
+        \\  # Rename the session tables                                               30m
+        \\  x Retry the flaky upload                           provider_http_500      50m
+        \\ new Session - no model - ~/code/rui
         \\ ^v select - enter open - ctrl+x stop
-        \\
     ,
-        \\.NNN..nnnnnnnnnn.........................................nnnnnnnnnnnnnnnnnnnnnn
-        \\.NNNNNNNN.nnnnnnnnnnnnnnnnnnnnnn
-        \\
+        \\nNNNnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\.NNNNNNNNNnnnn
+        \\..n.nnnnnnnnnnnnn............................................................nn
         \\
         \\.NNNNNnnnn
-        \\rrrRRRRRRRRRRRRRRRRRRRRRRRRRRrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
-        \\..n.NNNNNNNNNNNNN....................................nnnnnnnnnnnnnn..........nn
+        \\..n.NNNNNNNNNNNNNNNNNNNNNNNNN...............................................nnn
         \\..n.NNNNNNNNNNNNNNNNNNNNNNNNNNNNN...........................................nnn
         \\
         \\.NNNNNNnnnn
         \\..n.nnnnnnnnnnnnnnnnnnnnnnn..........................nnnnnnnnn...............nn
-        \\..n.nnnnnnnnnnnnnnnnnnnnnn.................nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn..nnn
+        \\..n.nnnnnnnnnnnnnnnnnnnnnn...................nnnnnnnnnnnnnnnnnnnnnnnnnnnnn..nnn
         \\..n.nnnnnnnnnnnnnnnnnnnnnnnnn........................nnnnnnnnnnnnnnnnnnn.....nn
         \\..n.nnnnnn.............................nnnnnnnnnnnn..........................nn
         \\..n.nnnnnnnnnnnnnnnnnnnnnnnnnnn..............................................nn
-        \\
-        \\.NNNNNNnnnn
         \\..n.nnnnnnnnnnnnnnnnnnnnnnnnn................................................nn
         \\
         \\.NNNNnnnn
         \\..n.nnnnnnnnnnnnnnnnnnnnnnnnnn...............................................nn
-        \\.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
-        \\.n.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\
+        \\.NNNNNNNNnnnn
+        \\..n.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn.........................................nnn
+        \\..n.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnn..........................................nnn
+        \\..n.nnnnnn...................................................................nn
+        \\..n.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn..........................................nn
+        \\..n.nnnnnnnnnnnnnnnnnnnnnnn...............nnnnnnnnn..........................nn
+        \\...nnnnnn
+        \\
+        \\.NNNNNNNNNNNNNNNNNnnnn
+        \\..n.nnnnnnnnnnnnnnnnnnnnnnnnn......................nnnnnnnnnnnnnnnnnnnnnnn..nnn
+        \\..n.nnnnnnnnnnnnnnnnnnnnnnnnn...............................................nnn
+        \\..n.nnnnnnnnnnnnnnnnnnnnnn...........................nnnnnnnnnnnnnnnnn......nnn
+        \\.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\
     ,
-        \\ rui  ~/code/rui                                                                                                                                                                 Unarchived - /sessions
-        \\ Running. 20 Sessions. 2 failed.
+        \\ rui  ? 1  * 6  : 1  x 2
+        \\ Needs you - 1
+        \\  ? Review PR 412                                                                                                                                                                                    3m
         \\
-        \\
-        \\ Yours - 3
+        \\ Yours - 2
         \\  * Fix the flaky resize test                                                                                                                                                                       40s
-        \\  o Review PR 412                                                                                                                                    Needs approval                                  3m
         \\  + r?sum? the na?ve caf? ? notes                                                                                                                                                                   12m
         \\
-        \\ Active - 5
+        \\ Active - 6
         \\  * List unused build steps                                                                                                                          Stopping.                                       8s
-        \\  * Audit permission paths                                                                                                                           Provider error - retry 2 in 12s                30s
+        \\  * Audit permission paths                                                                                                                           Provider error - retry in 12s                  30s
         \\  * Find why store tests fail                                                                                                                        Run the logic tests                             1m
         \\  * f6g7h8                                                                                                                             ~/code/other                                                  1m
         \\  * Profile the curl send queue                                                                                                                                                                      2m
-        \\
-        \\ Queued - 1
         \\  : Trace Host shutdown order                                                                                                                                                                        5s
         \\
         \\ Idle - 1
@@ -6460,85 +6367,29 @@ test "render draws ASCII without colour" {
         \\   2 more
         \\
         \\ Stopped or failed - 3
-        \\  x Bisect the WAL regression                                                                                                                        failed - for "Fix the flaky resize test"       15m
-        \\  # Rename the session tables                                                                                                                        stopped - for zzzzzz                           30m
-        \\  x Retry the flaky upload                                                                                                                                                                          50m
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\
-        \\ ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-        \\ > Type a task to start a Session
+        \\  x Bisect the WAL regression                                                                                                                        provider_output_invalid                        15m
+        \\  # Rename the session tables                                                                                                                                                                       30m
+        \\  x Retry the flaky upload                                                                                                                           provider_http_500                              50m
+        \\ new Session - no model - ~/code/rui
         \\ ^v select - enter open - ctrl+x stop
-        \\
     );
-    var screen = try sizedRender(&state, .{}, 200, 60, caps, 0);
+    var screen = try Frame.of(&state, 200, 60, caps, 0);
     defer screen.deinit();
     for (screen.lines) |line| for (line) |span| {
         try std.testing.expectEqual(Colour.normal, span.style.colour);
         for (span.text) |byte| try std.testing.expect(byte < 0x80);
     };
-    // The selection is reverse video across the whole line, as before the
-    // painted skins.
-    for ([_]usize{ 0, 1, 199 }) |column| try std.testing.expect(screen.styleAt(5, column).?.reverse);
 }
 
-test "render fits any screen size" {
+test "the overview's rows fit any screen size" {
     var state = try opened(&mixed);
     defer state.deinit();
     for ([_][2]u16{ .{ 0, 0 }, .{ 8, 2 }, .{ 20, 5 }, .{ 40, 10 }, .{ 119, 30 }, .{ 2048, 24 }, .{ 4096, 6 } }) |size| {
-        var screen = try sizedRender(&state, .{}, size[0], size[1], .{}, 0);
-        defer screen.deinit();
-        try std.testing.expectEqual(@as(usize, size[1]), screen.lines.len);
-        for (screen.lines) |line| for (line) |span| try std.testing.expect(span.column + span.cells <= size[0]);
         const text = try screenText(&state, size[0], size[1], .{});
-        std.testing.allocator.free(text);
+        defer std.testing.allocator.free(text);
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |line| try std.testing.expect(gwidth.gwidth(line, .unicode) <= size[0]);
     }
-}
-
-test "the composer needs six rows and six columns, and shows nothing smaller" {
-    var state = try opened(&mixed);
-    defer state.deinit();
-    for (1..9) |w| for (1..9) |h| {
-        const width: u16 = @intCast(w);
-        const height: u16 = @intCast(h);
-        var screen = try sizedRender(&state, .{ .bytes = "draft", .cursor = 5 }, width, height, .{}, 0);
-        defer screen.deinit();
-        const fits = width >= 6 and height >= 6;
-        try std.testing.expectEqual(fits, screen.cursor != null);
-        if (screen.cursor) |cursor| {
-            try std.testing.expectEqual(height - 2, cursor.row);
-            try std.testing.expect(cursor.column < width);
-        }
-    };
-}
-
-test "a full-capacity draft of spaces keeps the composer's caret on screen" {
-    var state = try opened(&mixed);
-    defer state.deinit();
-    const spaces: [65536]u8 = @splat(' ');
-    var screen = try sizedRender(&state, .{ .bytes = &spaces, .cursor = spaces.len }, 80, 24, .{}, 0);
-    defer screen.deinit();
-    try std.testing.expectEqual(@as(?Screen.Cursor, .{ .row = 22, .column = 3 }), screen.cursor);
 }
 
 fn repeated(comptime text: []const u8, comptime count: usize) []const u8 {
@@ -6562,17 +6413,16 @@ test "every line fits the screen as the terminal measures it" {
     defer state.deinit();
     draft = try typeText(&state, rockets);
     for ([_]Caps{ .{ .width = .unicode }, .{ .width = .wcwidth }, .{ .unicode = false } }) |caps| for ([_]u16{ 80, 41, 24 }) |width| {
-        var screen = try sizedRender(&state, draft, width, 24, caps, 0);
-        defer screen.deinit();
-        for (screen.lines) |line| for (line) |span| try std.testing.expectEqual(gwidth.gwidth(span.text, caps.width), span.cells);
-        const text = try screenText(&state, width, 24, caps);
+        var shown: Frame = try .drafted(&state, draft, width, 24, caps, 0);
+        defer shown.deinit();
+        const text = try shown.text();
         defer std.testing.allocator.free(text);
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |line| try std.testing.expect(gwidth.gwidth(line, caps.width) <= width);
     };
 }
 
-test "bidi controls in a title or a starter's Label cannot reorder a row" {
+test "bidi controls in a title cannot reorder a row" {
     const bidi = "\u{202e}\u{2066}\u{200f}\u{061c}";
     var state = try opened(&.{
         session("k7m2qx", .{ .working = ago(5) }, .{ .label = "Pay " ++ bidi ++ "evil" }),
@@ -6582,14 +6432,13 @@ test "bidi controls in a title or a starter's Label cannot reorder a row" {
     const text = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "Pay ????evil") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "for \"Pay ?") != null);
     for ([_][]const u8{ "\u{202e}", "\u{2066}", "\u{200f}", "\u{061c}" }) |control| try std.testing.expect(std.mem.indexOf(u8, text, control) == null);
 }
 
 test "untrusted text cannot reach the terminal as control bytes" {
     var state = try opened(&.{session("k7m2qx", .{ .working = ago(5) }, .{ .label = "Bell\x07 and \x1b[31mred" })});
     defer state.deinit();
-    try expectScreenLine(&state, 5, "  ● Bell? and ?[31mred                                                       5s");
+    try expectScreenLine(&state, 2, "  ● Bell? and ?[31mred                                                       5s");
 }
 
 test "only the finished and the failed or stopped groups fold" {
@@ -6607,10 +6456,10 @@ test "your Sessions keep a bright title once they end" {
     var state = try opened(&.{ session("k7m2qx", .{ .finished = ago(60) }, .{ .label = "Fix it", .yours = true }), session("r4t9vw", .{ .finished = ago(90) }, .{ .label = "Map it" }) });
     defer state.deinit();
     state.selected = null;
-    var screen = try sizedRender(&state, .{}, 80, 24, .{}, 0);
+    var screen = try Frame.of(&state, 80, 24, .{}, 0);
     defer screen.deinit();
-    try std.testing.expectEqual(Style{ .colour = .strong, .bold = true }, screen.styleAt(5, 4).?);
-    try std.testing.expectEqual(Style{ .colour = .quiet }, screen.styleAt(8, 4).?);
+    try std.testing.expectEqual(Style{ .colour = .strong, .bold = true }, screen.styleAt(2, 4).?);
+    try std.testing.expectEqual(Style{ .colour = .quiet }, screen.styleAt(5, 4).?);
 }
 
 test "every role has an entry in both skins, and its 256-colour entry is the nearest" {
@@ -6657,220 +6506,30 @@ test "the skin follows the terminal's background, night when it gave none" {
     try std.testing.expectEqual(Skin.night, (Caps{ .background = .{ 0, 0, 255 } }).skin());
 }
 
-/// A terminal cell as a frame leaves it.
-const Cell = struct { fg: Ink = .default, bg: Ink = .default, bold: bool = false, reverse: bool = false, written: bool = false };
-const Ink = union(enum) { default, index: u8, rgb: Rgb };
-
-/// Plays a frame onto `cells` as a terminal with background colour erase
-/// does: cursor moves, line erases, SGR and text.
-fn playFrame(bytes: []const u8, cells: []Cell, width: usize, method: gwidth.Method) !void {
-    var row: usize = 0;
-    var column: usize = 0;
-    var pen: Cell = .{};
-    var at: usize = 0;
-    while (at < bytes.len) {
-        if (bytes[at] == 0x1b) {
-            try std.testing.expectEqual(@as(u8, '['), bytes[at + 1]);
-            const start = at + 2;
-            var end = start;
-            while (bytes[end] < 0x40 or bytes[end] > 0x7e) end += 1;
-            const parameters = bytes[start..end];
-            at = end + 1;
-            switch (bytes[end]) {
-                'H' => {
-                    var parts = std.mem.splitScalar(u8, parameters, ';');
-                    row = try std.fmt.parseUnsigned(usize, parts.next().?, 10) - 1;
-                    column = try std.fmt.parseUnsigned(usize, parts.next().?, 10) - 1;
-                },
-                'K' => {
-                    try std.testing.expectEqualStrings("2", parameters);
-                    for (cells[row * width ..][0..width]) |*cell| cell.* = .{ .bg = pen.bg };
-                },
-                'm' => {
-                    var parts = std.mem.splitScalar(u8, parameters, ';');
-                    while (parts.next()) |part| {
-                        const code = try std.fmt.parseUnsigned(u8, part, 10);
-                        switch (code) {
-                            0 => pen = .{},
-                            1 => pen.bold = true,
-                            7 => pen.reverse = true,
-                            38, 48 => {
-                                const ink: Ink = switch (try std.fmt.parseUnsigned(u8, parts.next().?, 10)) {
-                                    5 => .{ .index = try std.fmt.parseUnsigned(u8, parts.next().?, 10) },
-                                    2 => .{ .rgb = .{ try std.fmt.parseUnsigned(u8, parts.next().?, 10), try std.fmt.parseUnsigned(u8, parts.next().?, 10), try std.fmt.parseUnsigned(u8, parts.next().?, 10) } },
-                                    else => return error.TestUnexpectedResult,
-                                };
-                                if (code == 38) pen.fg = ink else pen.bg = ink;
-                            },
-                            else => return error.TestUnexpectedResult,
-                        }
-                    }
-                },
-                'h', 'l' => {},
-                else => return error.TestUnexpectedResult,
-            }
-            continue;
-        }
-        var clusters = unicode.graphemeIterator(bytes[at..]);
-        const len = clusters.next().?.len;
-        const cluster = bytes[at..][0..len];
-        const cells_wide = if (cluster[0] < 0x80) 1 else gwidth.gwidth(cluster, method);
-        for (0..cells_wide) |offset| {
-            var cell = pen;
-            cell.written = true;
-            cells[row * width + column + offset] = cell;
-        }
-        column += cells_wide;
-        at += len;
-    }
-    // Whatever draws next starts from the terminal's own colours.
-    try std.testing.expect(std.mem.endsWith(u8, bytes[0 .. std.mem.lastIndexOf(u8, bytes, "\x1b[0m").? + 4], "\x1b[0m"));
-    try std.testing.expectEqual(Cell{}, Cell{ .fg = pen.fg, .bg = pen.bg, .bold = pen.bold, .reverse = pen.reverse });
-}
-
-fn expectPainted(state: *State, width: u16, height: u16, caps: Caps) !void {
-    var screen = try sizedRender(state, .{}, width, height, caps, 0);
-    defer screen.deinit();
-    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer bytes.deinit();
-    try screen.writeFrame(null, &bytes.writer);
-    const cells = try std.testing.allocator.alloc(Cell, @as(usize, width) * height);
-    defer std.testing.allocator.free(cells);
-    @memset(cells, .{});
-    try playFrame(bytes.written(), cells, width, caps.width);
-    const skin = caps.skin();
-    const ink = struct {
-        fn of(depth: Caps.Depth, palette_skin: Skin, role: union(enum) { colour: Colour, background: Background }) Ink {
-            return switch (depth) {
-                .none => .default,
-                .indexed => .{ .index = switch (role) {
-                    .colour => |colour| indexed.get(palette_skin).colours.get(colour),
-                    .background => |background| indexed.get(palette_skin).backgrounds.get(background),
-                } },
-                .direct => .{ .rgb = switch (role) {
-                    .colour => |colour| palettes.get(palette_skin).colours.get(colour),
-                    .background => |background| palettes.get(palette_skin).backgrounds.get(background),
-                } },
-            };
-        }
-    };
-    for (0..height) |row| for (0..width) |column| {
-        const cell = cells[row * width + column];
-        const style = screen.styleAt(row, column) orelse Style{};
-        // Every cell has the ground the screen gives it, empty rows included.
-        try std.testing.expectEqual(ink.of(caps.depth, skin, .{ .background = style.background }), cell.bg);
-        if (cell.written) {
-            try std.testing.expectEqual(ink.of(caps.depth, skin, .{ .colour = style.colour }), cell.fg);
-            try std.testing.expectEqual(style.bold, cell.bold);
-            try std.testing.expectEqual(style.reverse, cell.reverse);
-        }
-    };
-    if (caps.depth == .none) {
-        try std.testing.expect(std.mem.indexOf(u8, bytes.written(), ";38;") == null);
-        try std.testing.expect(std.mem.indexOf(u8, bytes.written(), ";48;") == null);
-    }
-}
-
-test "a colour frame places every span, and restyles only where the style changes" {
-    const plain: Style = .{ .colour = .normal };
-    const line = [_]Span{
-        .{ .column = 1, .cells = 2, .text = "ab", .style = plain },
-        .{ .column = 3, .cells = 2, .text = "cd", .style = plain },
-        .{ .column = 5, .cells = 1, .text = "e", .style = .{ .colour = .ink } },
-        .{ .column = 8, .cells = 1, .text = "f", .style = .{ .colour = .ink } },
-    };
-    const lines = [_][]const Span{&line};
-    var screen: Screen = .{ .arena = .init(std.testing.allocator), .width = 10, .lines = &lines, .depth = .indexed };
-    defer screen.deinit();
-    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer out.deinit();
-    try screen.writeFrame(null, &out.writer);
-    const night = indexed.get(.night);
-    const expected = try std.fmt.allocPrint(std.testing.allocator, "\x1b[?2026h\x1b[?25l\x1b[1;1H\x1b[0;48;5;{d}m\x1b[2K" ++
-        "\x1b[1;2H\x1b[0;38;5;{d};48;5;{d}mab\x1b[1;4Hcd" ++
-        "\x1b[1;6H\x1b[0;38;5;{d};48;5;{d}me" ++
-        "\x1b[1;9Hf\x1b[0m\x1b[?2026l", .{
-        night.backgrounds.get(.ground),
-        night.colours.get(.normal),
-        night.backgrounds.get(.ground),
-        night.colours.get(.ink),
-        night.backgrounds.get(.ground),
-    });
-    defer std.testing.allocator.free(expected);
-    try std.testing.expectEqualStrings(expected, out.written());
-}
-
-test "each skin paints every cell of the screen at each colour depth" {
+test "the top is the counts line, then the counted groups" {
     var state = try opened(&mixed);
     defer state.deinit();
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 7500, .slots = 100, .slots_in_use = 3 } });
-    for ([_]?Rgb{ null, .{ 0x12, 0x18, 0x33 }, .{ 0xf3, 0xee, 0xe2 } }) |background| {
-        for ([_]Caps.Depth{ .direct, .indexed, .none }) |depth| {
-            for ([_][2]u16{ .{ 80, 24 }, .{ 200, 60 } }) |size| try expectPainted(&state, size[0], size[1], .{ .depth = depth, .background = background });
-        }
-    }
-    // The band and the faded rows paint too.
-    _ = try step(&state, .{ .tick = (test_now_s + 1) * 1000 });
-    _ = try step(&state, .{ .list = .failed });
-    for ([_]Caps.Depth{ .direct, .indexed, .none }) |depth| try expectPainted(&state, 80, 24, .{ .depth = depth });
-}
-
-test "the top reads as the mock: wordmark, headline, health, then the counted groups" {
-    var state = try opened(&mixed);
-    defer state.deinit();
-    _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 7500, .slots = 100, .slots_in_use = 3 } });
-    try expectScreenLine(&state, 0, " रुई rui  ~/code/rui                                      Unarchived · /sessions");
-    try expectScreenLine(&state, 1, " Running. 20 Sessions. 2 failed.");
-    try expectScreenLine(&state, 2, " Host up 2h05m   slots 3/100");
-    // The headings count the rows, so no line above them does.
-    try expectScreenLine(&state, 3, "");
-    try expectScreenLine(&state, 4, " Yours · 3");
-    // The wordmark and the headline's opening are the only bold on the top.
-    try expectStyle(&state, 0, 1, .{ .colour = .strong, .background = .bar, .bold = true });
-    try expectStyle(&state, 0, 5, .{ .colour = .strong, .background = .bar, .bold = true });
-    try expectStyle(&state, 0, 79, .{ .background = .bar });
-    try expectStyle(&state, 1, 1, .{ .colour = .strong, .bold = true });
-    try expectStyle(&state, 1, 10, .{});
+    try expectScreenLine(&state, 0, " रुई rui  ? 1  ● 6  ◌ 1 · slots 3/100  × 2");
+    try expectScreenLine(&state, 1, " Needs you · 1");
+    // The wordmark is the only bold on the top.
+    var shown: Frame = try .of(&state, 80, 24, .{}, 0);
+    defer shown.deinit();
+    for ([_]usize{ 1, 4 }) |column| try std.testing.expect(shown.styleAt(0, column).?.bold);
+    try std.testing.expect(!shown.styleAt(0, 10).?.bold);
     // ASCII has rui alone.
     const text = try screenText(&state, 80, 24, .{ .unicode = false });
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.startsWith(u8, text, " rui  ~/code/rui                                         Unarchived - /sessions\n Running. 20 Sessions. 2 failed.\n Host up 2h05m   slots 3/100\n\n Yours - 3\n"));
-}
-
-test "the headline says whether anything works, and counts failures" {
-    const yours_done = session("k7m2qx", .{ .finished = ago(5 * 60) }, .{ .label = "Fix it", .yours = true });
-    const other_done = session("h8q2mz", .{ .finished = ago(9 * 60) }, .{ .label = "Map it", .yours = true });
-    const working = session("a1b2c3", .{ .working = ago(40) }, .{ .label = "Profile it" });
-    const failed = failedRow("aaaaaa", 60, "provider_output_invalid", null);
-    const approval = session("r4t9vw", .{ .approval = ago(3 * 60) }, .{ .label = "Review PR 412" });
-    for ([_]struct { rows: []const Listed, line: []const u8 }{
-        .{ .rows = &.{ working, yours_done }, .line = " Running. 2 Sessions. Nothing needs you." },
-        .{ .rows = &.{ approval, yours_done }, .line = " Running. 2 Sessions." },
-        .{ .rows = &.{session("r4t9vw", .{ .working = ago(3) }, .{ .label = "Review it", .yours = true })}, .line = " Running. 1 Session. Nothing needs you." },
-        .{ .rows = &.{ working, failed }, .line = " Running. 2 Sessions. 1 failed." },
-        .{ .rows = &.{ yours_done, other_done }, .line = " Quiet for 5m. All 2 of your conversations have answered." },
-        .{ .rows = &.{yours_done}, .line = " Quiet for 5m. Your conversation has answered." },
-        .{ .rows = &.{ yours_done, failed }, .line = " Quiet for 1m. 1 failed." },
-        .{ .rows = &.{session("g7h8j9", .{ .idle = ago(7200) }, .{ .label = "Wait" })}, .line = " Quiet for 2h00m. Nothing is working or waiting." },
-        .{ .rows = &.{}, .line = " No unarchived Sessions. /sessions archived shows the archive." },
-    }) |case| {
-        var state = try opened(case.rows);
-        defer state.deinit();
-        try expectScreenLine(&state, 1, case.line);
-        // The sentence reads the State the listing left.
-        try std.testing.expectEqual(std.mem.startsWith(u8, case.line, " Running."), state.summary.working);
-    }
+    try std.testing.expect(std.mem.startsWith(u8, text, " rui  ? 1  * 6  : 1 - slots 3/100  x 2\n Needs you - 1\n"));
 }
 
 test "overview top stays compact through completion failure Host changes and input" {
     const Check = struct {
-        fn screen(state: *State, headline_text: []const u8, health: []const u8, group: []const u8) !void {
+        fn screen(state: *State, top: []const u8, group: []const u8) !void {
             const text = try screenText(state, 80, 24, .{});
             defer std.testing.allocator.free(text);
             var lines = std.mem.splitScalar(u8, text, '\n');
-            for ([_][]const u8{ " रुई rui  ~/code/rui                                      Unarchived · /sessions", headline_text, health, "", group }) |expected| {
-                try std.testing.expectEqualStrings(expected, lines.next().?);
-            }
+            for ([_][]const u8{ top, group }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
             try std.testing.expect(std.mem.indexOf(u8, text, "Since you looked") == null);
             try std.testing.expect(std.mem.indexOf(u8, text, "Host restarted") == null);
         }
@@ -6880,35 +6539,35 @@ test "overview top stays compact through completion failure Host changes and inp
         session("b2c3d4", .{ .working = ago(20) }, .{ .label = "Fail later" }),
     });
     defer state.deinit();
-    try Check.screen(&state, " Running. 2 Sessions. Nothing needs you.", "", " Active · 2");
+    try Check.screen(&state, " रुई rui  ● 2", " Active · 2");
     const host: Host = .{ .started_at = test_now_s - 600, .slots = 4, .slots_in_use = 2 };
     _ = try step(&state, .{ .host = host });
-    try Check.screen(&state, " Running. 2 Sessions. Nothing needs you.", " Host up 10m   slots 2/4", " Active · 2");
+    try Check.screen(&state, " रुई rui  ● 2", " Active · 2");
 
     _ = try step(&state, .{ .tick = (test_now_s + 60) * 1000 });
     _ = try respond(&state, .changed, testToken(2), &.{session("a1b2c3", .{ .finished = .{ .since = test_now_s + 60 } }, .{ .label = "Finish later" })});
-    try Check.screen(&state, " Running. 2 Sessions. Nothing needs you.", " Host up 11m   slots 2/4", " Active · 1");
+    try Check.screen(&state, " रुई rui  ● 1", " Active · 1");
 
     _ = try step(&state, .{ .tick = (test_now_s + 120) * 1000 });
     _ = try respond(&state, .changed, testToken(3), &.{session("b2c3d4", .{ .failed = .{ .since = test_now_s + 120, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Fail later" })});
-    try Check.screen(&state, " Quiet for 0s. 1 failed.", " Host up 12m   slots 2/4", " Finished · 1");
-    try expectScreenLine(&state, 7, " Stopped or failed · 1");
-    try expectScreenLine(&state, 8, "  × Fail later                                                               0s");
+    try Check.screen(&state, " रुई rui  × 1", " Finished · 1");
+    try expectScreenLine(&state, 4, " Stopped or failed · 1");
+    try expectScreenLine(&state, 5, "  × Fail later                                     provider_output_invalid   0s");
 
     _ = try step(&state, .{ .host = null });
-    try Check.screen(&state, " Quiet for 0s. 1 failed.", "", " Finished · 1");
+    try Check.screen(&state, " रुई rui  × 1", " Finished · 1");
     _ = try step(&state, .{ .host = host });
-    try Check.screen(&state, " Quiet for 0s. 1 failed.", " Host up 12m   slots 2/4", " Finished · 1");
+    try Check.screen(&state, " रुई rui  × 1", " Finished · 1");
     for ([_]u64{ test_now_s + 60, test_now_s + 120, test_now_s + 120 }) |started_at| {
         _ = try step(&state, .{ .host = .{ .started_at = started_at, .slots = 8, .slots_in_use = 0 } });
-        try Check.screen(&state, " Quiet for 0s. 1 failed.", if (started_at == test_now_s + 60) " Host up 1m   slots 0/8" else " Host up 0s   slots 0/8", " Finished · 1");
+        try Check.screen(&state, " रुई rui  × 1", " Finished · 1");
     }
     _ = try step(&state, .{ .tick = (test_now_s + 121) * 1000 });
-    try Check.screen(&state, " Quiet for 1s. 1 failed.", " Host up 1s   slots 0/8", " Finished · 1");
+    try Check.screen(&state, " रुई rui  × 1", " Finished · 1");
     _ = try press(&state, .{}, .next);
-    try Check.screen(&state, " Quiet for 1s. 1 failed.", " Host up 1s   slots 0/8", " Finished · 1");
+    try Check.screen(&state, " रुई rui  × 1", " Finished · 1");
     _ = try typeText(&state, "a task");
-    try Check.screen(&state, " Quiet for 1s. 1 failed.", " Host up 1s   slots 0/8", " Finished · 1");
+    try Check.screen(&state, " रुई rui  × 1", " Finished · 1");
 }
 
 test "overview compact top leaves a failed row visible in a narrow viewport" {
@@ -6916,22 +6575,20 @@ test "overview compact top leaves a failed row visible in a narrow viewport" {
     defer state.deinit();
     _ = try step(&state, .{ .tick = (test_now_s + 60) * 1000 });
     _ = try respond(&state, .changed, testToken(2), &.{session("a1b2c3", .{ .failed = .{ .since = test_now_s + 60, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Fail later" })});
+    // One line of top, so the row is the list's second line at any height.
     const text = try screenText(&state, 40, 9, .{});
     defer std.testing.allocator.free(text);
     var lines = std.mem.splitScalar(u8, text, '\n');
     for ([_][]const u8{
-        " रुई rui  …e/rui  Unarchived · /sessions",
-        " Quiet for 0s. 1 failed.",
-        "",
-        "",
+        " रुई rui  × 1",
         " Stopped or failed · 1",
-        "  × Fail later",
+        "  × Fail later                       0s",
     }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
     try std.testing.expect(std.mem.indexOf(u8, text, "Since you looked") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Host restarted") == null);
 }
 
-test "overview compact top preserves both alarm bands before health and the list" {
+test "overview compact top preserves both alarm bands before the list" {
     var state = try opened(&.{session("a1b2c3", .{ .working = ago(40) }, .{ .label = "Fail later" })});
     defer state.deinit();
     _ = try step(&state, .{ .tick = (test_now_s + 60) * 1000 });
@@ -6943,13 +6600,11 @@ test "overview compact top preserves both alarm bands before health and the list
     defer std.testing.allocator.free(text);
     var lines = std.mem.splitScalar(u8, text, '\n');
     for ([_][]const u8{
-        " रुई rui  ~/code/rui                                      Unarchived · /sessions",
+        " रुई rui  × 1",
         " Host stopped 1m ago. Run rui host start.",
         " Sign-in expired. Run rui auth login codex.",
-        " Host not responding. Last update 1m ago.",
-        "",
         " Stopped or failed · 1",
-        "  × Fail later                                                               1m",
+        "  × Fail later                                       Sign-in expired         1m",
     }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
     try std.testing.expect(std.mem.indexOf(u8, text, "Since you looked") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Host restarted") == null);
@@ -6966,10 +6621,9 @@ test "the Host-stopped band comes first, over the provider bands and the faded r
     try expectScreenLine(&state, 1, " Host stopped 3m ago. Run rui host start.");
     try expectScreenLine(&state, 2, " Sign-in expired. Run rui auth login codex.");
     try expectStyle(&state, 1, 0, .{ .colour = .on_band, .background = .band, .bold = true });
-    // No headline sentence claims calm under a band; the rows fade.
-    try expectScreenLine(&state, 3, " Host not responding. Last update 3m ago.");
-    try expectStyle(&state, 3, 1, .{ .colour = .failure });
-    try expectStyle(&state, 9, 4, .{ .colour = .quiet });
+    // The rows fade under it.
+    try expectScreenLine(&state, 4, "  ● Profile it                                                               3m");
+    try expectStyle(&state, 4, 4, .{ .colour = .quiet });
 }
 
 /// Answers the picker's model-list read with the menu of `lists`.
@@ -7352,28 +7006,6 @@ test "on a short screen the highlighted model always shows, and \"N more\" takes
     try std.testing.expect(counted);
 }
 
-test "the Session row's highlight stays in view while the picker is open, even on a short screen" {
-    var state = try pickerState(null);
-    defer state.deinit();
-    // ChatGPT's models and the API-key login note fill a short screen.
-    try openPicker(&state, &.{chatgpt});
-    for (8..25) |height| {
-        var screen = try sizedRender(&state, .{}, 60, @intCast(height), .{ .unicode = true }, 0);
-        defer screen.deinit();
-        var highlighted: usize = 0;
-        for (screen.lines) |line| {
-            for (line) |span| if (span.style.background == .selection) {
-                highlighted += 1;
-                break;
-            };
-        }
-        // The selected Session always; the picker's model once a row is
-        // left for it. With one row, the Session keeps it: a stop is the
-        // key that must never act on what the screen does not show.
-        try std.testing.expectEqual(@as(usize, if (height > 8) 2 else 1), highlighted);
-    }
-}
-
 test "Shift-Up and Shift-Down choose a Session in both picker steps, and leave the picker as it was" {
     var state = try pickerState(Default.of("codex", "gpt-6-luna"));
     defer state.deinit();
@@ -7448,9 +7080,9 @@ test "a start the Host refuses for want of its sign-in names the sign-in and its
 test "a picker the screen cannot show never acts: /model says so, and keys on a hidden picker pick nothing" {
     var state = try pickerState(Default.of("codex", "gpt-6.1-sol"));
     defer state.deinit();
-    // At 8 rows the top, the selected Session and the input leave the
-    // picker none.
-    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 8 } }));
+    // At 7 rows the counts line, the selected Session and the input leave
+    // the picker none.
+    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 7 } }));
     var draft = try typeText(&state, "/model");
     try expectEffects(&.{}, try submit(&state, draft));
     try std.testing.expect(state.picker == null);
@@ -7459,31 +7091,29 @@ test "a picker the screen cannot show never acts: /model says so, and keys on a 
     // the screen shows, which holds no model.
     try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 24 } }));
     try openPicker(&state, &.{chatgpt});
-    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 8 } }));
+    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 7 } }));
     try std.testing.expect(state.shownPicker() == null);
     draft = try typeText(&state, "");
     _ = try press(&state, draft, .next);
     for ((try submit(&state, draft)).slice()) |effect| try std.testing.expect(effect != .save_default);
     try std.testing.expectEqualStrings("gpt-6.1-sol", state.default.?.model.slice());
-    const screen = try screenText(&state, 60, 8, .{ .unicode = true });
+    // The facts row names the next Session's model; no picker row shows.
+    const screen = try screenText(&state, 60, 7, .{ .unicode = true });
     defer std.testing.allocator.free(screen);
-    try std.testing.expect(std.mem.indexOf(u8, screen, "gpt-") == null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "› gpt-") == null);
 }
 
-/// The rows the Sessions' list takes on an 80 by 24 screen with `draft`.
+/// The rows the Sessions' list or a panel takes on an 80 by 24 screen.
 fn listRows(state: *State, draft: Draft) ![]u8 {
-    const text = try draftLines(state, draft, 80, 24);
-    errdefer std.testing.allocator.free(text);
-    const at = layout(state, 1, 0).list;
+    var shown: Frame = try .drafted(state, draft, 80, 24, .{}, 0);
+    defer shown.deinit();
+    const text = try Frame.textOf(shown.list);
+    defer std.testing.allocator.free(text);
+    var trimmed: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    errdefer trimmed.deinit();
     var lines = std.mem.splitScalar(u8, text, '\n');
-    var kept: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    errdefer kept.deinit();
-    var row: usize = 0;
-    while (lines.next()) |line| : (row += 1) if (row >= at.start and row < at.end) {
-        try kept.writer.print("{s}\n", .{std.mem.trimEnd(u8, line, " ")});
-    };
-    std.testing.allocator.free(text);
-    return kept.toOwnedSlice();
+    while (lines.next()) |line| try trimmed.writer.print("{s}\n", .{std.mem.trimEnd(u8, line, " ")});
+    return trimmed.toOwnedSlice();
 }
 
 test "/help shows the overview's keys and commands in the Sessions' rows until Esc" {
@@ -7520,7 +7150,7 @@ test "/help shows the overview's keys and commands in the Sessions' rows until E
     try std.testing.expect(std.mem.indexOf(u8, shown, label) == null);
     // The line under the input says Esc closes it, over held settings or a
     // typed draft.
-    try expectScreenLine(&state, 23, " start settings: --permission-mode ask · esc close");
+    try expectStatusLines(&state, &.{" start settings: --permission-mode ask · esc close"});
     const draft = try typeText(&state, "fix the build");
     const held = state.settings;
     state.settings = .{};
@@ -7627,8 +7257,7 @@ test "/rename names the selected Session through the shell, as a conversation do
         try std.testing.expectEqual(case[2], state.notice.?.colour);
     }
     // Both lines show under the input.
-    try expectScreenLine(&state, 22, " Configured.");
-    try expectScreenLine(&state, 23, " ! label saved locally only");
+    try expectStatusLines(&state, &.{ " Configured.", " ! label saved locally only" });
 }
 
 test "/rename under a panel brings the Sessions back, so the list shows the row it names" {

@@ -155,7 +155,11 @@ pub fn clockText(buffer: *[max_clock_bytes]u8, clock: Clock, form: Form, script:
             var span: [max_span_bytes]u8 = undefined;
             break :elapsed std.fmt.bufPrint(buffer, " {s} {s}", .{ set.dot, spanText(&span, seconds) }) catch unreachable;
         },
-        .retry => |retry| std.fmt.bufPrint(buffer, " {s} retry {d} in {d}s", .{ set.dot, retry.attempt, retry.seconds }) catch unreachable,
+        // The overview leaves the attempt to /details: it adds nothing to a scan.
+        .retry => |retry| if (form == .row)
+            std.fmt.bufPrint(buffer, " {s} retry in {d}s", .{ set.dot, retry.seconds }) catch unreachable
+        else
+            std.fmt.bufPrint(buffer, " {s} retry {d} in {d}s", .{ set.dot, retry.attempt, retry.seconds }) catch unreachable,
     };
 }
 
@@ -234,8 +238,8 @@ test "every work state has the approved words on both screens, and ended work ha
         .{ .state = .{ .idle = .{ .since = 1 } }, .conversation = "", .row = "", .ascii = "" },
         .{ .state = .{ .pending = .{ .since = test_now_s - 3 } }, .conversation = "• Queued · 3s", .row = "Queued", .ascii = "Queued" },
         .{ .state = .{ .working = .{ .since = test_now_s - 12 } }, .conversation = "• Waiting · 12s", .row = "Waiting", .ascii = "Waiting" },
-        .{ .state = retry, .conversation = "! Rate limited · retry 2 in 18s", .row = "Rate limited · retry 2 in 18s", .ascii = "Rate limited - retry 2 in 18s", .tone = .attention },
-        .{ .state = .{ .retrying = .{ .since = test_now_s, .due_at_ms = test_now_ms + 1, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_503"), .attempt = 1 } }, .conversation = "! Provider error · retry 1 in 1s", .row = "Provider error · retry 1 in 1s", .ascii = "Provider error - retry 1 in 1s", .tone = .attention },
+        .{ .state = retry, .conversation = "! Rate limited · retry 2 in 18s", .row = "Rate limited · retry in 18s", .ascii = "Rate limited - retry in 18s", .tone = .attention },
+        .{ .state = .{ .retrying = .{ .since = test_now_s, .due_at_ms = test_now_ms + 1, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_503"), .attempt = 1 } }, .conversation = "! Provider error · retry 1 in 1s", .row = "Provider error · retry in 1s", .ascii = "Provider error - retry in 1s", .tone = .attention },
         .{ .state = .{ .bash = .{ .since = test_now_s - 42, .call = 1, .description = bounded(session_work.max_description_bytes, "Run zig build test-store"), .running = 1, .approvals = 0 } }, .conversation = "• Run zig build test-store · 42s", .row = "Run zig build test-store", .ascii = "Run zig build test-store" },
         .{ .state = .{ .bash = .{ .since = test_now_s - 72, .call = 0, .description = null, .running = 2, .approvals = 1 } }, .conversation = "• Running a command · 1m 12s", .row = "Running a command", .ascii = "Running a command" },
         .{ .state = .{ .approval = .{ .since = test_now_s - 3 * 3600 - 5 * 60 } }, .conversation = "? Needs approval · 3h 5m", .row = "Needs approval", .ascii = "Needs approval", .tone = .attention },
@@ -302,7 +306,7 @@ test "a running span is seconds, then minutes and seconds, then hours and minute
     // The widest clocks fill their buffer exactly: Unicode's dot is the
     // wider.
     var clock: [max_clock_bytes]u8 = undefined;
-    const widest_retry = clockText(&clock, .{ .retry = .{ .attempt = session_work.max_retried_attempt, .seconds = max_retry_seconds } }, .row, .unicode).len;
+    const widest_retry = clockText(&clock, .{ .retry = .{ .attempt = session_work.max_retried_attempt, .seconds = max_retry_seconds } }, .conversation, .unicode).len;
     const widest_span = clockText(&clock, .{ .elapsed = std.math.maxInt(u64) }, .conversation, .unicode).len;
     try std.testing.expectEqual(max_clock_bytes, @max(widest_retry, widest_span));
 }

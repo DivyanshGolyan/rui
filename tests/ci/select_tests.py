@@ -371,8 +371,7 @@ CONTENT_RULES = {
 }
 
 # Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
-RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py",
-                      "tests/integration/terminal_input_replay.py")
+RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py")
 
 # What the import graph cannot see: inputs no literal import names (C
 # sources, generators, non-Zig consumers) and owners whose checks a test

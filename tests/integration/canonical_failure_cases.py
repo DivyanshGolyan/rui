@@ -335,7 +335,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     # Bare rui opens the overview; its composer starts the Session.
                     requested = len(endpoint.requests)
                     human.overview_frame(master, human.overview_title)
-                    os.write(master, b"fresh overview bytes\n")
+                    os.write(master, b"fresh overview bytes\r")
                     if binding:
                         # An unconfirmed start stays recoverable: the overview
                         # says so and Ctrl-D still leaves.
@@ -344,10 +344,11 @@ def interactive_cases(state, binding=False, null_code=False):
                 else:
                     if route == "/v1/control/permission-decision":
                         proposal = human.read_terminal(master, human.CHOICE)
-                        assert "\n? Check successful shell exit\n" in proposal and "\n  $ true\n" in proposal, proposal
+                        # The card draws the exact proposal inside its border.
+                        assert "\n│ ? Check successful shell exit " in proposal and "\n│   $ true " in proposal, proposal
                         proposal += human.action_ready(ready_read, master)
                         # Deny is picked and shown before Enter counts.
-                        proposal += human.pick_deny(master, ready_read)
+                        proposal += human.pick_deny(master)
                     else:
                         human.read_terminal(master, "› ")
                         if route == "/v1/activity-page":
@@ -356,7 +357,7 @@ def interactive_cases(state, binding=False, null_code=False):
                             proxy = ReplyProxy(host, "/v1/message", lambda response: response)
                         else:
                             proxy = ReplyProxy(host, route, rewrite)
-                    os.write(master, (line + "\n").encode())
+                    os.write(master, (line + "\r").encode())
                 output = ""
                 if route == "/v1/activity-page":
                     fixture.wait_for(lambda: proxy.exchanges, "healthy Message reply")
@@ -368,7 +369,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     human.read_terminal(master, "accepted work remains accepted",
                         timeout=deadline - time.monotonic(), composer=True)
                     while True:
-                        os.write(master, b"/status\n")
+                        os.write(master, b"/status\r")
                         status = human.read_terminal(master, f" Status · {session}",
                             timeout=deadline - time.monotonic(), composer=True)
                         # /status exposes unresolved frontend custody, independently
@@ -414,12 +415,12 @@ def interactive_cases(state, binding=False, null_code=False):
                                     timeout=deadline - time.monotonic(), composer=True)
                             elif "› " not in output.split("denied tool saved", 1)[1]:
                                 output += human.read_terminal(master, "› ", timeout=deadline - time.monotonic())
-                        os.write(master, b"/status\n")
+                        os.write(master, b"/status\r")
                         diagnostic = human.read_terminal(master, f"Last submission error: {reason}", composer=True)
                         assert key in diagnostic and "Ctrl-R retries this exact original" in diagnostic, diagnostic
                         # No ordinary no-op may retry an unresolved submission.
-                        human.return_to_live(master)
-                        os.write(master, b"\n")
+                        human.return_to_live(master, lambda screen: "Last submission error" not in screen)
+                        os.write(master, b"\r")
                         human.settle_screen(master, quiet=0.5)
                         assert len(proxy.exchanges) == 1, "empty input retried unconfirmed intent"
                         proxy.rewrite = lambda response: response
@@ -432,7 +433,10 @@ def interactive_cases(state, binding=False, null_code=False):
                         if route == "/v1/message":
                             output += human.await_screen(master, human.CHOICE)
                             output += human.action_ready(ready_read, master)
-                    os.write(master, b"/exit\n")
+                    # The card takes typed keys, so /exit cannot reach the
+                    # composer while it shows; Ctrl-D leaves from the card.
+                    card = binding and route == "/v1/message"
+                    os.write(master, b"\x04" if card else b"/exit\r")
                 # Supply output credit during the original exit budget for
                 # fatal cleanup and recoverable explicit detachment alike.
                 try:
@@ -617,7 +621,7 @@ def permission_read_cases(state):
             caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), details_session],
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             human.read_terminal(master, "› ")
-            os.write(master, b"/details\n")
+            os.write(master, b"/details\r")
             human.read_terminal(master, "host_busy", timeout=10)
             output = human.current_screen(master)
             # The transcript keeps the whole diagnostic, wrapped at the width;

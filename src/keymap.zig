@@ -64,6 +64,8 @@ pub const Refusal = enum {
     invalid,
     /// Enter on a line rejected earlier for its length.
     overflow,
+    /// A whole marked paste exceeded the limit; the prior draft stays.
+    paste_overflow,
     /// A refused edit; the draft stands as it was.
     edit_rejected,
     /// An Alt, Super, Hyper or Meta chord nothing binds, dropped whole.

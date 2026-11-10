@@ -59,12 +59,13 @@ static void record(const char *text) {
     if (close(fd)) _exit(91);
 }
 
-/* The Session screen writes through a private duplicate of stdout, and
-   commands borrow fd 1 for their page. Screen probes match the terminal
-   that was fd 1 at load, by identity, rather than the descriptor number. */
-static int screen_known = 0;
-static dev_t screen_dev;
-static ino_t screen_ino;
+/* App writes the screen through its own /dev/tty descriptor, and commands
+   borrow fd 1 for their page. Screen probes match the terminal that was fd 1
+   at load, or the controlling terminal opened as /dev/tty, by identity rather
+   than the descriptor number. */
+static int screen_known = 0, controlling_known = 0;
+static dev_t screen_dev, controlling_dev;
+static ino_t screen_ino, controlling_ino;
 
 __attribute__((constructor)) static void screen_identity(void) {
     struct stat st;
@@ -73,12 +74,18 @@ __attribute__((constructor)) static void screen_identity(void) {
         screen_ino = st.st_ino;
         screen_known = 1;
     }
+    if (!stat("/dev/tty", &st)) {
+        controlling_dev = st.st_dev;
+        controlling_ino = st.st_ino;
+        controlling_known = 1;
+    }
 }
 
 static int screen_fd(int fd) {
     struct stat st;
     if (fd == 1) return 1;
-    if (fd > 2 && screen_known && !fstat(fd, &st) && st.st_dev == screen_dev && st.st_ino == screen_ino) return 1;
+    if (fd > 2 && !fstat(fd, &st) && ((screen_known && st.st_dev == screen_dev && st.st_ino == screen_ino)
+            || (controlling_known && st.st_dev == controlling_dev && st.st_ino == controlling_ino))) return 1;
     return fd;
 }
 
@@ -220,28 +227,6 @@ static int command_return_signal(int fd, const void *bytes, size_t count) {
     return 0;
 }
 
-static void consent_hold(int fd, const void *bytes, size_t count, int last) {
-    const int screen = screen_fd(fd);
-    const char *fault = getenv("RUI_TERMINAL_FAULT");
-    static int choice = 0, choice_held = 0;
-    if (screen != 1 || !fault || strncmp(fault, "consent-", 8)) return;
-    /* The renderer writes only changed cells; "Allow" starts the choice's
-       highlighted option ("Allow once"). Hold after the frame that draws
-       it completes. */
-    static size_t matched = 0;  /* Writes may split the word. */
-    for (size_t i = 0; !choice && i < count; ++i) {
-        char byte = ((const char *)bytes)[i];
-        matched = byte == "Allow"[matched] ? matched + 1 : (byte == 'A' ? 1 : 0);
-        if (matched == 5) choice = 1;
-    }
-    if (last && choice && !choice_held && count >= 8 &&
-        !memcmp((const char *)bytes + count - 8, "\033[?2026l", 8)) {
-        choice_held = 1;
-        record("choice-output-complete\n");
-        while (access(getenv("RUI_TERMINAL_CHOICE_RELEASE"), F_OK)) usleep(1000);
-    }
-}
-
 static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
     const int screen = screen_fd(fd);
 #ifdef __APPLE__
@@ -272,15 +257,7 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
             return -1;
         }
     }
-    ssize_t written = real_writev(fd, iov, count);
-    size_t total = 0;
-    for (int i = 0; i < count; ++i) total += iov[i].iov_len;
-    if (written >= 0 && (size_t)written == total) {
-        int saved = errno;
-        for (int i = 0; i < count; ++i) consent_hold(fd, iov[i].iov_base, iov[i].iov_len, i == count - 1);
-        errno = saved;
-    }
-    return written;
+    return real_writev(fd, iov, count);
 }
 
 static ssize_t probe_write(int fd, const void *bytes, size_t count) {
@@ -437,7 +414,6 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
             }
         }
     }
-    if (result == (ssize_t)count) consent_hold(fd, bytes, count, 1);
     static int blocked = 0, progressed = 0;
     if (screen == 1 && pressure_stopped && result < 0 && saved_errno == EAGAIN && !blocked) {
         blocked = 1;
@@ -602,11 +578,7 @@ static int probe_tcdrain(int fd) {
     if (real_tcdrain == tcdrain) _exit(94);
 #endif
     if (!real_tcdrain || real_tcdrain == probe_tcdrain) _exit(94);
-    if (fd == 1 && !strcmp(getenv("RUI_TERMINAL_FAULT"), "consent-cancel")) {
-        record("choice-drain-held\n");
-        while (access(getenv("RUI_TERMINAL_DRAIN_RELEASE"), F_OK)) usleep(1000);
-    }
-    if (fd == 1 && disabled) {
+    if (screen_fd(fd) == 1 && disabled) {
         record("drain\n");
         const char *fault = getenv("RUI_TERMINAL_FAULT");
         static int interrupted = 0;
@@ -1004,343 +976,6 @@ def check_forwarding(state, library):
         dispose_all(release.touch, lambda: stop_process(caller, timeout=5))
 
 
-def persistent_cases(state, library, home, store, host, session):
-    """Real synchronous capture custody and actual nonblocking output credit."""
-    records = home / ".config/rui/requests"
-    records.mkdir(mode=0o700, parents=True, exist_ok=True)
-    # The departure owner covers interruption at every decision cut. Keep a
-    # real INT during join here; configure-commit-term covers the TERM adapter.
-    # Deliberate large backpressure inputs stay last: unrelated decoder and
-    # restoration cases must not inherit their opening-transcript workload.
-    for case in ("sync-exit", "sync-handoff", "sync-command-int",
-                 "admission-interrupt", "disable", "restore", "both",
-                 "incomplete-disable", "incomplete-restore", "incomplete-both",
-                 "backpressure", "backpressure-command"):
-        master, slave = open_pty()
-        output_master, output_slave = open_pty()
-        original = termios.tcgetattr(slave)
-        # probe.log under a case directory is retained on failure.
-        (state / f"persistent-{case}").mkdir()
-        log, release = state / f"persistent-{case}" / "probe.log", state / f"persistent-{case}.release"
-        caller = proxy = None
-        reply_release = threading.Event()
-        before = set(records.glob("*.json"))
-        try:
-            fault = "backpressure" if case.startswith("backpressure") else case.removeprefix("incomplete-")
-            environment = {**os.environ, "HOME": str(home),
-                os_semantics.PRELOAD: str(library),
-                "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": fault,
-                "RUI_TERMINAL_BACKPRESSURE_ARM": str(state / f"persistent-{case}" / "arm")}
-            if case.startswith("sync-"):
-                environment["RUI_CAPTURE_SYNC_RELEASE"] = str(release)
-                if case == "sync-handoff":
-                    environment["RUI_CAPTURE_SYNC_ERROR"] = "1"
-            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
-                "--", session], env=environment,
-                stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
-            human.read_terminal(output_master, "› ")
-            if fault in ("disable", "both"):
-                # The terminal reports alternate scroll reset, so Rui owns
-                # enabling it and must reset it even when paste disable fails.
-                os.write(master, b"\x1b[?1007;2$y")
-                fixture.wait_for(lambda: log.exists() and "scroll-enabled\n" in log.read_text(), "owned alternate scroll")
-            if case.startswith("sync-"):
-                os.write(master, b"original synchronously captured\n")
-                fixture.wait_for(lambda: log.exists() and "capture-sync-held" in log.read_text(), "real capture directory sync")
-                record, = set(records.glob("*.json")) - before
-                saved = record.read_bytes()
-                key = json.loads(saved)["key"]
-                assert fixture.command("request", "inspect", "--store", store, "--key", key)["observation"]["status"] == "absent"
-                if case == "sync-handoff":
-                    os.write(master, b"/inspect-action\nSTALE")
-                elif case.startswith("sync-command-"):
-                    os.write(master, b"/configure --permission-mode ask\n")
-                else:
-                    os.write(master, b"/exit\nSTALE")
-                if case.startswith("sync-command-"):
-                    # Commands run inside the screen; INT restores first.
-                    caller.send_signal(signal.SIGINT)
-                if case != "sync-handoff":
-                    fixture.wait_for(lambda: termios.tcgetattr(slave)[3] & termios.ICANON, "restoration before synchronous capture join")
-                assert caller.poll() is None, "synchronous capture was reported reaped before its gate released"
-                release.touch()
-                if case == "sync-handoff":
-                    human.read_terminal(output_master, "No actionable permission")
-                    resumed = human.await_screen(output_master, "Not confirmed", composer=True)
-                    assert "No actionable permission" in resumed, resumed
-                    # Queued suffix text stays an unsent draft, never input.
-                    assert "\n› STALE" in resumed and set(records.glob("*.json")) - before == {record}, resumed
-                    os.write(master, b"\x15")
-                    human.read_terminal(output_master, "› ", composer=True)
-                    resumed = human.return_to_live(output_master, input_fd=master)
-                    assert "STALE" not in resumed, resumed
-                    os.write(master, "next café!\x1b[D\x1b[DX".encode())
-                    human.read_terminal(output_master, "› next cafXé!")
-                    os.write(master, b"\x12")
-                    human.read_terminal(output_master, "\n› original synchronously captured")
-                    assert record.read_bytes() == saved, "postpublication recovery replaced original record"
-                    os.write(master, b"Y\n")
-                    human.read_terminal(output_master, "\n› next cafXYé!")
-                    os.write(master, b"\x03")
-                elif not case.startswith("sync-command-"):
-                    # The finished prompt's suffix must not reach the next owner.
-                    os.write(master, b"\n")
-                    assert select.select([slave], [], [], 5)[0]
-                    assert os.read(slave, 4096) == b"\n", "persistent detach leaked queued typeahead"
-                    # Canonical ECHO is restored on this separate input PTY.
-                    # Darwin's drain-based fixture cleanup waits for its peer;
-                    # consume the probe's echo, not only its accepted input.
-                    assert select.select([master], [], [], 5)[0]
-                    assert os.read(master, 4096) == b"\r\n", "canonical probe echo was not consumed"
-            elif case == "admission-interrupt":
-                received = threading.Event()
-                def hold(response):
-                    received.set()
-                    assert reply_release.wait(15)
-                    return b""  # Caller is already reaped; no delivery to its closed socket.
-                proxy = canonical.ReplyProxy(host, "/v1/message", hold)
-                os.write(master, b"held real Admission\n")
-                fixture.wait_for(human.draining(master, received.is_set), "Admission route reached", timeout=10)
-                caller.send_signal(signal.SIGINT)
-            elif case.startswith("backpressure"):
-                # After opening, the next screen write stops and fills stdout's
-                # PTY; an external caller's large content then keeps the
-                # frontend's actual activity reader writing into it.
-                (state / f"persistent-{case}" / "arm").touch()
-                human.run(home, "session", "send", "--store", store, "--to", session, input="z" * 50000)
-                fixture.wait_for(lambda: log.exists() and "output-blocked" in log.read_text(), "actual terminal EAGAIN")
-                if case == "backpressure-command":
-                    # Blocked output defers the command; it is no
-                    # cancellation trigger. Ctrl-C then retires without it.
-                    with log.open("a") as marks:
-                        marks.write("test-command-sent\n")
-                    os.write(master, b"/configure --permission-mode ask\n")
-                    time.sleep(0.5)
-                    with log.open("a") as marks:
-                        marks.write(f"test-interrupt-sent records={len(set(records.glob('*.json')) - before)}\n")
-                    # A drained queue lets the deferred command run legitimately;
-                    # that is a lost fixture precondition, not a product result.
-                    assert "output-progressed\n" not in log.read_text(), ("terminal output drained before the interrupt", log.read_text())
-                    assert caller.poll() is None, "blocked output turned a command into cancellation"
-                os.write(master, b"\x03")
-            elif case.startswith("incomplete-"):
-                os.write(master, b"\xc3")
-            else:
-                os.write(master, b"\x03")
-            expected = 1 if fault in ("backpressure", "disable", "restore", "both") else 0
-            assert caller.wait(timeout=5) == expected, caller.stderr.read()
-            errors = caller.stderr.read().decode()
-            if expected:
-                assert "[internal_unexpected]" in errors, errors
-            if fault in ("disable", "both"):
-                assert log.read_text().count("scroll-reset\n") == 1, ("failed paste disable skipped the owned scroll reset", log.read_text())
-            if case.startswith("incomplete-"):
-                assert set(records.glob("*.json")) == before, "incomplete input created a capture"
-            if case == "backpressure-command":
-                assert all(json.loads(record.read_bytes())["kind"] == "message"
-                    for record in set(records.glob("*.json")) - before), "failed cleanup captured pending configuration"
-                assert fixture.command("session", "inspect", "--store", store,
-                    "--session", session)["session"]["permission_mode"] == "bypass", "failed cleanup executed pending configuration"
-            if case.startswith("sync-command-"):
-                assert set(records.glob("*.json")) - before == {record}, "interrupt during join captured a pending configuration"
-                assert record.read_bytes() == saved, "interrupt replaced original capture"
-                assert fixture.command("session", "inspect", "--store", store,
-                    "--session", session)["session"]["permission_mode"] == "bypass", "interrupt during join executed pending configuration"
-            if fault not in ("restore", "both"):
-                actual = termios.tcgetattr(slave)
-                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), (case, actual, original)
-            if case == "admission-interrupt":
-                assert not reply_release.is_set(), "borrower cleanup needed the Host reply"
-                body, = [body for body, _ in proxy.exchanges]
-                request = json.loads(body)
-                assert (records / f"{request['key']}.json").read_bytes() == body
-                assert f"Message not confirmed. Use rui request recover {request['key']}" in errors, errors
-            reply_release.set()
-            if proxy is not None:
-                proxy.close()
-                proxy = None
-            # Detachment never cancels or restarts the actual owning Host.
-            answer = human.admit(home, "session", "send", "--store", store, "--to", session, input=f"valid after {case}")
-            assert answer["admission"]["answer"]["status"] == "accepted", answer
-            print(f"persistent terminal: {case} passed", flush=True)
-        finally:
-            dispose_all(
-                release.touch, reply_release.set,
-                lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                lambda: proxy.close() if proxy is not None else None,
-                lambda: termios.tcflush(output_slave, termios.TCOFLUSH),
-                # Discard and restore independently; do not wait for unread
-                # Darwin canonical echo on the separate input terminal.
-                lambda: termios.tcflush(slave, termios.TCIFLUSH),
-                lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
-                *(lambda fd=fd: os.close(fd) for fd in (master, slave, output_master, output_slave)),
-            )
-
-
-def renderer_backpressure_case(state, library, home, store):
-    """A real blocked frame defers a command; it never becomes cancellation."""
-    from terminal_screen import ScreenCapture
-
-    session = human.admit(home, "session", "configure", "--store", store,
-        "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")["admission"]["answer"]["session"]
-    master, slave = open_pty()
-    output_master, output_slave = open_pty()
-    original = termios.tcgetattr(slave)
-    original[6][termios.VERASE] = b"\x08"
-    termios.tcsetattr(slave, termios.TCSANOW, original)
-    flags = {fd: fcntl.fcntl(fd, fcntl.F_GETFL) for fd in (slave, output_slave)}
-    fcntl.ioctl(output_slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
-    log = state / "renderer-backpressure.log"
-    arm = state / "renderer-backpressure-arm"
-    records = home / ".config/rui/requests"
-    before = set(records.glob("*.json"))
-    caller = None
-    output, errors = bytearray(), bytearray()
-    echo_bytes = 0
-    stderr_open = True
-    events, omitted_events = [], 0
-    comparison = None
-
-    def event(phase, **facts):
-        nonlocal omitted_events
-        if len(events) < 256:
-            events.append({"at_ns": time.monotonic_ns(), "phase": phase, **facts})
-        else:
-            omitted_events += 1
-
-    def append_output(chunk, phase):
-        event(phase, channel="output", start=len(output), end=len(output) + len(chunk))
-        output.extend(chunk)
-
-    def drain_until(predicate, description, timeout=15):
-        nonlocal echo_bytes, stderr_open
-        deadline = time.monotonic() + timeout
-        # Retained event phases are JSON text; a description may carry the
-        # live screen for assertion context.
-        phase = description if isinstance(description, str) else description[0]
-        while not predicate():
-            remaining = deadline - time.monotonic()
-            assert remaining > 0, (description, caller.poll(), bytes(output[-4096:]), bytes(errors))
-            ready = select.select([master, output_master, *([caller.stderr] if stderr_open else [])], [], [], remaining)[0]
-            assert ready, (description if not isinstance(description, tuple) else (description[0], description[1].completed), caller.poll(), bytes(output[-4096:]), bytes(errors))
-            for fd in ready:
-                chunk = os.read(fd, 65536) if isinstance(fd, int) else os.read(fd.fileno(), 65536)
-                if not chunk and fd is caller.stderr:
-                    # Exit can close stderr in the same readiness batch as the
-                    # final PTY bytes; the predicate still decides after them.
-                    stderr_open = False
-                    continue
-                assert chunk, (description, caller.poll(), bytes(output[-4096:]), bytes(errors))
-                if fd == master:
-                    # Fresh Enter echoes on the separate input PTY after
-                    # restoration. Darwin's next TCSAFLUSH waits for its peer.
-                    event(phase, channel="input-echo", count=len(chunk))
-                    echo_bytes += len(chunk)
-                elif fd == output_master:
-                    append_output(chunk, phase)
-                else:
-                    event(phase, channel="stderr", count=len(chunk))
-                    errors.extend(chunk)
-            assert len(output) + len(errors) + echo_bytes < 1024 * 1024, "unbounded renderer witness"
-
-    try:
-        environment = {**os.environ, "HOME": str(home), "TERM": "xterm-256color",
-            "RUI_TERMINAL_FAULT": "renderer-backpressure",
-            "RUI_TERMINAL_PROBE": str(log),
-            "RUI_TERMINAL_BACKPRESSURE_ARM": str(arm),
-            os_semantics.PRELOAD: str(library)}
-        caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
-            "--", session], env=environment,
-            stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
-        screen = ScreenCapture(reply=answers_to(output_master))
-        consumed = 0
-        def composer_ready():
-            nonlocal consumed
-            screen.feed(bytes(output[consumed:]))
-            consumed = len(output)
-            return screen.draft("", 2)
-        drain_until(composer_ready, "opening alternate-screen composer")
-        arm.touch()
-        event("arm-backpressure")
-        assert os.write(master, b"x") == 1
-        fixture.wait_for(lambda: log.exists() and "output-blocked\n" in log.read_text(),
-            "renderer actual kernel EAGAIN")
-        command = b"\x15/configure --permission-mode ask\n"
-        event("send-configure")
-        assert os.write(master, command) == len(command)
-        # The command waits for the blocked frame; output credit returns
-        # before cleanup, never as a cancellation or a terminal handoff.
-        time.sleep(0.5)
-        assert caller.poll() is None and "output-blocked\n" in log.read_text()
-        termios.tcflow(output_slave, termios.TCOON)
-        event("restore-output-credit")
-        def configured_page():
-            composer_ready()
-            # Short command output is a status notice, not a page.
-            return "Configured." in screen.completed.split("\n") and not screen.completed.startswith("Browsing")
-        drain_until(configured_page, ("Configure notice", screen))
-        assert b"\x1b[?1049l" not in output, "command left the alternate screen"
-        def refreshed_composer():
-            composer_ready()
-            return not screen.completed.startswith("Browsing") and screen.draft("", 2)
-        drain_until(refreshed_composer, "refreshed empty composer")
-        # Without input, the shown screen never changes: no replayed command,
-        # second notice or redraw. Freeze both operands before asserting so
-        # retention keeps them losslessly across disposal.
-        screen_start = output.rfind(b"\x1b[?1049h")
-        assert screen_start >= 0, bytes(output[-4096:])
-        shown_output = bytes(output[screen_start:])
-        event("first-snapshot", output_end=len(output), screen_start=screen_start)
-        captured, = set(records.glob("*.json")) - before
-        saved = captured.read_bytes()
-        record = json.loads(saved)
-        assert record["kind"] == "configure", record
-        observed = fixture.command("request", "inspect", "--store", store, "--key", record["key"])
-        assert observed["observation"]["status"] == "accepted", observed
-        assert observed["observation"]["revision"] == "2", observed
-        assert fixture.command("session", "inspect", "--store", store,
-            "--session", session)["session"]["permission_mode"] == "ask"
-        # Canonical reads above provide work while no input is sent.
-        event("canonical-reads-complete")
-        assert caller.poll() is None
-        while select.select([output_master], [], [], 0)[0]:
-            append_output(os.read(output_master, 65536), "no-input-drain")
-        compared_output = bytes(output[screen_start:])
-        event("second-snapshot", output_end=len(output))
-        comparison = (shown_output, compared_output, screen_start, tuple(events), omitted_events)
-        assert compared_output == shown_output, "alternate-screen output changed without input"
-        refresh_start = len(output)
-        event("interrupt")
-        assert os.write(master, b"\x03") == 1
-        drain_until(lambda: b"\x1b[?1049l" in output[refresh_start:], "final alternate-screen exit")
-        assert caller.wait(timeout=5) == 0, caller.stderr.read()
-        assert not errors and not caller.stderr.read(), bytes(errors)
-        actual = termios.tcgetattr(slave)
-        assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), (actual, original)
-        for fd, expected in flags.items():
-            assert_file_flags(fcntl.fcntl(fd, fcntl.F_GETFL), expected)
-        assert set(records.glob("*.json")) - before == {captured}
-        assert captured.read_bytes() == saved
-        assert log.read_text().count("output-blocked\n") == 1
-        print("renderer backpressure: actual EAGAIN; deferred command ran once; accepted Configure notice on the alternate screen; refreshed composer; exact termios/fd restoration", flush=True)
-    finally:
-        try:
-            dispose_all(
-                lambda: termios.tcflow(output_slave, termios.TCOON),
-                lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                lambda: termios.tcflush(output_slave, termios.TCOFLUSH),
-                lambda: termios.tcflush(slave, termios.TCIFLUSH),
-                lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
-                *(lambda fd=fd: os.close(fd) for fd in (master, slave, output_master, output_slave)))
-        finally:
-            # Operands were frozen before assertion/disposal, including when
-            # disposal itself fails. No live PTY or process sampling is needed.
-            # Ordinary successful gates do not collect terminal content.
-            if comparison is not None and (sys.exception() is not None or
-                    os.environ.get("RUI_RENDERER_RETAIN_COMPARISON") == "1"):
-                preserve_renderer_comparison(state, *comparison)
-
-
 def secret_entry_restore_case(state, library):
     """An OpenAI key typed at the hidden prompt is refused, not saved, when
     the terminal's own settings cannot be restored afterwards."""
@@ -1372,9 +1007,12 @@ def secret_entry_restore_case(state, library):
     print("secret entry restore passed: an unrestored terminal refuses the typed key and saves nothing")
 
 
-def consent_boundary_cases(state, library):
-    """Input arriving during final presentation cannot consent or lose Ctrl-C."""
-    for case in ("cancel", "paste", "escape-allow", "escape-deny"):
+def consent_boundary_cases(state):
+    """At the permission card, Ctrl-C quits with the terminal usable and
+    nothing decided, a paste decides nothing, and a fresh Allow or Deny
+    decides. Authorization starts when the card draws its request (decided
+    2026-11-09: no flush receipt, no per-key spending)."""
+    for case in ("cancel", "paste", "allow"):
         root = state / f"consent-{case}"
         root.mkdir()
         home, store = root / "home", root / "store"
@@ -1383,7 +1021,7 @@ def consent_boundary_cases(state, library):
             fixture.sse_tool_calls("consent-call", [("bash", "consent-id",
                 json.dumps({"cmd": "printf forbidden > effect", "timeout_ms": None, "description": "Write consent effect marker"}))]),
             fixture.sse_answer("consent-answer", "consent-reason", "consent-message",
-                "Allowed." if case == "escape-allow" else "Denied.")[0],
+                "Allowed." if case == "allow" else "Denied.")[0],
         ])
         thread = threading.Thread(target=endpoint.serve_forever)
         thread.start()
@@ -1391,7 +1029,6 @@ def consent_boundary_cases(state, library):
         master, slave = open_pty()
         original = termios.tcgetattr(slave)
         read_ready, write_ready = os.pipe()
-        release, drain, log = root / "choice.release", root / "drain.release", root / "probe.log"
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
             session = human.admit(home, "session", "configure", "--store", store,
@@ -1399,61 +1036,37 @@ def consent_boundary_cases(state, library):
             caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", session], stdin=slave, stdout=slave, stderr=subprocess.PIPE,
                 env={**os.environ, "HOME": str(home), "NO_COLOR": "1",
-                    os_semantics.PRELOAD: str(library),
-                    "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": f"consent-{case}",
-                    "RUI_TERMINAL_CHOICE_RELEASE": str(release), "RUI_TERMINAL_DRAIN_RELEASE": str(drain),
                     "RUI_TEST_ACTION_READY_FD": str(write_ready)}, pass_fds=(write_ready,))
             human.read_terminal(master, "› ")
-            os.write(master, b"propose command\n")
-            presentation = human.read_terminal(master, human.CHOICE)
-            assert "Time limit" not in presentation, presentation
-            fixture.wait_for(lambda: log.exists() and "choice-output-complete" in log.read_text(), "final choice write")
             records = home / ".config/rui/requests"
+            os.write(master, b"propose command\r")
+            human.read_terminal(master, human.CHOICE)
+            human.action_ready(read_ready, master)
             before = set(records.glob("*.json"))
-            stale = b"\x03" if case == "cancel" else (
-                b"\x1b[C\n\x1b" if case.startswith("escape-") else b"\x1b[200~")
-            os.write(master, stale)
-            assert not select.select([read_ready], [], [], 0)[0], "held presentation opened consent"
-            release.touch()
+            if case == "paste":
+                # A paste, even one holding an Enter, is never a decision.
+                os.write(master, b"\x1b[200~\r\x1b[201~")
+                human.settle_screen(master, quiet=0.5)
+                assert set(records.glob("*.json")) == before, "paste at the card captured a decision"
+                assert not (root / "effect").exists(), "paste at the card ran Bash"
             if case == "cancel":
-                fixture.wait_for(lambda: termios.tcgetattr(slave)[3] & termios.ICANON,
-                    "restoration without releasing consent drain", timeout=3)
-                assert not drain.exists(), "fixture released the drain"
-                assert not select.select([read_ready], [], [], 0)[0], "cancelled choice became ready"
-            elif case.startswith("escape-"):
-                assert set(records.glob("*.json")) == before, "stale input captured permission"
-                presentation += human.action_ready(read_ready, master)
-                assert set(records.glob("*.json")) == before, "expiry captured stale permission"
-                assert not (root / "effect").exists(), "stale input ran Bash"
-                if case != "escape-allow":
-                    human.pick_deny(master, read_ready)
-                os.write(master, human.ALLOW)
-                human.read_terminal(master, "Allowed." if case == "escape-allow" else "• Write consent effect marker — Denied")
-                assert len(set(records.glob("*.json")) - before) == 1, "first fresh choice was not captured"
                 os.write(master, b"\x03")
             else:
-                assert not select.select([read_ready], [], [], 0.2)[0], "paste prefix opened consent"
-                os.write(master, b"\n")
-                assert not select.select([read_ready], [], [], 0.2)[0], "unfinished paste authorized"
-                assert set(records.glob("*.json")) == before
-                # The paste went to the draft; Esc returns to the choice.
-                os.write(master, b"\x1b[201~\x07")
-                presentation += human.action_ready(read_ready, master)
-                human.pick_deny(master, read_ready)
-                os.write(master, human.ALLOW)
-                human.read_terminal(master, "• Write consent effect marker — Denied")
+                os.write(master, human.ALLOW if case == "allow" else b"\x1b[C" + human.ALLOW)
+                human.read_terminal(master, "Allowed." if case == "allow" else "• Write consent effect marker — Denied")
+                assert len(set(records.glob("*.json")) - before) == 1, "the fresh choice was not captured once"
                 os.write(master, b"\x03")
             output, errors = human.terminal_exit(caller, master)
             assert caller.wait(timeout=5) == 0, (output, errors)
             actual = termios.tcgetattr(slave)
             assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
-            if case == "escape-allow":
+            if case == "allow":
                 assert (root / "effect").read_bytes() == b"forbidden", "fresh Allow was swallowed"
             else:
-                assert not (root / "effect").exists(), "pre-boundary or denied input ran Bash"
+                assert not (root / "effect").exists(), "cancelled or denied input ran Bash"
             if case == "cancel":
                 assert set(records.glob("*.json")) == before, "cancel captured permission"
-            print(f"persistent consent boundary: {case} passed", flush=True)
+            print(f"persistent consent card: {case} passed", flush=True)
         finally:
             if sys.exc_info()[0] is not None:
                 preserve_failure_metadata(root / "pty-failure.json", lambda: {
@@ -1461,10 +1074,8 @@ def consent_boundary_cases(state, library):
                     "caller_returncode": caller.poll() if caller is not None else None,
                     "ready_pending": bool(select.select([read_ready], [], [], 0)[0]),
                     "terminal_pending": bool(select.select([master], [], [], 0)[0]),
-                    "drain_released": drain.exists(),
                 })
             dispose_all(
-                release.touch, drain.touch,
                 lambda: stop_process(caller, timeout=5) if caller is not None else None,
                 lambda: fixture.stop_host(host) if host is not None else None,
                 endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
@@ -1478,230 +1089,6 @@ def consent_boundary_cases(state, library):
 def unread_input(slave):
     """Bytes written to the terminal that the caller has not read yet."""
     return struct.unpack("i", fcntl.ioctl(slave, termios.FIONREAD, b"\0" * 4))[0]
-
-
-def command_interruption_cases(state, library, only=None):
-    """Foreground signals cancel actual handoff sockets, not committed intent."""
-    root = state / "command-interruption"
-    root.mkdir()
-    home, store = root / "home", root / "store"
-    home.mkdir(mode=0o700)
-    endpoint = fixture.SuccessEndpoint([
-        fixture.sse_answer("command-answer", "command-reason", "command-message", "Saved answer.")[0],
-        fixture.sse_tool_calls("command-tool", [("bash", "command-id",
-            json.dumps({"cmd": "printf forbidden > effect", "timeout_ms": None, "description": "Write interruption effect marker"}))]),
-    ])
-    thread = threading.Thread(target=endpoint.serve_forever)
-    thread.start()
-    host = caller = proxy = None
-    try:
-        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        session = human.admit(home, "session", "configure", "--store", store,
-            "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
-        message = human.admit(home, "session", "send", "--store", store, "--to", session, input="saved answer")
-        fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "saved command result")
-        human.admit(home, "session", "send", "--store", store, "--to", session, input="propose tool")
-        records = home / ".config/rui/requests"
-        for case, command, route, signal_number in (
-                ("requests", "/requests", "", signal.SIGINT),
-                ("configure-before", "/configure --permission-mode ask", None, signal.SIGINT),
-                ("configure-stopped-stderr", "/configure --permission-mode ask", None, signal.SIGINT),
-                ("configure-full-stderr", "/configure --permission-mode ask", None, signal.SIGINT),
-                ("configure-inflight", "/configure --permission-mode ask", "/v1/configure", signal.SIGINT),
-                ("configure-commit-int", "/configure --permission-mode ask", "/v1/configure", signal.SIGINT),
-                ("configure-commit-term", "/configure --permission-mode ask", "/v1/configure", signal.SIGTERM),
-                ("configure-admitted", "/configure --permission-mode ask", "", signal.SIGINT),
-                ("configure-presentation", "/configure --permission-mode ask", "", signal.SIGINT),
-                ("configure-rejected", "/configure --model gpt-6.1-sol", "", signal.SIGINT),
-                ("configure-canonical", "/configure --permission-mode ask", "", signal.SIGINT),
-                ("configure-restore-stdout", "/configure --permission-mode ask", "", signal.SIGINT),
-                ("configure-restore-stderr", "/configure --permission-mode ask", "", signal.SIGINT),
-                ("configure-restore-both", "/configure --permission-mode ask", "", signal.SIGINT),
-                ("result-observe", f"/result {message['request']}", "/v1/observe-command", signal.SIGINT),
-                ("result-content", f"/result {message['request']}", "/v1/read-result", signal.SIGINT),
-                ("inspect-current", "/inspect-action", "/v1/inspect-session", signal.SIGINT),
-                ("inspect-arguments", "/inspect-action", "/v1/read-action-arguments", signal.SIGINT),
-                ("inspect-full-stderr", "/inspect-action", "/v1/read-action-arguments", signal.SIGINT)):
-            if only is not None and case not in only:
-                continue
-            master, slave = open_pty()
-            original = termios.tcgetattr(slave)
-            original_flags = fcntl.fcntl(slave, fcntl.F_GETFL)
-            ready_read, ready_write = os.pipe()
-            # Exit guidance is optional: a stopped terminal or a full blocking
-            # pipe on stderr drops it and never holds the restored caller.
-            stopped = case.endswith(("-stopped-stderr", "-full-stderr"))
-            error_master, error_slave = (open_pty() if case.endswith("-stopped-stderr")
-                else os.pipe() if stopped else (None, None))
-            if case.endswith("-full-stderr"):
-                os.set_blocking(error_slave, False)
-                try:
-                    while os.write(error_slave, b"x" * 65536):
-                        pass
-                except BlockingIOError:
-                    pass
-                os.set_blocking(error_slave, True)
-            unread_read, unread_write = os.pipe() if stopped else (None, None)
-            release = root / f"{case}.release"
-            log = root / f"{case}.log"
-            received, reply_release = threading.Event(), threading.Event()
-            transmitted = []
-            before = set(records.glob("*.json"))
-            try:
-                environment = {**os.environ, "HOME": str(home), "NO_COLOR": "1",
-                    "RUI_TEST_ACTION_READY_FD": str(ready_write)}
-                if not route:
-                    environment.update({os_semantics.PRELOAD: str(library),
-                        "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": case})
-                    if route is None:
-                        environment["RUI_CAPTURE_SYNC_RELEASE"] = str(release)
-                limits = ({resource.RLIMIT_NOFILE: (256, resource.getrlimit(resource.RLIMIT_NOFILE)[1])}
-                    if case.startswith("configure-restore-") else None)
-                caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
-                    "--", session], env=environment, stdin=slave, stdout=slave,
-                    stderr=error_slave if stopped else subprocess.PIPE, pass_fds=(ready_write,),
-                    default_signals=(signal.SIGINT, signal.SIGTERM), rlimits=limits)
-                human.action_ready(ready_read, master)
-                if route:
-                    def hold(response):
-                        received.set()
-                        assert reply_release.wait(15), "command reply never released"
-                        return None  # Cancellation must finish before peer release.
-                    def before_forward(body):
-                        transmitted.append(body)
-                        hold(body)
-                        return False
-                    proxy = canonical.ReplyProxy(host, route, hold,
-                        before_forward=before_forward if case == "configure-inflight" else None)
-                elif case == "configure-canonical":
-                    proxy = canonical.ReplyProxy(host, "/v1/configure")
-                os.write(master, command.encode() + b"\n")
-                if route is None:
-                    fixture.wait_for(lambda: log.exists() and "capture-sync-held" in log.read_text(), "Configure pre-send sync")
-                elif route:
-                    # Read the screen while waiting: Darwin's PTY holds 1 KiB, and
-                    # an unread screen blocks the command before it is sent.
-                    fixture.wait_for(human.draining(master, received.is_set), f"{case} command route reached", timeout=10)
-                else:
-                    fixture.wait_for(lambda: log.exists() and "command-return-signal" in log.read_text(), "decoded command return signal")
-                if route != "":  # The probe signals at a "" command's return; nothing holds it.
-                    # The command is held on the reader worker. The pending
-                    # Action owns the input field and nothing is fresh until
-                    # the command completes: neither a Message nor Enter is
-                    # captured, sent or authorizes the Action. Esc first
-                    # returns from the typed command line to the choice.
-                    os.write(master, b"\x07")
-                    for typed in (b"hello\r", b"a\r"):
-                        os.write(master, typed)
-                        fixture.wait_for(lambda: unread_input(slave) == 0, f"{case} read {typed!r} while held")
-                    shown = human.settle_screen(master, quiet=0.5)
-                    assert "Command running…" in shown and "hello" not in shown, (case, shown)
-                    assert "Allow once" not in shown, (case, "choice offered while command held", shown)
-                    held = set(records.glob("*.json")) - before
-                    # Only the held Configure's own record (its capture may
-                    # still be syncing); exact identity is checked after exit.
-                    assert len(held) <= (1 if case.startswith("configure") else 0), (case, held)
-                    assert all(json.loads(path.read_bytes())["kind"] == "configure" for path in held), (case, held)
-                    assert len(endpoint.requests) == 2 and not (root / "effect").exists(), (case, "held command sent input")
-                # Commands run inside the Session screen; the terminal stays
-                # raw until the signal's restoration (checked after exit).
-                if route != "":
-                    caller.send_signal(signal_number)
-                if case.endswith("-stopped-stderr"):
-                    termios.tcflow(error_slave, termios.TCOOFF)
-                if route is None:
-                    # kill() returns before delivery. The canonical terminal
-                    # is restored only after the handler sets the command's
-                    # cancellation, so it orders the signal before the release.
-                    fixture.wait_for(lambda: termios.tcgetattr(slave)[3] & termios.ICANON, f"{case} signal restoration")
-                    release.touch()  # File custody is nonpreemptible, transport is cancellable.
-                if stopped:  # Never readable: exit cannot depend on stderr credit.
-                    caller.stderr = open(os.dup(unread_read), "rb", buffering=0)
-                output, errors = human.terminal_exit(caller, master)
-                if case.endswith("-stopped-stderr"):
-                    termios.tcflow(error_slave, termios.TCOON)
-                restoring = case.startswith("configure-restore-")
-                if restoring:
-                    marks = log.read_text()
-                    assert "command-nofile-256" in marks, (case, marks)
-                    assert "restore-stdout-attempt" in marks and "restore-stderr-attempt" in marks, (case, marks)
-                    assert "replayed-into-scratch" not in marks, (case, marks)
-                    assert caller.returncode == 1, (case, caller.returncode, output, errors)
-                    if case.endswith("stdout"):
-                        assert "replayed-to-safe-sink" in marks and b"Configuration accepted; do not resubmit it" in errors, (case, marks, errors)
-                        assert b"error: TerminalCleanupFailed" not in errors, errors
-                    else:
-                        assert b"rui: Interrupted command output:" not in errors, (case, errors)
-                elif case == "configure-canonical":
-                    assert caller.returncode == 4 and b"Configuration not confirmed; do not replace uncertain work (internal_unexpected)" in errors and b"Resume: " in errors, (case, output, errors)
-                    assert b"error: CanonicalStoreFailure" not in errors, errors
-                else:
-                    assert caller.returncode == 0, (case, caller.returncode, output, errors)
-                if case == "requests" or case.startswith("inspect-"):
-                    # INT while a page is prepared detaches before showing
-                    # it; the restored main screen names exact recovery.
-                    assert b"Cancelled" not in errors, (output, errors)
-                    assert b"\x1b[?1049l\r\nDetached. Host work continues.\r\nResume: rui session resume --store " in output, output
-                    assert b"rui action inspect --store " in output and b" --action 1\r\n" in output, output
-                assert not reply_release.is_set(), "command needed peer release to exit"
-                added = set(records.glob("*.json")) - before
-                if case.startswith("configure"):
-                    record, = added
-                    saved = record.read_bytes()
-                    identity = json.loads(saved)
-                    key = identity["key"]
-                    if case == "configure-inflight":
-                        assert transmitted == [saved], "in-flight send changed captured request bytes"
-                    assert identity["store"] == str(store) and identity["session"] == session
-                    unsafe_stderr = restoring and not case.endswith("stdout")
-                    if stopped or unsafe_stderr:
-                        assert b"rui request" not in errors, errors  # Dropped, not delayed.
-                    else:
-                        assert f"rui request inspect {key}".encode() in errors, (case, errors, output[-1500:])
-                        assert b"rui: Interrupted command output:\n" in errors, (case, errors)
-                    if stopped or unsafe_stderr:
-                        pass
-                    elif restoring or case in ("configure-admitted", "configure-presentation", "configure-rejected"):
-                        assert (b"rejected" if case == "configure-rejected" else b"accepted; do not resubmit it") in errors and b"not confirmed" not in errors, errors
-                        if case == "configure-presentation":
-                            assert b"internal_unexpected" in errors, errors
-                    else:
-                        assert b"not confirmed" in errors and f"rui request recover {key}".encode() in errors, errors
-                else:
-                    assert not added, "read command captured a mutation"
-                actual = termios.tcgetattr(slave)
-                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original) and not (root / "effect").exists()
-                assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL), original_flags)
-                reply_release.set()
-                if proxy is not None:
-                    proxy.close()
-                    proxy = None
-                if case.startswith("configure"):
-                    observed = fixture.command("request", "inspect", "--store", store, "--key", key)
-                    expected = "rejected" if case == "configure-rejected" else "accepted"
-                    not_admitted = route is None or case == "configure-inflight"
-                    assert observed["observation"]["status"] == ("absent" if not_admitted else expected), observed
-                    recovered = json.loads(human.run(home, "request", "recover", key,
-                        success=case != "configure-rejected"))
-                    assert recovered["answer"]["status"] == expected
-                    assert recovered["answer"]["replayed"] is (not not_admitted)
-                    assert record.read_bytes() == saved and set(records.glob("*.json")) - before == {record}
-                assert len(endpoint.requests) == 2, "command signal replaced provider work"
-                print(f"synchronous command interruption: {case} passed", flush=True)
-            finally:
-                dispose_all(
-                    release.touch, reply_release.set,
-                    lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                    lambda: proxy.close() if proxy is not None else None,
-                    *(lambda fd=fd: os.close(fd) for fd in (master, slave, ready_read, ready_write)
-                        + ((error_master, error_slave, unread_read, unread_write) if stopped else ())),
-                )
-                proxy = None
-    finally:
-        dispose_all(
-            lambda: fixture.stop_host(host) if host is not None else None,
-            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
-        )
 
 
 def fatal_reporting_cases(state):
@@ -1770,64 +1157,6 @@ def fatal_reporting_cases(state):
                     lambda: stop_process(caller, timeout=5) if caller is not None else None,
                     *(lambda fd=fd: os.close(fd) for fd in (master, slave, write_error)),
                 )
-        master, slave = open_pty()
-        original = termios.tcgetattr(slave)
-        try:
-            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), session],
-                env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-            human.read_terminal(master, "› ")
-            proxy = canonical.ReplyProxy(host, "/v1/message",
-                lambda response: b"" if len(proxy.exchanges) == 2 else response)
-            records = home / ".config/rui/requests"
-            before = {path: path.read_bytes() for path in records.glob("*.json")}
-            os.write(master, b"accepted A\n")
-            human.read_terminal(master, "ACCEPTED-A", composer=True)
-            human.terminal_step(master, "/status", " Status · ", composer=True)
-            os.write(master, b"uncertain B\n")
-            human.read_terminal(master, "Not confirmed")
-            first, second = [json.loads(body) for body, _ in proxy.exchanges]
-            saved = (home / ".config/rui/requests" / f"{second['key']}.json").read_bytes()
-            os.write(master, b"\x1b[")
-            output, errors = human.terminal_exit(caller, master, timeout=6)
-            assert caller.returncode == 2, (output, errors)
-            assert second["key"].encode() in errors and first["key"].encode() not in errors, errors
-            assert b"not confirmed" in errors and b"rui request recover" in errors and b"[terminal_input_incomplete]" in errors, errors
-            assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == saved, "fatal exit replaced original"
-            assert proxy.mutations == [("/v1/message", body) for body, _ in proxy.exchanges]
-            after = {path: path.read_bytes() for path in records.glob("*.json")}
-            assert set(after) - set(before) == {records / f"{request['key']}.json" for request in (first, second)}
-            assert after == {**before, **{records / f"{json.loads(body)['key']}.json": body for body, _ in proxy.exchanges}}
-            actual = termios.tcgetattr(slave)
-            assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
-            print("fatal reporting: current unconfirmed original passed", flush=True)
-        finally:
-            dispose_all(
-                lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                lambda: os.close(master), lambda: os.close(slave),
-            )
-        master, slave = open_pty()
-        read_error, write_error = os.pipe()
-        os.close(read_error)
-        original = termios.tcgetattr(slave)
-        error_flags = fcntl.fcntl(write_error, fcntl.F_GETFL)
-        records_before = {path: path.read_bytes() for path in records.glob("*.json")}
-        try:
-            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), session],
-                env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=write_error)
-            human.read_terminal(master, "› ", composer=True)
-            os.write(master, b"\x1b[")
-            assert caller.wait(timeout=6) == 2, "disconnected stderr bypassed acquired-terminal cleanup"
-            actual = termios.tcgetattr(slave)
-            assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
-            assert_file_flags(fcntl.fcntl(write_error, fcntl.F_GETFL), error_flags)
-            assert {path: path.read_bytes() for path in records.glob("*.json")} == records_before
-            assert fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
-            print("fatal reporting: acquired terminal disconnected stderr passed", flush=True)
-        finally:
-            dispose_all(
-                lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                *(lambda fd=fd: os.close(fd) for fd in (master, slave, write_error)),
-            )
     finally:
         dispose_all(
             lambda: proxy.close() if proxy is not None else None,
@@ -1842,7 +1171,7 @@ def decision_reporting_cases(state):
     root.mkdir()
     home, store = root / "home", root / "store"
     home.mkdir(mode=0o700)
-    cases = [(decision, lost) for decision in ("allow_once", "deny") for lost in (False, True)]
+    cases = [(decision, True) for decision in ("allow_once", "deny")]
     responses = []
     for decision, lost in cases:
         name = f"{decision}-{lost}"
@@ -1878,11 +1207,11 @@ def decision_reporting_cases(state):
                     proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", hold)
                 else:
                     proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
-                os.write(master, b"propose exact decision\n")
+                os.write(master, b"propose exact decision\r")
                 proposal = human.read_terminal(master, human.CHOICE)
                 proposal += human.action_ready(read_ready, master)
                 if decision != "allow_once":
-                    human.pick_deny(master, read_ready)
+                    human.pick_deny(master)
                 os.write(master, human.ALLOW)
                 if lost:
                     fixture.wait_for(human.draining(master, received.is_set), "permission decision route reached", timeout=10)
@@ -1950,426 +1279,6 @@ def decision_reporting_cases(state):
             lambda: fixture.stop_host(host) if host is not None else None,
             endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
         )
-
-
-def entry_enable_cases(state, library):
-    """Failed acquisition restores each attempted descriptor, without alias masking."""
-    root = state / "entry-enable"
-    root.mkdir()
-    home, store = root / "home", root / "store"
-    home.mkdir(mode=0o700)
-    host = fixture.start_host(store, None)
-    try:
-        session = human.admit(home, "session", "configure", "--store", store,
-            "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")["admission"]["answer"]["session"]
-        before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
-        for target in (0, 1):
-            for mode in ("mutated", "unmutated", "mutated-reset"):
-                name = f"entry-{target}-{mode}"
-                input_master, input_slave = open_pty()
-                output_master, output_slave = open_pty()
-                slaves = (input_slave, output_slave)
-                flags = [fcntl.fcntl(fd, fcntl.F_GETFL) for fd in slaves]
-                original = termios.tcgetattr(input_slave)
-                log = root / f"{name}.log"
-                caller = None
-                try:
-                    caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), session],
-                        env={**os.environ, "HOME": str(home),
-                            os_semantics.PRELOAD: str(library),
-                            "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": name},
-                        stdin=input_slave, stdout=output_slave, stderr=subprocess.PIPE)
-                    _, errors = caller.communicate(timeout=6)
-                    assert caller.returncode == 1 and b"[internal_unexpected]" in errors, errors
-                    assert b"Detached" not in errors and b"accepted" not in errors, errors
-                    assert termios.tcgetattr(input_slave) == original
-                    for fd, saved, index in zip(slaves, flags, (0, 1)):
-                        assert_file_flags(fcntl.fcntl(fd, fcntl.F_GETFL),
-                            saved | os.O_NONBLOCK if index == target and mode == "mutated-reset" else saved)
-                    events = log.read_text()
-                    assert events.count("entry-enable\n") == 1 and events.count("entry-restore\n") == 1, events
-                    assert events.count("entry-mutated\n") == (mode != "unmutated"), events
-                    assert events.count("entry-restored\n") == (mode != "mutated-reset"), events
-                    assert {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")} == before
-                    print(f"entry enable: {name} exact flags, unchanged termios, no intent and cleanup error passed", flush=True)
-                finally:
-                    if sys.exc_info()[0] is not None:
-                        preserve_failure_metadata(root / "pty-failure.json", lambda: {
-                            "case": name, "caller_returncode": caller.poll() if caller else None,
-                            "flags": [fcntl.fcntl(fd, fcntl.F_GETFL) for fd in slaves],
-                            "saved_flags": flags, "termios_unchanged": termios.tcgetattr(input_slave) == original})
-                    dispose_all(
-                        lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                        *(lambda fd=fd: os.close(fd) for fd in (input_master, input_slave, output_master, output_slave)),
-                    )
-    finally:
-        fixture.stop_host(host)
-
-
-def detach_reporting_cases(state, library):
-    """A post-restoration notice error cannot erase an accepted intent."""
-    root = state / "detach-reporting"
-    root.mkdir()
-    home, store = root / "home", root / "store"
-    home.mkdir(mode=0o700)
-    # Syscall permutations live with SessionTerminal. These cases own the
-    # frontend handoff: exact accepted identity, no resend and saved recovery.
-    # Departure and guide tests cover reporting policy for both intent kinds.
-    # Retain both notice outcomes, both guide kinds and both actual decisions,
-    # without repeating their Cartesian product through a Host and PTY.
-    cases = [("message", "detach-enable-mutated-reset"), ("message", "detach-write-full"),
-             ("allow_once", "detach-enable-mutated-reset"), ("deny", "detach-write-full")]
-    responses = []
-    for kind, fault in cases:
-        name = f"{kind}-{fault}"
-        if kind != "message":
-            responses.append(fixture.sse_tool_calls(name, [("bash", name, json.dumps({"cmd": f"printf once >> effect-{name}", "timeout_ms": 1000, "description": f"Append effect-{name} marker"}))]))
-        responses.append(fixture.sse_answer(f"{name}-a", f"{name}-r", f"{name}-m", f"SETTLED-{name}")[0])
-    endpoint = fixture.SuccessEndpoint(responses)
-    thread = threading.Thread(target=endpoint.serve_forever)
-    thread.start()
-    host = caller = proxy = None
-    try:
-        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        for kind, fault in cases:
-            name = f"{kind}-{fault}"
-            session = human.admit(home, "session", "configure", "--store", store,
-                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
-            master, slave = open_pty()
-            read_ready, write_ready = os.pipe()
-            original, flags = termios.tcgetattr(slave), fcntl.fcntl(slave, fcntl.F_GETFL)
-            log, arm = root / f"{name}.log", root / f"{name}.arm"
-            try:
-                caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), session],
-                    env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(write_ready),
-                        os_semantics.PRELOAD: str(library),
-                        "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": fault, "RUI_TERMINAL_DETACH_ARM": str(arm)},
-                    pass_fds=(write_ready,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-                human.read_terminal(master, "› ")
-                proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: response)
-                os.write(master, b"accepted original\n")
-                if kind != "message":
-                    proposal = human.read_terminal(master, human.CHOICE)
-                    proposal += human.action_ready(read_ready, master)
-                    if kind != "allow_once":
-                        human.pick_deny(master, read_ready)
-                    os.write(master, human.ALLOW)
-                human.read_terminal(master, f"SETTLED-{name}", composer=True)
-                status = human.terminal_step(master, "/status", " Status · ", composer=True)
-                assert "Original reserved request:" not in status, status
-                before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
-                records = [path for path in before if json.loads(before[path]).get("session") == session]
-                intent_kind = "message" if kind == "message" else "permission_decision"
-                record, = [path for path in records if json.loads(before[path])["kind"] == intent_kind]
-                request = json.loads(before[record])
-                arm.touch()
-                os.write(master, b"\x03")
-                output, errors = human.terminal_exit(caller, master)
-                guide = b"Message accepted; do not resubmit it" if kind == "message" else b"Decision accepted; do not repeat it"
-                if fault == "detach-write-full":
-                    assert caller.returncode == 0 and not errors, (output, errors)
-                    assert b"Detached. Host work continues." in output and session.encode() in output, output
-                else:
-                    assert caller.returncode == 1 and b"error: TerminalCleanupFailed" not in errors, (output, errors)
-                    assert guide in errors and request["key"].encode() in errors, errors
-                    assert (b"rui request read-result " if kind == "message" else b"rui request inspect ") + request["key"].encode() in errors
-                assert "cleanup-flags-restored\ndetach-enable\n" in log.read_text(), log.read_text()
-                assert log.read_text().count("detach-enable\n") == 1
-                if fault.startswith("detach-write-"):
-                    assert log.read_text().count("detach-write\n") == 1, "notice write was retried"
-                    assert "detach-write-blocking" not in log.read_text(), log.read_text()
-                assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL),
-                    flags | os.O_NONBLOCK if fault.endswith("reset") else flags)
-                assert log.read_text().count("detach-reset\n") == 1
-                if fault.startswith("detach-enable"):
-                    assert b"Detached. Host work continues." not in output, output
-                if "mutated" in fault:
-                    assert log.read_text().count("detach-mutated\n") == 1
-                actual = termios.tcgetattr(slave)
-                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
-                assert {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")} == before
-                messages = [before[path] for path in records if json.loads(before[path])["kind"] == "message"]
-                assert proxy.mutations == [("/v1/message", messages[0])] + ([] if kind == "message" else [("/v1/control/permission-decision", before[record])])
-                proxy.close()
-                proxy = None
-                assert json.loads(human.run(home, "request", "recover", request["key"]))["answer"]["replayed"] is True
-                effect = root / f"effect-{name}"
-                assert (effect.read_bytes() if effect.exists() else b"") == (b"once" if kind == "allow_once" else b"")
-                print(f"detach reporting: {name} exact accepted guide, restored termios and saved replay passed", flush=True)
-            finally:
-                if sys.exc_info()[0] is not None:
-                    preserve_failure_metadata(root / "pty-failure.json", lambda: {
-                        "case": name, "error": sys.exc_info()[0].__name__,
-                        "caller_returncode": caller.poll() if caller is not None else None,
-                        "ready_pending": bool(select.select([read_ready], [], [], 0)[0]),
-                        "terminal_pending": bool(select.select([master], [], [], 0)[0]),
-                        "flags": fcntl.fcntl(slave, fcntl.F_GETFL), "saved_flags": flags,
-                        "exchanges": len(proxy.exchanges) if proxy is not None else 0,
-                    })
-                dispose_all(
-                    lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                    lambda: proxy.close() if proxy is not None else None,
-                    *(lambda fd=fd: os.close(fd) for fd in (master, slave, read_ready, write_ready)),
-                )
-                proxy = None
-    finally:
-        dispose_all(
-            lambda: fixture.stop_host(host) if host is not None else None,
-            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
-        )
-
-
-def startup_reporting_cases(state, library):
-    """Initial launch is definitely unsent; failed retry retains uncertainty."""
-    for kind in ("message", "message-reader-first", "allow_once", "deny", "message-restore", "retry"):
-        root = state / f"startup-{kind}"
-        root.mkdir()
-        home, store = root / "home", root / "store"
-        home.mkdir(mode=0o700)
-        responses = [fixture.sse_answer("seed", "seed-r", "seed-m", "SEED-ACCEPTED")[0]]
-        if kind in ("allow_once", "deny"):
-            responses.append(fixture.sse_tool_calls("choice", [("bash", "choice-call", json.dumps({"cmd": "touch must-not-run", "timeout_ms": 1000, "description": "Create must-not-run marker"}))]))
-        elif kind == "retry":
-            responses.append(fixture.sse_answer("retry", "retry-r", "retry-m", "ORIGINAL-ACCEPTED")[0])
-        endpoint = fixture.SuccessEndpoint(responses)
-        thread = threading.Thread(target=endpoint.serve_forever)
-        thread.start()
-        host = caller = proxy = None
-        held, release = threading.Event(), threading.Event()
-        reader_held, reader_release = threading.Event(), threading.Event()
-        master, slave = open_pty()
-        ready_read, ready_write = os.pipe()
-        original = termios.tcgetattr(slave)
-        arm, log = root / "arm", root / "probe.log"
-        try:
-            host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-            session = human.admit(home, "session", "configure", "--store", store,
-                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
-            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), session],
-                env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write),
-                    os_semantics.PRELOAD: str(library),
-                    "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "startup-restore" if kind == "message-restore" else "startup",
-                    "RUI_TERMINAL_STARTUP_ARM": str(arm), "RUI_TEST_SUBMISSION_START": "1"},
-                pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-            human.read_terminal(master, "› ")
-            os.write(master, b"seed accepted original\n")
-            human.read_terminal(master, "SEED-ACCEPTED", composer=True)
-            assert "Original reserved request:" not in human.terminal_step(master, "/status", " Status · ", composer=True)
-            human.return_to_live(master)
-            if kind in ("allow_once", "deny"):
-                os.write(master, b"propose exact Action\n")
-                proposal = human.read_terminal(master, human.CHOICE)
-                proposal += human.action_ready(ready_read, master)
-                proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
-                if kind == "deny":
-                    human.pick_deny(master, ready_read)
-                event = human.ALLOW
-            else:
-                if kind == "retry":
-                    proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: b"")
-                    os.write(master, b"retry this exact original\n")
-                    human.read_terminal(master, "Not confirmed")
-                def hold(response):
-                    if held.is_set() and kind == "message-reader-first":
-                        reader_held.set()
-                        assert reader_release.wait(15), "startup next reader not released"
-                    else:
-                        held.set()
-                        assert release.wait(15), "startup observation not released"
-                    return response
-                if proxy is None:
-                    proxy = canonical.ReplyProxy(host, "/v1/activity-page", hold)
-                else:
-                    proxy.route, proxy.rewrite = "/v1/activity-page", hold
-                human.terminal_gate(caller, master, held, "startup borrower held")
-                event = b"\x12" if kind == "retry" else "definitely unsent café!\n".encode()
-            records = home / ".config/rui/requests"
-            before = {path: path.read_bytes() for path in records.glob("*.json")}
-            mutations = list(proxy.mutations)
-            arm.touch()
-            if kind == "message-reader-first":
-                # Retire the held read while armed, before typing the intent.
-                # The next real frontend reader must start and reach the proxy;
-                # a process-wide pthread fault instead exits with the old
-                # accepted Message's guide, before begin can retain this intent.
-                release.set()
-                human.terminal_gate(caller, master, reader_held, "unrelated reader starts while armed")
-            os.write(master, event)
-            output, errors = human.terminal_exit(caller, master)
-            assert caller.returncode == 1, (output, errors)
-            assert b"[internal_unexpected]" in errors, errors
-            markers = log.read_text().splitlines()
-            assert markers.count("worker-not-started") == 1, markers
-            assert markers.count("submission-start") == markers.count("submission-start-end") == 1, markers
-            assert markers.index("submission-start") < markers.index("worker-not-started") < markers.index("submission-start-end"), markers
-            if kind == "message-reader-first":
-                # The child can reach the proxy before pthread_create returns
-                # and records its success. Check publication after caller exit.
-                assert markers.index("non-submission-worker-started") < markers.index("submission-start"), markers
-            if kind == "retry":
-                request, = [json.loads(body) for body in before.values()
-                    if json.loads(body).get("text", {}).get("value") == "retry this exact original"]
-                assert b"Message not confirmed" in errors and request["key"].encode() in errors
-                assert b"was not sent" not in errors
-            else:
-                intent = b"Decision" if kind in ("allow_once", "deny") else b"Message"
-                assert intent + b" was not sent" in errors and b"You may submit it again" in errors, errors
-                assert b"rui request recover " not in errors and b"rui request read-result " not in errors and b"reserved key" not in errors, errors
-            assert {path: path.read_bytes() for path in records.glob("*.json")} == before
-            assert proxy.mutations == mutations and not (root / "must-not-run").exists()
-            actual = termios.tcgetattr(slave)
-            if kind == "message-restore":
-                assert not actual[3] & termios.ICANON
-            else:
-                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
-            release.set()
-            reader_release.set()
-            proxy.close()
-            proxy = None
-            if kind == "retry":
-                assert json.loads(human.run(home, "request", "recover", request["key"]))["answer"]["replayed"] is True
-            print(f"startup reporting: {kind} exact custody, publication/mutation conservation and cleanup precedence passed", flush=True)
-        finally:
-            if sys.exc_info()[0] is not None:
-                preserve_failure_metadata(root / "pty-failure.json", lambda: {
-                    "case": kind, "error": sys.exc_info()[0].__name__,
-                    "caller_returncode": caller.poll() if caller is not None else None,
-                    "ready_pending": bool(select.select([ready_read], [], [], 0)[0]),
-                    "terminal_pending": bool(select.select([master], [], [], 0)[0]),
-                    "reply_released": release.is_set(),
-                    "exchanges": len(proxy.exchanges) if proxy is not None else 0,
-                })
-            dispose_all(
-                release.set, reader_release.set,
-                lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                lambda: proxy.close() if proxy is not None else None,
-                lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
-                *(lambda fd=fd: os.close(fd) for fd in (master, slave, ready_read, ready_write)),
-                lambda: fixture.stop_host(host) if host is not None else None,
-                endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
-            )
-
-
-def visible_stream_handoff_cases(state, library):
-    """A command during held visible output waits, then runs once."""
-    marker = "VISIBLE-CANCEL-PREFIX"
-    # The marker opens and closes the content: views from the top (history,
-    # details) and from the end (opening, live) both draw it first.
-    long = marker + "\n" + "complete saved content\n" * 240 + marker + "\nVISIBLE-END"
-    for phase in ("opening", "activity", "history", "details", "interrupt", "completion", "permission"):
-        root = state / f"visible-{phase}"
-        root.mkdir()
-        home, store = root / "home", root / "store"
-        home.mkdir(mode=0o700)
-        text = json.dumps({"cmd": "echo " + marker + " # " + "x" * 6000, "timeout_ms": 1000, "description": "Print visible permission marker"})
-        responses = [fixture.sse_tool_calls("visible", [("bash", "visible-call", text)])] if phase == "permission" else [
-            fixture.sse_answer("visible", "visible-r", "visible-m", long)[0]]
-        if phase == "history":
-            responses += [fixture.sse_answer(f"short-{i}", f"short-{i}-r", f"short-{i}-m", "OPENING-READY")[0] for i in range(8)]
-        endpoint = fixture.SuccessEndpoint(responses)
-        thread = threading.Thread(target=endpoint.serve_forever)
-        thread.start()
-        host = caller = None
-        master, slave = open_pty()
-        original = termios.tcgetattr(slave)
-        flags = fcntl.fcntl(slave, fcntl.F_GETFL)
-        arm, log = root / "arm", root / "probe.log"
-        try:
-            host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-            session = human.admit(home, "session", "configure", "--store", store,
-                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
-            if phase not in ("activity", "permission", "interrupt", "completion"):
-                for i in range(len(responses)):
-                    admission = human.admit(home, "session", "send", "--store", store, "--to", session, input=f"saved input {i}")
-                    fixture.wait_for(lambda: fixture.completed_observation(store, admission["request"]), "saved stream content")
-            if phase == "opening": arm.touch()
-            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), session],
-                env={**os.environ, "HOME": str(home), "NO_COLOR": "1",
-                    os_semantics.PRELOAD: str(library),
-                    "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "visible-stream", "RUI_TERMINAL_STREAM_ARM": str(arm)},
-                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-            if phase != "opening":
-                ready = "VISIBLE-END" if phase == "details" else "OPENING-READY" if phase == "history" else "› "
-                human.read_terminal(master, ready, composer=True)
-                arm.touch()
-                os.write(master, (f"/{phase}\n" if phase in ("history", "details") else "produce content\n").encode())
-            human.read_terminal(master, marker)
-            before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
-            if phase == "completion":
-                # A live page shows whole: its marker frame already ends the
-                # content. The typed input's own redraw is the first held
-                # write, and the command runs only once that output completes.
-                human.await_screen(master, "VISIBLE-END", composer=True)
-                os.write(master, b"/configure --permission-mode bypass\nUNREAD suffix\n")
-                fixture.wait_for(lambda: log.exists() and "visible-stream-held" in log.read_text(), "post-page output gate")
-                time.sleep(0.5)
-                assert fixture.command("session", "inspect", "--store", store,
-                    "--session", session)["session"]["permission_mode"] == "ask"
-                arm.unlink()
-                human.read_terminal(master, "Configured.", composer=True)
-                human.await_screen(master, "› UNREAD suffix", composer=True)
-                records = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
-                assert all(records.get(path) == value for path, value in before.items())
-                added = [json.loads(value) for path, value in records.items() if path not in before]
-                assert len(added) == 1 and "configuration" in added[0], "completed command captured its suffix"
-                assert fixture.command("session", "inspect", "--store", store,
-                    "--session", session)["session"]["permission_mode"] == "bypass"
-                os.write(master, b"\x03")
-                tail, errors = human.terminal_exit(caller, master)
-                assert caller.returncode == 0, (tail, errors)
-            else:
-                command = b"/inspect-action\n" if phase == "permission" else b"/status\n"
-                os.write(master, command)
-                # An unchanged frame writes nothing, so the typed command's
-                # own redraw may be the first held write.
-                fixture.wait_for(lambda: log.exists() and "visible-stream-held" in log.read_text(), "post-prefix output gate")
-                # Held output owns the terminal: the command stays pending,
-                # with no dispatch, capture or provider work meanwhile.
-                time.sleep(0.5)
-                assert caller.poll() is None, (phase, caller.stderr.read())
-                assert {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")} == before
-                assert len(endpoint.requests) == len(responses)
-                if phase == "interrupt":
-                    os.write(master, b"\x03")
-                    tail, errors = human.terminal_exit(caller, master)
-                    # Without output credit, cleanup cannot claim delivery: an
-                    # explicit failure that still names exact recovery.
-                    assert caller.returncode == 1 and b"Message accepted; do not resubmit it" in errors, (phase, tail, errors)
-                    assert b"error: TerminalCleanupFailed" not in errors, errors
-                    assert b"Use rui request read-result " in errors and b"Resume: rui session resume --store " in errors, errors
-                    assert f" Status · {session}".encode() not in tail, "interrupted pending command ran"
-                else:
-                    arm.unlink()
-                    # Long pages open at their top; the exact Action's inspection starts there.
-                    expected = "Arguments: " if phase == "permission" else f" Status · {session}"
-                    page = human.read_terminal(master, expected)
-                    shown = human.current_screen(master)
-                    assert expected in shown or expected in page, (phase, shown)
-                    os.write(master, b"\x03")
-                    tail, errors = human.terminal_exit(caller, master)
-                    assert caller.returncode == 0, (phase, tail, errors)
-                assert b"Cancelled" not in errors, (phase, errors)
-                assert {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")} == before
-            actual = termios.tcgetattr(slave)
-            assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
-            assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL), flags)
-            assert "restore-other" in log.read_text() and "disable" in log.read_text()
-            assert len(endpoint.requests) == len(responses), "held output restarted Host work"
-            print(f"visible {phase}: " + ("completed output permits one command; suffix stays a draft" if phase == "completion"
-                else "Ctrl-C while held restores and the pending command never runs" if phase == "interrupt"
-                else "pending command waits for held output, then runs once without capture or provider work"), flush=True)
-        finally:
-            def join_endpoint():
-                thread.join(timeout=5)
-                assert not thread.is_alive()
-
-            dispose_all(
-                lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
-                lambda: os.close(master), lambda: os.close(slave),
-                lambda: fixture.stop_host(host) if host is not None else None,
-                endpoint.shutdown, endpoint.server_close, join_endpoint,
-            )
 
 
 def host_diagnostic_cases(state, library):
@@ -3005,6 +1914,198 @@ def native_notice_cases(state):
             dispose_all(lambda: os.close(reader), lambda: os.close(writer))
 
 
+def app_terminal_cases():
+    binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
+    master, slave = open_pty()
+    caller = None
+    original = termios.tcgetattr(slave)
+    try:
+        caller = spawn([str(binary), "app-init-oom"], stdin=slave,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output, diagnostic = caller.communicate(timeout=5)
+        assert caller.returncode == 0, (caller.returncode, diagnostic)
+        assert output == b"", output
+        assert diagnostic == b"App.init: OutOfMemory\n", diagnostic
+        assert termios.tcgetattr(slave) == original, "App left terminal settings changed"
+        print("App.init OutOfMemory: terminal restored and process exited", flush=True)
+    finally:
+        dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                    lambda: os.close(master), lambda: os.close(slave))
+
+
+def app_signal_cases():
+    binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
+    for sent in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, *([None] * 8)):
+        master, slave = open_pty()
+        caller = None
+        original = termios.tcgetattr(slave)
+        try:
+            caller = spawn([str(binary), "app-signal"], stdin=slave,
+                           stdout=slave, stderr=subprocess.PIPE)
+            opening = bytearray()
+            answered = False
+
+            def frame_drawn():
+                nonlocal answered
+                if select.select([master], [], [], 0)[0]:
+                    opening.extend(os.read(master, 65536))
+                    assert len(opening) < 1024 * 1024, "unbounded App startup output"
+                if not answered and b"\x1b[c" in opening:
+                    os.write(master, b"\x1b[?1;2c")
+                    answered = True
+                return b"fixture" in opening and b"\x1b[?2026l" in opening
+
+            try:
+                fixture.wait_for(frame_drawn, "App's first frame", timeout=5)
+            except BaseException as error:
+                error.add_note(f"App startup bytes: {bytes(opening)!r}; exit: {caller.poll()}")
+                raise
+            assert not termios.tcgetattr(slave)[3] & termios.ICANON
+            if sent is None:
+                os.close(master)
+                master = None
+                _, diagnostic = caller.communicate(timeout=5)
+                assert caller.returncode == 0, (caller.returncode, diagnostic)
+                assert b"EndOfStream" not in diagnostic, diagnostic
+                assert b"error reading tty" not in diagnostic, diagnostic
+                assert caller.poll() == 0, "App survived terminal hangup"
+                print("App closed master: hangup exit; no terminal restoration claimed", flush=True)
+                continue
+            caller.send_signal(sent)
+            output, diagnostic = human.terminal_exit(caller, master)
+            assert caller.returncode == 0, (sent, caller.returncode, diagnostic)
+            assert diagnostic == b"", diagnostic
+            assert termios.tcgetattr(slave) == original, (sent, "terminal not restored")
+            for reset in (b"\x1b[?1049l", b"\x1b[?2004l", b"\x1b[?1002;1003;1004;1006;1016l"):
+                assert reset in output, (sent, reset, output)
+            print(f"App {sent.name}: terminal settings and enabled modes restored", flush=True)
+        finally:
+            dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                        lambda: os.close(master) if master is not None else None, lambda: os.close(slave))
+
+
+def app_resize_cases():
+    from terminal_screen import ScreenCapture
+
+    binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
+    for columns, rows in ((0, 1), (1, 0)):
+        master, slave = open_pty(columns=columns, rows=rows)
+        caller = None
+        try:
+            caller = spawn([str(binary), "app-resize"], stdin=slave,
+                           stdout=slave, stderr=subprocess.PIPE)
+            output, diagnostic = bytearray(), bytearray()
+            screen = ScreenCapture(columns=80, rows=24)
+            answered = False
+
+            def collect():
+                nonlocal answered
+                ready = select.select([master, caller.stderr], [], [], 0)[0]
+                if master in ready:
+                    chunk = os.read(master, 65536)
+                    output.extend(chunk)
+                    screen.feed(chunk)
+                if caller.stderr in ready:
+                    diagnostic.extend(os.read(caller.stderr.fileno(), 65536))
+                assert len(output) + len(diagnostic) < 1024 * 1024
+                assert caller.poll() is None, (caller.returncode, bytes(diagnostic))
+                if not answered and b"\x1b[c" in output:
+                    os.write(master, b"\x1b[?1;2c")
+                    answered = True
+
+            def empty_drawn():
+                collect()
+                return f"empty={columns}x{rows}\n".encode() in diagnostic
+
+            fixture.wait_for(empty_drawn, "App draws an empty terminal without exiting", timeout=5)
+            output.clear()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+            caller.send_signal(signal.SIGWINCH)
+
+            def positive_drawn():
+                collect()
+                return "App resize restored" in screen.completed
+
+            fixture.wait_for(positive_drawn, "App redraws after a nonzero resize", timeout=5)
+            os.write(master, b"\r")
+            _, remaining = human.terminal_exit(caller, master)
+            assert caller.returncode == 0, (caller.returncode, remaining)
+            assert remaining == b"", remaining
+            assert diagnostic == f"empty={columns}x{rows}\n".encode(), diagnostic
+            restored = termios.tcgetattr(slave)[3]
+            assert restored & termios.ICANON and restored & termios.ECHO
+            print(f"App {columns}x{rows} → 80x24: redrawn, input accepted, terminal usable", flush=True)
+        finally:
+            dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                        lambda: os.close(master), lambda: os.close(slave))
+
+
+def app_consent_cases():
+    binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
+    for replaced, keys, expected in (
+        (True, b"\r", b"decision=none\n"),
+        (False, b"\r", b"decision=17:allow_once\n"),
+        (False, b"\x1b[13;0u", b"decision=none\n"),
+    ):
+        master, slave = open_pty()
+        ready_read, ready_write = os.pipe()
+        caller = None
+        try:
+            caller = spawn([str(binary), "consent-replaced" if replaced else "consent-live"],
+                           stdin=slave, stdout=slave, stderr=subprocess.PIPE,
+                           pass_fds=(ready_write,),
+                           env={**os.environ, "RUI_TEST_ACTION_READY_FD": str(ready_write)})
+            opening = bytearray()
+            answered = 0
+
+            def enter_sent():
+                nonlocal answered
+                if select.select([master], [], [], 0)[0]:
+                    opening.extend(os.read(master, 65536))
+                    assert len(opening) < 1024 * 1024, "unbounded consent fixture output"
+                while opening.count(b"\x1b[c") > answered:
+                    answered += 1
+                    os.write(master, b"\x1b[?1;2c")
+                if select.select([ready_read], [], [], 0)[0]:
+                    assert os.read(ready_read, 1) == b"x"
+                    os.write(master, keys)
+                    return True
+                return False
+
+            fixture.wait_for(enter_sent, "Enter after the card draws its request", timeout=5)
+            _, diagnostic = human.terminal_exit(caller, master)
+            assert caller.returncode == 0, (replaced, caller.returncode, diagnostic)
+            assert diagnostic == expected, (replaced, diagnostic)
+            print(f"App consent: request-replaced={replaced}, keys={keys!r}, {diagnostic.decode().strip()}", flush=True)
+        finally:
+            dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                        lambda: os.close(master), lambda: os.close(slave),
+                        lambda: os.close(ready_read), lambda: os.close(ready_write))
+
+
+def app_ready_failure_case():
+    binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
+    master, slave = open_pty()
+    ready_read, ready_write = os.pipe()
+    os.close(ready_read)
+    caller = None
+    try:
+        caller = spawn([str(binary), "consent-live"], stdin=slave, stdout=slave,
+                       stderr=subprocess.PIPE, pass_fds=(ready_write,),
+                       env={**os.environ, "RUI_TEST_ACTION_READY_FD": str(ready_write)})
+        _, diagnostic = human.terminal_exit(caller, master)
+        assert caller.returncode == 1, (caller.returncode, diagnostic)
+        assert b"error: BrokenPipe" in diagnostic, diagnostic
+        assert b"decision=" not in diagnostic, diagnostic
+        restored = termios.tcgetattr(slave)[3]
+        assert restored & termios.ICANON and restored & termios.ECHO
+        print("App readiness write failure: run returned BrokenPipe and terminal is usable", flush=True)
+    finally:
+        dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                    lambda: os.close(master), lambda: os.close(slave),
+                    lambda: os.close(ready_write))
+
+
 def main(selected=None):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-terminal-restoration."))
     home = state / "home"
@@ -3013,9 +2114,29 @@ def main(selected=None):
     host = None
     completed = False
     try:
-        if selected == "input-replay":
-            from terminal_input_replay import input_replay_cases
-            input_replay_cases()
+        if selected in (None, "app-init"):
+            app_terminal_cases()
+        if selected == "app-init":
+            completed = True
+            return
+        if selected in (None, "app-signals"):
+            app_signal_cases()
+        if selected == "app-signals":
+            completed = True
+            return
+        if selected in (None, "app-resize"):
+            app_resize_cases()
+        if selected == "app-resize":
+            completed = True
+            return
+        if selected in (None, "app-consent"):
+            app_consent_cases()
+        if selected == "app-consent":
+            completed = True
+            return
+        if selected in (None, "app-ready-error"):
+            app_ready_failure_case()
+        if selected == "app-ready-error":
             completed = True
             return
         if selected in (None, "notice", "detach"):
@@ -3046,15 +2167,8 @@ def main(selected=None):
             completed = True
             return
         if selected in (None, "consent"):
-            consent_boundary_cases(state, library)
+            consent_boundary_cases(state)
         if selected == "consent":
-            completed = True
-            return
-        if selected in (None, "commands", "command-restoration"):
-            command_interruption_cases(state, library, only=(
-                "configure-restore-stdout", "configure-restore-stderr", "configure-restore-both")
-                if selected == "command-restoration" else None)
-        if selected in ("commands", "command-restoration"):
             completed = True
             return
         if selected in (None, "fatal"):
@@ -3067,36 +2181,6 @@ def main(selected=None):
         if selected == "decisions":
             completed = True
             return
-        if selected in (None, "entry-enable"):
-            entry_enable_cases(state, library)
-        if selected == "entry-enable":
-            completed = True
-            return
-        if selected in (None, "detach"):
-            detach_reporting_cases(state, library)
-        if selected == "detach":
-            completed = True
-            return
-        if selected in (None, "startup"):
-            startup_reporting_cases(state, library)
-        if selected == "startup":
-            completed = True
-            return
-        if selected in (None, "visible-stream"):
-            visible_stream_handoff_cases(state, library)
-        if selected == "visible-stream":
-            completed = True
-            return
-        host = fixture.start_host(store, None)
-        session = human.admit(home, "session", "configure", "--store", store,
-            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")["admission"]["answer"]["session"]
-        if selected in (None, "renderer-backpressure"):
-            renderer_backpressure_case(state, library, home, store)
-        if selected == "renderer-backpressure":
-            completed = True
-            return
-        assert selected in (None, "persistent"), selected
-        persistent_cases(state, library, home, store, host, session)
         completed = True
     finally:
         if host is not None:

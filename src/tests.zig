@@ -1,4 +1,14 @@
 test {
+    _ = @import("AppScreen.zig");
+    _ = @import("PermissionCard.zig");
+    _ = @import("widget_style.zig");
+    _ = @import("InputArea.zig");
+    _ = @import("GroupedList.zig");
+    _ = @import("Palette.zig");
+    _ = @import("Composer.zig");
+    _ = @import("Transcript.zig");
+    _ = @import("Root.zig");
+    _ = @import("TerminalApp.zig");
     _ = @import("Installation.zig");
     _ = @import("release_candidate.zig");
     _ = @import("upgrade_process.zig");

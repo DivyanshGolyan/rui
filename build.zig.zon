@@ -29,8 +29,8 @@
             .hash = "N-V-__8AACywKABFCj0r_Y-jIWsk9ahy10zlk78hjn6S-39g",
         },
         .vaxis = .{
-            .url = "git+https://github.com/rockorager/libvaxis#d4c3b3666e0c090e2b5092ca09893c6db15e0b79",
-            .hash = "vaxis-0.6.0-BWNV_O8ODQBFLRjA4D0q75pHPh63iPu_v0yhpCwsAMaM",
+            .url = "git+https://github.com/DivyanshGolyan/libvaxis#fbe2e03350b7172b6b4f556ac9c8c662a9653ffe",
+            .hash = "vaxis-0.6.0-BWNV_EhlDgBgOU9OEJZSfl3If8wftRZNR-L_M3BmQJFo",
         },
     },
     .paths = .{

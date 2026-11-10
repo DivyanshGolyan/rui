@@ -703,7 +703,7 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertEqual([name for name, _ in upgrade], ['startup', 'current-upgrade', 'previous-upgrade'])
         contracts = self.step_list(job(RENDERER.read_text(), 'contracts'))
         self.assertEqual([name for name, _ in contracts],
-                         ['selftest', 'pty', 'ghostty', 'controls', 'recovery', 'replay', 'sequence'])
+                         ['selftest', 'pty', 'ghostty', 'controls', 'recovery', 'sequence'])
         for name, command in upgrade + contracts:
             with self.subTest(step=name):
                 # Harnesses refuse an existing output; replays get a fresh $STEP_OUTPUT.
