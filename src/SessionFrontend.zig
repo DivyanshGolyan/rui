@@ -2745,10 +2745,13 @@ test "Ctrl-R while an Action waits recovers nothing and keeps the draft" {
 }
 
 test "every way out of the conversation ends consent, from the card" {
-    for ([_][]const u8{ "\x03", "\x1b[99;5u" }) |key| {
+    for ([_][]const u8{ "\x03", "\x04", "\x1b[99;5u", "\x1b[100;5u" }) |key| {
         errdefer std.debug.print("key={x}\n", .{key});
         const held = try HeldFrontend.create();
         defer held.destroy();
+        // A hidden draft with its caret at the start: Ctrl-D leaves from the
+        // card and never deletes what it cannot see.
+        try sendKeys(&held.self, "kept\x1b[H");
         const file = try held.adopt(3);
         defer file.close(std.testing.io);
         try std.testing.expect(held.self.app_consent.request != null);
@@ -2756,6 +2759,7 @@ test "every way out of the conversation ends consent, from the card" {
         try std.testing.expectEqual(@as(?Outcome, .detached), held.self.leaving);
         try std.testing.expectEqual(@as(?Outcome, .detached), held.left);
         try std.testing.expect(held.self.app_consent.request == null);
+        try std.testing.expectEqualStrings("kept", held.self.input.composition().bytes);
     }
 }
 
