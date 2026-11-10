@@ -2921,6 +2921,13 @@ test "production turn preserves skipped continuation preference through actual S
                     self.action = admission.permit.consume() catch unreachable;
                     return .admitted;
                 }
+                pub fn scanWork(self: *@This(), paused: bool) error{Fence}!turn.Work {
+                    const found = self.storage.dispatchWork(paused) catch |err| {
+                        self.failure = err;
+                        return error.Fence;
+                    };
+                    return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation };
+                }
                 pub fn scheduledRetry(_: *const @This()) turn.ScheduledRetry {
                     return .unknown;
                 }
@@ -6561,6 +6568,174 @@ test "retryable stream rejections retain only the settling Attempt diagnostic th
     }.run);
 }
 
+test "an entry point that changed rows sets the commit wake, and a read leaves it unset" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var wake: std.Io.Event = .unset;
+            storage.commitWake().store(&wake, .release);
+            defer storage.commitWake().store(null, .release);
+            _ = try storage.dispatchWork(false);
+            try std.testing.expect(!wake.isSet());
+            _ = try configureTestSession(&storage, "wake-config");
+            try std.testing.expect(wake.isSet());
+        }
+    }.run);
+}
+
+/// The dispatch loop's work read against the owners it speaks for: each
+/// call reads the hint, runs the owner, and expects the same answer.
+const WorkParity = struct {
+    /// The slot-free runners. Reads only, so any state can call it.
+    fn core(storage: *Store) !void {
+        const work = try storage.dispatchWork(false);
+        try std.testing.expectEqual((try storage.nextCoreWorkForHost(false)) != null, work.core);
+        try std.testing.expectEqual((try storage.nextCoreWork()) != null, work.core or work.mcp);
+    }
+
+    fn model(storage: *Store, kind: ModelAdmissionKind) !?AttemptBinding {
+        try core(storage);
+        const work = try storage.dispatchWork(kind == .open_turn_message);
+        const admission = try storage.admitModelAttempt(kind, .{});
+        try std.testing.expectEqual(admission != null, if (kind == .tool_continuation) work.tool_continuation else work.message);
+        return if (admission) |found| found.permit.binding else null;
+    }
+
+    fn bash(storage: *Store) !?ActionAttemptBinding {
+        try core(storage);
+        const work = try storage.dispatchWork(false);
+        const admission = try storage.admitNextActionAttempt(300_000, .{});
+        try std.testing.expectEqual(admission != null, work.bash);
+        return if (admission) |found| found.permit.binding else null;
+    }
+
+    /// Every owner at once, for a state where none has work.
+    fn idle(storage: *Store) !void {
+        for (std.enums.values(ModelAdmissionKind)) |kind| try std.testing.expect((try model(storage, kind)) == null);
+        try std.testing.expect((try bash(storage)) == null);
+    }
+};
+
+test "the dispatch work read answers as each admission owner does, in every state a Turn passes through" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try WorkParity.idle(&storage);
+
+            // Waiting input: a new Turn takes it unless new Turns are held.
+            const session = try configureTestSessionAsk(&storage, "parity-config");
+            try submitTestMessage(&storage, &tmp, "parity-start", "parity-start", session.slice(), "start");
+            try std.testing.expect((try WorkParity.model(&storage, .open_turn_message)) == null);
+            try std.testing.expect((try WorkParity.model(&storage, .tool_continuation)) == null);
+            const first = (try WorkParity.model(&storage, .message)).?;
+            try WorkParity.idle(&storage);
+
+            // Two Bash calls wait on a person: a blocked Operation, no work.
+            try settleTwoActionsForTesting(&storage, &tmp, first, "parity-config");
+            try WorkParity.idle(&storage);
+            // Input that arrives now joins the open Turn, held or not, once it continues.
+            try submitTestMessage(&storage, &tmp, "parity-more", "parity-more", session.slice(), "more");
+            const last_action = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
+            try denyForTesting(&storage, session.slice(), "parity-deny", last_action - 1);
+            try WorkParity.idle(&storage);
+            var allow: protocol.PermissionDecisionCommand = .{ .action_id = last_action, .decision = .allow_once };
+            try allow.key.set("parity-allow");
+            try allow.session.set(session.slice());
+            try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+            // An authorized Bash Action is Bash work alone.
+            try std.testing.expect((try WorkParity.model(&storage, .tool_continuation)) == null);
+            const action = (try WorkParity.bash(&storage)).?;
+            try WorkParity.idle(&storage);
+            try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
+            // Its last result lets the Turn go on; the queued input makes that a message admission.
+            try std.testing.expect((try WorkParity.bash(&storage)) == null);
+            try std.testing.expect((try WorkParity.model(&storage, .tool_continuation)) == null);
+            const joined = (try WorkParity.model(&storage, .open_turn_message)).?;
+            try std.testing.expectEqual(first.turn_id, joined.turn_id);
+            try WorkParity.idle(&storage);
+
+            // A rejected call continues its Turn with no input.
+            const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+            try settleCallsForTesting(&storage, &tmp, joined, "parity-rejected", &calls);
+            try std.testing.expect((try WorkParity.model(&storage, .message)) == null);
+            try std.testing.expect((try WorkParity.model(&storage, .open_turn_message)) == null);
+            const continued = (try WorkParity.model(&storage, .tool_continuation)).?;
+            try std.testing.expectEqual(first.turn_id, continued.turn_id);
+            try WorkParity.idle(&storage);
+
+            // A core tool call is slot-free work, never Bash work.
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var command = try completeConfiguration("parity-agent", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            command.configuration.tools.state = .value;
+            command.configuration.tools = try .of(&.{"message_agent"});
+            const configured = try storage.configure(&command, .{});
+            try std.testing.expect(configured == .accepted);
+            const caller = configured.accepted.session;
+            try submitTestMessage(&storage, &tmp, "parity-agent-task", "parity-agent-task", caller.slice(), "ask");
+            const asking = (try WorkParity.model(&storage, .message)).?;
+            const agent_calls = [_]TestingCall{.{ .item_id = "agent-item", .name = "message_agent", .encoded_call_id = "agent-call", .decoded_call_id = "agent-call", .encoded_arguments = "{\\\"id\\\":\\\"zzzzzz\\\",\\\"text\\\":\\\"hi\\\"}", .decoded_arguments = "{\"id\":\"zzzzzz\",\"text\":\"hi\"}" }};
+            try settleCallsForTesting(&storage, &tmp, asking, "parity-agent-calls", &agent_calls);
+            try std.testing.expect((try storage.dispatchWork(false)).core);
+            try WorkParity.idle(&storage);
+            const call = (try storage.nextCoreWork()).?.action;
+            try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(call.binding, "zzzzzz", "hi", .{}));
+            try std.testing.expect(!(try storage.dispatchWork(false)).core);
+            _ = (try WorkParity.model(&storage, .tool_continuation)).?;
+            try WorkParity.idle(&storage);
+
+            // A stop above an attached child with a Turn leaves that child's stop owed.
+            const child = try configureTestSession(&storage, "parity-child");
+            try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ caller.slice(), child.slice() });
+            try submitTestMessage(&storage, &tmp, "parity-child-task", "parity-child-task", child.slice(), "work");
+            _ = (try WorkParity.model(&storage, .message)).?;
+            var stop = try completeSessionStop("parity-stop", caller.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            try std.testing.expect((try storage.dispatchWork(false)).core);
+            try WorkParity.core(&storage);
+        }
+    }.run);
+}
+
+test "the dispatch work read fences a Store whose blocked Operations are malformed, as an empty admission does" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Malformed = enum { unrecorded, premature };
+            for (std.enums.values(Malformed)) |malformed| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSessionAsk(&storage, "malformed-config");
+                try submitTestMessage(&storage, &tmp, "malformed", "malformed", session.slice(), "start");
+                const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+                switch (malformed) {
+                    .unrecorded => {
+                        const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+                        try settleCallsForTesting(&storage, &tmp, first, "malformed-metadata", &calls);
+                        try store_testing.exec(&storage, "UPDATE turn SET continuation_operation_id=NULL", .{});
+                    },
+                    .premature => {
+                        try settleTwoActionsForTesting(&storage, &tmp, first, "malformed-config");
+                        try store_testing.exec(&storage, "UPDATE turn SET continuation_operation_id=operation_id", .{});
+                    },
+                }
+                try std.testing.expect(!storage.isFenced());
+                try std.testing.expectError(error.CorruptStore, storage.dispatchWork(false));
+                try std.testing.expect(storage.isFenced());
+            }
+        }
+    }.run);
+}
+
 test "retry settlement adds actual entropy after the provider deadline" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -9091,6 +9266,7 @@ const EntryPoint = enum {
     settleActionAttempt,
     recoverOneUncertainAction,
     tryAdmitNextModelRetry,
+    dispatchWork,
     operationSupersededByControl,
     withDispatchHandoff,
     claimModelAuthRefresh,
@@ -9162,6 +9338,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .settleActionAttempt = 3,
     .recoverOneUncertainAction = 1,
     .tryAdmitNextModelRetry = 1,
+    .dispatchWork = 1,
     .operationSupersededByControl = 1,
     .withDispatchHandoff = 1,
     .claimModelAuthRefresh = 2,
@@ -9883,6 +10060,9 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, null) == null);
             meter.stop(.tryAdmitNextModelRetry);
+            meter.start();
+            _ = try storage.dispatchWork(false);
+            meter.stop(.dispatchWork);
             meter.start();
             try std.testing.expect(!try storage.recoverOneExhaustedModelAttempt(ActiveOperationFilter.empty()));
             meter.stop(.recoverOneExhaustedModelAttempt);

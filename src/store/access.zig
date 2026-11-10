@@ -9,7 +9,7 @@
 //! (`sqlite.bindArgs`, `Borrowed`). A round may
 //! queue one statement any number of times: SQLite steps what is queued,
 //! in order (an engine pass), before it rebinds a statement already
-//! queued, when the queue's 8 slots are full, when `contentSink` opens a
+//! queued, when the queue's 16 slots are full, when `contentSink` opens a
 //! row on SQLite, before the commit round's compare-and-sets, and at
 //! `run`. On MySQL a pass also runs when a content chunk lacks room in the
 //! batch (`queueChunk`). A pass
@@ -31,6 +31,9 @@ const sqlite = @import("sqlite.zig");
 pub const Mode = enum {
     /// Reads only, outside any transaction.
     read,
+    /// A read Access whose pass holds more statements: the dispatch loop's
+    /// work reads share one (`model_admission.dispatchWork`).
+    survey,
     /// Opens the transaction before its first statement and ends it with
     /// `commit`, or with `abandon` when it finds no work or fails.
     write,
@@ -176,8 +179,10 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
     return struct {
         const Self = @This();
         pub const Error = Guards || Failure;
-        /// The statements one engine pass steps at most.
-        const max_queued = 8;
+        const reads_only = mode == .read or mode == .survey;
+        /// The statements one engine pass steps at most. Accesses sit on
+        /// the deepest stack chains, so only a survey's queue is wide.
+        const max_queued = if (mode == .survey) 16 else 8;
 
         store: *Store,
         /// `opened` once `ensureOpen` tried to begin, whether or not the
@@ -199,18 +204,18 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// `run` and `commit`, `.content_rounds` for `readRaw`).
         passes: TestCount = 0,
         /// None in a read Access, which claims no positions.
-        claims: [if (mode == .read or mode == .single) 0 else max_claims]Positions = undefined,
+        claims: [if (reads_only or mode == .single) 0 else max_claims]Positions = undefined,
         claimed: u8 = 0,
         /// The last `max_taken` content ids this Access took, the rows
         /// `contentSink` may open; 0 marks a free entry.
-        taken: [if (mode == .read or mode == .single) 0 else max_taken]u64 = @splat(0),
+        taken: [if (reads_only or mode == .single) 0 else max_taken]u64 = @splat(0),
         /// Whether this Access queued the content row of the `taken` id
         /// beside it (`recordContentRow`).
-        taken_rows: [if (mode == .read or mode == .single) 0 else max_taken]bool = @splat(false),
+        taken_rows: [if (reads_only or mode == .single) 0 else max_taken]bool = @splat(false),
         taken_count: u64 = 0,
         /// The content rows this Access queued, by identity, so a second
         /// import of an equal value reuses the row (`content.importSlot`).
-        inserted: [if (mode == .read or mode == .single) 0 else max_inserted]InsertedContent = undefined,
+        inserted: [if (reads_only or mode == .single) 0 else max_inserted]InsertedContent = undefined,
         inserted_count: u8 = 0,
 
         /// A peer creation can import six distinct values in one transaction:
@@ -375,7 +380,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// Records that this Access changes `head`'s Session, and returns
         /// its position claimer.
         pub fn positions(a: *Self, head: rsql.SessionHead) error{TooManyPositionClaims}!*Positions {
-            comptime std.debug.assert(mode != .read and mode != .single);
+            comptime std.debug.assert(!reads_only and mode != .single);
             a.touch(head);
             for (a.claims[0..a.claimed]) |*claim| if (std.mem.eql(u8, &claim.head.ref, &head.ref)) return claim;
             if (a.claimed == a.claims.len) return error.TooManyPositionClaims;
@@ -401,7 +406,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         fn queueWrite(a: *Self, comptime S: type, args: *const S.Args, target: @FieldType(Queued, "target")) void {
-            comptime std.debug.assert(S.kind == .write and mode != .read and S.session_fields.len <= max_sessions);
+            comptime std.debug.assert(S.kind == .write and !reads_only and S.session_fields.len <= max_sessions);
             inline for (S.session_fields) |field| a.touch(@field(args, field));
             _ = a.queueStatement(S, args, runWrite(S), target);
         }
@@ -425,7 +430,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         /// The next value of `column`, inside this transaction.
         pub fn identity(a: *Self, comptime column: store_core.Identity) !u64 {
-            comptime std.debug.assert(mode != .read and mode != .single);
+            comptime std.debug.assert(!reads_only and mode != .single);
             a.ensureOpen();
             if (a.failure) |err| return err;
             const id = try store_core.takeIdentity(a.store, column);
@@ -441,7 +446,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// `content_id`, inserted by an earlier queued write. `bytes` must
         /// outlive the round.
         pub fn writeContent(a: *Self, content_id: u64, bytes: []const u8) void {
-            comptime std.debug.assert(mode != .read and mode != .single);
+            comptime std.debug.assert(!reads_only and mode != .single);
             if (a.store.engine == .mysql) {
                 const Chunk = engine.Mysql.insert_chunk;
                 var offset: usize = 0;
@@ -481,7 +486,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// one of the last `max_taken` ids it took: what lets
         /// `contentSink` open on it.
         pub fn recordContentRow(a: *Self, content_id: u64) void {
-            comptime std.debug.assert(mode != .read and mode != .single);
+            comptime std.debug.assert(!reads_only and mode != .single);
             const index = std.mem.findScalar(u64, &a.taken, content_id) orelse @panic("a content row is recorded under an id this Access took");
             a.taken_rows[index] = true;
         }
@@ -500,7 +505,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// need it (`importSealed`, settlement), so a value is never held
         /// in memory whole.
         pub fn contentSink(a: *Self, content_id: u64, length: u64) Error!ContentSink {
-            comptime std.debug.assert(mode != .read and mode != .single);
+            comptime std.debug.assert(!reads_only and mode != .single);
             if (a.failure) |err| return err;
             if (content_id == 0) return error.ContentNotInserted;
             const index = std.mem.findScalar(u64, &a.taken, content_id) orelse return error.ContentNotInserted;

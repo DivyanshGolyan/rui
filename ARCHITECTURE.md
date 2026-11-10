@@ -860,7 +860,7 @@ The Store also advances an in-memory control generation after each accepted cont
 The Store advances an in-memory commit generation whenever a locked entry point changed rows, before releasing its lock; each turn skips its Bash, message and tool-continuation admission scans while the generation, the free-slot count and which shared preparation owners are open are unchanged since the last read found nothing.
 An Action Attempt loses custody without a saved outcome only after dispatch is fenced or the Host is shutting down, and neither admits work again, so uncertain Actions come only from an earlier Host; the lifecycle owner stops scanning for them once a scan after startup finds none.
 Retry admission depends on time and keeps its one-second poll.
-Nothing wakes the lifecycle owner for new work, so it waits at most 100 ms between turns, 25 ms while Bash runs; transport readiness and the HTTP/2 Client's own timers end a wait sooner.
+A Store commit from any thread and a finished stream wake the lifecycle owner at once; for everything else it waits at most 100 ms between turns, 25 ms while Bash runs, and the HTTP/2 Client's own timers end a wait sooner.
 A control always commits before its hint, so a lost hint still moves the control generation.
 Before transport handoff it rechecks superseding controls; stop or shutdown cancels preparation, closes readers and prevents launch.
 Canonical read faults fence dispatch.
@@ -3840,6 +3840,7 @@ The writer rechecks after writes; accepted live-effect controls publish their re
 No SQLite watcher is required.
 The retry scans use a due-time index that excludes future deadlines, and run at most once per second.
 A scan that found nothing runs again only after a commit, a slot change or the earliest scheduled retry falling due by the wall clock, the clock the Store admits by; the admission scan reads that due time in its own round, and an idle Host sends the Store no query.
+After a commit, one read round says which kinds of dispatch work the Store holds (core and MCP Actions, Bash, waiting Messages, tool continuations), and only those kinds' scans run; the answer is a hint, since each admission reads its own facts again, and a kind it wrongly names costs one empty round.
 Missed ticks do not queue.
 Full capacity or an empty array must not cause spinning.
 

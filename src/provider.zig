@@ -279,9 +279,10 @@ pub const Reactor = struct {
     stopping: bool = false,
     /// Under `mutex`. The failure that ended `serve`.
     failure: ?h2.DriveError = null,
-    /// Set by `serve` when a stream has finished or it failed, so the
-    /// execution thread's wait ends; only `awaitFinished` resets it.
-    finished: std.Io.Event = .unset,
+    /// Set by `serve` when a stream has finished or it failed, when given
+    /// before `serve` starts: the execution thread waits on it between
+    /// passes and resets it.
+    wake: ?*std.Io.Event = null,
 
     /// In final storage: h2's Client is pointer-stable. Host startup has
     /// already run `checkLibraries` and `validateEndpoint`.
@@ -392,7 +393,7 @@ pub const Reactor = struct {
         defer self.mutex.unlock(self.io);
         while (!self.stopping) {
             self.client.drive(self) catch |err| return self.fail(err);
-            if (self.client.finishedCount() != 0) self.finished.set(self.io);
+            if (self.client.finishedCount() != 0) self.signalFinished();
             // Only the engine's own deadlines bound the poll: every other
             // thread's call that gives the Client work wakes it.
             const armed = self.client.armWait(std.math.maxInt(u32));
@@ -405,7 +406,11 @@ pub const Reactor = struct {
 
     fn fail(self: *Reactor, err: h2.DriveError) void {
         self.failure = err;
-        self.finished.set(self.io);
+        self.signalFinished();
+    }
+
+    fn signalFinished(self: *Reactor) void {
+        if (self.wake) |wake| wake.set(self.io);
     }
 
     /// Ends `serve` at its next pass; the caller then joins its thread.
@@ -420,16 +425,6 @@ pub const Reactor = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.failure;
-    }
-
-    /// The execution thread, between passes: returns once a stream has
-    /// finished or the transport failed, or after `timeout_ms`.
-    pub fn awaitFinished(self: *Reactor, timeout_ms: u32) void {
-        self.finished.waitTimeout(self.io, .{ .duration = .{
-            .raw = .fromMilliseconds(timeout_ms),
-            .clock = .awake,
-        } }) catch {};
-        self.finished.reset();
     }
 
     /// Releases `mutex` after a call that gave the Client work, so `serve`
