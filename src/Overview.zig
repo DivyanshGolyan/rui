@@ -1367,7 +1367,8 @@ fn hostFacts(self: *Self) ?view.Host {
     if (self.host_process == null or self.host_process.?.started_at != ready.started_at) {
         self.host_process = if (client.observeHostProcess(self.init.io, self.options.store, null)) |process|
             .{ .started_at = ready.started_at, .pid = process.pid }
-        else |_| null;
+        else |_|
+            null;
     }
     var processes: @import("host_identity.zig").Processes = .{};
     self.memory = @import("process_memory.zig").read(&processes, std.c.getpid(), if (self.host_process) |host| host.pid else null);
