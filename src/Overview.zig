@@ -469,6 +469,11 @@ fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerro
     ctx.redraw = true;
 }
 
+/// A press on the list's line `index`; the core decides what it means.
+fn appPressed(raw: *anyopaque, ctx: *vxfw.EventContext, index: u32) anyerror!void {
+    try appClick(raw, ctx, .{ .line = index });
+}
+
 fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
     switch (next orelse return) {
         .leave => ctx.quit = true,
@@ -732,6 +737,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" } };
     self.app_screen = .{ .content = &self.app_list, .input = &self.app_input, .userdata = self, .on_event = appEvent };
     self.app_header = .{ .state = &self.state, .userdata = self, .on_click = appClick };
+    self.app_list.on_press = .{ .userdata = self, .pressed = appPressed };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     errdefer self.closePipes();
@@ -3799,4 +3805,38 @@ test "a draft past its cap scrolls inside the composer, and the rule counts what
     var ascii = try rig.shown(40, 40);
     defer ascii.deinit();
     try ascii.expectLines(26, &.{ "------------ v 3 more lines ------------", "> 1" });
+}
+
+test "a click on a Session row, as a terminal sends it, opens the row under it after the list scrolls" {
+    const rig = try openListed();
+    defer rig.close();
+    // A short terminal with the last Session selected scrolls the list: the
+    // header holds row 0, and the list's last three rows fill rows 1 to 3.
+    rig.overview.state.selected = shownRow(rig, 4);
+    var shown = try rig.shown(60, 9);
+    defer shown.deinit();
+    try std.testing.expectEqualStrings("  ● Fix the flaky test                                  13s", try shown.line(2));
+    try std.testing.expectEqualStrings("────────────────────────────────────────────────────────────", try shown.line(4));
+    // Below the list, on the rule, nothing opens.
+    try std.testing.expect(try rig.click(10, 4, 60, 9) == null);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+    // Row 2 shows the fourth Session, one above the selected last.
+    try std.testing.expect(try rig.click(10, 2, 60, 9) == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
+    try std.testing.expectEqualStrings(&shownRow(rig, 3), &Seen.now.conversed);
+}
+
+test "a click on a group heading, as a terminal sends it, opens nothing" {
+    const rig = try openListed();
+    defer rig.close();
+    var shown = try rig.shown(60, 16);
+    defer shown.deinit();
+    const heading: u16 = for (1..16) |row| {
+        const text = try shown.line(@intCast(row));
+        if (text.len > 0 and !std.mem.startsWith(u8, text, " ") and std.mem.indexOf(u8, text, "flaky") == null) break @intCast(row);
+    } else return error.TestUnexpectedResult;
+    const selected = rig.overview.state.selected.?;
+    try std.testing.expect(try rig.click(3, heading, 60, 16) == null);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+    try std.testing.expectEqualStrings(&selected, &rig.overview.state.selected.?);
 }

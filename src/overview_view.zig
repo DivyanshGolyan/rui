@@ -2434,13 +2434,14 @@ fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *co
 /// do. A folded group's "more" line opens the group at its first hidden
 /// row, as moving into them does. Headings and gaps take no click.
 fn click(state: *State, line: usize, effects: *Effects) error{OutOfMemory}!void {
+    // A shown panel fills the list's lines; none of them is a Session.
+    if (state.panel != null) return;
     const item = listItem(state, line) orelse return;
     const at = switch (item) {
         .gap, .heading, .empty => return,
         .row => |at| at,
         .more => |more| state.runs.get(more.group).start + fold_rows,
     };
-    state.closePanel();
     state.unfolded.insert(state.rows.items[state.order.items[at]].group());
     state.selected = state.rows.items[state.order.items[at]].reference;
     if (item == .row) try enter(state, "", effects);
@@ -5969,6 +5970,17 @@ test "a click on a heading, a gap or past the list changes nothing" {
         try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = clicked } }));
         try expectSelected(&state, &selected);
     }
+}
+
+test "a click on a line while a panel shows changes nothing: its lines are not Sessions" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const line = try lineOfRow(&state, "b2c3d4");
+    const selected = state.selected.?;
+    state.panel = .help;
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = line } }));
+    try expectSelected(&state, &selected);
+    try std.testing.expect(state.panel != null and state.panel.? == .help);
 }
 
 test "a click on the empty list's one line changes nothing, loading or listed empty" {
