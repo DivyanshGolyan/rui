@@ -691,6 +691,30 @@ const Transfer = union(enum) { bytes: usize, again, closed };
 
 /// One socket read, through TLS for https. Never zero bytes.
 fn readSome(self: *Connection, buffer: []u8) Transfer {
+    if (!builtin.is_test) return self.readSocket(buffer);
+    return self.withFaults(.read, buffer, readSocket);
+}
+
+/// One socket write, through TLS for https.
+fn writeSome(self: *Connection, bytes: []const u8) Transfer {
+    if (!builtin.is_test) return self.writeSocket(bytes);
+    return self.withFaults(.write, bytes, writeSocket);
+}
+
+/// Tests only: the transfer as the Engine's seeded faults allow it.
+fn withFaults(self: *Connection, comptime direction: Engine.Faults.Direction, bytes: anytype, transfer: fn (*Connection, @TypeOf(bytes)) Transfer) Transfer {
+    const faults = self.engine.faults orelse return transfer(self, bytes);
+    const allowed = switch (faults.admit(self.serial, direction, bytes.len, self.ssl != null)) {
+        .pass => |count| count,
+        .again => return .again,
+        .closed => return .closed,
+    };
+    const result = transfer(self, bytes[0..allowed]);
+    if (result == .bytes) faults.moved(self.serial, direction, result.bytes);
+    return result;
+}
+
+fn readSocket(self: *Connection, buffer: []u8) Transfer {
     if (self.ssl) |ssl| return switch (tls.read(ssl, buffer)) {
         .bytes => |count| .{ .bytes = count },
         .want_read => .again,
@@ -712,9 +736,9 @@ fn readSome(self: *Connection, buffer: []u8) Transfer {
     }
 }
 
-/// One socket write, through TLS for https. A TLS write that needs a read
-/// first waits for readability, which every session state polls for.
-fn writeSome(self: *Connection, bytes: []const u8) Transfer {
+/// A TLS write that needs a read first waits for readability, which every
+/// session state polls for.
+fn writeSocket(self: *Connection, bytes: []const u8) Transfer {
     if (self.ssl) |ssl| return switch (tls.write(ssl, bytes)) {
         .bytes => |count| .{ .bytes = count },
         .want_read, .want_write => .again,
