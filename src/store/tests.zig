@@ -2924,6 +2924,9 @@ test "production turn preserves skipped continuation preference through actual S
                 pub fn scheduledRetry(_: *const @This()) turn.ScheduledRetry {
                     return .unknown;
                 }
+                pub fn unixMilliseconds(_: *const @This()) ?u64 {
+                    return null;
+                }
 
                 pub fn admitRetry(self: *@This()) turn.Admission {
                     var admission = (self.storage.tryAdmitNextModelRetry(.empty(), self.faults, null) catch |err| {
@@ -6567,9 +6570,9 @@ test "retry settlement adds actual entropy after the provider deadline" {
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             // With no retry scheduled, the admission scan says so.
-            var waiting: ?u64 = 1;
-            try std.testing.expect((try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, &waiting)) == null);
-            try std.testing.expectEqual(@as(?u64, null), waiting);
+            var scheduled: ?u64 = 1;
+            try std.testing.expect((try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, &scheduled)) == null);
+            try std.testing.expectEqual(@as(?u64, null), scheduled);
             const session = try configureTestSession(&storage, "jitter-config");
             try submitTestMessage(&storage, &tmp, "jitter-input", "jitter-message", session.slice(), "retry");
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -6593,11 +6596,11 @@ test "retry settlement adds actual entropy after the provider deadline" {
                 .retry_after_deadline_ms = 40_000,
             } }, .{});
             try std.testing.expectEqual(@as(u64, 40_500), try store_testing.queryU64(&storage, "SELECT retry_due_at_ms FROM model_operation", .{}));
-            // Not due yet: the scan admits nothing and reads how long the
-            // earliest scheduled retry still waits, in its own round.
+            // Not due yet: the scan admits nothing and reads when the
+            // earliest scheduled retry falls due, in its own round.
             const rounds = storage.testing_content_work.rounds;
-            try std.testing.expect((try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, &waiting)) == null);
-            try std.testing.expectEqual(@as(?u64, 9_500), waiting);
+            try std.testing.expect((try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, &scheduled)) == null);
+            try std.testing.expectEqual(@as(?u64, 40_500), scheduled);
             try std.testing.expectEqual(rounds + 1, storage.testing_content_work.rounds);
         }
     }.run);

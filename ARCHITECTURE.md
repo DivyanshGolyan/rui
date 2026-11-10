@@ -3818,7 +3818,7 @@ Discovery uses bounded storage queries, not per-Session resident tasks.
 The writer rechecks after writes; accepted live-effect controls publish their required process-local signal.
 No SQLite watcher is required.
 The retry scans use a due-time index that excludes future deadlines, and run at most once per second.
-A scan that found nothing runs again only after a commit, a slot change or the earliest scheduled retry falling due, which the admission scan reads in its own round; an idle Host sends the Store no query.
+A scan that found nothing runs again only after a commit, a slot change or the earliest scheduled retry falling due by the wall clock, the clock the Store admits by; the admission scan reads that due time in its own round, and an idle Host sends the Store no query.
 Missed ticks do not queue.
 Full capacity or an empty array must not cause spinning.
 
