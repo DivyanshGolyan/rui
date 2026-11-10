@@ -391,7 +391,7 @@ const Harness = struct {
         const self: *Harness = @ptrCast(@alignCast(raw));
         self.scrolls += if (up) -1 else 1;
         const shape: viewport.Layout = .{ .width = self.size.width, .method = self.transcript.method };
-        self.transcript.first = if (up) self.document.up(shape, self.transcript.first, 1) else self.document.down(shape, self.transcript.first, 1).min(self.document.bottom(shape, self.size.height));
+        self.document.top = if (up) self.document.up(shape, self.transcript.first, 1) else self.document.down(shape, self.transcript.first, 1).min(self.document.bottom(shape, self.size.height));
     }
 };
 
@@ -468,7 +468,7 @@ test "a drag held at an edge scrolls one row a tick and selects the rows it brin
     for (0..10) |index| _ = std.fmt.bufPrint(text[index * 7 ..][0..7], "line {d}\n", .{index}) catch unreachable;
     const h = try Harness.init(&text, .{ .width = 10, .height = 3 });
     defer h.deinit();
-    h.transcript.first = .{ .offset = 4 * 7 };
+    h.document.top = .{ .offset = 4 * 7 };
     _ = try h.frame();
     var copied: [128]u8 = undefined;
     try h.drag(.{ 9, 1 }, .{ 2, 0 });
@@ -539,7 +539,7 @@ test "a press or drag ends without copying when the pointer leaves or the conten
 test "a drag over cells drawn before the text changed copies the text they showed" {
     const h = try Harness.init("first\nsecond line\nthird\n", .{ .width = 16, .height = 2 });
     defer h.deinit();
-    h.transcript.first = .{ .offset = "first\n".len };
+    h.document.top = .{ .offset = "first\n".len };
     _ = try h.frame();
     var copied: [64]u8 = undefined;
     // Between the draw and the gesture, a worker drops the line above the
