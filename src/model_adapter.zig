@@ -2376,7 +2376,7 @@ test "request preparation retains the allocated ID across reopen and replacement
             var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
             const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
             try setup.storage.open(std.testing.io, database, setup.root);
-            var replacement = (try setup.storage.tryAdmitNextModelRetry(store.ActiveOperationFilter.empty(), .{})).?;
+            var replacement = (try setup.storage.tryAdmitNextModelRetry(store.ActiveOperationFilter.empty(), .{}, null)).?;
             binding = try replacement.permit.consume();
             try std.testing.expectEqual(original.turn_id, binding.turn_id);
             try std.testing.expectEqual(original.operation_id, binding.operation_id);

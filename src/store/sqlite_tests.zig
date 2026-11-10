@@ -5926,7 +5926,7 @@ test "retry due index excludes future population and preserves age ordering" {
         .context = &empty_active_context,
         .containsFn = Active.contains,
         .maximum_exclusions = 1,
-    }, .{})).?;
+    }, .{}, null)).?;
     try std.testing.expectEqual(@as(u64, 2), admitted.permit.binding.operation_id);
 }
 
@@ -6032,7 +6032,7 @@ test "retry admission reads past a full page of active Operations" {
         .containsFn = Active.contains,
         .maximum_exclusions = retry_admission_page_rows,
     };
-    const admitted = (try storage.tryAdmitNextModelRetry(active_filter, .{})).?;
+    const admitted = (try storage.tryAdmitNextModelRetry(active_filter, .{}, null)).?;
     try std.testing.expectEqual(@as(u64, retry_admission_page_rows + 1), admitted.permit.binding.operation_id);
 }
 
@@ -6083,7 +6083,7 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
 
     try std.testing.expectError(
         error.InjectedAttemptCommitFailure,
-        storage.tryAdmitNextModelRetry(active_filter, .{ .attempt_before_commit = true }),
+        storage.tryAdmitNextModelRetry(active_filter, .{ .attempt_before_commit = true }, null),
     );
     try std.testing.expect(storage.isFenced());
     try std.testing.expectEqual(@as(usize, 5150), comparisons);
@@ -6091,7 +6091,7 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     try storage.close();
     try testingStore(&storage, &tmp, std.testing.io);
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
-    const admitted = (try storage.tryAdmitNextModelRetry(active_filter, .{})).?;
+    const admitted = (try storage.tryAdmitNextModelRetry(active_filter, .{}, null)).?;
     try std.testing.expectEqual(@as(u64, 201), admitted.permit.binding.operation_id);
     try std.testing.expectEqual(@as(u64, 2), admitted.permit.binding.attempt_ordinal);
     try std.testing.expectEqual(@as(usize, 5150), comparisons);

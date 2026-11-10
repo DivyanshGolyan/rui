@@ -11,9 +11,10 @@ Turn.
 BUDGET is the ratchet: a count above its bound fails, and so does an exact
 count that moved down, so every round-trip cut lowers the table in the same
 change. Commits and write round trips are exact, for a Session's first operation
-and for each later one. Total round trips per operation and idle round
-trips are upper bounds while the Host still polls
-the Store on a timer, which makes them vary by a few from run to run.
+and for each later one, and so are idle round trips. Total round trips per
+operation are an upper bound while the Host still rescans after each
+commit and the observe loop below polls, which makes them vary by a few
+from run to run.
 
 launch_frame_mysql_integration.py runs `run` after its own cases, with
 the same arguments, so launch-frame-integration holds the budget wherever
@@ -48,14 +49,15 @@ BUDGET = {
     # Each later operation, exact.
     "commits": 3,
     "write_round_trips": 10,
-    # Any operation, upper bound: timer polls, the observe loop below and
+    # Any operation, upper bound: rescans, the observe loop below and
     # history read one round at a time make the total vary (44 to 62 over
     # three runs once content chunks rode their row's round).
     "round_trips": 70,
-    # Over IDLE_SECONDS with no Session, upper bound (10 on main 59d5c7b3).
-    "idle_round_trips": 10,
+    # Over IDLE_SECONDS with no Session, exact: the Host asks again only
+    # after a commit, a slot change or a scheduled retry falling due.
+    "idle_round_trips": 0,
 }
-EXACT = ("first_commits", "first_write_round_trips", "commits", "write_round_trips")
+EXACT = ("first_commits", "first_write_round_trips", "commits", "write_round_trips", "idle_round_trips")
 
 
 class Relay:
