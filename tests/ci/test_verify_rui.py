@@ -1,8 +1,11 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import runpy
+import site
+import subprocess
 import sys
 import tempfile
 import types
@@ -14,6 +17,35 @@ SCRIPT = Path(__file__).parents[2] / ".claude/skills/verify-rui/scripts/verify-r
 
 
 class VerifyRuiTest(unittest.TestCase):
+    def test_child_imports_user_site_with_synthetic_home(self):
+        run_type = runpy.run_path(str(SCRIPT))["Run"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = root / "user-base"
+            home = root / "synthetic-home"
+            home.mkdir()
+            python = sys._base_executable
+            user_site = subprocess.check_output(
+                [python, "-m", "site", "--user-site"], text=True,
+                env={**os.environ, "PYTHONUSERBASE": str(base)},
+            ).strip()
+            Path(user_site).mkdir(parents=True)
+            (Path(user_site) / "verify_rui_fixture_dependency.py").write_text("VALUE = 42\n")
+            (root / "run.json").write_text(json.dumps({
+                "scratch": str(root), "home": str(home), "store": str(root / "store"),
+                "project": str(root), "binary": "/unused/rui",
+            }))
+            with patch.object(site, "getuserbase", return_value=str(base)):
+                env = run_type(root).env()
+            command = [python, "-c", "import verify_rui_fixture_dependency; print(verify_rui_fixture_dependency.VALUE)"]
+            without = subprocess.run(command, env={k: v for k, v in env.items() if k != "PYTHONUSERBASE"},
+                                     capture_output=True, text=True)
+            self.assertNotEqual(without.returncode, 0)
+            with_base = subprocess.run(command, env=env, capture_output=True, text=True)
+            self.assertEqual(with_base.returncode, 0, with_base.stderr)
+            self.assertEqual(with_base.stdout.strip(), "42")
+            self.assertEqual(env["HOME"], str(home))
+
     def test_new_sends_seed_to_session_id_from_start_response(self):
         module = runpy.run_path(str(SCRIPT))
         new = module["cmd_new"]

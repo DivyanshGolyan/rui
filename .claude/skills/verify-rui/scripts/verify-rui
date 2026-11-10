@@ -16,6 +16,7 @@ import select
 import shlex
 import shutil
 import signal
+import site
 import subprocess
 import sys
 import tarfile
@@ -98,6 +99,7 @@ class Run:
         # A minimal, explicit environment: no inherited credentials or Store.
         env = {
             "HOME": str(self.home),
+            "PYTHONUSERBASE": site.getuserbase(),
             "PATH": f"{self.rui.parent}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
             "TERM": "xterm-256color",
             "LANG": "en_US.UTF-8",
