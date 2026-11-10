@@ -22,181 +22,20 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Select fixture dependencies
-      id: requirements
-      shell: bash
-      env:
-        TARGETS: ${{ inputs.targets }}
-      run: |
-        python3 - <<'PY'
-        import json, os, sys
-        sys.path.insert(0, 'tests/ci')
-        from select_tests import setup_requirements
-        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-            for name, required in setup_requirements(json.loads(os.environ['TARGETS'])).items():
-                print(f'{name}={str(required).lower()}', file=output)
-        PY
-    - name: Install tmux for upgrade integration
-      if: ${{ steps.requirements.outputs.tmux == 'true' && inputs.check-part != 'compiled' }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        if ! command -v tmux >/dev/null 2>&1; then
-          case "$(uname -s)" in
-            Darwin) brew install tmux ;;
-            Linux) sudo apt-get update -q; sudo apt-get install -yq tmux ;;
-            *) echo "tmux installation is unsupported on $(uname -s)" >&2; exit 1 ;;
-          esac
-        fi
-        command -v tmux
-    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-      if: ${{ steps.requirements.outputs.go == 'true' }}
+    # Each part selects its own checks (select_tests.BUILD_MODULES): an edit
+    # to this file selects the full build gate, an edit to a part only what it can break.
+    - uses: ./.github/actions/setup/fixtures
+      id: fixtures
       with:
-        go-version: '1.27.1'
-        cache: false
-    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-      if: ${{ steps.requirements.outputs.node == 'true' }}
+        targets: ${{ inputs.targets }}
+        check-part: ${{ inputs.check-part }}
+    - uses: ./.github/actions/setup/caches
+      id: caches
       with:
-        node-version: '22'
-    - name: Install the TypeScript client's dependencies
-      if: ${{ steps.requirements.outputs.node == 'true' }}
-      shell: bash
-      working-directory: clients/ts
-      run: npm ci --ignore-scripts --no-audit --no-fund
-    - name: Identify the actual native build tools
-      id: tools
-      shell: bash
-      run: |
-        set -euo pipefail
-        identity="$RUNNER_TEMP/rui-native-tools.txt"
-        {
-          uname -sm
-          cc --version
-          make --version
-          perl -v
-          if [ "$(uname -s)" = Darwin ]; then
-            xcodebuild -version
-            xcrun --sdk macosx --show-sdk-path
-            xcrun --sdk macosx --show-sdk-version
-            xcrun --sdk macosx --show-sdk-build-version
-          else
-            cat /etc/os-release
-            ldd --version
-            ld --version
-          fi
-        } > "$identity"
-        cat "$identity"
-        echo "identity=$(shasum -a 256 "$identity" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
-        # The build runner is compiled for the host CPU, which varies between
-        # runners of one image, so its cache is only reusable per CPU model.
-        # x86 names the model; ARM Linux has no "model name" line, so the first implementer line stands in, and
-        # a /proc/cpuinfo with neither falls back to the machine type rather than failing the step.
-        if [ "$(uname -s)" = Darwin ]; then cpu=$(sysctl -n machdep.cpu.brand_string); else cpu=$(grep -m1 -E '^(model name|CPU implementer)' /proc/cpuinfo || uname -m); fi
-        echo "cpu=$(printf '%s' "$cpu" | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
-    - name: Name the build cache keys
-      id: build-keys
-      if: ${{ inputs.cold != 'true' && inputs.compiled != 'true' }}
-      shell: bash
-      env:
-        DEPS: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'screen-emulator/build.zig.zon', 'src/build_*') }}-
-        SOURCES: ${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-
-        CHECK_PART: ${{ inputs.check-part }}
-      run: |
-        {
-          echo "key=$DEPS$SOURCES$CHECK_PART"
-          echo "prefix-sources=$DEPS$SOURCES"
-          echo "prefix-deps=$DEPS"
-        } >> "$GITHUB_OUTPUT"
-    - name: Name the build runner cache keys
-      id: runner-keys
-      if: ${{ inputs.cold != 'true' && inputs.compiled == 'true' }}
-      shell: bash
-      env:
-        CPU: rui-runner-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ steps.tools.outputs.identity }}-${{ steps.tools.outputs.cpu }}-
-        BUILD: ${{ hashFiles('build.zig', 'build.zig.zon') }}
-      run: |
-        {
-          echo "key=$CPU$BUILD"
-          echo "prefix-cpu=$CPU"
-        } >> "$GITHUB_OUTPUT"
-    # Each cache is a pair: save where the token may write, else only restore.
-    # A `cache-mode: read` token refuses saves, so those workflows pass 'false'.
-    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.publish-caches == 'true' }}
-      with:
-        path: ${{ runner.temp }}/rui-zig
-        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.1
-    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.publish-caches != 'true' }}
-      with:
-        path: ${{ runner.temp }}/rui-zig
-        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.1
-    # Build pair: build.zig marks every Zig test run side-effectful, so no
-    # acceptance manifests are written/read. Output-producing build steps stay cached.
-    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      id: build-cache
-      if: ${{ inputs.publish-caches == 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
-      with:
-        path: |
-          ~/.cache/zig
-          .zig-cache
-          zig-pkg
-          screen-emulator/zig-pkg
-        key: ${{ steps.build-keys.outputs.key }}
-        restore-keys: |
-          ${{ steps.build-keys.outputs.prefix-sources }}
-          ${{ steps.build-keys.outputs.prefix-deps }}
-    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      id: build-cache-restore
-      if: ${{ inputs.publish-caches != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
-      with:
-        path: |
-          ~/.cache/zig
-          .zig-cache
-          zig-pkg
-          screen-emulator/zig-pkg
-        key: ${{ steps.build-keys.outputs.key }}
-        restore-keys: |
-          ${{ steps.build-keys.outputs.prefix-sources }}
-          ${{ steps.build-keys.outputs.prefix-deps }}
-    # Package pair: pinned package sources depend only on build.zig.zon, so a
-    # tool, image or build-input change that misses every build snapshot reads
-    # them here instead of from codeberg.org and GitHub, whose 504s and stalls
-    # failed producers. A repinned package restores the newest earlier set, so
-    # only the repinned one comes from its host; the fetch below downloads only
-    # packages still missing.
-    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.publish-caches == 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
-      with:
-        path: zig-pkg
-        key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
-        restore-keys: rui-packages-v1-
-    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.publish-caches != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
-      with:
-        path: zig-pkg
-        key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
-        restore-keys: rui-packages-v1-
-    # Runner pair: consumers compile only the build runner and configuration; executables
-    # come from the verified artifact and test runs are never cached.
-    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.publish-caches == 'true' && inputs.cold != 'true' && inputs.compiled == 'true' }}
-      with:
-        path: |
-          ~/.cache/zig
-          .zig-cache
-          !.zig-cache/o/ci-compiled
-        key: ${{ steps.runner-keys.outputs.key }}
-        restore-keys: ${{ steps.runner-keys.outputs.prefix-cpu }}
-    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.publish-caches != 'true' && inputs.cold != 'true' && inputs.compiled == 'true' }}
-      with:
-        path: |
-          ~/.cache/zig
-          .zig-cache
-          !.zig-cache/o/ci-compiled
-        key: ${{ steps.runner-keys.outputs.key }}
-        restore-keys: ${{ steps.runner-keys.outputs.prefix-cpu }}
+        check-part: ${{ inputs.check-part }}
+        cold: ${{ inputs.cold }}
+        compiled: ${{ inputs.compiled }}
+        publish-caches: ${{ inputs.publish-caches }}
     - name: Install pinned compiler
       shell: bash
       run: |
@@ -247,14 +86,6 @@ runs:
         cc -O2 -Wall -Wextra -Werror tests/ci/zig_cache_restat.c -o "$RUNNER_TEMP/zig-cache-restat"
         "$RUNNER_TEMP/zig-cache-restat" .zig-cache/h "$HOME/.cache/zig/h" -- \
           "$PWD" "$RUNNER_TEMP/rui-zig/lib" "$PWD/.zig-cache" "$HOME/.cache/zig"
-    - name: Install the selected Python fixture dependencies
-      if: ${{ steps.requirements.outputs.python == 'true' }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        python3 -m venv "$RUNNER_TEMP/rui-python"
-        "$RUNNER_TEMP/rui-python/bin/pip" --disable-pip-version-check install --retries 1 -r tests/integration/requirements.txt
-        echo "$RUNNER_TEMP/rui-python/bin" >> "$GITHUB_PATH"
     - name: Select empty caches for scheduled acceptance
       if: ${{ inputs.cold == 'true' }}
       shell: bash
@@ -266,7 +97,7 @@ runs:
         echo "ZIG_GLOBAL_CACHE_DIR=$root/global" >> "$GITHUB_ENV"
         echo "ZIG_LOCAL_PKG_DIR=$root/packages" >> "$GITHUB_ENV"
     - name: Fetch the existing pinned dependency graph
-      if: ${{ inputs.compiled != 'true' && (inputs.cold == 'true' || (steps.build-cache.outputs.cache-hit || steps.build-cache-restore.outputs.cache-hit) != 'true') }}
+      if: ${{ inputs.compiled != 'true' && (inputs.cold == 'true' || steps.caches.outputs.build-hit != 'true') }}
       shell: bash
       env:
         # GitHub-hosted archives come through the API, which anonymous load shedding spares.
@@ -280,7 +111,7 @@ runs:
     # It keeps its own zig-pkg: Zig refuses ghostty's path dependencies from
     # a package directory outside it.
     - name: Fetch the screen observer's pinned package graph
-      if: ${{ steps.requirements.outputs.screen == 'true' && inputs.compiled != 'true' && (inputs.cold == 'true' || (steps.build-cache.outputs.cache-hit || steps.build-cache-restore.outputs.cache-hit) != 'true') }}
+      if: ${{ steps.fixtures.outputs.screen == 'true' && inputs.compiled != 'true' && (inputs.cold == 'true' || steps.caches.outputs.build-hit != 'true') }}
       shell: bash
       run: |
         set -euo pipefail

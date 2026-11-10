@@ -507,13 +507,15 @@ RULES += ((("src/store.zig", "src/store/*", "!src/store/wire/*", "src/server_exe
            ("launch-frame-integration",), (),
            "The Store's MySQL round trips per model operation and while idle stay within their budget"),)
 
-# build.zig wires every target, so an edit to it selects the full gate (RULES
+# build.zig wires every target, and the setup action installs the compiler and
+# fetches the packages, so an edit to either selects the full gate (RULES
 # above). A hub module is build.zig's code split out for size, and an edit to
-# it selects what a build.zig edit does. Any other module under build/ selects
-# only what it can change: the targets it defines and those that use what it
-# builds. test_selection.BuildModuleTest holds every module and every target a
-# module defines to this map.
+# it selects what a build.zig edit does. Any other module under build/, or a
+# part of the setup action, selects only what it can change: the targets it
+# defines and those that use what it builds. test_selection.BuildModuleTest
+# holds every module and every target a module defines to this map.
 BUILD_HUB = "build.zig"
+SETUP_PARTS = ".github/actions/setup/*/action.yml"
 FIXTURE_TABLE = "build/fixtures.zig"
 FIXTURE_ROW = re.compile(r'^ *\.\{ \.step = "([a-z0-9-]+)",.*\},\n', re.M)
 
@@ -552,6 +554,13 @@ BUILD_MODULES = {
     # The unit roots and one screen fixture link and load what it names; it is
     # a Mac path, so ready PRs run these on Mac too.
     "build/darwin.zig": ("test", "host-launch-integration"),
+    # Every job restores and saves through it, and a key or path error fails
+    # its setup. Zig's cache is content-addressed and acceptance runs are never
+    # cached (cache_execution checks that), so a restore cannot pass a stale test.
+    ".github/actions/setup/caches/action.yml": ("test-logic",),
+    # One target for each tool it installs: Python packages, Go, Node and tmux.
+    ".github/actions/setup/fixtures/action.yml":
+        ("dispatch-integration", "measurement-check", "ts-client", "upgrade-integration"),
 }
 RULES += tuple(((module,), targets, tuple(target for target in targets if target not in LINUX_ONLY),
                 "Build module: the targets it defines or builds for")
