@@ -178,10 +178,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         const max_queued = 8;
 
         store: *Store,
-        opened: bool = false,
-        /// Set by `commit` and `abandon`; `deinit` refuses a write Access
-        /// that opened its transaction without either.
-        ended: bool = false,
+        /// `opened` once `ensureOpen` tried to begin, whether or not the
+        /// engine confirmed; `ended` once `commit` succeeded or `abandon`
+        /// ran, at this Access's boundary only: a batch's durability is
+        /// the Store's. `deinit` refuses a write Access still `opened`,
+        /// and an ended Access takes no new work.
+        phase: enum { lazy, opened, ended } = .lazy,
         /// The first failure; every later call does nothing and every round
         /// reports it.
         failure: ?Error = null,
@@ -502,7 +504,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 if (a.failure == null and a.queued != 1) @panic("a single Access commits exactly one write");
                 a.pass();
                 if (a.failure) |err| return err;
-                a.ended = true;
+                a.phase = .ended;
                 return;
             }
             try a.finishWrites();
@@ -510,7 +512,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 a.failure = err;
                 return err;
             };
-            a.ended = true;
+            a.phase = .ended;
         }
 
         /// Ends a write Access without committing: drops what it queued
@@ -521,11 +523,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// abandoned and then failed is not rolled back twice.
         pub fn abandon(a: *Self, faults: store_core.Faults) Error!void {
             comptime std.debug.assert(mode == .write or mode == .single);
-            if (a.ended) return;
+            if (a.phase == .ended) return;
+            const opened = a.phase == .opened;
             const discarded = a.resetQueued();
             a.claimed = 0;
-            a.ended = true;
-            if (mode == .write and a.opened) try store_core.rollbackAfterError(a.store, faults);
+            a.phase = .ended;
+            if (mode == .write and opened) try store_core.rollbackAfterError(a.store, faults);
             try discarded;
         }
 
@@ -550,7 +553,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 // latched so the Store cannot reuse the unresolved connection.
                 a.failure = err;
             };
-            if (mode == .write and a.opened and !a.ended) @panic("a write Access neither committed nor abandoned its transaction");
+            if (mode == .write and a.phase == .opened) @panic("a write Access neither committed nor abandoned its transaction");
         }
 
         /// The queued writes, then one compare-and-set per claiming
@@ -573,8 +576,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// statement. A network engine's ownership check (PR 8) joins
         /// `store_core.begin`.
         fn ensureOpen(a: *Self) void {
-            if (a.opened or a.failure != null) return;
-            a.opened = true;
+            // Every statement, identity and commit opens through here; an
+            // ended Access would begin a transaction that nothing ends.
+            std.debug.assert(a.phase != .ended);
+            if (a.phase == .opened or a.failure != null) return;
+            a.phase = .opened;
             if (mode == .write) store_core.begin(a.store) catch |err| {
                 a.failure = err;
             };
