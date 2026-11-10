@@ -531,13 +531,14 @@ pub const Reactor = struct {
 /// A response being captured in its Transfer's slot. Like PreparedRequest
 /// it keeps no io or budget; its Transfer's Reactor holds both.
 pub const ResponseCapture = struct {
+    /// The writer until `seal`, then the read-only alias.
     file: std.Io.File,
+    /// The read-only alias until `seal` moves it into `file`; null once sealed.
     readonly: ?std.Io.File,
     length: u64 = 0,
     /// Bytes charged by accepted body events, so a failed write's charge is
     /// still released.
     charged: u64 = 0,
-    sealed: bool = false,
 
     pub fn init(
         io: std.Io,
@@ -585,15 +586,13 @@ pub const ResponseCapture = struct {
 
     /// Check the length h2 wrote, then keep only the read-only alias.
     pub fn seal(self: *ResponseCapture, io: std.Io, fail: bool, written: u64) !void {
-        std.debug.assert(!self.sealed);
+        std.debug.assert(self.readonly != null);
         self.length = written;
         if (fail) return error.InjectedResponseSealFailure;
         if (try self.file.length(io) != written) return error.ResponseSealFailed;
-        const readonly = self.readonly orelse return error.ResponseSealFailed;
         self.file.close(io);
-        self.file = readonly;
+        self.file = self.readonly.?;
         self.readonly = null;
-        self.sealed = true;
     }
 
     pub fn deinit(self: *ResponseCapture, io: std.Io, budget: ScratchBudget) void {
@@ -883,7 +882,7 @@ pub const Transfer = struct {
     /// The sealed answer, success or HTTP error.
     pub fn takeResponse(self: *Transfer) SealedResponse {
         std.debug.assert(self.response_owned);
-        std.debug.assert(self.response.sealed);
+        std.debug.assert(self.response.readonly == null);
         self.response_owned = false;
         return .{
             .io = self.reactor.io,
@@ -894,8 +893,10 @@ pub const Transfer = struct {
         };
     }
 
-    /// The unsealed bytes h2 wrote before an unanswered failure.
+    /// The unsealed bytes h2 wrote before an unanswered failure, borrowed
+    /// from the capture this Transfer still owns.
     pub fn partialResponse(self: *const Transfer) struct { file: std.Io.File, length: u64 } {
+        std.debug.assert(self.response_owned);
         return .{ .file = self.response.file, .length = self.stream.responseLength() };
     }
 
