@@ -2,7 +2,7 @@
 //! outputs, parts, tool results and prefix seals.
 
 const std = @import("std");
-const protocol = @import("../../protocol.zig");
+const activity_read = @import("../../activity_read.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const store_path = @import("../../store_path.zig");
 const content_string = @import("../../content_string.zig");
@@ -1309,7 +1309,7 @@ fn readNextHistoricalToolGroup(a: *ReadAccess, view: *HistoricalView) !?Historic
         scan.previous_position = position;
         scan.item += 1;
         if (item.item_kind != 3) return error.HistoricalPending;
-        var metadata: protocol.ProposalMetadata = undefined;
+        var metadata: activity_read.ProposalMetadata = undefined;
         var proposal: reads_domain.ProposalRead = .{ .position = position, .metadata = &metadata };
         var found_outcome: call_outcome.Result = undefined;
         reads_domain.readProposal(a, item.session_ref.slice(), &proposal);

@@ -20,7 +20,6 @@
 
 const std = @import("std");
 const model_capability = @import("../../model_capability.zig");
-const protocol = @import("../../protocol.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");

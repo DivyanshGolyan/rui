@@ -6,7 +6,6 @@ const wire = @import("../wire/mysql_connection.zig");
 const rows = @import("../mysql_row.zig");
 const literal = @import("../mysql_literal.zig");
 const schema = @import("../schema.zig");
-const protocol = @import("../../protocol.zig");
 const store_path = @import("../../store_path.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const wire_version = @import("../../wire_version.zig").wire_version;

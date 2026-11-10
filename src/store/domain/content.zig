@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
-const protocol = @import("../../protocol.zig");
+const conversation_read = @import("../../conversation_read.zig");
 const content_string = @import("../../content_string.zig");
 const content_custody = @import("../../content_custody.zig");
 const store_core = @import("../Store.zig");
@@ -438,7 +438,7 @@ fn verifyExternalContent(
     destination: ?store_access.ContentSink,
     faults: Faults,
 ) !void {
-    var copy: HashedWindow(protocol.content_window_bytes) = .{ .hash = content_string.hasher() };
+    var copy: HashedWindow(conversation_read.content_window_bytes) = .{ .hash = content_string.hasher() };
     var offset: u64 = 0;
     while (offset < expected_length) {
         const wanted: usize = @intCast(@min(expected_length - offset, copy.window.len));

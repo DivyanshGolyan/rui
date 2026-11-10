@@ -2,7 +2,6 @@
 //! continuations.
 
 const std = @import("std");
-const protocol = @import("../../protocol.zig");
 const turn_ending = @import("../../turn_ending.zig");
 const session_id = @import("../../session_id.zig");
 const store_core = @import("../Store.zig");

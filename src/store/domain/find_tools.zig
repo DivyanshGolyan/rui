@@ -1,6 +1,6 @@
 //! Loading saved tools is one call-keyed command, revision and resolution.
 const std = @import("std");
-const protocol = @import("../../protocol.zig");
+const command_input = @import("../../command_input.zig");
 const content_string = @import("../../content_string.zig");
 const tool_name = @import("../../tool_name.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -58,7 +58,7 @@ const loaded_names = rsql.Read(.{
 });
 
 const LoadedNames = struct {
-    names: protocol.ToolsField = .{ .state = .value },
+    names: command_input.ToolsField = .{ .state = .value },
     invalid: bool = false,
 
     pub fn visit(self: *LoadedNames, row: *const loaded_names.Row) bool {
@@ -71,7 +71,7 @@ const LoadedNames = struct {
 };
 
 const Matches = struct {
-    names: protocol.ToolsField = .{ .state = .value },
+    names: command_input.ToolsField = .{ .state = .value },
     rows: [8]candidates.Row = undefined,
     count: usize = 0,
     remaining: usize = 0,

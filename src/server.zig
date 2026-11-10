@@ -60,11 +60,12 @@ const waitAtTestGate = server_host.waitAtTestGate;
 const traceSqliteDiagnostic = server_host.traceSqliteDiagnostic;
 
 fn captureFailedResponse(host: *Host, request: *const protocol.InspectSession, request_number: u64) !store_module.SessionReport {
-    const binding = try host.store.failedResponseBinding(request);
+    const selection = request.failed_response.?;
+    const binding = try host.store.failedResponseBinding(request.session.slice(), selection.operation, selection.attempt);
     var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
     try capture.create(host.lease.paths.scratch.slice(), request_number, host.hooks.fails(.report_unlink));
     errdefer capture.deinit();
-    try failed_responses.exportRecord(host.io, host.lease.store_dir, binding, request.failed_response.?.part, &capture);
+    try failed_responses.exportRecord(host.io, host.lease.store_dir, binding, selection.part, &capture);
     return capture.seal();
 }
 

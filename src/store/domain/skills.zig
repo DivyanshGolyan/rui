@@ -2,7 +2,6 @@
 //! content. Catalog instructions append at the Session's next position.
 const std = @import("std");
 const catalog = @import("../../skills.zig");
-const protocol = @import("../../protocol.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const content_string = @import("../../content_string.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
