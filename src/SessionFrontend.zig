@@ -2184,6 +2184,8 @@ fn commandLine(self: *Self) !void {
 /// Enter on a Message draft whose list the latest frame drew: takes its
 /// highlighted row. A command line's Enter goes to `commandLine`.
 fn takeShownRow(self: *Self) bool {
+    // A rejected line is the editor's to refuse and clear.
+    if (self.input.editors[self.input.active].rejected != null) return false;
     const draft = self.input.composition().bytes;
     if (draft.len == 0 or (draft[0] == '/' and !std.mem.startsWith(u8, draft, "//"))) return false;
     const shown = self.shownCommands() orelse return false;
@@ -3347,6 +3349,35 @@ test "a pending decision, or a Message that carries one, has no /recover row, an
         try std.testing.expectEqualStrings("/result " ++ newer, self.input.takeCommand().?);
         self.submission.intent = null;
     }
+}
+
+test "Enter on a rejected draft clears it even while a skill list shows" {
+    const Fake = struct {
+        fn read(_: client.Requests, gpa: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !skill_suggestions.Page {
+            const entries = try gpa.alloc(skill_suggestions.Entry, 1);
+            entries[0] = .{ .name = try gpa.dupe(u8, "recap"), .description = try gpa.dupe(u8, "") };
+            return .{ .entries = entries, .total = 1 };
+        }
+        fn done(self: *Self) bool {
+            return self.skill_task.completed();
+        }
+    };
+    const io = std.testing.io;
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    held.self.skill_read = Fake.read;
+    try held.keys("use /re");
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &held.self, Fake.done);
+    try held.settle();
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "/recap") != null);
+    // A malformed byte rejects the line; Enter clears it as it does with
+    // no list, rather than taking the row the list still offers.
+    try held.keys("\xff");
+    try held.keys("\r");
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+    try std.testing.expect(held.self.submission.view() == null);
+    try held.keys("hi");
+    try std.testing.expectEqualStrings("hi", held.self.input.composition().bytes);
 }
 
 test "End on an empty draft goes to the latest view and never leaves the conversation" {
