@@ -522,6 +522,23 @@ class CandidatePlanTest(unittest.TestCase):
             fixture.git('checkout', '-q', '--detach', retarget)
             self.assertNotEqual(fixture.run(candidate=candidate).returncode, 0)
 
+    def test_pr_plan_diffs_the_merge_commit_against_the_main_it_merged(self):
+        # #1199 changed only docs, but its event base.sha trailed the main its
+        # merge commit was built on, so main's src changes selected builds.
+        pr_base = re.search(r"(?m)^          BASE: \$\{\{ github\.event_name == 'pull_request' && '([^']+)' \|\| inputs\.base \}\}$",
+                            job(CHECK.read_text(), 'plan'))[1]
+        with PlanFixture() as fixture:
+            stale = fixture.base
+            fixture.write('src/history_memo.zig', 'changed on main\n')
+            main = fixture.commit()
+            fixture.git('checkout', '-q', '-b', 'pr', stale)
+            fixture.write('README.md', 'Candidate. Same line.\n')
+            fixture.commit()
+            fixture.git('checkout', '-q', '--detach', main)
+            fixture.git('-c', 'user.name=t', '-c', 'user.email=t@t', 'merge', '-q', '--no-ff', '-m', 'merge', 'pr')
+            self.assertEqual(fixture.plan(self, base=stale)['change_kind'], 'normal')
+            self.assert_documentation_plan(fixture.plan(self, base=pr_base))
+
     def test_plan_checks_whitespace_and_invalid_base(self):
         with PlanFixture() as fixture:
             fixture.write('README.md', 'Trailing whitespace.  \n')
@@ -599,7 +616,6 @@ class CandidatePlanTest(unittest.TestCase):
         on = CHECK.read_text().split('\npermissions:', 1)[0]
         events = re.search(r'types: \[(.*?)\]', on)[1].split(', ')
         self.assertEqual(set(events), {'opened', 'synchronize', 'reopened', 'ready_for_review'})
-        self.assertIn('BASE: ${{ github.event.pull_request.base.sha || inputs.base }}', CHECK.read_text())
 
 
 class ReleaseFlowTest(unittest.TestCase):
