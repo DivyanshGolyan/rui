@@ -264,7 +264,7 @@ test "historical export preserves hex Store escaping and canonical Session IDs" 
     const clock = View.clock(1_800_000_000, &time).?;
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "\n› \x1b[8m{s}\x1b[0m\x1b[2;8m┄\x1b[0m\n  \x1b[2;8mRaw export: rui session read-conversation{s} --position 2 --ordinal 0\x1b[0m\n" ++
         "\nRui: Historical item omitted: position 3, ordinal 0, 8193 raw bytes.\nRaw export: rui session read-conversation{s} --position 3 --ordinal 0\n" ++
-        "\n\x1b[2;8m← Received message from k7m2qx\x1b[8m{s}\x1b[0m\n", .{ clock, identity, identity, clock }), sink.bytes[0..sink.length]);
+        "\n\x1b[2;8m← Received message from \x1b]8;;rui-session:k7m2qx\x1b\\\x1b[4mk7m2qx\x1b]8;;\x1b\\\x1b[0m\x1b[2;8m\x1b[8m{s}\x1b[0m\n", .{ clock, identity, identity, clock }), sink.bytes[0..sink.length]);
 }
 
 test "history tool tails are exact bounded suffixes and transcript headers only" {
