@@ -217,8 +217,8 @@ def session_link_journey(installed, store, home, session_a):
     env = {"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}
 
     def showing(label):
-        # The line under the composer starts with the open Session's Label.
-        return lambda frame, x, y: f"\n{label} · " in frame
+        # The facts row under the composer starts with the open Session's Label.
+        return lambda frame, x, y: f"\n ‹ {label} · " in frame
 
     with terminal_process([str(installed), "session", "resume", "--store", str(store), session_a], env=env) as (_, master):
         read_terminal(master, f"Received message from {B_LABEL}")
