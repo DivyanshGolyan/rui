@@ -3,7 +3,7 @@
 //! I/O and waits on it; it starts no thread.
 //!
 //! Memory is fixed when the connection is made: a 16 KiB receive buffer, a
-//! send buffer that holds one 16 KiB batch, the client's 2 KiB handshake
+//! send buffer that holds one 4 MiB batch, the client's 2 KiB handshake
 //! buffer, and two TLS record buffers. Nothing grows with a row or a
 //! statement: rows stream from the receive buffer (an event's slices stay
 //! valid until the next call), and a statement longer than a batch streams
@@ -26,8 +26,10 @@ pub const tls = @import("tls.zig");
 /// error rather than a lost connection.
 pub const round_deadline_ms: u32 = 60_000;
 
-/// The statement text one COM_QUERY batch holds.
-pub const batch_bytes = 16 * 1024;
+/// The statement text one COM_QUERY batch holds at most: room for a
+/// step's writes and its content chunks in one round trip. A server whose
+/// `max_allowed_packet` is smaller lowers it (`limitBatch`).
+pub const batch_bytes = 4 * 1024 * 1024;
 
 const prefix_len = 5;
 
@@ -96,6 +98,9 @@ pub const Connection = struct {
     /// Bytes of a streamed statement still due, the buffered ones included;
     /// null while a batch fills, which never drains.
     stream_left: ?usize,
+    /// The text a batch may hold: `batch_bytes`, or less for a server
+    /// whose packets are smaller (`limitBatch`).
+    batch_limit: usize,
     context: ?tls.Context,
     session: ?tls.Session,
     /// After `.start_tls`: every later byte crosses TLS.
@@ -120,6 +125,7 @@ pub const Connection = struct {
         self.in_end = 0;
         self.writer = .{ .vtable = &.{ .drain = drain }, .buffer = &self.send_buffer };
         self.stream_left = null;
+        self.batch_limit = batch_bytes;
         self.context = null;
         self.session = null;
         self.tls_active = false;
@@ -182,7 +188,14 @@ pub const Connection = struct {
 
     /// Room left for text in the open batch.
     pub fn batchRoom(self: *const Connection) usize {
-        return self.send_buffer.len - @max(self.writer.end, prefix_len);
+        return (prefix_len + self.batch_limit) -| @max(self.writer.end, prefix_len);
+    }
+
+    /// Keeps every batch within the server's `max_allowed_packet`, less
+    /// room for the packet's own framing. No batch may be open.
+    pub fn limitBatch(self: *Connection, max_allowed_packet: u64) void {
+        std.debug.assert(self.writer.end == 0);
+        self.batch_limit = @intCast(@min(batch_bytes, max_allowed_packet -| 1024));
     }
 
     /// Text in the open batch.

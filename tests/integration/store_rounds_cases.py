@@ -44,14 +44,14 @@ IDLE_SECONDS = 5
 BUDGET = {
     # A Session's first operation, exact.
     "first_commits": 4,
-    "first_write_round_trips": 30,
+    "first_write_round_trips": 14,
     # Each later operation, exact.
     "commits": 3,
-    "write_round_trips": 21,
+    "write_round_trips": 10,
     # Any operation, upper bound: timer polls, the observe loop below and
-    # history read one round at a time make the total vary (57 to 74 over
-    # fourteen runs once admission read its context with its facts).
-    "round_trips": 80,
+    # history read one round at a time make the total vary (44 to 62 over
+    # three runs once content chunks rode their row's round).
+    "round_trips": 70,
     # Over IDLE_SECONDS with no Session, upper bound (10 on main 59d5c7b3).
     "idle_round_trips": 10,
 }
