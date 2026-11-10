@@ -2267,7 +2267,9 @@ A needs-you row reads its waiting Action's tool, then its arguments, once per Ac
 A narrow screen drops this detail column first and keeps the mark, title and age.
 Divyansh chose marks that hold still on 2026-11-02, replacing the 2026-10-30 pulse on every mark change, and the command and cause on 2026-11-09 (TUI rework plan, "What changes" O6), replacing the starter's name.
 Enter on a row opens that Session's conversation, and so does one click on the row, under Enter's rules; a click on a folded group's `N more` opens the group at its first hidden row, as moving into it does; headings, marks, counts, memory and row words take no click (Divyansh, 2026-11-09, TUI rework plan, "Click targets on the final screens").
-One line map, `listItem` in `src/overview_view.zig`, names each list line for drawing and for clicks.
+One line map, `listItem` in `src/overview_view.zig`, names each list line for drawing, and `clickOf` says what a click on one names: the Session to open or the group to unfold.
+Each drawn row keeps that name, so a click means what the person saw even when the list changed since the frame, and a Session gone by then opens nothing.
+The Sessions list, a panel and the model picker are three widgets in the list's place; the screen shows the one the core names (`State.listArea`), and only the Sessions hear a press.
 Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
 Every input takes one route, the one the core's input mode (`State.inputMode`: compose, frozen or choice) names, and the core steps once with what it made and the draft as it then stands.
 In compose mode the shell's line editor applies the input with the overview's one key table (`keys` in `src/overview_view.zig`); no key is caught ahead of the editor.
