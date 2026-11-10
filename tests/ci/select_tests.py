@@ -5,6 +5,7 @@ A changed file selects the unit roots and process fixtures that reach it
 through literal imports (`Graph`), plus the targets its path rules name.
 """
 import argparse
+import difflib
 from functools import cache
 import fnmatch
 import io
@@ -294,13 +295,75 @@ def store_format(source):
     return schema_version(source), digest_rows(source), migration_steps(source)
 
 
-def store_format_changed(before, after):
+def store_format_changed(path, before, after):
     return before is None or after is None or store_format(before) != store_format(after)
 
 
-# Paths selection judges by content: path -> whether a (before, after) text
-# pair changes what the path's checks exercise. `main` reads both sides.
-CONTENT_RULES = {STORE_SCHEMA: store_format_changed}
+# Build and workflow files whose changed lines can alter what a warm cache
+# replays: Zig cache paths, keys and steps, and the build's has_side_effects
+# runs. Every cache the setup action restores is a build cache; elsewhere
+# only Zig build-cache lines count, not other tools' caches (actionlint).
+# The cache_execution job's own definition counts too (`cache_policy_changed`).
+CACHE_CONFIG = ("build.zig", "build/*.zig", ".github/actions/*", ".github/workflows/*.yml")
+SETUP_CACHE_LINE = re.compile(r"cache", re.IGNORECASE)
+CACHE_LINE = re.compile(r"zig[-_ ]?cache|\.cache/zig|cache[-_]dir|cache_root|has_side_effects|ci-compiled|build-cache"
+                        r"|publish-caches|cache-execution", re.IGNORECASE)
+# Files that are cache policy, or the proof that it never caches acceptance.
+CACHE_POLICY = (".github/scripts/prune-caches.cjs", "tests/ci/cache_execution.py", "tests/ci/zig_cache_restat.c",
+                "tests/ci/run_selected.py")
+
+
+def code_lines(source):
+    """Lines that are not blank or comments (YAML `#`, Zig `//`)."""
+    return [line for line in (source or "").splitlines() if line.strip() and not line.lstrip().startswith(("#", "//"))]
+
+
+def workflow_job(source, name):
+    match = re.search(rf"(?ms)^  {re.escape(name)}:\n.*?(?=^  [A-Za-z_][\w-]*:\n|\Z)", source or "")
+    return code_lines(match[0]) if match else None
+
+
+def yaml_context(lines, index):
+    """A YAML line with what gives it meaning: each less-indented line above
+    it (its keys) and the whole list item (workflow step) it sits in."""
+    def indent(line):
+        return len(line) - len(line.lstrip())
+    context, level, item = [lines[index]], indent(lines[index]), index if lines[index].lstrip().startswith("- ") else None
+    for above in range(index - 1, -1, -1):
+        if indent(lines[above]) < level:
+            context.append(lines[above])
+            level = indent(lines[above])
+            if item is None and lines[above].lstrip().startswith("- "):
+                item = above
+    if item is not None:
+        end = item + 1
+        while end < len(lines) and indent(lines[end]) > indent(lines[item]):
+            end += 1
+        context += lines[item:end]
+    return context
+
+
+def cache_policy_changed(path, before, after):
+    """Whether a changed line, or for YAML its keys and step, names a build
+    cache. An added or removed file counts by its own lines."""
+    pattern = SETUP_CACHE_LINE if path.startswith(".github/actions/") else CACHE_LINE
+    old, new = code_lines(before), code_lines(after)
+    changed = []
+    for tag, old_start, old_end, new_start, new_end in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+        if tag != "equal":
+            changed += [(old, index) for index in range(old_start, old_end)] + [(new, index) for index in range(new_start, new_end)]
+    context = (yaml_context if path.endswith(".yml") else lambda lines, index: [lines[index]])
+    return (any(pattern.search(line) for lines, index in changed for line in context(lines, index))
+            or workflow_job(before, "cache_execution") != workflow_job(after, "cache_execution"))
+
+
+# Paths selection judges by content: rule -> (its paths, whether a
+# (before, after) text pair changes what the rule's check exercises).
+# `main` reads both sides of each matching path.
+CONTENT_RULES = {
+    "store_format": ((STORE_SCHEMA,), store_format_changed),
+    "cache_policy": (CACHE_CONFIG, cache_policy_changed),
+}
 
 # Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
 RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py")
@@ -434,19 +497,28 @@ RULES += ((("src/store.zig", "src/store/*", "!src/store/wire/*", "src/server_exe
            ("launch-frame-integration",), (),
            "The Store's MySQL round trips per model operation and while idle stay within their budget"),)
 
-# build.zig wires every target and builds the Rui every fixture runs, so an
-# edit to it selects the full gate (RULES above). A module under build/
-# selects only what it can change: the targets it defines and those that use
-# what it builds. test_selection.BuildModuleTest holds every module and every
-# target a module defines to this map.
+# build.zig wires every target, so an edit to it selects the full gate (RULES
+# above). A hub module is build.zig's code split out for size, and an edit to
+# it selects what a build.zig edit does. Any other module under build/ selects
+# only what it can change: the targets it defines and those that use what it
+# builds. test_selection.BuildModuleTest holds every module and every target a
+# module defines to this map.
+BUILD_HUB = "build.zig"
 BUILD_MODULES = {
+    # The Rui every target builds or runs, and the libraries it links.
+    "build/product.zig": BUILD_HUB,
+    # How every CI producer hands executables to the shards that run them.
+    "build/ci.zig": BUILD_HUB,
+    # The PTY screen observer: what check-full and these fixtures load to read
+    # the terminal. Its renderer harnesses are nonblocking (renderer-contracts.yml).
+    "build/screen.zig": ("check-full", "skills-integration", "upgrade-integration"),
     # Darwin linking, the screen library's name and the Mac unit-root limits.
     # The unit roots and one screen fixture link and load what it names; it is
     # a Mac path, so ready PRs run these on Mac too.
     "build/darwin.zig": ("test", "host-launch-integration"),
 }
 RULES += tuple(((module,), targets, targets, "Build module: the targets it defines or builds for")
-               for module, targets in BUILD_MODULES.items())
+               for module, targets in BUILD_MODULES.items() if targets != BUILD_HUB)
 
 
 # Inputs to the Host's ReleaseSafe frames or to their gate: Zig source the
@@ -467,14 +539,6 @@ CHECK_COVERS = {
     "terminal-restoration-integration",  # Same full fixture in the human CLI gate.
 }
 
-
-# Files that configure or prune build caches, or the proof that they never cache acceptance.
-CACHE_POLICY = {
-    "build.zig", ".github/actions/setup/action.yml", ".github/scripts/prune-caches.cjs",
-    ".github/workflows/cache-maintenance.yml", ".github/workflows/check.yml",
-    ".github/workflows/previous-release-upgrade.yml", ".github/workflows/qualify-macos.yml",
-    ".github/workflows/release.yml", "tests/ci/cache_execution.py",
-}
 
 
 # What `zig build typecheck-macos` compiles: Zig and C sources, the build
@@ -540,12 +604,14 @@ def matches(path, patterns):
 
 
 def select(paths, phase, available, graph=None, contents=None):
-    """`contents` maps a `CONTENT_RULES` path to its (before, after) text;
-    a path it leaves out counts as changed."""
+    """`contents` maps a path a `CONTENT_RULES` entry matches to its
+    (before, after) text; a path it leaves out counts as changed."""
     graph = graph or tree_graph()
+    paths = [BUILD_HUB if BUILD_MODULES.get(path) == BUILD_HUB else path for path in paths]
     contents = contents or {}
-    content_changed = {path for path, changed in CONTENT_RULES.items()
-                       if path in paths and (path not in contents or changed(*contents[path]))}
+    content_changed = {rule for rule, (patterns, changed) in CONTENT_RULES.items()
+                       if any(matches(path, patterns) and (path not in contents or changed(path, *contents[path]))
+                              for path in paths)}
     targets, native_targets, reasons = set(), set(), set()
     live_targets, live_reasons = set(), set()
     manual_checks = set()
@@ -635,7 +701,7 @@ def select(paths, phase, available, graph=None, contents=None):
     if mac_required:
         reasons.add("Mac-specific path: PR runs Mac Selected (tests/ci/platform_boundary.py)")
     upgrade_required = phase == "review" and (any(matches(path, UPGRADE_CHECK_PATHS) for path in paths)
-                                              or STORE_SCHEMA in content_changed)
+                                              or "store_format" in content_changed)
     if upgrade_required:
         reasons.add("Upgrade, installer or Store-format path: PR runs the previous installed-release upgrade")
     if phase == "development":
@@ -651,7 +717,8 @@ def select(paths, phase, available, graph=None, contents=None):
     for reason, served_by in live_reasons:
         if not targets & served_by:
             raise ValueError(f"{reason!r} selected none of the targets that start its server: {sorted(served_by)}")
-    cache_execution_checks = phase == "review" and any(path in CACHE_POLICY for path in paths)
+    cache_execution_checks = phase == "review" and (any(path in CACHE_POLICY for path in paths)
+                                                    or "cache_policy" in content_changed)
     typecheck_macos = any(matches(path, TYPECHECK_INPUTS) or path in graph.compiled for path in paths)
     missing = (targets | native_targets) - available
     if missing:
@@ -701,7 +768,8 @@ def main():
     head = subprocess.check_output(["git", "rev-parse", args.head], text=True).strip()
     result = select(paths, args.phase, available,
                     contents={path: (revision_text(base, path), revision_text(head, path))
-                              for path in CONTENT_RULES if path in paths})
+                              for path in paths
+                              if any(matches(path, patterns) for patterns, _ in CONTENT_RULES.values())})
     result["base"] = base
     result["head"] = head
     print(json.dumps(result, indent=2))

@@ -1,15 +1,17 @@
 const std = @import("std");
-const Translator = @import("translate_c").Translator;
 const unit_partition = @import("src/unit_test_partition.zig");
 const darwin = @import("build/darwin.zig");
+const product = @import("build/product.zig");
+const ci_module = @import("build/ci.zig");
+const screen_build = @import("build/screen.zig");
 
 pub fn build(b: *std.Build) void {
     // PR fixtures need ReleaseSafe checks, not shipped LLVM code generation.
     // Qualification/release and ordinary local builds keep the production backend.
     const pr_ci = b.option(bool, "pr-ci", "Use the Linux x86_64 PR-only integration artifact") orelse false;
     const ci_targets = b.option([]const u8, "ci-targets", "Comma-separated CI targets to compile");
-    const ci_part = b.option(CiPart, "ci-part", "Which selected CI compiles this producer emits") orelse .all;
-    const ci: CiArtifacts = .{ .b = b, .directory = b.option([]const u8, "ci-artifacts", "Verified native CI executables") };
+    const ci_part = b.option(ci_module.CiPart, "ci-part", "Which selected CI compiles this producer emits") orelse .all;
+    const ci: ci_module.CiArtifacts = .{ .b = b, .directory = b.option([]const u8, "ci-artifacts", "Verified native CI executables") };
     // Hosted workers can have different CPUs. Transfer only the platform's
     // baseline instruction set; ordinary local builds still target their host.
     const ci_mode = ci_targets != null or ci.directory != null;
@@ -33,9 +35,9 @@ pub fn build(b: *std.Build) void {
             @panic("Missing CI CPU identity");
         if (!std.mem.eql(u8, recorded, ci_cpu)) @panic("CI CPU identity mismatch");
     }
-    const pinned_transport = addPinnedTransport(b, target);
+    const pinned_transport = product.addPinnedTransport(b, target);
 
-    const rui = addRui(b, target, optimize, "rui", pinned_transport);
+    const rui = product.addRui(b, target, optimize, "rui", pinned_transport);
     b.installArtifact(rui);
     b.installFile("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md");
 
@@ -89,13 +91,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = .ReleaseSafe,
             }));
         }
-        configureSqlite(b, compile);
-        configureYaml(b, compile);
-        configureBashPlatform(b, compile);
-        configureHostLaunch(b, compile);
-        configureTerminalEditor(b, compile);
-        configureTransport(b, compile, target, pinned_transport);
-        configureOpenApi(b, compile);
+        product.configureUnitRoot(b, compile, target, pinned_transport);
         const run = ci.run(compile);
         run.has_side_effects = true;
         run.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
@@ -132,13 +128,7 @@ pub fn build(b: *std.Build) void {
         .filters = if (test_filters.len != 0) test_filters else &.{"Host processing wait does not consume response transfer inactivity"},
         .test_runner = filtered_runner,
     });
-    configureSqlite(b, deadline_witness);
-    configureYaml(b, deadline_witness);
-    configureBashPlatform(b, deadline_witness);
-    configureHostLaunch(b, deadline_witness);
-    configureTerminalEditor(b, deadline_witness);
-    configureTransport(b, deadline_witness, target, pinned_transport);
-    configureOpenApi(b, deadline_witness);
+    product.configureUnitRoot(b, deadline_witness, target, pinned_transport);
     const run_full_tests = ci.run(deadline_witness);
     run_full_tests.has_side_effects = true;
     run_full_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "1");
@@ -155,7 +145,7 @@ pub fn build(b: *std.Build) void {
         .filters = test_filters,
         .test_runner = filtered_runner,
     });
-    configureTerminalEditor(b, logic_tests);
+    product.configureTerminalEditor(b, logic_tests);
     const run_logic_tests = ci.run(logic_tests);
     run_logic_tests.has_side_effects = true;
     const logic_test_step = b.step(
@@ -195,13 +185,13 @@ pub fn build(b: *std.Build) void {
 
     const h2_test_step = b.step("test-h2", "Run the HTTP/2 client's own tests");
     const pg_test_step = b.step("test-pg", "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
-    if (addTlsClient(b, target, .ReleaseSafe, pinned_transport)) |tls_client| {
-        const h2 = addH2(b, target, .ReleaseSafe, pinned_transport, addTestPoll(b), tls_client);
+    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport)) |tls_client| {
+        const h2 = product.addH2(b, target, .ReleaseSafe, pinned_transport, product.addTestPoll(b), tls_client);
         const h2_tests = b.addTest(.{ .root_module = h2, .filters = test_filters });
         const run_h2_tests = ci.run(h2_tests);
         run_h2_tests.has_side_effects = true;
         h2_test_step.dependOn(&run_h2_tests.step);
-        const pg_tests = b.addTest(.{ .root_module = addPg(b, target, .ReleaseSafe, tls_client), .filters = test_filters });
+        const pg_tests = b.addTest(.{ .root_module = product.addPg(b, target, .ReleaseSafe, tls_client), .filters = test_filters });
         const run_pg_tests = ci.run(pg_tests);
         run_pg_tests.has_side_effects = true;
         pg_test_step.dependOn(&run_pg_tests.step);
@@ -241,7 +231,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSafe,
         }),
     });
-    configureTerminalEditor(b, terminal_notice);
+    product.configureTerminalEditor(b, terminal_notice);
 
     const signal_stack_probe = ci.run(b.addExecutable(.{
         .name = "rui-signal-stack-probe",
@@ -255,18 +245,18 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&signal_stack_probe.step);
     native_step.dependOn(&signal_stack_probe.step);
 
-    const production_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
-    const release_safe = if (pr_ci) addRui(b, target, .ReleaseSafe, "rui-pr-check", pinned_transport) else production_safe;
+    const production_safe = product.addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
+    const release_safe = if (pr_ci) product.addRui(b, target, .ReleaseSafe, "rui-pr-check", pinned_transport) else production_safe;
     if (pr_ci) release_safe.use_llvm = false;
     // The PTY screen observer (tests/integration/terminal_screen.py) loads
     // libghostty-vt through ctypes. Its test-only package in screen-emulator
     // keeps it out of this manifest, which installs fetch whole; only steps
     // that run the observer build it, and no product artifact links it.
-    const screen_emulator = addScreenEmulator(b, ci, ci_mode);
+    const screen_emulator = screen_build.addScreenEmulator(b, ci, ci_mode);
     const screen = screen_emulator.library;
     const screen_emulator_step = b.step("screen-emulator", "Install the PTY screen observer's libghostty-vt, for harnesses outside build steps");
     screen_emulator_step.dependOn(&b.addInstallLibFile(screen_emulator.library, screen_emulator.name).step);
-    const terminal_restoration = screenCommand(b, screen, &.{});
+    const terminal_restoration = screen_build.screenCommand(b, screen, &.{});
     terminal_restoration.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
     terminal_restoration.addArg("python3");
     terminal_restoration.addFileArg(b.path("tests/integration/terminal_restoration_integration.py"));
@@ -295,7 +285,7 @@ pub fn build(b: *std.Build) void {
         "tests/integration/session_sequence_model_test.py",
         "tests/ci/renderer_mutation_test.py",
     }) |path| {
-        const selftest = screenCommand(b, screen, &.{ "python3", "-B" });
+        const selftest = screen_build.screenCommand(b, screen, &.{ "python3", "-B" });
         selftest.addFileArg(b.path(path));
         selftest.has_side_effects = true;
         renderer_selftests.dependOn(&selftest.step);
@@ -303,15 +293,15 @@ pub fn build(b: *std.Build) void {
     b.step(
         "direct-pty",
         "Run the synthetic direct-PTY key matrix (nonblocking)",
-    ).dependOn(&addPtyHarness(b, screen, "tests/qualification/direct-pty/matrix.py", ci.path(release_safe)).step);
+    ).dependOn(&screen_build.addPtyHarness(b, screen, "tests/qualification/direct-pty/matrix.py", ci.path(release_safe)).step);
     b.step(
         "direct-pty-controls",
         "Run direct-PTY driver and disposal controls (nonblocking)",
-    ).dependOn(&addPtyHarness(b, screen, "tests/qualification/direct-pty/controls.py", ci.path(release_safe)).step);
+    ).dependOn(&screen_build.addPtyHarness(b, screen, "tests/qualification/direct-pty/controls.py", ci.path(release_safe)).step);
     b.step(
         "input-equivalence",
         "Run TD2 original-recovery encodings through the direct-PTY matrix (nonblocking)",
-    ).dependOn(&addPtyHarness(b, screen, "tests/integration/input_equivalence.py", ci.path(release_safe)).step);
+    ).dependOn(&screen_build.addPtyHarness(b, screen, "tests/integration/input_equivalence.py", ci.path(release_safe)).step);
 
     const session_list_client = b.addExecutable(.{
         .name = "rui-session-list-client-test",
@@ -328,7 +318,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseSafe,
     });
-    configurePosix(b, read_client);
+    product.configurePosix(b, read_client);
     session_list_client.root_module.addImport("rui_client", read_client);
     const session_list_integration = b.addSystemCommand(&.{"python3"});
     session_list_integration.addFileArg(b.path("tests/integration/session_list_integration.py"));
@@ -369,7 +359,7 @@ pub fn build(b: *std.Build) void {
     );
     dispatch_integration_step.dependOn(&dispatch_integration.step);
 
-    const skills_integration = screenCommand(b, screen, &.{"python3"});
+    const skills_integration = screen_build.screenCommand(b, screen, &.{"python3"});
     skills_integration.addFileArg(b.path("tests/integration/skills_integration.py"));
     skills_integration.addFileArg(ci.path(release_safe));
     b.step("skills-integration", "Run isolated native skills capture, replay and creation cases").dependOn(&skills_integration.step);
@@ -389,7 +379,7 @@ pub fn build(b: *std.Build) void {
     request_wait_integration.addFileArg(ci.path(release_safe));
     b.step("request-wait-integration", "Run request wait completion, recovery and conditional polling witnesses").dependOn(&request_wait_integration.step);
 
-    const canonical_failure_integration = screenCommand(b, screen, &.{"python3"});
+    const canonical_failure_integration = screen_build.screenCommand(b, screen, &.{"python3"});
     canonical_failure_integration.addFileArg(b.path("tests/integration/canonical_failure_integration.py"));
     canonical_failure_integration.addFileArg(ci.path(release_safe));
     b.step("canonical-failure-integration", "Run canonical invocation failure at real producer and caller boundaries").dependOn(&canonical_failure_integration.step);
@@ -457,7 +447,7 @@ pub fn build(b: *std.Build) void {
     );
     bash_lifecycle_integration_step.dependOn(&bash_lifecycle_integration.step);
 
-    const bash_recovery_integration = screenCommand(b, screen, &.{"python3"});
+    const bash_recovery_integration = screen_build.screenCommand(b, screen, &.{"python3"});
     bash_recovery_integration.addFileArg(b.path("tests/integration/bash_recovery_integration.py"));
     bash_recovery_integration.addFileArg(ci.path(release_safe));
     const bash_recovery_integration_step = b.step(
@@ -489,7 +479,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseSafe,
     });
-    configurePosix(b, credentials_module);
+    product.configurePosix(b, credentials_module);
     credential_actor.root_module.addImport("codex_credentials", credentials_module);
     const credential_integration = b.addSystemCommand(&.{"python3"});
     credential_integration.addFileArg(b.path("tests/integration/codex_credential_integration.py"));
@@ -515,7 +505,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseSafe,
     });
-    configurePosix(b, preferences_module);
+    product.configurePosix(b, preferences_module);
     preference_policy_actor.root_module.addImport("preferences", preferences_module);
     const preference_policy_integration = b.addSystemCommand(&.{"python3"});
     preference_policy_integration.addFileArg(b.path("tests/integration/preference_policy_integration.py"));
@@ -539,7 +529,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     // TLS: the connection's tls.zig is on tls_client's OpenSSL.
-    if (addTlsClient(b, target, .ReleaseSafe, pinned_transport)) |tls_client| mysql_connection.addImport("tls_client", tls_client);
+    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport)) |tls_client| mysql_connection.addImport("tls_client", tls_client);
     mysql_wire_tests.root_module.addImport("mysql_connection", mysql_connection);
     const mysql_wire_integration = b.addSystemCommand(&.{"python3"});
     mysql_wire_integration.addFileArg(b.path("tests/integration/mysql_wire_integration.py"));
@@ -595,7 +585,7 @@ pub fn build(b: *std.Build) void {
     const host_status_step = b.step("host-status-integration", "Run native Host information and lease observation cases");
     host_status_step.dependOn(&host_status_integration.step);
 
-    const host_launch_integration = screenCommand(b, screen, &.{"python3"});
+    const host_launch_integration = screen_build.screenCommand(b, screen, &.{"python3"});
     host_launch_integration.addFileArg(b.path("tests/integration/host_launch_integration.py"));
     host_launch_integration.addFileArg(ci.path(release_safe));
     const host_launch_step = b.step("host-launch-integration", "Run detached Host launch, alias convergence and startup-failure cases");
@@ -606,13 +596,13 @@ pub fn build(b: *std.Build) void {
     installer_integration.addFileArg(ci.path(release_safe));
     b.step("installer-integration", "Run source and release installer cases through the production publication owner").dependOn(&installer_integration.step);
 
-    const upgrade_release = addRuiWithIdentity(b, target, .ReleaseSafe, "rui-upgrade-release-fixture", pinned_transport, .{
+    const upgrade_release = product.addRuiWithIdentity(b, target, .ReleaseSafe, "rui-upgrade-release-fixture", pinned_transport, .{
         .version = b.fmt("0.{d}.10000", .{@import("src/store/schema.zig").schema_version}),
-        .revision = buildRevision(b),
+        .revision = product.buildRevision(b),
     });
     const upgrade_fixture_step = b.step("upgrade-fixture", "Build the same-source native actor with synthetic release identity for upgrade evidence");
     upgrade_fixture_step.dependOn(&b.addInstallArtifact(upgrade_release, .{}).step);
-    const upgrade_integration = screenCommand(b, screen, &.{"python3"});
+    const upgrade_integration = screen_build.screenCommand(b, screen, &.{"python3"});
     upgrade_integration.addFileArg(b.path("tests/integration/upgrade_integration.py"));
     upgrade_integration.addFileArg(ci.path(upgrade_release));
     const upgrade_step = b.step("upgrade-integration", "Run isolated release publication and exact Host upgrade lifecycle cases");
@@ -667,7 +657,7 @@ pub fn build(b: *std.Build) void {
         .dependOn(&addFixture(b, "tests/integration/conversation_page_integration.py", ci.path(release_safe)).step);
     b.step("host-allocator-integration", "Observe the Host allocator environment before main")
         .dependOn(&addFixture(b, "tests/integration/host_allocator_test.py", ci.path(release_safe)).step);
-    const human_cli = screenCommand(b, screen, &.{});
+    const human_cli = screen_build.screenCommand(b, screen, &.{});
     human_cli.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
     human_cli.addArg("python3");
     human_cli.addFileArg(b.path("tests/integration/human_cli_integration.py"));
@@ -680,7 +670,7 @@ pub fn build(b: *std.Build) void {
     host_process_test.addFileArg(b.path("tests/integration/host_process_test.py"));
     b.step("host-process-test", "Run the bounded Host process fixture's own failure checks").dependOn(&host_process_test.step);
 
-    const debug = addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
+    const debug = product.addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
     const debug_integration = b.addSystemCommand(&.{"sh"});
     debug_integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     debug_integration.addFileArg(ci.path(debug));
@@ -715,8 +705,8 @@ pub fn build(b: *std.Build) void {
     format.addFileArg(b.path("build.zig"));
     format.addDirectoryArg(b.path("build"));
     format.addDirectoryArg(b.path("src"));
-    const release_small = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
-    const fast_integrations = screenCommand(b, screen, &.{"sh"});
+    const release_small = product.addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
+    const fast_integrations = screen_build.screenCommand(b, screen, &.{"sh"});
     fast_integrations.addFileArg(b.path("tests/integration/check.sh"));
     fast_integrations.addFileArg(ci.path(release_safe));
     fast_integrations.addFileArg(ci.path(debug));
@@ -756,7 +746,7 @@ pub fn build(b: *std.Build) void {
         "Run routine native tests and process integrations serially (long witnesses are separate)",
     );
     const check_part = b.option(enum { all, execution, callers }, "check-part", "Isolated full-check part (default all)") orelse .all;
-    const process_integrations = screenCommand(b, screen, &.{"sh"});
+    const process_integrations = screen_build.screenCommand(b, screen, &.{"sh"});
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
     process_integrations.addFileArg(ci.path(release_safe));
     process_integrations.addFileArg(ci.path(debug));
@@ -796,7 +786,7 @@ pub fn build(b: *std.Build) void {
     });
     queue_audit_test.setCwd(b.path("tests/qualification"));
     queue_audit_test.setEnvironmentVariable("GOTOOLCHAIN", "local");
-    const sqlite_shell = addSqliteShell(b, target, .ReleaseSmall);
+    const sqlite_shell = product.addSqliteShell(b, target, .ReleaseSmall);
     queue_audit_test.addFileArg(ci.path(sqlite_shell));
     measurement_test_step.dependOn(&queue_audit_test.step);
 
@@ -827,7 +817,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
             }),
         });
-        configureYaml(b, yaml_linux);
+        product.configureYaml(b, yaml_linux);
         yaml_linux_step.dependOn(&yaml_linux.step);
     }
     const macos_cross_step = b.step(
@@ -846,7 +836,7 @@ pub fn build(b: *std.Build) void {
     );
     {
         const apple = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
-        macos_types_step.dependOn(&addRui(b, apple, .ReleaseSafe, "rui-typecheck-macos", null).step);
+        macos_types_step.dependOn(&product.addRui(b, apple, .ReleaseSafe, "rui-typecheck-macos", null).step);
         const apple_tests = b.addTest(.{
             .name = "test-typecheck-macos",
             .root_module = b.createModule(.{
@@ -855,13 +845,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = .ReleaseSafe,
             }),
         });
-        configureSqlite(b, apple_tests);
-        configureYaml(b, apple_tests);
-        configureBashPlatform(b, apple_tests);
-        configureHostLaunch(b, apple_tests);
-        configureTerminalEditor(b, apple_tests);
-        configureTransport(b, apple_tests, apple, null);
-        configureOpenApi(b, apple_tests);
+        product.configureUnitRoot(b, apple_tests, apple, null);
         macos_types_step.dependOn(&apple_tests.step);
     }
     const targets = [_]std.Target.Query{
@@ -872,11 +856,11 @@ pub fn build(b: *std.Build) void {
     };
     for (targets) |query| {
         const resolved = b.resolveTargetQuery(query);
-        const cross_transport = if (sameTransportTarget(target, resolved))
+        const cross_transport = if (product.sameTransportTarget(target, resolved))
             pinned_transport
         else
-            addPinnedTransport(b, resolved);
-        const executable = addRui(
+            product.addPinnedTransport(b, resolved);
+        const executable = product.addRui(
             b,
             resolved,
             .ReleaseSmall,
@@ -993,7 +977,7 @@ pub fn build(b: *std.Build) void {
             const cpu_manifest = b.addWriteFiles().add("ci-cpu.json", ci_cpu);
             ci_build.dependOn(&b.addInstallBinFile(cpu_manifest, "ci-cpu.json").step);
         }
-        var collection: CiCollection = .{ .b = b, .destination = ci_build, .part = ci_part, .unit = tests, .screen = screen_emulator };
+        var collection: ci_module.CiCollection = .{ .b = b, .destination = ci_build, .part = ci_part, .unit = tests, .screen = screen_emulator };
         var names = std.mem.splitScalar(u8, selected, ',');
         while (names.next()) |name| {
             const root = b.top_level_steps.get(name) orelse @panic("Unknown CI target");
@@ -1085,110 +1069,6 @@ fn unitFilters(b: *std.Build) [unit_partition.roots.len][]const []const u8 {
     return filters;
 }
 
-/// Unit roots compile independently on their own producer, beside the other gates.
-const CiPart = enum { all, unit, rest };
-
-const CiCollection = struct {
-    b: *std.Build,
-    destination: *std.Build.Step,
-    part: CiPart,
-    unit: []const *std.Build.Step.Compile,
-    screen: ScreenEmulator,
-    visited: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty,
-    reached_unit: bool = false,
-
-    fn collect(collection: *CiCollection, source: *std.Build.Step) void {
-        const b = collection.b;
-        const entry = collection.visited.getOrPut(b.allocator, source) catch @panic("OOM");
-        if (entry.found_existing) return;
-        if (source.cast(std.Build.Step.Compile)) |compile| {
-            const unit = std.mem.indexOfScalar(*std.Build.Step.Compile, collection.unit, compile) != null;
-            collection.reached_unit = collection.reached_unit or unit;
-            const emit = switch (collection.part) {
-                .all => true,
-                .unit => unit,
-                .rest => !unit,
-            };
-            if (emit) collection.destination.dependOn(&b.addInstallBinFile(compile.getEmittedBin(), ciName(b, compile)).step);
-            return;
-        }
-        // The child build's library rides with the executables, so consumers
-        // neither fetch ghostty's packages nor build it again.
-        if (collection.screen.child) |child| if (source == &child.step) {
-            if (collection.part != .unit)
-                collection.destination.dependOn(&b.addInstallBinFile(collection.screen.library, collection.screen.name).step);
-            return;
-        };
-        for (source.dependencies.items) |dependency| collection.collect(dependency);
-    }
-};
-
-fn ciName(b: *std.Build, compile: *std.Build.Step.Compile) []const u8 {
-    // Test roots can use Zig's default executable name; distinguish their
-    // source-owned roots without changing normal compilation or cache keys.
-    return if (compile.kind == .@"test")
-        b.fmt("{s}-{s}", .{ compile.name, std.fs.path.stem(compile.root_module.root_source_file.?.src_path.sub_path) })
-    else
-        compile.name;
-}
-
-const CiArtifacts = struct {
-    b: *std.Build,
-    directory: ?[]const u8,
-
-    fn path(ci: CiArtifacts, compile: *std.Build.Step.Compile) std.Build.LazyPath {
-        return if (ci.directory) |directory|
-            .{ .cwd_relative = ci.b.pathJoin(&.{ directory, ciName(ci.b, compile) }) }
-        else
-            compile.getEmittedBin();
-    }
-
-    fn run(ci: CiArtifacts, compile: *std.Build.Step.Compile) *std.Build.Step.Run {
-        if (ci.directory == null) return ci.b.addRunArtifact(compile);
-        const command = ci.b.addRunFile(ci.path(compile));
-        if (compile.kind == .@"test") command.enableTestRunnerMode();
-        return command;
-    }
-};
-
-const ScreenEmulator = struct {
-    library: std.Build.LazyPath,
-    name: []const u8,
-    /// The child build; null in a CI consumer, whose producer ran it.
-    child: ?*std.Build.Step.Run,
-};
-
-/// libghostty-vt's shared library for the PTY screen observer, which a child
-/// `zig build` of screen-emulator builds from its pinned release tarball.
-/// A CI producer builds it for the baseline CPU, as its executables are.
-fn addScreenEmulator(b: *std.Build, ci: CiArtifacts, baseline: bool) ScreenEmulator {
-    const name = darwin.screenLibraryName(b.graph.host.result.os.tag);
-    if (ci.directory) |directory|
-        return .{ .library = .{ .cwd_relative = b.pathJoin(&.{ directory, name }) }, .name = name, .child = null };
-    const child = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "install", "--summary", "none", "--build-file" });
-    child.addFileArg(b.path("screen-emulator/build.zig"));
-    child.addFileInput(b.path("screen-emulator/build.zig.zon"));
-    if (baseline) child.addArg("-Dcpu=baseline");
-    child.addArg("--cache-dir");
-    child.addDirectoryArg(std.Build.LazyPath.cache_root);
-    child.addArg("--prefix");
-    const prefix = child.addOutputDirectoryArg("screen");
-    // Zig refuses ghostty's path dependencies from a package directory
-    // outside screen-emulator, so the child keeps its own screen-emulator/zig-pkg.
-    child.removeEnvironmentVariable("ZIG_LOCAL_PKG_DIR");
-    return .{ .library = prefix.path(b, b.pathJoin(&.{ "lib", name })), .name = name, .child = child };
-}
-
-/// A fixture command whose environment names the screen observer's library.
-fn screenCommand(b: *std.Build, screen: std.Build.LazyPath, argv: []const []const u8) *std.Build.Step.Run {
-    const run = b.addSystemCommand(&.{"env"});
-    run.addPrefixedFileArg("RUI_TEST_GHOSTTY_VT=", screen);
-    run.addArgs(argv);
-    return run;
-}
-
-/// Runs a direct-PTY harness against the build-owned ReleaseSafe Rui; callers
-/// pass the harness's own options, including a fresh --output, after `--`.
 // A Go measurement launches Rui, so it enters the fixture boundary like every
 // fixture: root is refused and the environment is built there.
 fn addMeasurement(b: *std.Build, arguments: []const []const u8) *std.Build.Step.Run {
@@ -1200,414 +1080,10 @@ fn addMeasurement(b: *std.Build, arguments: []const []const u8) *std.Build.Step.
     return run;
 }
 
-fn addPtyHarness(b: *std.Build, screen: std.Build.LazyPath, harness: []const u8, rui: std.Build.LazyPath) *std.Build.Step.Run {
-    const run = screenCommand(b, screen, &.{"python3"});
-    run.addFileArg(b.path(harness));
-    run.addFileArg(rui);
-    run.addPassthruArgs();
-    run.has_side_effects = true;
-    return run;
-}
-
-fn sameTransportTarget(a: std.Build.ResolvedTarget, b: std.Build.ResolvedTarget) bool {
-    return a.result.cpu.arch == b.result.cpu.arch and
-        a.result.os.tag == b.result.os.tag and
-        a.result.abi == b.result.abi;
-}
-
 /// A Python process fixture run against one Rui executable.
 fn addFixture(b: *std.Build, script: []const u8, rui: std.Build.LazyPath) *std.Build.Step.Run {
     const run = b.addSystemCommand(&.{"python3"});
     run.addFileArg(b.path(script));
     run.addFileArg(rui);
     return run;
-}
-
-fn addRui(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    name: []const u8,
-    pinned_transport: ?PinnedTransport,
-) *std.Build.Step.Compile {
-    return addRuiWithIdentity(b, target, optimize, name, pinned_transport, .{ .version = buildVersion(b), .revision = buildRevision(b) });
-}
-
-const BuildIdentity = struct { version: []const u8, revision: []const u8 };
-
-fn addRuiWithIdentity(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    name: []const u8,
-    pinned_transport: ?PinnedTransport,
-    identity: BuildIdentity,
-) *std.Build.Step.Compile {
-    const executable = b.addExecutable(.{
-        .name = name,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/cli.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    executable.root_module.link_libc = true;
-    configureSqlite(b, executable);
-    configureYaml(b, executable);
-    configureBashPlatform(b, executable);
-    configureHostLaunch(b, executable);
-    configureTerminalEditor(b, executable);
-    configureTransportWithIdentity(b, executable, target, pinned_transport, identity);
-    return executable;
-}
-
-const PinnedTransport = struct {
-    output: std.Build.LazyPath,
-};
-
-fn addPinnedTransport(b: *std.Build, target: std.Build.ResolvedTarget) PinnedTransport {
-    const openssl = b.dependency("openssl", .{});
-    const nghttp2 = b.dependency("nghttp2", .{});
-    const build_transport = b.addSystemCommand(&.{"sh"});
-    build_transport.addFileArg(b.path("src/build_transport.sh"));
-    // Configure scripts change cwd and embed the installation prefix in Makefiles.
-    build_transport.addDirectoryArg2(openssl.path("."), .{ .make_absolute = true });
-    build_transport.addDirectoryArg2(nghttp2.path("."), .{ .make_absolute = true });
-    const target_name = b.fmt("{s}-{s}", .{
-        @tagName(target.result.cpu.arch),
-        @tagName(target.result.os.tag),
-    });
-    const output = build_transport.addOutputDirectoryArg2(b.fmt("pinned-transport-{s}", .{target_name}), .{ .make_absolute = true });
-    build_transport.addArg(target_name);
-    build_transport.addArg(b.graph.zig_exe);
-    return .{ .output = output };
-}
-
-fn buildRevision(b: *std.Build) []const u8 {
-    return gitHead(b, &.{ "rev-parse", "HEAD" }) orelse "unknown";
-}
-
-/// The release version from a `vMAJOR.MINOR.PATCH` tag on the built commit.
-/// Release publication tags the commit before building it.
-fn buildVersion(b: *std.Build) []const u8 {
-    const tag = gitHead(b, &.{ "describe", "--tags", "--exact-match", "--match", "v[0-9]*.[0-9]*.[0-9]*", "HEAD" }) orelse
-        return "unreleased";
-    return tag[1..];
-}
-
-fn gitHead(b: *std.Build, query: []const []const u8) ?[]const u8 {
-    // Git refs can change without any build input changing.
-    b.graph.poisonCache();
-    // An archive nested in another checkout must not inherit that checkout's revision.
-    _ = b.root.statFile(b.graph.io, ".git") catch return null;
-    const root = b.root.toString(b.allocator) catch @panic("OOM");
-    const argv = std.mem.concat(b.allocator, []const u8, &.{ &.{ "git", "-C", root }, query }) catch @panic("OOM");
-    return switch (b.runFallible(argv, .{ .stderr_behavior = .ignore })) {
-        .success => |stdout| std.mem.trim(u8, stdout, "\r\n"),
-        else => null,
-    };
-}
-
-fn configureTransport(
-    b: *std.Build,
-    compile: *std.Build.Step.Compile,
-    target: std.Build.ResolvedTarget,
-    /// Null type-checks without the built transport: headers only, no link.
-    maybe_pinned: ?PinnedTransport,
-) void {
-    configureTransportWithIdentity(b, compile, target, maybe_pinned, .{ .version = buildVersion(b), .revision = buildRevision(b) });
-}
-
-fn configureTransportWithIdentity(
-    b: *std.Build,
-    compile: *std.Build.Step.Compile,
-    target: std.Build.ResolvedTarget,
-    maybe_pinned: ?PinnedTransport,
-    identity: BuildIdentity,
-) void {
-    const options = b.addOptions();
-    options.addOption(bool, "enabled", transportEnabled(target));
-    options.addOption([]const u8, "revision", identity.revision);
-    options.addOption([]const u8, "version", identity.version);
-    compile.root_module.addOptions("transport_options", options);
-    const test_poll = addTestPoll(b);
-    compile.root_module.addImport("test_poll", test_poll);
-    const optimize = compile.root_module.optimize.?;
-    const tls_client = addTlsClient(b, target, optimize, maybe_pinned) orelse return;
-    compile.root_module.addImport("tls_client", tls_client);
-    compile.root_module.addImport("h2", addH2(b, target, optimize, maybe_pinned, test_poll, tls_client));
-}
-
-/// The one helper Rui's and h2's tests poll through. A module, so both
-/// share one copy of the file.
-fn addTestPoll(b: *std.Build) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("src/testing/poll.zig") });
-}
-
-/// TLS client settings, host naming and trust loading, linked against the
-/// pinned OpenSSL, or null where the pinned transport is not built. The one
-/// module that links OpenSSL: h2 and the Store's wire import it. With only
-/// headers it type-checks and links nothing.
-fn addTlsClient(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    maybe_pinned: ?PinnedTransport,
-) ?*std.Build.Module {
-    if (!transportEnabled(target)) return null;
-    const module = b.createModule(.{
-        .root_source_file = b.path("src/tls_client/tls_client.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    const bindings = addBindings(b, module, "openssl_c",
-        \\#include <openssl/ssl.h>
-        \\#include <openssl/err.h>
-        \\#include <openssl/x509v3.h>
-        \\
-    );
-    const pinned = maybe_pinned orelse {
-        bindings.addIncludePath(addTransportHeaders(b, target));
-        return module;
-    };
-    addPinnedPaths(b, target, pinned, module, bindings);
-    module.addObjectFile(pinned.output.path(b, "lib/libssl.a"));
-    module.addObjectFile(pinned.output.path(b, "lib/libcrypto.a"));
-    return module;
-}
-
-/// The HTTP/2 client module, linked against the pinned nghttp2, on
-/// `tls_client`'s OpenSSL. With only headers it type-checks and links
-/// nothing.
-fn addH2(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    maybe_pinned: ?PinnedTransport,
-    test_poll: *std.Build.Module,
-    tls_client: *std.Build.Module,
-) *std.Build.Module {
-    const module = b.createModule(.{
-        .root_source_file = b.path("src/h2/h2.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    module.addImport("test_poll", test_poll);
-    module.addImport("tls_client", tls_client);
-    const bindings = addBindings(b, module, "h2_c",
-        \\#include <nghttp2/nghttp2.h>
-        \\
-    );
-    const pinned = maybe_pinned orelse {
-        bindings.addIncludePath(addTransportHeaders(b, target));
-        return module;
-    };
-    addPinnedPaths(b, target, pinned, module, bindings);
-    module.addObjectFile(pinned.output.path(b, "lib/libnghttp2.a"));
-    // SecTrust verifies h2's sessions under system trust on macOS.
-    if (target.result.os.tag == .macos) {
-        darwin.linkTrust(module);
-    }
-    return module;
-}
-
-/// The pinned headers and the system libraries a module on the pinned
-/// transport compiles and links against: the bundled SDK on macOS.
-fn addPinnedPaths(b: *std.Build, target: std.Build.ResolvedTarget, pinned: PinnedTransport, module: *std.Build.Module, bindings: Translator) void {
-    bindings.addIncludePath(pinned.output.path(b, "include"));
-    if (target.result.os.tag == .macos) {
-        darwin.addSdkPaths(b, module, bindings, pinned.output);
-    } else {
-        module.linkSystemLibrary("pthread", .{});
-        module.linkSystemLibrary("dl", .{});
-    }
-}
-
-/// The Store's Postgres wire client, on `tls_client`'s OpenSSL.
-fn addPg(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, tls_client: *std.Build.Module) *std.Build.Module {
-    const module = b.createModule(.{
-        .root_source_file = b.path("src/store/wire/pg.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    module.addImport("tls_client", tls_client);
-    return module;
-}
-
-/// The pinned OpenSSL and nghttp2 headers for `target`, generated without
-/// building either library.
-fn addTransportHeaders(b: *std.Build, target: std.Build.ResolvedTarget) std.Build.LazyPath {
-    const generate = b.addSystemCommand(&.{"sh"});
-    generate.addFileArg(b.path("src/build_transport_headers.sh"));
-    generate.addDirectoryArg2(b.dependency("openssl", .{}).path("."), .{ .make_absolute = true });
-    generate.addDirectoryArg2(b.dependency("nghttp2", .{}).path("."), .{ .make_absolute = true });
-    const target_name = b.fmt("{s}-{s}", .{ @tagName(target.result.cpu.arch), @tagName(target.result.os.tag) });
-    const output = generate.addOutputDirectoryArg2(b.fmt("transport-headers-{s}", .{target_name}), .{ .make_absolute = true });
-    generate.addArg(target_name);
-    return output.path(b, "include");
-}
-
-fn transportEnabled(target: std.Build.ResolvedTarget) bool {
-    return (target.result.os.tag == .macos or target.result.os.tag == .linux) and
-        (target.result.cpu.arch == .aarch64 or target.result.cpu.arch == .x86_64);
-}
-
-fn configureYaml(b: *std.Build, compile: *std.Build.Step.Compile) void {
-    const module = compile.root_module;
-    const yaml = b.dependency("yaml", .{});
-    if (module.root_source_file != null) {
-        const yaml_bindings = addBindings(b, module, "yaml", "#include <yaml.h>\n");
-        yaml_bindings.addIncludePath(yaml.path("include"));
-    }
-    module.addIncludePath(yaml.path("include"));
-    module.addIncludePath(yaml.path("src"));
-    module.addCMacro("YAML_VERSION_STRING", "\"0.2.5\"");
-    module.addCMacro("YAML_VERSION_MAJOR", "0");
-    module.addCMacro("YAML_VERSION_MINOR", "2");
-    module.addCMacro("YAML_VERSION_PATCH", "5");
-    for ([_][]const u8{ "api.c", "reader.c", "scanner.c", "parser.c", "loader.c", "writer.c", "emitter.c", "dumper.c" }) |source| {
-        // api.c uses POSIX strdup; expose its declaration in strict C99 only
-        // for these dependency sources, never the consumer's other C files.
-        module.addCSourceFile(.{
-            .file = yaml.path(b.fmt("src/{s}", .{source})),
-            .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" },
-        });
-    }
-}
-
-fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
-    const sqlite = b.dependency("sqlite", .{});
-    const module = compile.root_module;
-    if (module.root_source_file != null) {
-        const bindings = addBindings(b, module, "sqlite", "#include <sqlite3.h>\n");
-        bindings.addIncludePath(sqlite.path("."));
-    }
-    module.link_libc = true;
-    module.addIncludePath(sqlite.path("."));
-    module.addCSourceFile(.{
-        .file = sqlite.path("sqlite3.c"),
-        .flags = &.{ "-std=c99", "-fno-strict-aliasing" },
-    });
-    module.addCMacro("SQLITE_THREADSAFE", "1");
-    module.addCMacro("SQLITE_DEFAULT_PAGE_SIZE", "4096");
-    module.addCMacro("SQLITE_MAX_DEFAULT_PAGE_SIZE", "4096");
-    module.addCMacro("SQLITE_DEFAULT_FOREIGN_KEYS", "1");
-    module.addCMacro("SQLITE_DEFAULT_MMAP_SIZE", "0");
-    module.addCMacro("SQLITE_MAX_MMAP_SIZE", "0");
-    module.addCMacro("SQLITE_DEFAULT_SYNCHRONOUS", "3");
-    module.addCMacro("SQLITE_DQS", "0");
-    module.addCMacro("SQLITE_OMIT_LOAD_EXTENSION", "1");
-    module.addCMacro("SQLITE_OMIT_SHARED_CACHE", "1");
-    module.addCMacro("SQLITE_MAX_ATTACHED", "0");
-    module.addCMacro("SQLITE_MAX_LENGTH", "1073741824");
-    module.addCMacro("SQLITE_DEFAULT_WORKER_THREADS", "0");
-    module.addCMacro("SQLITE_MAX_WORKER_THREADS", "0");
-    module.addCMacro("SQLITE_TEMP_STORE", "1");
-    // Every page cache, each ephemeral table's (IN lists, RETURNING) included,
-    // otherwise bulk-allocates 20 pages on first fetch: they fault in, then
-    // free returns them to the kernel. Per-page allocation skips that churn.
-    module.addCMacro("SQLITE_DEFAULT_PCACHE_INITSZ", "0");
-    module.addCMacro("SQLITE_USE_URI", "0");
-    module.addCMacro("SQLITE_ENABLE_API_ARMOR", "1");
-}
-
-fn configureBashPlatform(b: *std.Build, compile: *std.Build.Step.Compile) void {
-    compile.root_module.addCSourceFile(.{
-        .file = b.path("src/bash_platform.c"),
-        .flags = &.{"-std=c11"},
-    });
-}
-
-fn configureHostLaunch(b: *std.Build, compile: *std.Build.Step.Compile) void {
-    compile.root_module.addCSourceFile(.{
-        .file = b.path("src/host_launch.c"),
-        .flags = &.{"-std=c11"},
-    });
-    compile.root_module.addCSourceFile(.{
-        .file = b.path("src/host_identity.c"),
-        .flags = &.{"-std=c11"},
-    });
-}
-
-fn configureTerminalEditor(b: *std.Build, compile: *std.Build.Step.Compile) void {
-    const utf8proc = b.dependency("utf8proc", .{});
-    configurePosix(b, compile.root_module);
-    configureVaxis(b, compile.root_module);
-    compile.root_module.link_libc = true;
-    compile.root_module.addIncludePath(utf8proc.path("."));
-    compile.root_module.addCSourceFile(.{
-        .file = utf8proc.path("utf8proc.c"),
-        .flags = &.{ "-std=c99", "-O2" },
-    });
-}
-
-fn configureVaxis(b: *std.Build, module: *std.Build.Module) void {
-    const dependency = b.dependency("vaxis", .{
-        .target = module.resolved_target.?,
-        .optimize = module.optimize.?,
-    });
-    // Layout can import only the dependency's value-only Unicode modules,
-    // without acquiring its TTY, process or event-loop capabilities.
-    module.addImport("terminal_unicode", dependency.module("unicode"));
-    module.addImport("terminal_width", dependency.module("gwidth"));
-    module.addImport("vaxis", dependency.module("vaxis"));
-}
-
-fn addBindings(b: *std.Build, module: *std.Build.Module, name: []const u8, header: []const u8) Translator {
-    const bindings: Translator = .init(b.dependency("translate_c", .{ .optimize = std.builtin.OptimizeMode.ReleaseFast }), .{
-        .name = name,
-        .c_source_file = b.addWriteFiles().add(b.fmt("{s}.h", .{name}), header),
-        .target = module.resolved_target.?,
-        .optimize = module.optimize.?,
-    });
-    module.addImport(name, bindings.mod);
-    return bindings;
-}
-
-fn configurePosix(b: *std.Build, module: *std.Build.Module) void {
-    _ = addBindings(b, module, "posix",
-        // Fortified variadic open wrappers are not needed by these bindings.
-        \\#undef _FORTIFY_SOURCE
-        \\#include <unistd.h>
-        \\#include <sys/stat.h>
-        \\#include <sys/resource.h>
-        \\#include <termios.h>
-        \\#include <fcntl.h>
-        \\#include <sys/mman.h>
-        \\#include <sys/wait.h>
-        \\#include <signal.h>
-        \\#include <stdio.h>
-        \\#include <poll.h>
-        \\
-    );
-}
-
-fn addSqliteShell(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) *std.Build.Step.Compile {
-    const sqlite = b.dependency("sqlite", .{});
-    const executable = b.addExecutable(.{
-        .name = "rui-qualification-sqlite3",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    configureSqlite(b, executable);
-    executable.root_module.addCSourceFile(.{
-        .file = sqlite.path("shell.c"),
-        .flags = &.{"-std=gnu99"},
-    });
-    return executable;
-}
-
-/// The checked-in wire contract, which a unit test compares with what the
-/// wire types emit.
-fn configureOpenApi(b: *std.Build, compile: *std.Build.Step.Compile) void {
-    compile.root_module.addAnonymousImport("openapi.json", .{ .root_source_file = b.path("openapi.json") });
 }

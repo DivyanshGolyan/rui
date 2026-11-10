@@ -47,7 +47,7 @@ A capture made with no `reply` is a silent terminal, for a fixture that answers 
 | Resource owner | Comparable measurements and lifecycle evidence on applicable runners |
 
 The executable minimum is [select_tests.py](tests/ci/select_tests.py), using targets from [build.zig](build.zig) and its modules under `build/`.
-An edit to `build.zig` or `build.zig.zon` selects the full build gate; an edit to a module under `build/` selects only the targets its `BUILD_MODULES` entry names, which include every target it defines.
+An edit to `build.zig`, `build.zig.zon` or a hub module (`build/product.zig`, the Rui every target builds, and `build/ci.zig`, the CI artifact handoff) selects the full build gate; an edit to another module under `build/` selects only the targets its `BUILD_MODULES` entry names, which include every target it defines.
 CI runs `python3 tests/ci/select_tests.py --base origin/main --phase review` on the pushed head.
 Run it locally only to diagnose a CI red; [Evidence](CODING_STANDARDS.md#evidence) lists the pre-push checks.
 The selector reads the import graph of the tree it runs on: Zig `@import` and `@embedFile`, and the Python imports and `src/` reads of `tests/integration`.
@@ -121,7 +121,8 @@ For normal changes, Linux runs the affected targets from [select_tests.py](tests
 Native macOS runs the affected targets, or `check`, only when the change touches a [Mac path](tests/ci/platform_boundary.py): Darwin branches, C and shell sources, the PTY launcher, the HTTP/2 client, release and install scripts, and the Mac workflow.
 Darwin-only linking and settings live in `build/darwin.zig`, a Mac path.
 Other build plumbing (`build.zig`, `build.zig.zon`, the setup action, `tests/ci/qualification.py`) is not a Mac path: Linux runs it, `typecheck-macos` compiles Rui for Darwin, and promotion links and runs it on a Mac.
-The [previous installed-release upgrade](.github/workflows/previous-release-upgrade.yml) runs on Linux against that same candidate only for upgrade, installer and migration paths, the check itself, and a `schema.zig` edit that changes the Store format: its `schema_version`, a `bootstrap_digests` row or a migration step. Promotion runs it on both systems.
+The [previous installed-release upgrade](.github/workflows/previous-release-upgrade.yml) runs on Linux against that same candidate only for upgrade, installer and migration paths, the check itself, and a `schema.zig` edit that changes the Store format: its `schema_version`, a `bootstrap_digests` row or a migration step.
+Promotion runs it on both systems.
 Renderer contracts run nonblocking only for renderer and frontend owners.
 The documentation lane skips heavyweight policy, product builds and suites, and prior-release upgrades.
 It requires a successful plan with canonical empty product outputs and a successful Linux aggregate that verifies all product producers were skipped.
@@ -228,6 +229,7 @@ The release publisher is serialized and never treats cancelled acceptance as a p
 Build caches hold compilation inputs and outputs, not acceptance.
 All Zig unit Run steps bypass Zig acceptance caching, and Go tests use `-count=1`.
 Cache-policy changes run [the fixed-seed execution regression](tests/ci/cache_execution.py) on Linux before main, and on macOS in promotion when the batch changed cache policy.
+Cache policy is the proof and the prune script themselves, and changed non-comment lines that name a Zig build cache or `has_side_effects` in the build, the workflows and the setup action, whose caches are all build caches; any change to the `cache_execution` job counts too.
 The required `admission` aggregate includes this job when selected.
 Build-cache keys separate native tools, Apple SDK, architecture, dependency pins, scripts, source inputs and shard.
 Only `main` saves caches; PR jobs restore main's snapshots and save none, so PR caches never feed a privileged workflow or evict main's.
