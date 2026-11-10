@@ -715,6 +715,18 @@ const due_retries = rsql.Read(.{
     .cardinality = .each,
 });
 
+/// The earliest scheduled retry not yet due, which no commit makes due:
+/// only time does.
+const next_scheduled_retry = rsql.Read(.{
+    .sql = "SELECT o.retry_due_at_ms FROM model_operation o @index(model_operation_retry_due) JOIN session s ON s.session_ref=o.session_ref " ++
+        "WHERE o.resolution_code IS NULL AND o." ++ retry_allowance_open_sql ++ " " ++
+        "AND o.retry_due_at_ms>?1 AND " ++ "@served(s.provider)" ++
+        " ORDER BY o.retry_due_at_ms LIMIT 1",
+    .Args = struct { now_ms: u64 },
+    .Row = struct { retry_due_at_ms: u64 },
+    .cardinality = .optional,
+});
+
 /// `due_retries` as SQLite runs it.
 pub const retry_admission_select_sql = due_retries.sql;
 
@@ -758,14 +770,23 @@ const RetryChoice = struct {
 /// after at most one more than it can exclude; each page is a round. The
 /// Store runs no other entry point meanwhile, so the write Access `a`
 /// starts the replacement Attempt from what the scan read, in one round.
-pub fn tryAdmitNextModelRetry(candidate: anytype, a: anytype, io: std.Io, active: ActiveOperationFilter, faults: Faults) !?AttemptAdmission {
+/// The first page's round also reads `waiting`, when given: the
+/// milliseconds until the earliest scheduled retry not yet due.
+pub fn tryAdmitNextModelRetry(candidate: anytype, a: anytype, io: std.Io, active: ActiveOperationFilter, faults: Faults, waiting: ?*?u64) !?AttemptAdmission {
     const now_ms = std.math.cast(u64, try store_core.readUnixMilliseconds(io)) orelse return error.IntegerOutOfRange;
     const limit = try std.math.add(u64, active.maximum_exclusions, 1);
     var choice: RetryChoice = .{ .active = active, .now_ms = now_ms };
+    var scheduled: next_scheduled_retry.Result = null;
+    var first_page = true;
     while (choice.chosen == null and choice.scanned < limit) {
         choice.page_rows = 0;
         candidate.readEach(due_retries, .{ .now_ms = now_ms, .after = choice.after }, limit - choice.scanned, &choice);
+        if (first_page and waiting != null) candidate.read(next_scheduled_retry, .{ .now_ms = now_ms }, &scheduled);
         try store_access.runAs(candidate, error.RetrySelectionFailed);
+        if (first_page) if (waiting) |out| {
+            out.* = if (scheduled) |row| row.retry_due_at_ms - now_ms else null;
+        };
+        first_page = false;
         if (choice.corrupt) return error.CorruptStore;
         if (choice.page_rows < retry_admission_page_rows) break;
     }

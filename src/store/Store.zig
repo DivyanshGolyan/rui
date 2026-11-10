@@ -1415,18 +1415,24 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.recoverOneUncertainAction(&candidate, &access, active)));
     }
 
+    /// Admits the oldest due retry no slot in `active` holds. `waiting`,
+    /// when given, is set in the same round to the milliseconds until the
+    /// earliest scheduled retry not yet due, or null when none is
+    /// scheduled: when the caller next needs to ask, absent a commit.
     pub fn tryAdmitNextModelRetry(
         self: *Store,
         active: ActiveOperationFilter,
         faults: Faults,
+        waiting: ?*?u64,
     ) !?AttemptAdmission {
-        return self.queue().write(tryAdmitNextModelRetryHeld, .{ self, active, faults });
+        return self.queue().write(tryAdmitNextModelRetryHeld, .{ self, active, faults, waiting });
     }
 
     fn tryAdmitNextModelRetryHeld(
         self: *Store,
         active: ActiveOperationFilter,
         faults: Faults,
+        waiting: ?*?u64,
     ) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
@@ -1434,7 +1440,7 @@ pub const Store = struct {
         defer candidate.deinit();
         var access: Access(.write, error{RetryNoLongerDue}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, model_admission_domain.tryAdmitNextModelRetry(&candidate, &access, self.io, active, faults)));
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, model_admission_domain.tryAdmitNextModelRetry(&candidate, &access, self.io, active, faults, waiting)));
     }
 
     /// Opens the view in `out`, where it stays until it closes: a view
