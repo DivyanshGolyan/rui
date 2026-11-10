@@ -14,6 +14,7 @@ const queued_line = @import("queued_line.zig");
 const View = @import("session_view.zig");
 const protocol = @import("protocol.zig");
 const ConsentPolicy = @import("session_consent.zig");
+const session_id = @import("session_id.zig");
 const Self = @This();
 
 /// What the conversation area shows. The transcript is a frozen copy of live
@@ -492,18 +493,27 @@ fn boundary(self: *Self, text: []const u8) !usize {
     return before - self.transcriptCollapsed();
 }
 
-/// The lowest collapsed user block the latest frame drew in the live view
-/// or transcript, as how many collapsed blocks follow it in that document.
+/// What Ctrl-O opens: the lowest item the latest frame drew in the live
+/// view or transcript, a collapsed user block, counted by how many collapsed
+/// blocks follow it in that document, or a peer's name, by its Session's ID.
 /// Call right after drawing: later text moves what the frame drew.
-pub fn collapsedInView(self: *Self) ?usize {
+pub const Openable = union(enum) { message: usize, session: [session_id.bytes]u8 };
+
+pub fn openableInView(self: *Self) ?Openable {
     if (self.view != .live and self.view != .transcript) return null;
     const document = self.viewed();
     const text = document.text().len;
     const next = document.measure(self.textLayout(), self.drawn.first, self.drawn.rows).next;
     // A line cut at the bottom shows its first rows, which hold the mark.
     const end = if (next.offset >= text) text else if (next.row != 0) document.lineEnd(next.offset) else next.offset;
-    const last = document.collapsed(@min(self.drawn.first.offset, text), end).last orelse return null;
-    return document.collapsed(last + 1, text).count;
+    const start = @min(self.drawn.first.offset, text);
+    const mark = document.collapsed(start, end).last;
+    if (document.lastSession(start, end)) |name| if (mark == null or name > mark.?) {
+        const id = document.sessionAt(name).?;
+        if (id.len == session_id.bytes) return .{ .session = id[0..session_id.bytes].* };
+    };
+    const last = mark orelse return null;
+    return .{ .message = document.collapsed(last + 1, text).count };
 }
 
 /// Shows one Message's full text over the live view or the transcript.
@@ -1779,7 +1789,7 @@ test "Ctrl-O names the lowest collapsed block drawn, counted from the end" {
     }
     _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
     // The newest block scrolled off with its answer's rows below it.
-    try std.testing.expectEqual(@as(?usize, null), screen.collapsedInView());
+    try std.testing.expectEqual(@as(?Openable, null), screen.openableInView());
     try screen.beginTranscript(0);
     for (0..10) |_| _ = screen.browse(false, true);
     // Line by line down from the top, the lowest block drawn names each
@@ -1788,7 +1798,7 @@ test "Ctrl-O names the lowest collapsed block drawn, counted from the end" {
     var count: usize = 0;
     while (true) {
         _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
-        const index = screen.collapsedInView();
+        const index: ?usize = if (screen.openableInView()) |item| item.message else null;
         if (count == 0 or !std.meta.eql(seen[count - 1], index)) {
             seen[count] = index;
             count += 1;

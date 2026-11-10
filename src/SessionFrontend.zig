@@ -388,6 +388,11 @@ fn appNotice(raw: *anyopaque, ctx: *vxfw.EventContext, text: []const u8) !void {
 /// else say what keeps this one open. The draft and Session stay as they are.
 fn appOpen(raw: *anyopaque, ctx: *vxfw.EventContext, id: []const u8) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    try self.follow(ctx, id);
+}
+
+/// Opens the peer `id` names, by a click or Ctrl-O, under Esc's rules.
+fn follow(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
     if (self.leaving != null or id.len != session_id.bytes or !session_id.valid(id) or std.mem.eql(u8, id, self.session)) return;
     const screen = self.screen;
     const action = screen.action_view != null or self.live.work.first_action != null or self.reading.prepared_action != null;
@@ -453,7 +458,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 self.dirty = true;
             };
             try self.app_card.widget().handleEvent(ctx, .tick);
-            if (self.expansion.queued == .after_frame) try self.expand();
+            if (self.expansion.queued == .after_frame) if (try self.expand()) |peer| try self.follow(ctx, &peer);
             ctx.redraw = ctx.redraw or self.dirty;
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
@@ -894,6 +899,88 @@ test "App Session link click leaves for the peer only where Esc would leave" {
     try click(&ctx, content, 25);
     try std.testing.expectEqualStrings("m3n4p5", &Hooks.opened.?);
     try std.testing.expectEqual(Outcome.returned, Hooks.left.?);
+}
+
+test "App Session Ctrl-O follows the lowest drawn peer name, or opens the lower Message" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const page = try tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+    defer page.close(std.testing.io);
+    var init: std.process.Init = undefined;
+    init.io = std.testing.io;
+    init.gpa = std.testing.allocator;
+    init.environ_map = &environ;
+    var interrupted: client.Cancellation = .{};
+    const self = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(self);
+    self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
+    const Hooks = struct {
+        var opened: ?[session_id.bytes]u8 = null;
+        fn leave(_: *anyopaque, _: *vxfw.EventContext, _: Outcome) !void {}
+        fn upgrade(_: *anyopaque, _: *vxfw.EventContext) !void {
+            return error.UnexpectedUpgrade;
+        }
+        fn copy(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
+            return error.UnexpectedCopy;
+        }
+        fn open(_: *anyopaque, _: *vxfw.EventContext, id: *const [session_id.bytes]u8) !void {
+            opened = id.*;
+        }
+    };
+    Hooks.opened = null;
+    var root: Root = .{ .overview = empty_app_text.widget() };
+    const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .upgrade = Hooks.upgrade, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
+    self.reading.opening = false;
+    self.poll_at = std.math.maxInt(i96);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
+    defer ctx.cmds.deinit(std.testing.allocator);
+    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+    const peer = "\x1b[2;8m← Received message from " ++ TerminalText.link_open ++ TerminalText.session_link ++ "m3n4p5" ++ TerminalText.link_end ++ "\x1b[4mPlan" ++ TerminalText.link_close ++ "\x1b[0m\x1b[2;8m\x1b[0m\n";
+    const ctrl_o: vxfw.Event = .{ .key_press = .{ .codepoint = 'o', .mods = .{ .ctrl = true } } };
+    // A collapsed Message above, its block kept, and a peer row below it.
+    try screen.live.append("\n› " ++ View.Mark.body ++ "preview\n" ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n");
+    self.live.blocks.append(.{ .source = .conversation, .position = 0, .ordinal = 1, .content = undefined, .row = false });
+    try screen.live.append(peer);
+    // While an Action waits, Ctrl-O opens no peer: the Action's card
+    // holds the keys, and the Session stays.
+    try page.writeStreamingAll(std.testing.io, "$ echo safe\n");
+    self.reading.prepared_action = 9;
+    self.live.work.first_action = 9;
+    try widget_.handleEvent(&ctx, .tick);
+    _ = try widget_.draw(draw_context);
+    try std.testing.expectEqual(@as(?u64, 9), self.app_consent.drawn);
+    try widget_.handleEvent(&ctx, ctrl_o);
+    try widget_.handleEvent(&ctx, .tick);
+    try std.testing.expectEqualStrings("! Ctrl-O opens a message or Session name from the conversation.", self.notice.?);
+    try std.testing.expectEqual(@as(?[session_id.bytes]u8, null), Hooks.opened);
+    try std.testing.expectEqual(@as(?Outcome, null), self.leaving);
+    self.live.work.first_action = null;
+    try widget_.handleEvent(&ctx, .tick);
+    // A Message drawn lower than the name is what Ctrl-O opens.
+    try screen.live.append("\n› " ++ View.Mark.body ++ "later\n" ++ View.Mark.summary ++ "┄ 4 more lines" ++ View.Mark.reset ++ "\n");
+    self.live.blocks.append(.{ .source = .conversation, .position = 0, .ordinal = 2, .content = undefined, .row = false });
+    _ = try widget_.draw(draw_context);
+    try widget_.handleEvent(&ctx, ctrl_o);
+    try widget_.handleEvent(&ctx, .tick);
+    try std.testing.expectEqualStrings("Opening message…", self.notice.?);
+    try std.testing.expectEqual(@as(u64, 2), self.expansion.queued.ready.target.ordinal);
+    try std.testing.expectEqual(@as(?[session_id.bytes]u8, null), Hooks.opened);
+    // With the peer row lowest again, Ctrl-O follows the peer.
+    self.dropMessageRequest();
+    try screen.live.append(peer);
+    _ = try widget_.draw(draw_context);
+    try widget_.handleEvent(&ctx, ctrl_o);
+    try widget_.handleEvent(&ctx, .tick);
+    try std.testing.expectEqualStrings("m3n4p5", &Hooks.opened.?);
+    try std.testing.expectEqual(Outcome.returned, self.leaving.?);
 }
 
 /// A Session's input starts empty, and no frame of it has drawn a list yet:
@@ -1565,7 +1652,8 @@ fn driveActive(self: *Self) !void {
         // Another Session's notification goes out with the next frame.
         if (self.terminal.notificationWaiting()) self.dirty = true;
         if (self.dirty or self.screen.stale()) if (try self.draw()) break;
-        if (self.expansion.queued == .after_frame) try self.expand();
+        // The classic loop has no link to follow; only the App Session does.
+        if (self.expansion.queued == .after_frame) _ = try self.expand();
         _ = try self.step(16);
     }
 }
@@ -1963,26 +2051,31 @@ fn dropMessageRequest(self: *Self) void {
     self.expansion.queued = .none;
 }
 
-/// Ctrl-O: opens the lowest collapsed Message the latest frame drew.
-fn expand(self: *Self) !void {
+/// Ctrl-O: opens the lowest collapsed Message the latest frame drew, or
+/// returns the peer whose name is drawn lower, for `follow`.
+fn expand(self: *Self) !?[session_id.bytes]u8 {
     self.expansion.queued = .none;
     self.dirty = true;
     const screen = self.screen;
     if (self.pagePlace() == .elsewhere) {
-        self.notice = "! Ctrl-O opens a collapsed message from the conversation.";
-        return;
+        self.notice = "! Ctrl-O opens a message or Session name from the conversation.";
+        return null;
     }
-    const index = screen.collapsedInView() orelse {
-        self.notice = "No collapsed message in view; scroll to one, then Ctrl-O.";
-        return;
+    const index = switch (screen.openableInView() orelse {
+        self.notice = "Nothing to open in view; scroll to one, then Ctrl-O.";
+        return null;
+    }) {
+        .message => |index| index,
+        .session => |id| return id,
     };
     const blocks = if (screen.view == .live) &self.live.blocks else &self.transcript.blocks;
     const target = blocks.fromEnd(index) orelse {
         self.notice = "! That message's full text is no longer held here; /history shows it again.";
-        return;
+        return null;
     };
     self.expansion.queued = .{ .ready = .{ .target = target, .asked = self.pageAsked() } };
     self.notice = "Opening message…";
+    return null;
 }
 
 /// Freezes live output for scrolling. The copy starts at a recorded read

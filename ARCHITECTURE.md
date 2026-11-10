@@ -2752,6 +2752,7 @@ When no boundary remains in view (one page exceeded it, or a Message still await
 A boundary's offset is where its item's text begins in live output, which keeps text but not the styling the read staged; a saved page larger than the view keeps its newest whole lines and says so.
 `/history` jumps to the transcript's top.
 Ctrl-O opens the lowest collapsed Message the latest frame drew, live or in the transcript, as a Message page: it is read from the Store and shows only if its length and digest match.
+When a peer's name is drawn below that Message, Ctrl-O follows it instead, under the same rules and refusals as a click on the name, so every link has a keyboard path.
 The page shows the whole text up to the 256-KiB view, then says how many lines it did not show in full; a saved row's page names its exact raw export.
 Esc, Ctrl-G or Ctrl-O returns to the same view and rows.
 Each collapsed block keeps its Message's identity while it stays in the copy; a block whose identity is no longer held says so and opens nothing.
