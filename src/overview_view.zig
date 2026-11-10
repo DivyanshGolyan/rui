@@ -3160,64 +3160,44 @@ fn shownCommands(state: *State, draft: Draft) ?*slash_commands.Shown {
     return slash_commands.Shown.drawnNow(&state.commands, nextCommands(state, draft));
 }
 
-/// Builds one line's spans left to right, sanitizing and clipping text:
-/// the span builder behind the App rows' segment functions, until PR 3
-/// replaces it.
-const Painter = struct {
+/// One line's spans, placed left to right at their columns, its text made
+/// terminal-safe and clipped to the room it has. Each span keeps the role
+/// it was given, as `plain` leaves it without colour; the widget that
+/// draws the line makes the role a colour through `widget_style`.
+const Spans = struct {
     arena: Allocator,
     caps: Caps,
     glyphs: Glyphs,
     width: u16,
-    frame: u64,
     spans: [24]Span = undefined,
     count: usize = 0,
     column: usize = 0,
-    /// The selection's ground across the line, inside its margins.
-    selected: bool = false,
+
+    fn of(arena: Allocator, caps: Caps, width: u16) Spans {
+        return .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width };
+    }
 
     /// The glyph set `work_line` draws this screen's clocks with.
-    fn script(self: *const Painter) work_line.Script {
+    fn script(self: *const Spans) work_line.Script {
         return if (self.caps.unicode) .unicode else .ascii;
     }
 
-    fn begin(self: *Painter, selected: bool) void {
+    fn begin(self: *Spans) void {
         self.count = 0;
         self.column = 0;
-        self.selected = selected;
     }
 
-    fn finish(self: *Painter) error{OutOfMemory}![]const Span {
-        if (self.selected) try self.pad(self.width -| self.inset(), .{});
+    fn finish(self: *Spans) error{OutOfMemory}![]const Span {
         return self.arena.dupe(Span, self.spans[0..self.count]);
     }
 
-    /// The selection's margin: one cell when painted, as in the mock; none
-    /// without colour, where it is reverse video across the line.
-    fn inset(self: *const Painter) usize {
-        return @intFromBool(self.caps.depth != .none);
-    }
-
-    /// The style drawn. Without colour, only bold and reverse remain: the
-    /// band and the selection reverse, and every other ground is the
-    /// terminal's own.
-    fn style(self: *const Painter, wanted: Style) Style {
-        var result = wanted;
-        if (self.selected) result.background = .selection;
-        if (self.caps.depth == .none) return .{
-            .bold = result.bold or result.background == .band,
-            .reverse = result.background == .band or result.background == .selection,
-        };
-        return result;
-    }
-
-    /// Moves to `column`, filling the cells passed when they show a ground
-    /// of their own.
-    fn pad(self: *Painter, column: usize, wanted: Style) error{OutOfMemory}!void {
+    /// Moves to `column`, filling the cells passed when `wanted` shows a
+    /// ground of its own.
+    fn pad(self: *Spans, column: usize, wanted: Style) error{OutOfMemory}!void {
         const to = @min(column, self.width);
         if (to <= self.column) return;
-        const drawn = self.style(wanted);
-        if (self.selected and self.column == 0) self.column = self.inset();
-        if (to > self.column and (drawn.reverse or drawn.background != .ground)) {
+        const drawn = plain(self.caps, wanted);
+        if (drawn.reverse or drawn.background != .ground) {
             const blank = try self.arena.alloc(u8, to - self.column);
             @memset(blank, ' ');
             self.push(blank, to - self.column, wanted);
@@ -3225,91 +3205,110 @@ const Painter = struct {
         self.column = to;
     }
 
-    fn push(self: *Painter, bytes: []const u8, cells: usize, wanted: Style) void {
+    fn push(self: *Spans, bytes: []const u8, cells: usize, wanted: Style) void {
         if (self.count == self.spans.len or cells == 0) return;
-        self.spans[self.count] = .{ .column = @intCast(self.column), .cells = @intCast(cells), .text = bytes, .style = self.style(wanted) };
+        self.spans[self.count] = .{ .column = @intCast(self.column), .cells = @intCast(cells), .text = bytes, .style = plain(self.caps, wanted) };
         self.count += 1;
         self.column += cells;
     }
 
     /// Puts `bytes` at `column` within `limit` cells, ending in an ellipsis
     /// when cut. Returns the cells it took.
-    fn put(self: *Painter, column: usize, bytes: []const u8, limit: usize, wanted: Style) error{OutOfMemory}!usize {
-        try self.pad(column, wanted);
-        const room = @min(limit, self.width -| self.column);
-        if (room == 0) return 0;
-        const shown = try self.clean(bytes, room, .head);
-        self.push(shown.bytes, shown.cells, wanted);
-        return shown.cells;
+    fn put(self: *Spans, column: usize, bytes: []const u8, limit: usize, wanted: Style) error{OutOfMemory}!usize {
+        return self.putKept(column, bytes, limit, wanted, .head);
     }
 
     /// Like `put`, keeping the end of `bytes` when it is cut.
-    fn putTail(self: *Painter, column: usize, bytes: []const u8, limit: usize, wanted: Style) error{OutOfMemory}!usize {
+    fn putTail(self: *Spans, column: usize, bytes: []const u8, limit: usize, wanted: Style) error{OutOfMemory}!usize {
+        return self.putKept(column, bytes, limit, wanted, .tail);
+    }
+
+    fn putKept(self: *Spans, column: usize, bytes: []const u8, limit: usize, wanted: Style, keep: Keep) error{OutOfMemory}!usize {
         try self.pad(column, wanted);
         const room = @min(limit, self.width -| self.column);
         if (room == 0) return 0;
-        const shown = try self.clean(bytes, room, .tail);
+        const shown = try fitted(self.arena, self.caps, self.glyphs, bytes, room, keep);
         self.push(shown.bytes, shown.cells, wanted);
         return shown.cells;
     }
 
     /// Puts `bytes` so they end at `end`.
-    fn putRight(self: *Painter, end: usize, bytes: []const u8, wanted: Style) error{OutOfMemory}!void {
+    fn putRight(self: *Spans, end: usize, bytes: []const u8, wanted: Style) error{OutOfMemory}!void {
         const cells = self.measure(bytes);
         if (cells > end or end - cells < self.column) return;
         _ = try self.put(end - cells, bytes, cells, wanted);
     }
 
-    /// Terminal-safe text clipped to `room` cells, as `Pieces` shows it.
-    fn clean(self: *Painter, bytes: []const u8, room: usize, keep: enum { head, tail }) error{OutOfMemory}!Piece {
-        const total = self.measure(bytes);
-        const ellipsis = self.glyphs.ellipsis;
-        const budget = if (total <= room) total else room - 1;
-        var out = try self.arena.alloc(u8, bytes.len * 3 + ellipsis.len);
-        var used: usize = 0;
-        var cells: usize = 0;
-        if (keep == .tail and total > room) {
-            @memcpy(out[0..ellipsis.len], ellipsis);
-            used = ellipsis.len;
-        }
-        var skip = if (keep == .tail) total - budget else 0;
-        var pieces: Pieces = .{ .bytes = bytes, .painter = self };
-        while (pieces.next()) |piece| {
-            if (skip > 0) {
-                skip -|= piece.cells;
-                continue;
-            }
-            if (cells + piece.cells > budget) break;
-            @memcpy(out[used..][0..piece.bytes.len], piece.bytes);
-            used += piece.bytes.len;
-            cells += piece.cells;
-        }
-        if (keep == .head and total > room) {
-            @memcpy(out[used..][0..ellipsis.len], ellipsis);
-            used += ellipsis.len;
-        }
-        return .{ .bytes = out[0..used], .cells = cells + @intFromBool(total > room) };
-    }
-
-    fn measure(self: *const Painter, bytes: []const u8) usize {
-        var total: usize = 0;
-        var pieces: Pieces = .{ .bytes = bytes, .painter = self };
-        while (pieces.next()) |piece| total += piece.cells;
-        return total;
-    }
-
-    /// The glyph shown for a code point that cannot reach the terminal: a
-    /// control character or an invalid byte, or without Unicode anything
-    /// past ASCII.
-    fn standIn(self: *const Painter, codepoint: u21) ?[]const u8 {
-        if (codepoint == '\n') return self.glyphs.newline;
-        // A tab shows as one space, as in a conversation.
-        if (codepoint == '\t') return " ";
-        if (TerminalText.isControl(codepoint) or codepoint == replacement) return "?";
-        if (!self.caps.unicode and codepoint > 0x7e) return "?";
-        return null;
+    fn measure(self: *const Spans, bytes: []const u8) usize {
+        return measured(self.caps, self.glyphs, bytes);
     }
 };
+
+const Keep = enum { head, tail };
+
+/// `wanted` as a terminal without colour shows it: only bold and reverse
+/// remain, the band and the selection reverse, and every other ground is
+/// the terminal's own.
+fn plain(caps: Caps, wanted: Style) Style {
+    if (caps.depth != .none) return wanted;
+    return .{
+        .bold = wanted.bold or wanted.background == .band,
+        .reverse = wanted.reverse or wanted.background == .band or wanted.background == .selection,
+    };
+}
+
+/// `bytes` made terminal-safe and clipped to `room` cells, as `Pieces`
+/// shows it, with an ellipsis where it was cut: at the end, or at the
+/// start when keeping the tail.
+fn fitted(arena: Allocator, caps: Caps, glyphs: Glyphs, bytes: []const u8, room: usize, keep: Keep) error{OutOfMemory}!Piece {
+    const total = measured(caps, glyphs, bytes);
+    const ellipsis = glyphs.ellipsis;
+    const budget = if (total <= room) total else room - 1;
+    var out = try arena.alloc(u8, bytes.len * 3 + ellipsis.len);
+    var used: usize = 0;
+    var cells: usize = 0;
+    if (keep == .tail and total > room) {
+        @memcpy(out[0..ellipsis.len], ellipsis);
+        used = ellipsis.len;
+    }
+    var skip = if (keep == .tail) total - budget else 0;
+    var pieces: Pieces = .{ .bytes = bytes, .caps = caps, .glyphs = glyphs };
+    while (pieces.next()) |piece| {
+        if (skip > 0) {
+            skip -|= piece.cells;
+            continue;
+        }
+        if (cells + piece.cells > budget) break;
+        @memcpy(out[used..][0..piece.bytes.len], piece.bytes);
+        used += piece.bytes.len;
+        cells += piece.cells;
+    }
+    if (keep == .head and total > room) {
+        @memcpy(out[used..][0..ellipsis.len], ellipsis);
+        used += ellipsis.len;
+    }
+    return .{ .bytes = out[0..used], .cells = cells + @intFromBool(total > room) };
+}
+
+/// The cells `bytes` takes as `Pieces` shows it.
+fn measured(caps: Caps, glyphs: Glyphs, bytes: []const u8) usize {
+    var total: usize = 0;
+    var pieces: Pieces = .{ .bytes = bytes, .caps = caps, .glyphs = glyphs };
+    while (pieces.next()) |piece| total += piece.cells;
+    return total;
+}
+
+/// The glyph shown for a code point that cannot reach the terminal: a
+/// control character or an invalid byte, or without Unicode anything past
+/// ASCII.
+fn standIn(caps: Caps, glyphs: Glyphs, codepoint: u21) ?[]const u8 {
+    if (codepoint == '\n') return glyphs.newline;
+    // A tab shows as one space, as in a conversation.
+    if (codepoint == '\t') return " ";
+    if (TerminalText.isControl(codepoint) or codepoint == replacement) return "?";
+    if (!caps.unicode and codepoint > 0x7e) return "?";
+    return null;
+}
 
 const Piece = struct { bytes: []const u8, cells: usize };
 
@@ -3318,20 +3317,21 @@ const Piece = struct { bytes: []const u8, cells: usize };
 /// that cannot reach it.
 const Pieces = struct {
     bytes: []const u8,
-    painter: *const Painter,
+    caps: Caps,
+    glyphs: Glyphs,
     at: usize = 0,
 
     fn next(self: *Pieces) ?Piece {
         if (self.at == self.bytes.len) return null;
         const rest = self.bytes[self.at..];
         const first = decode(rest);
-        if (self.painter.standIn(first.codepoint)) |glyph| {
+        if (standIn(self.caps, self.glyphs, first.codepoint)) |glyph| {
             self.at += first.len;
             return .{ .bytes = glyph, .cells = 1 };
         }
         // Printable ASCII before ASCII or the end is a whole cluster of one
         // cell under every method; this keeps long ASCII text cheap.
-        if (!self.painter.caps.unicode or (first.codepoint < 0x80 and (rest.len == 1 or rest[1] < 0x80))) {
+        if (!self.caps.unicode or (first.codepoint < 0x80 and (rest.len == 1 or rest[1] < 0x80))) {
             self.at += 1;
             return .{ .bytes = rest[0..1], .cells = 1 };
         }
@@ -3340,11 +3340,11 @@ const Pieces = struct {
         var end = first.len;
         while (end < cluster) {
             const decoded = decode(rest[end..]);
-            if (self.painter.standIn(decoded.codepoint) != null) break;
+            if (standIn(self.caps, self.glyphs, decoded.codepoint) != null) break;
             end += decoded.len;
         }
         self.at += end;
-        return .{ .bytes = rest[0..end], .cells = gwidth.gwidth(rest[0..end], self.painter.caps.width) };
+        return .{ .bytes = rest[0..end], .cells = gwidth.gwidth(rest[0..end], self.caps.width) };
     }
 };
 
@@ -3368,42 +3368,42 @@ fn decode(bytes: []const u8) struct { codepoint: u21, len: usize } {
 
 /// The list's line while it has no rows: loading, or what the view holds
 /// and where the rest are.
-fn emptyLine(painter: *Painter, state: *const State) error{OutOfMemory}![]const Span {
-    painter.begin(false);
+fn emptyLine(built: *Spans, state: *const State) error{OutOfMemory}![]const Span {
+    built.begin();
     const text = if (state.listed_at_ms == null)
-        try std.fmt.allocPrint(painter.arena, "Loading{s}", .{painter.glyphs.ellipsis})
+        try std.fmt.allocPrint(built.arena, "Loading{s}", .{built.glyphs.ellipsis})
     else if (state.archive == .archived)
         "No archived Sessions. /sessions changes the view."
     else if (state.archive == .all)
         "No Sessions yet. Type a task below."
     else
         "No unarchived Sessions. /sessions archived shows the archive.";
-    _ = try painter.put(1, text, painter.width -| 2, .{ .colour = .quiet });
-    return painter.finish();
+    _ = try built.put(1, text, built.width -| 2, .{ .colour = .quiet });
+    return built.finish();
 }
 
 /// A full-width alarm line, dark on yellow.
-fn bandLine(painter: *Painter, text: []const u8) error{OutOfMemory}![]const Span {
-    painter.begin(false);
+fn bandLine(built: *Spans, text: []const u8) error{OutOfMemory}![]const Span {
+    built.begin();
     const style: Style = .{ .colour = .on_band, .background = .band, .bold = true };
-    try painter.pad(1, style);
-    _ = try painter.put(1, text, painter.width -| 2, style);
-    try painter.pad(painter.width, style);
-    return painter.finish();
+    try built.pad(1, style);
+    _ = try built.put(1, text, built.width -| 2, style);
+    try built.pad(built.width, style);
+    return built.finish();
 }
 
-fn providerBand(painter: *Painter, trouble: Band, now_ms: u64) error{OutOfMemory}![]const Span {
+fn providerBand(built: *Spans, trouble: Band, now_ms: u64) error{OutOfMemory}![]const Span {
     var buffer: [8]u8 = undefined;
-    return bandLine(painter, switch (trouble.trouble) {
+    return bandLine(built, switch (trouble.trouble) {
         // A row does not carry its provider, so each names the one provider
         // with that kind of credential.
         .sign_in => "Sign-in expired. Run " ++ comptime Provider.onlyWith(.sign_in).login() ++ ".",
         .api_key => comptime Provider.onlyWith(.api_key).shown() ++ " API key rejected. Run " ++ Provider.onlyWith(.api_key).login() ++ ", then rui host pause.",
         .quota => if (trouble.resets_at) |at|
-            try std.fmt.allocPrint(painter.arena, "Quota used up. Resets in {s}.", .{ageText(&buffer, at -| now_ms / 1000)})
+            try std.fmt.allocPrint(built.arena, "Quota used up. Resets in {s}.", .{ageText(&buffer, at -| now_ms / 1000)})
         else
             "Quota used up.",
-        .rate_limit => try std.fmt.allocPrint(painter.arena, "Rate limited. {d} Session{s} will retry.", .{ trouble.sessions, if (trouble.sessions == 1) "" else "s" }),
+        .rate_limit => try std.fmt.allocPrint(built.arena, "Rate limited. {d} Session{s} will retry.", .{ trouble.sessions, if (trouble.sessions == 1) "" else "s" }),
     });
 }
 
@@ -3452,51 +3452,51 @@ const DraftPieces = struct {
 };
 
 /// The line under the input. `listed`: this frame shows the command list.
-fn hints(painter: *Painter, state: *const State, draft: Draft, listed: bool) error{OutOfMemory}![]const Span {
-    painter.begin(false);
-    const room = painter.width -| 2;
-    const dot = painter.glyphs.dot;
+fn hints(built: *Spans, state: *const State, draft: Draft, listed: bool) error{OutOfMemory}![]const Span {
+    built.begin();
+    const room = built.width -| 2;
+    const dot = built.glyphs.dot;
     // What Esc does here, as `compose` reads it: a list or a panel closes
     // before the draft and the held settings clear.
     var status: StatusBuffer = undefined;
     const esc_does: ?[]const u8 = if (listed or state.panel != null) "esc close" else if (draft.bytes.len != 0 or !state.settings.empty()) "esc clear" else null;
     if (state.shownPicker()) |picker| {
         // A notice shares the row, so the picker's keys stay in view.
-        const used = if (state.notice) |*notice| try painter.put(1, notice.firstLine(), room, .{ .colour = notice.colour }) + 1 else 0;
+        const used = if (state.notice) |*notice| try built.put(1, notice.firstLine(), room, .{ .colour = notice.colour }) + 1 else 0;
         const text = if (picker.step == .sign_in)
-            try std.fmt.allocPrint(painter.arena, "{s}{s} choose {s} enter pick {s} esc models", .{ if (used != 0) " " else "", painter.glyphs.sides, dot, dot })
+            try std.fmt.allocPrint(built.arena, "{s}{s} choose {s} enter pick {s} esc models", .{ if (used != 0) " " else "", built.glyphs.sides, dot, dot })
         else
-            try std.fmt.allocPrint(painter.arena, "{s}{s} choose {s} enter pick {s} esc close", .{ if (used != 0) " " else "", painter.glyphs.arrows, dot, dot });
-        _ = try painter.put(used, text, room -| used, .{ .colour = .quiet });
-    } else if (statusLine(state, painter.caps, &status)) |line| {
+            try std.fmt.allocPrint(built.arena, "{s}{s} choose {s} enter pick {s} esc close", .{ if (used != 0) " " else "", built.glyphs.arrows, dot, dot });
+        _ = try built.put(used, text, room -| used, .{ .colour = .quiet });
+    } else if (statusLine(state, built.caps, &status)) |line| {
         // A notice, else the Upgrade at work or held, else an unconfirmed
         // send: each says what the keys below cannot.
-        _ = try painter.put(1, line.text, room, .{ .colour = line.colour });
+        _ = try built.put(1, line.text, room, .{ .colour = line.colour });
     } else if (state.starting()) {
-        _ = try painter.put(1, try std.fmt.allocPrint(painter.arena, "Starting{s}", .{painter.glyphs.ellipsis}), room, .{ .colour = .quiet });
+        _ = try built.put(1, try std.fmt.allocPrint(built.arena, "Starting{s}", .{built.glyphs.ellipsis}), room, .{ .colour = .quiet });
     } else if (!state.settings.empty()) {
-        var text: std.Io.Writer.Allocating = .init(painter.arena);
+        var text: std.Io.Writer.Allocating = .init(built.arena);
         text.writer.writeAll("start settings:") catch return error.OutOfMemory;
         writeSettings(&state.settings, &text.writer) catch return error.OutOfMemory;
         // Long settings are cut so the way out stays on screen.
-        const suffix = try std.fmt.allocPrint(painter.arena, " {s} {s}", .{ dot, esc_does.? });
-        const used = try painter.put(1, text.written(), room -| painter.measure(suffix), .{ .colour = .quiet });
-        _ = try painter.put(1 + used, suffix, room -| used, .{ .colour = .quiet });
+        const suffix = try std.fmt.allocPrint(built.arena, " {s} {s}", .{ dot, esc_does.? });
+        const used = try built.put(1, text.written(), room -| built.measure(suffix), .{ .colour = .quiet });
+        _ = try built.put(1 + used, suffix, room -| used, .{ .colour = .quiet });
     } else if (draft.bytes.len != 0) {
         // What Enter and Esc do to this draft, as `enter` and `compose` read it.
         const slashed = draft.bytes[0] == '/' and !std.mem.startsWith(u8, draft.bytes, "//");
         const enter_does: []const u8 = if (!slashed) "enter start " else if (commands.parse(draft.bytes) == .command) "enter run " else "";
-        const text = try std.fmt.allocPrint(painter.arena, "{s}{s}{s}", .{ enter_does, if (enter_does.len != 0) try std.fmt.allocPrint(painter.arena, "{s} ", .{dot}) else "", esc_does.? });
-        _ = try painter.put(1, text, room, .{ .colour = .quiet });
+        const text = try std.fmt.allocPrint(built.arena, "{s}{s}{s}", .{ enter_does, if (enter_does.len != 0) try std.fmt.allocPrint(built.arena, "{s} ", .{dot}) else "", esc_does.? });
+        _ = try built.put(1, text, room, .{ .colour = .quiet });
     } else if (state.selectedRow()) |row| {
-        const stop = if (stoppable(state, row.reference, row.state.asOf(state.now_ms))) try std.fmt.allocPrint(painter.arena, " {s} " ++ session_line.stop_hint, .{dot}) else "";
-        const close = if (esc_does) |does| try std.fmt.allocPrint(painter.arena, " {s} {s}", .{ dot, does }) else "";
-        const text = try std.fmt.allocPrint(painter.arena, "{s} select {s} enter open{s}{s}", .{ painter.glyphs.arrows, dot, stop, close });
-        _ = try painter.put(1, text, room, .{ .colour = .quiet });
+        const stop = if (stoppable(state, row.reference, row.state.asOf(state.now_ms))) try std.fmt.allocPrint(built.arena, " {s} " ++ session_line.stop_hint, .{dot}) else "";
+        const close = if (esc_does) |does| try std.fmt.allocPrint(built.arena, " {s} {s}", .{ dot, does }) else "";
+        const text = try std.fmt.allocPrint(built.arena, "{s} select {s} enter open{s}{s}", .{ built.glyphs.arrows, dot, stop, close });
+        _ = try built.put(1, text, room, .{ .colour = .quiet });
     } else if (esc_does) |does| {
-        _ = try painter.put(1, does, room, .{ .colour = .quiet });
+        _ = try built.put(1, does, room, .{ .colour = .quiet });
     }
-    return painter.finish();
+    return built.finish();
 }
 
 /// ` --name value` per held setting, quoting values the /configure grammar
@@ -3568,14 +3568,14 @@ fn pickerNote(state: *const State, provider: Provider) ?enum { pending, fallback
 }
 
 /// Fills `lines`, the rows `layout` gave the picker, as `pickerFit` says.
-fn pickerLines(painter: *Painter, state: *const State, picker: *const Picker, lines: [][]const Span) error{OutOfMemory}!void {
+fn pickerLines(built: *Spans, state: *const State, picker: *const Picker, lines: [][]const Span) error{OutOfMemory}!void {
     const menu = &state.menu;
     const fit = pickerFit(state, lines.len);
     std.debug.assert(fit.used() == lines.len);
     if (picker.step == .sign_in) {
-        painter.begin(false);
-        _ = try painter.put(4, picker.highlight.slice(), painter.width -| 5, .{ .colour = .strong });
-        lines[0] = try painter.finish();
+        built.begin();
+        _ = try built.put(4, picker.highlight.slice(), built.width -| 5, .{ .colour = .strong });
+        lines[0] = try built.finish();
         return;
     }
     const kept = menu.entries.len != 0 or for (menu.sources.values) |source| {
@@ -3583,9 +3583,9 @@ fn pickerLines(painter: *Painter, state: *const State, picker: *const Picker, li
     } else false;
     var line: usize = 0;
     if (fit.above) {
-        lines[line] = try quietLine(painter, switch (state.menu_read) {
+        lines[line] = try quietLine(built, switch (state.menu_read) {
             .read => unreachable,
-            .unread => try std.fmt.allocPrint(painter.arena, "Loading models{s}", .{painter.glyphs.ellipsis}),
+            .unread => try std.fmt.allocPrint(built.arena, "Loading models{s}", .{built.glyphs.ellipsis}),
             .unanswered => if (kept) "The Host did not answer; this is the last list" else "Models unavailable: the Host did not answer",
             .invalid => if (kept) "The Host's model list was not valid; this is the last list" else "Models unavailable: the Host's list was not valid",
         });
@@ -3601,17 +3601,17 @@ fn pickerLines(painter: *Painter, state: *const State, picker: *const Picker, li
     var listed: usize = 0;
     for (first..first + fit.shown) |item| {
         if (item == others) {
-            painter.begin(false);
-            _ = try painter.put(2, "Other models", painter.width -| 3, .{ .colour = .ink, .bold = true });
-            lines[line] = try painter.finish();
+            built.begin();
+            _ = try built.put(2, "Other models", built.width -| 3, .{ .colour = .ink, .bold = true });
+            lines[line] = try built.finish();
         } else {
-            lines[line] = try modelLine(painter, state, shown_menu.entry(item - @intFromBool(item > others)), tag_column);
+            lines[line] = try modelLine(built, state, shown_menu.entry(item - @intFromBool(item > others)), tag_column);
             listed += 1;
         }
         line += 1;
     }
     if (fit.more) {
-        lines[line] = try quietLine(painter, try std.fmt.allocPrint(painter.arena, "{d} more", .{menu.entries.len - listed}));
+        lines[line] = try quietLine(built, try std.fmt.allocPrint(built.arena, "{d} more", .{menu.entries.len - listed}));
         line += 1;
     }
     var noted: usize = 0;
@@ -3619,10 +3619,10 @@ fn pickerLines(painter: *Painter, state: *const State, picker: *const Picker, li
         if (noted == fit.notes) break;
         const note = pickerNote(state, provider) orelse continue;
         const name = provider.signIn();
-        lines[line] = try quietLine(painter, switch (note) {
-            .pending => try std.fmt.allocPrint(painter.arena, "{s}: loading its models{s}", .{ name, painter.glyphs.ellipsis }),
-            .fallback => try std.fmt.allocPrint(painter.arena, "{s}: its live list is unavailable", .{name}),
-            .login => try std.fmt.allocPrint(painter.arena, "{s}: run {s} in your shell", .{ name, provider.login() }),
+        lines[line] = try quietLine(built, switch (note) {
+            .pending => try std.fmt.allocPrint(built.arena, "{s}: loading its models{s}", .{ name, built.glyphs.ellipsis }),
+            .fallback => try std.fmt.allocPrint(built.arena, "{s}: its live list is unavailable", .{name}),
+            .login => try std.fmt.allocPrint(built.arena, "{s}: run {s} in your shell", .{ name, provider.login() }),
         });
         line += 1;
         noted += 1;
@@ -3631,41 +3631,50 @@ fn pickerLines(painter: *Painter, state: *const State, picker: *const Picker, li
 }
 
 /// One of the picker's dim lines, under its models.
-fn quietLine(painter: *Painter, text: []const u8) error{OutOfMemory}![]const Span {
-    painter.begin(false);
-    _ = try painter.put(4, text, painter.width -| 5, .{ .colour = .quiet });
-    return painter.finish();
+fn quietLine(built: *Spans, text: []const u8) error{OutOfMemory}![]const Span {
+    built.begin();
+    _ = try built.put(4, text, built.width -| 5, .{ .colour = .quiet });
+    return built.finish();
 }
 
-fn modelLine(painter: *Painter, state: *const State, entry: model_picker.Entry, tag_column: usize) error{OutOfMemory}![]const Span {
+fn modelLine(built: *Spans, state: *const State, entry: model_picker.Entry, tag_column: usize) error{OutOfMemory}![]const Span {
     const highlighted = state.picker.?.highlight.eql(entry.id);
-    painter.begin(highlighted);
-    if (highlighted) _ = try painter.put(2, painter.glyphs.prompt, 1, .{ .colour = .strong });
+    built.begin();
+    // The highlight is the selection's ground across the line, one cell in
+    // from each edge in colour, as in the mock, and edge to edge as
+    // NO_COLOR's reverse video.
+    const ground: Background = if (highlighted) .selection else .ground;
+    const margin: usize = @intFromBool(built.caps.depth != .none);
+    if (highlighted) {
+        built.column = margin;
+        _ = try built.put(2, built.glyphs.prompt, 1, .{ .colour = .strong, .background = ground });
+    }
     const is_default = if (state.nextBinding().model) |model| std.mem.eql(u8, model, entry.id) else false;
     const tag: []const u8 = if (!entry.known)
-        (if (is_default) try std.fmt.allocPrint(painter.arena, "default {s} default limits", .{painter.glyphs.dot}) else "default limits")
+        (if (is_default) try std.fmt.allocPrint(built.arena, "default {s} default limits", .{built.glyphs.dot}) else "default limits")
     else if (is_default) "default" else "";
-    const tag_cells = painter.measure(tag);
-    const fits = tag.len != 0 and tag_column + tag_cells + 1 <= painter.width;
-    const id_room = (if (fits) tag_column -| 2 else painter.width -| 1) -| 4;
-    _ = try painter.put(4, entry.id, id_room, .{ .colour = if (highlighted) .strong else if (entry.known) .ink else .normal });
-    if (fits) _ = try painter.put(tag_column, tag, tag_cells, .{ .colour = .quiet });
-    return painter.finish();
+    const tag_cells = built.measure(tag);
+    const fits = tag.len != 0 and tag_column + tag_cells + 1 <= built.width;
+    const id_room = (if (fits) tag_column -| 2 else built.width -| 1) -| 4;
+    _ = try built.put(4, entry.id, id_room, .{ .colour = if (highlighted) .strong else if (entry.known) .ink else .normal, .background = ground });
+    if (fits) _ = try built.put(tag_column, tag, tag_cells, .{ .colour = .quiet, .background = ground });
+    if (highlighted) try built.pad(built.width -| margin, .{ .background = ground });
+    return built.finish();
 }
 
 /// The input row at the sign-in choice: `Use`, then each sign-in that
 /// offers the model, the highlighted one marked and on the selection
 /// ground, as an Action's Allow once / Deny choice is drawn.
-fn signInChoice(painter: *Painter, providers: model_picker.Providers, highlight: Provider) error{OutOfMemory}![]const Span {
-    painter.begin(false);
-    _ = try painter.put(3, "Use", 3, .{ .colour = .quiet });
+fn signInChoice(built: *Spans, providers: model_picker.Providers, highlight: Provider) error{OutOfMemory}![]const Span {
+    built.begin();
+    _ = try built.put(3, "Use", 3, .{ .colour = .quiet });
     var column: usize = 8;
     for (std.enums.values(Provider)) |provider| if (providers.contains(provider)) {
         const chosen = provider == highlight;
-        const text = if (chosen) try std.fmt.allocPrint(painter.arena, "{s} {s} ", .{ painter.glyphs.prompt, provider.signIn() }) else try std.fmt.allocPrint(painter.arena, "  {s} ", .{provider.signIn()});
-        column += try painter.put(column, text, painter.width -| column -| 1, .{ .colour = if (chosen) .strong else .normal, .background = if (chosen) .selection else .ground }) + 2;
+        const text = if (chosen) try std.fmt.allocPrint(built.arena, "{s} {s} ", .{ built.glyphs.prompt, provider.signIn() }) else try std.fmt.allocPrint(built.arena, "  {s} ", .{provider.signIn()});
+        column += try built.put(column, text, built.width -| column -| 1, .{ .colour = if (chosen) .strong else .normal, .background = if (chosen) .selection else .ground }) + 2;
     };
-    return painter.finish();
+    return built.finish();
 }
 
 /// A line of the Sessions list: the gap before a group, its heading, the
@@ -3704,28 +3713,28 @@ pub fn listItem(state: *const State, line: usize) ?Item {
 /// The panel in the Sessions' rows: its heading, with the way back at the
 /// right, then its lines. When more lines come than rows, the last row
 /// counts the rest.
-fn panelLines(painter: *Painter, panel: *const Panel, lines: [][]const Span) error{OutOfMemory}!void {
-    painter.begin(false);
+fn panelLines(built: *Spans, panel: *const Panel, lines: [][]const Span) error{OutOfMemory}!void {
+    built.begin();
     const name = switch (panel.*) {
         .help => "Help",
-        .output => |output| try std.fmt.allocPrint(painter.arena, "/{s}", .{@tagName(output.name)}),
+        .output => |output| try std.fmt.allocPrint(built.arena, "/{s}", .{@tagName(output.name)}),
     };
-    _ = try painter.put(1, name, painter.width -| 2, .{ .colour = .ink, .bold = true });
-    try painter.putRight(painter.width -| 1, "Esc returns", .{ .colour = .quiet });
-    lines[0] = try painter.finish();
+    _ = try built.put(1, name, built.width -| 2, .{ .colour = .ink, .bold = true });
+    try built.putRight(built.width -| 1, "Esc returns", .{ .colour = .quiet });
+    lines[0] = try built.finish();
     const total = panel.rows() - 1;
     const room = lines.len - 1;
     const shown = if (total <= room) total else room -| 1;
     var texts = std.mem.splitScalar(u8, panel.text(), '\n');
     for (lines[1..][0..shown]) |*line| {
-        painter.begin(false);
-        _ = try painter.put(1, texts.next().?, painter.width -| 2, .{});
-        line.* = try painter.finish();
+        built.begin();
+        _ = try built.put(1, texts.next().?, built.width -| 2, .{});
+        line.* = try built.finish();
     }
     if (shown == total or room == 0) return;
-    painter.begin(false);
-    _ = try painter.put(1, try std.fmt.allocPrint(painter.arena, "+{d} more lines", .{total - shown}), painter.width -| 2, .{ .colour = .quiet });
-    lines[1 + shown] = try painter.finish();
+    built.begin();
+    _ = try built.put(1, try std.fmt.allocPrint(built.arena, "+{d} more lines", .{total - shown}), built.width -| 2, .{ .colour = .quiet });
+    lines[1 + shown] = try built.finish();
 }
 
 /// Lines of the list, group by group: a gap before each group but the
@@ -3773,22 +3782,22 @@ const ListLines = struct {
 
 /// A group's heading: its title and how many Sessions it holds, folded
 /// ones included.
-fn heading(painter: *Painter, group: Group, count: usize) error{OutOfMemory}![]const Span {
-    painter.begin(false);
+fn heading(built: *Spans, group: Group, count: usize) error{OutOfMemory}![]const Span {
+    built.begin();
     const info = groups.get(group);
-    var column = 1 + try painter.put(1, info.title, painter.width -| 2, .{ .colour = .ink, .bold = true });
+    var column = 1 + try built.put(1, info.title, built.width -| 2, .{ .colour = .ink, .bold = true });
     var buffer: [32]u8 = undefined;
-    const counted = try std.fmt.allocPrint(painter.arena, " {s} {s}", .{ painter.glyphs.dot, grouped(&buffer, count) });
-    column += try painter.put(column, counted, painter.width -| column -| 1, .{ .colour = .quiet });
-    if (info.help.len != 0) _ = try painter.put(column + 2, info.help, painter.width -| column -| 3, .{ .colour = .quiet });
-    return painter.finish();
+    const counted = try std.fmt.allocPrint(built.arena, " {s} {s}", .{ built.glyphs.dot, grouped(&buffer, count) });
+    column += try built.put(column, counted, built.width -| column -| 1, .{ .colour = .quiet });
+    if (info.help.len != 0) _ = try built.put(column + 2, info.help, built.width -| column -| 3, .{ .colour = .quiet });
+    return built.finish();
 }
 
-fn moreLine(painter: *Painter, hidden: usize) error{OutOfMemory}![]const Span {
-    painter.begin(false);
-    const text = try std.fmt.allocPrint(painter.arena, "{d} more", .{hidden});
-    _ = try painter.put(3, text, painter.width -| 4, .{ .colour = .quiet });
-    return painter.finish();
+fn moreLine(built: *Spans, hidden: usize) error{OutOfMemory}![]const Span {
+    built.begin();
+    const text = try std.fmt.allocPrint(built.arena, "{d} more", .{hidden});
+    _ = try built.put(3, text, built.width -| 4, .{ .colour = .quiet });
+    return built.finish();
 }
 
 /// Row columns, as the Khadi mock sets them: the mark at 2, the title at 4,
@@ -3820,18 +3829,18 @@ const Columns = struct {
     }
 };
 
-fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) error{OutOfMemory}![]const Span {
+fn rowLine(built: *Spans, state: *const State, at: usize, columns: Columns, frame: u64) error{OutOfMemory}![]const Span {
     const row = &state.rows.items[state.order.items[at]];
-    painter.begin(false);
+    built.begin();
     const kind = shownKind(state, row);
     const rule = rules.get(kind);
     var words: [work_line.max_words_bytes]u8 = undefined;
     const line = workLine(&words, state, row);
     const faded = state.unreachable_since_ms != null;
     const mark = marks.get(rule.mark);
-    const spins = markSpins(state, .{ .row = at }, painter.caps);
-    const glyph = if (spins) spinner[painter.frame % spinner.len] else if (painter.caps.unicode) mark.unicode else mark.ascii;
-    _ = try painter.put(2, glyph, 1, .{ .colour = if (faded) .quiet else if (line) |shown| toneColour(shown.tone, rule.colour) else rule.colour });
+    const spins = markSpins(state, .{ .row = at }, built.caps);
+    const glyph = if (spins) spinner[frame % spinner.len] else if (built.caps.unicode) mark.unicode else mark.ascii;
+    _ = try built.put(2, glyph, 1, .{ .colour = if (faded) .quiet else if (line) |shown| toneColour(shown.tone, rule.colour) else rule.colour });
 
     // Yours in the brightest ink, then named work; unnamed and ended grey.
     const yours = row.group() == .yours;
@@ -3839,47 +3848,47 @@ fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) 
     const named = title(state, row);
     const row_title = switch (row.archive_state) {
         .active => named.text,
-        .archiving => try std.fmt.allocPrint(painter.arena, "[Archiving] {s}", .{named.text}),
-        .archived => try std.fmt.allocPrint(painter.arena, "[Archived] {s}", .{named.text}),
+        .archiving => try std.fmt.allocPrint(built.arena, "[Archiving] {s}", .{named.text}),
+        .archived => try std.fmt.allocPrint(built.arena, "[Archived] {s}", .{named.text}),
     };
     const title_colour: Colour = if (faded) .quiet else if (yours) .strong else if (named.hint or ended) .quiet else .ink;
     // Only a row outside the working directory names its Workspace, at the
     // end of its title's room.
     const workspace: []const u8 = if (columns.workspace != 0 and row.workspace != state.cwd) workspace: {
         const path = shortPath(state.home, state.workspaces.items[row.workspace]);
-        break :workspace try std.mem.concat(painter.arena, u8, &.{ path.prefix, path.rest });
+        break :workspace try std.mem.concat(built.arena, u8, &.{ path.prefix, path.rest });
     } else "";
     // A word longer than its column, such as a retry's countdown, starts
     // early and takes from the title's room, down to `min_title` cells.
     var word_bytes: [max_word_bytes]u8 = undefined;
-    const text = if (columns.word != columns.end) word(&word_bytes, state, row, rule, line, painter.script()) else "";
+    const text = if (columns.word != columns.end) word(&word_bytes, state, row, rule, line, built.script()) else "";
     const word_end = columns.end -| Columns.age_cells -| 1;
-    const overflow = painter.measure(text) -| (word_end -| columns.word);
+    const overflow = built.measure(text) -| (word_end -| columns.word);
     const word_column = @max(columns.word -| overflow, @min(columns.word, Columns.title + Columns.min_title + 2));
-    const workspace_cells = if (word_column < columns.word) 0 else @min(painter.measure(workspace), columns.workspace);
+    const workspace_cells = if (word_column < columns.word) 0 else @min(built.measure(workspace), columns.workspace);
     // Without a detail column the title still leaves the age its room.
     const title_end = @min((word_column -| 2) -| (if (workspace_cells == 0) 0 else workspace_cells + 2), word_end -| 1);
-    _ = try painter.put(Columns.title, row_title, title_end -| Columns.title, .{ .colour = title_colour, .bold = yours and !faded });
-    _ = try painter.putTail(title_end + 2, workspace, workspace_cells, .{ .colour = if (faded) .quiet else .normal });
+    _ = try built.put(Columns.title, row_title, title_end -| Columns.title, .{ .colour = title_colour, .bold = yours and !faded });
+    _ = try built.putTail(title_end + 2, workspace, workspace_cells, .{ .colour = if (faded) .quiet else .normal });
 
     if (columns.word != columns.end) {
         // Colour only for what needs the person, or quiet as the work asks.
         const settled: Colour = if (rule.colour == .failure) .failure else .normal;
         // A needs-you row's command is plain: the mark already asks.
         const tone = if (faded) .quiet else if (row.needsYou()) .normal else if (line) |shown| toneColour(shown.tone, .normal) else settled;
-        _ = try painter.put(word_column, text, word_end -| word_column, .{ .colour = tone });
+        _ = try built.put(word_column, text, word_end -| word_column, .{ .colour = tone });
     }
     var buffer: [8]u8 = undefined;
-    try painter.putRight(columns.end, ageText(&buffer, (state.now_ms / 1000) -| row.state.since()), .{ .colour = .quiet });
-    return painter.finish();
+    try built.putRight(columns.end, ageText(&buffer, (state.now_ms / 1000) -| row.state.since()), .{ .colour = .quiet });
+    return built.finish();
 }
 
 /// The Session row at `at` in screen order, laid out for `width` cells as
 /// segments that fill the width, so a list draws it as given. The list
 /// marks the selection; the segments never do. Allocates from `arena`.
 pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}![]const Segment {
-    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = frame };
-    const spans = try rowLine(&painter, state, at, Columns.of(width));
+    var built: Spans = .of(arena, caps, width);
+    const spans = try rowLine(&built, state, at, Columns.of(width), frame);
     return segmentsOf(arena, spans, width, .{});
 }
 
@@ -3905,15 +3914,15 @@ pub fn header(arena: Allocator, state: *const State, width: u16, caps: Caps) err
     var lines: [3][]const Segment = undefined;
     lines[0] = top.segments;
     var count: usize = 1;
-    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
+    var built: Spans = .of(arena, caps, width);
     if (state.unreachable_since_ms) |since| {
         var buffer: [16]u8 = undefined;
         const text = try std.fmt.allocPrint(arena, "Host stopped {s} ago. Run rui host start.", .{spanText(&buffer, (state.now_ms -| since) / 1000)});
-        lines[count] = try segmentsOf(arena, try bandLine(&painter, text), width, .{});
+        lines[count] = try segmentsOf(arena, try bandLine(&built, text), width, .{});
         count += 1;
     }
     if (band(state.rows.items, state.now_ms, state.login_at)) |trouble| {
-        lines[count] = try segmentsOf(arena, try providerBand(&painter, trouble, state.now_ms), width, .{});
+        lines[count] = try segmentsOf(arena, try providerBand(&built, trouble, state.now_ms), width, .{});
         count += 1;
     }
     var length = count - 1;
@@ -3938,22 +3947,22 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
         const row = &state.rows.items[state.order.items[item.row]];
         return .{ .segments = try rowSegments(arena, state, item.row, width, caps, frame), .heading = false, .selected = if (state.selected) |selected| std.mem.eql(u8, &selected, &row.reference) else false };
     }
-    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = frame };
+    var built: Spans = .of(arena, caps, width);
     const spans = switch (item) {
         .gap => &.{},
-        .heading => |group| try heading(&painter, group, state.runs.get(group).len),
-        .more => |more| try moreLine(&painter, more.hidden),
-        .empty => try emptyLine(&painter, state),
+        .heading => |group| try heading(&built, group, state.runs.get(group).len),
+        .more => |more| try moreLine(&built, more.hidden),
+        .empty => try emptyLine(&built, state),
         .row => unreachable,
     };
     return .{ .segments = try segmentsOf(arena, spans, width, .{}), .heading = true, .selected = false };
 }
 
 pub fn statusSegments(arena: Allocator, state: *const State, draft: Draft, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
-    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
+    var built: Spans = .of(arena, caps, width);
     // An open list is the one Esc closes; a closed one leaves Esc the draft.
     const listed = if (state.commands) |shown| shown.seen != .closed else false;
-    const first = try segmentsOf(arena, try hints(&painter, state, draft, listed), width, .{});
+    const first = try segmentsOf(arena, try hints(&built, state, draft, listed), width, .{});
     // A notice's later lines follow on lines of their own.
     const rows = hintRows(state);
     if (rows == 1) return first;
@@ -3963,9 +3972,9 @@ pub fn statusSegments(arena: Allocator, state: *const State, draft: Draft, width
     var lines = std.mem.splitScalar(u8, state.notice.?.text(), '\n');
     _ = lines.next();
     for (shown[1..rows]) |*line| {
-        painter.begin(false);
-        _ = try painter.put(1, lines.next().?, width -| 2, .{ .colour = state.notice.?.colour });
-        line.* = try segmentsOf(arena, try painter.finish(), width, .{});
+        built.begin();
+        _ = try built.put(1, lines.next().?, width -| 2, .{ .colour = state.notice.?.colour });
+        line.* = try segmentsOf(arena, try built.finish(), width, .{});
         length += 1 + line.len;
     }
     const segments = try arena.alloc(Segment, length);
@@ -3982,14 +3991,14 @@ pub fn statusSegments(arena: Allocator, state: *const State, draft: Draft, width
 }
 
 pub fn factsSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
-    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
-    painter.begin(false);
+    var built: Spans = .of(arena, caps, width);
+    built.begin();
     const path = shortPath(state.home, state.workspaces.items[state.cwd]);
     const model = state.nextBinding().model orelse "no model";
     const effort = state.heldEffort();
-    const text = try std.fmt.allocPrint(arena, "new Session {s} {s}{s}{s} {s} {s}{s}", .{ painter.glyphs.dot, model, if (effort != null) " " else "", effort orelse "", painter.glyphs.dot, path.prefix, path.rest });
-    _ = try painter.put(1, text, width -| 2, .{ .colour = .quiet });
-    return segmentsOf(arena, try painter.finish(), width, .{});
+    const text = try std.fmt.allocPrint(arena, "new Session {s} {s}{s}{s} {s} {s}{s}", .{ built.glyphs.dot, model, if (effort != null) " " else "", effort orelse "", built.glyphs.dot, path.prefix, path.rest });
+    _ = try built.put(1, text, width -| 2, .{ .colour = .quiet });
+    return segmentsOf(arena, try built.finish(), width, .{});
 }
 
 /// A panel or model picker supplies its own rows instead of Session groups.
@@ -3997,9 +4006,9 @@ pub fn factsSegments(arena: Allocator, state: *const State, width: u16, caps: Ca
 /// list; null while no panel shows.
 pub fn panelItems(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!?[]const ListRow {
     const panel = if (state.panel) |*shown| shown else return null;
-    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
+    var built: Spans = .of(arena, caps, width);
     const spans = try arena.alloc([]const Span, @min(panel.rows(), layout(state).list.len()));
-    if (spans.len != 0) try panelLines(&painter, panel, spans);
+    if (spans.len != 0) try panelLines(&built, panel, spans);
     return try rowsOf(arena, spans, width);
 }
 
@@ -4007,13 +4016,13 @@ pub fn panelItems(arena: Allocator, state: *const State, width: u16, caps: Caps)
 /// it; null while it is closed or the screen leaves it none.
 pub fn pickerRows(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!?[]const ListRow {
     const picker = state.shownPicker() orelse return null;
-    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
+    var built: Spans = .of(arena, caps, width);
     const height = layout(state).picker.len();
     const choice = picker.step == .sign_in and height > 1;
     const count = pickerFit(state, height - @intFromBool(choice)).used();
     const spans = try arena.alloc([]const Span, count + @intFromBool(choice));
-    if (count != 0) try pickerLines(&painter, state, picker, spans[0..count]);
-    if (choice) spans[count] = try signInChoice(&painter, state.menu.entries[state.highlighted().?].providers, picker.step.sign_in);
+    if (count != 0) try pickerLines(&built, state, picker, spans[0..count]);
+    if (choice) spans[count] = try signInChoice(&built, state.menu.entries[state.highlighted().?].providers, picker.step.sign_in);
     return try rowsOf(arena, spans, width);
 }
 
@@ -4058,15 +4067,15 @@ pub const CountsLine = struct { segments: []const Segment, view: ?struct { start
 
 pub fn countsLine(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!CountsLine {
     var result: CountsLine = .{ .segments = &.{} };
-    var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
-    painter.begin(false);
+    var built: Spans = .of(arena, caps, width);
+    built.begin();
     const bar: Style = .{ .background = .bar };
-    const end = painter.width -| 1;
+    const end = built.width -| 1;
     var column: usize = 1;
     // रुई beside rui, as on a station board; ASCII has rui alone.
     const wordmark: Style = .{ .colour = .strong, .background = .bar, .bold = true };
-    if (caps.unicode) column += try painter.put(column, "रुई", end -| column, wordmark) + 1;
-    column += try painter.put(column, "rui", end -| column, wordmark);
+    if (caps.unicode) column += try built.put(column, "रुई", end -| column, wordmark) + 1;
+    column += try built.put(column, "rui", end -| column, wordmark);
     const counts_ = state.summary.counts;
     const shown = [_]struct { Mark, usize, Colour }{
         .{ .needs_you, counts_.needs_you, .attention },
@@ -4080,10 +4089,10 @@ pub fn countsLine(arena: Allocator, state: *const State, width: u16, caps: Caps)
         const glyph = if (caps.unicode) marks.get(mark).unicode else marks.get(mark).ascii;
         var number: [32]u8 = undefined;
         const text = if (mark == .queued and state.host != null)
-            try std.fmt.allocPrint(arena, "{s} {s} {s} slots {d}/{d}", .{ glyph, grouped(&number, count), painter.glyphs.dot, state.host.?.slots_in_use, state.host.?.slots })
+            try std.fmt.allocPrint(arena, "{s} {s} {s} slots {d}/{d}", .{ glyph, grouped(&number, count), built.glyphs.dot, state.host.?.slots_in_use, state.host.?.slots })
         else
             try std.fmt.allocPrint(arena, "{s} {s}", .{ glyph, grouped(&number, count) });
-        column = column + 2 + try painter.put(column + 2, text, end -| (column + 2), .{ .colour = colour, .background = .bar });
+        column = column + 2 + try built.put(column + 2, text, end -| (column + 2), .{ .colour = colour, .background = .bar });
     }
     // The right side, widest first, dropping what does not fit.
     const view: []const u8 = if (state.archive == .active) "" else archiveViewName(state.archive);
@@ -4092,19 +4101,19 @@ pub fn countsLine(arena: Allocator, state: *const State, width: u16, caps: Caps)
     const choices: [3][]const u8 = if (state.memory) |memory| choices: {
         const rui = try std.fmt.allocPrint(arena, "rui {s}", .{sizeText(&rui_buffer, memory.rui)});
         const tools = if (memory.tools) |bytes| try std.fmt.allocPrint(arena, "tools {s}", .{sizeText(&tools_buffer, bytes)}) else "";
-        break :choices if (tools.len == 0) .{ rui, "", "" } else .{ try std.fmt.allocPrint(arena, "{s} {s} {s}", .{ rui, painter.glyphs.dot, tools }), tools, "" };
+        break :choices if (tools.len == 0) .{ rui, "", "" } else .{ try std.fmt.allocPrint(arena, "{s} {s} {s}", .{ rui, built.glyphs.dot, tools }), tools, "" };
     } else .{ "", "", "" };
     for (choices) |memory| {
         const text = if (memory.len == 0) view else if (view.len == 0) memory else try std.fmt.allocPrint(arena, "{s}  {s}", .{ memory, view });
-        const cells = painter.measure(text);
+        const cells = built.measure(text);
         if (text.len != 0 and column + 2 + cells > end) continue;
-        try painter.pad(end -| cells, bar);
-        try painter.putRight(end, text, bar);
-        if (view.len != 0) result.view = .{ .start = @intCast(end - painter.measure(view)), .end = @intCast(end) };
+        try built.pad(end -| cells, bar);
+        try built.putRight(end, text, bar);
+        if (view.len != 0) result.view = .{ .start = @intCast(end - built.measure(view)), .end = @intCast(end) };
         break;
     }
-    try painter.pad(painter.width, bar);
-    result.segments = try segmentsOf(arena, try painter.finish(), width, bar);
+    try built.pad(built.width, bar);
+    result.segments = try segmentsOf(arena, try built.finish(), width, bar);
     return result;
 }
 
@@ -4803,9 +4812,8 @@ fn expectLine(segments: []const Segment, width: u16, expected: []const []const u
     var line: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer line.deinit();
     var cells: usize = 0;
-    const measurer: Painter = .{ .arena = undefined, .caps = .{}, .glyphs = unicode_glyphs, .width = 0, .frame = 0 };
     for (segments) |segment| {
-        cells += measurer.measure(segment.text);
+        cells += measured(.{}, unicode_glyphs, segment.text);
         try line.writer.writeAll(segment.text);
     }
     var said: usize = 0;
@@ -7197,6 +7205,34 @@ test "picker tag columns admit ids at and beyond the 24-column cap" {
         try std.testing.expectEqual(length, state.menu.widest);
         try std.testing.expect(try onScreen(&state, "› mmmm"));
         try std.testing.expectEqualStrings(id[0..length], state.picker.?.highlight.slice());
+    }
+}
+
+test "the highlighted model's row takes the selection ground inside one-cell margins, and edge to edge without colour" {
+    var state = try pickerState(Default.of("codex", "gpt-6.1-sol"));
+    defer state.deinit();
+    try openPicker(&state, &.{chatgpt});
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const width = 40;
+    for ([_]Caps{ .{ .unicode = true }, .{ .unicode = true, .depth = .none } }) |caps| {
+        const rows = (try pickerRows(arena.allocator(), &state, width, caps)).?;
+        const highlighted = for (rows) |row| {
+            if (for (row.segments) |segment| {
+                if (std.mem.eql(u8, segment.text, "›")) break true;
+            } else false) break row;
+        } else return error.TestUnexpectedResult;
+        // Which ground each cell of the row shows, by cell.
+        var grounds: [width]bool = @splat(false);
+        var column: usize = 0;
+        for (highlighted.segments) |segment| {
+            const cells = measured(caps, unicode_glyphs, segment.text);
+            const marked = if (caps.depth == .none) segment.style.reverse else segment.style.background == .selection;
+            for (column..@min(column + cells, width)) |at| grounds[at] = marked;
+            column += cells;
+        }
+        const margin: usize = if (caps.depth == .none) 0 else 1;
+        for (grounds, 0..) |marked, at| try std.testing.expectEqual(at >= margin and at < width - margin, marked);
     }
 }
 
