@@ -8,7 +8,24 @@ const ConsentPolicy = @import("session_consent.zig");
 /// The original a submission holds, as the conversation shows it.
 /// `failure` is the line its last attempt's failure left (a rejection with
 /// its code, `too_large`), which says more than its state's own words.
-pub const Held = struct { kind: submission.Kind, state: submission.State, failure: ?[]const u8 = null };
+pub const Held = struct { kind: submission.Kind, state: submission.State, failure: ?Failure = null };
+
+/// A failed attempt's own line, and the key that line names.
+pub const Failure = struct { line: []const u8, key: Key };
+
+/// What ends what the held original needs: Ctrl-R's retry, or a command.
+/// The status names it after its last ` · `; a click there runs it.
+pub const Key = enum { retry, discard, status };
+
+/// The key that ends what `held` needs, or null while it is in flight.
+pub fn key(held: Held) ?Key {
+    if (held.failure) |failure| return failure.key;
+    return switch (held.state) {
+        .not_started, .unconfirmed => .retry,
+        .submitting => null,
+        .rejected => .discard,
+    };
+}
 
 /// What a Message refused for its environment needs: a retry from this
 /// process fails the same way, so no Ctrl-R; /status says the size, the
@@ -22,7 +39,7 @@ pub fn status(opening: bool, waiting: bool, held: ?Held) ?[]const u8 {
     if (opening) return "Opening…";
     if (waiting) return "";
     const original = held orelse return null;
-    if (original.failure) |line| return line;
+    if (original.failure) |failure| return failure.line;
     return switch (original.state) {
         .not_started => "Not sent · ctrl+r retries original",
         .submitting => "Sending…",
@@ -124,8 +141,15 @@ test "the status says the opening first, nothing over a waiting Action, then the
     try std.testing.expectEqualStrings("Not sent · ctrl+r retries original", status(false, false, .{ .kind = .message, .state = .not_started }).?);
     try std.testing.expectEqualStrings("Rejected · /discard", status(false, false, .{ .kind = .decision, .state = .rejected }).?);
     // A failure's own line replaces its state's words, under the opening.
-    try std.testing.expectEqualStrings(too_large, status(false, false, .{ .kind = .message, .state = .not_started, .failure = too_large }).?);
-    try std.testing.expectEqualStrings("Opening…", status(true, false, .{ .kind = .message, .state = .not_started, .failure = too_large }).?);
+    const refused: Failure = .{ .line = too_large, .key = .status };
+    try std.testing.expectEqualStrings(too_large, status(false, false, .{ .kind = .message, .state = .not_started, .failure = refused }).?);
+    try std.testing.expectEqualStrings("Opening…", status(true, false, .{ .kind = .message, .state = .not_started, .failure = refused }).?);
+    // Each line's key is the held original's, never read back from its words.
+    try std.testing.expectEqual(@as(?Key, .status), key(.{ .kind = .message, .state = .not_started, .failure = refused }));
+    try std.testing.expectEqual(@as(?Key, .retry), key(.{ .kind = .message, .state = .not_started }));
+    try std.testing.expectEqual(@as(?Key, .retry), key(unconfirmed));
+    try std.testing.expectEqual(@as(?Key, .discard), key(.{ .kind = .decision, .state = .rejected }));
+    try std.testing.expectEqual(@as(?Key, null), key(.{ .kind = .message, .state = .submitting }));
 }
 
 test "Enter in the draft says the most pressing reason it sent nothing" {

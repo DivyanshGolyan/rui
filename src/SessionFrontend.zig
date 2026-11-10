@@ -11,6 +11,9 @@ const ActionConsent = @import("ActionConsent.zig");
 const PermissionCard = @import("PermissionCard.zig");
 const Palette = @import("Palette.zig");
 const SessionChrome = @import("SessionChrome.zig");
+const FactsRow = @import("FactsRow.zig");
+const viewport = @import("ConversationViewport.zig");
+const style = @import("widget_style.zig");
 const session_chrome = @import("session_chrome.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -186,6 +189,8 @@ live: struct {
     messages: reads.Messages = .{},
     // The Messages live output shows since its newest mark.
     echoes: reads.Record = .{},
+    // How many entries live output has shown, as its reads counted them.
+    entries: u64 = 0,
     // Where a transcript's search for the Messages a seam lists may stop
     // (see reads.listed): at most the lowest position of one seen or not yet
     // searched for; a stale value only costs reads.
@@ -242,12 +247,12 @@ shown_notice: session_chrome.Notice(notice_capacity) = .{},
 /// What the held original's last attempt failed with, while that original
 /// is held in the state the failure left: its status-bar line, and for
 /// /status what to do. It needs the person, so it is no notice.
-failure: ?struct { key: [36]u8, state: Submission.State, bar: []const u8, page: ?[]const u8 = null } = null,
+failure: ?struct { key: [36]u8, state: Submission.State, bar: session_notice.Failure, page: ?[]const u8 = null } = null,
 failure_buffer: [failure_capacity]u8 = undefined,
 /// The `?` shortcuts are open.
 shortcuts_open: bool = false,
-/// Where live output stood when the view was scrolled back, so the marker
-/// counts the entries that arrived since.
+/// How many entries live output had shown when the view was scrolled back,
+/// so the marker counts the ones that arrived since.
 browsed_from: ?u64 = null,
 chrome: SessionChrome = undefined,
 /// The Session line's facts from the latest read that took them, the
@@ -471,21 +476,41 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
     self.screen.setWidth(caps.width);
     self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = "shift+↓" };
     self.app_card = .{ .consent = &self.app_consent, .pasting = &hooks.root.pasting, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
-    self.chrome = .init(.{ .userdata = self, .key = chromeKey, .stop = chromeClick(.stop), .back = chromeClick(.close), .latest = chromeClick(.latest), .status_page = chromeStatus });
+    self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status) });
     return self.widget();
 }
 
-/// A click on the chrome runs what its key runs.
-fn chromeClick(comptime action: ConversationAction) *const fn (*anyopaque, *vxfw.EventContext) anyerror!void {
+/// What a click on the chrome runs: what its key runs.
+const Click = union(enum) {
+    action: ConversationAction,
+    /// `+N more running · /status`.
+    status,
+    /// The key that ends what needs the person: Ctrl-R's retry, or the
+    /// command the held original's line names (`session_notice.key`).
+    needs,
+};
+
+/// Every chrome click meets the rules a key does: none once leaving, the
+/// last reply dismissed, then what follows any input.
+fn chromeClick(comptime click: Click) *const fn (*anyopaque, *vxfw.EventContext) anyerror!void {
     return struct {
-        fn click(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+        fn run(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
             const self: *Self = @ptrCast(@alignCast(raw));
             if (self.leaving != null) return;
             self.shown_notice.dismiss();
-            try self.perform(action);
+            switch (click) {
+                .action => |action| try self.perform(action),
+                .status => try self.clickCommand("/status"),
+                .needs => if (self.heldOriginal()) |held| if (session_notice.key(held)) |key| switch (key) {
+                    .retry => try self.perform(.recover),
+                    .discard => try self.clickCommand("/discard"),
+                    .status => try self.clickCommand("/status"),
+                },
+            }
+            self.dirty = true;
             try self.afterInput(ctx);
         }
-    }.click;
+    }.run;
 }
 
 /// A key that types `?`, as the editor reads text: the codepoint itself or
@@ -496,36 +521,16 @@ fn typesQuestion(key: vaxis.Key) bool {
     return key.codepoint == '?' or if (key.text) |text| std.mem.eql(u8, text, "?") else false;
 }
 
-/// The key that ends what needs the person: the command it names
-/// (`/discard`, `/status`), else Ctrl-R's retry.
-fn chromeKey(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.leaving != null) return;
-    self.shown_notice.dismiss();
-    const key = session_chrome.needsKey(session_notice.status(false, false, self.heldOriginal()) orelse "");
-    if (std.mem.startsWith(u8, key, "/")) try self.clickCommand(key) else try self.perform(.recover);
-    self.dirty = true;
-    try self.afterInput(ctx);
-}
-
-/// `+N more running · /status`.
-fn chromeStatus(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.leaving != null) return;
-    self.shown_notice.dismiss();
-    try self.clickCommand("/status");
-    self.dirty = true;
-    try self.afterInput(ctx);
-}
-
 /// A command a click runs, admitted as a typed one is (`SessionInput`):
 /// while another command waits its turn, it says so and runs nothing.
 fn clickCommand(self: *Self, text: []const u8) !void {
-    if (self.input.queuedCommand() != null) {
-        self.notice = session_notice.busy(.{ .command = true, .held = self.heldOriginal(), .preparing = self.reading.phase == .permission, .action = null, .letter = false });
-        return;
-    }
+    if (!self.input.admitsCommand()) return self.sayBusy(null, false);
     try self.slashCommand(text);
+}
+
+/// Says why input the draft refused waits, for a typed line or a click.
+fn sayBusy(self: *Self, action: ?session_notice.Action, letter: bool) void {
+    self.notice = session_notice.busy(.{ .command = self.commandActive(), .held = self.heldOriginal(), .preparing = self.reading.phase == .permission, .action = action, .letter = letter });
 }
 
 /// The Session's name as the terminal title leads with it.
@@ -578,7 +583,7 @@ fn follow(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
 
 /// A click on a `┄ N more lines` row opens that Message, as Ctrl-O opens
 /// the lowest one in view; a click anywhere else does nothing.
-fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, at: @import("ConversationViewport.zig").Position) !void {
+fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, at: viewport.Position) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.leaving != null or self.pagePlace() == .elsewhere) return;
     const index = self.app_content.document.summaryAt(at.offset) orelse return;
@@ -665,7 +670,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                     switch (self.input.appEvent(conversation_keys, event, pasting, allowed)) {
                         .message => |ticket| try self.beginMessage(.{ .message = ticket }),
                         .command => try self.commandLine(),
-                        .busy => self.notice = session_notice.busy(.{ .command = self.commandActive(), .held = self.heldOriginal(), .preparing = self.reading.phase == .permission, .action = null, .letter = false }),
+                        .busy => self.sayBusy(null, false),
                         .editor => |outcome| switch (outcome) {
                             .action => |action| try self.perform(action),
                             .refused => |why| self.notice = refusedNotice(why),
@@ -723,7 +728,6 @@ fn depart(self: *Self, ctx: *vxfw.EventContext) !void {
 fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const screen = self.screen;
-    const style = @import("widget_style.zig");
     const normal = style.of(self.app_caps, .{});
     const quiet = style.of(self.app_caps, .{ .colour = .quiet });
     const facts_style = style.of(self.app_caps, .{ .colour = .quiet, .background = .bar });
@@ -761,7 +765,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const work = self.live.work.state.asOf(now_ms);
     const said = self.lender.line(self.lender.context, work);
     const browsing = screen.view != .live;
-    if (!browsing) self.browsed_from = null else if (self.browsed_from == null) self.browsed_from = self.live.cursor.position;
+    if (!browsing) self.browsed_from = null else if (self.browsed_from == null) self.browsed_from = self.live.entries;
     const chrome = &self.chrome;
     chrome.activity.live = self.live.view;
     chrome.activity.work = if (self.app_consent.request != null) null else work_line.of(try ctx.arena.create([work_line.max_words_bytes]u8), &self.live.work.state, self.live.work.operation, now_ms);
@@ -786,12 +790,12 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const facts_buffer = try ctx.arena.create([session_chrome.facts_bytes]u8);
     chrome.place(&self.app_screen, .{
         .browsing = browsing,
-        .new_entries = if (self.browsed_from) |from| self.live.cursor.position -| from else 0,
+        .new_entries = if (self.browsed_from) |from| self.live.entries - from else 0,
         .needs = send.needs,
         .needs_key = if (send.needs) |needs| session_chrome.needsKey(needs) else "",
         .progress = send.progress,
         .stoppable = said.stoppable,
-        .facts = session_chrome.factsRow(facts_buffer, self.line.facts(&self.hint, self.session), self.session, status_page.archiveBadge(self.line.archive_state), ctx.max.width.? -| @import("FactsRow.zig").text_column, self.app_caps.width),
+        .facts = session_chrome.factsRow(facts_buffer, self.line.facts(&self.hint, self.session), self.session, status_page.archiveBadge(self.line.archive_state), ctx.max.width.? -| FactsRow.text_column, self.app_caps.width),
         .notice = self.shown_notice.current(now_ms),
         .overview = said.text,
         .shortcuts = self.shortcuts_open,
@@ -870,7 +874,7 @@ test "App Session retains the draft across a permission card arriving during pas
         surface.render(window, self.app_input.composer.widget());
         const user = rendered.readCell(0, 0).?;
         try std.testing.expectEqualStrings("t", user.char.grapheme);
-        try std.testing.expectEqual(@import("widget_style.zig").of(case.caps, .{ .colour = .quiet }).fg, user.style.fg);
+        try std.testing.expectEqual(style.of(case.caps, .{ .colour = .quiet }).fg, user.style.fg);
         try std.testing.expect(!user.style.dim);
         try std.testing.expectEqual(case.ground, rendered.readCell(79, 10).?.style.bg);
         try std.testing.expectEqual(case.band, rendered.readCell(79, 22).?.style.bg);
@@ -2709,7 +2713,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer)
             try self.beginMessage(.{ .message_then_deny = .{ .ticket = ticket, .action = denial.action } });
         } else try self.beginMessage(.{ .message = ticket }),
         .command => try self.commandLine(),
-        .busy => self.notice = session_notice.busy(.{ .command = self.commandActive(), .held = self.heldOriginal(), .preparing = self.reading.phase == .permission, .action = self.waitingAction(), .letter = letter }),
+        .busy => self.sayBusy(self.waitingAction(), letter),
         .editor => |outcome| switch (outcome) {
             .action => |action| try self.perform(action),
             .refused => |why| self.notice = refusedNotice(why),
@@ -2816,14 +2820,14 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
             try text.feed(&writer, rejected.code.slice());
             try text.finish(&writer);
             try writer.writeAll(rejection_suffix);
-            self.holdFailure(writer.buffered(), null);
+            self.holdFailure(.{ .line = writer.buffered(), .key = .discard }, null);
         },
         .failed => |failed| if (failed.err == error.EnvironmentTooLarge) {
             var writer = std.Io.Writer.fixed(&self.failure_buffer);
             try writer.writeAll("! ");
             try self.submission.environment.describeTooLarge(&writer);
             try writer.writeAll(too_large_advice);
-            self.holdFailure(session_notice.too_large, writer.buffered());
+            self.holdFailure(.{ .line = session_notice.too_large, .key = .status }, writer.buffered());
         },
         .absent => {},
     }
@@ -2831,7 +2835,7 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
 
 /// Keeps `bar` and `page` for the original the submission holds, in the
 /// state the failure left it.
-fn holdFailure(self: *Self, bar: []const u8, page: ?[]const u8) void {
+fn holdFailure(self: *Self, bar: session_notice.Failure, page: ?[]const u8) void {
     const held = self.submission.view() orelse return;
     self.failure = .{ .key = held.key, .state = held.state, .bar = bar, .page = page };
 }
@@ -2934,6 +2938,7 @@ pub fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.
 fn showStaged(self: *Self) !void {
     const result = &self.job.result;
     self.live.messages = result.messages;
+    self.live.entries += result.entries;
     if (result.lowest) |lowest| self.live.lowest = if (self.live.lowest) |known| @min(known, lowest) else lowest;
     var staged: Staged = .{ .frontend = self, .length = result.output_length, .start = try self.screen.liveEnd() };
     // Every cut in output order; at one offset an echo ends before a
@@ -3310,7 +3315,7 @@ fn showCopy(self: *Self) !void {
     self.notice = switch (self.job.result.copied) {
         .no_answer => "No answer to copy yet.",
         .no_code => "No code block in the last answer.",
-        .too_large => "Too large for the clipboard · /copy file",
+        .too_large => TerminalText.clipboard_too_large,
         // Rui cannot see whether the clipboard took it.
         .clipboard => |range| sent: {
             try self.app_hooks.copy(self.app_hooks.context, self.files.scratch, range.start, range.length);
@@ -5242,6 +5247,13 @@ test "App Session's chrome clicks that run a command say so while another waits 
     for (0..2) |_| try self.chrome.activity.more.on_click(self.chrome.activity.more.userdata, &fixture.ctx);
     try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
     try std.testing.expectEqualStrings("! Command still running. Draft retained.", (try fixture.rows())[23]);
+    // A typed command meets the same rule and says the same.
+    self.shown_notice.dismiss();
+    _ = self.input.append("/model");
+    try fixture.press(.{ .codepoint = vaxis.Key.enter });
+    try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
+    try std.testing.expectEqualStrings("/model", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("! Command still running. Draft retained.", (try fixture.rows())[23]);
     // A needs key that names a command: `/discard` on a rejected original.
     const original = self.input.submitText("original model input");
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .rejected, .key = @splat('K') };
@@ -5250,6 +5262,14 @@ test "App Session's chrome clicks that run a command say so while another waits 
     try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
     try std.testing.expectEqual(Submission.State.rejected, self.submission.view().?.state);
     try std.testing.expectEqualStrings("! Command still running. Draft retained.", self.shown_notice.current(self.nowMs()).?);
+    // Once none waits, the key runs what the held original's line names:
+    // a refused environment's `/status`, never a retry.
+    _ = self.input.takeCommand();
+    self.submission.state = .not_started;
+    self.holdFailure(.{ .line = session_notice.too_large, .key = .status }, null);
+    try self.chrome.status.key.on_click(self.chrome.status.key.userdata, &fixture.ctx);
+    try std.testing.expectEqualStrings("/status", self.input.queuedCommand().?);
+    try std.testing.expectEqual(Submission.State.not_started, self.submission.view().?.state);
 }
 
 test "App Session says Sent for a Message waiting behind work while scrolled back, where its waiting row is out of view" {
@@ -5289,6 +5309,19 @@ test "App Session shows work under way at the transcript's tail, and the ↓ mar
     try std.testing.expect(self.app_screen.tail == null);
     try std.testing.expect(self.app_screen.marker.?.eql(self.chrome.marker.widget()));
     try std.testing.expectEqualStrings("↓", self.chrome.marker.label);
+    // The marker counts entries live output showed since, never how far
+    // the Activity's positions moved: a read of items that show nothing
+    // adds none.
+    self.live.cursor.position += 40;
+    self.job.result = .{};
+    try self.showStaged();
+    _ = try fixture.draw();
+    try std.testing.expectEqualStrings("↓", self.chrome.marker.label);
+    self.live.cursor.position += 1;
+    self.job.result = .{ .entries = 2 };
+    try self.showStaged();
+    _ = try fixture.draw();
+    try std.testing.expectEqualStrings("↓ 2 new", self.chrome.marker.label);
 
     try fixture.press(.{ .codepoint = vaxis.Key.escape });
     _ = try fixture.draw();

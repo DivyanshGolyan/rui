@@ -60,7 +60,7 @@ pub fn Notice(comptime capacity: usize) type {
 // --- Status bar -----------------------------------------------------------
 
 /// The stop key the last row offers while work can be stopped.
-pub const stop_key = "ctrl+x stop";
+pub const stop_key = session_line.stop_hint;
 
 /// What the status bar says of a send. `status` is the held original's
 /// line (`session_notice.status`); while it is opening or in flight it is

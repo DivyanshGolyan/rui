@@ -300,12 +300,21 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             var screen: vaxis.Screen = .{ .width = layout.width, .height = rows, .width_method = layout.method, .buf = cells };
             const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = layout.width, .height = rows, .screen = &screen };
             _ = self.printLine(window, 0, line, true, false, .{}, .default);
-            const base = @intFromPtr(&self.bytes);
             for (cells) |cell| {
-                const at = @intFromPtr(cell.char.grapheme.ptr);
-                if (cell.char.grapheme.len != 0 and at >= base + from and at < base + to) return true;
+                const at = self.cellOffset(cell) orelse continue;
+                if (at >= from and at < to) return true;
             }
             return false;
+        }
+
+        /// Where in the current text a cell laid out from it starts, or
+        /// null for a cell that shows none of it: blank, indent, `…` or
+        /// `┆`. A text cell's grapheme points into the text.
+        pub fn cellOffset(self: *const Self, cell: vaxis.Cell) ?usize {
+            const at = @intFromPtr(cell.char.grapheme.ptr);
+            const base = @intFromPtr(&self.bytes);
+            if (cell.char.grapheme.len == 0 or at < base or at >= base + self.text().len) return null;
+            return at - base;
         }
 
         /// The text of `[from, to)` as the view shows it, for the clipboard:

@@ -102,13 +102,9 @@ const Spots = struct {
 };
 
 /// Where a cell's cluster starts, as an absolute offset, or null for a cell
-/// that shows no body text: blank, indent, margin time, `…` or `┆`. Laid
-/// out from the current text, a text cell's grapheme points into it.
+/// that shows no body text: blank, indent, margin time, `…` or `┆`.
 fn source(document: *const Document, cell: vaxis.Cell) ?u64 {
-    const address = @intFromPtr(cell.char.grapheme.ptr);
-    const base = @intFromPtr(&document.bytes);
-    if (cell.char.grapheme.len == 0 or address < base or address >= base + document.text().len) return null;
-    const offset = address - base;
+    const offset = document.cellOffset(cell) orelse return null;
     if (!document.selectable(offset)) return null;
     return document.origin + offset;
 }
@@ -161,7 +157,7 @@ pub fn copy(gpa: std.mem.Allocator, document: *const Document, range: Range) !Co
 pub fn notice(result: Copy, buffer: *[64]u8) ?[]const u8 {
     return switch (result) {
         .nothing => null,
-        .too_large => "Too large for the clipboard · /copy file",
+        .too_large => TerminalText.clipboard_too_large,
         .text => |text| std.fmt.bufPrint(buffer, "Copied {d} line{s}", .{ text.lines, if (text.lines == 1) "" else "s" }) catch unreachable,
     };
 }

@@ -36,6 +36,9 @@ pub const session_link = "rui-session:";
 /// tooling documents.
 pub const clipboard_limit = 100_000 / 4 * 3;
 
+/// What a copy past that limit says, whichever gesture asked for it.
+pub const clipboard_too_large = "Too large for the clipboard · /copy file";
+
 /// An address a terminal may open: http or https with a host, every byte
 /// printable ASCII, so it cannot end or extend the OSC 8 sequence it rides in.
 pub fn linkTarget(uri: []const u8) bool {

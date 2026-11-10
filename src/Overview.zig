@@ -40,6 +40,7 @@ const session_reads = @import("session_reads.zig");
 const SessionInput = @import("SessionInput.zig");
 const SessionScreen = @import("SessionScreen.zig");
 const session_id = @import("session_id.zig");
+const Follow = @import("session_follow.zig").Follow;
 const SessionTerminal = @import("SessionTerminal.zig");
 const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalInput = @import("TerminalInput.zig");
@@ -326,7 +327,7 @@ app_models: ?model_picker_view.Rows = null,
 session_screen: *SessionScreen = undefined,
 app_session: ?Left = null,
 /// Where leaving a Session goes when Session links are followed.
-follow: @import("session_follow.zig").Follow = .{},
+follow: Follow = .{},
 retired: std.ArrayList(struct { left: Left, frame: u64 }) = .empty,
 interrupted: *client.Cancellation,
 /// The composer's line editor, the conversation's, which owns the draft.
