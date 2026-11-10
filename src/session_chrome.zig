@@ -62,6 +62,31 @@ pub fn Notice(comptime capacity: usize) type {
 /// The stop key the last row offers while work can be stopped.
 pub const stop_key = "ctrl+x stop";
 
+/// What the status bar says of a send. `status` is the held original's
+/// line (`session_notice.status`); while it is opening or in flight it is
+/// progress, else it needs the person until resolved. With none held, `Sent`
+/// covers an accepted Message until live output or the waiting row shows it.
+pub const Send = struct { needs: ?[]const u8 = null, progress: ?[]const u8 = null };
+
+pub fn send(status: ?[]const u8, in_flight: bool, sent: bool) Send {
+    // An empty status is a waiting Action, which says how to decide it.
+    if (status) |text| return if (text.len == 0) .{} else if (in_flight) .{ .progress = text } else .{ .needs = text };
+    return .{ .progress = if (sent) "Sent" else null };
+}
+
+test "a send is progress while in flight or just accepted, and needs the person once unresolved" {
+    try std.testing.expectEqualDeep(Send{ .progress = "Sending…" }, send("Sending…", true, false));
+    try std.testing.expectEqualDeep(Send{ .needs = "! Not confirmed · Ctrl-R retries original" }, send("! Not confirmed · Ctrl-R retries original", false, true));
+    try std.testing.expectEqualDeep(Send{ .progress = "Sent" }, send(null, false, true));
+    try std.testing.expectEqualDeep(Send{}, send("", false, true));
+    try std.testing.expectEqualDeep(Send{}, send(null, false, false));
+    // Progress outranks a notice, quietly; what needs the person outranks both.
+    const sent = bar(.{ .progress = "Sent", .notice = "! Unknown command /x", .width = 80 });
+    try std.testing.expectEqualStrings("Sent", sent.left);
+    try std.testing.expectEqual(Tone.quiet, sent.tone);
+    try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .progress = "Sent", .width = 80 }).left);
+}
+
 /// The key that ends what needs the person, which the status bar makes
 /// clickable: the part after its last ` · ` (`! Not confirmed · ctrl+r
 /// retries` → `ctrl+r retries`), or nothing when it names none.
@@ -87,6 +112,10 @@ pub const Facts = struct {
     /// What needs the person, with its key (`! Not confirmed · ctrl+r
     /// retries`). Persists until resolved; outranks any notice.
     needs: ?[]const u8 = null,
+    /// Where a send stands while it is under way (`Sending…`, `Sent`):
+    /// quiet, below what needs the person and above a notice, so the frame
+    /// that clears the composer already says it.
+    progress: ?[]const u8 = null,
     /// The notice that shows now (`Notice.current`), if any.
     notice: ?[]const u8 = null,
     /// `stoppable` for the Session's work.
@@ -107,6 +136,8 @@ pub fn bar(facts: Facts) Bar {
     if (facts.needs) |needs| {
         result.left = needs;
         result.tone = .attention;
+    } else if (facts.progress) |progress| {
+        result.left = progress;
     } else if (facts.notice) |notice| {
         result.left = notice;
         result.tone = if (std.mem.startsWith(u8, notice, "!")) .attention else .quiet;

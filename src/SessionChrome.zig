@@ -42,6 +42,8 @@ pub const View = struct {
     /// retries`), and that key's words, which become clickable.
     needs: ?[]const u8 = null,
     needs_key: []const u8 = "",
+    /// Where a send stands (`chrome.Send.progress`).
+    progress: ?[]const u8 = null,
     stoppable: bool = false,
     /// The facts after `‹ `.
     facts: []const u8 = "",
@@ -81,6 +83,7 @@ pub fn init(actions: Actions) Self {
 pub fn place(self: *Self, screen: *AppScreen.Session, view: View) void {
     self.status.bar = chrome.bar(.{
         .needs = view.needs,
+        .progress = view.progress,
         .notice = view.notice,
         .stoppable = view.stoppable,
         .width = view.width,
