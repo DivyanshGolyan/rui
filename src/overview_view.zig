@@ -377,7 +377,7 @@ pub const Event = union(enum) {
     /// A needs-you row's command read ended.
     command: CommandText,
     /// The Upgrade /upgrade started moved on.
-    upgrade: UpgradeStep,
+    upgrade: upgrade_status.News,
     conversed: Conversed,
     /// A model-list read ended.
     models: ModelsRead,
@@ -613,15 +613,6 @@ pub const Commands = struct {
     pub fn slice(self: *const Commands) []const CommandRead {
         return self.items[0..self.len];
     }
-};
-
-/// What the Upgrade worker reports, in the order it happens.
-pub const UpgradeStep = union(enum) {
-    found: upgrade_status.Found,
-    step: upgrade_status.Step,
-    /// How it ended, as the status bar says it, and what it leaves Host
-    /// requests: the job's own outcome, never read back from the words.
-    ended: struct { how: upgrade_status.Ended, outcome: session_upgrade.Outcome },
 };
 
 /// A command read's answer: the Action's command, or null when the read
@@ -1212,7 +1203,7 @@ pub const State = struct {
         return at;
     }
 
-    /// An Upgrade ended with `outcome`: an unchanged panel leaves the block
+    /// An Upgrade ended with `outcome`: an unchanged one leaves the block
     /// as it was, and unless blocked the overview lists again before Host
     /// intents resume.
     pub fn upgraded(self: *State, outcome: session_upgrade.Outcome) void {
@@ -2415,7 +2406,6 @@ fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *co
     return if (state.openStop(row.reference) != null) work_line.stopping else work_line.of(words, &row.state, null, state.now_ms);
 }
 
-/// Moves the selection where the Sessions show.
 /// One click on a row opens it, as selecting it and Enter on a blank draft
 /// do. A folded group's "more" line opens the group at its first hidden
 /// row, as moving into them does. Headings and gaps take no click.
@@ -2436,6 +2426,7 @@ fn click(state: *State, line: usize, effects: *Effects) error{OutOfMemory}!void 
     if (item == .row) try enter(state, "", effects);
 }
 
+/// Moves the selection where the Sessions show.
 fn select(state: *State, action: Action) void {
     state.closePanel();
     move(state, action);

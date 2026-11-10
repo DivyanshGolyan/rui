@@ -117,6 +117,12 @@ pub fn canInstall(checked: *const Check) bool {
     return checked.selected == .released;
 }
 
+/// The selected build already is the release, or newer: an install
+/// reselects it and prepares nothing.
+pub fn holdsRelease(checked: *const Check) bool {
+    return checked.selected == .released and checked.selected.released.version.order(checked.candidate.version) != .lt;
+}
+
 const ActivationProgress = struct {
     progress: ?Progress,
 
@@ -138,7 +144,7 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
     errdefer allocator.free(store);
     var installation: Installation.InstallationOutcome = undefined;
     const selected = checked.selected.released;
-    if (selected.version.order(checked.candidate.version) != .lt) {
+    if (holdsRelease(checked)) {
         // Reselecting the installed build publishes too.
         Progress.send(progress, .publishing);
         try process.check(cancellation);

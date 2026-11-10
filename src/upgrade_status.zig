@@ -4,6 +4,7 @@
 //! step. Whether Host requests wait is `session_upgrade`'s decision.
 
 const std = @import("std");
+const session_upgrade = @import("session_upgrade.zig");
 
 /// A release's version, as `0.{schema}.{patch}`.
 pub const Version = struct {
@@ -22,7 +23,7 @@ pub const Host = union(enum) { none, running: usize };
 pub const Found = struct { version: Version, host: Host };
 
 /// Why the check installs nothing here. The full reason prints in a shell.
-pub const Refusal = enum { first_install, source_build, unknown_build, package_managed, host_unsupported };
+pub const Refusal = enum { first_install, source_build, unknown_build, package_managed };
 
 /// Where an install stands. Only `preparing` can still roll back.
 pub const Step = enum { preparing, publishing, restarting };
@@ -40,6 +41,15 @@ pub const Ended = union(enum) {
     upgraded: struct { version: Version, restarted: bool },
     /// Installed, but this client cannot use the Host it left.
     incompatible: Version,
+};
+
+/// What the worker reports of a run, in the order it happens.
+pub const News = union(enum) {
+    found: Found,
+    step: Step,
+    /// How it ended, as the status bar says it, and what it leaves Host
+    /// requests: the run's own outcome, never read back from the words.
+    ended: struct { how: Ended, outcome: session_upgrade.Outcome },
 };
 
 pub const State = union(enum) {
@@ -188,7 +198,6 @@ const refusals = std.enums.EnumArray(Refusal, []const u8).init(.{
     .source_build = "a source build",
     .unknown_build = "an unknown build",
     .package_managed = "installed by another tool",
-    .host_unsupported = "the Host has another owner",
 });
 
 comptime {
@@ -277,7 +286,6 @@ test "a check that installs nothing ends as a notice: up to date, superseded, re
         .{ .{ .refused = .source_build }, "Can't upgrade here: a source build · run rui upgrade in a shell for details", .attention },
         .{ .{ .refused = .unknown_build }, "Can't upgrade here: an unknown build · run rui upgrade in a shell for details", .attention },
         .{ .{ .refused = .package_managed }, "Can't upgrade here: installed by another tool · run rui upgrade in a shell for details", .attention },
-        .{ .{ .refused = .host_unsupported }, "Can't upgrade here: the Host has another owner · run rui upgrade in a shell for details", .attention },
         .{ .failed, "! Upgrade failed; nothing changed · run rui upgrade in a shell for details", .attention },
     }) |case| {
         var run: Upgrade = .{};

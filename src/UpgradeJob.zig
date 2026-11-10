@@ -8,7 +8,6 @@ const installation_path = @import("installation_path.zig");
 const caller_error = @import("caller_error.zig");
 const ClientTask = @import("ClientTask.zig");
 const upgrade_status = @import("upgrade_status.zig");
-const UpgradeStep = @import("overview_view.zig").UpgradeStep;
 const Self = @This();
 
 pub const Outcome = @import("session_upgrade.zig").Outcome;
@@ -28,6 +27,8 @@ result: ?upgrade.Result = null,
 cleanup: upgrade.CleanupReceipts = .{},
 failure: ?anyerror = null,
 outcome: Outcome = .unchanged,
+/// A stop was asked for: an Esc that `gate` let through, or leaving the
+/// overview, which stops the run whatever `gate` says.
 cancelling: bool = false,
 started: bool = false,
 finished: bool = false,
@@ -152,7 +153,7 @@ pub const Heard = struct { found: bool = false, step: upgrade_status.Step = .pre
 /// when it is up to date. `working` counts the Host's Sessions at work.
 /// A release the selected build already is, with no older Host to restart,
 /// installs quietly: the check goes on until it ends up to date.
-pub fn news(self: *const Self, heard: *Heard, working: usize) ?UpgradeStep {
+pub fn news(self: *const Self, heard: *Heard, working: usize) ?upgrade_status.News {
     if (heard.ended) return null;
     if (self.operation == .install and !heard.found) if (self.checked) |*checked| if (!current(checked)) {
         heard.found = true;
@@ -178,12 +179,9 @@ pub fn news(self: *const Self, heard: *Heard, working: usize) ?UpgradeStep {
 /// Host would restart onto it, so the run has nothing to show until it
 /// ends. A newer selected build is never restarted onto the older release.
 fn current(checked: *const upgrade.Check) bool {
-    if (checked.selected != .released) return false;
-    return switch (checked.selected.released.version.order(checked.candidate.version)) {
-        .lt => false,
-        .gt => true,
-        .eq => !(checked.host == .managed and checked.host.managed.version.order(checked.candidate.version) == .lt),
-    };
+    if (!upgrade.holdsRelease(checked)) return false;
+    if (checked.selected.released.version.order(checked.candidate.version) == .gt) return true;
+    return !(checked.host == .managed and checked.host.managed.version.order(checked.candidate.version) == .lt);
 }
 
 fn version(of: @FieldType(@FieldType(upgrade.Check, "candidate"), "version")) upgrade_status.Version {
@@ -528,7 +526,7 @@ const news_check: upgrade.Check = .{
 };
 
 /// Everything `news` says now, in order, as the core would hear it.
-fn heardAll(job: *const Self, heard: *Heard, working: usize, out: []UpgradeStep) []UpgradeStep {
+fn heardAll(job: *const Self, heard: *Heard, working: usize, out: []upgrade_status.News) []upgrade_status.News {
     var count: usize = 0;
     while (job.news(heard, working)) |step| : (count += 1) out[count] = step;
     return out[0..count];
@@ -537,24 +535,24 @@ fn heardAll(job: *const Self, heard: *Heard, working: usize, out: []UpgradeStep)
 test "the core hears a found release once, then each restart step forward, then how it ended" {
     var job: Self = .{ .started = true, .checked = news_check };
     var heard: Heard = .{};
-    var out: [8]UpgradeStep = undefined;
+    var out: [8]upgrade_status.News = undefined;
     // Still checking: nothing to say.
     try std.testing.expectEqual(@as(usize, 0), heardAll(&job, &heard, 2, &out).len);
     job.operation = .install;
     job.phase.store(.preparing, .release);
-    try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .found = .{ .version = .{ .schema = 60, .patch = 1 }, .host = .none } }}), heardAll(&job, &heard, 2, &out));
+    try std.testing.expectEqualDeep(@as([]const upgrade_status.News, &.{.{ .found = .{ .version = .{ .schema = 60, .patch = 1 }, .host = .none } }}), heardAll(&job, &heard, 2, &out));
     // A Host it would restart counts the Sessions at work.
     var running: Heard = .{};
     job.checked.?.host = .{ .unsupported = .incompatible };
     try std.testing.expectEqual(upgrade_status.Host{ .running = 2 }, heardAll(&job, &running, 2, &out)[0].found.host);
     job.phase.store(.stopping, .release);
-    try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .step = .restarting }}), heardAll(&job, &heard, 2, &out));
+    try std.testing.expectEqualDeep(@as([]const upgrade_status.News, &.{.{ .step = .restarting }}), heardAll(&job, &heard, 2, &out));
     // Publishing reported after the restart began is no step back.
     job.phase.store(.publishing, .release);
     try std.testing.expectEqual(@as(usize, 0), heardAll(&job, &heard, 2, &out).len);
     job.result = .{ .installation = .{ .installed = .{ .operation_build = "/b", .selected_after = "/b" } }, .activation = .{ .ready = .{ .instance = @splat(0), .pid = 1 } }, .store = "/s" };
     job.finish();
-    try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 1 }, .restarted = true } }, .outcome = .compatible } }}), heardAll(&job, &heard, 2, &out));
+    try std.testing.expectEqualDeep(@as([]const upgrade_status.News, &.{.{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 1 }, .restarted = true } }, .outcome = .compatible } }}), heardAll(&job, &heard, 2, &out));
     try std.testing.expectEqual(@as(usize, 0), heardAll(&job, &heard, 2, &out).len);
     job.result = null;
     job.checked = null;
@@ -570,13 +568,13 @@ test "a release already selected but not yet running in the Host is found, so it
         job.checked.?.host = .{ .managed = .{ .observed = undefined, .launch = .{ .options = &.{} }, .version = .{ .schema = 60, .patch = case.host }, .snapshot = snapshot } };
         job.phase.store(.preparing, .release);
         var heard: Heard = .{};
-        var out: [8]UpgradeStep = undefined;
+        var out: [8]upgrade_status.News = undefined;
         const said = heardAll(&job, &heard, 3, &out);
         if (case.found) {
             // An older Host restarts onto it: the status row says so.
-            try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .found = .{ .version = .{ .schema = 60, .patch = 1 }, .host = .{ .running = 3 } } }}), said);
+            try std.testing.expectEqualDeep(@as([]const upgrade_status.News, &.{.{ .found = .{ .version = .{ .schema = 60, .patch = 1 }, .host = .{ .running = 3 } } }}), said);
             job.phase.store(.stopping, .release);
-            try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .step = .restarting }}), heardAll(&job, &heard, 3, &out));
+            try std.testing.expectEqualDeep(@as([]const upgrade_status.News, &.{.{ .step = .restarting }}), heardAll(&job, &heard, 3, &out));
         } else {
             // The Host already runs it: nothing to show until it ends.
             try std.testing.expectEqual(@as(usize, 0), said.len);
@@ -622,8 +620,8 @@ test "how a run ends, as the status bar names it" {
         job.checked = news_check;
         job.finish();
         var heard: Heard = .{ .found = true };
-        var out: [8]UpgradeStep = undefined;
-        try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .ended = .{ .how = case.ended, .outcome = case.outcome } }}), heardAll(&job, &heard, 0, &out));
+        var out: [8]upgrade_status.News = undefined;
+        try std.testing.expectEqualDeep(@as([]const upgrade_status.News, &.{.{ .ended = .{ .how = case.ended, .outcome = case.outcome } }}), heardAll(&job, &heard, 0, &out));
         job.result = null;
         job.checked = null;
     }
@@ -640,8 +638,8 @@ test "a check that may not install here names why" {
         job.checked.?.selected = case[0];
         job.finish();
         var heard: Heard = .{};
-        var out: [8]UpgradeStep = undefined;
-        try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .ended = .{ .how = .{ .refused = case[1] }, .outcome = .unchanged } }}), heardAll(&job, &heard, 0, &out));
+        var out: [8]upgrade_status.News = undefined;
+        try std.testing.expectEqualDeep(@as([]const upgrade_status.News, &.{.{ .ended = .{ .how = .{ .refused = case[1] }, .outcome = .unchanged } }}), heardAll(&job, &heard, 0, &out));
         job.checked = null;
     }
 }
@@ -651,11 +649,11 @@ test "a newer build already selected installs quietly: no older release found, t
     job.checked.?.selected.released.version = .{ .schema = 60, .patch = 2 };
     job.phase.store(.publishing, .release);
     var heard: Heard = .{};
-    var out: [8]UpgradeStep = undefined;
+    var out: [8]upgrade_status.News = undefined;
     try std.testing.expectEqual(@as(usize, 0), heardAll(&job, &heard, 0, &out).len);
     job.result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b" } }, .activation = .superseded, .store = "" };
     job.finish();
-    try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .ended = .{ .how = .superseded, .outcome = .compatible } }}), heardAll(&job, &heard, 0, &out));
+    try std.testing.expectEqualDeep(@as([]const upgrade_status.News, &.{.{ .ended = .{ .how = .superseded, .outcome = .compatible } }}), heardAll(&job, &heard, 0, &out));
     job.result = null;
     job.checked = null;
 }
@@ -665,11 +663,11 @@ test "the selected build already current installs quietly: no found release, the
     job.checked.?.selected.released.version = .{ .schema = 60, .patch = 1 };
     job.phase.store(.publishing, .release);
     var heard: Heard = .{};
-    var out: [8]UpgradeStep = undefined;
+    var out: [8]upgrade_status.News = undefined;
     try std.testing.expectEqual(@as(usize, 0), heardAll(&job, &heard, 0, &out).len);
     job.result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b" } }, .activation = .not_needed, .store = "" };
     job.finish();
-    try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 60, .patch = 1 } }, .outcome = .compatible } }}), heardAll(&job, &heard, 0, &out));
+    try std.testing.expectEqualDeep(@as([]const upgrade_status.News, &.{.{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 60, .patch = 1 } }, .outcome = .compatible } }}), heardAll(&job, &heard, 0, &out));
     job.result = null;
     job.checked = null;
 }

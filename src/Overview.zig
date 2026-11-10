@@ -17,12 +17,14 @@ const Root = @import("Root.zig");
 const AppScreen = @import("AppScreen.zig");
 const InputArea = @import("InputArea.zig");
 const GroupedList = @import("GroupedList.zig");
+const host_identity = @import("host_identity.zig");
 const OverviewLines = @import("OverviewLines.zig");
 const Palette = @import("Palette.zig");
 const skill_completion = @import("skill_completion.zig");
 const skill_suggestions = @import("skill_suggestions.zig");
 const client = @import("client.zig");
 const configure_input = @import("configure_input.zig");
+const process_memory = @import("process_memory.zig");
 const product_defaults = @import("product_defaults.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -660,6 +662,7 @@ fn finishApp(self: *Self, ended: anyerror!void) !void {
     const kept = self.keepUpgrade();
     // The terminal is restored: the report names what the run published or
     // left behind, so it is written whole, however small the terminal's buffer.
+    // A stderr that takes nothing leaves no other place to say it.
     if (self.upgrade_report) |*report| _ = stderr.writeReceipt(report.written());
     self.worker.cancel();
     const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
@@ -896,10 +899,7 @@ fn event(self: *Self, value: view.Event) !?Next {
         .start => |request| self.queue(.{ .start = try request.own(self.init.gpa) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
         .cancel_upgrade => self.upgrade_job.cancel(),
-        .upgrade => {
-            self.upgrade_requested = true;
-            self.state.upgrade_pending = true;
-        },
+        .upgrade => self.upgrade_requested = true,
         .archive => |request| self.queue(.{ .archive = request }),
         .list_models => self.queue(.models),
         .save_default => |binding| self.queue(.{ .save = binding }),
@@ -1460,20 +1460,26 @@ fn hostFacts(self: *Self) ?view.Host {
         .ready => |ready| ready,
         else => null,
     };
-    // The counts line's memory: this TUI, the Host and its tools. With no
-    // Host ready it is this TUI alone.
-    if (ready) |host| {
-        if (self.host_process == null or self.host_process.?.started_at != host.started_at) {
+    // The same read samples the counts line's memory.
+    self.memory = self.liveMemory(if (ready) |host| host.started_at else null);
+    const host = ready orelse return null;
+    return .{ .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied };
+}
+
+/// The counts line's memory: this TUI, the Host that started at
+/// `host_started_at` and its tools. With no Host ready it is this TUI alone.
+/// The Host's pid is read once per Host start.
+fn liveMemory(self: *Self, host_started_at: ?u64) view.Memory {
+    if (host_started_at) |started_at| {
+        if (self.host_process == null or self.host_process.?.started_at != started_at) {
             self.host_process = if (client.observeHostProcess(self.init.io, self.options.store, null)) |process|
-                .{ .started_at = host.started_at, .pid = process.pid }
+                .{ .started_at = started_at, .pid = process.pid }
             else |_|
                 null;
         }
     } else self.host_process = null;
-    var processes: @import("host_identity.zig").Processes = .{};
-    self.memory = @import("process_memory.zig").read(&processes, std.c.getpid(), if (self.host_process) |host| host.pid else null);
-    const host = ready orelse return null;
-    return .{ .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied };
+    var processes: host_identity.Processes = .{};
+    return process_memory.read(&processes, std.c.getpid(), if (self.host_process) |host| host.pid else null);
 }
 
 fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
