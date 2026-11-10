@@ -2685,6 +2685,7 @@ Interactive entry requires a terminal and refuses `TERM=dumb` with guidance befo
 A User Message is a block: `›` at the margin, dim body text, and its Host-written admission time as `HH:MM` in a right sidenote margin at 60 columns and wider.
 Assistant prose starts at column 0 without speaker labels.
 A Message over 1,024 bytes, 4 non-blank lines or 12 lines from its first to its last non-blank line shows its first two non-blank lines and a dim `┄ N more lines` row; `/details` shows it whole.
+A shown line over 200 bytes is cut at a grapheme boundary and ends in `…`. When no line is hidden, as for one long line, that `…` marks the collapsed block and no `┄` row is drawn; Ctrl-O opens the Message from either mark. When only blank lines would be hidden, the Message shows its lines with no mark.
 Tool activity follows the conversation's last line.
 It shows at most the three oldest calls awaiting permanent presentation, fewer on short terminals, with an exact overflow count and `/status` guidance.
 A displayed call retains its complete wrapped description and outcome explanation; calls that do not fit the physical-row budget count in overflow rather than showing a misleading clipped prefix.

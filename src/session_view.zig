@@ -384,6 +384,9 @@ pub fn UserBody(comptime Sink: type) type {
         line_blank: bool = true,
         shown: usize = 0,
         nonblank: u64 = 0,
+        // The last shown line was cut: its `…` waits to learn whether any
+        // line follows, since with none hidden it is the block's mark.
+        cut: bool = false,
 
         pub fn init(self: *Self, sink: Sink, length: u64, whole: bool) !void {
             self.* = .{ .out = .{ .sink = sink }, .escaped = undefined, .length = length, .whole = whole };
@@ -414,16 +417,20 @@ pub fn UserBody(comptime Sink: type) type {
             } else {
                 if (self.length <= collapse_bytes) try self.scan(self.small[0..self.length]);
                 try self.endLine();
-                if (self.shown != 0) try self.out.feed("\n");
-                try self.out.feed(Mark.summary);
-                var count: [32]u8 = undefined;
                 const hidden = self.nonblank - self.shown;
-                try self.out.feed(switch (hidden) {
-                    0 => "┄",
-                    1 => "┄ 1 more line",
-                    else => std.fmt.bufPrint(&count, "┄ {d} more lines", .{hidden}) catch unreachable,
-                });
-                collapsed = true;
+                if (hidden != 0) {
+                    try self.endCut();
+                    if (self.shown != 0) try self.out.feed("\n");
+                    try self.out.feed(Mark.summary);
+                    var count: [32]u8 = undefined;
+                    try self.out.feed(if (hidden == 1) "┄ 1 more line" else std.fmt.bufPrint(&count, "┄ {d} more lines", .{hidden}) catch unreachable);
+                    collapsed = true;
+                } else if (self.cut) {
+                    // Nothing hidden: the cut line's `…` marks the block.
+                    try self.out.feed(Mark.reset ++ Mark.summary ++ "…");
+                    collapsed = true;
+                }
+                // Only blank lines hidden: every line shows, with no mark.
             }
             try self.out.feed(Mark.reset);
             try self.out.finish();
@@ -449,6 +456,7 @@ pub fn UserBody(comptime Sink: type) type {
             }
             if (self.line_blank) return;
             self.nonblank += 1;
+            try self.endCut();
             if (self.shown == preview_lines) return;
             if (self.shown != 0) try self.out.feed("\n");
             self.shown += 1;
@@ -456,7 +464,13 @@ pub fn UserBody(comptime Sink: type) type {
             const cut = if (self.line_bytes <= preview_bytes) kept.len else graphemeCut(kept, preview_bytes);
             try self.escaped.feed(kept[0..cut]);
             try self.escaped.finish();
-            if (cut != kept.len) try self.out.feed(Mark.reset ++ Mark.summary ++ "…" ++ Mark.reset ++ Mark.body);
+            self.cut = cut != kept.len;
+        }
+
+        /// A cut line another line follows ends in `…` as body text.
+        fn endCut(self: *Self) !void {
+            if (self.cut) try self.out.feed("…");
+            self.cut = false;
         }
     };
 }
@@ -568,7 +582,10 @@ test "a long user Message shows two non-blank lines and what it hides" {
     const B = Mark.body;
     const S = Mark.summary;
     const R = Mark.reset;
-    const cut = R ++ S ++ "…" ++ R ++ B;
+    // A cut line ends in `…`. When nothing more is hidden, that `…` is the
+    // block's mark, as `┄` is otherwise, and no summary row is drawn.
+    const end = R ++ S ++ "…" ++ R;
+    const cut = "…";
     const a = @as([255]u8, @splat('a'));
     const x = @as([1100]u8, @splat('x'));
     const lines = comptime repeat("line\n", 29) ++ "line";
@@ -584,15 +601,21 @@ test "a long user Message shows two non-blank lines and what it hides" {
         // Twelve lines from the first non-blank to the last fit; thirteen do not.
         .{ .input = "a" ++ six ++ "b" ++ five ++ "c", .output = B ++ "a" ++ six ++ "  b" ++ five ++ "  c" ++ R },
         .{ .input = "a" ++ six ++ "b" ++ six ++ "c", .output = B ++ "a\n  b\n  " ++ S ++ "┄ 1 more line" ++ R },
+        // Only blank lines hidden: both lines show, with no bare `┄` row.
+        .{ .input = "a" ++ six ++ six ++ "b", .output = B ++ "a\n  b" ++ R },
         // Leading and trailing blank lines do not count; trailing ones never show.
         .{ .input = twenty ++ "a\n \t\r\n", .output = B ++ twenty ++ "  a" ++ R },
         .{ .input = "a\r\n", .output = B ++ "a\\x0d" ++ R },
-        // Long only by its bytes: a cut line counts as shown.
-        .{ .input = x[0..1025], .output = B ++ x[0..200] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
+        // Long only by its bytes: a cut line counts as shown, and with no
+        // line hidden it ends in `…` and draws no bare `┄` row.
+        .{ .input = x[0..1025], .output = B ++ x[0..200] ++ end },
+        .{ .input = x[0..1100], .output = B ++ x[0..200] ++ end },
         // Cuts count source bytes and never split a grapheme.
-        .{ .input = "\x01" ++ a[0..197] ++ "😀" ++ x[0..900], .output = B ++ "\\x01" ++ a[0..197] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
-        .{ .input = a[0..199] ++ "e\u{301}" ++ x[0..900], .output = B ++ a[0..199] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
-        .{ .input = a[0..200] ++ "\n" ++ x[0..900], .output = B ++ a[0..200] ++ "\n  " ++ x[0..200] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
+        .{ .input = "\x01" ++ a[0..197] ++ "😀" ++ x[0..900], .output = B ++ "\\x01" ++ a[0..197] ++ end },
+        .{ .input = a[0..199] ++ "e\u{301}" ++ x[0..900], .output = B ++ a[0..199] ++ end },
+        .{ .input = a[0..200] ++ "\n" ++ x[0..900], .output = B ++ a[0..200] ++ "\n  " ++ x[0..200] ++ end },
+        // With lines hidden, a cut line's `…` is body text; `┄ N` marks.
+        .{ .input = x[0..1100] ++ "\nb\nc\nd", .output = B ++ x[0..200] ++ cut ++ "\n  b\n  " ++ S ++ "┄ 2 more lines" ++ R },
         // Preview lines skip blank ones; a large Message streams.
         .{ .input = "\n \nfirst\n\nsecond\nthird\n" ++ x ++ "\n\n", .output = B ++ "first\n  second\n  " ++ S ++ "┄ 2 more lines" ++ R },
         .{ .input = lines, .whole = true, .output = B ++ "line" ++ more ++ R },
@@ -603,7 +626,8 @@ test "a long user Message shows two non-blank lines and what it hides" {
             try body.init(&sink, case.input.len, case.whole);
             try body.feed(case.input[0..split]);
             try body.feed(case.input[split..]);
-            try std.testing.expectEqual(std.mem.indexOf(u8, case.output, "┄") != null, try body.finish());
+            const marked = std.mem.indexOf(u8, case.output, "┄") != null or std.mem.endsWith(u8, case.output, end);
+            try std.testing.expectEqual(marked, try body.finish());
             try std.testing.expectEqualStrings(case.output, sink.bytes[0..sink.length]);
         }
     }
