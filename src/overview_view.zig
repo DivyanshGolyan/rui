@@ -3419,7 +3419,7 @@ fn hints(painter: *Painter, state: *const State, draft: Draft, listed: bool) err
     } else if (draft.bytes.len != 0) {
         // What Enter and Esc do to this draft, as `enter` and `compose` read it.
         const slashed = draft.bytes[0] == '/' and !std.mem.startsWith(u8, draft.bytes, "//");
-        const enter_does: []const u8 = if (!slashed) "enter start " else if (commands.parse(draft.bytes) == .command) "enter run " else "";
+        const enter_does: []const u8 = if (!slashed) (if (listed) "enter pick " else "enter start ") else if (commands.parse(draft.bytes) == .command) "enter run " else "";
         const text = try std.fmt.allocPrint(painter.arena, "{s}{s}{s}", .{ enter_does, if (enter_does.len != 0) try std.fmt.allocPrint(painter.arena, "{s} ", .{dot}) else "", esc_does.? });
         _ = try painter.put(1, text, room, .{ .colour = .quiet });
     } else if (state.selectedRow()) |row| {
@@ -5406,6 +5406,9 @@ test "the composer's /word asks the Workspace's skills, but not while an Upgrade
     skillsRead(&state, read.read, .{ .entries = entries, .total = 1 }, draft);
     const shown = nextCommands(&state, draft).?;
     try std.testing.expectEqualStrings("/review", shown.list.entries[0].shown);
+    // Over the drawn list, Enter picks the skill rather than starting.
+    drawWithRoom(&state, draft);
+    try expectLastLine(&state, draft, " enter pick · esc close");
 }
 
 test "start settings are the options session start shares with /configure" {
