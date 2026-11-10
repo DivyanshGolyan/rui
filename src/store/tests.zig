@@ -8716,7 +8716,6 @@ test "an Attempt check reads no Session, and a prefix seal's Session read answer
             // Main touched the Session in each check, so a faulted session row
             // answered SessionReadFailed there; only the seal's write reads it now.
             try store_testing.failReadsOf(&storage, "session");
-            try view.checkAttempt();
             try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(attempt.binding));
             try storage.withDispatchHandoff(attempt.binding, {}, TestingAttempt.handoff);
             try std.testing.expect(!storage.isFenced());

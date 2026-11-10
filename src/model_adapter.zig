@@ -4638,7 +4638,7 @@ test "a preparation cancelled while keeping its memo keeps nothing of it" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try setup.storage.openHistoricalView(binding, &preparation.view);
+    _ = try setup.storage.openHistoricalView(binding, &preparation.view);
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     while (preparation.memoCopied() == 0) try std.testing.expect(preparation.advance(7, 3) == .pending);
