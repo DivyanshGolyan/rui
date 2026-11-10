@@ -15,8 +15,9 @@ from types import SimpleNamespace
 from textwrap import dedent
 from unittest.mock import patch
 
-from select_tests import (CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES,
-                          POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, TEST_CODE, Graph, execution_batches, matches, select,
+import build_files
+from select_tests import (BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES,
+                          POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, TEST_CODE, UNIT_ROOTS, Graph, execution_batches, matches, select,
                           setup_requirements, tree_graph)
 from qualification import NATIVE, RESOURCES, qualification, shards
 
@@ -24,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
 from host_process import dispose_all, wait_for
 
 
-AVAILABLE = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path("build.zig").read_text()))
+AVAILABLE = set(build_files.steps())
 
 
 def named_paths(patterns):
@@ -88,6 +89,33 @@ class RuleMatchTest(unittest.TestCase):
                     if served_by and not targets & served_by:
                         failures.append((phase, path, reason, "starts no server"))
         self.assertEqual(failures, [])
+
+
+class BuildModuleTest(unittest.TestCase):
+    """build.zig selects the full gate; a module under build/ selects only its
+    BUILD_MODULES entry, which must name every target the module defines."""
+
+    def test_every_build_module_is_mapped(self):
+        modules = {path.relative_to(build_files.ROOT).as_posix() for path in build_files.files()}
+        self.assertEqual(modules - {"build.zig"}, BUILD_MODULES.keys())
+
+    def test_a_module_edit_selects_the_targets_it_defines(self):
+        # Targets some selection can name. A module that defines one and does
+        # not select it would let an edit to that target's wiring skip it.
+        selectable = ({target for _, checks, native, _ in RULES for target in (*checks, *native)}
+                      | UNIT_ROOTS.keys() | FIXTURES.keys() | CHECK_COVERS | {"check", "check-full", "stack-frames", "test-full"})
+        defined = build_files.steps()
+        for module, targets in BUILD_MODULES.items():
+            with self.subTest(module=module):
+                result = select([module], "review", AVAILABLE)
+                selected = set(result["targets"])
+                self.assertTrue(selected)
+                self.assertLessEqual(set(targets), AVAILABLE)
+                covered = (selected | {case for broad, cases in FIXTURE_COVERS.items() if broad in selected for case in cases}
+                           | (CHECK_COVERS if selected & {"check", "check-full"} else set())
+                           | ({"test-native", "test-store"} if "test" in selected else set()))
+                self.assertLessEqual({step for step, owner in defined.items() if owner == module} & selectable, covered)
+                self.assertLessEqual(set(targets), covered)
 
 
 class SelectionTest(unittest.TestCase):
@@ -849,7 +877,7 @@ class SelectionTest(unittest.TestCase):
     def test_every_script_the_build_runs_is_a_declared_fixture(self):
         # A script outside FIXTURES would reach no target through the graph.
         declared = {script for scripts, _, _ in FIXTURES.values() for script in scripts}
-        named = set(re.findall(r'"(tests/integration/[\w]+\.(?:py|sh))"', Path("build.zig").read_text()))
+        named = set(re.findall(r'"(tests/integration/[\w]+\.(?:py|sh))"', build_files.source()))
         runners = {"tests/integration/check.sh", "tests/integration/host_process.py"}
         undeclared = {path for path in named - declared - runners if not matches(path, RENDERER_HARNESSES)}
         self.assertEqual(undeclared, set())
@@ -932,8 +960,8 @@ class SelectionTest(unittest.TestCase):
         for targets in (["check"], ["check-full"], ["terminal-restoration-integration"], ["test-logic", "direct-pty"]):
             with self.subTest(targets=targets):
                 self.assertTrue(setup_requirements(targets)["screen"])
-        build = (Path(__file__).parents[2] / "build.zig").read_text()
-        self.assertLessEqual(SCREEN_TARGETS, set(re.findall(r'b\.step\(\s*"([^"]+)"', build)))
+        build = build_files.source()
+        self.assertLessEqual(SCREEN_TARGETS, set(build_files.steps()))
         # Every fixture that reaches the observer runs with its library named,
         # and setup fetches the package for it.
         observing = tree_graph().targets("tests/integration/terminal_screen.py")

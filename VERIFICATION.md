@@ -46,7 +46,8 @@ A capture made with no `reply` is a silent terminal, for a fixture that answers 
 | Build or dependency | Linux `check-full`, `typecheck-macos` and mapped checks before merge; macOS `check-full` in promotion; manual empty-cache acceptance |
 | Resource owner | Comparable measurements and lifecycle evidence on applicable runners |
 
-The executable minimum is [select_tests.py](tests/ci/select_tests.py), using targets from [build.zig](build.zig).
+The executable minimum is [select_tests.py](tests/ci/select_tests.py), using targets from [build.zig](build.zig) and its modules under `build/`.
+An edit to `build.zig` or `build.zig.zon` selects the full build gate; an edit to a module under `build/` selects only the targets its `BUILD_MODULES` entry names, which include every target it defines.
 CI runs `python3 tests/ci/select_tests.py --base origin/main --phase review` on the pushed head.
 Run it locally only to diagnose a CI red; [Evidence](CODING_STANDARDS.md#evidence) lists the pre-push checks.
 The selector reads the import graph of the tree it runs on: Zig `@import` and `@embedFile`, and the Python imports and `src/` reads of `tests/integration`.
