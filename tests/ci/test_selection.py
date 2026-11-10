@@ -164,7 +164,7 @@ class SelectionTest(unittest.TestCase):
     def test_upgrade_owners_select_standalone_fixture_in_both_phases(self):
         paths = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
                  "src/upgrade_process.zig", "src/HostLifecycle.zig", "src/host_identity.zig",
-                 "src/host_identity.c", "src/UpgradePanel.zig", "src/host_launch.c",
+                 "src/host_identity.c", "src/host_launch.c",
                  "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/slash_commands.zig",
                  "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
                  "tests/integration/upgrade_integration.py", "tests/ci/test_upgrade_fixture.py", "release/publish.sh", "release/install.sh",

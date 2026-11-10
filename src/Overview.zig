@@ -31,7 +31,6 @@ const test_poll = @import("test_poll");
 const app_events = @import("testing/app_events.zig");
 const view = @import("overview_view.zig");
 const ClientTask = @import("ClientTask.zig");
-const UpgradePanel = @import("UpgradePanel.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const session_reads = @import("session_reads.zig");
 const SessionInput = @import("SessionInput.zig");
