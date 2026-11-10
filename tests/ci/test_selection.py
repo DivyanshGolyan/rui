@@ -99,6 +99,12 @@ class BuildModuleTest(unittest.TestCase):
         modules = {path.relative_to(build_files.ROOT).as_posix() for path in build_files.files()}
         self.assertEqual(modules - {"build.zig"}, BUILD_MODULES.keys())
 
+    def test_checks_read_every_build_file(self):
+        # A read of build.zig alone misses the targets and calls build/ modules hold.
+        read = re.compile(r"""build\.zig["']\)\.read_text\(""")
+        readers = [path.name for path in Path(__file__).parent.glob("*.py") if read.search(path.read_text())]
+        self.assertEqual(readers, [], "read the build with build_files.steps() or build_files.source()")
+
     def test_a_module_edit_selects_the_targets_it_defines(self):
         # Targets some selection can name. A module that defines one and does
         # not select it would let an edit to that target's wiring skip it.

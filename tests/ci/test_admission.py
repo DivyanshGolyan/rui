@@ -65,7 +65,7 @@ class PlanFixture:
             if name and (ROOT / name).is_file():
                 (self.repo / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / name, self.repo / name)
-        self.write('build.zig', (ROOT / 'build.zig').read_text())
+        shutil.copyfile(ROOT / 'build.zig', self.repo / 'build.zig')
         self.write('README.md', 'Base. Another sentence on one line.\n')
         self.base = self.commit()
         return self
@@ -460,7 +460,7 @@ class CandidatePlanTest(unittest.TestCase):
                 self.assertFalse(select([path], 'review', available)['upgrade_required'])
 
     def test_schema_edits_run_the_upgrade_only_when_the_store_format_changes(self):
-        available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', (ROOT / 'build.zig').read_text()))
+        available = set(build_files.steps())
         schema = 'src/store/schema.zig'
         source = (ROOT / schema).read_text()
         version = int(re.search(r'^pub const schema_version: u32 = (\d+);$', source, re.M)[1])
