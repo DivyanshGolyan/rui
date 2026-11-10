@@ -374,6 +374,14 @@ class SelectionTest(unittest.TestCase):
                 for family in ("targets", "native_targets"):
                     self.assertNotIn("check", landing[family])
 
+    def test_host_serve_grammar_does_not_select_human_cli_for_host_edits(self):
+        result = select(["src/server_host.zig"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertNotIn("human-cli-integration", result[family])
+        result = select(["src/serve_grammar.zig"], "review", AVAILABLE)
+        for target in ("host-launch-integration", "request-wait-integration"):
+            self.assertTrue(covered(target, set(result["targets"])), target)
+
     def test_strict_paths_never_retry(self):
         # Each of these selected retryable suites before strictness decided retries.
         for paths in (["tests/integration/bash_integration.py"], ["src/store.zig"], ["src/server.zig"],

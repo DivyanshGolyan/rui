@@ -21,7 +21,7 @@ def catalog(pending=(), mapped=("Classified",)):
 
 class CallerErrors(unittest.TestCase):
     def test_inventory_is_exactly_the_cli_owners_and_root_caller_modules(self):
-        for path in ("src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/preferences.zig",
+        for path in ("src/cli.zig", "src/cli_args.zig", "src/cli_grammar.zig", "src/client.zig", "src/preferences.zig",
                      "src/caller_error.zig", "src/caller_exit.zig", "src/caller_new.zig"):
             with self.subTest(path=path):
                 self.assertTrue(inventory_path(path))
@@ -51,7 +51,7 @@ class CallerErrors(unittest.TestCase):
         ])
 
     def test_raw_error_name_is_forbidden_in_every_caller_owner(self):
-        for path in ("src/cli.zig", "src/cli_args.zig", "src/caller_exit.zig", "src/caller_new.zig"):
+        for path in ("src/cli.zig", "src/cli_args.zig", "src/cli_grammar.zig", "src/caller_exit.zig", "src/caller_new.zig"):
             with self.subTest(path=path):
                 failures = check({CATALOG: catalog(), path: "\n@errorName // a comment\n (err);"})
                 self.assertEqual(failures, [f"{path}:2: raw @errorName is forbidden on the caller surface"])
