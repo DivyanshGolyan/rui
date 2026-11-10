@@ -24,7 +24,8 @@ FIELDS = {"signature", "path", "issue", "owner", "added", "expires"}
 MAX_DAYS = 14
 # Strict paths fail for real and are never rerun; so are these suites wherever they live.
 NEVER = re.compile(r"store|recovery|upgrade", re.IGNORECASE)
-ZIG_TEST = re.compile(r"zig test '([^']*)'")
+# report_issue.py's Zig suffixes; a test name may hold apostrophes, so the suffix ends it.
+ZIG_TEST = re.compile(r"zig test '(.*)' (?:failed(?: \(\w+\))?|terminated with signal \w+)")
 SUMMARY = re.compile(r"^Build Summary: \d+/\d+ steps succeeded \((\d+) failed\)", re.M)
 OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 
@@ -32,8 +33,10 @@ OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 def subject(signature):
     """The test a signature names: a Zig test's name or a fixture's path, not
     the failing line, whose call text may mention a Store (`--store`)."""
-    zig = ZIG_TEST.match(signature)
-    return zig[1] if zig else signature.split(": ", 1)[0]
+    if signature.startswith("zig test "):
+        zig = ZIG_TEST.fullmatch(signature)
+        return zig[1] if zig else signature  # Unparsed: judge all of it.
+    return signature.split(": ", 1)[0]
 
 
 def entries(path=LIST):

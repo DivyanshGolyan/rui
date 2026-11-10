@@ -75,6 +75,11 @@ class ListTest(unittest.TestCase):
             "a Store unit test": dict(FLAKE, path="src/store/tests.zig", signature="zig test 'store x' failed (E)"),
             "a Store test named outside src/store": dict(FLAKE, path="src/tests.zig",
                                                          signature="zig test 'store.tests.x' failed (E)"),
+            "a Store test whose name has apostrophes": dict(FLAKE, path="src/launch_frame.zig", signature=(
+                "zig test 'launch_frame.test.a launched Host's start failure is refused with its Store's "
+                "codes only' failed (TestUnexpectedResult)")),
+            "a crashed Store test": dict(FLAKE, path="src/tests.zig",
+                                         signature="zig test 'store.tests.x' terminated with signal SIGABRT"),
             "a Store fixture": dict(FLAKE, path="tests/integration/store_rounds_cases.py",
                                     signature="tests/integration/store_rounds_cases.py: x raised E"),
             "the fixture's path first": dict(FLAKE, signature="assert x raised AssertionError"),
