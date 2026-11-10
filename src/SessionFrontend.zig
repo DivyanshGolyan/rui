@@ -186,10 +186,10 @@ transcript: struct {
 expansion: struct {
     // Ctrl-O waits for the frame it names a block in; the read then waits for
     // the reader, and its page shows only over the view it was asked from.
-    pending: bool = false,
-    // A Message page asked for, and the one being read. Each holds where it was
-    // asked from; Esc, Ctrl-G, a send or a newer Ctrl-O supersedes it.
-    requested: ?MessageRequest = null,
+    // A newer Ctrl-O may queue while an older page is still being read.
+    queued: union(enum) { none, after_frame, ready: MessageRequest } = .none,
+    // The page being read. Each request holds where it was asked from;
+    // Esc, Ctrl-G, a send or a newer Ctrl-O supersedes it.
     reading: ?MessageRequest = null,
     generation: u64 = 0,
 } = .{},
@@ -1001,13 +1001,14 @@ fn update(self: *Self) !Updated {
                 self.dirty = true;
             }
         }
-        if (self.reader.thread == null) if (self.expansion.requested) |request| {
-            self.expansion.requested = null;
+        if (self.reader.thread == null and self.expansion.queued == .ready) {
+            const request = self.expansion.queued.ready;
+            self.expansion.queued = .none;
             self.expansion.reading = request;
             const job = self.freeze(.message);
             job.target = .{ .message = request.target };
             try self.launch(job, reads.fullMessage);
-        };
+        }
         // An Action's choice holds the input: no press waits for it.
         if (self.screen.inputRow() == .selector) {
             self.input.dropPresses();
@@ -1060,7 +1061,7 @@ fn driveActive(self: *Self) !void {
         // Another Session's notification goes out with the next frame.
         if (self.terminal.notificationWaiting()) self.dirty = true;
         if (self.dirty or self.screen.stale()) if (try self.draw()) break;
-        if (self.expansion.pending) try self.expand();
+        if (self.expansion.queued == .after_frame) try self.expand();
         _ = try self.step(16);
     }
 }
@@ -1380,7 +1381,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
             // A newer Ctrl-O replaces any page asked for before it, even
             // before its own target is found, or if none is.
             self.dropMessageRequest();
-            self.expansion.pending = true;
+            self.expansion.queued = .after_frame;
         },
         .detach => self.leaving = .detached,
         // While approval is paused, recovery waits for the Action and the
@@ -1473,13 +1474,12 @@ fn pageAsked(self: *const Self) reader_policy.Asked {
 /// No Message page asked for so far opens.
 fn dropMessageRequest(self: *Self) void {
     self.expansion.generation += 1;
-    self.expansion.requested = null;
-    self.expansion.pending = false;
+    self.expansion.queued = .none;
 }
 
 /// Ctrl-O: opens the lowest collapsed Message the latest frame drew.
 fn expand(self: *Self) !void {
-    self.expansion.pending = false;
+    self.expansion.queued = .none;
     self.dirty = true;
     const screen = self.screen;
     if (self.pagePlace() == .elsewhere) {
@@ -1495,7 +1495,7 @@ fn expand(self: *Self) !void {
         self.notice = "! That message's full text is no longer held here; /history shows it again.";
         return;
     };
-    self.expansion.requested = .{ .target = target, .asked = self.pageAsked() };
+    self.expansion.queued = .{ .ready = .{ .target = target, .asked = self.pageAsked() } };
     self.notice = "Opening message…";
 }
 
