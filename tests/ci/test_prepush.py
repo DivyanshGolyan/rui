@@ -59,7 +59,7 @@ class PrepushTest(unittest.TestCase):
         commands = self.commands(["src/request_encoding.zig"])
         self.assertEqual(set(commands), SOURCE_CHECKS | {"whitespace", "zig fmt", "generated files", "development selection", "macOS type check"})
         self.assertEqual(commands["zig fmt"], ["zig", "fmt", "--check", "--ast-check", "src/request_encoding.zig"])
-        self.assertEqual(commands["development selection"], ["zig", "build", "test-logic", "--summary", "line"])
+        self.assertEqual(commands["development selection"], ["zig", "build", "test-logic", "test-native", "--summary", "line"])
 
     def test_cli_inventory_uses_its_existing_owner_predicate(self):
         for path in ("src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/preferences.zig", "src/caller_new.zig"):

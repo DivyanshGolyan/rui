@@ -16,7 +16,7 @@ import subprocess
 import sys
 
 from conflict_alert import gh, github
-from pr_overlap import overlaps
+from pr_overlap import branch_changes, overlaps, report
 
 
 def create_args(title, body_file, base, branch):
@@ -71,10 +71,7 @@ def main():
                 print(refusal, file=sys.stderr)
                 return 1
             repo = json.loads(gh("repo", "view", "--json", "nameWithOwner"))["nameWithOwner"]
-            paths = set(subprocess.check_output(
-                ["git", "diff", "--name-only", "--no-renames", "-z", f"origin/{args.base}...HEAD"]).decode().split("\0")) - {""}
-            for number, shared in overlaps(github, repo, branch, paths):
-                print(f"Shares files with #{number}: {', '.join(shared)}")
+            report(overlaps(github, repo, branch, *branch_changes(f"origin/{args.base}")))
             print(gh(*create_args(args.title, args.body_file, args.base, branch)).strip())
             print("Opened as a draft. After the last planned push, run: python3 tests/ci/open_pr.py ready")
             return 0
