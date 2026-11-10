@@ -344,10 +344,11 @@ def interactive_cases(state, binding=False, null_code=False):
                 else:
                     if route == "/v1/control/permission-decision":
                         proposal = human.read_terminal(master, human.CHOICE)
-                        assert "\n? Check successful shell exit\n" in proposal and "\n  $ true\n" in proposal, proposal
+                        # The card draws the exact proposal inside its border.
+                        assert "\n│ ? Check successful shell exit " in proposal and "\n│   $ true " in proposal, proposal
                         proposal += human.action_ready(ready_read, master)
                         # Deny is picked and shown before Enter counts.
-                        proposal += human.pick_deny(master, ready_read)
+                        proposal += human.pick_deny(master)
                     else:
                         human.read_terminal(master, "› ")
                         if route == "/v1/activity-page":
@@ -418,7 +419,7 @@ def interactive_cases(state, binding=False, null_code=False):
                         diagnostic = human.read_terminal(master, f"Last submission error: {reason}", composer=True)
                         assert key in diagnostic and "Ctrl-R retries this exact original" in diagnostic, diagnostic
                         # No ordinary no-op may retry an unresolved submission.
-                        human.return_to_live(master)
+                        human.return_to_live(master, lambda screen: "Last submission error" not in screen)
                         os.write(master, b"\r")
                         human.settle_screen(master, quiet=0.5)
                         assert len(proxy.exchanges) == 1, "empty input retried unconfirmed intent"
@@ -432,7 +433,10 @@ def interactive_cases(state, binding=False, null_code=False):
                         if route == "/v1/message":
                             output += human.await_screen(master, human.CHOICE)
                             output += human.action_ready(ready_read, master)
-                    os.write(master, b"/exit\r")
+                    # The card takes typed keys, so /exit cannot reach the
+                    # composer while it shows; Ctrl-D leaves from the card.
+                    card = binding and route == "/v1/message"
+                    os.write(master, b"\x04" if card else b"/exit\r")
                 # Supply output credit during the original exit budget for
                 # fatal cleanup and recoverable explicit detachment alike.
                 try:

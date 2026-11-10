@@ -387,20 +387,12 @@ SLEEP_ORDERED = {
         (1, "client sleeps 2 s mid-header against the Host's acceptance budget"),
     ("tests/integration/human_cli_integration.py", "main"):
         (2, "input paced past the bare-ESC ambiguity timeout and the repaint window"),
-    ("tests/integration/human_cli_integration.py", "persistent_opening_case"):
-        (1, "sleeps 0.5 s before asserting history stopped at its start"),
     ("tests/integration/human_cli_integration.py", "renderer_cases"):
-        (14, "settle sleeps before screen and request assertions"),
+        (5, "settle sleeps before screen and request assertions"),
     ("tests/integration/model_fixture.py", "FailureHandler.do_POST"):
         (2, "slow-body and stall peers pace bytes against the client's real deadlines"),
     ("tests/integration/model_fixture.py", "SuccessHandler.do_POST"):
         (1, "paces SSE chunks by the scenario's chunk_delay"),
-    ("tests/integration/terminal_restoration_cases.py", "persistent_cases"):
-        (1, "sleeps 0.5 s after a command so it can reach blocked output before Ctrl-C"),
-    ("tests/integration/terminal_restoration_cases.py", "renderer_backpressure_case"):
-        (1, "sleeps 0.5 s to show a command stays pending behind blocked output"),
-    ("tests/integration/terminal_restoration_cases.py", "visible_stream_handoff_cases"):
-        (2, "sleeps 0.5 s to show a command stays pending behind held output"),
     ("tests/integration/transport_h2_cases.py", "held_population"):
         (2, "0.2 s settle, then a 3 s idle-CPU measurement window"),
 }
