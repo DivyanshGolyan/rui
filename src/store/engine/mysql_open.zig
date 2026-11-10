@@ -31,6 +31,7 @@ const FactsRow = struct {
     bin: bool,
     bin_format: Bounded(32),
     doublewrite: Bounded(32),
+    max_allowed_packet: u64,
     database: Bounded(64),
 };
 
@@ -45,7 +46,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
         try w.writeAll(sql);
         try w.writeByte(';');
     }
-    try w.writeAll("SELECT @@version,@@version_comment,@@global.read_only,@@global.super_read_only,@@global.innodb_flush_log_at_trx_commit,@@global.sync_binlog,@@global.log_bin,@@global.binlog_format,@@global.innodb_doublewrite,DATABASE();SELECT GET_LOCK(");
+    try w.writeAll("SELECT @@version,@@version_comment,@@global.read_only,@@global.super_read_only,@@global.innodb_flush_log_at_trx_commit,@@global.sync_binlog,@@global.log_bin,@@global.binlog_format,@@global.innodb_doublewrite,@@max_allowed_packet,DATABASE();SELECT GET_LOCK(");
     try text(w, options.database);
     try w.writeAll(",0)");
     try conn.sendBatch();
@@ -56,6 +57,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     const acquired = lock.acquired orelse return error.StoreConnectionLost;
     if (acquired == 0) return error.StoreLocked;
     if (acquired != 1) return error.CorruptStore;
+    conn.limitBatch(facts.max_allowed_packet);
     if (policy.refusal(.{
         .server_version = facts.version.slice(),
         .version_comment = facts.version_comment.slice(),
