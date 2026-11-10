@@ -1135,9 +1135,20 @@ test "App Session Ctrl-O follows the lowest drawn peer name, or opens the lower 
     try std.testing.expectEqualStrings("Opening message…", self.shown_notice.current(self.nowMs()).?);
     try std.testing.expectEqual(@as(u64, 2), self.expansion.queued.ready.target.ordinal);
     try std.testing.expectEqual(@as(?[session_id.bytes]u8, null), Hooks.opened);
-    // With the peer row lowest again, Ctrl-O follows the peer.
+    // With the peer row lowest again, Ctrl-O follows the peer, unless the
+    // row is too narrow to show any of its name: then the Message above is
+    // the lowest thing drawn that Ctrl-O can open.
     self.dropMessageRequest();
     try screen.live.append(peer);
+    var narrow = draw_context;
+    narrow.max.width = 20;
+    _ = try widget_.draw(narrow);
+    try widget_.handleEvent(&ctx, ctrl_o);
+    try widget_.handleEvent(&ctx, .tick);
+    try std.testing.expectEqual(@as(?[session_id.bytes]u8, null), Hooks.opened);
+    try std.testing.expectEqualStrings("Opening message…", self.shown_notice.current(self.nowMs()).?);
+    try std.testing.expectEqual(@as(u64, 2), self.expansion.queued.ready.target.ordinal);
+    self.dropMessageRequest();
     _ = try widget_.draw(draw_context);
     try widget_.handleEvent(&ctx, ctrl_o);
     try widget_.handleEvent(&ctx, .tick);
@@ -2227,7 +2238,7 @@ fn expand(self: *Self) !?[session_id.bytes]u8 {
         self.notice = "! Ctrl-O opens a message or Session name from the conversation.";
         return null;
     }
-    const index = switch (screen.openableInView() orelse {
+    const index = switch (try screen.openableInView(self.init.gpa) orelse {
         self.notice = "Nothing to open in view; scroll to one, then Ctrl-O.";
         return null;
     }) {

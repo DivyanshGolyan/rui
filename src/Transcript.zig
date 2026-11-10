@@ -53,6 +53,9 @@ pub const Selection = struct {
     dragging: bool = false,
     edge: enum { none, up, down } = .none,
     ticking: bool = false,
+    /// The first row shown when `head` was last set: held at an edge, the
+    /// head moves to the edge row only once the view has scrolled.
+    view: viewport.Position = .{},
 };
 
 /// A cell in this widget's coordinates; a forwarded drag may be outside it.
@@ -125,6 +128,7 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) anyerror!void
             if (!selection.dragging and std.meta.eql(at, selection.press)) return;
             selection.dragging = true;
             selection.head = try self.spotAt(ctx.alloc, at);
+            selection.view = self.first;
             selection.edge = if (at.row <= 0) .up else if (at.row >= self.drawn.height - 1) .down else .none;
             if (selection.edge != .none and !selection.ticking) {
                 selection.ticking = true;
@@ -244,12 +248,14 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (self.selection) |*selection| if (selection.dragging and surface.buffer.len != 0) {
         const width = surface.size.width;
         const height = text.height;
-        // Held at an edge, the selection follows the rows scrolled in.
-        switch (selection.edge) {
+        // Held at an edge, the selection follows the rows scrolled in; until
+        // the view moves, it keeps the pointer's column.
+        if (!std.meta.eql(selection.view, self.first)) switch (selection.edge) {
             .none => {},
             .up => selection.head = self.rowAt(surface.buffer[0..width], self.first, 0).spot(0),
             .down => selection.head = self.rowAt(surface.buffer[(height - 1) * width ..][0..width], self.first, height - 1).spot(width),
-        }
+        };
+        selection.view = self.first;
         const range: selecting.Range = .of(selection.anchor, selection.head);
         const columns = try ctx.arena.alloc(bool, width);
         for (0..height) |index| {
@@ -540,6 +546,27 @@ test "a drag held at an edge scrolls one row a tick and selects the rows it brin
     try h.send(.release, 3, 5);
     try std.testing.expectEqual(@as(i32, -1), h.scrolls);
     try std.testing.expectEqualStrings("line 3\nline 4\nline 5", h.copies(&copied));
+}
+
+test "a drag on an edge row keeps the pointer's column until the view scrolls" {
+    const h = try Harness.init("alpha beta\ngamma delta\nepsilon\n", .{ .width = 16, .height = 3 });
+    defer h.deinit();
+    var copied: [64]u8 = undefined;
+    // On the first row at the document's top, a frame and an edge tick move
+    // nothing, so the selection stays where the pointer is.
+    try h.drag(.{ 6, 0 }, .{ 9, 0 });
+    try h.transcript.widget().handleEvent(&h.ctx, .tick);
+    _ = try h.frame();
+    try h.send(.release, 9, 0);
+    try std.testing.expectEqualStrings("beta", h.copies(&copied));
+    h.clearCommands();
+    // Likewise on the last row at the document's bottom.
+    try h.drag(.{ 1, 2 }, .{ 3, 2 });
+    try h.transcript.widget().handleEvent(&h.ctx, .tick);
+    _ = try h.frame();
+    try h.send(.release, 3, 2);
+    try std.testing.expectEqualStrings("psi", h.copies(&copied));
+    try std.testing.expectEqual(@as(i32, 0), h.scrolls);
 }
 
 test "a press or drag ends without copying when the pointer leaves or the content is replaced" {
