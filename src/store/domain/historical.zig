@@ -1087,6 +1087,13 @@ fn entryAfter(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*con
     return ordinary;
 }
 
+/// The output items a view serves: `item`'s Operation `owner` is unknown,
+/// above the floor, or the selected base. Every read of a view's items
+/// selects by it, so a page holds what the entries name.
+fn servedItemSql(comptime floor: []const u8, comptime base: []const u8) []const u8 {
+    return "(owner.admission_position IS NULL OR owner.admission_position>" ++ floor ++ " OR owner.operation_id=" ++ base ++ ")";
+}
+
 /// The host inputs and output items after ?2 below the Operation's
 /// admission, the first `HistoricalView.entry_batch` of them in position
 /// order.
@@ -1111,7 +1118,7 @@ const historical_entries = rsql.Read(.{
         "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
         "LEFT JOIN session_revision r ON r.session_ref=owner.session_ref AND r.revision=owner.settings_revision " ++
         "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position " ++
-        "AND (owner.admission_position IS NULL OR owner.admission_position>?3 OR owner.operation_id=?5) UNION ALL " ++
+        "AND " ++ servedItemSql("?3", "?5") ++ " UNION ALL " ++
         // Every earlier Operation of the Session above the floor, whatever
         // its outcome: its request carried its own boundary, so later ones do too.
         // With each, its tool set and whether it declares any tool.
@@ -1248,8 +1255,8 @@ fn pageBytesSql(comptime table: []const u8, comptime name: []const u8) []const u
     return "CASE WHEN " ++ table ++ ".byte_length BETWEEN 1 AND " ++ std.fmt.comptimePrint("{d}", .{Page.inline_bytes}) ++ " THEN @payload(" ++ table ++ ") END AS " ++ name;
 }
 
-/// The Session's output items at positions ?2 to ?3, in order, each with
-/// its call's fields and, for every content it names, the metadata and
+/// The output items the view serves at positions ?2 to ?3, in order, each
+/// with its call's fields and, for every content it names, the metadata and
 /// the bytes of a small one.
 const page_items = rsql.Read(.{
     .sql = "SELECT item.session_position,item.operation_id,item.item_ordinal,item.item_kind,item.phase,item.replay_omits_reasoning_text,item.part_count," ++
@@ -1257,14 +1264,16 @@ const page_items = rsql.Read(.{
         "tool_call.name_content_id," ++ pageContentSql("name", "name") ++ ",tool_call.call_id_content_id," ++ pageContentSql("call_id", "call_id") ++ "," ++
         "tool_call.arguments_content_id," ++ pageContentSql("arguments", "arguments") ++ " " ++
         "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
+        "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
         "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=item.operation_id AND tool_call.item_ordinal=item.item_ordinal " ++
         "LEFT JOIN content bag ON bag.content_id=item.extras_content_id " ++
         "LEFT JOIN content message ON message.content_id=item.message_content_id " ++
         "LEFT JOIN content name ON name.content_id=tool_call.name_content_id " ++
         "LEFT JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
         "LEFT JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
-        "WHERE current.operation_id=?1 AND item.session_position>=?2 AND item.session_position<=?3 ORDER BY item.session_position",
-    .Args = struct { operation: u64, first: u64, last: u64 },
+        "WHERE current.operation_id=?1 AND item.session_position>=?2 AND item.session_position<=?3 AND " ++ servedItemSql("?4", "?5") ++
+        " ORDER BY item.session_position",
+    .Args = struct { operation: u64, first: u64, last: u64, floor: u64, base: u64 },
     .Row = struct {
         session_position: rsql.Positive,
         operation_id: rsql.Positive,
@@ -1302,20 +1311,21 @@ const page_items = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// The parts of those items from part ?3 of the item at ?2 on, in item
+/// The parts of the served items from part ?3 of the item at ?2 on, in item
 /// then part order, each with the metadata of its own text and its bag
 /// and the bytes of a small one.
 const page_parts = rsql.Read(.{
     .sql = "SELECT item.session_position,part.part_ordinal,part.part_array,part.part_kind,part.text_length,part.text_content_id," ++
         pageContentSql("own", "own") ++ ",part.extras_content_id," ++ pageContentSql("bag", "bag") ++ " " ++
         "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
+        "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
         "JOIN model_output_part part ON part.operation_id=item.operation_id AND part.item_ordinal=item.item_ordinal " ++
         "LEFT JOIN content own ON own.content_id=part.text_content_id " ++
         "LEFT JOIN content bag ON bag.content_id=part.extras_content_id " ++
-        "WHERE current.operation_id=?1 AND item.session_position>=?2 AND item.session_position<=?4 " ++
+        "WHERE current.operation_id=?1 AND item.session_position>=?2 AND item.session_position<=?4 AND " ++ servedItemSql("?5", "?6") ++ " " ++
         "AND (item.session_position>?2 OR part.part_ordinal>=?3) ORDER BY item.session_position,part.part_ordinal " ++
         std.fmt.comptimePrint("LIMIT {d}", .{Page.part_batch}),
-    .Args = struct { operation: u64, first: u64, part: u64, last: u64 },
+    .Args = struct { operation: u64, first: u64, part: u64, last: u64, floor: u64, base: u64 },
     .Row = struct {
         session_position: rsql.Positive,
         part_ordinal: u64,
@@ -1480,10 +1490,10 @@ const Page = struct {
     };
 
     /// Queues the parts read from part `part` of the item at `first`.
-    fn queueParts(page: *Page, a: *ReadAccess, operation: u64, visitor: *Parts, first: u64, part: u64) void {
+    fn queueParts(page: *Page, a: *ReadAccess, view: *const HistoricalView, visitor: *Parts, first: u64, part: u64) void {
         page.parts_next = 0;
         page.parts_end = 0;
-        a.readEach(page_parts, .{ .operation = operation, .first = first, .part = part, .last = page.last }, part_batch, visitor);
+        a.readEach(page_parts, .{ .operation = view.binding.operation_id, .first = first, .part = part, .last = page.last, .floor = view.floor.position, .base = view.selected_base }, part_batch, visitor);
     }
 };
 
@@ -1502,8 +1512,8 @@ fn loadPage(a: *ReadAccess, view: *HistoricalView) !void {
     page.last = view.entries[view.entries_end - 1].position;
     var items: Page.Items = .{ .page = page, .decoded = &page.item_row };
     var parts: Page.Parts = .{ .page = page, .decoded = &page.part_row };
-    a.readEach(page_items, .{ .operation = view.binding.operation_id, .first = first, .last = page.last }, HistoricalView.entry_batch, &items);
-    page.queueParts(a, view.binding.operation_id, &parts, first, 0);
+    a.readEach(page_items, .{ .operation = view.binding.operation_id, .first = first, .last = page.last, .floor = view.floor.position, .base = view.selected_base }, HistoricalView.entry_batch, &items);
+    page.queueParts(a, view, &parts, first, 0);
     try store_access.runAs(a, error.CorruptStore);
     page.parts_complete = page.parts_end < Page.part_batch;
 }
@@ -1782,7 +1792,7 @@ fn partsFrom(a: *ReadAccess, view: *HistoricalView) !void {
     const cursor = &view.output_parts.?;
     const page = view.page.?;
     var parts: Page.Parts = .{ .page = page, .decoded = &page.part_row };
-    page.queueParts(a, view.binding.operation_id, &parts, cursor.position, cursor.next);
+    page.queueParts(a, view, &parts, cursor.position, cursor.next);
     try store_access.runAs(a, error.HistoricalEntryReadFailed);
     page.parts_complete = page.parts_end < Page.part_batch;
 }

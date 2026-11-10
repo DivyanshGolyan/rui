@@ -7499,6 +7499,77 @@ fn manyPartMessage(buffer: []u8, answer: []u8, comptime count: usize) !struct { 
     return .{ .item = item.buffered(), .answer = text.buffered() };
 }
 
+test "a view's page holds the outputs its entries name under no floor, a deeper floor and an inherited one" {
+    try store_testing.forEachEngine(struct {
+        /// The view's entries in order, each rendered and joined by `;`.
+        fn walk(storage: *Store, binding: AttemptBinding, buffer: []u8) ![]const u8 {
+            var view: HistoricalView = undefined;
+            _ = try storage.openHistoricalView(binding, &view);
+            defer view.close();
+            var out = std.Io.Writer.fixed(buffer);
+            var cursor: TestingHistoryCursor = .{};
+            var rendered: [256]u8 = undefined;
+            while (try cursor.next(&view)) |entry| {
+                if (entry.kind == .tool_results) continue;
+                try out.print("{s};", .{try renderTestingEntry(&view, entry, &rendered)});
+            }
+            return out.buffered();
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "floor-page-config");
+            try submitTestMessage(&storage, &tmp, "floor-page-one", "floor-page-one", session.slice(), "first");
+            const overflowed = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try storage.settleModelAttemptFailure(overflowed, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+            const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
+            // More outputs than a page holds, from one Operation the floor
+            // will drop, between the base and a newer output it keeps.
+            const many = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var texts: [20][160]u8 = undefined;
+            var items: [20][]const u8 = undefined;
+            for (&items, &texts, 0..) |*item, *text, index|
+                item.* = try std.fmt.bufPrint(text, "{{\"type\":\"message\",\"id\":\"d{d}\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"dropped\"}}]}}", .{index});
+            try settleItemsForTesting(&storage, &tmp, many, &items, "dropped");
+            try submitTestMessage(&storage, &tmp, "floor-page-two", "floor-page-two", session.slice(), "second");
+            const kept = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleItemsForTesting(&storage, &tmp, kept, &.{"{\"type\":\"message\",\"id\":\"k\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"kept\"}]}"}, "kept");
+            try submitTestMessage(&storage, &tmp, "floor-page-three", "floor-page-three", session.slice(), "third");
+            const full = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var buffer: [4096]u8 = undefined;
+            const kept_output = "message{\"id\":\"k\"}|content.output_text=kept;";
+
+            // No floor: every output, across more than one batch.
+            const all = try walk(&storage, full, &buffer);
+            try std.testing.expectEqual(@as(usize, 20), std.mem.count(u8, all, "content.output_text=dropped;"));
+            try std.testing.expect(std.mem.endsWith(u8, all, "second;" ++ kept_output ++ "third;"));
+
+            // A floor deeper than the base's keeps the base and the newer
+            // output, with the dropped ones between them.
+            try storage.settleModelAttemptFailure(full, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+            const deeper = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(deeper));
+            try store_testing.setHistoryFloorForTesting(&storage, deeper.operation_id, "second", 1);
+            const floored = try walk(&storage, deeper, &buffer);
+            try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, floored, "dropped"));
+            try std.testing.expect(std.mem.startsWith(u8, floored, "first;compaction{"));
+            try std.testing.expect(std.mem.endsWith(u8, floored, kept_output ++ "third;"));
+
+            // A request on that compaction inherits its floor.
+            try settleCompactionForTesting(&storage, &tmp, deeper, &.{.compaction});
+            const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const inherited = try walk(&storage, successor, &buffer);
+            try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, inherited, "dropped"));
+            try std.testing.expect(std.mem.indexOf(u8, inherited, kept_output ++ "third;compaction{") != null);
+        }
+    }.run);
+}
+
 test "a history batch's items, parts and small contents cost no round after its first entry" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
