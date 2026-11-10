@@ -2702,7 +2702,10 @@ const HeldFrontend = struct {
     }
 
     fn destroy(held: *HeldFrontend) void {
-        held.self.submission.cancel();
+        // As `settle` does: a read a key started, such as /help's page, may
+        // still be running, and it borrows the frontend freed below.
+        held.self.stop();
+        _ = held.self.joinReader();
         _ = held.self.submission.join();
         held.self.submission.close();
         held.screen.deinit();
@@ -2808,6 +2811,21 @@ const HeldFrontend = struct {
         return file;
     }
 };
+
+test "a held frontend stops a read still running and joins it before it is freed" {
+    const Worker = struct {
+        var stopped: std.atomic.Value(bool) = .init(false);
+        fn read(_: *anyopaque, task: *Task) !void {
+            while (!task.cancellation.stopped.load(.acquire)) std.Thread.yield() catch {};
+            stopped.store(true, .release);
+            return error.Cancelled;
+        }
+    };
+    const held = try HeldFrontend.create();
+    try held.self.reader.start(std.testing.io, &held.self, Worker.read);
+    held.destroy();
+    try std.testing.expect(Worker.stopped.load(.acquire));
+}
 
 /// Terminal bytes into the frontend's App, as `HeldFrontend.keys`.
 fn sendKeys(frontend: *Self, bytes: []const u8) !void {
