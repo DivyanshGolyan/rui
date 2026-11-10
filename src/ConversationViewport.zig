@@ -156,6 +156,8 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         /// starts with `┆`, so no row of that text can pass for a field, nor
         /// a wrapped row for a new `│` line.
         quotes: bool = false,
+        /// Counts clears: offsets from before one name other text.
+        replacements: u32 = 0,
 
         pub fn append(self: *Self, input: []const u8) !void {
             if (!styled) return self.appendText(input);
@@ -245,7 +247,107 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return self.bytes[start..end];
         }
 
+        /// A hidden link address: kept in the text, never drawn or copied.
+        fn hidden(self: *const Self, position: usize) bool {
+            return styled and foregroundIndex(self.styles[position]) == address_index;
+        }
+
+        /// The address the terminal gets for the text at `position`: a
+        /// Session link opens inside Rui, so the terminal gets none.
+        fn terminalLink(self: *const Self, position: usize) []const u8 {
+            if (!styled) return "";
+            const uri = self.address(position);
+            return if (std.mem.startsWith(u8, uri, TerminalText.session_link)) "" else uri;
+        }
+
+        /// The Session a peer's name at `position` links to, by its ID.
+        /// The slice is this text's: copy it before the text changes.
+        pub fn sessionAt(self: *const Self, position: usize) ?[]const u8 {
+            comptime std.debug.assert(styled);
+            if (position >= self.text().len) return null;
+            const uri = self.address(position);
+            return if (std.mem.startsWith(u8, uri, TerminalText.session_link)) uri[TerminalText.session_link.len..] else null;
+        }
+
+        /// The last position in `[from, to)` on a peer's name that its line,
+        /// laid out at `layout`, shows in a cell. A name clipped off its row
+        /// entirely is not on screen, so it is not there to open.
+        pub fn lastShownSession(self: *const Self, gpa: std.mem.Allocator, layout: Layout, from: usize, to: usize) !?usize {
+            comptime std.debug.assert(styled);
+            var end = @min(to, self.text().len);
+            while (end > from) {
+                end -= 1;
+                const id = self.sessionAt(end) orelse continue;
+                var start = end;
+                while (start > from) : (start -= 1) {
+                    const before = self.sessionAt(start - 1) orelse break;
+                    if (!std.mem.eql(u8, before, id)) break;
+                }
+                if (try self.shows(gpa, layout, start, end + 1)) return end;
+                end = start;
+            }
+            return null;
+        }
+
+        /// Whether laying out the line holding `[from, to)` puts any of
+        /// those bytes in a cell.
+        fn shows(self: *const Self, gpa: std.mem.Allocator, layout: Layout, from: usize, to: usize) !bool {
+            const line = if (std.mem.lastIndexOfScalar(u8, self.text()[0..from], '\n')) |at| at + 1 else 0;
+            const rows = self.lineRows(layout, line);
+            const cells = try gpa.alloc(vaxis.Cell, @as(usize, layout.width) * rows);
+            defer gpa.free(cells);
+            @memset(cells, .{});
+            var screen: vaxis.Screen = .{ .width = layout.width, .height = rows, .width_method = layout.method, .buf = cells };
+            const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = layout.width, .height = rows, .screen = &screen };
+            _ = self.printLine(window, 0, line, true, false, .{}, .default);
+            for (cells) |cell| {
+                const at = self.cellOffset(cell) orelse continue;
+                if (at >= from and at < to) return true;
+            }
+            return false;
+        }
+
+        /// Where in the current text a cell laid out from it starts, or
+        /// null for a cell that shows none of it: blank, indent, `…` or
+        /// `┆`. A text cell's grapheme points into the text.
+        pub fn cellOffset(self: *const Self, cell: vaxis.Cell) ?usize {
+            const at = @intFromPtr(cell.char.grapheme.ptr);
+            const base = @intFromPtr(&self.bytes);
+            if (cell.char.grapheme.len == 0 or at < base or at >= base + self.text().len) return null;
+            return at - base;
+        }
+
+        /// The text of `[from, to)` as the view shows it, for the clipboard:
+        /// wrapping adds no bytes, so wrapped rows join as the text runs;
+        /// right-margin times and hidden link addresses are left out, and a
+        /// tab, shown as a space, copies as one. Null past `most` bytes.
+        pub fn shownText(self: *const Self, gpa: std.mem.Allocator, from: usize, to: usize, most: usize) !?[]u8 {
+            comptime std.debug.assert(styled);
+            const end = @min(to, self.text().len);
+            const start = @min(from, end);
+            var length: usize = 0;
+            for (start..end) |index| {
+                if (!isSidenote(self.styles[index]) and !self.hidden(index)) length += 1;
+            }
+            if (length > most) return null;
+            const out = try gpa.alloc(u8, length);
+            length = 0;
+            for (start..end) |index| {
+                if (isSidenote(self.styles[index]) or self.hidden(index)) continue;
+                out[length] = if (self.bytes[index] == '\t') ' ' else self.bytes[index];
+                length += 1;
+            }
+            return out;
+        }
+
+        /// Whether a drawn cell's text at `position` belongs to the body:
+        /// right-margin times are apart from the text a drag selects.
+        pub fn selectable(self: *const Self, position: usize) bool {
+            return position < self.text().len and !(styled and isSidenote(self.styles[position]));
+        }
+
         pub fn clear(self: *Self) void {
+            self.replacements +%= 1;
             self.length = 0;
             self.origin = 0;
             self.top = null;
@@ -373,16 +475,22 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 if (commit) {
                     // Whole clusters measured by this view's width method:
                     // a wide last cluster never crosses the body's edge.
+                    // A Session link's hidden address takes no cells.
                     const line = body.child(.{ .y_off = row, .height = 1 });
                     const text_bytes = self.bytes[offset..shown];
-                    if (gwidth.gwidth(text_bytes, self.width_method) <= line.width) {
+                    var whole: usize = 0;
+                    var measured = unicode.graphemeIterator(text_bytes);
+                    while (measured.next()) |cluster| {
+                        if (!self.hidden(offset + cluster.start)) whole += gwidth.gwidth(cluster.bytes(text_bytes), self.width_method);
+                    }
+                    if (whole <= line.width) {
                         _ = self.printRange(line, offset, shown, .none, false, true, colour, plain, quiet);
                     } else if (line.width != 0) {
                         var clusters = unicode.graphemeIterator(text_bytes);
                         var used: u16 = 0;
                         var cut = offset;
                         while (clusters.next()) |cluster| {
-                            const width = gwidth.gwidth(cluster.bytes(text_bytes), self.width_method);
+                            const width = if (self.hidden(offset + cluster.start)) 0 else gwidth.gwidth(cluster.bytes(text_bytes), self.width_method);
                             if (used + width > line.width - 1) break;
                             used += width;
                             cut = offset + cluster.start + cluster.len;
@@ -418,7 +526,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 const shown = !styled or (isSidenote(self.styles[start]) == notes and foregroundIndex(self.styles[start]) != address_index);
                 if (shown) {
-                    segments[count] = .{ .text = self.bytes[start..stop], .style = self.segmentStyle(start, colour, plain, quiet), .link = .{ .uri = if (styled) self.address(start) else "" } };
+                    segments[count] = .{ .text = self.bytes[start..stop], .style = self.segmentStyle(start, colour, plain, quiet), .link = .{ .uri = self.terminalLink(start) } };
                     count += 1;
                 }
                 start = stop;
@@ -554,6 +662,16 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 result.last = found;
             }
             return result;
+        }
+
+        /// The collapsed block whose `┄` row is the logical line at `offset`,
+        /// counted from the end as Ctrl-O names one (0 is the last), or null
+        /// when that line is not a collapsed block's row. A click on the row
+        /// opens that Message.
+        pub fn summaryAt(self: *const Self, offset: usize) ?usize {
+            if (offset >= self.text().len) return null;
+            const found = self.collapsed(offset, self.lineEnd(offset)).last orelse return null;
+            return self.collapsed(found + 1, self.text().len).count;
         }
 
         /// Drops retained bytes before `position` (an absolute offset that
@@ -913,6 +1031,79 @@ test "a peer line keeps one row with its time in the right margin, as a user blo
     try std.testing.expectEqual(@as(usize, 2), found.count);
     try std.testing.expectEqual(std.mem.indexOf(u8, text, "┄ 3").?, found.last.?);
     try std.testing.expectEqual(@as(usize, 1), blocks.collapsed(std.mem.indexOf(u8, text, "┄ 2").? + 1, text.len).count);
+    // A click names the clicked row's block, counted from the end; any
+    // other row names none.
+    const rows = struct {
+        fn start(bytes: []const u8, needle: []const u8) usize {
+            const at = std.mem.indexOf(u8, bytes, needle).?;
+            return if (std.mem.lastIndexOfScalar(u8, bytes[0..at], '\n')) |newline| newline + 1 else 0;
+        }
+    };
+    try std.testing.expectEqual(@as(?usize, 1), blocks.summaryAt(rows.start(text, "┄ 2")));
+    try std.testing.expectEqual(@as(?usize, 0), blocks.summaryAt(rows.start(text, "┄ 3")));
+    for ([_][]const u8{ "← Received", "→ Messaged", "┄ typed" }) |other| try std.testing.expectEqual(@as(?usize, null), blocks.summaryAt(rows.start(text, other)));
+    try std.testing.expectEqual(@as(?usize, null), blocks.summaryAt(text.len));
+}
+
+test "a peer's name links to its Session inside Rui, never through the terminal" {
+    const name = TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end ++ "\x1b[4mReview the WAL" ++ TerminalText.link_close ++ "\x1b[0m\x1b[2;8m";
+    var view: Sized(512, true) = .{ .sidenotes = true };
+    try view.append("\x1b[2;8m→ Messaged " ++ name ++ "\x1b[8m08:00\x1b[0m\n");
+    try view.prepare();
+    var test_screen: TestScreen = undefined;
+    var storage: [256]u8 = undefined;
+    // The hidden ID takes no cell: the row reads, fits and clips as the
+    // name alone, with its time in the margin.
+    _ = view.draw(test_screen.window(60, 1), .{}, true, true, .{}, .default);
+    try std.testing.expectEqualStrings("→ Messaged Review the WAL" ++ @as([55 - 25]u8, @splat(' ')) ++ "08:00", test_screen.row(0, &storage));
+    _ = view.draw(test_screen.window(20, 1), .{}, true, true, .{}, .default);
+    try std.testing.expectEqualStrings("→ Messaged Review t…", test_screen.row(0, &storage));
+    _ = view.draw(test_screen.window(25, 1), .{}, true, true, .{}, .{ .index = 59 });
+    try std.testing.expectEqualStrings("→ Messaged Review the WAL", test_screen.row(0, &storage));
+    // Only the name is underlined, the row stays quiet, and no cell carries
+    // an OSC 8 address.
+    for (0..25) |column| {
+        const cell = test_screen.screen.readCell(@intCast(column), 0).?;
+        try std.testing.expectEqualStrings("", cell.link.uri);
+        try std.testing.expectEqual(column >= 11, cell.style.ul_style == .single);
+        try std.testing.expectEqual(vaxis.Color{ .index = 59 }, cell.style.fg);
+    }
+    const text = view.text();
+    const at = std.mem.indexOf(u8, text, "Review").?;
+    try std.testing.expectEqualStrings("k7m2qx", view.sessionAt(at).?);
+    try std.testing.expectEqualStrings("k7m2qx", view.sessionAt(at + "Review the WA".len).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), view.sessionAt(at - 1));
+    try std.testing.expectEqual(@as(?[]const u8, null), view.sessionAt(at + "Review the WAL".len));
+    // An answer's web link still reaches the terminal.
+    var answer: Sized(256, true) = .{};
+    try answer.append(TerminalText.link_open ++ "https://r.dev" ++ TerminalText.link_end ++ "docs" ++ TerminalText.link_close);
+    try expectLinks(&answer, .{}, 8, &.{ "https://r.dev", "https://r.dev", "https://r.dev", "https://r.dev", "-" });
+    try std.testing.expectEqual(@as(?[]const u8, null), answer.sessionAt(0));
+}
+
+test "shown text joins wrapped rows and leaves out margin times and link addresses" {
+    const name = TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end ++ "\x1b[4mPlan" ++ TerminalText.link_close ++ "\x1b[0m\x1b[2;8m";
+    var view: Sized(512, true) = .{ .sidenotes = true };
+    try view.append("› \x1b[2mfix\tthe flaky store test please\x1b[8m14:20\x1b[0m\n\x1b[2;8m← Received message from " ++ name ++ "\x1b[8m08:00\x1b[0m\nlast");
+    try view.prepare();
+    // Laid out at 16 columns the first line wraps; its bytes don't.
+    try std.testing.expect(view.lineRows(.{ .width = 16, .method = .unicode }, 0) > 1);
+    const text = view.text();
+    const copied = (try view.shownText(std.testing.allocator, 0, text.len, 1000)).?;
+    defer std.testing.allocator.free(copied);
+    try std.testing.expectEqualStrings("› fix the flaky store test please\n← Received message from Plan\nlast", copied);
+    // From inside a line to inside a later one.
+    const from = std.mem.indexOf(u8, text, "store").?;
+    const to = std.mem.indexOf(u8, text, "ast").?;
+    const part = (try view.shownText(std.testing.allocator, from, to, 1000)).?;
+    defer std.testing.allocator.free(part);
+    try std.testing.expectEqualStrings("store test please\n← Received message from Plan\nl", part);
+    // The limit counts copied bytes, not hidden ones.
+    const exact = (try view.shownText(std.testing.allocator, from, to, part.len)).?;
+    std.testing.allocator.free(exact);
+    try std.testing.expectEqual(@as(?[]u8, null), try view.shownText(std.testing.allocator, from, to, part.len - 1));
+    try std.testing.expect(!view.selectable(std.mem.indexOf(u8, text, "14:20").?));
+    try std.testing.expect(view.selectable(from));
 }
 
 test "a peer line's wide last cluster yields to the ellipsis instead of crossing the edge" {

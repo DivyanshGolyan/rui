@@ -281,7 +281,7 @@ fn admitMessage(
     try skills_domain.saveBound(a, admission_id, reads.bound, faults);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
-    if (committed) |callback| callback.call(callback.context, .{
+    if (committed) |callback| store_core.admitted(a.store, callback, .{
         .session = session.slice(),
         .admission_id = admission_id,
         .from_peer = command.sender != null,
@@ -764,7 +764,7 @@ pub fn startAgent(
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
     const value = applied orelse return .failed;
-    if (committed) |callback| callback.call(callback.context, .{ .session = value.session.slice(), .admission_id = admission_id, .from_peer = true });
+    if (committed) |callback| store_core.admitted(a.store, callback, .{ .session = value.session.slice(), .admission_id = admission_id, .from_peer = true });
     return .started;
 }
 

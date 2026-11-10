@@ -18,8 +18,8 @@ pub const max_line_bytes = 256;
 
 pub const separator = " · ";
 pub const ellipsis = "…";
-const asks_text = "asks before Bash/MCP";
-const left_text = "100% left";
+pub const asks_text = "asks before Bash/MCP";
+pub const left_text = "100% left";
 /// The key that stops a Session, as both screens hint it.
 pub const stop_hint = "ctrl+x stop";
 

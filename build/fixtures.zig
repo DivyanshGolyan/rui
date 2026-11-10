@@ -42,7 +42,7 @@ pub const fixtures = [_]Fixture{
     .{ .step = "dispatch-debug-integration", .description = "Run bounded model failure correlation through SQLite on the Debug artifact", .script = "tests/integration/dispatch_integration.py", .rui = .debug, .args = &.{"failure-correlation"} },
     // check runs these cases among its process integrations; each step runs
     // the same case alone, so selection can name only the ones a change reaches.
-    .{ .step = "peer-integration", .description = "Run the peer round trip through Rui-launched Bash", .script = "tests/integration/peer_integration.py" },
+    .{ .step = "peer-integration", .description = "Run the peer round trip through Rui-launched Bash", .script = "tests/integration/peer_integration.py", .screen = true },
     .{ .step = "sender-identity-integration", .description = "Run Action sender authority through the installed CLI, exit, stop and restart", .script = "tests/integration/sender_identity_integration.py" },
     .{ .step = "conversation-page-integration", .description = "Run public Conversation wire reads against a real Host and canonical Store", .script = "tests/integration/conversation_page_integration.py" },
     .{ .step = "host-allocator-integration", .description = "Observe the Host allocator environment before main", .script = "tests/integration/host_allocator_test.py" },

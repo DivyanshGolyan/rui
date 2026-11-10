@@ -59,11 +59,17 @@ pub fn next(self: *EventStream, input: []const u8, data: *std.Io.Writer) Error!S
         const byte = input[at];
         at += 1;
         if (self.bom_read != 3) {
-            // A stream may start with a byte order mark. No stream starts
-            // with these bytes otherwise: they are not a field's start.
+            // A stream may start with a byte order mark. Part of one is
+            // part of the first line, as the U+FFFD it decodes to would be:
+            // it starts a field name no field has.
             if (byte == bom[self.bom_read]) {
                 self.bom_read += 1;
                 continue;
+            }
+            if (self.bom_read != 0) {
+                self.state = .name;
+                self.name_len = 0;
+                for (bom[0..self.bom_read]) |mark| self.addName(mark);
             }
             self.bom_read = 3;
         }
@@ -185,6 +191,10 @@ test "comments, unknown fields and empty events carry nothing" {
     try expectEvents(": keep-alive\n\n:\r\n\r\nretry: 10\n\nfoo: data: no\n\ndata: yes\n\n", "yes|");
     try expectEvents("data\n\n", "|");
     try expectEvents("datum: x\ndata2: y\ndata: z\n\n", "z|");
+    // Part of a byte order mark is not one: it starts an unknown field.
+    try expectEvents("\xefdata: x\n\ndata: y\n\n", "y|");
+    try expectEvents("\xef\xbbdata: x\n\n\xef\xbb\xbfdata: y\n\n", "");
+    try expectEvents("\xef\xbb\n\ndata: z\n\n", "z|");
 }
 
 test "an event the body ends inside is dropped" {
