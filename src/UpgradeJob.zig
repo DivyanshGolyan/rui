@@ -5,6 +5,7 @@
 const std = @import("std");
 const upgrade = @import("upgrade.zig");
 const installation_path = @import("installation_path.zig");
+const caller_error = @import("caller_error.zig");
 const ClientTask = @import("ClientTask.zig");
 const upgrade_status = @import("upgrade_status.zig");
 const UpgradeStep = @import("overview_view.zig").UpgradeStep;
@@ -203,13 +204,23 @@ pub fn writeReport(self: *const Self, writer: *std.Io.Writer) !void {
         try upgrade.writeResult(writer, result);
     }
     if (self.failure) |err| {
-        try writer.print("\nUpgrade {s} ended with {s}.\n", .{ if (self.operation == .check) "check" else "installation", @errorName(err) });
+        try writer.print("\nUpgrade {s} failed: {s}\n", .{ if (self.operation == .check) "check" else "installation", failureWords(err) });
         if (self.operation == .install and self.result == null) try writer.writeAll("No completed installation receipt; inspect the selected command and Host before retrying.\n");
     } else if (self.cancelling and self.result == null) {
         try writer.writeAll("\nUpgrade cancelled before installation.\n");
     }
     try self.cleanup.write(writer);
     if (self.outcome == .incompatible) try writer.writeAll("\nThis client cannot safely resume Host requests. Keep the draft and recovery handles; use the selected Rui in a new terminal. Do not resend indeterminate work.\n");
+}
+
+/// Why a run failed, in words: the caller code's own for the release and
+/// preparation failures it names; anything else, such as a network or
+/// file fault, only that it did not finish.
+fn failureWords(err: anyerror) []const u8 {
+    return switch (caller_error.of(err)) {
+        .upgrade_release_invalid, .upgrade_preparation_failed, .upgrade_ineligible => |code| caller_error.facts(code).says,
+        else => "Rui could not finish it. Check network access and disk space, then run /upgrade again.",
+    };
 }
 
 test "the Upgrade worker wipes its private Host snapshot before freeing with or without an install result" {
@@ -301,6 +312,22 @@ test "joined installation cancellation retains the actual publication receipt" {
     try std.testing.expect(std.mem.indexOf(u8, receipt.buffered(), "publication was not rolled back") != null);
     // Fixture strings are static, not owned allocations.
     job.result = null;
+}
+
+test "a failed run says why in plain words, not an error name" {
+    const cases = [_]struct { Operation, anyerror, []const u8 }{
+        .{ .check, error.InvalidReleaseVersion, "Upgrade check failed: Published stable release metadata or platform assets could not be validated." },
+        .{ .install, error.ReleaseChecksumMismatch, "Upgrade installation failed: Release preparation or validation failed." },
+        .{ .check, error.ConnectionRefused, "Upgrade check failed: Rui could not finish it." },
+    };
+    for (cases) |case| {
+        const job: Self = .{ .started = true, .finished = true, .operation = case[0], .failure = case[1] };
+        var buffer: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try job.writeReport(&writer);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), case[2]) != null);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), @errorName(case[1])) == null);
+    }
 }
 
 test "cleanup report retains copied paths and the worker error" {

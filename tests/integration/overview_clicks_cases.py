@@ -162,8 +162,9 @@ def opening_and_views():
                 screen.keys(f"/sessions {command}\r")
                 screen.wait(lambda frame, name=name: frame.split("\n")[0].rstrip().endswith(f"  {name}")
                                     and "[Archived] charlie" in frame, f"the {name} view")
-                # The wordmark's Devanagari holds more characters than
-                # cells, so columns count from the right: the name ends one
+                # A terminal may show the wordmark's Devanagari, which holds
+                # more characters than cells, so columns count from the
+                # right: the name ends one
                 # cell short of the edge, its last bar cell. Click its middle.
                 screen.click(WIDTH - len(name) + len(name) // 2, 1)
                 back = screen.wait(lambda frame: "  ✓ alpha" in frame and "charlie" not in frame, f"{name} returns to default")

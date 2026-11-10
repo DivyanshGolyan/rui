@@ -15,7 +15,9 @@ import model_fixture as fixture
 from overview_fixture import world
 from terminal_process import ROWS
 
-WORDMARK = " रुई rui"
+# The test terminal is not one theme.wordmark trusts with Devanagari, so
+# the counts line names rui alone.
+WORDMARK = " rui"
 # Live memory on the right of the counts line: `rui 42 MB` or
 # `rui 42 MB · tools 1.8 GB` (sizeText: whole MB, or GB to a tenth).
 SIZE = r"\d+(?:\.\d)? [MG]B"
@@ -192,9 +194,9 @@ def memory():
             screen.wait(lambda f: counts(f) == f"{WORDMARK}  ● 1", "● 1")
             frame = screen.wait(lambda f: re.search(rf"  {MEMORY.pattern}$", top(f).rstrip()), "rui N MB on the right")
             assert counts(frame) == f"{WORDMARK}  ● 1", frame
-            # The same screen narrowed: 22 columns hold the counts (12
+            # The same screen narrowed: 14 columns hold the counts (9
             # cells) but not two spaces and memory too.
-            screen.resize(22, ROWS)
+            screen.resize(14, ROWS)
             frame = screen.wait(lambda f: top(f).rstrip() == f"{WORDMARK}  ● 1", "● 1 alone")
             assert not MEMORY.search(top(frame)), frame
     print("overview counts: live memory shows as rui N MB on the right and drops before the counts "
