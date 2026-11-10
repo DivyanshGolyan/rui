@@ -1411,7 +1411,7 @@ fn drawFrame(self: *Self) !void {
     if (screen.actionVisible())
         try approvalContext(&context, screen.actionTopHidden(), self.action_summary)
     else if (self.tmux and !waiting and view.bytes.len != 0)
-        try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
+        try context.writeAll("In tmux, Shift-Enter sends · Ctrl-J adds a line");
     var status_buffer: [Frame.status_capacity]u8 = undefined;
     const status = statusLines(&status_buffer, context.buffered(), base_status, self.line.archive_state);
     var queued_buffer: [Frame.status_capacity]u8 = undefined;
@@ -3935,6 +3935,34 @@ test "malformed UTF-8 rejects its line, and typing after it reaches the draft" {
         try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "› hi") != null);
         try held.keys("\x15");
         try held.settle();
+    }
+}
+
+test "Alt-J adds no line and keeps the draft; Ctrl-J, Shift-Enter and Alt-Enter each add one" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try held.settle();
+    const Case = struct { key: []const u8, draft: []const u8 };
+    for ([_]Case{
+        // Alt-J: legacy ESC prefix, Kitty and modifyOtherKeys.
+        .{ .key = "\x1bj", .draft = "onetwo" },
+        .{ .key = "\x1b[106;3u", .draft = "onetwo" },
+        .{ .key = "\x1b[27;3;106~", .draft = "onetwo" },
+        // Ctrl-J, Shift-Enter, and Alt-Enter as ESC CR, Kitty and modifyOtherKeys.
+        .{ .key = "\n", .draft = "one\ntwo" },
+        .{ .key = "\x1b[13;2u", .draft = "one\ntwo" },
+        .{ .key = "\x1b\r", .draft = "one\ntwo" },
+        .{ .key = "\x1b[13;3u", .draft = "one\ntwo" },
+        .{ .key = "\x1b[27;3;13~", .draft = "one\ntwo" },
+    }) |case| {
+        errdefer std.debug.print("key={any}\n", .{case.key});
+        held.self.input.clear();
+        try held.keys("one");
+        try held.keys(case.key);
+        try held.keys("two");
+        try held.settle();
+        try std.testing.expectEqualStrings(case.draft, held.self.input.composition().bytes);
+        try std.testing.expectEqual(null, held.self.input.submitted);
     }
 }
 
