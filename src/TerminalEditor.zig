@@ -815,20 +815,19 @@ test "Tab puts a completion's completed in place of its range, the caret after i
         }
         const review: Completion = .{ .context = &{}, .add = add };
     };
+    const keys: keymap.Keymap(void) = comptime .{ .meanings = .initFill(null) };
+    const press_tab: vaxis.vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.tab } };
     var storage: [24]u8 = undefined;
-    var editor: Editor = .{ .buffer = &storage, .completion = Complete.review };
-    var stream: Input = .{};
-    for ("use /re on it") |byte| _ = editor.feed(&stream, byte);
-    editor.cursor = "use /re".len;
-    try std.testing.expectEqual(KeyOutcome.redraw, editor.feed(&stream, '\t'));
+    @memcpy(storage[0.."use /re on it".len], "use /re on it");
+    var editor: Editor = .{ .buffer = &storage, .length = "use /re on it".len, .cursor = "use /re".len, .completion = Complete.review };
+    try std.testing.expectEqual(.redraw, editor.appEvent(keys, press_tab, false));
     try std.testing.expectEqualStrings("use /review  on it", editor.buffer[0..editor.length]);
     try std.testing.expectEqual("use /review ".len, editor.cursor);
     // Three bytes more than fit: refused whole, the draft and caret unchanged.
     var small: [12]u8 = undefined;
-    var full: Editor = .{ .buffer = &small, .completion = Complete.review };
-    for ("go /re now") |byte| _ = full.feed(&stream, byte);
-    full.cursor = "go /re".len;
-    try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, full.feed(&stream, '\t'));
+    @memcpy(small[0.."go /re now".len], "go /re now");
+    var full: Editor = .{ .buffer = &small, .length = "go /re now".len, .cursor = "go /re".len, .completion = Complete.review };
+    try std.testing.expectEqual(keymap.Outcome(void){ .refused = .overflow }, full.appEvent(keys, press_tab, false));
     try std.testing.expectEqualStrings("go /re now", full.buffer[0..full.length]);
     try std.testing.expectEqual("go /re".len, full.cursor);
     try std.testing.expectEqual(@as(?keymap.Refusal, null), full.rejected);
