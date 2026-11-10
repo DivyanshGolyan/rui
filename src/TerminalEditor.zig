@@ -29,6 +29,8 @@ paste_start: struct { cursor: usize = 0, length: usize = 0 } = .{},
 /// This editor saw the current marked paste begin. A replacement editor
 /// receiving the rest of a paste rejects it rather than adopting it.
 pasting: bool = false,
+/// The last pasted key was a CR, so an LF right after it ends the same line.
+pasted_cr: bool = false,
 
 /// What an input did before any screen's table: an edit, or, as `action`,
 /// a `Key` the editor had no use for. `apply` gives that key the screen's
@@ -343,6 +345,7 @@ pub fn appEvent(self: *Editor, comptime keys: anytype, event: vaxis.vxfw.Event, 
             if (!self.allow_paste) break :blk .none;
             self.paste_start = .{ .cursor = self.cursor, .length = self.length };
             self.pasting = true;
+            self.pasted_cr = false;
             break :blk .none;
         },
         .paste_end => if (self.pasting) self.finishPaste() else .none,
@@ -453,7 +456,12 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) KeyOutcome {
             self.reject(.invalid);
             return .none;
         }
-        if (value.matchExact('j', .{ .ctrl = true })) return self.insert('\n', true);
+        // Terminals send a pasted line break as CR; a CRLF clipboard sends
+        // both, which is one line break.
+        const after_cr = self.pasted_cr;
+        self.pasted_cr = value.matchExact(vaxis.Key.enter, .{});
+        if (self.pasted_cr) return self.insert('\n', true);
+        if (value.matchExact('j', .{ .ctrl = true })) return if (after_cr) .none else self.insert('\n', true);
         if (value.matchExact(vaxis.Key.tab, .{})) return self.insert('\t', true);
         if (value.text) |text| return self.insertText(text, true);
         self.reject(.invalid);
