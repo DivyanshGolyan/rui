@@ -66,6 +66,8 @@ const observeUnprocessedCompletions = server_host.observeUnprocessedCompletions;
 const AttemptOwner = struct {
     token: execution.CustodyToken = undefined,
     binding: store_module.AttemptBinding = undefined,
+    /// What the response settles as, read when the view opened.
+    purpose: store_module.ModelOperationKind = undefined,
 };
 
 const ProviderSlot = struct {
@@ -119,6 +121,8 @@ const BashPreparingSlot = struct {
 const ModelPreparingSlot = struct {
     token: execution.CustodyToken,
     binding: store_module.AttemptBinding,
+    /// Set once the view opens, before preparation starts.
+    purpose: ?store_module.ModelOperationKind = null,
 };
 
 /// A prepared request waiting for its credential. The request stays where
@@ -417,10 +421,6 @@ const observed_codec = blk: {
     break :blk codec;
 };
 
-/// The header a Turn's routing value is echoed under: the one the Reactor
-/// observes it in.
-const routing_header = codecs.manifest(observed_codec).observe.turn_state;
-
 pub fn executionMain(host: *Host) void {
     const mapped_workspace = pages.Mapped(Workspace).map() catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
@@ -531,6 +531,19 @@ pub fn executionMain(host: *Host) void {
     defer if (reactor) |active| {
         for (std.enums.values(provider.ListingKind)) |kind| endListing(active, kind, workspace.listings.getPtr(kind));
     };
+    // Streams, PING answers and flow control move on their own thread, so a
+    // Store round this thread waits on never holds them up.
+    const transport: ?std.Thread = if (reactor) |active|
+        signal_stack.spawn(.{}, provider.Reactor.serve, .{active}) catch |err| {
+            fenceDispatch(host, "transport thread start", err);
+            return;
+        }
+    else
+        null;
+    defer if (transport) |thread| {
+        reactor.?.stop();
+        thread.join();
+    };
     if (reactor != null) host.scratch_budget = budget;
     defer host.scratch_budget = null;
     var mcp_calls: server_mcp.Calls = .{};
@@ -556,10 +569,7 @@ pub fn executionMain(host: *Host) void {
                 if (heap_release.due(slots, if (reactor) |active| active.listingPending() else false)) process.releaseFreeHeap();
                 const wait_started = std.Io.Clock.Timestamp.now(host.io, .awake);
                 switch (kind) {
-                    .transport => reactor.?.wait(if (mcp_calls.any()) 25 else transportWaitMs(slots)) catch |err| {
-                        fenceDispatch(host, "transport wait", err);
-                        break;
-                    },
+                    .transport => reactor.?.awaitFinished(if (mcp_calls.any()) 25 else transportWaitMs(slots)),
                     .bash => _ = host.io.sleep(.fromMilliseconds(25), .awake) catch {},
                     .idle => _ = host.io.sleep(.fromMilliseconds(100), .awake) catch {},
                 }
@@ -801,12 +811,14 @@ const NativeTurn = struct {
         };
     }
 
+    /// The transport thread drives the Client; this step fences on the
+    /// failure that ended it and traces the completions waiting.
     pub fn driveTransport(self: *NativeTurn) error{Fence}!void {
-        self.reactor.?.drive() catch |err| {
+        if (self.reactor.?.failed()) |err| {
             fenceDispatch(self.host, "transport reactor", err);
             self.fenced = true;
             return error.Fence;
-        };
+        }
         observeUnprocessedCompletions(self.host, self.reactor.?);
     }
 
@@ -1844,7 +1856,7 @@ fn beginAdmittedAttempt(
     };
     // The view opens where it lives for the whole preparation; it never
     // moves.
-    host.store.openHistoricalView(binding, &preparation.view) catch |err| {
+    slot.model_preparing.purpose = host.store.openHistoricalView(binding, &preparation.view) catch |err| {
         if (err == error.SupersededByControl) {
             finishCustodyNow(host, slot);
             return .admitted;
@@ -2073,22 +2085,17 @@ fn launchPreparedRequest(
         finishCustodyNow(host, slot);
         return;
     };
-    // Every request echoes its Turn's routing value, whatever its provider:
-    // one that never sends the codec's routing header has none to echo.
-    const replay = host.turn_states.get(request.provider).replay(binding.turn_id, served.credential.routingOwner(lease));
-    headers.routing(routing_header, replay.value);
-    const turn_state = provider.TurnStateKey{ .provider = request.provider, .turn_id = binding.turn_id, .epoch = replay.epoch };
     // h2 holds the Transfer's stream from launch, so construct it in its
     // final slot and keep that union arm active through completion and deinit.
     moveSlot(host, slot, .provider, .{
-        .owner = .{ .token = token, .binding = binding },
+        .owner = .{ .token = token, .binding = binding, .purpose = owner.purpose.? },
         .rejection = served.credential.rejection(lease),
     });
     const active = &slot.provider;
     active.transfer.start(reactor, request, binding, .{
         .fields = headers.fields(),
         .credential = headers.takeCredential(),
-        .turn_state = turn_state,
+        .routing = .{ .turn_id = binding.turn_id, .owner = served.credential.routingOwner(lease) },
         .faults = host.hooks.transferFaults(host.hook_progress.response_write_once_spent),
     }, &retained_response) catch |err| {
         request.deinit(host.io, host.scratch_budget.?);
@@ -2332,10 +2339,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
     };
     defer event_data.deinit();
     traceOperation(host, "validation_started", owner.binding);
-    const operation = host.store.modelOperationKind(owner.binding) catch |err| {
-        if (err != error.SupersededByControl) fenceDispatch(host, "model operation purpose", err);
-        return .cleanup;
-    };
+    const operation = owner.purpose;
     metadata.fail_writes = host.hooks.fails(.response_metadata);
     output_decode.interpret(&workspace.interpret, codec, host.io, response.file, response.length, &metadata, event_data, operation, .{
         .openai = openai_model.slice(),
@@ -3611,7 +3615,7 @@ test "preparing slots belong to their live preparations" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: model_adapter.Preparation = undefined;
-    try storage.openHistoricalView(binding_a, &preparation.view);
+    _ = try storage.openHistoricalView(binding_a, &preparation.view);
     try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     var preparation_active = true;
     defer if (preparation_active) preparation.cancel();
@@ -3945,7 +3949,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     var slots = [_]ExecutionSlot{.{ .model_preparing = .{ .token = token, .binding = binding } }};
     var preparation: model_adapter.Preparation = undefined;
     var retained: ?named_scratch.Owner = null;
-    try storage.openHistoricalView(binding, &preparation.view);
+    _ = try storage.openHistoricalView(binding, &preparation.view);
     try preparation.init(
         std.testing.io,
         root,

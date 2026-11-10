@@ -51,7 +51,8 @@ const cases = [_]Case{
     .{ .name = "Ctrl-D deletes forward", .event = .redraw, .after = "one to!", .wires = .{ no_alt, bytes("\x1b[100;5u"), bytes("\x1b[27;5;100~"), bytes("\x04") } },
     .{ .name = "Ctrl-D on an empty draft", .before = "", .caret = 0, .after = "", .cursor = 0, .event = .{ .action = .ctrl_d }, .wires = .{ no_alt, bytes("\x1b[100;5u"), bytes("\x1b[27;5;100~"), bytes("\x04") } },
     .{ .name = "Enter", .event = .submit, .wires = .{ no_alt, bytes("\x1b[13u"), bytes("\x1b[27;1;13~"), bytes("\r") } },
-    .{ .name = "Ctrl-J", .event = .submit, .wires = .{ no_alt, bytes("\x1b[106;5u"), bytes("\x1b[27;5;106~"), bytes("\n") } },
+    // Ctrl-J adds a line in every encoding and never sends.
+    .{ .name = "Ctrl-J", .event = .redraw, .after = "one t\nwo!", .cursor = 6, .wires = .{ no_alt, bytes("\x1b[106;5u"), bytes("\x1b[27;5;106~"), bytes("\n") } },
     .{ .name = "Escape", .event = .{ .action = .escape }, .wires = .{ no_alt, bytes("\x1b[27u"), bytes("\x1b[27;1;27~"), bytes("\x1b") } },
     .{ .name = "Alt-Escape", .event = .{ .action = .escape }, .wires = .{ bytes("\x1b\x1b"), bytes("\x1b[27;3u"), bytes("\x1b[27;3;27~"), no_raw } },
     .{ .name = "Tab", .event = .redraw, .after = "one t\two!", .cursor = 6, .wires = .{ no_alt, bytes("\x1b[9u"), bytes("\x1b[27;1;9~"), bytes("\t") } },
@@ -419,7 +420,7 @@ test "TD2 explicit Kitty Ctrl press then release acts once through both editor e
         const case: Case = switch (control.point) {
             'c' => .{ .name = "Ctrl-C press", .event = .{ .action = .ctrl_c }, .wires = undefined },
             'd' => .{ .name = "Ctrl-D press", .event = .redraw, .after = "one to!", .wires = undefined },
-            'j' => .{ .name = "Ctrl-J press", .event = .submit, .wires = undefined },
+            'j' => .{ .name = "Ctrl-J press", .event = .redraw, .after = "one t\nwo!", .cursor = 6, .wires = undefined },
             else => unreachable,
         };
         for ([_]bool{ false, true }) |choice| inline for (.{ Route.events, Route.inline_editor }) |route| {
@@ -537,10 +538,13 @@ test "TD2 SessionTerminal expiry boundaries use a controlled clock and retain qu
         const read = (try terminal.next(io, &input, 0)).?;
         try std.testing.expectEqual(enter, read.byte);
         feedAt(&editor, &input, read, &outcome);
-        try std.testing.expectEqualStrings(if (offset < 0) "head\nTAIL" else "headTAIL", storage[0..editor.length]);
-        try std.testing.expectEqual(@as(usize, if (offset < 0) 5 else 4), editor.cursor);
-        try std.testing.expectEqual(@as(usize, if (offset < 0) 0 else 1), outcome.submits);
-        try std.testing.expectEqual(@as(KeyOutcome, if (offset < 0) .redraw else .submit), outcome.event);
+        // Joined to ESC it is Alt-Enter; alone, CR sends and LF (Ctrl-J)
+        // adds a line.
+        const newline = offset < 0 or enter == '\n';
+        try std.testing.expectEqualStrings(if (newline) "head\nTAIL" else "headTAIL", storage[0..editor.length]);
+        try std.testing.expectEqual(@as(usize, if (newline) 5 else 4), editor.cursor);
+        try std.testing.expectEqual(@as(usize, if (newline) 0 else 1), outcome.submits);
+        try std.testing.expectEqual(@as(KeyOutcome, if (newline) .redraw else .submit), outcome.event);
         try std.testing.expectEqual(Input.Pending.none, input.pending());
     };
 }

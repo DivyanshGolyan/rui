@@ -1339,7 +1339,7 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
     try sqlite.exec(storage.sqliteDatabase(), "UPDATE tool_record SET description_content_id=(SELECT content_id FROM content WHERE CAST(payload AS TEXT)='Reworded description.') WHERE name='bash'");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var view: HistoricalView = undefined;
-    try storage.openHistoricalView(binding, &view);
+    _ = try storage.openHistoricalView(binding, &view);
     defer view.close();
     var settings: HistoricalSettings = undefined;
     try view.settings(&settings);
@@ -1414,7 +1414,7 @@ test "loaded tools hide configured tools from frozen requests reports and call s
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     {
         var view: HistoricalView = undefined;
-        try storage.openHistoricalView(binding, &view);
+        _ = try storage.openHistoricalView(binding, &view);
         defer view.close();
         var settings: HistoricalSettings = undefined;
         try view.settings(&settings);
@@ -1922,7 +1922,7 @@ test "complete call outcomes continue once in call order ahead of pending input"
     try std.testing.expectEqual(protocol.PermissionDecisionRejection.action_not_pending, stale_reply.rejected.code);
 
     var view: HistoricalView = undefined;
-    try storage.openHistoricalView(continuation, &view);
+    _ = try storage.openHistoricalView(continuation, &view);
     defer view.close();
     var position: u64 = 0;
     try std.testing.expectEqual(HistoricalEntryKind.user, (try view.nextEntry(position)).?.kind);
@@ -2090,7 +2090,7 @@ test "complete historical tool-result traversal scales with groups and calls" {
             c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, Counter.progress, &counter);
             defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(binding, &view);
+            _ = try storage.openHistoricalView(binding, &view);
             defer view.close();
             var position: u64 = 0;
             var groups_seen: usize = 0;
@@ -2159,7 +2159,7 @@ test "historical preparation yields covered group populations under small allowa
     // call, and a view closed mid-discovery leaves checkpoints free.
     {
         var view: HistoricalView = undefined;
-        try storage.openHistoricalView(binding, &view);
+        _ = try storage.openHistoricalView(binding, &view);
         while (!try view.validateOutputsStep()) {}
         var bytes: usize = 7;
         var items: usize = 1;
@@ -2170,7 +2170,7 @@ test "historical preparation yields covered group populations under small allowa
         try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), checkpoint);
     }
     var view: HistoricalView = undefined;
-    try storage.openHistoricalView(binding, &view);
+    _ = try storage.openHistoricalView(binding, &view);
     defer view.close();
     while (!try view.validateOutputsStep()) {}
     var turns: usize = 0;
@@ -2215,7 +2215,7 @@ test "large historical readers leave checkpoints free" {
     }});
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var view: HistoricalView = undefined;
-    try storage.openHistoricalView(continuation, &view);
+    _ = try storage.openHistoricalView(continuation, &view);
     defer view.close();
     const entry = (try view.nextEntry(0)).?;
     try std.testing.expectEqual(HistoricalEntryKind.user, entry.kind);
@@ -2274,7 +2274,7 @@ test "historical preparation rejects missing extra and reordered sibling classif
             try sqlite.exec(storage.sqliteDatabase(), fault.sql);
             try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(next, &view);
+            _ = try storage.openHistoricalView(next, &view);
             defer view.close();
             while (!(view.validateOutputsStep() catch |err| {
                 try std.testing.expectEqual(error.CorruptStore, err);
@@ -2351,7 +2351,7 @@ test "historical accepted output selection work excludes failed Operation popula
             try sqlite.bindU64(insert, 2, current.operation_id);
             try sqlite.expectDone(insert);
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(current, &view);
+            _ = try storage.openHistoricalView(current, &view);
             defer view.close();
             var measured: @This() = .{};
             c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, progress, &measured);
@@ -3120,7 +3120,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET provider='other' WHERE session_ref=?1", .{created_session_0.slice()});
     var view: HistoricalView = undefined;
-    try storage.openHistoricalView(binding, &view);
+    _ = try storage.openHistoricalView(binding, &view);
     try std.testing.expectError(error.CorruptStore, testSettings(&view));
     view.close();
     try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET provider='codex' WHERE session_ref=?1", .{created_session_0.slice()});
@@ -3157,7 +3157,7 @@ test "a Session pinned to a codec this Host cannot build fences its settings" {
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         if (fault) |sql| try store_testing.sqliteExec(storage.sqliteDatabase(), sql, .{session.slice()});
         var view: HistoricalView = undefined;
-        try storage.openHistoricalView(binding, &view);
+        _ = try storage.openHistoricalView(binding, &view);
         defer view.close();
         if (fault == null) _ = try testSettings(&view) else try std.testing.expectError(error.CorruptStore, testSettings(&view));
     }
@@ -4640,7 +4640,7 @@ test "replay fences part damage that keeps every digest" {
         const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try sqlite.exec(storage.sqliteDatabase(), fault);
         var view: HistoricalView = undefined;
-        try storage.openHistoricalView(next, &view);
+        _ = try storage.openHistoricalView(next, &view);
         defer view.close();
         var cursor: TestingHistoryCursor = .{};
         var bytes: [512]u8 = undefined;
@@ -4683,7 +4683,7 @@ test "a message's text is stored once and its parts replay as lengths of it" {
     try submitTestMessage(&storage, &tmp, "text-once-next", "text-once-next", session.slice(), "next");
     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var view: HistoricalView = undefined;
-    try storage.openHistoricalView(next, &view);
+    _ = try storage.openHistoricalView(next, &view);
     defer view.close();
     var cursor: TestingHistoryCursor = .{};
     var bytes: [512]u8 = undefined;
@@ -4714,7 +4714,7 @@ test "a large message's parts read only their own ranges" {
     try submitTestMessage(&storage, &tmp, "large-parts-next", "large-parts-next", session.slice(), "next");
     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var view: HistoricalView = undefined;
-    try storage.openHistoricalView(next, &view);
+    _ = try storage.openHistoricalView(next, &view);
     defer view.close();
     var cursor: TestingHistoryCursor = .{};
     while (try cursor.next(&view)) |entry| {
@@ -4973,7 +4973,7 @@ test "one committed selection freezes its settings and input prefix" {
     try expectBindingPreserved(&storage, created_session_0.slice(), "during-work");
 
     var view: HistoricalView = undefined;
-    try storage.openHistoricalView(binding, &view);
+    _ = try storage.openHistoricalView(binding, &view);
     defer if (view.active) view.close();
     var settings: HistoricalSettings = undefined;
     try view.settings(&settings);
@@ -5003,7 +5003,7 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqualStrings("first", &actual);
 
     var foreign_view: HistoricalView = undefined;
-    try storage.openHistoricalView(binding, &foreign_view);
+    _ = try storage.openHistoricalView(binding, &foreign_view);
     try std.testing.expect(first_input.content.?.belongsTo(&view));
     try std.testing.expect(!first_input.content.?.belongsTo(&foreign_view));
     foreign_view.close();
@@ -5042,7 +5042,7 @@ test "one committed selection freezes its settings and input prefix" {
 
     const later = (try storage.admitNextModelAttempt(.{})).?;
     var later_view: HistoricalView = undefined;
-    try storage.openHistoricalView(later.permit.binding, &later_view);
+    _ = try storage.openHistoricalView(later.permit.binding, &later_view);
     defer later_view.close();
     var later_settings: HistoricalSettings = undefined;
     try later_view.settings(&later_settings);
@@ -5563,7 +5563,7 @@ test "canonical historical read failure fences dispatch without a fabricated out
     try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET instructions_content_id=9223372036854775807 WHERE session_ref=?1", .{created_session_0.slice()});
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
     var view: HistoricalView = undefined;
-    try storage.openHistoricalView(binding, &view);
+    _ = try storage.openHistoricalView(binding, &view);
     defer view.close();
     try std.testing.expectError(error.CorruptStore, testSettings(&view));
     try std.testing.expect(storage.isFenced());
@@ -6778,7 +6778,7 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     try std.testing.expectEqual(first.operation_id, retry.operation_id);
     {
         var view: HistoricalView = undefined;
-        try storage.openHistoricalView(retry, &view);
+        _ = try storage.openHistoricalView(retry, &view);
         defer view.close();
         try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .high), (try testSettings(&view)).reasoning_effort);
     }
@@ -6833,7 +6833,7 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     try testingStore(&reopened, &tmp, std.testing.io);
     defer reopened.close() catch unreachable;
     var view: HistoricalView = undefined;
-    try reopened.openHistoricalView(second, &view);
+    _ = try reopened.openHistoricalView(second, &view);
     defer view.close();
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .medium), (try testSettings(&view)).reasoning_effort);
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .xhigh), (try reopened.inspectSessionForTesting(session.slice())).reasoning_effort);
@@ -6899,7 +6899,7 @@ test "historical accepted output completeness and provenance fence both read pat
                 try sqlite.expectDone(mutation);
                 try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
                 var view: HistoricalView = undefined;
-                try storage.openHistoricalView(next, &view);
+                _ = try storage.openHistoricalView(next, &view);
                 defer view.close();
                 if (context_read) {
                     try std.testing.expectError(error.CorruptStore, view.coverage());
@@ -6954,7 +6954,7 @@ test "historical context selection work excludes nonmatching Operation populatio
             try sqlite.expectDone(insert);
 
             var view: HistoricalView = undefined;
-            try storage.openHistoricalView(current, &view);
+            _ = try storage.openHistoricalView(current, &view);
             defer view.close();
             var measured: @This() = .{};
             c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, progress, &measured);
@@ -7473,10 +7473,10 @@ test "a Current report's presentation reads answer their list's name" {
     }
 }
 
-test "admission's context read answers CorruptStore, as admission names it" {
-    // Main checked whether the context changed in a statement of its own,
-    // whose failed step went through as StatementFailed, and named the
-    // estimate's CorruptStore; `admission_context` reads both. The second
+test "a failed context read answers its reader's name and fences" {
+    // The report's `admission_context` names a failed step CorruptStore,
+    // as main named the estimate's. Admission reads the context within
+    // `admission_facts`, whose failed step is SessionReadFailed. The second
     // Message follows a Turn with usage under a trigger, so admission
     // weighs the context, and the report estimates it.
     for ([_]bool{ false, true }) |report| {
@@ -7496,13 +7496,16 @@ test "admission's context read answers CorruptStore, as admission names it" {
         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two");
         try settleCallsForTestingWithFaults(&storage, &tmp, first, "context-fold-output", &.{}, .{}, "{\"input_tokens\":10,\"output_tokens\":0}");
-        var fault: TestingStatementFault = .{ .sql = namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT") };
+        var fault: TestingStatementFault = .{ .sql = if (report)
+            namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT")
+        else
+            model_admission_domain.admission_facts_sql };
         fault.arm(storage.sqliteDatabase());
         defer fault.disarm(storage.sqliteDatabase());
         if (report)
             try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024))
         else
-            try std.testing.expectError(error.CorruptStore, storage.admitNextModelAttempt(.{}));
+            try std.testing.expectError(error.SessionReadFailed, storage.admitNextModelAttempt(.{}));
         try std.testing.expect(fault.failed > 0);
         try std.testing.expect(storage.isFenced());
     }
@@ -8216,27 +8219,24 @@ test "Attempt checks, prefix seals and content lookups do no more work than main
     defer storage.close() catch unreachable;
     const attempt = try TestingAttempt.admit(&storage, &tmp);
     // Main's statements and VM steps at 72db6de9 and again at 2e8e8353,
-    // each on its warm second call: opening a view, its Attempt check,
-    // recording a seal, the Operation's kind, a dispatch handoff and a
-    // content lookup.
-    const main_work = [_][2]i64{ .{ 2, 24 }, .{ 2, 24 }, .{ 6, 125 }, .{ 3, 32 }, .{ 2, 24 }, .{ 1, 14 } };
+    // each on its warm second call: opening a view, recording a seal, the
+    // Operation's kind, a dispatch handoff and a content lookup.
+    const main_work = [_][2]i64{ .{ 2, 24 }, .{ 6, 125 }, .{ 3, 32 }, .{ 2, 24 }, .{ 1, 14 } };
     for (0..2) |call| {
         var work: [main_work.len][2]i64 = undefined;
         _ = statementWorkSince(storage.sqliteDatabase());
         var view: HistoricalView = undefined;
-        try storage.openHistoricalView(attempt.binding, &view);
+        _ = try storage.openHistoricalView(attempt.binding, &view);
         defer view.close();
         work[0] = statementWorkSince(storage.sqliteDatabase());
-        try view.checkAttempt();
-        work[1] = statementWorkSince(storage.sqliteDatabase());
         try view.recordPrefixSeal(&TestingAttempt.seal);
-        work[2] = statementWorkSince(storage.sqliteDatabase());
+        work[1] = statementWorkSince(storage.sqliteDatabase());
         _ = try storage.modelOperationKind(attempt.binding);
-        work[3] = statementWorkSince(storage.sqliteDatabase());
+        work[2] = statementWorkSince(storage.sqliteDatabase());
         try storage.withDispatchHandoff(attempt.binding, {}, TestingAttempt.handoff);
-        work[4] = statementWorkSince(storage.sqliteDatabase());
+        work[3] = statementWorkSince(storage.sqliteDatabase());
         _ = try storage.openContent(attempt.content);
-        work[5] = statementWorkSince(storage.sqliteDatabase());
+        work[4] = statementWorkSince(storage.sqliteDatabase());
         if (call == 0) continue;
         for (work, main_work) |measured, main| {
             try std.testing.expect(measured[0] <= main[0]);
@@ -8279,7 +8279,7 @@ test "a prefix seal on a full disk answers CanonicalStorageFull and fences" {
     defer storage.close() catch unreachable;
     const attempt = try TestingAttempt.admit(&storage, &tmp);
     var view: HistoricalView = undefined;
-    try storage.openHistoricalView(attempt.binding, &view);
+    _ = try storage.openHistoricalView(attempt.binding, &view);
     defer view.close();
     // The seal rewrites a few bytes of one Session row in place, which a
     // capped file still holds, so a trigger grows the file as it writes.
@@ -9639,7 +9639,7 @@ test "a removed MCP tool gets the removed-tool result instead of an Action" {
     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var view: HistoricalView = undefined;
-    try storage.openHistoricalView(continuation, &view);
+    _ = try storage.openHistoricalView(continuation, &view);
     defer view.close();
     var position: u64 = 0;
     while (try view.nextEntry(position)) |entry| {

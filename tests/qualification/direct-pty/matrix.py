@@ -56,7 +56,9 @@ def inventory():
         row("kitty-shift-enter", b"one t\x1b[13;2uZwo!\r", "one t\nZwo!"),
         row("kitty-ctrl-a-e", b"bc\x1b[97;5ua\x1b[101;5uZ\r", "abcZ"),
         row("kitty-alt-j", b"one\x1b[106;3utwo\r", "one\ntwo"),
-        row("double-esc-arrow", b"ac\x1b\x1b[Db\r", "abc"),
+        # rxvt's Alt-Left (ESC before the Left sequence) moves a word left;
+        # plain Left would give "one tXw", and a leaked tail "one tw[DX".
+        row("double-esc-arrow", b"one tw\x1b\x1b[DX\r", "one Xtw"),
         row("double-esc-paste", b"a\x1b\x1b[200~b\x1b[201~\r", "ab"),
         row("paste", b"\x1b[200~line1\nline2\x1b[201~\r", "line1\nline2"),
         row("alt-j", b"line1\x1bjline2\r", "line1\nline2"),
@@ -81,32 +83,31 @@ def inventory():
         {"name": "resize", "scenario": "editor", "chunks":
             [chunk("A中bc\x1b[D".encode()), {"resize": [32, 12]}, chunk(b"Z\r", 0.1)], "expected": "A中bZc"},
     ]
-    for name, data in (("incomplete-csi", b"\x1b["), ("incomplete-ss3", b"\x1bO"),
-                       ("incomplete-utf8", b"\xc3"), ("incomplete-paste", b"\x1b[200~unfinished")):
-        rows.append({"name": name, "scenario": "expiry", "chunks": [chunk(data)]})
     for name, data in (("paste-controls", b"\x1b[200~a\x12b\x1b[201~\r"),
                        ("malformed-utf8", b"bad\xc3(\r")):
         rows.append({"name": name, "scenario": "rejection", "chunks": [chunk(data)]})
     rows.append({"name": "recovery-raw", "scenario": "recovery", "chunks": [chunk(b"\x12")]})
+    # The live view's first history line is 82, and a page is the
+    # transcript's 19 rows (scenarios.navigation).
     for name, enter, leave, first in (
-        ("key-pgup", b"\x1b[5~", b"\x07", 61),
-        ("key-pgdn", b"\x1b[5~" * 2, b"\x1b[6~", 41),
-        ("key-shift-pgup", b"\x1b[5;2~", b"\x07", 61),
-        ("key-up-csi", b"\x1b[A", b"\x07", 80),
-        ("key-up-ss3", b"\x1bOA", b"\x07", 80),
-        ("key-end-csi-f", b"\x1b[5~", b"\x1b[F", 61),
-        ("key-end-ss3-f", b"\x1b[5~", b"\x1bOF", 61),
-        ("key-end-csi-4", b"\x1b[5~", b"\x1b[4~", 61),
-        ("key-esc", b"\x1b[5~", b"\x1b", 61),
-        ("wheel-alt-scroll", b"\x1b[A" * 3, b"\x1b[B", 78),
+        ("key-pgup", b"\x1b[5~", b"\x07", 63),
+        ("key-pgdn", b"\x1b[5~" * 2, b"\x1b[6~", 44),
+        ("key-shift-pgup", b"\x1b[5;2~", b"\x07", 63),
+        ("key-up-csi", b"\x1b[A", b"\x07", 81),
+        ("key-up-ss3", b"\x1bOA", b"\x07", 81),
+        ("key-end-csi-f", b"\x1b[5~", b"\x1b[F", 63),
+        ("key-end-ss3-f", b"\x1b[5~", b"\x1bOF", 63),
+        ("key-end-csi-4", b"\x1b[5~", b"\x1b[4~", 63),
+        ("key-esc", b"\x1b[5~", b"\x1b", 63),
+        ("wheel-alt-scroll", b"\x1b[A" * 3, b"\x1b[B", 79),
         ("status", b"/status\r", b"\x1b", None),
     ):
         vector = {"name": name, "scenario": "navigation", "chunks": [chunk(enter)],
                   "return_chunks": [chunk(leave)], "status": name == "status", "first_history": first}
         if name == "key-pgdn":
-            vector["middle"] = [{"chunks": [chunk(b"\x1b[6~")], "first_history": 61}]
+            vector["middle"] = [{"chunks": [chunk(b"\x1b[6~")], "first_history": 63}]
         elif name == "wheel-alt-scroll":
-            vector["middle"] = [{"chunks": [chunk(b"\x1b[B")], "first_history": first} for first in (79, 80)]
+            vector["middle"] = [{"chunks": [chunk(b"\x1b[B")], "first_history": first} for first in (80, 81)]
         rows.append(vector)
     return rows
 

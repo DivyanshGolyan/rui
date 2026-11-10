@@ -61,6 +61,7 @@ pub const Faults = store_core.Faults;
 pub const HistoricalContent = historical_domain.HistoricalContent;
 pub const HistoricalReader = historical_domain.HistoricalReader;
 pub const HistoricalSettings = historical_domain.HistoricalSettings;
+pub const ModelOperationKind = historical_domain.ModelOperationKind;
 pub const HistoricalTool = historical_domain.HistoricalTool;
 pub const Declaration = historical_domain.Declaration;
 pub const HistoricalView = historical_domain.HistoricalView;

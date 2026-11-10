@@ -20,6 +20,7 @@ import host_process
 import live_engines
 import os_semantics
 import launch_frame_fixture as frame_host
+import store_rounds_cases
 
 
 def main():
@@ -186,3 +187,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # The Store's MySQL round-trip budget needs the same live server.
+    store_rounds_cases.run(*(str(pathlib.Path(arg).resolve()) for arg in sys.argv[1:3]))
