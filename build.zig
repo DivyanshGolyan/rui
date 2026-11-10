@@ -5,6 +5,7 @@ const screen_module = @import("build/screen.zig");
 const unit_module = @import("build/unit.zig");
 const measurement_module = @import("build/measurement.zig");
 const cross_module = @import("build/cross.zig");
+const fixtures_module = @import("build/fixtures.zig");
 
 pub fn build(b: *std.Build) void {
     // PR fixtures need ReleaseSafe checks, not shipped LLVM code generation.
@@ -110,6 +111,7 @@ pub fn build(b: *std.Build) void {
     const production_safe = product.addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
     const release_safe = if (pr_ci) product.addRui(b, target, .ReleaseSafe, "rui-pr-check", pinned_transport) else production_safe;
     if (pr_ci) release_safe.use_llvm = false;
+    const debug = product.addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
     // The PTY screen observer (tests/integration/terminal_screen.py) loads
     // libghostty-vt through ctypes. Its test-only package in screen-emulator
     // keeps it out of this manifest, which installs fetch whole; only steps
@@ -212,45 +214,6 @@ pub fn build(b: *std.Build) void {
     );
     integration_step.dependOn(&integration.step);
 
-    const dispatch_integration = b.addSystemCommand(&.{"python3"});
-    dispatch_integration.addFileArg(b.path("tests/integration/dispatch_integration.py"));
-    dispatch_integration.addFileArg(ci.path(release_safe));
-    const dispatch_integration_step = b.step(
-        "dispatch-integration",
-        "Run the targeted model dispatch, output, retry, and recovery shortcut",
-    );
-    dispatch_integration_step.dependOn(&dispatch_integration.step);
-
-    const skills_integration = screen_module.screenCommand(b, screen, &.{"python3"});
-    skills_integration.addFileArg(b.path("tests/integration/skills_integration.py"));
-    skills_integration.addFileArg(ci.path(release_safe));
-    b.step("skills-integration", "Run isolated native skills capture, replay and creation cases").dependOn(&skills_integration.step);
-
-    const login_signal_integration = b.addSystemCommand(&.{"python3"});
-    login_signal_integration.addFileArg(b.path("tests/integration/login_signal_integration.py"));
-    login_signal_integration.addFileArg(ci.path(release_safe));
-    b.step("login-signal-integration", "Run the Linux-only one-shot login signal loader witness").dependOn(&login_signal_integration.step);
-
-    const current_facts_integration = b.addSystemCommand(&.{"python3"});
-    current_facts_integration.addFileArg(b.path("tests/integration/current_facts_integration.py"));
-    current_facts_integration.addFileArg(ci.path(release_safe));
-    b.step("current-facts-integration", "Run the real Current producer/consumer observation oracle").dependOn(&current_facts_integration.step);
-
-    const request_wait_integration = b.addSystemCommand(&.{"python3"});
-    request_wait_integration.addFileArg(b.path("tests/integration/request_wait_integration.py"));
-    request_wait_integration.addFileArg(ci.path(release_safe));
-    b.step("request-wait-integration", "Run request wait completion, recovery and conditional polling witnesses").dependOn(&request_wait_integration.step);
-
-    const canonical_failure_integration = screen_module.screenCommand(b, screen, &.{"python3"});
-    canonical_failure_integration.addFileArg(b.path("tests/integration/canonical_failure_integration.py"));
-    canonical_failure_integration.addFileArg(ci.path(release_safe));
-    b.step("canonical-failure-integration", "Run canonical invocation failure at real producer and caller boundaries").dependOn(&canonical_failure_integration.step);
-
-    const server_delivery_integration = b.addSystemCommand(&.{"python3"});
-    server_delivery_integration.addFileArg(b.path("tests/integration/server_delivery_integration.py"));
-    server_delivery_integration.addFileArg(ci.path(release_safe));
-    b.step("server-delivery-integration", "Run real reply inactivity, connection headroom and Host drain separately from load").dependOn(&server_delivery_integration.step);
-
     const h2_integration = b.addSystemCommand(&.{"python3"});
     h2_integration.addFileArg(b.path("tests/integration/transport_h2_integration.py"));
     h2_integration.addFileArg(ci.path(release_safe));
@@ -263,69 +226,6 @@ pub fn build(b: *std.Build) void {
         "Run the native TLS/H2 stream and bounded connection fixture (requires Python h2==4.3.0)",
     );
     h2_integration_step.dependOn(&h2_integration.step);
-
-    const bash_integration = b.addSystemCommand(&.{"python3"});
-    bash_integration.addFileArg(b.path("tests/integration/bash_integration.py"));
-    bash_integration.addFileArg(ci.path(release_safe));
-    const bash_integration_step = b.step(
-        "bash-integration",
-        "Run authorized Bash execution, stop, failure, and recovery cases",
-    );
-    bash_integration_step.dependOn(&bash_integration.step);
-
-    const bash_walkthrough = b.addSystemCommand(&.{"python3"});
-    bash_walkthrough.addFileArg(b.path("tests/integration/bash_integration.py"));
-    bash_walkthrough.addFileArg(ci.path(release_safe));
-    bash_walkthrough.addArg("--walkthrough");
-    const bash_walkthrough_step = b.step(
-        "bash-walkthrough",
-        "Run the narrated public Bash approve-and-recover journey",
-    );
-    bash_walkthrough_step.dependOn(&bash_walkthrough.step);
-
-    const bash_environment_integration = b.addSystemCommand(&.{"python3"});
-    bash_environment_integration.addFileArg(b.path("tests/integration/bash_environment_integration.py"));
-    bash_environment_integration.addFileArg(ci.path(release_safe));
-    b.step(
-        "bash-environment-integration",
-        "Run Bash in the sending terminal's environment across terminals, peers and recovery",
-    ).dependOn(&bash_environment_integration.step);
-
-    const bash_owner_integration = b.addSystemCommand(&.{"python3"});
-    bash_owner_integration.addFileArg(b.path("tests/integration/bash_owner_integration.py"));
-    bash_owner_integration.addFileArg(ci.path(release_safe));
-    const bash_owner_integration_step = b.step(
-        "bash-owner-integration",
-        "Run focused Bash owner transition cases",
-    );
-    bash_owner_integration_step.dependOn(&bash_owner_integration.step);
-
-    const bash_lifecycle_integration = b.addSystemCommand(&.{"python3"});
-    bash_lifecycle_integration.addFileArg(b.path("tests/integration/bash_lifecycle_integration.py"));
-    bash_lifecycle_integration.addFileArg(ci.path(release_safe));
-    const bash_lifecycle_integration_step = b.step(
-        "bash-lifecycle-integration",
-        "Run Bash lifecycle syscall-failure and custody cases",
-    );
-    bash_lifecycle_integration_step.dependOn(&bash_lifecycle_integration.step);
-
-    const bash_recovery_integration = screen_module.screenCommand(b, screen, &.{"python3"});
-    bash_recovery_integration.addFileArg(b.path("tests/integration/bash_recovery_integration.py"));
-    bash_recovery_integration.addFileArg(ci.path(release_safe));
-    const bash_recovery_integration_step = b.step(
-        "bash-recovery-integration",
-        "Run fresh-Host Bash recovery cuts for admitted and committed Actions",
-    );
-    bash_recovery_integration_step.dependOn(&bash_recovery_integration.step);
-
-    const codex_integration = b.addSystemCommand(&.{"python3"});
-    codex_integration.addFileArg(b.path("tests/integration/codex_integration.py"));
-    codex_integration.addFileArg(ci.path(release_safe));
-    const codex_integration_step = b.step(
-        "codex-integration",
-        "Run synthetic managed-route credentials, Bash continuation and fresh-Host caller journey",
-    );
-    codex_integration_step.dependOn(&codex_integration.step);
 
     const credential_actor = b.addExecutable(.{
         .name = "codex-credential-actor",
@@ -402,33 +302,6 @@ pub fn build(b: *std.Build) void {
     );
     mysql_wire_integration_step.dependOn(&mysql_wire_integration.step);
 
-    const codex_h2_integration = b.addSystemCommand(&.{"python3"});
-    codex_h2_integration.addFileArg(b.path("tests/integration/codex_h2_integration.py"));
-    codex_h2_integration.addFileArg(ci.path(release_safe));
-    const codex_h2_integration_step = b.step(
-        "codex-h2-integration",
-        "Run synthetic managed TLS/H2 negotiation and observed sequential reuse (requires h2==4.3.0)",
-    );
-    codex_h2_integration_step.dependOn(&codex_h2_integration.step);
-
-    const control_integration = b.addSystemCommand(&.{"python3"});
-    control_integration.addFileArg(b.path("tests/integration/control_integration.py"));
-    control_integration.addFileArg(ci.path(release_safe));
-    const control_integration_step = b.step(
-        "control-integration",
-        "Run Session-stop, exact-interruption, and protected-capacity cases",
-    );
-    control_integration_step.dependOn(&control_integration.step);
-
-    const descriptor_capacity_integration = b.addSystemCommand(&.{"python3"});
-    descriptor_capacity_integration.addFileArg(b.path("tests/integration/descriptor_capacity_integration.py"));
-    descriptor_capacity_integration.addFileArg(ci.path(release_safe));
-    const descriptor_capacity_integration_step = b.step(
-        "descriptor-capacity-integration",
-        "Run reduced-limit startup rejection and adequate-limit fill/drain cases",
-    );
-    descriptor_capacity_integration_step.dependOn(&descriptor_capacity_integration.step);
-
     const host_status_actor = b.addExecutable(.{
         .name = "rui-host-status-test",
         .use_llvm = test_actor_llvm,
@@ -446,17 +319,6 @@ pub fn build(b: *std.Build) void {
     host_status_integration.addFileArg(ci.path(host_status_actor));
     const host_status_step = b.step("host-status-integration", "Run native Host information and lease observation cases");
     host_status_step.dependOn(&host_status_integration.step);
-
-    const host_launch_integration = screen_module.screenCommand(b, screen, &.{"python3"});
-    host_launch_integration.addFileArg(b.path("tests/integration/host_launch_integration.py"));
-    host_launch_integration.addFileArg(ci.path(release_safe));
-    const host_launch_step = b.step("host-launch-integration", "Run detached Host launch, alias convergence and startup-failure cases");
-    host_launch_step.dependOn(&host_launch_integration.step);
-
-    const installer_integration = b.addSystemCommand(&.{"python3"});
-    installer_integration.addFileArg(b.path("tests/integration/installer_integration.py"));
-    installer_integration.addFileArg(ci.path(release_safe));
-    b.step("installer-integration", "Run source and release installer cases through the production publication owner").dependOn(&installer_integration.step);
 
     const upgrade_release = product.addRuiWithIdentity(b, target, .ReleaseSafe, "rui-upgrade-release-fixture", pinned_transport, .{
         .version = b.fmt("0.{d}.10000", .{@import("src/store/schema.zig").schema_version}),
@@ -509,16 +371,6 @@ pub fn build(b: *std.Build) void {
     const host_stop_step = b.step("host-stop-integration", "Run native exact-instance Host shutdown and custody drain");
     host_stop_step.dependOn(&host_stop_integration.step);
 
-    // check runs these cases among its process integrations; each step runs
-    // the same case alone, so selection can name only the ones a change reaches.
-    b.step("peer-integration", "Run the peer round trip through Rui-launched Bash")
-        .dependOn(&addFixture(b, "tests/integration/peer_integration.py", ci.path(release_safe)).step);
-    b.step("sender-identity-integration", "Run Action sender authority through the installed CLI, exit, stop and restart")
-        .dependOn(&addFixture(b, "tests/integration/sender_identity_integration.py", ci.path(release_safe)).step);
-    b.step("conversation-page-integration", "Run public Conversation wire reads against a real Host and canonical Store")
-        .dependOn(&addFixture(b, "tests/integration/conversation_page_integration.py", ci.path(release_safe)).step);
-    b.step("host-allocator-integration", "Observe the Host allocator environment before main")
-        .dependOn(&addFixture(b, "tests/integration/host_allocator_test.py", ci.path(release_safe)).step);
     const human_cli = screen_module.screenCommand(b, screen, &.{});
     human_cli.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
     human_cli.addArg("python3");
@@ -532,7 +384,6 @@ pub fn build(b: *std.Build) void {
     host_process_test.addFileArg(b.path("tests/integration/host_process_test.py"));
     b.step("host-process-test", "Run the bounded Host process fixture's own failure checks").dependOn(&host_process_test.step);
 
-    const debug = product.addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
     const debug_integration = b.addSystemCommand(&.{"sh"});
     debug_integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     debug_integration.addFileArg(ci.path(debug));
@@ -541,16 +392,7 @@ pub fn build(b: *std.Build) void {
         "Run the documented Debug artifact through configuration/message recovery",
     );
     debug_integration_step.dependOn(&debug_integration.step);
-    // A bounded Debug subset of the dispatch scenarios: failure provenance
-    // through SQLite. The full dispatch journey stays on ReleaseSafe.
-    const dispatch_debug_integration = b.addSystemCommand(&.{"python3"});
-    dispatch_debug_integration.addFileArg(b.path("tests/integration/dispatch_integration.py"));
-    dispatch_debug_integration.addFileArg(ci.path(debug));
-    dispatch_debug_integration.addArg("failure-correlation");
-    b.step(
-        "dispatch-debug-integration",
-        "Run bounded model failure correlation through SQLite on the Debug artifact",
-    ).dependOn(&dispatch_debug_integration.step);
+    fixtures_module.add(b, screen, ci.path(release_safe), ci.path(debug));
 
     const check_step = b.step(
         "check",
@@ -656,12 +498,4 @@ pub fn build(b: *std.Build) void {
         if (ci_part != .all and !collection.reached_unit)
             @panic("Split CI producers selected without the unit test compile; update UNIT_TARGETS");
     }
-}
-
-/// A Python process fixture run against one Rui executable.
-fn addFixture(b: *std.Build, script: []const u8, rui: std.Build.LazyPath) *std.Build.Step.Run {
-    const run = b.addSystemCommand(&.{"python3"});
-    run.addFileArg(b.path(script));
-    run.addFileArg(rui);
-    return run;
 }

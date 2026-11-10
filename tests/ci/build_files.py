@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[2]
-STEP = re.compile(r'b\.step\(\s*"([a-z0-9-]+)"')
+STEP = re.compile(r'(?:b\.step\(\s*|\.step\s*=\s*)"([a-z0-9-]+)"')
 
 
 def files(root=ROOT):

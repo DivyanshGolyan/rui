@@ -969,6 +969,11 @@ class SelectionTest(unittest.TestCase):
         for target in observing:
             with self.subTest(target=target):
                 fixture = FIXTURES[target][0][0]
+                row = re.search(r'(?m)^\s*\.\{ \.step = "' + re.escape(target) + r'",[^\n]*$', build)
+                if row:
+                    self.assertIn(f'.script = "{fixture}"', row[0])
+                    self.assertIn('.screen = true', row[0])
+                    continue
                 run = re.search(r'(\w+)\.addFileArg\(b\.path\("' + re.escape(fixture) + r'"\)\)', build)
                 self.assertIsNotNone(run, fixture)
                 self.assertIn(f"const {run[1]} = screen_module.screenCommand(", build, fixture)
