@@ -6,11 +6,14 @@ Usage: overview_integration.py PATH_TO_RUI [GROUP]. Each group lives in its
 own module and exports `cases()`; with no GROUP, every group runs.
 """
 from contextlib import contextmanager
+import fcntl
 import json
 import os
-import pathlib
+import shutil
+import struct
 import subprocess
 import sys
+import termios
 import threading
 import time
 
@@ -81,6 +84,12 @@ class Screen:
         """Write bytes as the terminal would send them (Enter is b"\\r")."""
         os.write(self.master, data if isinstance(data, bytes) else data.encode())
 
+    def resize(self, columns, rows):
+        """Resize the terminal as a window resize does: the PTY's size,
+        which signals rui, and the observer's screen."""
+        fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+        self.capture.resize(columns, rows)
+
     def click(self, column, row, button=0):
         """A left press and release at 1-based (column, row), as SGR mouse
         reporting sends them."""
@@ -100,7 +109,10 @@ class World:
         self.store = self.root / "store"
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
-        self.env = {**os.environ, "HOME": str(self.home), "TERM": "xterm-256color"}
+        # A colour terminal, whatever the runner's own settings: the screen's
+        # colours are part of what these cases check.
+        self.env = {key: value for key, value in os.environ.items() if key != "NO_COLOR"}
+        self.env.update(HOME=str(self.home), TERM="xterm-256color", COLORTERM="truecolor")
         self.endpoint = fixture.SuccessEndpoint([], responses_by_input or {})
         threading.Thread(target=self.endpoint.serve_forever, daemon=True).start()
         self.host = fixture.start_host(self.store, f"http://127.0.0.1:{self.endpoint.server_port}/responses",
@@ -108,7 +120,8 @@ class World:
         self.run("defaults", "configure", "--store", self.store, "--provider", "codex", "--model", "gpt-6-luna")
 
     def close(self):
-        dispose_all(lambda: stop_process(self.host, timeout=5), self.endpoint.shutdown, self.endpoint.server_close)
+        dispose_all(lambda: stop_process(self.host, timeout=5), self.endpoint.shutdown, self.endpoint.server_close,
+                    lambda: shutil.rmtree(self.root, ignore_errors=True))
 
     def run(self, *args, expect=0, input=None):
         """One rui command in this HOME; returns stdout."""
