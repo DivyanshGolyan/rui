@@ -269,6 +269,17 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return if (std.mem.startsWith(u8, uri, TerminalText.session_link)) uri[TerminalText.session_link.len..] else null;
         }
 
+        /// The last position in `[from, to)` on a peer's name, if any.
+        pub fn lastSession(self: *const Self, from: usize, to: usize) ?usize {
+            comptime std.debug.assert(styled);
+            var index = @min(to, self.text().len);
+            while (index > from) {
+                index -= 1;
+                if (self.sessionAt(index) != null) return index;
+            }
+            return null;
+        }
+
         /// The text of `[from, to)` as the view shows it, for the clipboard:
         /// wrapping adds no bytes, so wrapped rows join as the text runs;
         /// right-margin times and hidden link addresses are left out, and a

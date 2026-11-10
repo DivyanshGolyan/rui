@@ -5240,7 +5240,7 @@ def renderer_cases():
                 proxy.close()
                 proxy = None
             # With no collapsed block in view, Ctrl-O says so and opens nothing.
-            tty.send("\x0f", "No collapsed message in view")
+            tty.send("\x0f", "Nothing to open in view")
             assert "Message ·" not in tty.capture.completed
             # A newer Ctrl-O that finds nothing still replaces a loading page.
             tty.send("\x1b[A", "Browsing · Esc returns")
@@ -5268,7 +5268,7 @@ def renderer_cases():
                         break
                     tty.send("\x1b[B", predicate=lambda: True)
                 assert "┄ 299 more lines" not in tty.capture.completed and "Browsing" in tty.capture.completed, tty.capture.completed
-                tty.send("\x0f", "No collapsed message in view")
+                tty.send("\x0f", "Nothing to open in view")
                 holding.clear()
                 release.set()
                 fixture.wait_for(lambda: proxy.exchanges, "the superseded content read", timeout=20)
