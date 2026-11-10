@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
-const protocol = @import("../../protocol.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const provider_name = @import("../../provider_name.zig");

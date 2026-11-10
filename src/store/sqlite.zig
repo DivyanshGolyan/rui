@@ -2,7 +2,6 @@
 //! preparing, caching and stepping statements, binding parameters and reading columns.
 
 const std = @import("std");
-const protocol = @import("../protocol.zig");
 const provider_route = @import("../provider_route.zig");
 const Bounded = @import("../bounded.zig").Bounded;
 const model_capability = @import("../model_capability.zig");

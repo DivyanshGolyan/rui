@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
-const protocol = @import("../../protocol.zig");
 const turn_ending = @import("../../turn_ending.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
 const workspace_path = @import("../../workspace_path.zig");

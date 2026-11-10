@@ -16,7 +16,7 @@ from textwrap import dedent
 from unittest.mock import patch
 
 from select_tests import (CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES,
-                          POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, Graph, execution_batches, matches, select,
+                          POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, TEST_CODE, Graph, execution_batches, matches, select,
                           setup_requirements, tree_graph)
 from qualification import NATIVE, RESOURCES, qualification, shards
 
@@ -278,6 +278,16 @@ class SelectionTest(unittest.TestCase):
                          if not name.startswith("src/store/") and "src/store.zig" in graph.every.get(name, ()))
         self.assertEqual(callers, [], "Store tests reach these Store callers; move the tests that "
                          "import them into the callers")
+
+    def test_store_code_imports_no_protocol(self):
+        # The Store reads and writes plain values; the Host translates
+        # between them and the wire, so a wire change does not reach it.
+        graph = tree_graph()
+        importers = sorted(name for name, imported in graph.production.items()
+                           if name.startswith("src/store/") and not matches(name, TEST_CODE)
+                           and "src/protocol.zig" in imported)
+        self.assertEqual(importers, [], "Store code imports protocol.zig; import the leaf that owns the "
+                         "value, and translate wire types where the Host calls the Store")
 
     def test_registered_cores_reach_only_unit_roots_unless_a_fixture_names_them(self):
         # A core's value tests own its decisions. A fixture that asserts one

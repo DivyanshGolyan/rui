@@ -7,6 +7,7 @@ const socket_os = @import("os/socket.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
+const activity_reply = @import("activity_reply.zig");
 const Input = @import("SessionInput.zig");
 const Submission = @import("SessionSubmission.zig");
 const Task = @import("ClientTask.zig");
@@ -1189,7 +1190,7 @@ test "the Session line takes archive and other facts from Current and reads agai
     }
     page.end = 40;
     page.work.revision = 3;
-    page.work.work = .{ .turn = 9, .operation = 12 };
+    page.work.work = .{ .state = .{ .idle = .{ .since = 0 } }, .turn = 9, .operation = 12 };
     try std.testing.expect(!Line.stale(moment, &page));
 }
 
@@ -1353,7 +1354,7 @@ const FakeHost = struct {
             const facts = self.page(end, position, ordinal, if (std.mem.eql(u8, cursor.direction, "backward")) .backward else .forward);
             var out = std.Io.Writer.Allocating.init(std.testing.allocator);
             defer out.deinit();
-            try facts.writeJson(&out.writer);
+            try activity_reply.writePage(&out.writer, &facts);
             respond(fd, "200 OK", "application/json", "", out.written());
         } else if (std.mem.startsWith(u8, request[0..used], "POST /v1/activity-content ")) {
             self.contents += 1;

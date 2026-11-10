@@ -4,7 +4,6 @@
 const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const skills_domain = @import("skills.zig");
-const protocol = @import("../../protocol.zig");
 const turn_ending = @import("../../turn_ending.zig");
 const message_admission = @import("../../message_admission.zig");
 const workspace_path = @import("../../workspace_path.zig");
