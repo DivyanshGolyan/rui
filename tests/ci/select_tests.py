@@ -165,6 +165,9 @@ class Graph:
                                       for module in (match[1] and [match[1]] or re.split(r"\s*,\s*", match[2]))}
                                      | set(SOURCE_READ.findall(strings))
                                      | {"src/" + joined for joined in SOURCE_JOIN.findall(source)}) & names - {name}
+        # Every file a Zig compilation reads: sources, and what they import
+        # or embed that is not Zig (openapi.json, SQL baselines, prompt text).
+        self.compiled = set(self.every).union(*self.every.values())
         self.cores = {"src/" + core for core in re.findall(
             r'\.\{ "([^"]+\.zig)", @import', read(FUNCTIONAL_CORES).split("const cores = .{", 1)[1].split("\n};", 1)[0])}
         # Rui's code: its production imports, less test code that a
@@ -216,7 +219,8 @@ class Graph:
                                  "or list it in PACKAGES")
             return {os.path.normpath(directory / imported)}
 
-        embedded = {os.path.normpath(directory / path) for path in EMBED.findall(source)}
+        # An embed names a file, or a module build.zig adds (`MODULES`).
+        embedded = {MODULES.get(path) or os.path.normpath(directory / path) for path in EMBED.findall(source)}
         self.production[name] = embedded.union(*map(resolve, production))
         self.every[name] = self.production[name].union(*map(resolve, tested))
 
@@ -443,6 +447,13 @@ CACHE_POLICY = {
 }
 
 
+# What `zig build typecheck-macos` compiles: Zig and C sources, the build
+# and its pinned packages, and the patches and scripts that prepare them.
+# Files Zig imports or embeds count too (`Graph.compiled`). No other change can alter
+# whether Rui type-checks for Apple Silicon.
+TYPECHECK_INPUTS = ("*.zig", "*.zon", "*.c", "*.h", "src/*.patch", "src/*.sh", ".github/actions/setup/action.yml")
+
+
 # tests/ci units that read no repository file outside their inputs (traced).
 # The policy job skips a unit whose inputs the diff leaves unchanged; every
 # other tests/ci test always runs.
@@ -605,6 +616,7 @@ def select(paths, phase, available, graph=None):
         if not targets & served_by:
             raise ValueError(f"{reason!r} selected none of the targets that start its server: {sorted(served_by)}")
     cache_execution_checks = phase == "review" and any(path in CACHE_POLICY for path in paths)
+    typecheck_macos = any(matches(path, TYPECHECK_INPUTS) or path in graph.compiled for path in paths)
     missing = (targets | native_targets) - available
     if missing:
         raise ValueError(f"Selected targets absent from build.zig: {sorted(missing)}")
@@ -616,6 +628,8 @@ def select(paths, phase, available, graph=None):
             # Store, recovery and upgrade changes fail for real; never rerun them.
             "retry": not strict(paths),
             "cache_execution_checks": cache_execution_checks,
+            # Whether the change can alter what `typecheck-macos` compiles.
+            "typecheck_macos": typecheck_macos,
             "linux_memory_checks": linux_memory_checks, "manual_checks": sorted(manual_checks),
             "policy_skips": [unit for unit, inputs in POLICY_SELF_CHECKS
                              if not any(matches(path, inputs) for path in paths)],
