@@ -81,7 +81,7 @@ fn run(case: Case) !void {
     command.configuration.tools = try .of(&.{"fetch_page"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("bypass");
-    const configured = storage.configure(command, .{});
+    const configured = try storage.configure(command, .{});
     try expectHere(@src(), configured == .accepted);
     const session = configured.accepted.session;
     try store.testingSubmitMessage(storage, &tmp, "mcp-message", "mcp-message", session.slice(), "fetch");
@@ -155,7 +155,7 @@ fn run(case: Case) !void {
             // A new Session is independent of the first Session's sent call.
             try command.key.set("other-config");
             command.configuration.tools = try .of(&.{"fetch_other"});
-            const other_configured = storage.configure(command, .{});
+            const other_configured = try storage.configure(command, .{});
             try expectHere(@src(), other_configured == .accepted);
             const other_session = other_configured.accepted.session;
             try expectHere(@src(), !std.mem.eql(u8, session.slice(), other_session.slice()));

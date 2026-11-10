@@ -17,7 +17,7 @@ const content_custody = @import("../../content_custody.zig");
 const model_catalog = @import("../../model_catalog.zig");
 const model_capability = @import("../../model_capability.zig");
 const product_defaults = @import("../../product_defaults.zig");
-const tool_catalog = @import("../../tools.zig");
+const tool_catalog = @import("../../tool_record.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const command_domain = @import("command.zig");
@@ -356,7 +356,7 @@ pub fn planConfigurationUpdate(
 /// write round (`importSealed`). The
 /// decision is `applyConfiguration`; the write round saves the Session,
 /// the command and its revision, then commits.
-pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const content_custody.ConfigureCommand, preset: ?*const PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, faults: Faults) !ConfigureReply {
+pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const content_custody.ConfigureCommand, preset: ?*const PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, allocator: std.mem.Allocator, faults: Faults) !ConfigureReply {
     // The captured creation intent has no ID. Save its original digest
     // alongside the allocated target so a lost reply never creates twice.
     const command = request;
@@ -390,7 +390,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const conten
     if (command.require_model and !servesProviderOf(served, &command.configuration, if (reads.found.get()) reads.next.provider else null)) {
         return saveConfigurationRejection(a, command, digest, .model_capability_unavailable, faults);
     }
-    if (command.reload_skills) return reloadSkills(a, command, creating, reads, reload_capture, digest, faults);
+    if (command.reload_skills) return reloadSkills(a, command, creating, reads, reload_capture, allocator, digest, faults);
     const applied = switch (try applyConfiguration(a, io, command.session.slice(), &command.configuration, initial_skills, faults, reads)) {
         .rejected => |code| return saveConfigurationRejection(a, command, digest, code, faults),
         .accepted => |value| value,
@@ -404,7 +404,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const conten
 
 // Native reload has its own atomic result/catalog settlement and scratch.
 // Keep this rare branch off ordinary Configure's deeper content-import chain.
-noinline fn reloadSkills(a: anytype, command: *const content_custody.ConfigureCommand, creating: bool, reads: *const ConfigurationReads, reload_capture: ?*const skills_domain.Capture, digest: *const [32]u8, faults: Faults) !ConfigureReply {
+noinline fn reloadSkills(a: anytype, command: *const content_custody.ConfigureCommand, creating: bool, reads: *const ConfigurationReads, reload_capture: ?*const skills_domain.Capture, allocator: std.mem.Allocator, digest: *const [32]u8, faults: Faults) !ConfigureReply {
     if (targetRejection(command.session.slice())) |code| return saveConfigurationRejection(a, command, digest, code, faults);
     if (creating or !reads.found.get()) return saveConfigurationRejection(a, command, digest, .unknown_session, faults);
     var invalid = command.preset != null or command.require_model;
@@ -413,9 +413,9 @@ noinline fn reloadSkills(a: anytype, command: *const content_custody.ConfigureCo
     }
     if (invalid) return saveConfigurationRejection(a, command, digest, .incomplete_initial_configuration, faults);
     const captured = reload_capture orelse return saveConfigurationRejection(a, command, digest, .skills_unavailable, faults);
-    if (captured.* == .failed) return saveConfigurationRejectionWithFailure(a, command, digest, captured.failed.rejection(configuration_admission.Rejection), captured.failed, faults);
+    if (captured.* == .failed) return saveConfigurationRejectionWithFailure(a, command, digest, captured.failed.configurationRejection(), captured.failed, faults);
     if (captured.* != .reload) return saveConfigurationRejection(a, command, digest, .skills_unavailable, faults);
-    var memory: std.heap.ArenaAllocator = .init(std.heap.c_allocator);
+    var memory: std.heap.ArenaAllocator = .init(allocator);
     defer memory.deinit();
     const head: rsql.SessionHead = .{ .ref = command.session.slice()[0..session_id.bytes].*, .workspace_key = .of(reads.next.workspace_key), .next_position = .of(reads.next.next_position) };
     const result = try skills_domain.apply(a, memory.allocator(), head, captured, faults);
@@ -500,7 +500,7 @@ const Settings = struct {
     }
 
     /// Each field whose value differs, by its name in `SessionField`.
-    fn changed(before: *const Settings, after: *const Settings) std.EnumSet(protocol.SessionField) {
+    fn changed(before: *const Settings, after: *const CurrentConfiguration) std.EnumSet(protocol.SessionField) {
         var fields: std.EnumSet(protocol.SessionField) = .empty;
         fields.setPresent(.provider, before.provider != after.provider);
         fields.setPresent(.model, !before.model.eql(after.model.slice()));
@@ -540,6 +540,9 @@ pub const ConfigurationReads = struct {
     /// The Session's saved configuration, which the plan then updates in
     /// place: one 4.6 KB value, not a copy of it.
     next: CurrentConfiguration,
+    /// The validation-only phase and application borrow this same plan until
+    /// settlement; keep its saved Settings off the Host's import call chain.
+    validated: ValidatedConfiguration = undefined,
     /// Whether the Session exists: `.missing` for a creation, which reads none.
     found: store_access.Found = .missing,
     reference: [session_id.bytes]u8 = undefined,
@@ -845,15 +848,22 @@ fn targetRejection(session: []const u8) ?configuration_admission.Rejection {
 /// first Message can share this owner without an intermediate commit. The
 /// answer names the Session either way; the caller records an accepted
 /// one with `queueConfiguredCommand`.
-pub fn applyConfiguration(
+pub const ValidatedConfiguration = struct {
+    content_actions: @FieldType(ConfigurationUpdatePlan, "update"),
+    before: ?Settings,
+};
+pub const ConfigurationValidation = union(enum) { ready: *const ValidatedConfiguration, rejected: protocol.ConfigurationRejection };
+
+/// Validates without queuing content, tool-set or Session writes. The resulting
+/// plan borrows the same transaction's reads and is applied exactly once.
+pub fn validateConfiguration(
     a: anytype,
     io: std.Io,
     session: []const u8,
     configuration: *const content_custody.Configuration,
     initial_skills: ?*const skills_domain.Initial,
-    faults: Faults,
     reads: *ConfigurationReads,
-) !Application {
+) !ConfigurationValidation {
     const creating = session.len == 0;
     if (targetRejection(session)) |code| return .{ .rejected = code };
     if (configuration.permission_mode.state == .value and
@@ -908,7 +918,7 @@ pub fn applyConfiguration(
     if (try prepareLoadedTools(a, creating, configuration, reads)) |rejection| return .{ .rejected = rejection };
 
     const created = !reads.found.get();
-    const before: ?Settings = if (created) null else .of(next);
+    reads.validated.before = if (created) null else .of(next);
     const content_actions = switch (planConfigurationUpdate(
         current_configuration,
         configuration,
@@ -923,6 +933,24 @@ pub fn applyConfiguration(
     // discovery capture, but reject it before any content or Session writes.
     if (creating) if (initial_skills) |captured| if (captured.* == .unavailable) return .{ .rejected = .skills_unavailable };
 
+    reads.validated.content_actions = content_actions;
+    return .{ .ready = &reads.validated };
+}
+
+pub fn applyConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads) !Application {
+    const checked = try validateConfiguration(a, io, session, configuration, initial_skills, reads);
+    return switch (checked) {
+        .rejected => |code| .{ .rejected = code },
+        .ready => |plan| try applyValidatedConfiguration(a, io, session, configuration, initial_skills, faults, reads, plan),
+    };
+}
+
+pub fn applyValidatedConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads, plan: *const ValidatedConfiguration) !Application {
+    const creating = session.len == 0;
+    const created = !reads.found.get();
+    const next = &reads.next;
+    const before = if (plan.before) |*saved| saved else null;
+    const content_actions = plan.content_actions;
     var command_instructions_id: ?u64 = null;
     switch (content_actions.instructions) {
         .preserve => {},
@@ -999,7 +1027,7 @@ pub fn applyConfiguration(
         .instructions_id = command_instructions_id,
         .output_schema_id = command_output_schema_id,
         .instructions_updated = created or configuration.instructions.state == .value,
-        .changes = if (before) |*saved| saved.changed(&Settings.of(next)) else .empty,
+        .changes = if (before) |saved| saved.changed(next) else .empty,
     } };
 }
 
@@ -1021,7 +1049,7 @@ fn saveConfigurationRejectionWithFailure(
     failure: ?skills_domain.Failure,
     faults: Faults,
 ) !ConfigureReply {
-    const outcome_id = if (failure) |diagnostic| try skills_domain.importFailure(a, diagnostic, faults) else null;
+    const outcome_id = if (failure) |diagnostic| try skills_domain.importFailure(a, diagnostic.bytes, faults) else null;
     var answer = StoredAnswer{ .accepted = false };
     try answer.code.set(@tagName(code));
     try command_domain.queueCommand(a, command.key.slice(), .configure, command.session.slice(), digest, outcome_id, null, &answer);

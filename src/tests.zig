@@ -32,6 +32,7 @@ test {
     _ = @import("models_dev.zig");
     _ = @import("descriptor_capacity.zig");
     _ = @import("os/descriptor_limit.zig");
+    _ = @import("os/os.zig");
     _ = @import("os/pages.zig");
     _ = @import("os/process.zig");
     _ = @import("os/socket.zig");
@@ -49,13 +50,17 @@ test {
     _ = @import("mcp/offered.zig");
     _ = @import("mcp/Request.zig");
     _ = @import("protocol.zig");
+    _ = @import("session_skills.zig");
     _ = @import("protocol_reply.zig");
+    _ = @import("protocol_reply_store_tests.zig");
     _ = @import("caller_rejection.zig");
     _ = @import("platform.zig");
     _ = @import("socket_fixture.zig");
     _ = @import("HostDiagnostics.zig");
     _ = @import("TestObservation.zig");
     _ = @import("store.zig");
+    _ = @import("session_list_golden_tests.zig");
+    _ = @import("session_report_golden_tests.zig");
     _ = @import("server.zig");
     _ = @import("server_execution.zig");
     _ = @import("server_host.zig");

@@ -43,7 +43,7 @@ A capture made with no `reply` is a silent terminal, for a fixture that answers 
 | --- | --- |
 | Documentation | Review references and consistency. The plan runs `git diff --check` on the committed candidate diff. Only nonempty, exclusively allowlisted regular nonexecutable documentation and asset changes qualify for the [documentation lane](tests/ci/docs_only.py); executable, unknown and mixed changes keep normal verification. Source sentence layout remains optional |
 | Runtime behavior | Subsystem mapping below on the PR head for Linux main acceptance; Mac mapping and full Debug recovery on the exact main SHA before stable promotion. A skip is not evidence |
-| Build or dependency | Linux and macOS `check-full` and mapped checks before merge; manual empty-cache acceptance |
+| Build or dependency | Linux `check-full`, `typecheck-macos` and mapped checks before merge; macOS `check-full` in promotion; manual empty-cache acceptance |
 | Resource owner | Comparable measurements and lifecycle evidence on applicable runners |
 
 The executable minimum is [select_tests.py](tests/ci/select_tests.py), using targets from [build.zig](build.zig).
@@ -72,7 +72,7 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 | HTTP/2 client (`src/h2/`) | `test-h2`; `test-logic` for `src/h2/policy.zig` | Runs in `check` and the `check-full` execution part. Its peer tests run over loopback h2c and TLS in process. System trust against real servers is manual, on each platform (macOS SecTrust above all), and not a gate: `RUI_H2_LIVE_URL=https://api.openai.com/v1/models zig build test-h2` and `RUI_H2_LIVE_NEGATIVE=1 zig build test-h2` |
 | Postgres wire client (`src/store/wire/pg*.zig`, `scram.zig`, `tls.zig`) | `test-pg`, on drafts too, also for `src/tls_client/` (its OpenSSL settings and trust, shared with `test-h2`) | Runs in `check` and the `check-full` execution part. Decode tests use bytes captured from Postgres 16 and RFC 7677's SCRAM exchange. On Linux CI the live tests run against `postgres:15` over verified TLS with SCRAM-SHA-256-PLUS and fail if it is missing (`RUI_TEST_REQUIRE_ENGINES=postgres`); elsewhere they run only when `RUI_TEST_PG_PORT`, `RUI_TEST_PG_PASSWORD` and `RUI_TEST_PG_CA_FILE` name a server. A pipeline deeper than the socket buffers is the driver's concern and is not covered here |
 | MySQL wire client (`src/store/wire/mysql.zig`) and the Store's blocking connection (`mysql_connection.zig`) | `test-logic` and `mysql-wire-integration`, on drafts too; also `test` for those two files and `tests/integration/mysql_server.py` | `test-logic` runs `mysql.zig`'s own tests, and `test` replays its captures through the connection over a socket. `mysql-wire-integration` runs `mysql_wire_test.zig` through the connection against a MySQL 8.4 server in Docker, over its Unix socket, plaintext TCP and verified TLS, and fails, never skips, without Docker. `mysql_server.py` holds the one image pin; this harness and `check.yml`'s dialect-check server both start the image through it |
-| Skills discovery, capture and immutable catalog instructions | Focused `test -Dtest-filter='skills '` and `skills-integration` | Scanner/parser/delta/resource and Store/admission/history owners plus isolated real Host wire; native malformed filename case may skip on macOS/APFS, which rejects creating the fixture |
+| Skills discovery, capture and immutable catalog instructions | Focused `test -Dtest-filter='skills '`, `test -Dtest-filter='inline '` and `skills-integration` | Scanner/parser/delta/resource and Store/admission/history/`/name` binding and skill-entry owners plus isolated real Host wire; native malformed filename case may skip on macOS/APFS, which rejects creating the fixture |
 | Model and transport | `test`, `dispatch-integration`, `transport-h2-integration`; `test-logic` for `src/transport_policy.zig` | Live provider remains opt-in |
 | Codex credentials | `test`, Codex, credential and Codex H2 targets; `test-logic` for `src/codex_credential_policy.zig` and `src/codex_token_wire.zig` | No real account login required |
 | Product defaults (`src/product_defaults.zig`, `tests/integration/product_defaults.py`) | `test-logic`, `check`, `admission-debug-integration` and the startup-capacity targets on both systems | Every omitted-value surface consumes the module. `host-launch-integration` reads the module instead of copying values. `test-logic` pins the approved values |
@@ -83,7 +83,7 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 | Standalone Current, reply-delivery and login-signal oracles | Owning integration target; login signal on Linux only | Neither composed gate runs them. Changes to their helpers keep these targets |
 | Canonical-failure oracle | `canonical-failure-integration` on both systems | Skip it when a composed gate is selected; the human CLI fixture runs all cases |
 | Build, dependencies or bootstrap | `check-full`, full Debug admission, long timeout and churn witnesses, relevant H2 and standalone targets, manual empty-cache evidence | Transport build, dependency pins and bootstrap select both H2 targets |
-| Main admission, every ready PR | Successful plan and Linux aggregate on the immutable merge candidate: compile and format, `typecheck-macos`, `stack-frames` and the selected unit roots and integration targets. Normal changes also require policy. Native Mac runs only for [Mac paths](tests/ci/platform_boundary.py), and the [upgrade check](.github/workflows/previous-release-upgrade.yml) on hosted Linux and macOS only for upgrade, installer and Store-format paths | The conservative documentation lane requires explicit empty product selections and skipped policy, native, upgrade and cache jobs. Admission requires the exact Mac and upgrade results the plan selected: success when selected, skipped otherwise. Required admission runs before main |
+| Main admission, every ready PR | Successful plan and Linux aggregate on the immutable merge candidate: compile and format, `typecheck-macos`, `stack-frames` and the selected unit roots and integration targets. Normal changes also require policy. Native Mac runs only for [Mac paths](tests/ci/platform_boundary.py), the code Linux never executes as a Mac does; build plumbing is not one. The [upgrade check](.github/workflows/previous-release-upgrade.yml) runs on hosted Linux only for upgrade, installer and Store-format paths | The conservative documentation lane requires explicit empty product selections and skipped policy, native, upgrade and cache jobs. Admission requires the exact Mac and upgrade results the plan selected: success when selected, skipped otherwise. Required admission runs before main |
 | Promotion, manual | [Promote](.github/workflows/promote.yml) on main HEAD: Linux and macOS `check-full`, `test-logic` and `admission-debug-integration` with the batch's selected targets, `stack-frames`, the upgrade check on both systems, [renderer contracts](#renderer-contracts), then cold release builds | A failing job bisects each failed step over the batch since `stable` and files one `promotion-red` issue per cause. Only a fully green promotion publishes a release and advances `stable` |
 | Host stack frames (Zig the Host compiles: `server.zig` and the `host_modules` closure; other `src/` inputs, `build.zig`, `tests/ci/stack_frames.*`) | `stack-frames` on x86-64 Linux; `check` runs it, `check-full` does not | [stack_frames.py](tests/ci/stack_frames.py) reads the ReleaseSafe binary's prologues and direct calls. It fails on a frame over 8 KiB reachable from a Host thread or a function of a module in `host_modules` unless an exception in [stack_frames.json](tests/ci/stack_frames.json) names its cause, and on a thread whose deepest chain passes its `chain_ceiling`. Exceptions and ceilings only shrink. Calls through function pointers outside `host_modules` are not followed, and no other platform is measured |
 | Caller error coverage (`cli.zig`, `cli_args.zig`, `client.zig`, `preferences.zig` and root `caller_*.zig` under `src/`) | `python3 tests/ci/caller_errors.py`, the prepush driver and CI policy | Caller-facing CLI modules cannot use raw `@errorName`; every literal production error reference or declaration in that inventory needs a catalog mapping or an existing pending entry. The trusted `origin/main` pending set only shrinks; first rollout bootstraps from the same trusted CLI-owned sources and the exact pinned Zig standard library. Closed inferred sets also fail compilation through `caller_error.of`; unmapped errors widened from other owners remain `internal_unexpected`, exit 1 (unclassified), without extending the CLI inventory. |
@@ -117,8 +117,10 @@ A changed head requires current candidate checks before merge.
 
 [Selected checks](.github/workflows/check.yml) qualify each ready PR's immutable merge candidate.
 For normal changes, Linux runs the affected targets from [select_tests.py](tests/ci/select_tests.py), `typecheck-macos` and, when selected, the `stack-frames` oracle.
-Native macOS runs the affected targets, or `check`, only when the change touches a [Mac path](tests/ci/platform_boundary.py).
-The [previous installed-release upgrade](.github/workflows/previous-release-upgrade.yml) runs on Linux and macOS against that same candidate only for upgrade, installer and Store-format paths and the check itself.
+Native macOS runs the affected targets, or `check`, only when the change touches a [Mac path](tests/ci/platform_boundary.py): Darwin branches, C and shell sources, the PTY launcher, the HTTP/2 client, release and install scripts, and the Mac workflow.
+Darwin-only linking and settings live in `build/darwin.zig`, a Mac path.
+Other build plumbing (`build.zig`, `build.zig.zon`, the setup action, `tests/ci/qualification.py`) is not a Mac path: Linux runs it, `typecheck-macos` compiles Rui for Darwin, and promotion links and runs it on a Mac.
+The [previous installed-release upgrade](.github/workflows/previous-release-upgrade.yml) runs on Linux against that same candidate only for upgrade, installer and Store-format paths and the check itself; promotion runs it on both systems.
 Renderer contracts run nonblocking only for renderer and frontend owners.
 The documentation lane skips heavyweight policy, product builds and suites, and prior-release upgrades.
 It requires a successful plan with canonical empty product outputs and a successful Linux aggregate that verifies all product producers were skipped.
@@ -165,7 +167,7 @@ The driver waits for every peer before isolated cases and fails if any peer fail
 The unsplit serial gate retains its original case order and assertions.
 
 `zig build check-full` runs routine native tests and process integrations serially after formatting and production builds.
-Selected CI runs it on Linux for build or dependency changes; macOS Selected CI also keeps `check-full` for those changes, and manual qualification runs it on request.
+Selected CI runs it on Linux for build or dependency changes; promotion runs it on macOS, and manual qualification runs it on request.
 Run the unsplit default locally for release qualification and isolated process-latency claims.
 It is not an every-edit gate.
 Serial execution reduces unrelated load but does not establish scheduler order; use owner-visible outcomes or handshakes for ordering claims.
@@ -227,10 +229,10 @@ The Mac cross-build requires an Apple SDK.
 The release publisher is serialized and never treats cancelled acceptance as a pass.
 Build caches hold compilation inputs and outputs, not acceptance.
 All Zig unit Run steps bypass Zig acceptance caching, and Go tests use `-count=1`.
-Cache-policy changes run [the fixed-seed execution regression](tests/ci/cache_execution.py) on Linux and macOS before main.
+Cache-policy changes run [the fixed-seed execution regression](tests/ci/cache_execution.py) on Linux before main, and on macOS in promotion when the batch changed cache policy.
 The required `admission` aggregate includes this job when selected.
 Build-cache keys separate native tools, Apple SDK, architecture, dependency pins, scripts, source inputs and shard.
-PR caches never feed a privileged workflow.
+Only `main` saves caches; PR jobs restore main's snapshots and save none, so PR caches never feed a privileged workflow or evict main's.
 
 Each platform builds its target closure once with `ci-build -Dci-targets=...`.
 On Linux and macOS, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.
@@ -257,7 +259,8 @@ Successful gates do not capture.
 Native observation failure metadata is copied after reap and before temporary-root deletion.
 
 [Cache maintenance](.github/workflows/cache-maintenance.yml) warms production compilation after trusted main pushes that change build, dependency or maintenance inputs.
-Cleanup keeps the newest snapshot per platform and partition for open PRs and two for main, and removes closed PR caches; these are targets, not a quota.
+It also compiles the build runner on six Linux slots and one Mac, so test shards on the CPU models those slots drew restore it from main.
+Cleanup keeps main's newest snapshot per platform and partition, per build-runner CPU model, of each platform's compiler and of the package set, and removes every PR cache; these are targets, not a quota.
 Warm baselines are not test acceptance.
 Maintenance also builds the pinned previous release per platform for the read-only upgrade check.
 The API-only cleanup job runs trusted main code with cache-deletion permission and consumes no producer code, caches or artifacts.
@@ -846,7 +849,6 @@ The [small Host memory trial](research/memory-trial/README.md) is a collection e
 It exercises Host-owned Configure and initial-Message creation, default and explicitly restricted tools, full raw invocation/path, idle no-op and metadata reload, keyed replay after file deletion and process restart, bound model invocation and child `start_agent` discovery.
 The fixture uses native public readers and actual provider inputs, not direct Store edits or terminal excerpts.
 Mismatched repository symlinks and HOME directory aliases retain their declared names through creation, invocation, reload and replay.
-An actual PTY `/skill` invocation announces a normal HOME-owned request handle; plain `request inspect`, `list` and `recover` retain that identity and frozen admitted bytes after the source file and terminal receipt disappear, without another provider request or Conversation input.
 
 `zig build yaml-linux-compile` compiles all pinned libyaml sources as strict C99 against Linux glibc headers for x86-64 and ARM64 without linking or executing a Host.
 It reuses `configureYaml`, whose POSIX feature exposure is scoped to the dependency's C sources; removing it must fail at libyaml's `strdup` declaration, not witness setup.

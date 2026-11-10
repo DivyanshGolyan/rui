@@ -16,6 +16,7 @@ const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
 const model_list = @import("model_list.zig");
 const store = @import("store.zig");
+const session_report_reply = @import("session_report_reply.zig");
 const launch_frame = @import("launch_frame.zig");
 const core_tools = @import("core_tools.zig");
 const Hole = protocol.Hole;
@@ -116,10 +117,8 @@ pub const routes = [_]Route{
     .{
         .path = protocol.CommandKind.message.route(),
         .kind = .message,
-        .summary = "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
+        .summary = "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
         .variants = &.{
-            variant(protocol.message_request.head ++ protocol.message_request.skill, .{}),
-            variant(protocol.message_request.sender_head ++ protocol.message_request.skill, .{ .{ 3, "\"/s\"" }, .{ 4, "\"aaaaaa\"" } }),
             variant(protocol.message_request.head ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{}),
             // A sending Session's address: an absolute Store path and a Session id.
             variant(protocol.message_request.sender_head ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{ .{ 3, "\"/s\"" }, .{ 4, "\"aaaaaa\"" } }),
@@ -257,6 +256,13 @@ pub const routes = [_]Route{
         .reply = .bytes,
     },
     .{
+        .path = "/v1/skill-suggestions",
+        .kind = .skill_suggestions,
+        .summary = "Bounded skill metadata from a Session catalog or prospective Workspace discovery.",
+        .variants = &.{ variant(protocol.skill_suggestions_session_request, .{.{ 1, "\"k7m2qx\"" }}), variant(protocol.skill_suggestions_workspace_request, .{}) },
+        .reply = jsonReply(.{protocol.skill_suggestions_reply.head ++ .{BoundedListOf(protocol.skill_suggestions_reply.entry, 24, false)} ++ .{protocol.skill_suggestions_reply.tail}}),
+    },
+    .{
         .path = "/v1/model-list",
         .kind = .model_list,
         .summary = "The models each served provider offers.",
@@ -287,6 +293,19 @@ fn ListOf(comptime item: anytype) type {
         pub fn openapi_inline(d: *Document) !Value {
             const items = if (@TypeOf(item) == type) try d.typeRef(item) else try d.shapeSchema(item);
             return d.object(.{ .type = Value{ .string = "array" }, .items = items });
+        }
+    };
+}
+
+fn BoundedListOf(comptime item: anytype, comptime capacity: usize, comptime unique: bool) type {
+    return struct {
+        pub const is_list = true;
+        pub fn openapi_example(out: *std.Io.Writer) !void {
+            try out.writeAll("[]");
+        }
+        pub fn openapi_inline(d: *Document) !Value {
+            const items = if (@TypeOf(item) == type) try d.typeRef(item) else try d.shapeSchema(item);
+            return d.object(.{ .type = Value{ .string = "array" }, .items = items, .maxItems = Value{ .integer = capacity }, .uniqueItems = Value{ .bool = unique } });
         }
     };
 }
@@ -338,10 +357,7 @@ const ToolNameList = struct {
     pub fn openapi_inline(d: *Document) !Value {
         return d.object(.{
             .type = Value{ .string = "array" },
-            .items = try d.object(.{
-                .type = Value{ .string = "string" },
-                .pattern = Value{ .string = std.fmt.comptimePrint("^[A-Za-z0-9_-]{{1,{d}}}$", .{protocol.max_tool_name_bytes}) },
-            }),
+            .items = try toolName(d),
             .maxItems = Value{ .integer = protocol.max_tools },
             .uniqueItems = Value{ .bool = true },
             .@"x-rui-max-bytes" = Value{ .integer = protocol.max_tool_list_name_bytes },
@@ -352,6 +368,14 @@ const ToolNameList = struct {
         try out.print("[\"{s}\"]", .{@tagName(std.meta.tags(Tool)[0])});
     }
 };
+
+/// A tool name (`tool_name.valid`).
+fn toolName(d: *Document) !Value {
+    return d.object(.{
+        .type = Value{ .string = "string" },
+        .pattern = Value{ .string = std.fmt.comptimePrint("^[A-Za-z0-9_-]{{1,{d}}}$", .{protocol.max_tool_name_bytes}) },
+    });
+}
 
 /// Fields after `output_schema` are optional to the parser, in any order;
 /// the client always sends all four, in this order. Creation requires model,
@@ -522,6 +546,7 @@ pub const Document = struct {
         if (@hasDecl(T, "openapi_inline")) return T.openapi_inline(d);
         if (@hasDecl(T, "openapi_list")) return d.object(.{ .type = Value{ .string = "array" }, .items = try d.typeRef(T.openapi_list) });
         if (@hasDecl(T, "openapi_tools")) return ToolNameList.openapi_inline(d);
+        if (@hasDecl(T, "openapi_tool_name")) return toolName(d);
         if (@hasDecl(T, "openapi_content")) return Content.openapi_inline(d);
         const name = comptime componentName(T);
         if (!d.schemas.contains(name)) {
@@ -814,7 +839,7 @@ pub const Document = struct {
                 .report => {
                     var content: ObjectMap = .empty;
                     const reply_name = try std.fmt.allocPrint(d.arena, "{s}Reply", .{base});
-                    const shapes = store.session_report_shapes;
+                    const shapes = session_report_reply.shapes;
                     try d.schemas.put(d.arena, reply_name, try d.anyOf(&.{
                         try d.shapeSchema(shapes.current),
                         try d.shapeSchema(shapes.full),
@@ -1463,11 +1488,11 @@ test "catalog full report schema represents turnless catalog source facts" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var document: Document = .init(arena.allocator());
-    const shape = try document.shapeSchema(store.session_report_shapes.conversation);
+    const shape = try document.shapeSchema(session_report_reply.FullJson.Conversation.json_shape);
     const json = try std.json.parseFromSliceLeaky(
         Value,
         arena.allocator(),
-        "{\"ordinal\":\"1\",\"position\":\"1\",\"kind\":\"settings\",\"turn\":null,\"source_admission\":null,\"source_revision\":null,\"source_catalog_position\":\"1\",\"source_operation\":null,\"content\":{\"bytes\":\"12\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"}}",
+        "{\"ordinal\":\"1\",\"position\":\"1\",\"kind\":\"settings\",\"turn\":null,\"source_admission\":null,\"source_revision\":null,\"source_catalog_position\":\"1\",\"source_skill_position\":null,\"source_operation\":null,\"content\":{\"bytes\":\"12\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"}}",
         .{},
     );
     try std.testing.expect(conforms(document.schemas, shape, json));

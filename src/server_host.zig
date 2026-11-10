@@ -20,6 +20,7 @@ const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
+const session_report = @import("session_report.zig");
 const stderr = @import("stderr.zig");
 
 pub const default_bash_timeout_ms: u64 = 5 * 60 * 1000;
@@ -777,7 +778,7 @@ noinline fn writeRequestTrace(host: *Host, phase: []const u8, request_number: u6
 
 /// Local execution facts for inspection, read from another thread than the
 /// execution owner's.
-pub fn executionFacts(host: *Host) store_module.SessionReportExecution {
+pub fn executionFacts(host: *Host) session_report.Execution {
     return .{
         .dispatch_fenced = !host.launchAllowed(),
         .custody_occupied = host.custody.held(),

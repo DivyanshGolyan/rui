@@ -54,7 +54,7 @@ test "launch presets resolve MCP tools through the same catalog as configure" {
                 direct.configuration.tools = try .of(&.{"fetch_page"});
                 direct.configuration.permission_mode.state = .value;
                 try direct.configuration.permission_mode.value.set("ask");
-                const ordinary = storage.configure(&direct, .{});
+                const ordinary = try storage.configure(&direct, .{});
 
                 var request: wire_request.ConfigureCommand = .{ .preset = .{} };
                 try request.key.set("mcp-preset");
@@ -63,7 +63,7 @@ test "launch presets resolve MCP tools through the same catalog as configure" {
                 var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
                 defer memory.deinit();
                 try std.testing.expect(try core_tools.parseAgentSpec(memory.allocator(), frame.presets[0].spec, &resolved.configuration) == .accepted);
-                const preset = storage.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{});
+                const preset = try storage.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{});
                 if (available) {
                     try std.testing.expect(ordinary == .accepted);
                     try std.testing.expect(preset == .accepted);

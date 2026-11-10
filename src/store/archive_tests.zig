@@ -239,7 +239,7 @@ test "Session archive gates core peer sends and restores only fresh delivered wo
             var workspace: [protocol.max_workspace_bytes]u8 = undefined;
             var config = try testing.completeConfiguration("archive-core-sender", "", try testing.canonicalCwd(std.testing.io, &workspace), "model-a");
             config.configuration.tools = try .of(&.{"message_agent"});
-            const sender = storage.configure(&config, .{}).accepted.session;
+            const sender = (try storage.configure(&config, .{})).accepted.session;
             try testing.submitTestMessage(&storage, &tmp, "archive-core-input", "archive-core-message", sender.slice(), "send two messages");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             var decoded_buffer: [96]u8 = undefined;
@@ -313,7 +313,7 @@ fn attachedFamily(storage: *Store, tmp: *std.testing.TmpDir) !Family {
     var workspace: [protocol.max_workspace_bytes]u8 = undefined;
     var create = try testing.completeConfiguration("archive-parent", "", try testing.canonicalCwd(std.testing.io, &workspace), "model-a");
     create.configuration.tools = try .of(&.{ "bash", "start_agent" });
-    const parent = storage.configure(&create, .{}).accepted.session;
+    const parent = (try storage.configure(&create, .{})).accepted.session;
     try testing.submitTestMessage(storage, tmp, "archive-parent-input", "archive-parent-message", parent.slice(), "start child");
     const model = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
     try fixtures.settleCallsForTesting(storage, tmp, model, "archive-start-child", &.{.{

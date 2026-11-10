@@ -1,7 +1,7 @@
 """The h2 model endpoint and Host request helpers that the transport and Codex H2
 fixtures share."""
 import json
-import socket
+import os_semantics
 import socketserver
 import threading
 import time
@@ -356,7 +356,7 @@ def closed_host_request(socket_path, store, kind, *, timeout=15, deadline=None, 
         deadline = min(deadline, time.monotonic() + timeout)
     payload = json.dumps({"version": host_process.WIRE_VERSION, "kind": kind, "store": str(store.resolve()),
                           **fields}, separators=(",", ":")).encode()
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+    with os_semantics.unix_stream() as connection:
         def set_timeout():
             remaining = timeout if deadline is None else min(timeout, deadline - time.monotonic())
             assert remaining > 0, "Host request exhausted original deadline"

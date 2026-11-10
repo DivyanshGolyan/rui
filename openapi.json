@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Rui Host",
-    "version": "10",
+    "version": "11",
     "description": "The Rui Host's local protocol: HTTP/1.1 over the Unix socket of a running Host, one POST per request, generated from the Host's own wire types.\n\nRequest bodies list their fields in the order this document lists them; the Host refuses another order. Numbers that may exceed 2^53 travel as decimal strings. String bounds are in UTF-8 bytes (`x-rui-max-bytes`)."
   },
   "paths": {
@@ -210,7 +210,7 @@
     "/v1/message": {
       "post": {
         "operationId": "message",
-        "summary": "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
+        "summary": "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
         "parameters": [
           {
             "$ref": "#/components/parameters/WireVersion"
@@ -1039,6 +1039,52 @@
         }
       }
     },
+    "/v1/skill-suggestions": {
+      "post": {
+        "operationId": "skillSuggestions",
+        "summary": "Bounded skill metadata from a Session catalog or prospective Workspace discovery.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WireVersion"
+          },
+          {
+            "$ref": "#/components/parameters/HostInstance"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillSuggestionsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The reply.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillSuggestionsReply"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A refusal or failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorReply"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/model-list": {
       "post": {
         "operationId": "modelList",
@@ -1092,7 +1138,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "activity_content"
@@ -2057,7 +2103,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "activity_page"
@@ -2125,7 +2171,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "activity_page"
@@ -2155,7 +2201,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "activity_page"
@@ -2246,7 +2292,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "activity_page"
@@ -2433,7 +2479,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "activity_search"
@@ -2467,7 +2513,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "activity_search"
@@ -3163,7 +3209,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "configuration_reply"
@@ -3225,7 +3271,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3289,7 +3335,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3361,7 +3407,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3407,11 +3453,7 @@
                       "provider_is_immutable",
                       "model_is_immutable",
                       "revision_exhausted",
-                      "skills_unavailable",
-                      "unknown_skill",
-                      "skill_file_unavailable",
-                      "skill_file_too_large",
-                      "skill_text_invalid"
+                      "skills_unavailable"
                     ]
                   }
                 },
@@ -3456,7 +3498,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "configure"
@@ -3494,7 +3536,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "configure"
@@ -3536,7 +3578,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "configure"
@@ -3582,7 +3624,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "configure"
@@ -3624,7 +3666,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "configure"
@@ -3668,7 +3710,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "configure"
@@ -3718,7 +3760,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "conversation_content"
@@ -3764,7 +3806,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "conversation_page"
@@ -4073,7 +4115,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "conversation_page"
@@ -4392,7 +4434,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "conversation_page"
@@ -4437,7 +4479,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "type": "string",
@@ -4508,7 +4550,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "host_info"
@@ -4602,7 +4644,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "host_info"
@@ -4704,7 +4746,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "host_info"
@@ -4726,7 +4768,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "host_pause_reply"
@@ -4746,7 +4788,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "host_pause"
@@ -4772,7 +4814,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "host_stop_reply"
@@ -4792,7 +4834,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "host_stop"
@@ -4816,7 +4858,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_report"
@@ -4919,7 +4961,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_report"
@@ -5018,7 +5060,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_report"
@@ -5071,7 +5113,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_report"
@@ -5120,7 +5162,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "inspect_session"
@@ -5148,7 +5190,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "inspect_session"
@@ -5189,7 +5231,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "inspect_session"
@@ -5221,7 +5263,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "inspect_session"
@@ -5366,7 +5408,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_list"
@@ -5420,7 +5462,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_list"
@@ -5476,7 +5518,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_list"
@@ -5521,7 +5563,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "list_sessions"
@@ -5573,7 +5615,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "list_sessions"
@@ -5630,7 +5672,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "list_sessions"
@@ -6158,7 +6200,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "message_reply"
@@ -6270,7 +6312,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "message_reply"
@@ -6365,7 +6407,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "message_reply"
@@ -6414,7 +6456,6 @@
                       "model_is_immutable",
                       "revision_exhausted",
                       "skills_unavailable",
-                      "unknown_skill",
                       "skill_file_unavailable",
                       "skill_file_too_large",
                       "skill_text_invalid"
@@ -6480,138 +6521,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
-              },
-              "kind": {
-                "const": "message"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "sender": {
-                "type": "null"
-              },
-              "sender_handle": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 32,
-                    "x-rui-max-bytes": 32
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "skill": {
-                "type": "string",
-                "maxLength": 64,
-                "x-rui-max-bytes": 64
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "sender",
-              "sender_handle",
-              "skill"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "10"
-              },
-              "kind": {
-                "const": "message"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "sender": {
-                "type": "object",
-                "properties": {
-                  "store": {
-                    "type": "string",
-                    "maxLength": 492,
-                    "x-rui-max-bytes": 492
-                  },
-                  "session": {
-                    "type": "string",
-                    "maxLength": 128,
-                    "x-rui-max-bytes": 128
-                  }
-                },
-                "required": [
-                  "store",
-                  "session"
-                ],
-                "additionalProperties": false
-              },
-              "sender_handle": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 32,
-                    "x-rui-max-bytes": 32
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "skill": {
-                "type": "string",
-                "maxLength": 64,
-                "x-rui-max-bytes": 64
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "sender",
-              "sender_handle",
-              "skill"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "message"
@@ -6680,7 +6590,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "message"
@@ -6766,7 +6676,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "message"
@@ -6839,7 +6749,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "message"
@@ -6918,7 +6828,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "model_interruption_reply"
@@ -6980,7 +6890,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -7036,7 +6946,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -7106,7 +7016,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "model_interruption"
@@ -7205,7 +7115,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "model_list"
@@ -7228,7 +7138,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "model_list"
@@ -7279,7 +7189,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -7322,7 +7232,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -7502,7 +7412,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -10780,7 +10690,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -11026,7 +10936,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -11232,7 +11142,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -11442,7 +11352,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -11648,7 +11558,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -11684,7 +11594,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "observe_command"
@@ -11712,7 +11622,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "observe_command"
@@ -11843,7 +11753,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "permission_decision_reply"
@@ -11900,7 +11810,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -11951,7 +11861,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -12016,7 +11926,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "permission_decision"
@@ -12086,7 +11996,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "read_action_arguments"
@@ -12118,7 +12028,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "read_action_call_id"
@@ -12150,7 +12060,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "read_result"
@@ -12178,7 +12088,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "session_archive_reply"
@@ -12236,7 +12146,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -12296,7 +12206,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -12359,7 +12269,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "session_archive"
@@ -12517,7 +12427,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "session_stop_reply"
@@ -12575,7 +12485,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -12655,7 +12565,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -12717,7 +12627,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "session_stop"
@@ -12791,6 +12701,128 @@
           "first_action"
         ],
         "additionalProperties": false
+      },
+      "SkillSuggestionsReply": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "11"
+          },
+          "type": {
+            "const": "skill_suggestions"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "total": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "x-rui-max-bytes": 64
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 4096,
+                  "x-rui-max-bytes": 4096
+                }
+              },
+              "required": [
+                "name",
+                "description"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 24,
+            "uniqueItems": false
+          }
+        },
+        "required": [
+          "version",
+          "type",
+          "revision",
+          "total",
+          "entries"
+        ],
+        "additionalProperties": false
+      },
+      "SkillSuggestionsRequest": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "11"
+              },
+              "kind": {
+                "const": "skill_suggestions"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "prefix": {
+                "type": "string",
+                "maxLength": 64,
+                "x-rui-max-bytes": 64
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "session",
+              "prefix"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "11"
+              },
+              "kind": {
+                "const": "skill_suggestions"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "workspace": {
+                "type": "string",
+                "maxLength": 4096,
+                "x-rui-max-bytes": 4096
+              },
+              "prefix": {
+                "type": "string",
+                "maxLength": 64,
+                "x-rui-max-bytes": 64
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "workspace",
+              "prefix"
+            ],
+            "additionalProperties": false
+          }
+        ]
       },
       "StartError": {
         "type": "object",
@@ -13475,63 +13507,123 @@
         "additionalProperties": false
       },
       "domainreportCurrentJsonUnresolved": {
-        "type": "object",
-        "properties": {
-          "action": {
-            "$ref": "#/components/schemas/Decimal"
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "parent_operation": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "call_ordinal": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "tool": {
+                "type": "string",
+                "enum": [
+                  "bash",
+                  "find_tools",
+                  "message_agent",
+                  "read_transcript",
+                  "skill",
+                  "start_agent",
+                  "web_search"
+                ]
+              },
+              "permission_revision": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "authorization": {
+                "type": "string",
+                "enum": [
+                  "core",
+                  "pending",
+                  "bypass",
+                  "allow_once"
+                ]
+              },
+              "call_id": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+              },
+              "arguments": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+              },
+              "presentation": {
+                "$ref": "#/components/schemas/ToolPresentation"
+              }
+            },
+            "required": [
+              "action",
+              "parent_operation",
+              "call_ordinal",
+              "tool",
+              "permission_revision",
+              "authorization",
+              "call_id",
+              "arguments",
+              "presentation"
+            ],
+            "additionalProperties": false
           },
-          "parent_operation": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "call_ordinal": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "tool": {
-            "type": "string",
-            "enum": [
-              "bash",
-              "find_tools",
-              "message_agent",
-              "read_transcript",
-              "skill",
-              "start_agent",
-              "web_search"
-            ]
-          },
-          "permission_revision": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "authorization": {
-            "type": "string",
-            "enum": [
-              "core",
-              "pending",
-              "bypass",
-              "allow_once"
-            ]
-          },
-          "call_id": {
-            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
-          },
-          "arguments": {
-            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
-          },
-          "presentation": {
-            "$ref": "#/components/schemas/ToolPresentation"
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "parent_operation": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "call_ordinal": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "tool": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,64}$"
+              },
+              "permission_revision": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "authorization": {
+                "type": "string",
+                "enum": [
+                  "core",
+                  "pending",
+                  "bypass",
+                  "allow_once"
+                ]
+              },
+              "call_id": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+              },
+              "server": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,64}$"
+              },
+              "arguments": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+              },
+              "presentation": {
+                "$ref": "#/components/schemas/ToolPresentation"
+              }
+            },
+            "required": [
+              "action",
+              "parent_operation",
+              "call_ordinal",
+              "tool",
+              "permission_revision",
+              "authorization",
+              "call_id",
+              "server",
+              "arguments",
+              "presentation"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "action",
-          "parent_operation",
-          "call_ordinal",
-          "tool",
-          "permission_revision",
-          "authorization",
-          "call_id",
-          "arguments",
-          "presentation"
-        ],
-        "additionalProperties": false
+        ]
       },
       "domainreportCurrentJsonWork": {
         "type": "object",
@@ -13858,7 +13950,8 @@
             "enum": [
               "message",
               "settings",
-              "assistant"
+              "assistant",
+              "skill"
             ]
           },
           "turn": {
@@ -13901,6 +13994,16 @@
               }
             ]
           },
+          "source_skill_position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "source_operation": {
             "anyOf": [
               {
@@ -13923,6 +14026,7 @@
           "source_admission",
           "source_revision",
           "source_catalog_position",
+          "source_skill_position",
           "source_operation",
           "content"
         ],
@@ -14565,7 +14669,7 @@
         "description": "The wire version this document describes. Any other version is refused.",
         "schema": {
           "type": "string",
-          "const": "10"
+          "const": "11"
         }
       },
       "HostInstance": {

@@ -10,6 +10,7 @@ import os
 import select
 import shutil
 import socket
+import os_semantics
 import sqlite3
 import statistics
 import subprocess
@@ -196,7 +197,7 @@ def percentile_95(values):
 
 
 def prepare_raw_request(socket_path, route, body):
-    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection = os_semantics.unix_stream()
     connection.settimeout(20)
     connection.connect(socket_path)
     request = (
@@ -235,7 +236,7 @@ def open_complete_inspection(socket_path, store, session, profile):
     if profile == "full":
         request["profile"] = "full"
     body = json.dumps(request, separators=(",", ":")).encode()
-    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection = os_semantics.unix_stream()
     try:
         connection.settimeout(15)
         connection.connect(socket_path)
@@ -339,7 +340,7 @@ def open_blocked_result(socket_path, store, key):
         },
         separators=(",", ":"),
     ).encode()
-    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection = os_semantics.unix_stream()
     connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
     connection.settimeout(5)
     connection.connect(socket_path)

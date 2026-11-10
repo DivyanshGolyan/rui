@@ -323,7 +323,7 @@ test "read_transcript core runner reads other Session outlines before full windo
     command.configuration.tools = try .of(&.{"read_transcript"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
-    const caller = database.configure(&command, .{}).accepted.session;
+    const caller = (try database.configure(&command, .{})).accepted.session;
     try submitTestMessage(&database, &tmp, "transcript-task", "transcript-task", caller.slice(), "read the public feed");
     const model = (try database.admitNextModelAttempt(.{})).?.permit.binding;
 
@@ -461,7 +461,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     const workspace = try storage.testingCanonicalCwd(std.testing.io, &workspace_buffer);
     var source_command = try completeConfiguration("transcript-source", "", workspace, "model-a");
     source_command.configuration.tools = try .of(&.{ "bash", "message_agent" });
-    const source_reply = database.configure(&source_command, .{});
+    const source_reply = try database.configure(&source_command, .{});
     try std.testing.expect(source_reply == .accepted);
     const source = source_reply.accepted.session;
     try submitTestMessage(&database, &tmp, "transcript-source-message", "transcript-source-message", source.slice(), "make calls");
@@ -486,7 +486,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     rename.session = source;
     rename.configuration.label.state = .value;
     try rename.configuration.label.value.set("Never expose this target label");
-    try std.testing.expect(database.configure(&rename, .{}) == .accepted);
+    try std.testing.expect(try database.configure(&rename, .{}) == .accepted);
     // The real Bash sender writes refusal positions and command identities
     // together; this fixture never bypasses the open Store's identity owner.
     const refusals = [_]struct { key: []const u8, target: []const u8, code: protocol.MessageRejection }{
@@ -546,7 +546,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     for (refusal_addresses) |address| try std.testing.expect(address != 0);
     var command = try completeConfiguration("transcript-reader", "", workspace, "model-a");
     command.configuration.tools = try .of(&.{"read_transcript"});
-    const reader_reply = database.configure(&command, .{});
+    const reader_reply = try database.configure(&command, .{});
     try std.testing.expect(reader_reply == .accepted);
     const reader_session = reader_reply.accepted.session;
     try submitTestMessage(&database, &tmp, "transcript-reader-message", "transcript-reader-message", reader_session.slice(), "read calls");
@@ -645,7 +645,7 @@ test "searchActivity finds start_agent call names and stored JSON arguments not 
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var command = try completeConfiguration("search-calls", "", workspace, "model-a");
     command.configuration.tools = try .of(&.{ "read_transcript", "start_agent" });
-    const session = database.configure(&command, .{}).accepted.session;
+    const session = (try database.configure(&command, .{})).accepted.session;
     try submitTestMessage(&database, &tmp, "search-call-task", "search-call-task", session.slice(), "make calls");
     const model = (try database.admitNextModelAttempt(.{})).?.permit.binding;
     const arguments = "{\"text\":\"find\\nthis\"}";

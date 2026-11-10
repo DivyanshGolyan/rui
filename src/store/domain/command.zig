@@ -149,7 +149,8 @@ pub const MessageReads = struct {
     sender: message_sender.Result = null,
     /// The text's identity, and the row its lookup found.
     text: content_domain.Import,
-    captured_text: ?[]const u8 = null,
+    /// The skills the text's `/name` words bound, saved with the admission.
+    bound: []const skills_domain.BoundSkill = &.{},
 };
 
 /// The handle a peer Message's sender claims, when its address names this
@@ -225,10 +226,10 @@ fn rejectMessageWithFailure(
     reads: *const MessageReads,
     sender_known: bool,
     code: message_admission.Rejection,
-    failure: ?skills_domain.Failure,
+    failure: ?skills_domain.MessageFailure,
     faults: Faults,
 ) !MessageReply {
-    const outcome_id = if (failure) |diagnostic| try skills_domain.importFailure(a, diagnostic, faults) else null;
+    const outcome_id = if (failure) |diagnostic| try skills_domain.importFailure(a, diagnostic.bytes, faults) else null;
     var answer = StoredAnswer{ .accepted = false };
     try answer.code.set(@tagName(code));
     try queueCommand(a, command.key.slice(), .message, command.session.slice(), &reads.digest, outcome_id, null, &answer);
@@ -255,7 +256,7 @@ fn admitMessage(
     committed: ?MessageCommitted,
     faults: Faults,
 ) !MessageReply {
-    const text_id = if (reads.captured_text) |bytes| try content_domain.importBytes(a, &reads.text, bytes) else try content_domain.importSealed(a, io, &command.text, &reads.text, faults);
+    const text_id = try content_domain.importSealed(a, io, &command.text, &reads.text, faults);
     const answer: StoredAnswer = .{ .accepted = true };
     if (configured) |applied| {
         try configuration_domain.queueConfiguredCommand(a, applied, command.key.slice(), .message, &reads.digest, text_id, null, &answer);
@@ -278,6 +279,7 @@ fn admitMessage(
     } else {
         a.write(admit_message, .{ .admission_id = admission_id, .session = head, .key = command.key.slice(), .content_id = text_id, .position = position });
     }
+    try skills_domain.saveBound(a, admission_id, reads.bound, faults);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
     if (committed) |callback| callback.call(callback.context, .{
@@ -307,10 +309,10 @@ pub fn submitMessage(
     command: *const content_custody.MessageCommand,
     committed: ?MessageCommitted,
     initial_skills: ?*const skills_domain.Initial,
-    captured_skill: ?*const skills_domain.Capture,
+    captured_skill: ?*const skills_domain.MessageCapture,
     faults: Faults,
 ) !MessageReply {
-    if (command.configuration != null) return submitCreating(a, io, served, selector, command, committed, initial_skills, faults);
+    if (command.configuration != null) return submitCreating(a, io, served, selector, command, committed, initial_skills, captured_skill, faults);
     var reads: MessageReads = .{ .digest = command.semanticDigest(), .text = content_domain.sealedIdentity(&command.text) };
     return submitTo(a, io, served, selector, command, committed, captured_skill, faults, &reads);
 }
@@ -326,7 +328,7 @@ noinline fn submitTo(
     selector: []const u8,
     command: *const content_custody.MessageCommand,
     committed: ?MessageCommitted,
-    captured_skill: ?*const skills_domain.Capture,
+    captured_skill: ?*const skills_domain.MessageCapture,
     faults: Faults,
     reads: *MessageReads,
 ) !MessageReply {
@@ -351,14 +353,12 @@ noinline fn submitTo(
     else
         null;
     if (rejection) |code| return rejectMessage(a, command, reads, command.sender != null and sender_valid, code, faults);
-    if (command.skill != null) {
-        const captured = captured_skill orelse return rejectMessage(a, command, reads, command.sender != null and sender_valid, .skills_unavailable, faults);
-        if (captured.* == .failed) return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, captured.failed.rejection(message_admission.Rejection), captured.failed, faults);
-        if (captured.* != .invocation) return rejectMessage(a, command, reads, command.sender != null and sender_valid, .skills_unavailable, faults);
-        reads.captured_text = captured.invocation;
-        reads.text = .ofBytes(captured.invocation, false);
-        content_domain.lookup(a, &reads.text);
-        try a.run();
+    // The Host bound the text's `/name` words to skills, or found none.
+    if (captured_skill) |captured| {
+        switch (captured.*) {
+            .failed => |failure| return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, failure.rejection(), failure, faults),
+            .bound => |bound| reads.bound = bound,
+        }
     }
     if (target.?.archive_state == .archived) a.write(clear_archive, .{ .session = target.?.session });
     return admitMessage(a, io, command, reads, target.?.session, command.session, null, committed, faults);
@@ -380,6 +380,7 @@ noinline fn submitCreating(
     command: *const content_custody.MessageCommand,
     committed: ?MessageCommitted,
     initial_skills: ?*const skills_domain.Initial,
+    captured_skill: ?*const skills_domain.MessageCapture,
     faults: Faults,
 ) !MessageReply {
     const configuration = &command.configuration.?;
@@ -402,15 +403,39 @@ noinline fn submitCreating(
         .model_capability_unavailable
     else
         null;
-    if (rejection == null) switch (try configuration_domain.applyConfiguration(a, io, "", configuration, initial_skills, faults, creation)) {
+    if (rejection != null) return rejectMessage(a, command, reads, command.sender != null and sender_valid, rejection.?, faults);
+    const checked = try configuration_domain.validateConfiguration(a, io, "", configuration, initial_skills, creation);
+    const plan = switch (checked) {
+        .rejected => |code| return rejectMessage(a, command, reads, command.sender != null and sender_valid, std.meta.stringToEnum(message_admission.Rejection, @tagName(code)).?, faults),
+        .ready => |value| value,
+    };
+    // Configuration's validation-only phase owns ordinary refusal precedence.
+    // No configuration/content/Session writes exist when a batch refuses.
+    // The Host bound the text's `/name` words to skills, or found none.
+    if (captured_skill) |captured| {
+        switch (captured.*) {
+            .failed => |failure| return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, failure.rejection(), failure, faults),
+            .bound => |bound| reads.bound = bound,
+        }
+    }
+    switch (try configuration_domain.applyValidatedConfiguration(a, io, "", configuration, initial_skills, faults, creation, plan)) {
         .rejected => |code| rejection = std.meta.stringToEnum(message_admission.Rejection, @tagName(code)).?,
         .accepted => |applied| {
             content_domain.lookup(a, &reads.text);
             try a.run();
             return admitMessage(a, io, command, reads, applied.head, applied.session, &applied, committed, faults);
         },
-    };
+    }
     return rejectMessage(a, command, reads, command.sender != null and sender_valid, rejection.?, faults);
+}
+
+/// The skills a door's capture bound; none for no capture or a failed one.
+fn boundOf(captured: ?*const skills_domain.MessageCapture) []const skills_domain.BoundSkill {
+    const value = captured orelse return &.{};
+    return switch (value.*) {
+        .bound => |bound| bound,
+        .failed => &.{},
+    };
 }
 
 /// What running a `message_agent` call did.
@@ -439,6 +464,7 @@ pub fn deliverAgentMessage(
     binding: action_domain.ActionAttemptBinding,
     target: []const u8,
     text: []const u8,
+    captured: ?*const skills_domain.MessageCapture,
     faults: Faults,
 ) !AgentDelivery {
     var key_buffer: [idempotency_key.max_bytes]u8 = undefined;
@@ -459,13 +485,20 @@ pub fn deliverAgentMessage(
         return .stopped;
     }
     var result_buffer: [160]u8 = undefined;
-    const delivered = receiver != null and receiver.?.archive_state != .archiving and saved == null;
+    // The Host bound the text's `/name` words to the receiver's skills.
+    const unreadable: ?skills_domain.MessageFailure = if (captured) |value| switch (value.*) {
+        .failed => |failure| failure,
+        .bound => null,
+    } else null;
+    const delivered = receiver != null and receiver.?.archive_state != .archiving and saved == null and unreadable == null;
     const result = if (receiver == null)
         std.fmt.bufPrint(&result_buffer, "No Session {s} in this Store; nothing was sent.", .{target}) catch unreachable
     else if (receiver.?.archive_state == .archiving)
         "Rui could not send this Message: the Session is archiving. Nothing was sent."
     else if (saved != null)
         "Rui could not send this Message: its command key is already taken. Nothing was sent."
+    else if (unreadable) |failure|
+        std.fmt.bufPrint(&result_buffer, "{s} Nothing was sent.", .{failure.bytes[0..@min(failure.bytes.len, 120)]}) catch unreachable
     else
         std.fmt.bufPrint(&result_buffer, "Delivered to {s}.", .{target}) catch unreachable;
     var outcome: content_domain.Import = .ofBytes(result, false);
@@ -481,8 +514,9 @@ pub fn deliverAgentMessage(
         digest.update("rui/core/message_agent/v1");
         digest.update(&content_string.digest(text));
         try queueCommand(a, key, .message, target, &digest.finalResult(), text_id, null, &.{ .accepted = true });
+        const admission_id = try a.identity(.admission_id);
         a.write(admit_sent_message, .{
-            .admission_id = try a.identity(.admission_id),
+            .admission_id = admission_id,
             .session = head,
             .key = key,
             .content_id = text_id,
@@ -490,6 +524,7 @@ pub fn deliverAgentMessage(
             .sender = found.session,
             .sender_position = try (try a.positions(found.session)).take(1),
         });
+        try skills_domain.saveBound(a, admission_id, boundOf(captured), faults);
     }
     const outcome_id = try content_domain.importBytes(a, &outcome, result);
     try action_domain.queueCoreResolution(a, binding, found.session, if (delivered) .succeeded else .failed, outcome_id);
@@ -540,7 +575,7 @@ fn endingText(buffer: []u8, ending: turn_ending.TurnEnding) []const u8 {
 /// naming it. An ending its parent's own stop caused only settles (D139).
 /// False when nothing was owed any more. Its `rui.core/` key is free:
 /// clients cannot use one, and settling marks the row with the admission.
-pub fn deliverChildEnding(a: anytype, turn_id: u64, faults: Faults) !bool {
+pub fn deliverChildEnding(a: anytype, turn_id: u64, captured: ?*const skills_domain.MessageCapture, faults: Faults) !bool {
     var key_buffer: [idempotency_key.max_bytes]u8 = undefined;
     const key = childEndingKey(&key_buffer, turn_id);
     var owed: owed_ending_facts.Result = undefined;
@@ -583,8 +618,9 @@ pub fn deliverChildEnding(a: anytype, turn_id: u64, faults: Faults) !bool {
     digest.update("rui/core/child_ending/v1");
     digest.update(&content_digest);
     try queueCommand(a, key, .message, found.parent.slice(), &digest.finalResult(), content_id, null, &.{ .accepted = true });
+    const admission_id = try a.identity(.admission_id);
     a.write(admit_sent_message, .{
-        .admission_id = try a.identity(.admission_id),
+        .admission_id = admission_id,
         .session = head,
         .key = key,
         .content_id = content_id,
@@ -592,6 +628,9 @@ pub fn deliverChildEnding(a: anytype, turn_id: u64, faults: Faults) !bool {
         .sender = found.child,
         .sender_position = try (try a.positions(found.child)).take(1),
     });
+    // An ending is owed, so it cannot be refused: when a skill its answer
+    // bound could not be read, the ending is delivered with no skills.
+    try skills_domain.saveBound(a, admission_id, boundOf(captured), faults);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
     return true;
@@ -635,6 +674,7 @@ pub fn startAgent(
     configuration: *content_custody.Configuration,
     committed: ?MessageCommitted,
     initial_skills: ?*const skills_domain.Initial,
+    captured: ?*const skills_domain.MessageCapture,
     faults: Faults,
 ) !AgentStart {
     var key_buffer: [idempotency_key.max_bytes]u8 = undefined;
@@ -669,6 +709,9 @@ pub fn startAgent(
         if (wider.next()) |tool| break :refusal std.fmt.bufPrint(&result_buffer, "spec.tools: {s} is not one of your tools. Nothing was started.", .{@tagName(tool)}) catch unreachable;
         if (try configuration_domain.permissionMode(parent.permission_mode) == .ask and !configuration.permission_mode.value.eql("ask"))
             break :refusal "spec.permissionMode: you ask before running commands, so your agents ask too. Nothing was started.";
+        // The Host bound the task's `/name` words to the new Session's skills.
+        if (captured) |value| if (value.* == .failed)
+            break :refusal std.fmt.bufPrint(&result_buffer, "{s} Nothing was started.", .{value.failed.bytes[0..@min(value.failed.bytes.len, 150)]}) catch unreachable;
         break :refusal null;
     };
     configuration.provider = .{ .state = .value, .value = .{ .len = 0 } };
@@ -715,6 +758,7 @@ pub fn startAgent(
             .sender = found.session,
             .sender_position = try (try a.positions(found.session)).take(1),
         });
+        try skills_domain.saveBound(a, admission_id, boundOf(captured), faults);
     }
     const outcome_id = try content_domain.importBytes(a, &outcome, result);
     try action_domain.queueCoreResolution(a, binding, found.session, if (applied != null) .succeeded else .failed, outcome_id);

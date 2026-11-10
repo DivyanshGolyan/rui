@@ -3,7 +3,7 @@ and observation, raw socket requests and the streaming model endpoint."""
 import http.server
 import json
 import pathlib
-import socket
+import os_semantics
 import subprocess
 import sys
 import threading
@@ -243,7 +243,7 @@ def read_http_response(connection, timeout=3, *, deadline=None):
 
 
 def open_partial(socket_path, route, *, complete_headers=True):
-    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection = os_semantics.unix_stream()
     try:
         connection.settimeout(3)
         connection.connect(socket_path)
@@ -266,7 +266,7 @@ def environment_header(route):
 
 
 def raw_request(socket_path, route, body, declared_length=None):
-    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection = os_semantics.unix_stream()
     try:
         connection.settimeout(5)
         connection.connect(socket_path)

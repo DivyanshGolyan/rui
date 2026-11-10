@@ -101,7 +101,6 @@ pub const Code = enum {
     model_is_immutable,
     revision_exhausted,
     skills_unavailable,
-    unknown_skill,
     skill_file_unavailable,
     skill_file_too_large,
     skill_text_invalid,
@@ -284,7 +283,7 @@ fn mapped(err: anyerror) ?Code {
         error.InteractiveTerminalRequired => .terminal_required,
         error.IncompleteTerminalInput => .terminal_input_incomplete,
         error.EmptyMessageInput => .message_empty,
-        error.InvalidArguments => .invocation_invalid,
+        error.InvalidArguments, error.InvalidPrefix => .invocation_invalid,
         error.InvalidInvocation => .invocation_invalid,
         error.CallerFailure => .internal_unexpected,
         // Directory owners translate this to a contextual Store/preference
@@ -486,9 +485,8 @@ pub fn facts(code: Code) Facts {
         .workspace_is_immutable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "the workspace already saved for this Session" }, .says = "An existing Session cannot change its workspace.", .next = "Omit --workspace, or create a new Session for the other directory." },
         .provider_is_immutable => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "the provider already saved for this Session" }, .says = "An existing Session cannot change its provider.", .next = "Omit --provider, or create a new Session with the other provider." },
         .model_is_immutable => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "the model already saved for this Session" }, .says = "An existing Session cannot change its model.", .next = "Omit --model, or create a new Session with the other model." },
-        .unknown_skill => .{ .act = .fix, .input = .tools, .accepted = .{ .grammar = "a name in this Session's advertised skills catalog" }, .says = "No advertised skill has that name.", .next = "Reload skills to refresh the catalog, then use its exact name." },
         .skill_file_unavailable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "a readable SKILL.md at its advertised absolute path" }, .says = "The selected skill file could not be read.", .next = "Restore the file and access to it, or reload skills before choosing another name." },
-        .skill_file_too_large => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "a complete SKILL.md of at most 1 MiB" }, .says = "The selected skill file exceeds the read limit.", .next = "Reduce SKILL.md to at most 1 MiB, then invoke it again." },
+        .skill_file_too_large => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "complete SKILL.md files of at most 1 MiB each and in total" }, .says = "The selected skill files exceed the per-file or combined read limit.", .next = "Select fewer skills or reduce their files to fit both limits." },
         .skill_text_invalid => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "UTF-8 SKILL.md text" }, .says = "The selected skill file is not valid UTF-8 text.", .next = "Save the complete file as UTF-8, then invoke it again." },
         .skills_unavailable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "readable repository and home .agents/skills roots" }, .says = "The skills catalog could not be read completely.", .next = "Restore access to the skill roots, then retry the original request." },
         .revision_exhausted => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "a Session whose configuration revision can still advance" }, .says = "This Session has exhausted its configuration revisions.", .next = "Create a new Session with the desired configuration." },
@@ -765,4 +763,19 @@ test "fresh CLI argument errors are distinct from saved tool refusals" {
     var out = std.Io.Writer.fixed(&bytes);
     try writeSavedLine(&out, .invalid_arguments, .{ .resource = "session", .operation = "send" });
     try std.testing.expectEqualStrings("rui session send: arguments: The tool arguments are invalid. Accepted: arguments satisfying the selected tool schema. Next: Correct the arguments to match the selected tool schema. This rejection was saved and replays as saved; a resend needs a new key. [invalid_arguments]\n", out.buffered());
+}
+
+// Prefixes are native read arguments, not saved tool rejections.
+test "inline skills invalid suggestion prefix has a mapped caller repair" {
+    try std.testing.expectEqual(Code.invocation_invalid, of(error.InvalidPrefix));
+}
+
+test "inline skills size refusal explains per-file and combined limits" {
+    var storage: [2048]u8 = undefined;
+    var out = std.Io.Writer.fixed(&storage);
+    try writeSavedLine(&out, .skill_file_too_large, .{ .resource = "session", .operation = "send" });
+    const line = out.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, line, "each and in total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "Select fewer skills or reduce their files") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "a resend needs a new key") != null);
 }

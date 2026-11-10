@@ -388,7 +388,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
             assert len(records) == ordinal + 1, records
             starts.append(records[-1])
         for _ in range(2):
-            connection = socket.socket(socket.AF_UNIX)
+            connection = os_semantics.unix_stream()
             connection.settimeout(3)
             connection.connect(socket_path)
             connection.sendall(b"POST /v1/")
@@ -563,7 +563,7 @@ def prove_accept_pressure(state):
         connections = []
 
         def connect(path):
-            peer = socket.socket(socket.AF_UNIX)
+            peer = os_semantics.unix_stream()
             connections.append(peer)
             peer.settimeout(1)
             peer.connect(path)
@@ -718,7 +718,7 @@ os.execv('/bin/bash', ['/bin/bash', *sys.argv[1:]])
         fixture.message(root, store, "message", session, "check inheritance")
         diagnostics.wait("prepared_before_handoff", timeout=10)
         hold.touch()
-        peer = socket.socket(socket.AF_UNIX)
+        peer = os_semantics.unix_stream()
         peer.connect(fields["socket"])
         wait_for(lambda: ready.exists() and ready.read_bytes().endswith(b"\n"), "accepted socket before flags", timeout=10)
         # Open a competing launch window, not a timing acceptance assertion.
