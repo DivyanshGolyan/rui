@@ -94,13 +94,23 @@ pub const Hooks = struct {
     captured: *const fn (std.Io) anyerror!void,
 };
 
+/// What one Host read found, kept whole so neither part outlives the read
+/// that took it.
+pub const HostRead = struct {
+    /// Null when no Host is ready.
+    facts: ?view.Host = null,
+    /// This TUI's memory, with the Host's and its tools' while one runs;
+    /// null when the read sampled none.
+    memory: ?view.Memory = null,
+};
+
 /// The client operations the effects run. The worker runs all but
 /// `converse`, each with its own cancellable requests; the loop runs
 /// `converse`. Each returns what the Host answered, failures included, and
 /// an error when there was no answer. Tests substitute their own.
 pub const Operations = struct {
-    /// host-info's facts, or null when the Host gives none.
-    host: *const fn (*Self) ?view.Host,
+    /// One Host read: host-info's facts and the memory sampled with them.
+    host: *const fn (*Self) HostRead,
     /// Whether no Host owns the Store: it stopped, rather than failing to
     /// answer discovery.
     stopped: *const fn (*Self) bool,
@@ -345,15 +355,11 @@ draft_anchor: usize = 0,
 done: [2]c_int = .{ -1, -1 },
 
 worker: ClientTask = .{},
-upgrade_requested: bool = false,
-/// The /upgrade run, its news so far, and the receipts runs left, which
-/// print on exit.
+/// The /upgrade run's worker, for as long as the core says one runs, and
+/// the receipts runs left, which print on exit.
 upgrade_job: UpgradeJob = .{},
-upgrade_heard: UpgradeJob.Heard = .{},
 /// The serving Host's pid, read once per Host start.
 host_process: ?struct { started_at: u64, pid: i32 } = null,
-/// Live memory from the latest host read, null until one succeeds.
-memory: ?view.Memory = null,
 upgrade_report: ?std.Io.Writer.Allocating = null,
 /// The terminal title as last set: the open Session's name, if any, and how
 /// many Sessions need the person.
@@ -364,7 +370,7 @@ job_count: usize = 0,
 job: Job = .list,
 traversal: protocol_reply.SessionTraversal = .init(null),
 traversal_archive: protocol.SessionArchiveFilter = .active,
-host: ?view.Host = null,
+host: HostRead = .{},
 page: protocol_reply.SessionListPage = undefined,
 lines: [view.max_first_line_reads]Line = @splat(.{}),
 /// Each command read's leading bytes, null when it has none to show.
@@ -486,7 +492,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 }
                 const now = self.realMs();
                 // An Upgrade holds Host work until it ends.
-                if (self.upgrade_requested) try self.appUpgrade(ctx) else {
+                if (self.state.upgrading()) try self.appUpgrade(ctx) else {
                     if (self.state.wakeAt()) |at| if (now >= at) {
                         try self.appNext(ctx, try self.event(.{ .tick = now }));
                         ctx.redraw = true;
@@ -633,23 +639,21 @@ fn appCopy(raw: *anyopaque, file: std.Io.File, start: u64, length: u64) !void {
     try app.vx.copyToSystemClipboard(app.tty.writer(), bytes, self.init.gpa);
 }
 
-/// Runs /upgrade inline: once the overview's own Host work has settled,
-/// the check and install run on their worker, and the core hears each step.
+/// Runs the Upgrade the core says is going: once the overview's own Host
+/// work has settled, the check and install run on their worker. The core
+/// is told where the run stands whenever that differs from what it holds,
+/// so the worker is the one place the run's state is decided.
 fn appUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
-    if (!self.upgrade_job.started) {
-        if (!try self.quiesceUpgrade()) return;
-        self.upgrade_heard = .{};
-        // A failed start finishes the run, which the core hears below.
-        self.upgrade_job.begin(self.init, self.options.store) catch {};
-    }
-    const done = try self.upgrade_job.advance();
-    while (self.upgrade_job.news(&self.upgrade_heard, self.state.summary.counts.working)) |step| {
-        try self.appNext(ctx, try self.event(.{ .upgrade = step }));
+    const job = &self.upgrade_job;
+    // A failed start finishes the run, which the core is told below.
+    if (!job.started and try self.quiesceUpgrade()) job.begin(self.init, self.options.store) catch {};
+    const done = job.started and try job.advance();
+    const stands = job.status(self.state.summary.counts.working);
+    if (!std.meta.eql(stands, self.state.upgrade.?)) {
+        try self.appNext(ctx, try self.event(.{ .upgrade = stands }));
         ctx.redraw = true;
     }
-    if (!done) return;
-    try self.keepUpgrade();
-    self.upgrade_requested = false;
+    if (done) try self.keepUpgrade();
 }
 
 /// Keeps a finished run's receipt for exit, the full report when it
@@ -763,17 +767,29 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const frame = self.animationFrame();
     self.app_frame = frame;
     self.app_width = size.width;
-    self.app_panel = try view.panelItems(ctx.arena, &self.state, size.width, self.caps);
-    const panel = self.app_panel;
     if (self.state.picker != null) view.syncPicker(&self.state, self.composerDraft());
-    self.app_models = if (self.state.picker) |shown| blk: {
-        const defaults = view.pickerDefaults(&self.state);
-        const words = view.pickerWords(self.composerDraft().bytes);
-        const choice = shown.choice orelse model_picker_view.open(&self.state.menu, words, defaults);
-        break :blk try model_picker_view.rows(ctx.arena, &self.state.menu, words, defaults, choice, size.width, self.caps.width, self.caps.unicode, self.state.menu_read);
-    } else null;
-    self.app_list.selected = if (self.app_models) |models| models.selected else if (panel == null) if (view.selectedLine(&self.state)) |line| @intCast(line) else null else null;
-    self.app_list.rows = .{ .userdata = self, .count = @intCast(if (self.app_models) |models| models.count else if (panel) |items| items.len else view.listLength(&self.state)), .rowFn = appRow };
+    // The core says what fills the list; this frame draws only that.
+    switch (self.state.listArea()) {
+        .picker => {
+            const defaults = view.pickerDefaults(&self.state);
+            const words = view.pickerWords(self.composerDraft().bytes);
+            const choice = self.state.picker.?.choice orelse model_picker_view.open(&self.state.menu, words, defaults);
+            const models = try model_picker_view.rows(ctx.arena, &self.state.menu, words, defaults, choice, size.width, self.caps.width, self.caps.unicode, self.state.menu_read);
+            self.app_models = models;
+            self.app_list.selected = models.selected;
+            self.app_list.rows = .{ .userdata = self, .count = @intCast(models.count), .rowFn = appRow };
+        },
+        .panel => {
+            const items = (try view.panelItems(ctx.arena, &self.state, size.width, self.caps)).?;
+            self.app_panel = items;
+            self.app_list.selected = null;
+            self.app_list.rows = .{ .userdata = self, .count = @intCast(items.len), .rowFn = appRow };
+        },
+        .sessions => {
+            self.app_list.selected = if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
+            self.app_list.rows = .{ .userdata = self, .count = @intCast(view.listLength(&self.state)), .rowFn = appRow };
+        },
+    }
     self.app_list.caps = self.caps;
     self.state.commands = view.nextCommands(&self.state, self.composerDraft());
     self.app_header.caps = self.caps;
@@ -798,7 +814,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     var surface = try self.app_screen.widget().draw(ctx);
     surface.widget = self.widget();
     self.app_spins = false;
-    if (panel == null and self.state.picker == null) for (self.app_list.shown.first..self.app_list.shown.end) |at| {
+    if (self.state.listArea() == .sessions) for (self.app_list.shown.first..self.app_list.shown.end) |at| {
         if (view.markSpins(&self.state, view.listItem(&self.state, at).?, self.caps)) self.app_spins = true;
     };
     return surface;
@@ -922,7 +938,6 @@ fn event(self: *Self, value: view.Event) !?Next {
         .start => |request| self.queue(.{ .start = try request.own(self.init.gpa) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
         .cancel_upgrade => self.upgrade_job.cancel(),
-        .upgrade => self.upgrade_requested = true,
         .archive => |request| self.queue(.{ .archive = request }),
         .list_models => self.queue(.models),
         .save_default => |binding| self.queue(.{ .save = binding }),
@@ -1118,8 +1133,8 @@ fn complete(self: *Self) !?Next {
 fn deliver(self: *Self, outcome: anyerror!void) !?Next {
     switch (self.job) {
         .host => {
-            if (self.memory) |memory| _ = try self.event(.{ .memory = memory });
-            return self.event(.{ .host = self.host });
+            if (self.host.memory) |memory| _ = try self.event(.{ .memory = memory });
+            return self.event(.{ .host = self.host.facts });
         },
         .list => {
             outcome catch return self.event(.{ .list = .failed });
@@ -1349,7 +1364,7 @@ fn observed(raw: *anyopaque, read: protocol.session_work.Work, name: []const u8,
 fn service(raw: *anyopaque) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
-    if (self.state.upgrade_blocked) return false;
+    if (self.state.upgrade_after == .blocked) return false;
     const now_ms = self.realMs();
     if (self.state.wakeAt()) |at| if (now_ms >= at) {
         _ = try self.event(.{ .tick = now_ms });
@@ -1392,7 +1407,6 @@ fn quiesceUpgrade(self: *Self) !bool {
             };
         }
     }
-    self.state.upgrade_pending = true;
     return self.worker.thread == null and self.job_count == 0;
 }
 
@@ -1400,7 +1414,7 @@ fn upgradeHandoff(raw: *anyopaque, handoff: SessionFrontend.UpgradeHandoff) !boo
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (handoff) {
         .quiesce => {
-            self.state.upgrade_pending = true;
+            self.state.holdForSessionUpgrade();
             return self.quiesceUpgrade();
         },
         .ready, .incompatible => {
@@ -1478,15 +1492,16 @@ fn hostStopped(self: *Self) bool {
     return client.hostStatus(self.init.io, self.options.store) == .unavailable;
 }
 
-fn hostFacts(self: *Self) ?view.Host {
+fn hostFacts(self: *Self) HostRead {
     const ready: ?@FieldType(protocol_reply.HostStatus, "ready") = switch (client.hostStatus(self.init.io, self.options.store)) {
         .ready => |ready| ready,
         else => null,
     };
-    // The same read samples the counts line's memory.
-    self.memory = self.liveMemory(if (ready) |host| host.started_at else null);
-    const host = ready orelse return null;
-    return .{ .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied };
+    return .{
+        .facts = if (ready) |host| .{ .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied } else null,
+        // The same read samples the counts line's memory.
+        .memory = self.liveMemory(if (ready) |host| host.started_at else null),
+    };
 }
 
 /// The counts line's memory: this TUI, the Host that started at
@@ -1679,9 +1694,9 @@ const fake_operations: Operations = .{
         }
     }.skills,
     .host = struct {
-        fn host(_: *Self) ?view.Host {
+        fn host(_: *Self) HostRead {
             Seen.now.hosts += 1;
-            return .{ .started_at = test_now_s - 60, .slots = 4, .slots_in_use = 1 };
+            return .{ .facts = .{ .started_at = test_now_s - 60, .slots = 4, .slots_in_use = 1 } };
         }
     }.host,
     .stopped = struct {
@@ -4404,7 +4419,7 @@ test "upgrade quiescence settles accepted queued and running archive mutations b
         try std.testing.expectEqual(@as(usize, 1), overview.job_count);
         if (running) try overview.dispatch(.all);
         try std.testing.expect(try rig.press("/upgrade\r") == null);
-        try std.testing.expect(overview.upgrade_requested);
+        try std.testing.expect(overview.state.upgrading());
         try std.testing.expect(!try overview.quiesceUpgrade());
         try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &Gate.entered, test_poll.isSet);
         try std.testing.expect(!try overview.quiesceUpgrade());
@@ -4460,13 +4475,13 @@ test "Esc while /upgrade waits for a held archive keeps the cancel: nothing chec
     defer ctx.cmds.deinit(std.testing.allocator);
     // The archive holds the handoff: the run has not started.
     try overview.appUpgrade(&ctx);
-    try std.testing.expect(overview.upgrade_requested and !overview.upgrade_job.started);
+    try std.testing.expect(overview.state.upgrading() and !overview.upgrade_job.started);
     // Kitty's Esc, unambiguous on its own.
     try std.testing.expect(try rig.press("\x1b[27u") == null);
     Gate.release.store(true, .release);
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), overview, Gate.completed);
     var turns: usize = 0;
-    while (overview.upgrade_requested) : (turns += 1) {
+    while (overview.state.upgrading()) : (turns += 1) {
         try std.testing.expect(turns < 100);
         try overview.appUpgrade(&ctx);
     }
@@ -4480,16 +4495,18 @@ test "memory counts this TUI alone while no Host runs, at open and after a Host 
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
     defer rig.close();
     const overview = rig.overview;
-    try std.testing.expect(overview.hostFacts() == null);
-    const alone = overview.memory orelse return error.TestUnexpectedResult;
+    const first = overview.hostFacts();
+    try std.testing.expect(first.facts == null);
+    const alone = first.memory orelse return error.TestUnexpectedResult;
     try std.testing.expect(alone.rui > 0 and alone.tools == null);
-    // As after one good sample of a Host and its tools, which then stopped.
+    // As after one good sample of a Host and its tools, which then stopped:
+    // the read after it carries nothing over from that sample.
     overview.host_process = .{ .started_at = 1, .pid = std.c.getpid() };
-    overview.memory = .{ .rui = 1, .tools = 99 };
-    try std.testing.expect(overview.hostFacts() == null);
+    const second = overview.hostFacts();
+    try std.testing.expect(second.facts == null);
     try std.testing.expect(overview.host_process == null);
-    const after = overview.memory orelse return error.TestUnexpectedResult;
-    try std.testing.expect(after.rui > 1 and after.tools == null);
+    const after = second.memory orelse return error.TestUnexpectedResult;
+    try std.testing.expect(after.rui > 0 and after.tools == null);
 }
 
 test "upgrade quiescence cancels read jobs rather than granting them mutation custody" {

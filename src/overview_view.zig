@@ -376,8 +376,8 @@ pub const Event = union(enum) {
     memory: Memory,
     /// A needs-you row's command read ended.
     command: CommandText,
-    /// The Upgrade /upgrade started moved on.
-    upgrade: upgrade_status.News,
+    /// Where the run /upgrade started stands now.
+    upgrade: upgrade_status.Run,
     conversed: Conversed,
     /// A model-list read ended.
     models: ModelsRead,
@@ -422,14 +422,21 @@ pub fn unconfirmedLine(state: *const State, buffer: *[max_unconfirmed_line_bytes
 }
 
 pub const StatusBuffer = [@max(upgrade_status.max_line_bytes, max_unconfirmed_line_bytes)]u8;
+
+/// What fills the list's lines; `State.listArea` says which.
+pub const ListArea = enum { sessions, panel, picker };
+
 pub const StatusLine = struct { text: []const u8, colour: Colour };
 
-/// The overview's status bar: the newest notice, else the Upgrade while it
-/// runs or holds, else the newest unconfirmed send; null when all is quiet.
+/// The overview's status bar: an Upgrade while it runs, since its line is
+/// where Esc is offered; else the newest notice; else an Upgrade that
+/// holds; else the newest unconfirmed send; null when all is quiet.
 /// Borrows `state` and `buffer`.
 pub fn statusLine(state: *const State, caps: Caps, buffer: *StatusBuffer) ?StatusLine {
+    const upgrade: ?upgrade_status.Line = if (state.upgrade) |run| upgrade_status.line(run, buffer[0..upgrade_status.max_line_bytes], if (caps.unicode) .unicode else .ascii) else null;
+    if (upgrade) |line| if (line.lasts == .until_done) return .{ .text = line.text, .colour = .normal };
     if (state.notice) |*notice| return .{ .text = notice.firstLine(), .colour = notice.colour };
-    if (state.upgrade.line(buffer[0..upgrade_status.max_line_bytes], if (caps.unicode) .unicode else .ascii)) |line| if (line.lasts != .notice)
+    if (upgrade) |line| if (line.lasts == .persistent)
         return .{ .text = line.text, .colour = if (line.tone == .attention) .attention else .normal };
     const unconfirmed = unconfirmedLine(state, buffer[0..max_unconfirmed_line_bytes]) orelse return null;
     return .{ .text = unconfirmed, .colour = .attention };
@@ -650,7 +657,6 @@ pub const Effect = union(enum) {
     /// Save the person's default for new Sessions, as `rui defaults
     /// configure --provider --model` does, and answer with `saved`.
     save_default: Default,
-    upgrade,
     /// Esc asked the running Upgrade to cancel before it publishes.
     cancel_upgrade,
     /// Empty the line editor.
@@ -965,12 +971,11 @@ pub const State = struct {
     /// The Workspace the composer starts Sessions in, as an index in `workspaces`.
     cwd: u32,
     now_ms: u64 = 0,
-    /// The selected Rui does not speak this Host's protocol: Host intents
-    /// wait for /upgrade or a new terminal.
-    upgrade_blocked: bool = false,
-    /// An Upgrade is under way or the listing has not yet been read again
-    /// under the selected Rui: Host intents wait.
-    upgrade_pending: bool = false,
+    /// What the last Upgrade left Host intents: open, held until the
+    /// listing is read again under the selected Rui, or blocked, since the
+    /// selected Rui does not speak this Host's protocol, until /upgrade or
+    /// a new terminal.
+    upgrade_after: session_upgrade.After = .open,
     /// The terminal's own last successful `rui auth login`, Unix seconds.
     login_at: ?u64 = null,
 
@@ -1014,8 +1019,9 @@ pub const State = struct {
     host: ?Host = null,
     /// The latest memory read; null before the first.
     memory: ?Memory = null,
-    /// The inline /upgrade run and what the status bar says of it.
-    upgrade: upgrade_status.Upgrade = .{},
+    /// The run /upgrade started, as its worker last said it stands; null
+    /// before the first.
+    upgrade: ?upgrade_status.Run = null,
 
     /// The person's default for new Sessions. A pick replaces it at once,
     /// and a save follows it to the preferences file. `nextBinding` says
@@ -1102,6 +1108,15 @@ pub const State = struct {
             .compose => .edit,
             .frozen => .frozen,
         };
+    }
+
+    /// What fills the list's lines: the model picker over a panel, a panel
+    /// over the Sessions. The frame draws this and a click lands on it, so
+    /// neither decides it again.
+    pub fn listArea(self: *const State) ListArea {
+        if (self.picker != null) return .picker;
+        if (self.panel != null) return .panel;
+        return .sessions;
     }
 
     /// The picker remains actionable even on a screen too small to show it.
@@ -1203,26 +1218,42 @@ pub const State = struct {
         return at;
     }
 
+    /// /upgrade's run has not ended: the shell runs and polls its worker.
+    pub fn upgrading(self: *const State) bool {
+        return if (self.upgrade) |run| run.going() else false;
+    }
+
+    /// Host intents wait: an Upgrade runs, or the last one left them held.
+    /// The one rule every Host intent and the shell's lending ask.
+    pub fn holdsHost(self: *const State) bool {
+        return self.upgrading() or self.upgrade_after != .open;
+    }
+
     /// An Upgrade ended with `outcome`: an unchanged one leaves the block
     /// as it was, and unless blocked the overview lists again before Host
     /// intents resume.
     pub fn upgraded(self: *State, outcome: session_upgrade.Outcome) void {
-        switch (outcome) {
-            .unchanged => {},
-            .compatible => self.upgrade_blocked = false,
-            .incompatible => self.upgrade_blocked = true,
-        }
-        self.upgrade_pending = !self.upgrade_blocked;
+        self.upgrade_after = switch (outcome) {
+            .unchanged => if (self.upgrade_after == .blocked) .blocked else .reobserving,
+            .compatible => .reobserving,
+            .incompatible => .blocked,
+        };
         self.next_list_ms = 0;
     }
 
+    /// A conversation's Upgrade began: Host intents wait until it says how
+    /// it ended and the listing is read again. A block stays.
+    pub fn holdForSessionUpgrade(self: *State) void {
+        if (self.upgrade_after == .open) self.upgrade_after = .reobserving;
+    }
+
     /// How long the shell may wait for input, in milliseconds, -1 for ever:
-    /// until the next `tick`, every `upgrade_poll_ms` while an Upgrade holds
-    /// the overview or is asked for, and while the screen spins no later than
+    /// until the next `tick`, every `upgrade_poll_ms` while an Upgrade runs
+    /// or blocks the overview, and while the screen spins no later than
     /// its next frame. `now_ms` is wall-clock time, as ticks are; `awake_ms`
     /// is the monotonic clock frames count on.
-    pub fn waitMs(self: *const State, upgrading: bool, now_ms: u64, awake_ms: u64, spins: bool) i32 {
-        const next: i32 = if (self.upgrade_blocked or upgrading) upgrade_poll_ms else if (self.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
+    pub fn waitMs(self: *const State, now_ms: u64, awake_ms: u64, spins: bool) i32 {
+        const next: i32 = if (self.upgrade_after == .blocked or self.upgrading()) upgrade_poll_ms else if (self.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
         if (!spins) return next;
         const frame: i32 = @intCast(spin_interval_ms - awake_ms % spin_interval_ms);
         return if (next < 0) frame else @min(next, frame);
@@ -1628,7 +1659,9 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             },
         },
         .first_line => |result| try firstLine(state, result),
-        .clicked => |clicked| switch (clicked) {
+        // A click is input as a key is: the screen that takes no key takes
+        // no click, wherever it lands.
+        .clicked => |clicked| if (state.inputMode() != .frozen) switch (clicked) {
             .line => |line| try click(state, line, &effects),
             // As `/sessions` does; the default view shows no name.
             .view => if (state.archive != .active) try changeArchiveView(state, .active, &effects),
@@ -1734,18 +1767,18 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .host => |facts| state.host = facts,
         .memory => |memory| state.memory = memory,
         .command => |answer| try commandRead(state, answer),
-        .upgrade => |reported| switch (reported) {
-            .found => |release| state.upgrade.found(release),
-            .step => |next| state.upgrade.step(next),
-            .ended => |ended| {
-                state.upgrade.ended(ended.how);
+        .upgrade => |run| {
+            // The shell reports only the run /upgrade asked for.
+            std.debug.assert(state.upgrading());
+            state.upgrade = run;
+            if (run == .ended) {
                 // An ending that is only news is a notice, which the next
                 // key clears; one that holds stays as the Upgrade's line.
                 var said: [upgrade_status.max_line_bytes]u8 = undefined;
-                if (state.upgrade.line(&said, .unicode)) |line| if (line.lasts == .notice)
-                    state.say(if (line.tone == .attention) .attention else .normal, "{s}", .{line.text});
-                state.upgraded(ended.outcome);
-            },
+                const line = upgrade_status.line(run, &said, .unicode);
+                if (line.lasts == .notice) state.say(if (line.tone == .attention) .attention else .normal, "{s}", .{line.text});
+                state.upgraded(run.ended.outcome);
+            }
         },
         .models => |read| readModels(state, read),
         .picker_action => |input| if (state.picker) |*shown| {
@@ -1947,7 +1980,7 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
         effects.add(.{ .notify = .{ .name = title(state, row).text, .kind = found.kind, .more = found.more } });
     }
     state.listing = false;
-    state.upgrade_pending = false;
+    if (state.upgrade_after == .reobserving) state.upgrade_after = .open;
     try readFirstLines(state, effects);
     readCommands(state, effects);
 }
@@ -2294,7 +2327,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             .clear => if (picker != null) {
                 state.closePicker();
                 effects.add(.clear_draft);
-            } else if (state.upgrade.escape()) {
+            } else if (state.upgrade != null and state.upgrade.?.takesEscape()) {
                 effects.add(.cancel_upgrade);
             } else if (shownCommands(state, value.draft)) |shown| {
                 shown.close();
@@ -2410,11 +2443,8 @@ fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *co
 /// do. A folded group's "more" line opens the group at its first hidden
 /// row, as moving into them does. Headings and gaps take no click.
 fn click(state: *State, line: usize, effects: *Effects) error{OutOfMemory}!void {
-    // A shown panel or the model picker fills the list's lines; none of
-    // them is a Session.
-    if (state.panel != null or state.shownPicker() != null) return;
-    // While a start waits, keys move nothing and Enter opens nothing.
-    if (state.inputMode() == .frozen) return;
+    // Only the Sessions list's lines are Sessions.
+    if (state.listArea() != .sessions) return;
     const item = listItem(state, line) orelse return;
     const at = switch (item) {
         .gap, .heading, .empty => return,
@@ -2436,23 +2466,19 @@ pub const upgrade_recovery = "! Host requests paused after Upgrade; draft retain
 
 /// Admission applies only to new Host intents, never to their completions.
 fn admitHostRequest(state: *State) bool {
-    if (!state.upgrade_blocked and !state.upgrade_pending) return true;
+    if (!state.holdsHost()) return true;
     state.say(.attention, upgrade_recovery, .{});
     return false;
 }
 
-/// /upgrade checks at once; Host intents wait until it ends.
-fn startUpgrade(state: *State, effects: *Effects) void {
+/// /upgrade checks at once; Host intents wait until it ends. The shell
+/// runs the worker for as long as `upgrading` says.
+fn startUpgrade(state: *State) void {
     // The run going on keeps its progress and its Esc.
-    switch (state.upgrade.state) {
-        .checking, .installing => return,
-        .idle, .ended => {},
-    }
-    state.upgrade_pending = true;
-    // The run's line is newer than any notice.
+    if (state.upgrading()) return;
+    // An ending that holds is newer than any notice.
     state.notice = null;
-    state.upgrade.begin();
-    effects.add(.upgrade);
+    state.upgrade = .checking;
 }
 
 fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
@@ -2469,7 +2495,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
     // hold refuses them.
     if (parsed) |result| switch (result) {
         .command => |command| switch (command.name) {
-            .upgrade => return startUpgrade(state, effects),
+            .upgrade => return startUpgrade(state),
             .exit => return effects.add(.exit),
             else => {},
         },
@@ -2511,7 +2537,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
             try changeArchiveView(state, filter, effects);
         },
         .exit => effects.add(.exit),
-        .upgrade => startUpgrade(state, effects),
+        .upgrade => startUpgrade(state),
         .model => unreachable, // The draft-backed picker takes /model before submission.
         .configure => if (configure(state, command.argument)) effects.add(.clear_draft),
         .help => {
@@ -3113,7 +3139,7 @@ fn caretName(draft: Draft) ?[]const u8 {
 /// `skillsRead`. Its prefix borrows the state until then.
 pub fn askSkills(state: *State, draft: Draft) ?skill_completion.Ask {
     // The Host may not speak this protocol while an Upgrade is under way.
-    if (state.inputMode() != .compose or state.upgrade_blocked or state.upgrade_pending) return null;
+    if (state.inputMode() != .compose or state.holdsHost()) return null;
     // A Message binds the skills of the Workspace its Session starts in:
     // a held `/configure --workspace`, else the overview's. When that
     // changes, nothing held or in flight answers.
@@ -4179,7 +4205,7 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                     try std.testing.expectEqual(x.action, y.action);
                 }
             },
-            .list_models, .clear_draft, .upgrade, .cancel_upgrade, .exit => {},
+            .list_models, .clear_draft, .cancel_upgrade, .exit => {},
         }
     }
 }
@@ -5320,9 +5346,9 @@ test "the composer's /word asks the Workspace's skills, but not while an Upgrade
     defer state.deinit();
     const draft: Draft = .{ .bytes = "use /re", .cursor = "use /re".len, .edits = 1 };
     try std.testing.expectEqual(@as(?skill_completion.Ask, null), askSkills(&state, .{ .bytes = "use it", .cursor = 3, .edits = 1 }));
-    state.upgrade_pending = true;
+    state.upgrade_after = .reobserving;
     try std.testing.expectEqual(@as(?skill_completion.Ask, null), askSkills(&state, draft));
-    state.upgrade_pending = false;
+    state.upgrade_after = .open;
     const read = askSkills(&state, draft).?;
     try std.testing.expectEqualStrings("re", read.prefix);
     // Its page, owned by the state, lists over the draft once a frame draws it.
@@ -5798,7 +5824,7 @@ test "one click on a row opens it, under Enter's rules" {
     try expectSelected(&state, "b2c3d4");
     // While Host requests wait on an Upgrade, the click selects but does
     // not open, as Enter would not.
-    state.upgrade_pending = true;
+    state.upgrade = .checking;
     try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = try lineOfRow(&state, "g7h8j9") } }));
     try expectSelected(&state, "g7h8j9");
 }
@@ -5854,6 +5880,49 @@ test "a click on a line while a panel shows changes nothing: its lines are not S
     try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = line } }));
     try expectSelected(&state, &selected);
     try std.testing.expect(state.panel != null and state.panel.? == .help);
+}
+
+test "a click lands on what fills the list and obeys the input mode, whatever combination shows" {
+    const ref = "b2c3d4";
+    for ([_]ListArea{ .sessions, .panel, .picker }) |area| for ([_]bool{ false, true }) |frozen| for ([_]bool{ false, true }) |on_view| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        const line = try lineOfRow(&state, ref);
+        if (on_view) {
+            _ = try submit(&state, .{ .bytes = "/sessions archived" });
+            _ = try respond(&state, .full, testToken(2), &.{});
+        }
+        if (frozen) {
+            _ = try submit(&state, try typeText(&state, "go"));
+            try std.testing.expectEqual(InputMode.frozen, state.inputMode());
+        }
+        switch (area) {
+            .sessions => {},
+            .panel => state.panel = .help,
+            .picker => state.picker = .{},
+        }
+        defer state.picker = null;
+        try std.testing.expectEqual(area, state.listArea());
+        const selected = state.selected;
+        const effects = try step(&state, .{ .clicked = if (on_view) .view else .{ .line = line } });
+        if (frozen) {
+            // No key moves a frozen screen, and no click does.
+            try expectEffects(&.{}, effects);
+            try std.testing.expectEqual(selected, state.selected);
+            try std.testing.expectEqual(on_view, state.archive == .archived);
+        } else if (on_view) {
+            // The counts line is above the list: its click is the same
+            // whatever the list shows.
+            try expectEffects(&.{.{ .list = null }}, effects);
+            try std.testing.expectEqual(ArchiveFilter.active, state.archive);
+        } else if (area == .sessions) {
+            try expectEffects(&.{.{ .open = ref.* }}, effects);
+        } else {
+            // A panel's or the picker's line is no Session.
+            try expectEffects(&.{}, effects);
+            try std.testing.expectEqual(selected, state.selected);
+        }
+    };
 }
 
 test "a click on the empty list's one line changes nothing, loading or listed empty" {
@@ -7363,7 +7432,7 @@ test "upgrade emits only its local effect and preserves selection settings and u
     state.answer(0, .unknown, "01234567-89ab-4cde-8012-0123456789ab");
     const request = state.requests[0];
     const draft = try typeText(&state, "/upgrade");
-    try expectEffects(&.{.upgrade}, try submit(&state, draft));
+    try expectEffects(&.{}, try submit(&state, draft));
     try std.testing.expectEqual(selected, state.selected);
     try std.testing.expect(std.meta.eql(settings, state.settings));
     try std.testing.expectEqual(@as(usize, 1), state.request_count);
@@ -7376,8 +7445,8 @@ test "/upgrade runs inline: Esc cancels it before the draft, checking or prepari
     var state = try opened(&.{});
     defer state.deinit();
     var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
-    try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
-    try std.testing.expectEqualStrings("Checking for updates…", state.upgrade.line(&buffer, .unicode).?.text);
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try std.testing.expectEqualStrings("Checking for updates…", upgrade_status.line(state.upgrade.?, &buffer, .unicode).text);
     // Esc cancels the check too, keeping the draft, even while the draft
     // is still `/upgrade` and lists its command: the status row says esc
     // cancels.
@@ -7387,41 +7456,79 @@ test "/upgrade runs inline: Esc cancels it before the draft, checking or prepari
     const draft = try typeText(&state, "keep me");
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } });
     try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", state.notice.?.text());
-    try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
-    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } });
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
     // Esc cancels the Upgrade and keeps the draft.
     try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
-    try std.testing.expectEqualStrings("Cancelling…", state.upgrade.line(&buffer, .unicode).?.text);
+    // The worker says whether the stop held; until then the line stands.
+    try std.testing.expectEqualStrings("Upgrading to 0.60.0 · no Host running · esc cancels", upgrade_status.line(state.upgrade.?, &buffer, .unicode).text);
+    _ = try step(&state, .{ .upgrade = .cancelling });
+    // A second Esc is still the Upgrade's while it winds down.
+    try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
+    try std.testing.expectEqualStrings("Cancelling…", upgrade_status.line(state.upgrade.?, &buffer, .unicode).text);
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } });
-    try std.testing.expect(!state.upgrade_blocked);
+    try std.testing.expectEqual(session_upgrade.After.reobserving, state.upgrade_after);
     // Once it ended, Esc clears the draft again.
     try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
 
     // Past publishing Esc is the draft's, and an incompatible end holds.
     _ = try submit(&state, try typeText(&state, "/upgrade"));
-    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .{ .running = 1 } } } });
-    _ = try step(&state, .{ .upgrade = .{ .step = .publishing } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .{ .running = 1 } }, .step = .publishing } } });
     try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
-    try std.testing.expect(state.upgrade_blocked);
-    try std.testing.expectEqual(upgrade_status.Lasts.persistent, state.upgrade.line(&buffer, .unicode).?.lasts);
+    try std.testing.expectEqual(session_upgrade.After.blocked, state.upgrade_after);
+    try std.testing.expectEqual(upgrade_status.Lasts.persistent, upgrade_status.line(state.upgrade.?, &buffer, .unicode).lasts);
 
     // A retry that installs nothing keeps the hold unless the job found
     // the Host it left usable, though both say up to date.
     _ = try submit(&state, try typeText(&state, "/upgrade"));
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 61, .patch = 0 } }, .outcome = .unchanged } } });
-    try std.testing.expect(state.upgrade_blocked);
+    try std.testing.expectEqual(session_upgrade.After.blocked, state.upgrade_after);
     _ = try submit(&state, try typeText(&state, "/upgrade"));
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 61, .patch = 0 } }, .outcome = .compatible } } });
-    try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending);
+    try std.testing.expect(state.upgrade_after == .reobserving);
 
     // Another /upgrade that upgrades lifts the hold until the next listing.
     _ = try submit(&state, try typeText(&state, "/upgrade"));
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
     _ = try submit(&state, try typeText(&state, "/upgrade"));
-    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 61, .patch = 1 }, .host = .{ .running = 0 } } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 1 }, .host = .{ .running = 0 } } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 61, .patch = 1 }, .restarted = true } }, .outcome = .compatible } } });
-    try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending);
+    try std.testing.expect(state.upgrade_after == .reobserving);
+}
+
+test "every place an Upgrade run can stand decides the hold, Esc and another /upgrade from that one value" {
+    const found: upgrade_status.Found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .{ .running = 2 } };
+    const Case = struct { run: ?upgrade_status.Run, going: bool, escape: bool };
+    const cases = [_]Case{
+        .{ .run = null, .going = false, .escape = false },
+        .{ .run = .checking, .going = true, .escape = true },
+        .{ .run = .{ .installing = .{ .found = found, .step = .preparing } }, .going = true, .escape = true },
+        .{ .run = .{ .installing = .{ .found = found, .step = .publishing } }, .going = true, .escape = false },
+        .{ .run = .{ .installing = .{ .found = found, .step = .restarting } }, .going = true, .escape = false },
+        .{ .run = .cancelling, .going = true, .escape = true },
+        .{ .run = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } }, .going = false, .escape = false },
+        .{ .run = .{ .ended = .{ .how = .superseded, .outcome = .unchanged } }, .going = false, .escape = false },
+        .{ .run = .{ .ended = .{ .how = .{ .incompatible = found.version }, .outcome = .incompatible } }, .going = false, .escape = false },
+    };
+    for (cases) |case| {
+        var state = try opened(&.{});
+        defer state.deinit();
+        state.upgrade = case.run;
+        // With nothing left held by an earlier run, the run alone holds
+        // Host intents and keeps the shell polling its worker.
+        try std.testing.expectEqual(case.going, state.upgrading());
+        try std.testing.expectEqual(case.going, state.holdsHost());
+        try std.testing.expectEqual(case.going, state.waitMs(0, 0, false) == upgrade_poll_ms);
+        // Esc is the run's exactly while it can still change nothing.
+        const draft = try typeText(&state, "keep me");
+        try expectEffects(if (case.escape) &.{.cancel_upgrade} else &.{.clear_draft}, try press(&state, draft, .clear));
+        try std.testing.expectEqual(case.run, state.upgrade);
+        // Another /upgrade starts a check only when none is going.
+        try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+        if (case.going) try std.testing.expectEqual(case.run, state.upgrade) else try std.testing.expect(state.upgrade.? == .checking);
+        try std.testing.expect(state.holdsHost());
+    }
 }
 
 test "another /upgrade while one runs changes nothing: its progress and Esc stay" {
@@ -7429,21 +7536,21 @@ test "another /upgrade while one runs changes nothing: its progress and Esc stay
     defer state.deinit();
     var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
     _ = try submit(&state, try typeText(&state, "/upgrade"));
-    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } });
-    const preparing = try std.testing.allocator.dupe(u8, state.upgrade.line(&buffer, .unicode).?.text);
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
+    const preparing = try std.testing.allocator.dupe(u8, upgrade_status.line(state.upgrade.?, &buffer, .unicode).text);
     defer std.testing.allocator.free(preparing);
     try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
-    try std.testing.expectEqualStrings(preparing, state.upgrade.line(&buffer, .unicode).?.text);
-    _ = try step(&state, .{ .upgrade = .{ .step = .publishing } });
-    const publishing = try std.testing.allocator.dupe(u8, state.upgrade.line(&buffer, .unicode).?.text);
+    try std.testing.expectEqualStrings(preparing, upgrade_status.line(state.upgrade.?, &buffer, .unicode).text);
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none }, .step = .publishing } } });
+    const publishing = try std.testing.allocator.dupe(u8, upgrade_status.line(state.upgrade.?, &buffer, .unicode).text);
     defer std.testing.allocator.free(publishing);
     try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
-    try std.testing.expectEqualStrings(publishing, state.upgrade.line(&buffer, .unicode).?.text);
+    try std.testing.expectEqualStrings(publishing, upgrade_status.line(state.upgrade.?, &buffer, .unicode).text);
     // Past publishing Esc is still the draft's: nothing cancels.
     try expectEffects(&.{.clear_draft}, try press(&state, try typeText(&state, "x"), .clear));
 }
 
-test "the status bar says the newest notice, else the Upgrade at work or held, else an unconfirmed send" {
+test "the status bar says the Upgrade at work, else the newest notice, else an Upgrade that holds, else an unconfirmed send" {
     var state = try opened(&.{session("k7m2qx", .{ .working = ago(10) }, .{})});
     defer state.deinit();
     var buffer: StatusBuffer = undefined;
@@ -7453,13 +7560,12 @@ test "the status bar says the newest notice, else the Upgrade at work or held, e
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
     _ = try submit(&state, try typeText(&state, "/upgrade"));
     try expectStatus(&state, "Checking for updates…", .normal);
-    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
     try expectStatus(&state, "Upgrading to 0.60.0 · no Host running · esc cancels", .normal);
-    // A notice is newer, and the next key clears it.
+    // A notice never hides the run's line, where Esc is offered.
     state.say(.attention, "! Select a Session first.", .{});
-    try expectStatus(&state, "! Select a Session first.", .attention);
-    _ = try press(&state, .{}, .next);
     try expectStatus(&state, "Upgrading to 0.60.0 · no Host running · esc cancels", .normal);
+    _ = try press(&state, .{}, .next);
     // An ending that is news is a notice: it goes with the next key and
     // the unconfirmed send shows again.
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 0 }, .restarted = false } }, .outcome = .compatible } } });
@@ -7468,7 +7574,7 @@ test "the status bar says the newest notice, else the Upgrade at work or held, e
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
     // A release this client cannot use stays until another /upgrade.
     _ = try submit(&state, try typeText(&state, "/upgrade"));
-    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
     _ = try press(&state, .{}, .next);
     try expectStatus(&state, "Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave", .attention);
@@ -7487,7 +7593,7 @@ test "the status row under the input says the status bar's line" {
     const unconfirmed = try segmentText(arena.allocator(), try statusSegments(arena.allocator(), &state, .{}, 120, .{}));
     try std.testing.expect(std.mem.startsWith(u8, unconfirmed, " ! Not confirmed · rui request recover " ++ key));
     _ = try submit(&state, try typeText(&state, "/upgrade"));
-    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
     const upgrading = try segmentText(arena.allocator(), try statusSegments(arena.allocator(), &state, .{}, 120, .{ .unicode = false }));
     try std.testing.expect(std.mem.startsWith(u8, upgrading, " Upgrading to 0.60.0 - no Host running - esc cancels"));
 }
@@ -7495,18 +7601,18 @@ test "the status row under the input says the status bar's line" {
 test "/upgrade is never refused as a Host request: the status bar shows its run at first, while it runs and after a hold" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
     try expectStatus(&state, "Checking for updates…", .normal);
     // Enter again while it runs starts nothing and hides nothing.
     try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
     try expectStatus(&state, "Checking for updates…", .normal);
-    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
-    try std.testing.expect(state.upgrade_blocked);
+    try std.testing.expectEqual(session_upgrade.After.blocked, state.upgrade_after);
     // A Host request is refused in words; the retry shows its own progress.
     try expectEffects(&.{}, try submit(&state, try typeText(&state, "start this")));
     try expectStatus(&state, upgrade_recovery, .attention);
-    try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
     try expectStatus(&state, "Checking for updates…", .normal);
 }
 
@@ -7546,7 +7652,7 @@ fn segmentText(arena: Allocator, segments: []const Segment) ![]const u8 {
 test "upgrade protocol hold refuses starts opens stops and Host commands but permits local recovery" {
     var state = try pickerState(Default.of("codex", "gpt-6-luna"));
     defer state.deinit();
-    state.upgrade_blocked = true;
+    state.upgrade_after = .blocked;
     const selected = state.selected;
     for ([_][]const u8{ "new model work", "", "/rename new name", "/setup --model gpt-5.5" }) |text| {
         try expectEffects(&.{}, try submit(&state, try typeText(&state, text)));
@@ -7556,7 +7662,7 @@ test "upgrade protocol hold refuses starts opens stops and Host commands but per
     }
     try expectEffects(&.{}, try press(&state, try typeText(&state, "draft"), .stop));
     try std.testing.expectEqual(@as(usize, 0), state.request_count);
-    try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
     try expectEffects(&.{.exit}, try submit(&state, try typeText(&state, "/exit")));
 }
 
@@ -7771,8 +7877,7 @@ test "upgrade holds admit no archive surface before draft or ledger mutation" {
                     _ = try step(&state, .{ .tick = test_now_s * 1000 });
                     _ = try respond(&state, .full, testToken(1), &.{row});
                     try std.testing.expectEqual(@as(?Reference, ref), state.selected);
-                    state.upgrade_blocked = blocked;
-                    state.upgrade_pending = !blocked;
+                    state.upgrade_after = if (blocked) .blocked else .reobserving;
                     state.last_archived = "bbbbbb".*;
                     state.panel = .help;
                     // Preserve both an unknown handle and accepted in-flight work.
@@ -7812,15 +7917,13 @@ test "upgrade holds share stop admission for both screens, and the stop goes onc
         for (events) |event| {
             var state = try opened(&.{session(&ref, .{ .working = ago(1) }, .{})});
             defer state.deinit();
-            state.upgrade_blocked = blocked;
-            state.upgrade_pending = !blocked;
+            state.upgrade_after = if (blocked) .blocked else .reobserving;
             state.panel = .help;
             try expectEffects(&.{}, try step(&state, event));
             try std.testing.expectEqual(@as(usize, 0), state.request_count);
             try std.testing.expect(state.panel != null and state.panel.? == .help);
             try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
-            state.upgrade_blocked = false;
-            state.upgrade_pending = false;
+            state.upgrade_after = .open;
             try expectEffects(&.{.{ .stop = ref }}, try step(&state, event));
         }
     }
@@ -7832,17 +7935,18 @@ test "upgrade holds refuse archive until admitted and allow local draft recovery
     for ([_]bool{ false, true }) |blocked| {
         var state = try opened(&.{session(&ref, .{ .working = ago(1) }, .{})});
         defer state.deinit();
-        state.upgrade_blocked = blocked;
-        state.upgrade_pending = !blocked;
+        state.upgrade_after = if (blocked) .blocked else .reobserving;
         try expectEffects(&.{}, try press(&state, draft, .archive));
         try std.testing.expectEqual(@as(usize, 0), state.request_count);
         // Edits stay local; existing local exit and recovery commands still
         // bypass the hold.
         try expectEffects(&.{}, try step(&state, .{ .composed = .{ .draft = draft, .input = .{ .composer = .redraw } } }));
-        try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
         try expectEffects(&.{.exit}, try submit(&state, try typeText(&state, "/exit")));
-        state.upgrade_blocked = false;
-        state.upgrade_pending = false;
+        try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+        try std.testing.expect(state.upgrading());
+        // That run ends having changed nothing, and the overview lists again.
+        try expectEffects(&.{}, try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } }));
+        state.upgrade_after = .open;
         try expectEffects(&.{.{ .archive = .{ .reference = ref } }}, try press(&state, draft, .archive));
         try std.testing.expectEqual(@as(usize, 1), state.request_count);
     }
@@ -7861,8 +7965,7 @@ test "upgrade holds settle accepted archive restore and stop completions without
                 // Admit before the hold, then deliver the worker's answer.
                 try std.testing.expect(state.request(if (archived) .archive else .unarchive, ref));
                 state.left = left;
-                state.upgrade_blocked = blocked;
-                state.upgrade_pending = !blocked;
+                state.upgrade_after = if (blocked) .blocked else .reobserving;
                 try expectEffects(&.{}, try step(&state, .{ .archive = .{ .request = .{ .reference = ref, .archived = archived }, .outcome = outcome } }));
                 // A confirmed answer retires from the attached ledger; only
                 // unknown outcomes or departure custody retain a record.
@@ -7885,8 +7988,7 @@ test "upgrade holds settle accepted archive restore and stop completions without
             defer state.deinit();
             try std.testing.expect(state.request(.stop, ref));
             state.left = left;
-            state.upgrade_blocked = blocked;
-            state.upgrade_pending = !blocked;
+            state.upgrade_after = if (blocked) .blocked else .reobserving;
             try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref, .outcome = outcome } }));
             const retained = left or outcome == .unconfirmed;
             try std.testing.expectEqual(@as(usize, if (retained) 1 else 0), state.request_count);
@@ -7909,24 +8011,26 @@ test "the overview waits until its next tick, polls while an Upgrade holds it, a
     defer state.deinit();
     state.listing = false;
     state.next_list_ms = 10_000;
-    try std.testing.expectEqual(@as(i32, 2_500), state.waitMs(false, 7_500, 0, false));
+    try std.testing.expectEqual(@as(i32, 2_500), state.waitMs(7_500, 0, false));
     // A tick already due waits nothing; one far off is capped, not wrapped.
-    try std.testing.expectEqual(@as(i32, 0), state.waitMs(false, 12_000, 0, false));
+    try std.testing.expectEqual(@as(i32, 0), state.waitMs(12_000, 0, false));
     state.next_list_ms = std.math.maxInt(u64);
-    try std.testing.expectEqual(@as(i32, std.math.maxInt(i32)), state.waitMs(false, 0, 0, false));
+    try std.testing.expectEqual(@as(i32, std.math.maxInt(i32)), state.waitMs(0, 0, false));
     // A listing in flight wakes the loop only through its answer.
     state.listing = true;
-    try std.testing.expectEqual(@as(i32, -1), state.waitMs(false, 0, 0, false));
+    try std.testing.expectEqual(@as(i32, -1), state.waitMs(0, 0, false));
     // The spinner's next frame on the monotonic clock comes first.
-    try std.testing.expectEqual(@as(i32, spin_interval_ms - 30), state.waitMs(false, 0, 1_030, true));
+    try std.testing.expectEqual(@as(i32, spin_interval_ms - 30), state.waitMs(0, 1_030, true));
     state.listing = false;
     state.next_list_ms = 10_010;
-    try std.testing.expectEqual(@as(i32, 10), state.waitMs(false, 10_000, 1_030, true));
-    // An Upgrade asked for, or one that left the overview blocked, polls.
-    try std.testing.expectEqual(@as(i32, upgrade_poll_ms), state.waitMs(true, 0, 0, false));
-    state.upgrade_blocked = true;
-    try std.testing.expectEqual(@as(i32, upgrade_poll_ms), state.waitMs(false, 0, 0, false));
-    try std.testing.expectEqual(@as(i32, 10), state.waitMs(false, 0, 190, true));
+    try std.testing.expectEqual(@as(i32, 10), state.waitMs(10_000, 1_030, true));
+    // An Upgrade that runs, or one that left the overview blocked, polls.
+    state.upgrade = .checking;
+    try std.testing.expectEqual(@as(i32, upgrade_poll_ms), state.waitMs(0, 0, false));
+    state.upgrade = null;
+    state.upgrade_after = .blocked;
+    try std.testing.expectEqual(@as(i32, upgrade_poll_ms), state.waitMs(0, 0, false));
+    try std.testing.expectEqual(@as(i32, 10), state.waitMs(0, 190, true));
 }
 
 test "a model list Rui cannot read says so; any other failure is no answer" {
@@ -7942,15 +8046,15 @@ test "an Upgrade holds Host intents until the overview lists again under the sel
     defer state.deinit();
     state.next_list_ms = 10_000;
     state.upgraded(.unchanged);
-    try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending and state.next_list_ms == 0);
+    try std.testing.expect(state.upgrade_after == .reobserving and state.next_list_ms == 0);
     state.upgraded(.incompatible);
-    try std.testing.expect(state.upgrade_blocked and !state.upgrade_pending);
+    try std.testing.expect(state.upgrade_after == .blocked);
     // An unchanged panel keeps the block; a compatible one lifts it.
     state.next_list_ms = 10_000;
     state.upgraded(.unchanged);
-    try std.testing.expect(state.upgrade_blocked and !state.upgrade_pending and state.next_list_ms == 0);
+    try std.testing.expect(state.upgrade_after == .blocked and state.next_list_ms == 0);
     state.upgraded(.compatible);
-    try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending);
+    try std.testing.expect(state.upgrade_after == .reobserving);
 }
 
 test "the one-pick model flow leaves typing with the composer" {
