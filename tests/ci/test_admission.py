@@ -58,14 +58,14 @@ class PlanFixture:
         self.git('init', '-q', '-b', 'main')
         self.write('.git/info/exclude', 'selection.json\n__pycache__/\n')
         for name in ('select_tests.py', 'docs_only.py', 'qualification.py', 'strict_paths.py', 'platform_boundary.py',
-                     'import_architecture.py', 'build_files.py', 'stack_frames.json'):
+                     'import_architecture.py', 'build_files.py', 'release_numbers.py', 'stack_frames.json'):
             self.write('tests/ci/' + name, (ROOT / 'tests/ci' / name).read_text())
         # The selector's import graph reads the source tree.
         for name in subprocess.check_output(['git', 'ls-files', '-z', 'src', 'tests/integration', 'build'], cwd=ROOT).decode().split('\0'):
             if name and (ROOT / name).is_file():
                 (self.repo / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / name, self.repo / name)
-        self.write('build.zig', (ROOT / 'build.zig').read_text())
+        shutil.copyfile(ROOT / 'build.zig', self.repo / 'build.zig')
         self.write('README.md', 'Base. Another sentence on one line.\n')
         self.base = self.commit()
         return self
@@ -233,7 +233,7 @@ class AdmissionTest(unittest.TestCase):
         env = dict(CHANGE_KIND='documentation', PLAN_RESULT='success', POLICY_RESULT='skipped',
                    TARGETS='[]', SPLIT='false', CODEGEN='false', BUILD_RESULT='skipped',
                    UNIT_RESULT='skipped', CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped',
-                   TYPECHECK_RESULT='skipped')
+                   TYPECHECK='false', TYPECHECK_RESULT='skipped')
 
         def run(values):
             return subprocess.run(['bash', '-euc', script], env=values,
@@ -256,7 +256,7 @@ class AdmissionTest(unittest.TestCase):
         script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
         env = dict(PLAN_RESULT='success', POLICY_RESULT='success', TARGETS='[]', SPLIT='false',
                    CODEGEN='false', BUILD_RESULT='skipped', UNIT_RESULT='skipped',
-                   CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped', TYPECHECK_RESULT='skipped')
+                   CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped', TYPECHECK='false', TYPECHECK_RESULT='skipped')
         self.assertEqual(subprocess.run(['bash', '-euc', script], env=env).returncode, 0)
         for kind in ('', 'docs', 'unknown'):
             with self.subTest(kind=kind):
@@ -425,6 +425,7 @@ class CandidatePlanTest(unittest.TestCase):
                         self.assertEqual(output['linux_split'], str(split_build(linux)).lower())
                         self.assertEqual(output['linux_codegen'], str(codegen).lower())
                         self.assertEqual(output['cache_execution'], str(selection['cache_execution_checks']).lower())
+                        self.assertEqual(output['typecheck_macos'], str(selection['typecheck_macos']).lower())
                         self.assertEqual(output['linux_memory'], str(selection['linux_memory_checks']).lower())
                         self.assertEqual(json.loads(output['policy_skips']), selection['policy_skips'])
                         required = event == 'pull_request' and phase == 'review'
@@ -453,6 +454,39 @@ class CandidatePlanTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(select([path], 'review', available)['upgrade_required'], required)
                 self.assertFalse(select([path], 'development', available)['upgrade_required'])
+        # Its unit test runs in policy; cache maintenance publishes main's caches, which a PR's run never reads.
+        for path in ('tests/ci/test_previous_release_upgrade.py', '.github/workflows/cache-maintenance.yml'):
+            with self.subTest(path=path):
+                self.assertFalse(select([path], 'review', available)['upgrade_required'])
+
+    def test_schema_edits_run_the_upgrade_only_when_the_store_format_changes(self):
+        available = set(build_files.steps())
+        schema = 'src/store/schema.zig'
+        source = (ROOT / schema).read_text()
+        version = int(re.search(r'^pub const schema_version: u32 = (\d+);$', source, re.M)[1])
+        last_row = re.findall(r'\.\{ \.schema_version = \d+, \.digest = 0x[0-9a-f]+ \},\n', source)[-1]
+        bumped = (source.replace(f'schema_version: u32 = {version};', f'schema_version: u32 = {version + 1};')
+                  .replace(last_row, last_row + f'    .{{ .schema_version = {version + 1}, .digest = 0x0123456789abcdef }},\n'))
+        for after, required in (
+                # Imports, comments and code that read the format leave it alone.
+                ('const unused = @import("std");\n' + source, False),
+                (source.replace('/// `digest()` of each', '/// The `digest()` of each'), False),
+                (bumped, True),
+                # An edited released digest is a format change too (its guard then refuses it).
+                (source.replace(last_row, last_row.replace('.digest = 0x', '.digest = 0x1')), True),
+                (None, True)):
+            with self.subTest(required=required):
+                self.assertEqual(select([schema], 'review', available, contents={schema: (source, after)})
+                                 ['upgrade_required'], required)
+
+    def test_plan_reads_the_store_format_from_both_revisions(self):
+        schema = 'src/store/schema.zig'
+        source = (ROOT / schema).read_text()
+        for after, upgrade in (('const unused = @import("std");\n' + source, 'false'),
+                               (source.replace('.digest = 0x', '.digest = 0x1', 1), 'true')):
+            with self.subTest(upgrade=upgrade), PlanFixture() as fixture:
+                fixture.write(schema, after)
+                self.assertEqual(fixture.plan(self, candidate=fixture.commit())['upgrade'], upgrade)
 
     def assert_documentation_plan(self, output):
         self.assertEqual(output['change_kind'], 'documentation')
@@ -461,7 +495,7 @@ class CandidatePlanTest(unittest.TestCase):
         for key in ('linux_matrix', 'macos_matrix'):
             self.assertEqual(output[key], '{"include": []}', key)
         for key in ('native', 'upgrade', 'retry', 'linux_split', 'macos_split', 'linux_codegen',
-                    'linux_memory', 'cache_execution'):
+                    'linux_memory', 'cache_execution', 'typecheck_macos'):
             self.assertEqual(output[key], 'false', key)
 
     def test_executed_plan_uses_pinned_tree_and_recomputes_after_base_change(self):
@@ -541,7 +575,7 @@ class CandidatePlanTest(unittest.TestCase):
     def test_future_selector_obligations_veto_documentation(self):
         for key, value in (('targets', ['test-logic']), ('native_targets', ['test-logic']),
                            ('native_required', True), ('mac_required', True), ('upgrade_required', True),
-                           ('server_targets', ['test-logic']), ('cache_execution_checks', True),
+                           ('server_targets', ['test-logic']), ('cache_execution_checks', True), ('typecheck_macos', True),
                            ('linux_memory_checks', True), ('manual_checks', ['diagnostic'])):
             with self.subTest(obligation=key), PlanFixture() as fixture:
                 path = fixture.repo / 'tests/ci/select_tests.py'

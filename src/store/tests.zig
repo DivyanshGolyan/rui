@@ -1096,7 +1096,7 @@ pub const TestingRound = struct {
     }
 };
 
-test "a content sink opens only a content id its Access itself took, stepping its queued insert" {
+test "a content sink opens only on a content row its Access itself queued, in the same round" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1121,12 +1121,14 @@ test "a content sink opens only a content id its Access itself took, stepping it
             a.write(TestingRound.insert_content, .{ .content_id = before, .digest = digests[0], .length = 4 });
             const first = try a.identity(.content_id);
             a.write(TestingRound.insert_content, .{ .content_id = first, .digest = digests[1], .length = 4 });
+            a.recordContentRow(first);
             // Taken outside this Access between its own ids: inside the range of
             // the ids it took, but not its own.
             const between = try store_core.takeIdentity(&storage, .content_id);
             const never = try a.identity(.content_id);
             const last = try a.identity(.content_id);
             a.write(TestingRound.insert_content, .{ .content_id = last, .digest = digests[2], .length = 4 });
+            a.recordContentRow(last);
             try std.testing.expectEqual(first + 3, last);
             // Refused: 0, a committed row, one taken in this transaction before
             // this Access's first, one other code took between its own, and one
@@ -1137,11 +1139,13 @@ test "a content sink opens only a content id its Access itself took, stepping it
             try std.testing.expectError(error.ContentNotInserted, a.contentSink(before, 4));
             try std.testing.expectError(error.ContentNotInserted, a.contentSink(between, 4));
             try std.testing.expectError(error.ContentNotInserted, a.contentSink(last + 1, 4));
-            // The old rule took only the last id, with nothing queued: here the
-            // first id opens while inserts are queued, and the pass steps them.
+            // The first id opens while its insert is still queued: SQLite
+            // steps it for the blob handle, while MySQL queues the chunk
+            // behind it, so one round runs both.
             const sink = try a.contentSink(first, 4);
             try sink.write("sink", 0);
             sink.close();
+            try a.run();
             try std.testing.expectEqual(0, a.queued);
             const again = try a.contentSink(last, 4);
             again.close();

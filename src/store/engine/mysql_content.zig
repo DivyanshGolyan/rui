@@ -19,7 +19,17 @@ pub const Observer = struct {
         self.server_error(self.context, code);
     }
 };
-const insert_prefix = "INSERT INTO content_chunk(content_id,chunk_index,bytes) VALUES({d},{d},X'";
+
+/// A chunk INSERT's text before its payload's hex.
+pub const insert_prefix = "INSERT INTO content_chunk(content_id,chunk_index,bytes) VALUES({d},{d},X'";
+/// A chunk INSERT's text after its payload's hex, the batch's separator
+/// included.
+pub const insert_suffix = "');";
+
+/// The batch text of a chunk INSERT whose payload is `n` bytes.
+pub fn chunkStatementBytes(id: u64, index: u64, n: usize) usize {
+    return std.fmt.count(insert_prefix, .{ id, index }) + 2 * n + insert_suffix.len;
+}
 
 fn serverFailure(code: u16) Failure {
     return switch (code) {
@@ -28,147 +38,91 @@ fn serverFailure(code: u16) Failure {
     };
 }
 
-/// Consume the entire response, including after an ERR. A wire error always
-/// wins over a server error because the connection can no longer be reused.
-fn finishInsert(connection: *wire.Connection, observer: Observer) Failure!u64 {
-    var failure: ?Failure = null;
-    var changed: ?u64 = null;
-    while (!connection.isReady()) {
-        const event = connection.next() catch return error.StoreConnectionLost;
-        switch (event) {
-            .ok => |ok| {
-                if (changed != null) failure = error.CorruptStore;
-                changed = ok.affected_rows;
-            },
-            .err => |err| {
-                observer.report(err.code);
-                failure = serverFailure(err.code);
-            },
-            .ready => {},
-            else => failure = error.CorruptStore,
-        }
-    }
-    if (failure) |err| return err;
-    if (changed != 1) return error.CorruptStore;
-    return 1;
-}
+/// Where a sink puts its chunk INSERTs: the Access whose transaction holds
+/// the content row. `chunk` queues one INSERT of `n` payload bytes into the
+/// open batch, after a round when the batch or its queue lacks room, and
+/// returns the batch's writer with the text up to the payload written; the
+/// Access steps its result in order with the rest of its round. When it
+/// cannot, the Access records why and the sink fails.
+pub const Host = struct {
+    context: *anyopaque,
+    chunk: *const fn (context: *anyopaque, id: u64, index: u64, n: usize) error{ContentWriteFailed}!*std.Io.Writer,
+};
 
-fn beginChunk(connection: *wire.Connection, id: u64, index: u64, length: usize, observer: Observer) Failure!void {
-    const size = std.fmt.count(insert_prefix, .{ id, index }) + length * 2 + 2;
-    observer.content_query(observer.context);
-    const writer = connection.beginQuery(size) catch return error.StoreConnectionLost;
-    writer.print(insert_prefix, .{ id, index }) catch return error.StoreConnectionLost;
-}
-
-fn endChunk(connection: *wire.Connection, observer: Observer) Failure!u64 {
-    connection.writer.writeAll("')") catch return error.StoreConnectionLost;
-    connection.endQuery() catch return error.StoreConnectionLost;
-    return finishInsert(connection, observer);
-}
-
-/// Called after the engine has flushed its deferred control and content row.
-pub fn openSink(mysql: anytype, id: u64, length: u64, observer: Observer) Failure!ContentSink {
-    try mysql.check();
-    // Taking an identity does not insert its row. Validate before handing out
-    // a sink, including for empty content or a caller that never writes.
-    var buffer: [96]u8 = undefined;
-    const sql = std.fmt.bufPrint(&buffer, "SELECT 1 FROM content WHERE content_id={d}", .{id}) catch unreachable;
-    observer.content_query(observer.context);
-    mysql.state.connection.query(sql) catch return error.StoreConnectionLost;
-    var found = false;
-    var failure: ?Failure = null;
-    while (!mysql.state.connection.isReady()) {
-        switch (try mysql.next()) {
-            .row => found = true,
-            .err => |err| {
-                observer.report(err.code);
-                failure = serverFailure(err.code);
-            },
-            else => {},
-        }
-    }
-    if (failure) |err| return err;
-    if (!found) return error.ContentWriteFailed;
-    return mysql.state.sink.open(&mysql.state.connection, &mysql.state.failure, &mysql.state.changes, id, length, observer);
+/// Opens a sink on the content row `id`, whose payload holds `length`
+/// bytes. It sends nothing: each chunk rides the Access's batch.
+pub fn openSink(state: *SinkState, id: u64, length: u64, host: Host) ContentSink {
+    std.debug.assert(!state.open);
+    state.* = .{ .open = true, .host = host, .id = id, .length = length };
+    return state;
 }
 
 pub const SinkState = struct {
-    connection: ?*wire.Connection = null,
-    failure: *?Failure = undefined,
-    changes: *i64 = undefined,
-    observer: Observer = undefined,
+    open: bool = false,
+    host: Host = undefined,
     id: u64 = 0,
     length: u64 = 0,
     position: u64 = 0,
-    /// Bytes still owed to the currently framed COM_QUERY; zero between chunks.
+    /// The writer of the chunk INSERT being written, and the payload bytes
+    /// it still owes; null between chunks.
+    writer: ?*std.Io.Writer = null,
     remaining: usize = 0,
+    /// A chunk could not be queued: the Access holds the cause.
+    failed: bool = false,
 
-    pub fn open(self: *SinkState, connection: *wire.Connection, failure: *?Failure, changes: *i64, id: u64, length: u64, observer: Observer) Failure!ContentSink {
-        std.debug.assert(self.connection == null);
-        if (failure.*) |err| return err;
-        self.* = .{ .connection = connection, .failure = failure, .changes = changes, .id = id, .length = length, .observer = observer };
-        return self;
-    }
-
-    fn latch(self: *SinkState, err: Failure) void {
-        // Preserve the server cause, except that a lost stream always wins.
-        if (self.failure.* == null or err == error.StoreConnectionLost) self.failure.* = err;
-    }
-
-    fn append(self: *SinkState, bytes: []const u8) Failure!void {
-        const connection = self.connection.?;
+    fn append(self: *SinkState, bytes: []const u8) error{ContentWriteFailed}!void {
         var rest = bytes;
         while (rest.len > 0) {
-            if (self.remaining == 0) {
+            if (self.writer == null) {
                 const n: usize = @intCast(@min(chunk_bytes, self.length - self.position));
-                try beginChunk(connection, self.id, self.position / chunk_bytes, n, self.observer);
+                self.writer = try self.host.chunk(self.host.context, self.id, self.position / chunk_bytes, n);
                 self.remaining = n;
             }
+            const w = self.writer.?;
             const n = @min(rest.len, self.remaining);
-            literal.writeHex(&connection.writer, rest[0..n]) catch return error.StoreConnectionLost;
+            // The Access made room for the whole statement.
+            literal.writeHex(w, rest[0..n]) catch unreachable;
             self.remaining -= n;
             self.position += n;
             rest = rest[n..];
-            if (self.remaining == 0) self.changes.* += @intCast(try endChunk(connection, self.observer));
+            if (self.remaining == 0) self.endChunk();
         }
     }
 
+    fn endChunk(self: *SinkState) void {
+        self.writer.?.writeAll(insert_suffix) catch unreachable;
+        self.writer = null;
+    }
+
     pub fn write(self: ContentSink, bytes: []const u8, offset: u64) error{ ContentWriteFailed, ContentTooLarge }!void {
-        if (self.connection == null or self.failure.* != null) return error.ContentWriteFailed;
+        if (!self.open or self.failed) return error.ContentWriteFailed;
         if (offset > self.length or bytes.len > self.length - offset) {
             return error.ContentTooLarge;
         }
         if (offset != self.position) {
             return error.ContentWriteFailed;
         }
-        self.append(bytes) catch |err| {
-            self.latch(err);
+        self.append(bytes) catch {
+            self.failed = true;
             return error.ContentWriteFailed;
         };
     }
 
+    /// Ends the sink. A chunk begun but not filled is padded with zeros so
+    /// the batch stays whole text; the caller's failed Access drops it with
+    /// the rest of its transaction.
     pub fn close(self: ContentSink) void {
-        const connection = self.connection orelse return;
-        defer self.connection = null;
-        if (self.remaining == 0 or connection.lost) return;
-        // Finish only the already-framed chunk, not the rest of the content.
-        // Its INSERT is rolled back by the caller's failed Access. Incomplete
-        // input is not a connection failure: preserve the caller's ordinary
-        // file/read error and keep rollback usable.
-        const zeros: [128]u8 = @splat(0);
-        while (self.remaining > 0) {
-            const n = @min(self.remaining, zeros.len);
-            literal.writeHex(&connection.writer, zeros[0..n]) catch {
-                self.latch(error.StoreConnectionLost);
-                return;
-            };
-            self.remaining -= n;
+        if (!self.open) return;
+        defer self.* = .{};
+        if (self.writer) |w| {
+            const zeros: [128]u8 = @splat(0);
+            while (self.remaining > 0) {
+                const n = @min(self.remaining, zeros.len);
+                literal.writeHex(w, zeros[0..n]) catch unreachable;
+                self.remaining -= n;
+            }
+            self.endChunk();
         }
-        const changed = endChunk(connection, self.observer) catch |err| {
-            self.latch(err);
-            return;
-        };
-        self.changes.* += @intCast(changed);
     }
 };
 
@@ -261,44 +215,54 @@ pub fn readRaw(connection: *wire.Connection, id: u64, offset: u64, dest: []u8, o
     if (filled != dest.len or value_left != 0 or awaiting_value or rows != expected_rows or columns != 1) return error.CorruptStore;
 }
 
-test "content sink is one pointer and empty content frames no query" {
+const TestHost = struct {
+    buffer: [4096]u8 = undefined,
+    writer: std.Io.Writer = undefined,
+    chunks: usize = 0,
+
+    fn chunk(context: *anyopaque, id: u64, index: u64, n: usize) error{ContentWriteFailed}!*std.Io.Writer {
+        const self: *TestHost = @ptrCast(@alignCast(context));
+        if (self.chunks == 0) self.writer = .fixed(&self.buffer);
+        self.chunks += 1;
+        self.writer.print(insert_prefix, .{ id, index }) catch unreachable;
+        std.debug.assert(n <= self.writer.buffer.len);
+        return &self.writer;
+    }
+
+    fn host(self: *TestHost) Host {
+        return .{ .context = self, .chunk = chunk };
+    }
+};
+
+test "content sink is one pointer and empty content queues no chunk" {
     try std.testing.expectEqual(@sizeOf(*SinkState), @sizeOf(ContentSink));
-    const connection = try std.testing.allocator.create(wire.Connection);
-    defer std.testing.allocator.destroy(connection);
-    var failure: ?Failure = null;
-    var changes: i64 = 0;
+    var test_host: TestHost = .{};
     var state: SinkState = .{};
-    const sink = try state.open(connection, &failure, &changes, 1, 0, .{ .context = &changes, .server_error = ignoreTestServerError, .content_query = countTestContentQuery });
+    const sink = openSink(&state, 1, 0, test_host.host());
     try sink.write("", 0);
     sink.close();
-    try std.testing.expect(state.connection == null);
-    try std.testing.expect(failure == null);
-    try std.testing.expectEqual(@as(i64, 0), changes);
+    try std.testing.expect(!state.open);
+    try std.testing.expectEqual(@as(usize, 0), test_host.chunks);
 }
 
-test "content sink rejects nonsequential and oversized writes before framing" {
-    const connection = try std.testing.allocator.create(wire.Connection);
-    defer std.testing.allocator.destroy(connection);
-    var failure: ?Failure = null;
-    var changes: i64 = 0;
+test "content sink rejects nonsequential and oversized writes before queueing" {
+    var test_host: TestHost = .{};
     var state: SinkState = .{};
-    var sink = try state.open(connection, &failure, &changes, 1, 5, .{ .context = &changes, .server_error = ignoreTestServerError, .content_query = countTestContentQuery });
+    var sink = openSink(&state, 1, 5, test_host.host());
     try std.testing.expectError(error.ContentWriteFailed, sink.write("x", 1));
-    try std.testing.expect(failure == null);
     sink.close();
-    try std.testing.expect(failure == null);
-    failure = null;
-    sink = try state.open(connection, &failure, &changes, 1, 5, .{ .context = &changes, .server_error = ignoreTestServerError, .content_query = countTestContentQuery });
+    sink = openSink(&state, 1, 5, test_host.host());
     try std.testing.expectError(error.ContentTooLarge, sink.write("123456", 0));
-    try std.testing.expect(failure == null);
     sink.close();
-    try std.testing.expect(failure == null);
-    try std.testing.expectEqual(@as(i64, 0), changes);
+    try std.testing.expectEqual(@as(usize, 0), test_host.chunks);
 }
 
-fn ignoreTestServerError(_: *anyopaque, _: u16) void {}
-
-fn countTestContentQuery(context: *anyopaque) void {
-    const count: *i64 = @ptrCast(@alignCast(context));
-    count.* += 1;
+test "a closed sink pads its unfinished chunk into whole text" {
+    var test_host: TestHost = .{};
+    var state: SinkState = .{};
+    const sink = openSink(&state, 7, 3, test_host.host());
+    try sink.write("a", 0);
+    sink.close();
+    try std.testing.expectEqualStrings("INSERT INTO content_chunk(content_id,chunk_index,bytes) VALUES(7,0,X'610000');", test_host.writer.buffered());
+    try std.testing.expectEqual(chunkStatementBytes(7, 0, 3), test_host.writer.buffered().len);
 }
