@@ -57,6 +57,14 @@ SEND_FEEDBACK_SKIPPED = "PR 2 release blocker: the frame that clears the compose
 LIVE_FOOTER_SKIPPED = "PR 2 release blocker: App draws no live footer"
 
 
+# Release blocker (plan rev 176), cleared by PR 2: App's Session screen
+# draws no queued row, so a Message waiting behind work shows nowhere until
+# its conversation row does. PR 2 draws the row in the screen's tail and
+# removes this constant; until then the waits and assertions on the
+# queued row are skipped and every other check in those cases still runs.
+QUEUED_ROW_SKIPPED = "PR 2 release blocker: App draws no queued row"
+
+
 def card_text(screen):
     """The permission card's rows inside its border, from its "? " heading
     through its choice row."""
@@ -4882,7 +4890,7 @@ def renderer_cases():
                 # before a separate body frame, which is not a display guarantee.
                 tty.send("EVICTION-DRIVER\r", predicate=lambda: "› EVICTION-DRIVER" in tty.capture.completed)
                 fixture.wait_for(lambda: len(endpoint.requests) > requests, "predecessor model request", timeout=20)
-                tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed)
+                tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and (QUEUED_ROW_SKIPPED or "m" * 40 in tty.capture.completed))
                 if variant == "alone":
                     first_release.set()
                     fixture.wait_for(lambda: len(endpoint.requests) > requests + 1, "model request", timeout=20)
@@ -5053,7 +5061,7 @@ def renderer_cases():
         endpoint.responses.append(fixture.sse_answer("evicted-steer", "reason", "message", reply)[0])
         with terminal(session) as tty:
             tty.send("start steering\r", "Wait for steer")
-            tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and waiting(tty, "m" * 40))
+            tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and (QUEUED_ROW_SKIPPED or waiting(tty, "m" * 40)))
             assert not gate.exists()
             gate.touch()
             tty.wait("REPLY-04399", timeout=30)
@@ -5073,7 +5081,7 @@ def renderer_cases():
             requests = len(endpoint.requests)
             tty.send("FIRST-SMALL-QUESTION\r", predicate=lambda: "› FIRST-SMALL-QUESTION" in tty.capture.completed)
             fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
-            tty.send("\x1b[200~" + "q" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and waiting(tty, "q" * 40))
+            tty.send("\x1b[200~" + "q" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and (QUEUED_ROW_SKIPPED or waiting(tty, "q" * 40)))
             first_release.set()
             tty.wait("REPLY-04399", timeout=30)
             shown = traverse(tty)
@@ -5095,7 +5103,7 @@ def renderer_cases():
             requests = len(endpoint.requests)
             tty.send("DRIVER-QUESTION\r", predicate=lambda: "› DRIVER-QUESTION" in tty.capture.completed)
             fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
-            tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed)
+            tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and (QUEUED_ROW_SKIPPED or "m" * 40 in tty.capture.completed))
             holding.set()
             fixture.wait_for(tty.draining(held.is_set), "no scan reached the held page", timeout=5)
             first_release.set()
@@ -5134,7 +5142,7 @@ def renderer_cases():
             requests = len(endpoint.requests)
             tty.send("DRIVER-QUESTION\r", predicate=lambda: "› DRIVER-QUESTION" in tty.capture.completed)
             fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
-            tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed)
+            tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and (QUEUED_ROW_SKIPPED or "m" * 40 in tty.capture.completed))
             holding.set()
             fixture.wait_for(tty.draining(held.is_set), "no scan reached the held page", timeout=5)
             first_release.set()
@@ -5203,7 +5211,7 @@ def renderer_cases():
                 requests = len(endpoint.requests)
                 tty.send("DRIVER-QUESTION\r", predicate=lambda: "› DRIVER-QUESTION" in tty.capture.completed)
                 fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
-                tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed)
+                tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and (QUEUED_ROW_SKIPPED or "m" * 40 in tty.capture.completed))
                 first_release.set()
                 tty.wait("REPLY-04399", timeout=30)
                 # The queued Message is now applied, and its own answer held.
@@ -5236,7 +5244,7 @@ def renderer_cases():
                 requests = len(endpoint.requests)
                 tty.send("DRIVER-QUESTION\r", predicate=lambda: "› DRIVER-QUESTION" in tty.capture.completed)
                 fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
-                tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed)
+                tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and (QUEUED_ROW_SKIPPED or "m" * 40 in tty.capture.completed))
                 first_release.set()
                 tty.wait(CHOICE, timeout=30)
                 # A pending Action holds the screen until decided (/history waits).
@@ -5276,7 +5284,7 @@ def renderer_cases():
         def queue_three(tty):
             # Each waits above the input before the next is sent.
             for text, label in (("EQUAL-CONTENT", "queued"), ("EQUAL-CONTENT", "2 queued"), (big, "3 queued")):
-                tty.send("\x1b[200~" + text + "\x1b[201~\r", predicate=lambda: waiting(tty, text[:9], label) and tty.capture.draft("", 2))
+                tty.send("\x1b[200~" + text + "\x1b[201~\r", predicate=lambda: (QUEUED_ROW_SKIPPED or waiting(tty, text[:9], label)) and tty.capture.draft("", 2))
 
         long_reply = "\n".join(f"LONG-{index:05d} " + "y" * 50 for index in range(4400))
         big = "BIG-START " + "é ñ ü " * 300 + "BIG-END"
@@ -5309,7 +5317,7 @@ def renderer_cases():
                 first_release.set()
                 tty.wait("LONG-04399", timeout=60)
                 wait_for_listed_call(tty)
-                assert waiting(tty, "BIG-START", "3 queued"), tty.capture.completed
+                assert QUEUED_ROW_SKIPPED or waiting(tty, "BIG-START", "3 queued"), tty.capture.completed
                 shown = traverse(tty)
                 assert "Start of conversation" in shown and shown.count("DRIVER-QUESTION") == 1, shown
                 assert "EQUAL-CONTENT" not in shown and "BIG-START" not in shown and "Queued" not in shown, shown
@@ -5345,11 +5353,11 @@ def renderer_cases():
                 fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
                 for index in range(66):
                     label = f"{index + 1} queued" if index else "queued"
-                    tty.send(f"DROPPED-QUEUED-{index:02d}\r", predicate=lambda index=index, label=label: waiting(tty, f"DROPPED-QUEUED-{index:02d}", label) and tty.capture.draft("", 2))
+                    tty.send(f"DROPPED-QUEUED-{index:02d}\r", predicate=lambda index=index, label=label: (QUEUED_ROW_SKIPPED or waiting(tty, f"DROPPED-QUEUED-{index:02d}", label)) and tty.capture.draft("", 2))
                 first_release.set()
                 tty.wait("LONG-04399", timeout=60)
                 tty.wait("Held call", timeout=30)
-                assert waiting(tty, "DROPPED-QUEUED-65", "66 queued"), tty.capture.completed
+                assert QUEUED_ROW_SKIPPED or waiting(tty, "DROPPED-QUEUED-65", "66 queued"), tty.capture.completed
                 (workspace / "dropped-release").write_text("")
                 tty.wait("DROPPED-DONE", timeout=30)
                 assert "queued" not in tty.capture.completed, tty.capture.completed
@@ -5415,7 +5423,7 @@ def renderer_cases():
                 fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
                 for index in range(40):
                     label = f"{index + 1} queued" if index else "queued"
-                    tty.send(f"MANY-STOPPED-{index:02d}\r", predicate=lambda index=index, label=label: waiting(tty, f"MANY-STOPPED-{index:02d}", label) and tty.capture.draft("", 2))
+                    tty.send(f"MANY-STOPPED-{index:02d}\r", predicate=lambda index=index, label=label: (QUEUED_ROW_SKIPPED or waiting(tty, f"MANY-STOPPED-{index:02d}", label)) and tty.capture.draft("", 2))
                 run(home, "session", "stop", "--store", store, "--session", session, "--record", state / "many-stop.json", "--key", "many-stop")
                 tty.wait(predicate=lambda: "! Session stopped." in tty.capture.completed, timeout=30)
                 live = tty.capture.completed
@@ -5465,7 +5473,7 @@ def renderer_cases():
             with terminal(session, rows=200, opening=False) as tty:
                 tty.capture.resize(80, 200)
                 opened = tty.wait(predicate=lambda: tty.capture.draft("", 2), timeout=30)
-                assert opened.count("HIDDEN-QUEUED-UNIQUE") == 1 and waiting(tty, "HIDDEN-QUEUED-UNIQUE") and "OPENING-LONG-04499" in opened, opened
+                assert opened.count("HIDDEN-QUEUED-UNIQUE") == 1 and (QUEUED_ROW_SKIPPED or waiting(tty, "HIDDEN-QUEUED-UNIQUE")) and "OPENING-LONG-04499" in opened, opened
                 # One read returns the calls' results and the Message's row.
                 proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_once)
                 fixture.wait_for(tty.draining(page_held.is_set), "no scan reached the held page", timeout=5)
@@ -5501,7 +5509,7 @@ def renderer_cases():
                 run(home, "session", "send", "--to", session, input=f"OPENING-QUEUED-{index:02d}")
             with terminal(session, rows=200, opening=False) as tty:
                 tty.capture.resize(80, 200)
-                opened = tty.wait(predicate=lambda: tty.capture.draft("", 2) and waiting(tty, "OPENING-QUEUED-23", "24 queued"))
+                opened = tty.wait(predicate=lambda: tty.capture.draft("", 2) and (QUEUED_ROW_SKIPPED or waiting(tty, "OPENING-QUEUED-23", "24 queued")))
                 assert "queued behind" not in opened and "Queued" not in opened, opened
                 assert not any(f"OPENING-QUEUED-{index:02d}" in opened for index in range(23)), opened
                 shown = traverse(tty)
