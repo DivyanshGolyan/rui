@@ -639,6 +639,40 @@ test "store.mysql live content chunks keep each batch within a small max_allowed
     try std.testing.expect(!storage.isFenced());
 }
 
+test "store.mysql live every message carries the session settings, so none relies on the last" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const conn = &storage.engine.mysql.state.connection;
+    // What a proxy handing the next message to a fresh server connection
+    // looks like: the session the last message left is gone.
+    try conn.query("SET SESSION sql_mode='',SESSION group_concat_max_len=4");
+    while (!conn.isReady()) switch (try conn.next()) {
+        .ok => {},
+        else => return error.TestUnexpectedResult,
+    };
+    try conn.query("SELECT @@session.group_concat_max_len,INSTR(@@session.sql_mode,'NO_BACKSLASH_ESCAPES')>0");
+    const Row = struct { len: u64, escapes_off: u64 };
+    var columns: rows.Columns(Row) = undefined;
+    var got: ?Row = null;
+    while (!conn.isReady()) switch (try conn.next()) {
+        .columns => |n| columns = try rows.readColumns(Row, conn, n),
+        .row => {
+            var row: Row = undefined;
+            try rows.decodeRow(Row, &columns, conn, &row);
+            got = row;
+        },
+        .rows_end => {},
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(got.?.len > 4);
+    try std.testing.expectEqual(@as(u64, 1), got.?.escapes_off);
+    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
+    try std.testing.expect(!storage.isFenced());
+}
+
 test "store.mysql live GET_LOCK excludes a second Store on the same database" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

@@ -1490,10 +1490,10 @@ pub fn objects(comptime dialect: rsql.Dialect) []const Object {
     };
 }
 
-/// What MySQL sessions on a Store set before their first statement: the
+/// What every MySQL message on a Store sets before its statements: the
 /// collation the DDL's keys compare in, a strict `sql_mode` with
-/// ONLY_FULL_GROUP_BY and NO_BACKSLASH_ESCAPES, and `@list`'s length. Nothing in this PR runs
-/// it; the live dialect check and PR 8's engine do.
+/// ONLY_FULL_GROUP_BY and NO_BACKSLASH_ESCAPES, and `@list`'s length.
+/// The engine prefixes each COM_QUERY with them (`engine/mysql_open.zig`).
 pub const mysql_session = [_][:0]const u8{
     "SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin",
     "SET SESSION sql_mode='ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'",
