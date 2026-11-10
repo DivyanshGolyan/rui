@@ -1821,6 +1821,8 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             "peer_integration.py release", "bash_environment_integration.py release",
             "sender_identity_integration.py release",
             "human_cli_integration.py release", "preference_policy_integration.py preferences",
+            "model_picker_integration.py release", "model_picker_signin_integration.py release",
+            "model_picker_failure_integration.py release",
             "request_wait_integration.py release",
             "bash_lifecycle_integration.py release", "bash_recovery_integration.py release",
             "codex_integration.py release", "control_integration.py release",
