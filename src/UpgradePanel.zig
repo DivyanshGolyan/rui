@@ -402,7 +402,9 @@ test "upgrade panel accepts semantic Enter only when typed pressed offered and i
     const Case = struct { key: vaxis.Key, accepts: bool = false };
     const cases = [_]Case{
         .{ .key = .{ .codepoint = vaxis.Key.enter }, .accepts = true },
-        .{ .key = .{ .codepoint = 'j', .mods = .{ .ctrl = true } }, .accepts = true },
+        // Ctrl-J adds a line in a composer and never sends, so it never
+        // confirms either.
+        .{ .key = .{ .codepoint = 'j', .mods = .{ .ctrl = true } } },
         .{ .key = .{ .codepoint = vaxis.Key.enter, .mods = .{ .shift = true }, .text = "\r" } },
         .{ .key = .{ .codepoint = vaxis.Key.enter, .mods = .{ .alt = true }, .text = "\r" } },
         .{ .key = .{ .codepoint = vaxis.Key.enter, .mods = .{ .ctrl = true } } },
@@ -432,8 +434,15 @@ test "upgrade panel accepts semantic Enter only when typed pressed offered and i
     }
 }
 
-test "upgrade panel accepts CR LF and exact Kitty ctrl-J through the terminal decoder without accepting preprompt input" {
-    for ([_][]const u8{ "\r", "\n", "\x1b[13u", "\x1b[106;5u" }) |sequence| {
+test "upgrade panel accepts CR and Kitty Enter through the terminal decoder, never LF or Ctrl-J, without accepting preprompt input" {
+    const Case = struct { sequence: []const u8, accepts: bool };
+    for ([_]Case{
+        .{ .sequence = "\r", .accepts = true },
+        .{ .sequence = "\x1b[13u", .accepts = true },
+        .{ .sequence = "\n", .accepts = false },
+        .{ .sequence = "\x1b[106;5u", .accepts = false },
+    }) |case| {
+        const sequence = case.sequence;
         for ([_]bool{ false, true }) |offered| {
             var stream: TerminalInput = .{};
             var self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = &stream, .interrupted = undefined, .screen = undefined, .checked = test_checked, .offered = offered };
@@ -441,8 +450,8 @@ test "upgrade panel accepts CR LF and exact Kitty ctrl-J through the terminal de
                 var decoded = stream.feed(byte, 0);
                 while (decoded != .none) : (decoded = stream.next()) try self.input(decoded);
             }
-            try std.testing.expectEqual(offered, self.install_requested);
-            try std.testing.expect(!self.offered);
+            try std.testing.expectEqual(offered and case.accepts, self.install_requested);
+            try std.testing.expectEqual(offered and !case.accepts, self.offered);
         }
     }
 }

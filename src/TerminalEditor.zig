@@ -514,7 +514,7 @@ const Press = union(enum) {
 };
 
 pub fn isEnter(value: vaxis.Key) bool {
-    return value.matchExact(vaxis.Key.enter, .{}) or value.matchExact('j', .{ .ctrl = true });
+    return value.matchExact(vaxis.Key.enter, .{});
 }
 
 fn classify(value: vaxis.Key) Press {
@@ -526,7 +526,7 @@ fn classify(value: vaxis.Key) Press {
     if (value.matchExact(vaxis.Key.tab, .{})) return .{ .edit = .tab };
     // Alt-Enter adds a line in every form: Ghostty and other terminals send
     // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.
-    if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .alt = true })) return .{ .edit = .newline };
+    if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .alt = true }) or value.matchExact('j', .{ .ctrl = true })) return .{ .edit = .newline };
     if (value.matchExact(vaxis.Key.left, .{}) or value.matchExact('b', .{ .ctrl = true })) return .{ .edit = .left };
     if (value.matchExact(vaxis.Key.right, .{}) or value.matchExact('f', .{ .ctrl = true })) return .{ .edit = .right };
     if (value.matchExact('a', .{ .ctrl = true })) return .{ .edit = .line_start };
@@ -1081,7 +1081,7 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
 test "xterm modifyOtherKeys bindings mean what the same Kitty keys mean" {
     var storage: [64]u8 = undefined;
     // Ghostty's legacy table sends Shift-Enter as CSI 27;2;13~ unasked. It
-    // adds a line like Kitty's CSI 13;2u; Ctrl-A still moves to the line start and Ctrl-J sends.
+    // adds a line like Kitty's CSI 13;2u; Ctrl-A moves to the line start and Ctrl-J adds a line.
     for ([_][]const u8{ "\x1b[27;2;13~", "\x1b[13;2u", "\x1b[13;2;13u", "\x1b[13:13;2u" }) |shift_enter| {
         for ([_]bool{ true, false }) |allow_paste| {
             var editor: Editor = .{ .buffer = &storage, .allow_paste = allow_paste };
@@ -1092,9 +1092,8 @@ test "xterm modifyOtherKeys bindings mean what the same Kitty keys mean" {
             try std.testing.expectEqualStrings("one\ntwo", storage[0..editor.length]);
             for ("\x1b[27;5;97~X") |byte| _ = editor.feed(&stream, byte);
             try std.testing.expectEqualStrings("one\nXtwo", storage[0..editor.length]);
-            var sent = false;
-            for ("\x1b[27;5;106~") |byte| sent = editor.feed(&stream, byte) == .submit or sent;
-            try std.testing.expect(sent);
+            for ("\x1b[27;5;106~") |byte| try std.testing.expect(editor.feed(&stream, byte) != .submit);
+            try std.testing.expectEqualStrings("one\nX\ntwo", storage[0..editor.length]);
         }
     }
     // A malformed form is a key the user pressed whose meaning was lost. It
@@ -1161,9 +1160,9 @@ test "meta-backspace deletes a word without swallowing the next character" {
     var storage: [80]u8 = undefined;
     var editor: Editor = .{ .buffer = &storage };
     var stream: Input = .{};
-    for ("first second\x1b\x7fZ\n") |byte| {
+    for ("first second\x1b\x7fZ\r") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n') try std.testing.expectEqual(KeyOutcome.submit, event);
+        if (byte == '\r') try std.testing.expectEqual(KeyOutcome.submit, event);
     }
     try std.testing.expectEqualStrings("first Z", editor.buffer[0..editor.length]);
 }
@@ -1172,34 +1171,34 @@ test "grapheme deletion, distinct word bindings and multiline paste" {
     var storage: [100]u8 = undefined;
     var editor: Editor = .{ .buffer = &storage };
     var stream: Input = .{};
-    for ("A中e\u{301}🧑‍🌾\x7f\n") |byte| {
+    for ("A中e\u{301}🧑‍🌾\x7f\r") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n') try std.testing.expectEqual(KeyOutcome.submit, event);
+        if (byte == '\r') try std.testing.expectEqual(KeyOutcome.submit, event);
     }
     try std.testing.expectEqualStrings("A中e\u{301}", storage[0..editor.length]);
 
     editor = .{ .buffer = &storage };
-    for ("ask src/foo-bar\x1b\x7f\n") |byte| _ = editor.feed(&stream, byte);
+    for ("ask src/foo-bar\x1b\x7f\r") |byte| _ = editor.feed(&stream, byte);
     try std.testing.expectEqualStrings("ask src/foo-", storage[0..editor.length]);
     editor = .{ .buffer = &storage };
-    for ("ask src/foo-bar\x17\n") |byte| _ = editor.feed(&stream, byte);
+    for ("ask src/foo-bar\x17\r") |byte| _ = editor.feed(&stream, byte);
     try std.testing.expectEqualStrings("ask ", storage[0..editor.length]);
 
     editor = .{ .buffer = &storage };
-    for ("\x1b[200~line1\nline2\x1b[201~\n") |byte| {
+    for ("\x1b[200~line1\nline2\x1b[201~\r") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n' and !stream.paste) try std.testing.expectEqual(KeyOutcome.submit, event);
+        if (byte == '\r' and !stream.paste) try std.testing.expectEqual(KeyOutcome.submit, event);
     }
     try std.testing.expectEqualStrings("line1\nline2", storage[0..editor.length]);
     for ([_][]const u8{ "left\tright", "left\x1b[9uright" }) |input| {
         editor = .{ .buffer = &storage };
         for (input) |byte| _ = editor.feed(&stream, byte);
-        try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\n'));
+        try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
         try std.testing.expectEqualStrings("left\tright", storage[0..editor.length]);
     }
     editor = .{ .buffer = &storage };
     for ("left\x1b[27uright") |byte| _ = editor.feed(&stream, byte);
-    try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\n'));
+    try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
     try std.testing.expectEqualStrings("leftright", storage[0..editor.length]);
 }
 
@@ -1208,16 +1207,16 @@ test "exact UTF-8 bound and sticky rejection after backspace" {
     var editor: Editor = .{ .buffer = &storage };
     var stream: Input = .{};
     for (0..65534) |_| _ = editor.feed(&stream, 'a');
-    for ("é\n") |byte| {
+    for ("é\r") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n') try std.testing.expectEqual(KeyOutcome.submit, event);
+        if (byte == '\r') try std.testing.expectEqual(KeyOutcome.submit, event);
     }
     try std.testing.expectEqual(@as(usize, 65536), editor.length);
     editor = .{ .buffer = &storage };
     for (0..65535) |_| _ = editor.feed(&stream, 'a');
-    for ("é\x7f\n") |byte| {
+    for ("é\x7f\r") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n') try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, event);
+        if (byte == '\r') try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, event);
     }
     try std.testing.expectEqual(@as(usize, 65535), editor.length);
 }
@@ -1226,26 +1225,26 @@ test "unknown CSI retains following text; malformed input and marked choice reje
     var storage: [80]u8 = undefined;
     var editor: Editor = .{ .buffer = &storage };
     var stream: Input = .{};
-    for ("\x1b[123;4~Z\n") |byte| {
+    for ("\x1b[123;4~Z\r") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n') try std.testing.expectEqual(KeyOutcome.submit, event);
+        if (byte == '\r') try std.testing.expectEqual(KeyOutcome.submit, event);
     }
     try std.testing.expectEqualStrings("Z", storage[0..editor.length]);
     editor = .{ .buffer = &storage };
-    for ("\xc3(\n") |byte| {
+    for ("\xc3(\r") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n') try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, event);
+        if (byte == '\r') try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, event);
     }
     // A Kitty report of a surrogate or a codepoint past Unicode is no key.
     for ([_][]const u8{ "a\x1b[55296u", "a\x1b[1114112u" }) |input| for ([_]bool{ true, false }) |allow_paste| {
         editor = .{ .buffer = &storage, .allow_paste = allow_paste };
         for (input) |byte| _ = editor.feed(&stream, byte);
-        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, editor.feed(&stream, '\n'));
+        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, editor.feed(&stream, '\r'));
     };
     editor = .{ .buffer = &storage, .allow_paste = false };
-    for ("\x1b[200~a\x1b[201~\n") |byte| {
+    for ("\x1b[200~a\x1b[201~\r") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n' and !stream.paste) try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, event);
+        if (byte == '\r' and !stream.paste) try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, event);
     }
     // Alt-A remains a screen action, never the permission choice "a".
     editor = .{ .buffer = &storage, .allow_paste = false };
@@ -1391,7 +1390,7 @@ test "incomplete escape cannot swallow Enter or Ctrl-C" {
     var editor: Editor = .{ .buffer = &storage };
     var stream: Input = .{};
     for ("ok\x1b[") |byte| _ = editor.feed(&stream, byte);
-    try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\n'));
+    try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
     try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
     editor = .{ .buffer = &storage };
     for ("\x1b[") |byte| _ = editor.feed(&stream, byte);
@@ -1400,7 +1399,7 @@ test "incomplete escape cannot swallow Enter or Ctrl-C" {
     // ESC with a following key is an Alt chord: unbound, it is dropped.
     for ("ok\x1b") |byte| _ = editor.feed(&stream, byte);
     try std.testing.expectEqual(KeyOutcome{ .refused = .unbound }, editor.feed(&stream, 'Z'));
-    try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\n'));
+    try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
     try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
 }
 

@@ -4266,7 +4266,7 @@ test "a change run from the /status page replies under the page, which shows the
     }
 }
 
-test "upgrade command stays local and preserves the actual draft cursor and original submission" {
+test "upgrade command names the shell command, consumes only its line and keeps the original submission" {
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
     const screen = try std.testing.allocator.create(Screen);
@@ -4470,7 +4470,7 @@ const UnusedArchiveCommand = struct {
 };
 
 test "conversation slash archive archives a busy Session at once and consumes only its submitted command without approving" {
-    for ([_]bool{ false, true }) |approval| for ([_][]const u8{ "\r", "\n" }) |enter| for ([_]bool{ false, true }) |completion| {
+    for ([_]bool{ false, true }) |approval| for ([_][]const u8{"\r"}) |enter| for ([_]bool{ false, true }) |completion| {
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
@@ -4516,13 +4516,13 @@ test "conversation slash and shortcut archive restore share one pending or unkno
         held.self.lender = overview.lender();
         held.self.command = UnusedArchiveCommand.command;
         UnusedArchiveCommand.calls = 0;
-        try sendKeys(&held.self, if (restore) "/unarchive\n" else "/archive\n");
+        try sendKeys(&held.self, if (restore) "/unarchive\r" else "/archive\r");
         try std.testing.expectEqual(@as(usize, 1), overview.archives);
         try std.testing.expectEqual(!restore, overview.requested);
         try std.testing.expectEqualStrings("k7m2qx", &overview.archived.?);
         try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
         if (unknown) _ = try overview_view.step(&overview.state, .{ .archive = .{ .request = .{ .reference = "k7m2qx".*, .archived = !restore }, .outcome = .{ .unconfirmed = "saved-archive-handle" } } });
-        try sendKeys(&held.self, if (restore) "/archive\n" else "/unarchive\n");
+        try sendKeys(&held.self, if (restore) "/archive\r" else "/unarchive\r");
         try sendKeys(&held.self, "\x1ba");
         try std.testing.expectEqual(@as(usize, 1), overview.archives);
         try std.testing.expectEqual(@as(usize, 1), overview.state.request_count);
@@ -4540,7 +4540,7 @@ test "conversation slash and shortcut archive restore share one pending or unkno
 }
 
 test "Ctrl-X stops at once beside a typed slash archive, and Enter then archives" {
-    for ([_][]const u8{ "\r", "\n" }) |enter| {
+    for ([_][]const u8{"\r"}) |enter| {
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
@@ -4564,7 +4564,7 @@ test "conversation slash archive errors propagate and consume only the submitted
             if (input == .archive or input == .unarchive) return error.TestArchiveDispatchFailed;
         }
     };
-    for ([_][]const u8{ "/archive\n", "/unarchive\n" }) |command| {
+    for ([_][]const u8{ "/archive\r", "/unarchive\r" }) |command| {
         const held = try HeldFrontend.create();
         defer held.destroy();
         held.self.lender.step = Failed.step;
