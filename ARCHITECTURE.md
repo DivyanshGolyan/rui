@@ -128,7 +128,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
 | Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
 | Session overview | `src/Overview.zig` owns the terminal surface and its reader; `src/overview_view.zig` is its presentation core. |
-| Desktop notifications | `src/attention.zig` decides which states are news and words them, and what program status record each Session has; `src/SessionTerminal.zig` owns focus and the program status probe, and writes both. |
+| Desktop notifications | `src/attention.zig` decides which states are news and words them, and what program status record each Session has; `src/TerminalApp.zig`'s `Attention` writes notifications and program status records through vaxis, and `Root` keeps the terminal's focus from App's focus events. |
 | Functional cores | The `cores` list in `src/logic_tests.zig`; `src/core_boundary.zig` defines what a core may name. |
 
 ## Admission and public requests
@@ -2476,25 +2476,18 @@ So the overview's listing jobs keep running under the conversation, which steps 
 The conversation hands each read it applies to the overview through its lender, and the core records it as it records the listing's; news the conversation reads first is named as its Session line names the Session.
 Whichever reads a state first notifies, and the other finds it recorded, so no news comes twice: not when the listing catches up after Esc, nor when it first lists a Session the conversation already read.
 
-`SessionTerminal` asks for focus reports (mode 1004) on entry and turns them off on restoration.
-`TerminalInput` decodes `ESC [ I` and `ESC [ O` as reports, never keys, so a focus change spends no Action offer, counts as no keypress and keeps a notice.
+App delivers focus changes as events, never keys: `Root` keeps the terminal's focus from them, so a focus change counts as no keypress and keeps a notice.
 Rui starts focused and stays so until a report says otherwise: a terminal that never reports, such as tmux without `focus-events on`, never notifies rather than notifying while the person watches.
 The text is `Rui: NAME finished`, `failed` or `needs approval`, with `, and N more` when one listing brings several; the name is cut to 80 bytes and escaped through `TerminalText` as one line, so no byte of it ends or extends the sequence.
 The signal follows the environment: OSC 9 for iTerm2, kitty, WezTerm and Ghostty (`TERM_PROGRAM` or `TERM`), OSC 777 `notify` for foot, and a bell elsewhere.
 Inside tmux or screen (`TMUX`, `STY`, or a `tmux`/`screen` `TERM`) it is always a bell: a multiplexer drops an unknown OSC unless passthrough is configured, but passes a bell to the outer terminal.
 Under a multiplexer that sends no focus reports Rui stays focused, so it never rings.
-`SessionTerminal` holds at most one waiting notification; news that comes while it waits joins it, naming the most urgent Session and counting the rest, and the next frame writes it as its first bytes through that frame's write: it never lands inside another sequence, and a terminal that takes no output runs the frame's pump rather than failing.
-A frame that fails drops it.
+`Attention.notify` writes each notification the overview hands it and flushes it at once.
 Each notification rereads the preference, so `/setup --notifications off` applies at once; unreadable preferences leave the default, on.
 
 Divyansh asked on 2026-11-02 for Mitchell Hashimoto's program status protocol, OSC 7501 (https://www.superlogical.com/rex/docs/build/program-status).
 Rui uses it alongside the signal above, not instead of it, because few terminals take it yet (Rex; Ghostty and kitty unreleased); that, and what follows, are builder choices.
-On entry, outside tmux or screen, `SessionTerminal` sends the probe `OSC 7501 ; ? ST` and then `CSI c`.
-The spec says nothing of multiplexers, and one would answer for itself, so inside one Rui never probes and keeps the bell.
-`TerminalInput` decodes the probe's answer and every device attributes answer as reports, never keys, as it does focus reports.
-An answer to the probe before the device attributes answer behind it means the terminal takes program status; a device attributes answer first, or none, means it does not, and Rui notifies as above.
-Opening never waits for either.
-The overview's own background question also ends with `CSI c`; its answers come after the probe's, so the first device attributes answer is the probe's and the second still ends that wait.
+vaxis asks the terminal whether it takes program status and keeps the answer in `caps.program_status`; until it says so, Rui notifies as above.
 Where the terminal takes it, Rui writes one record per Session, `id=rui/REFERENCE` with `app=rui` and the Session's row title in base64 as `msg`: `working` for pending, working, retrying, stopping and Bash work; `blocked` with `kind=permission` while an Action awaits a decision; `done` for a finish the person has not opened; `error` for a failure; `idle` after a stop, or once the person opens a Session whose outcome the record shows.
 Each record changes when the Session's state does, whether or not the terminal has focus: the terminal chooses how to show it and how often to tell the person.
 Then Rui writes no OSC 9, OSC 777 or bell, so no news comes twice.
@@ -2504,8 +2497,7 @@ A record follows each change a listing reads, and a later finish, failure or wai
 An outcome the conversation's first read shows as the person opens the Session is one they have seen, even when no listing had read it yet: `State.seen` keeps the latest such state, a listing that reads that outcome or an earlier one gives `idle`, and only a later Turn's finish or failure is `done` or `error` again.
 The listing the overview opens on gives a record only to work under way or waiting, so an outcome from before Rui opened never gets one, and a Session at rest gets none until it does something; a Session a full listing no longer shows has its record cleared.
 A new title, from a Label or a first line read later, is a new version, so the record is written again with that name.
-Reports are written first in each frame, as a notification is, and stay with `SessionTerminal` until a frame writes them whole: only then does the overview count them as held.
-A frame cut short changes nothing the core knows, so the next frame writes them again, and reports a frame cannot hold wait in the core for the next.
+`Attention.report` writes each record and flushes it, and only then does the overview count it as held.
 With notifications off Rui wants no record: while any record of Rui's may be on the terminal it writes one clear (`state=clear:id=rui`, which clears Rui's records and no other program's), and from the frame that carries it until one writes it whole, what the terminal holds of each record is unknown; on again, it writes every record again.
 Leaving clears Rui's records too whenever one may be on the terminal, though the spec lets `done` and `error` outlive the program: a record of a Session no Rui watches would not change again.
 
@@ -2606,8 +2598,8 @@ Sessions started from the overview composer are fresh Sessions.
 Explicitly ask-configured Sessions use the same allow-once/deny path, without special fresh-Session behavior.
 
 The frontend's caller owns the terminal and lends it.
-The caller creates the screen and `SessionTerminal`, installs the SIGINT and SIGTERM handlers and passes the cancellation they stop.
-`SessionFrontend.run` draws until the person leaves or a signal arrives, and returns how it stopped: `detached`, `interrupted` or `returned`.
+`TerminalApp` installs the SIGINT, SIGTERM and SIGHUP handlers, and the root quits on its next tick once one arrives.
+The conversation runs until the person leaves or a signal arrives, and reports how it stopped: `detached`, `interrupted` or `returned`.
 It returns `returned` only when nothing would be lost or dismissed: no draft, pending Action, sub-view or running command, and no original that is not yet saved (`not_started` or `submitting`).
 The overview then closes the frontend, which joins its reader, and draws again without restoring the terminal or printing a notice.
 A rejected original is released as `/discard` would. An unconfirmed one goes into the overview's request ledger: the overview says `! Not confirmed · rui request recover KEY`, and its departure prints the line the conversation's exit would have printed. When that ledger is full, the frontend leaves as Ctrl-C would and prints the line itself.

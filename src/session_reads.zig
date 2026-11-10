@@ -22,7 +22,6 @@ const slash_commands = @import("slash_commands.zig");
 const queued_line = @import("queued_line.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const AnswerRenderer = @import("AnswerRenderer.zig");
-const Terminal = @import("SessionTerminal.zig");
 const status_page = @import("status_page.zig");
 const ReadPhase = departure.ReadPhase;
 const session_transcript = @import("session_transcript.zig");
@@ -961,6 +960,10 @@ const MessagePage = struct {
 /// /copy: the newest answer, bound to its length and digest before its last
 /// window arrives. A file takes it as it arrives; the clipboard's bytes wait
 /// in scratch, which only the UI may write to the terminal.
+/// The most bytes /copy sends: hterm's osc52.sh sends at most 100,000
+/// base64 bytes, the smallest limit a terminal's own tooling documents.
+pub const clipboard_limit = 100_000 / 4 * 3;
+
 pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();
@@ -1002,7 +1005,7 @@ pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
         job.result.copied = .saved;
         return;
     }
-    if (copy == .answer and answer.content.bytes > Terminal.clipboard_limit) {
+    if (copy == .answer and answer.content.bytes > clipboard_limit) {
         job.result.copied = .too_large;
         return;
     }
@@ -1017,7 +1020,7 @@ pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
         }
     else
         .{ .start = 0, .length = sink.offset };
-    job.result.copied = if (range.length > Terminal.clipboard_limit) .too_large else .{ .clipboard = range };
+    job.result.copied = if (range.length > clipboard_limit) .too_large else .{ .clipboard = range };
 }
 
 /// The Conversation's newest assistant answer, or null before the first.

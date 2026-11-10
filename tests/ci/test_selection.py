@@ -400,7 +400,7 @@ class SelectionTest(unittest.TestCase):
         self.assertIn("check-full", NATIVE)
 
     def test_frontend_selects_the_pty_fixtures_that_drive_it_not_check(self):
-        for path in ("src/SessionFrontend.zig", "src/SessionTerminal.zig", "src/Overview.zig"):
+        for path in ("src/SessionFrontend.zig", "src/Overview.zig"):
             with self.subTest(path=path):
                 result = select([path, "README.md"], "review", AVAILABLE)
                 for family in ("targets", "native_targets"):
@@ -413,7 +413,7 @@ class SelectionTest(unittest.TestCase):
 
     def test_renderer_diff_skips_check_before_landing(self):
         for paths in (["src/SessionFrontend.zig"], ["src/TerminalText.zig"], ["src/AnswerRenderer.zig"],
-                      ["src/ConversationViewport.zig"], ["src/session_sequence_model_test.zig"],
+                      ["src/ConversationViewport.zig"],
                       ["src/request_encoding.zig"], ["README.md"]):
             with self.subTest(paths=paths):
                 landing = select(paths, "review", AVAILABLE)
@@ -853,8 +853,7 @@ class SelectionTest(unittest.TestCase):
             # The restoration fixture is also a blocking gate, so it keeps its own selection.
             self.assertEqual(harnesses - {"tests/integration/terminal_restoration_*"},
                              set(RENDERER_HARNESSES))
-        for path in ("tests/integration/input_equivalence.py", "tests/integration/session_sequence_model.py",
-                     "tests/integration/session_sequence_model_test.py"):
+        for path in ("tests/integration/input_equivalence.py",):
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 self.assertEqual(result["targets"] + result["native_targets"], [])

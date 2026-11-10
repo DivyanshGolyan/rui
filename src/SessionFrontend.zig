@@ -19,7 +19,6 @@ const Submission = @import("SessionSubmission.zig");
 const original_state = @import("submission_state.zig");
 const Task = @import("ClientTask.zig");
 const Screen = @import("SessionScreen.zig");
-const Frame = @import("TerminalFrame.zig");
 const Editor = @import("TerminalEditor.zig");
 const keymap = @import("keymap.zig");
 const overview_view = @import("overview_view.zig");
@@ -1017,7 +1016,7 @@ test "frontend /model shows the Session's model and sign-in within 60 columns an
 test "frontend lists the efforts of the Session's model once it is read, the one in force marked" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .colour = false };
     self.input.init();
-    for ("/effort ") |byte| _ = self.input.feed(byte);
+    _ = self.input.typed("/effort ");
     try std.testing.expectEqualStrings("/effort ", self.input.composition().bytes);
     try std.testing.expect(self.nextCommands(null) == null);
     self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .medium };
@@ -1032,7 +1031,7 @@ test "frontend lists the efforts of the Session's model once it is read, the one
     shown = self.nextCommands(shown).?;
     try std.testing.expectEqualStrings("medium", shown.completion());
     // Typing moves it back to the first.
-    _ = self.input.feed('m');
+    _ = self.input.typed("m");
     try std.testing.expectEqualStrings("/effort m", self.input.composition().bytes);
     shown = self.nextCommands(shown).?;
     try std.testing.expectEqualStrings("edium", shown.completion());
@@ -1218,9 +1217,8 @@ fn update(self: *Self) !Updated {
         // unfinished work in raw mode.
         self.reader.cancel();
     }
-    // A joined read may hide or withdraw the Action, so a sequence the
-    // choice is decoding finishes there first and keeps its meaning.
-    if (self.reader.thread != null and reader_policy.settles(self.reader.completed(), self.screen.inputRow() == .selector, self.input.pending() != .none)) {
+    // A joined read may hide or withdraw the Action.
+    if (self.reader.thread != null and self.reader.completed()) {
         try self.settleReader();
         self.withdrawDecided();
     }
@@ -1257,10 +1255,7 @@ fn update(self: *Self) !Updated {
             job.target = .{ .message = request.target };
             try self.launch(job, reads.fullMessage);
         }
-        // An Action's choice holds the input: no press waits for it.
-        if (self.screen.inputRow() == .selector) {
-            self.input.dropPresses();
-        } else if (self.reader.thread == null and !self.reading.opening) if (self.input.nextStep()) |recall| {
+        if (self.reader.thread == null and !self.reading.opening) if (self.input.nextStep()) |recall| {
             const job = self.freeze(.recall);
             job.recall = recall;
             try self.launch(job, reads.recall);
@@ -1345,14 +1340,12 @@ fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
     return shown.completion();
 }
 
-// A notice fits the rows under the input as the status fits above it.
-comptime {
-    std.debug.assert(@typeInfo(@FieldType(Self, "notice_buffer")).array.len <= Frame.status_capacity);
-}
-
 /// The instructions always fit; a long context line is shortened, on a
 /// UTF-8 boundary, rather than pushing them out of the status region.
-fn statusLines(buffer: *[Frame.status_capacity]u8, context: []const u8, base: []const u8, archive_state: protocol.SessionArchiveState) []const u8 {
+/// The most bytes the status lines take.
+const status_capacity = 2048;
+
+fn statusLines(buffer: *[status_capacity]u8, context: []const u8, base: []const u8, archive_state: protocol.SessionArchiveState) []const u8 {
     std.debug.assert(base.len <= 256);
     var status = std.Io.Writer.fixed(buffer);
     const badge = status_page.archiveBadge(archive_state);
@@ -1379,7 +1372,7 @@ fn statusLines(buffer: *[Frame.status_capacity]u8, context: []const u8, base: []
 }
 
 test "status lines keep the instructions beside an oversized context" {
-    var buffer: [Frame.status_capacity]u8 = undefined;
+    var buffer: [status_capacity]u8 = undefined;
     // A context whose cut falls inside a two-byte scalar.
     var context: [4000]u8 = undefined;
     for (0..context.len / 2) |index| context[index * 2 ..][0..2].* = "é".*;
@@ -1391,7 +1384,7 @@ test "status lines keep the instructions beside an oversized context" {
 }
 
 test "archive badges keep submission status and whole instructions beside oversized context" {
-    var buffer: [Frame.status_capacity]u8 = undefined;
+    var buffer: [status_capacity]u8 = undefined;
     var context: [4000]u8 = undefined;
     for (0..context.len / 2) |index| context[index * 2 ..][0..2].* = "é".*;
     for ([_]struct { state: protocol.SessionArchiveState, expected: []const u8 }{
@@ -1410,11 +1403,10 @@ test "archive badges keep submission status and whole instructions beside oversi
 }
 
 /// Another client decided, or the Turn ended: the choice can no longer decide.
-/// It leaves before more input is read, so no key decides; a fragmented
-/// sequence finishes at the choice first and keeps its meaning.
+/// It leaves before more input is read, so no key decides.
 fn withdrawDecided(self: *Self) void {
     const pending = self.screen.consent orelse return;
-    if (self.live.work.first_action == pending.action or self.input.pending() != .none) return;
+    if (self.live.work.first_action == pending.action) return;
     self.screen.withdrawAction();
 }
 
@@ -1448,11 +1440,11 @@ fn perform(self: *Self, action: ConversationAction) !void {
     const screen = self.screen;
     switch (action) {
         // A shown list takes the arrows, as the overview's model list does.
-        .previous, .next => if (if (screen.inputRow() == .draft) self.shownCommands() else null) |shown| {
+        .previous, .next => if (self.shownCommands()) |shown| {
             shown.move(action == .next);
             self.dirty = true;
-        } else if (screen.inputRow() != .draft or !try self.moveSelection(action == .next)) try self.scroll(action == .next, false),
-        .scroll_up, .scroll_down => if (if (screen.inputRow() == .draft) self.shownCommands() else null) |shown| {
+        } else if (!try self.moveSelection(action == .next)) try self.scroll(action == .next, false),
+        .scroll_up, .scroll_down => if (self.shownCommands()) |shown| {
             shown.move(action == .scroll_down);
             self.dirty = true;
         } else try self.scroll(action == .scroll_down, false),
@@ -1462,7 +1454,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
         },
         .latest, .back, .close => {
             // Esc closes only a list the person saw.
-            if (action == .close and screen.inputRow() == .draft) if (self.shownCommands()) |shown| {
+            if (action == .close) if (self.shownCommands()) |shown| {
                 shown.close();
                 self.dirty = true;
                 return;
@@ -1646,7 +1638,6 @@ fn idleReader(self: *const Self) reader_policy.Idle {
         .choice_open = self.screen.consent != null or self.app_consent.request != null,
         .action_named = self.live.work.first_action != null,
         .submission = self.submission.view() != null,
-        .decoder_pending = self.input.pending() != .none,
     };
 }
 
@@ -2084,7 +2075,7 @@ test "archive badges follow only completed server snapshots and stay distinct fr
     self.line = .{ .read = .{ .revision = 1, .end = 1 } };
     self.live.work.state = .{ .working = .{ .since = 1 } };
     self.reading.phase = .activity;
-    var buffer: [Frame.status_capacity]u8 = undefined;
+    var buffer: [status_capacity]u8 = undefined;
     for ([_]struct { archive: protocol.SessionArchiveState, work: protocol.WorkState, status: []const u8 }{
         .{ .archive = .archiving, .work = .{ .stopping = .{ .since = 1 } }, .status = "Command accepted\nStopping and archiving" },
         .{ .archive = .archived, .work = .{ .stopped = .{ .since = 1, .cause = .stop } }, .status = "Command accepted\nArchived · /unarchive" },

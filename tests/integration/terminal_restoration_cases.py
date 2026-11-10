@@ -1864,56 +1864,6 @@ def host_diagnostic_cases(state, library):
                     pass  # Optional reporting cannot replace the original failure.
 
 
-def native_notice_cases(state):
-    """Exercise the public notice's libc adapter without a Host or interposer."""
-    binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
-    expected = b"\nDetached. Host work continues.\nResume: rui session resume --store $'/tmp/a\\' path' k7m2qx\n"
-    for transport, full in (("pipe", False), ("pipe", True), ("pty", False)):
-        # PTY EAGAIN is not persistent: internal delivery can make space without
-        # a reader. A full pipe with no reader owns the backpressure witness.
-        reader, writer = os.pipe() if transport == "pipe" else open_pty()
-        try:
-            if transport == "pty":
-                attrs = termios.tcgetattr(writer)
-                attrs[1] &= ~termios.OPOST
-                termios.tcsetattr(writer, termios.TCSANOW, attrs)
-            flags = fcntl.fcntl(writer, fcntl.F_GETFL)
-            filled = 0
-            if full:
-                fcntl.fcntl(writer, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-                while True:
-                    try:
-                        filled += os.write(writer, b"x" * 1024)
-                        assert filled < 1024 * 1024, "unbounded fixture output"
-                    except BlockingIOError:
-                        break
-                fcntl.fcntl(writer, fcntl.F_SETFL, flags)
-            result = subprocess.run([str(binary)], stdout=writer, stderr=subprocess.PIPE, timeout=5)
-            assert_file_flags(fcntl.fcntl(writer, fcntl.F_GETFL), flags)
-            assert result.returncode == (1 if full else 0), result.stderr
-            if full:
-                assert b"TerminalCleanupFailed" in result.stderr, result.stderr
-            else:
-                assert not result.stderr, result.stderr
-            # Read only after the actor exits. Bound reads even on a broken
-            # adapter, and reject extra/missing bytes, not just a prefix.
-            fcntl.fcntl(reader, fcntl.F_SETFL, fcntl.fcntl(reader, fcntl.F_GETFL) | os.O_NONBLOCK)
-            actual = bytearray()
-            while True:
-                try:
-                    chunk = os.read(reader, 4096)
-                    if not chunk:
-                        break
-                    actual.extend(chunk)
-                    assert len(actual) <= max(filled, len(expected)), "extra notice bytes"
-                except BlockingIOError:
-                    break
-            assert actual == (b"x" * filled if full else expected), actual
-            print(f"native notice: {transport} full={full}, exact bytes and restored flags passed", flush=True)
-        finally:
-            dispose_all(lambda: os.close(reader), lambda: os.close(writer))
-
-
 def app_terminal_cases():
     binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
     master, slave = open_pty()
@@ -2137,11 +2087,6 @@ def main(selected=None):
         if selected in (None, "app-ready-error"):
             app_ready_failure_case()
         if selected == "app-ready-error":
-            completed = True
-            return
-        if selected in (None, "notice", "detach"):
-            native_notice_cases(state)
-        if selected == "notice":
             completed = True
             return
         source, library = state / "probe.c", state / "probe.so"

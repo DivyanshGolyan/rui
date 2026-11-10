@@ -121,7 +121,7 @@ FIXTURES = {
                             ("src/upgrade.zig", "src/upgrade_process.zig",
                              "src/HostLifecycle.zig", "src/Installation.zig")),
     "terminal-restoration-integration": ((I + "terminal_restoration_integration.py",), ("src/terminal_notice_test.zig",),
-                                         ("src/SessionFrontend.zig", "src/SessionTerminal.zig", "src/TerminalEditor.zig")),
+                                         ("src/SessionFrontend.zig", "src/TerminalApp.zig", "src/TerminalEditor.zig")),
     "canonical-failure-integration": ((I + "canonical_failure_integration.py",), (),
                                       (CALLER, "src/SessionFrontend.zig", "src/failure_class.zig", "src/model_adapter.zig")),
     "model-picker-integration": ((I + "model_picker_integration.py", I + "model_picker_signin_integration.py",
@@ -374,7 +374,7 @@ CONTENT_RULES = {
 }
 
 # Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
-RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py")
+RENDERER_HARNESSES = ("tests/integration/input_equivalence.py",)
 
 # What the import graph cannot see: inputs no literal import names (C
 # sources, generators, non-Zig consumers) and owners whose checks a test
@@ -392,8 +392,6 @@ RULES = (
     (("src/model_list.zig",), ("codex-h2-integration",), ("codex-h2-integration",),
      "Provider model lists: the Host's fetch and the wire reply follow"),
     (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the nonblocking renderer contracts run them"),
-    (("src/session_sequence_model_test.zig",), ("test-logic",), ("test-logic",),
-     "Sequence-model oracle: no gate compiles it; nonblocking renderer contracts run it"),
     (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
      "The wire contract: openapi.json must equal what the wire types emit"),
     (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),

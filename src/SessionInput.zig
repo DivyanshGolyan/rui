@@ -1,7 +1,6 @@
 //! One invocation's logical drafts. Initialize in final storage; never move.
 const std = @import("std");
 const Editor = @import("TerminalEditor.zig");
-const TerminalInput = @import("TerminalInput.zig");
 const keymap = @import("keymap.zig");
 const slash_commands = @import("slash_commands.zig").conversation;
 const Self = @This();
@@ -39,9 +38,6 @@ pub const Landing = union(enum) {
     show: Found,
 };
 
-/// The invocation's one terminal byte stream. Draft resets, bank switches and
-/// the Session's choice editor never replace it.
-stream: TerminalInput = .{},
 banks: [2][capacity]u8 = undefined,
 editors: [2]Editor = undefined,
 // The one queued inspection command; only queueCommand and takeCommand change it.
@@ -86,31 +82,6 @@ pub fn composition(self: *const Self) View {
     return .{ .bytes = editor.buffer[0..editor.length], .cursor = editor.cursor };
 }
 
-pub fn pending(self: *const Self) Editor.Pending {
-    return self.stream.pending();
-}
-
-/// One byte for the draft and every event it completes (tests, which keep
-/// clear of input deadlines), each key as itself. Returns the last event
-/// that is not an editor `.none`.
-pub fn feed(self: *Self, byte: u8) Event(keymap.Key) {
-    var last: Event(keymap.Key) = .{ .editor = .none };
-    var decoded = self.stream.feed(byte, 0);
-    while (decoded != .none) : (decoded = self.stream.next()) {
-        const event = self.applySelected(keymap.every, decoded, true);
-        if (!(event == .editor and event.editor == .none)) last = event;
-    }
-    return last;
-}
-
-pub fn applySelected(self: *Self, comptime keys: anytype, decoded: TerminalInput.Decoded, selected: bool) Event(@TypeOf(keys).Action) {
-    const editor = &self.editors[self.active];
-    const edits = editor.edits;
-    const outcome = editor.apply(keys, decoded);
-    if (editor.edits != edits) self.changed();
-    return self.accept(@TypeOf(keys).Action, outcome, selected);
-}
-
 pub fn appEvent(self: *Self, comptime keys: anytype, event: @import("vaxis").vxfw.Event, pasting: bool, selected: bool) Event(@TypeOf(keys).Action) {
     const editor = &self.editors[self.active];
     const edits = editor.edits;
@@ -119,28 +90,32 @@ pub fn appEvent(self: *Self, comptime keys: anytype, event: @import("vaxis").vxf
     return self.accept(@TypeOf(keys).Action, outcome, selected);
 }
 
-test "Ctrl-J inserts at the caret without submitting through either input path" {
+/// Terminal bytes, decoded as App decodes them, each key as itself. For
+/// tests. Returns the last event that is not an editor `.none`.
+pub fn typed(self: *Self, bytes: []const u8) Event(keymap.Key) {
+    var events: @import("testing/app_events.zig").Events = .init(bytes);
+    var last: Event(keymap.Key) = .{ .editor = .none };
+    while (events.next()) |input| {
+        const event = self.appEvent(keymap.every, input, events.pasting, true);
+        if (!(event == .editor and event.editor == .none)) last = event;
+    }
+    return last;
+}
+
+test "Ctrl-J inserts at the caret without submitting, in every encoding" {
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
     for ([_][]const u8{ "\n", "\x1b[106;5u", "\x1b[106;5;106u", "\x1b[27;5;106~" }) |bytes| {
+        errdefer std.debug.print("bytes={any}\n", .{bytes});
         self.init();
         _ = self.append("leftRIGHT");
         self.editors[self.active].cursor = 4;
-        for (bytes) |byte| try std.testing.expect(self.feed(byte) == .editor);
+        try std.testing.expect(self.typed(bytes) == .editor);
         try std.testing.expectEqualStrings("left\nRIGHT", self.composition().bytes);
         try std.testing.expectEqual(@as(usize, 5), self.composition().cursor);
         try std.testing.expectEqual(null, self.submitted);
-        try std.testing.expect(self.feed('\r') == .message);
+        try std.testing.expect(self.typed("\r") == .message);
     }
-    self.init();
-    _ = self.append("leftRIGHT");
-    self.editors[self.active].cursor = 4;
-    const newline = self.appEvent(keymap.every, .{ .key_press = .{ .codepoint = 'j', .mods = .{ .ctrl = true } } }, false, true);
-    try std.testing.expect(newline == .editor);
-    try std.testing.expectEqualStrings("left\nRIGHT", self.composition().bytes);
-    try std.testing.expectEqual(@as(usize, 5), self.composition().cursor);
-    try std.testing.expectEqual(null, self.submitted);
-    try std.testing.expect(self.appEvent(keymap.every, .{ .key_press = .{ .codepoint = @import("vaxis").Key.enter } }, false, true) == .message);
 }
 
 fn accept(self: *Self, comptime Action: type, outcome: keymap.Outcome(Action), selected: bool) Event(Action) {
@@ -229,12 +204,6 @@ pub fn nextStep(self: *Self) ?Step {
     return .{ .from = self.recall.shown, .older = older, .revision = self.revision };
 }
 
-/// No press waits once an Action's choice holds the input. A step already
-/// read still lands on the draft it began from.
-pub fn dropPresses(self: *Self) void {
-    self.recall.pending = 0;
-}
-
 /// A step that failed or was cancelled: the presses after it go too.
 pub fn abandonStep(self: *Self) void {
     self.recall.reading = false;
@@ -292,9 +261,9 @@ fn checked(self: *const Self, ticket: Ticket) !@TypeOf(self.submitted.?) {
 test "SessionInput loan release preserves next Unicode draft and cursor" {
     var input: Self = undefined;
     input.init();
-    for ("aéZ\x1b[D") |byte| _ = input.feed(byte);
-    const ticket = input.feed('\r').message;
-    for ("next!\x1b[D\x1b[D") |byte| _ = input.feed(byte);
+    _ = input.typed("aéZ\x1b[D");
+    const ticket = input.typed("\r").message;
+    _ = input.typed("next!\x1b[D\x1b[D");
     try std.testing.expectEqualStrings("aéZ", try input.message(ticket));
     try input.release(ticket);
     try std.testing.expectEqualStrings("next!", input.composition().bytes);
@@ -305,21 +274,12 @@ test "SessionInput loan release preserves next Unicode draft and cursor" {
 test "SessionInput malformed rejection resets only the active composition" {
     var input: Self = undefined;
     input.init();
-    for ("original") |byte| _ = input.feed(byte);
-    const ticket = input.feed('\r').message;
-    for ("\xff") |byte| _ = input.feed(byte);
-    try std.testing.expect(std.meta.eql(input.feed('\r').editor, .{ .refused = .invalid }));
-    for ([_][]const u8{ "\x1b\n", "\x1b\r", "\x1b[20\n", "\x1b[201\r" }) |sequence| {
-        for ("\x1b[200~left") |byte| _ = input.feed(byte);
-        for (sequence) |byte| _ = input.feed(byte);
-        try std.testing.expectEqual(Editor.Pending.incomplete, input.pending());
-        for ("a\r") |byte| try std.testing.expect(input.feed(byte).editor == .none);
-        for ("\x1b[201~") |byte| _ = input.feed(byte);
-        try std.testing.expect(std.meta.eql(input.feed('\r').editor, .{ .refused = .invalid }));
-        try std.testing.expectEqual(Editor.Pending.none, input.pending());
-        try std.testing.expectEqualStrings("original", try input.message(ticket));
-    }
-    for ("valid") |byte| _ = input.feed(byte);
+    _ = input.typed("original");
+    const ticket = input.typed("\r").message;
+    _ = input.typed("\xff");
+    try std.testing.expect(std.meta.eql(input.typed("\r").editor, .{ .refused = .invalid }));
+    try std.testing.expectEqualStrings("original", try input.message(ticket));
+    _ = input.typed("valid");
     try std.testing.expectEqualStrings("valid", input.composition().bytes);
     try std.testing.expectEqualStrings("original", try input.message(ticket));
 }
@@ -327,36 +287,16 @@ test "SessionInput malformed rejection resets only the active composition" {
 test "SessionInput retained loan and stale tickets cannot consume next composition" {
     var input: Self = undefined;
     input.init();
-    for ("old") |byte| _ = input.feed(byte);
-    const ticket = input.feed('\r').message;
-    for ("new\x1b[D") |byte| _ = input.feed(byte);
-    try std.testing.expectEqual(.busy, std.meta.activeTag(input.feed('\r')));
+    _ = input.typed("old");
+    const ticket = input.typed("\r").message;
+    _ = input.typed("new\x1b[D");
+    try std.testing.expectEqual(.busy, std.meta.activeTag(input.typed("\r")));
     try input.release(ticket);
     try std.testing.expectEqualStrings("new", input.composition().bytes);
     try std.testing.expectEqual(@as(usize, 2), input.composition().cursor);
-    const next = input.feed('\r').message;
+    const next = input.typed("\r").message;
     try std.testing.expectError(error.SubmissionChanged, input.release(ticket));
     try std.testing.expectEqualStrings("new", try input.message(next));
-}
-
-test "one stream survives draft resets and replacement editors" {
-    var input: Self = undefined;
-    input.init();
-    // A sequence split across a draft reset is decoded once: an arrow, not
-    // its final byte as typed text.
-    for ("draft\x1b[") |byte| _ = input.feed(byte);
-    input.clear();
-    try std.testing.expectEqual(keymap.Outcome(keymap.Key){ .action = .up }, input.feed('A').editor);
-    try std.testing.expectEqualStrings("", input.composition().bytes);
-    // An editor that replaces another mid-paste, like a fresh choice field,
-    // rejects the paste's remainder instead of adopting it as typed input.
-    var storage: [16]u8 = undefined;
-    for ("\x1b[200~") |byte| _ = input.feed(byte);
-    var choice: Editor = .{ .buffer = &storage, .allow_paste = false };
-    for ("a\x1b[201~") |byte| _ = choice.feed(&input.stream, byte);
-    try std.testing.expectEqualStrings("", storage[0..choice.length]);
-    try std.testing.expect(std.meta.eql(choice.feed(&input.stream, '\r'), .{ .refused = .invalid }));
-    try std.testing.expectEqual(Editor.Pending.none, input.pending());
 }
 
 test "a recalled Message is the draft until an edit, never a caret move" {
@@ -372,21 +312,21 @@ test "a recalled Message is the draft until an edit, never a caret move" {
     try input.fill(io, file, found);
     try std.testing.expectEqualStrings("//sent\nagain", input.composition().bytes);
     try std.testing.expectEqual(@as(usize, 12), input.composition().cursor);
-    for ("\x1b[A\x1b[D\x1b[C\x01\x05\x1b[B") |byte| _ = input.feed(byte);
+    _ = input.typed("\x1b[A\x1b[D\x1b[C\x01\x05\x1b[B");
     try std.testing.expectEqual(found.at, input.recall.shown.?);
     // Each edit, even one that keeps the length (a paste rolled back as a
     // whole), makes it an ordinary draft.
     for ([_][]const u8{ "x", "\x7f", "\x01\x1b[3~", "\x15", "\x1b[200~p\x1b[201~", "\xff", "\xc3\xa9", "\x1b[200~\n\xcc\x81\x1b[201~" }) |edit| {
         try input.fill(io, file, found);
         const revision = input.revision;
-        for (edit) |byte| _ = input.feed(byte);
+        _ = input.typed(edit);
         try std.testing.expect(input.recall.shown == null);
         try std.testing.expect(input.revision != revision);
     }
     try input.fill(io, file, .{ .at = found.at, .length = 5, .slash = false });
     try std.testing.expectEqualStrings("/sent", input.composition().bytes);
     // Without the second slash, text that begins with one runs as a command.
-    try std.testing.expectEqual(.command, std.meta.activeTag(input.feed('\r')));
+    try std.testing.expectEqual(.command, std.meta.activeTag(input.typed("\r")));
     input.clear();
     try std.testing.expect(input.recall.shown == null);
 }
@@ -408,7 +348,7 @@ test "a recall step lands only on the draft it began from, one at a time" {
     var step = input.nextStep().?;
     try std.testing.expectEqual(@as(?Recalled, null), step.from);
     try std.testing.expect(input.nextStep() == null);
-    for ("a") |byte| _ = input.feed(byte);
+    _ = input.typed("a");
     try std.testing.expectEqual(.typed, input.press(true));
     try std.testing.expectEqual(Landing.stale, input.land(step, newest));
     try std.testing.expectEqualStrings("a", input.composition().bytes);
@@ -423,7 +363,7 @@ test "a recall step lands only on the draft it began from, one at a time" {
     _ = input.press(true);
     step = input.nextStep().?;
     try std.testing.expectEqual(@as(?Recalled, newest.at), step.from);
-    const ticket = input.feed('\r').message;
+    const ticket = input.typed("\r").message;
     try std.testing.expectEqual(Landing.stale, input.land(step, newest));
     try std.testing.expectEqualStrings("", input.composition().bytes);
     try std.testing.expectEqualStrings("newest", try input.message(ticket));
@@ -453,15 +393,6 @@ test "a recall step lands only on the draft it began from, one at a time" {
     // Newer than an empty draft is nothing.
     _ = input.press(false);
     try std.testing.expect(input.nextStep() == null);
-
-    // A step that lands once an Action's choice is set up: the presses that
-    // waited are dropped, and the one read lands on the unchanged draft.
-    _ = input.press(true);
-    step = input.nextStep().?;
-    for (0..3) |_| _ = input.press(true);
-    input.dropPresses();
-    try std.testing.expectEqual(Landing{ .show = newest }, input.land(step, newest));
-    try std.testing.expect(input.nextStep() == null);
 }
 
 test "Tab puts in the list's first word at the draft's end and adds a tab anywhere else" {
@@ -488,7 +419,7 @@ test "Tab puts in the list's first word at the draft's end and adds a tab anywhe
         var input: Self = undefined;
         input.init();
         input.complete(.{ .context = &{}, .add = List.add });
-        for (case.typed) |byte| _ = input.feed(byte);
+        _ = input.typed(case.typed);
         try std.testing.expectEqualStrings(case.shown, input.composition().bytes);
         try std.testing.expectEqual(case.shown.len, input.composition().cursor);
     }

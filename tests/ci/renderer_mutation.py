@@ -32,12 +32,7 @@ class Check:
     target: str
     name: str
 
-    def command(self, root, output, environment):
-        if self.target == "sequence-model":
-            return [sys.executable, str(root / "tests/integration/session_sequence_model.py"),
-                    "--source", str(root), "--output", str(output),
-                    "--cache", str(Path(environment["ZIG_LOCAL_CACHE_DIR"]) / "sequence-model"),
-                    "--selector", self.name.removeprefix("TD1 sequence model ")]
+    def command(self, root):
         return ["zig", "build", self.target, "-j2", "-Dtest-filter=" + self.name,
                 "--summary", "all", "--verbose", "--test-timeout", TEST_TIMEOUT]
 
@@ -59,10 +54,6 @@ def logic(name):
 
 def native(name):
     return Check("test", name)
-
-
-def model(selector):
-    return Check("sequence-model", "TD1 sequence model " + selector)
 
 
 # Exact anchors intentionally fail closed when the protection changes. Add or
@@ -87,100 +78,35 @@ MUTATIONS = (
              "self.editors[submitted.bank] = self.empty(submitted.bank);",
              "self.editors[self.active] = self.empty(submitted.bank);",
              logic("SessionInput loan release preserves next Unicode draft and cursor")),
-    Mutation("paste-provenance", "paste data never becomes a fresh typed decision", "359567e6",
-             "src/TerminalInput.zig", ".event = event, .pasted = pasted",
-             ".event = event, .pasted = !pasted",
-             logic("terminal input owns fragmentation and paste provenance without an event queue")),
-    Mutation("escape-alt", "ESC prefix preserves the key's Alt modifier", "6277744c",
-             "src/TerminalInput.zig", "key.mods.alt = true;", "key.mods.alt = false;",
-             logic("TD2 binding outcomes across raw ESC-prefix and kitty at every fragmentation boundary")),
-    Mutation("input-expiry-edge", "pending input expires at the inclusive 80ms/2s deadline", "1566667d",
-             "src/TerminalInput.zig", "if (remaining <= 0) return .expire;",
-             "if (remaining < 0) return .expire;",
-             logic("TD2 SessionTerminal expiry boundaries use a controlled clock and retain queued bytes")),
-    Mutation("escape-suffix", "an interrupted OSC retains the following sequence", "0e3b44b5",
-             "src/TerminalInput.zig", "self.used -= result.n;", "self.used = 0;",
-             logic("an interrupted OSC keeps the following sequence and key")),
-    Mutation("approval-contiguity", "only contiguous delivered Action rows permit approval", "4d5cf8ba",
-             "src/TerminalFrame.zig",
-             "if (self.first.order(input.action_seen) != .gt and shown.next.order(input.action_seen) == .gt)",
-             "if (shown.next.order(input.action_seen) == .gt)",
-             logic("Action approval requires contiguous displayed rows and resets after resize")),
-    Mutation("consent-freshness", "a pending decoder never grants fresh permission input", "771a8de5",
-             "src/SessionScreen.zig", "service != .empty or decoder_pending or blocked",
-             "service != .empty or (decoder_pending and false) or blocked",
-             native("a decision prompt is offered only after its own delivered frame")),
-    Mutation("incomplete-classification", "only a bare ESC or ESC ESC may expire as Escape", "359567e6",
-             "src/TerminalInput.zig", ".escape else .incomplete;", ".escape else .escape;",
-             logic("TD2 incomplete prefixes expire fatally without modifying or submitting drafts")),
-    Mutation("mouse-framing", "X10 payload never becomes composer text", "10e07b17",
-             "src/TerminalInput.zig", 'if (!self.paste and std.mem.startsWith(u8, bytes, "\\x1b[M")) {',
-             'if (false and !self.paste and std.mem.startsWith(u8, bytes, "\\x1b[M")) {',
-             logic("fragmented X10 mouse reports are consumed whole, never as typed text")),
     Mutation("stale-details", "a delayed details page cannot cover a later Message", "67f80e38",
              "src/session_reading.zig", "return asked_sent == sent;", "return true or asked_sent == sent;",
              logic("a /details page shows only before the next send")),
-    Mutation("stale-transcript", "a delayed history page belongs to its transcript generation", "4d5cf8ba",
-             "src/SessionFrontend.zig", "self.job.transcript == self.transcript.id", "true",
-             model("pages")),
     Mutation("send-generation", "sending invalidates already running details work", "67f80e38",
              "src/SessionFrontend.zig", "self.admission.sent += 1;", "self.admission.sent += 0;",
-             model("pages")),
-    Mutation("send-queued-history", "sending discards a queued older-page request", "5bb24efe",
-             "src/SessionFrontend.zig",
-             "self.inspection.status_requested = false;\n    self.transcript.history_requested = null;\n    self.dropMessageRequest();",
-             "self.inspection.status_requested = false;\n    self.dropMessageRequest();",
-             model("pages")),
-    Mutation("send-queued-status", "sending discards a queued status-page request", "67f80e38",
-             "src/SessionFrontend.zig",
-             "self.inspection.status_requested = false;\n    self.transcript.history_requested = null;\n    self.dropMessageRequest();",
-             "self.transcript.history_requested = null;\n    self.dropMessageRequest();",
-             model("pages")),
-    Mutation("send-latest-view", "sending leaves a frozen inspection for latest conversation", "67f80e38",
-             "src/SessionFrontend.zig",
-             "self.dropMessageRequest();\n    try self.screen.latest();\n}",
-             "self.dropMessageRequest();\n}",
-             model("pages")),
-    Mutation("ack-frontier", "older captures cannot decrease delivered admission frontier", "3c690817",
-             "src/SessionFrontend.zig", "@max(self.admission.delivered, result.delivered)", "result.delivered",
-             model("acknowledgement")),
-    Mutation("late-ack-echo", "late acceptance cannot resurrect Sent after delivery", "3c690817",
-             "src/SessionFrontend.zig", "if (admission > self.admission.delivered) admission else null", "admission",
-             model("acknowledgement")),
-    Mutation("echo-retirement-edge", "delivery at the exact admission clears Sent", "41984558",
-             "src/SessionFrontend.zig", "if (admission <= self.admission.delivered)", "if (admission < self.admission.delivered)",
-             model("acknowledgement")),
+             native("a details page read before a Message was sent never covers it")),
     # 1f52ba94 split the paused draft: typing beside a shown Action is its reason.
     Mutation("paused-draft-submission", "paused approval cannot submit the retained draft", "52e9055d",
              "src/session_consent.zig", "return (consent == null or reason) and !blockers.opening",
              "return (consent == null or reason or true) and !blockers.opening",
-             model("focus")),
+             logic("a Message probe blocks on every live owner fact independently")),
     Mutation("paused-editor-owner", "a hidden Action keeps the draft and its own caret", "52e9055d",
              "src/session_consent.zig",
              "if (!shown.action_page) return .{ .approval = .paused };",
              "if (!shown.action_page) return .{ .row = .selector, .approval = .paused };",
-             model("focus")),
+             logic("projection selects the selector beside a whole visible Action nobody is typing at, and a reason beside one they are")),
     Mutation("reason-editor-owner", "typing beside a shown Action keeps the draft and its own caret", "52e9055d",
              "src/session_consent.zig",
              "if (pending.row == .draft) return .{ .approval = if (command_blocked) .paused else .reason };",
              "if (pending.row == .draft) return .{ .row = .selector, .approval = if (command_blocked) .paused else .reason };",
-             model("focus")),
+             logic("projection selects the selector beside a whole visible Action nobody is typing at, and a reason beside one they are")),
     Mutation("reason-letter", "a draft of one choice letter never denies as a reason", "1f52ba94",
              "src/session_consent.zig", "return text.len == 1 and std.mem.indexOfScalar",
              "return false and text.len == 1 and std.mem.indexOfScalar",
-             model("focus")),
+             logic("only a draft of exactly one choice letter is refused as a reason")),
     Mutation("unread-action-decision", "choice submission requires a completely delivered Action", "4d5cf8ba",
              "src/session_consent.zig", "if (!shown.read) return .{ .row = .selector, .approval = .reading };",
              "if (false and !shown.read) return .{ .row = .selector, .approval = .reading };",
-             model("focus")),
-    Mutation("frame-publication", "failed frame output cannot advance inspected rows or approval", "4d5cf8ba",
-             "src/SessionScreen.zig", "    try out.writeAll(frame.written());",
-             "    self.action_seen = layout.action_seen;\n    try out.writeAll(frame.written());",
-             model("publication")),
-    Mutation("frame-flush-publication", "accepted writes without successful flush cannot certify a frame", "4d5cf8ba",
-             "src/SessionScreen.zig", "    try out.writeAll(frame.written());\n    try out.flush();",
-             "    try out.writeAll(frame.written());\n    self.action_seen = layout.action_seen;\n    try out.flush();",
-             model("publication")),
+             logic("projection selects the selector beside a whole visible Action nobody is typing at, and a reason beside one they are")),
 )
 
 
@@ -246,33 +172,9 @@ def execute(command, root, log, timeout, environment):
 
 def run_check(check, root, log, timeout, environment):
     deadline = time.monotonic() + timeout
-    model_output = log.with_suffix(".model")
-    result = execute(check.command(root, model_output, environment), root, log, timeout, environment)
+    result = execute(check.command(root), root, log, timeout, environment)
     output = log.read_text(errors="replace")
     if result["timeout"] or result["returncode"] not in (0, 1):
-        result["outcome"] = classify(result, output, check)
-        return result
-    if check.target == "sequence-model":
-        # The maintained runner already executed its exact binary directly.
-        # Consume that evidence rather than performing a third model execution.
-        receipt_path = model_output / "receipt.json"
-        try:
-            receipt = json.loads(receipt_path.read_text())
-            binary = Path(receipt["binary"])
-            valid = (receipt["source"] == str(root) and
-                     receipt["selector"] == check.name.removeprefix("TD1 sequence model ") and
-                     receipt["source_unchanged"] is True and
-                     receipt["overlay_unchanged"] is True and
-                     receipt["exit"] == receipt["direct_exit"] == result["returncode"] and
-                     sha(binary) == receipt["binary_sha256"])
-        except (OSError, ValueError, KeyError, TypeError):
-            valid = False
-        if not valid:
-            result["outcome"] = "invalid-model-receipt"
-            return result
-        result["receipt_sha256"] = sha(receipt_path)
-        result["binary_sha256"] = receipt["binary_sha256"]
-        result["assertion"] = {"returncode": receipt["direct_exit"]}
         result["outcome"] = classify(result, output, check)
         return result
     # Zig 0.17's build protocol can say "failed without output", omitting the

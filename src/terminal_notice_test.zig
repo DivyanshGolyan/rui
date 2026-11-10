@@ -1,6 +1,5 @@
 //! Native adapter actor: no Host, frontend or syscall interposition.
 const std = @import("std");
-const Terminal = @import("SessionTerminal.zig");
 pub const panic = @import("vaxis").Panic;
 
 pub fn main(init: std.process.Init) !void {
@@ -52,16 +51,7 @@ pub fn main(init: std.process.Init) !void {
         app.deinit();
         return error.ExpectedAllocationFailure;
     }
-    if (args.len != 1) return error.InvalidArguments;
-    const flags = std.c.fcntl(1, std.c.F.GETFL);
-    if (flags < 0) return error.TerminalCleanupFailed;
-    var terminal: Terminal = .{
-        .original = undefined,
-        .flags = .{ 0, flags },
-        .screen = undefined,
-        .active = false,
-    };
-    try terminal.detached("/tmp/a' path", "k7m2qx", null);
+    return error.InvalidArguments;
 }
 
 const ResizeProbe = struct {

@@ -101,7 +101,6 @@ test {
     _ = @import("SessionFrontend.zig");
     _ = @import("Overview.zig");
     _ = @import("session_reads.zig");
-    _ = @import("SessionTerminal.zig");
     _ = @import("SessionScreen.zig");
     _ = @import("session_history.zig");
     _ = @import("session_view.zig");
