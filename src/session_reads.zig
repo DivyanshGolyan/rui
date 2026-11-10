@@ -1052,7 +1052,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll(session_chrome.help ++ slash_commands.conversation.help ++ "\nLogin: ");
+        try output.interface.writeAll(session_chrome.help ++ slash_commands.conversation.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: ");
         try output.interface.print("{s} in your shell.\n", .{(job.provider orelse comptime protocol.Provider.onlyWith(.sign_in)).login()});
     } else {
         std.debug.assert(job.inspection_kind == .requests);

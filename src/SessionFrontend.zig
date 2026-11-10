@@ -623,6 +623,8 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const style = @import("widget_style.zig");
     const normal = style.of(self.app_caps, .{});
     const quiet = style.of(self.app_caps, .{ .colour = .quiet });
+    const facts_style = style.of(self.app_caps, .{ .colour = .quiet, .background = .bar });
+    self.app_screen.style = normal;
     self.app_input.composer.style = normal;
     self.app_input.composer.quiet = quiet;
     self.app_input.composer.method = self.app_caps.width;
@@ -632,8 +634,10 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_card.description = self.action_summary.description.slice();
     self.app_card.method = self.app_caps.width;
     self.app_preview.style = normal;
+    self.app_preview.quiet = quiet.fg;
     self.app_preview.method = self.app_caps.width;
     self.app_content.style = normal;
+    self.app_content.quiet = quiet.fg;
     self.app_content.method = self.app_caps.width;
     self.app_content.document = switch (screen.view) {
         .live => &screen.live,
@@ -667,7 +671,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     chrome.status.quiet = quiet;
     chrome.status.attention = attention;
     chrome.facts.method = self.app_caps.width;
-    chrome.facts.style = quiet;
+    chrome.facts.style = facts_style;
     chrome.marker.method = self.app_caps.width;
     chrome.marker.style = .{ .reverse = true };
     chrome.shortcuts.method = self.app_caps.width;
@@ -747,6 +751,29 @@ test "App Session retains the draft across a permission card arriving during pas
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+    try screen.append("\x1b[2mtheme witness\x1b[0m");
+    for ([_]struct { caps: overview_view.Caps, ground: vaxis.Color, band: vaxis.Color }{
+        .{ .caps = .{}, .ground = .{ .rgb = .{ 0x12, 0x19, 0x33 } }, .band = .{ .rgb = .{ 0x1a, 0x22, 0x46 } } },
+        .{ .caps = .{ .background = .{ 255, 255, 255 } }, .ground = .{ .rgb = .{ 0xf3, 0xee, 0xe2 } }, .band = .{ .rgb = .{ 0xe6, 0xdd, 0xc8 } } },
+        .{ .caps = .{ .depth = .indexed }, .ground = .{ .index = 234 }, .band = .{ .index = 236 } },
+        .{ .caps = .{ .depth = .none }, .ground = .default, .band = .default },
+    }) |case| {
+        self.app_caps = case.caps;
+        self.app_content.colour = case.caps.depth != .none;
+        const surface = try widget_.draw(draw_context);
+        try std.testing.expectEqual(case.ground, surface.readCell(79, 10).style.bg);
+        var rendered: vaxis.Screen = try .init(arena.allocator(), .{ .rows = 24, .cols = 80, .x_pixel = 0, .y_pixel = 0 });
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 24, .screen = &rendered };
+        surface.render(window, self.app_input.composer.widget());
+        const user = rendered.readCell(0, 0).?;
+        try std.testing.expectEqualStrings("t", user.char.grapheme);
+        try std.testing.expectEqual(@import("widget_style.zig").of(case.caps, .{ .colour = .quiet }).fg, user.style.fg);
+        try std.testing.expect(!user.style.dim);
+        try std.testing.expectEqual(case.ground, rendered.readCell(79, 10).?.style.bg);
+        try std.testing.expectEqual(case.band, rendered.readCell(79, 22).?.style.bg);
+        try std.testing.expectEqual(case.ground, rendered.readCell(79, 23).?.style.bg);
+    }
+    self.app_caps = .{ .depth = .none };
     _ = self.input.append("headTAIL");
     self.input.editors[self.input.active].cursor = 4;
     root.pasting = true;

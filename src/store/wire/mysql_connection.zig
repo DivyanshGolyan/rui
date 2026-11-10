@@ -123,6 +123,21 @@ pub const Connection = struct {
     /// `error.LoginRefused`. On any error the connection is closed.
     pub fn open(self: *Connection, options: Options, refusal: *std.Io.Writer) OpenError!void {
         defer if (options.password_to_wipe) |bytes| std.crypto.secureZero(u8, bytes);
+        self.context = null;
+        if (options.address == .tcp_tls) self.context = try .init(options.address.tcp_tls.trust);
+        errdefer self.forgetContext();
+        try self.login(options, refusal);
+    }
+
+    /// Connects and logs in again after `disconnect`, with the TLS trust
+    /// the last `open` loaded: a reconnect never loads trust, whose
+    /// OpenSSL stack is too deep for a Store caller's thread.
+    pub fn reopen(self: *Connection, options: Options, refusal: *std.Io.Writer) OpenError!void {
+        std.debug.assert((options.address == .tcp_tls) == (self.context != null));
+        try self.login(options, refusal);
+    }
+
+    fn login(self: *Connection, options: Options, refusal: *std.Io.Writer) OpenError!void {
         // Full authentication can send the clear password over TLS/a socket.
         defer std.crypto.secureZero(u8, &self.handshake);
         self.fd = -1;
@@ -138,11 +153,10 @@ pub const Connection = struct {
         self.settings = "";
         self.settings_count = 0;
         self.settings_due = 0;
-        self.context = null;
         self.session = null;
         self.tls_active = false;
         self.cipher_len = 0;
-        errdefer self.release();
+        errdefer self.disconnect();
         self.client = try .init(.{
             .user = options.user,
             .password = options.password,
@@ -157,7 +171,6 @@ pub const Connection = struct {
             .unix_socket => |path| try self.connectUnix(path),
             .tcp => |tcp| try self.connectTcp(tcp.host, tcp.port),
             .tcp_tls => |tcp| {
-                self.context = try .init(tcp.trust);
                 const kind: tls.HostKind = if (std.Io.net.IpAddress.parseLiteral(tcp.host)) |_| .ip_literal else |_| .dns_name;
                 self.session = try .init(&self.context.?, tcp.host, kind);
                 try self.connectTcp(tcp.host, tcp.port);
@@ -175,7 +188,13 @@ pub const Connection = struct {
     /// reported: the descriptor and the TLS state are released either way.
     pub fn close(self: *Connection) void {
         if (!self.lost and self.client.isReady()) self.transmit(&self.client.quit()) catch {};
-        self.release();
+        self.disconnect();
+        self.forgetContext();
+    }
+
+    fn forgetContext(self: *Connection) void {
+        if (self.context) |*context| context.deinit();
+        self.context = null;
     }
 
     pub fn isReady(self: *const Connection) bool {
@@ -325,12 +344,12 @@ pub const Connection = struct {
         self.writer.end = 0;
     }
 
-    fn release(self: *Connection) void {
+    /// Releases the descriptor and the TLS session, keeping the trust a
+    /// `reopen` uses. `close` releases everything.
+    pub fn disconnect(self: *Connection) void {
         self.lost = true;
         if (self.session) |*session| session.deinit();
-        if (self.context) |*context| context.deinit();
         self.session = null;
-        self.context = null;
         // A failed close leaves nothing to retry: the descriptor is
         // released either way.
         if (self.fd >= 0) _ = std.c.close(self.fd);

@@ -13,6 +13,7 @@ fn Screen(comptime Content: type) type {
 
         content: *Content,
         input: *InputArea,
+        style: @import("vaxis").Style = .{},
         header: ?vxfw.Widget = null,
         tail: ?vxfw.Widget = null,
         marker: ?vxfw.Widget = null,
@@ -74,7 +75,10 @@ fn Screen(comptime Content: type) type {
                 children[used] = .{ .origin = .{ .row = input_row - drawn.size.height, .col = 0 }, .surface = drawn, .z_index = 2 };
                 used += 1;
             }
-            return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children[0..used] };
+            var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
+            @memset(surface.buffer, .{ .style = self.style });
+            surface.children = children[0..used];
+            return surface;
         }
     };
 }

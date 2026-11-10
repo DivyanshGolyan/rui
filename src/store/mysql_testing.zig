@@ -673,6 +673,118 @@ test "store.mysql live every message carries the session settings, so none relie
     try std.testing.expect(!storage.isFenced());
 }
 
+const Drop = @TypeOf(@as(@import("engine/Mysql.zig").State, undefined).testing_drop);
+
+/// Commits one content row in a write Access whose COMMIT loses its
+/// connection at `drop`, and returns the row's id with the commit's result.
+fn commitLosing(storage: *Store, drop: Drop) !struct { id: u64, result: anyerror!void } {
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+    defer access.deinit();
+    errdefer access.abandon(.{}) catch {};
+    const id = try access.identity(.content_id);
+    access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest("lost commit"), .length = 0 });
+    storage.engine.mysql.state.testing_drop = drop;
+    access.commit() catch |err| {
+        access.abandon(.{}) catch {};
+        return .{ .id = id, .result = err };
+    };
+    return .{ .id = id, .result = {} };
+}
+
+test "store.mysql live a connection lost around COMMIT reconnects and reports what landed" {
+    for ([_]Drop{ .before_commit, .after_commit }) |drop| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try openLive(&storage, &tmp);
+        defer storage.close() catch {};
+        const state = storage.engine.mysql.state;
+        const old_connection = state.connection_id;
+        const got = try commitLosing(&storage, drop);
+        const rows_saved = try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{got.id});
+        switch (drop) {
+            // COMMIT never left: nothing landed, and that is known.
+            .before_commit => {
+                try std.testing.expectError(error.StoreConnectionLost, got.result);
+                try std.testing.expectEqual(@as(u64, 0), rows_saved);
+            },
+            // The server committed and only its OK was lost: success.
+            .after_commit => {
+                try got.result;
+                try std.testing.expectEqual(@as(u64, 1), rows_saved);
+            },
+            .none => unreachable,
+        }
+        try std.testing.expectEqual(@as(u64, 1), state.testing_shape.reconnects);
+        try std.testing.expect(state.connection_id != old_connection);
+        // The new connection holds the lock: a second Store is refused.
+        var second: Store = undefined;
+        try std.testing.expectError(error.StoreLocked, open(&second, &tmp, std.testing.io, .{}));
+        if (drop == .after_commit) {
+            // The Store carries on writing on its new connection.
+            try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }
+}
+
+test "store.mysql live a reconnect onto a server admission refuses does not resume" {
+    if (!try available()) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch {};
+    // What a failover onto a weaker server looks like to the reconnect.
+    const old = old: {
+        mutex.lockUncancelable(std.testing.io);
+        defer mutex.unlock(std.testing.io);
+        _ = try connection();
+        const old = try globalValue("innodb_flush_log_at_trx_commit");
+        try setGlobal("innodb_flush_log_at_trx_commit", "2");
+        break :old old;
+    };
+    defer {
+        mutex.lockUncancelable(std.testing.io);
+        defer mutex.unlock(std.testing.io);
+        setGlobal("innodb_flush_log_at_trx_commit", old.slice()) catch @panic("cannot restore innodb_flush_log_at_trx_commit");
+    }
+    const got = try commitLosing(&storage, .after_commit);
+    // Its counters are not trusted, so the outcome stays unknown, and no
+    // write follows on that server.
+    try std.testing.expectError(error.CommitOutcomeUnknown, got.result);
+    try std.testing.expectEqual(@as(u64, 0), storage.engine.mysql.state.testing_shape.reconnects);
+}
+
+test "store.mysql live a reconnect never ends a session that does not hold the Store's lock" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch {};
+    // Another Store's session under the same login, which KILL could end.
+    var other_tmp = std.testing.tmpDir(.{});
+    defer other_tmp.cleanup();
+    var other: Store = undefined;
+    try openLive(&other, &other_tmp);
+    defer other.close() catch {};
+    // What a restarted server that gave the old id to another client looks
+    // like: the saved id names that session.
+    storage.engine.mysql.state.connection_id = other.engine.mysql.state.connection_id;
+    const got = try commitLosing(&storage, .after_commit);
+    // The other session survives and keeps writing.
+    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&other, live_noop, .{}));
+    try std.testing.expect(!other.isFenced());
+    // Whether the lost session's lock had gone yet decides between resuming
+    // and leaving the outcome unknown; either way the answer is true.
+    const rows_saved = try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{got.id});
+    if (got.result) |_| {
+        try std.testing.expectEqual(@as(u64, 1), rows_saved);
+    } else |err| try std.testing.expectEqual(error.CommitOutcomeUnknown, err);
+}
+
 test "store.mysql live GET_LOCK excludes a second Store on the same database" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
