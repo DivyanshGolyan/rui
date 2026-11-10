@@ -31,8 +31,12 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const status = if (status_room == 0) null else try self.status.draw(ctx.withConstraints(.{ .width = size.width, .height = 1 }, .{ .width = size.width, .height = status_room }));
     const footer_rows = facts_rows + if (status) |drawn| @min(drawn.size.height, status_room) else 0;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + facts_rows + @intFromBool(status != null));
-    const primary = if (self.permission) |card| card.widget() else self.composer.widget();
-    const content = try primary.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - footer_rows }));
+    // A draft grows to a third of the screen at most, between its two rules.
+    const room = size.height - footer_rows;
+    const content = if (self.permission) |card|
+        try card.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = room }))
+    else
+        try self.composer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = @min(room, @import("draft_layout.zig").cap(size.height) + 2) }));
     const row = ctx.withConstraints(.{ .width = size.width, .height = 1 }, .{ .width = size.width, .height = 1 });
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = content };
     if (facts_rows == 1) children[1] = .{ .origin = .{ .row = content.size.height, .col = 0 }, .surface = try self.facts.draw(row) };
@@ -148,4 +152,22 @@ test "InputArea permission hides and restores the draft and its caret after deci
     const after = try input.widget().draw(ctx);
     try std.testing.expectEqualDeep(before.children[0].surface.buffer, after.children[0].surface.buffer);
     try std.testing.expectEqualDeep(before.children[0].surface.cursor, after.children[0].surface.cursor);
+}
+
+test "a draft grows to a third of the screen at most, and the content keeps the rest" {
+    var bytes: [128]u8 = undefined;
+    const draft = "1\n2\n3\n4\n5\n6\n7\n8\n9";
+    @memcpy(bytes[0..draft.len], draft);
+    var editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = draft.len, .cursor = draft.len };
+    var input: Self = .{ .composer = .{ .editor = &editor } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u16{ 10, 24, 60 }) |height| {
+        errdefer std.debug.print("height={d}\n", .{height});
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = height }, .cell_size = .{} };
+        const drawn = try input.widget().draw(ctx);
+        // The draft's rows sit between the composer's two rules.
+        const draft_rows = drawn.children[0].surface.size.height - 2;
+        try std.testing.expectEqual(@min(@as(u16, 9), @import("draft_layout.zig").cap(height)), draft_rows);
+    }
 }
