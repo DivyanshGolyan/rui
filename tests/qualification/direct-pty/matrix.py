@@ -87,25 +87,31 @@ def inventory():
                        ("malformed-utf8", b"bad\xc3(\r")):
         rows.append({"name": name, "scenario": "rejection", "chunks": [chunk(data)]})
     rows.append({"name": "recovery-raw", "scenario": "recovery", "chunks": [chunk(b"\x12")]})
-    # The live view's first history line is 82, and a page is the
-    # transcript's 19 rows (scenarios.navigation).
+    # The live view's first history line is 82 of the transcript's 19 rows
+    # (scenarios.navigation). Shift-Up/Down and their PgUp/PgDn aliases move
+    # half of them, 9; End no longer returns, so its rows return with Esc.
     for name, enter, leave, first in (
-        ("key-pgup", b"\x1b[5~", b"\x07", 63),
-        ("key-pgdn", b"\x1b[5~" * 2, b"\x1b[6~", 44),
-        ("key-shift-pgup", b"\x1b[5;2~", b"\x07", 63),
+        ("key-pgup", b"\x1b[5~", b"\x07", 73),
+        ("key-pgdn", b"\x1b[5~" * 2, b"\x1b[6~", 64),
+        ("key-shift-pgup", b"\x1b[5;2~", b"\x07", 73),
+        ("key-shift-up", b"\x1b[1;2A", b"\x07", 73),
         ("key-up-csi", b"\x1b[A", b"\x07", 81),
         ("key-up-ss3", b"\x1bOA", b"\x07", 81),
-        ("key-end-csi-f", b"\x1b[5~", b"\x1b[F", 63),
-        ("key-end-ss3-f", b"\x1b[5~", b"\x1bOF", 63),
-        ("key-end-csi-4", b"\x1b[5~", b"\x1b[4~", 63),
-        ("key-esc", b"\x1b[5~", b"\x1b", 63),
+        ("key-end-csi-f", b"\x1b[5~", b"\x1b", 73),
+        ("key-end-ss3-f", b"\x1b[5~", b"\x1b", 73),
+        ("key-end-csi-4", b"\x1b[5~", b"\x1b", 73),
+        ("key-esc", b"\x1b[5~", b"\x1b", 73),
         ("wheel-alt-scroll", b"\x1b[A" * 3, b"\x1b[B", 79),
         ("status", b"/status\r", b"\x1b", None),
     ):
         vector = {"name": name, "scenario": "navigation", "chunks": [chunk(enter)],
                   "return_chunks": [chunk(leave)], "status": name == "status", "first_history": first}
         if name == "key-pgdn":
-            vector["middle"] = [{"chunks": [chunk(b"\x1b[6~")], "first_history": 63}]
+            vector["middle"] = [{"chunks": [chunk(b"\x1b[6~")], "first_history": 73}]
+        elif name.startswith("key-end-"):
+            # End leaves the view and its marker where they are.
+            end = {"key-end-csi-f": b"\x1b[F", "key-end-ss3-f": b"\x1bOF", "key-end-csi-4": b"\x1b[4~"}[name]
+            vector["middle"] = [{"chunks": [chunk(end)], "first_history": first, "still": True}]
         elif name == "wheel-alt-scroll":
             vector["middle"] = [{"chunks": [chunk(b"\x1b[B")], "first_history": first} for first in (80, 81)]
         rows.append(vector)
