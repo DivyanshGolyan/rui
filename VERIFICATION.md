@@ -130,6 +130,7 @@ The allowlist reads committed Git paths and modes against the selector's resolve
 Reference and consistency checks remain reviewed evidence, not automated link validation.
 The always-run `admission` aggregate requires the exact results for the declared change kind, including the selected Mac, upgrade and cache-execution checks for normal changes.
 Failed, cancelled, missing or unexpectedly skipped required jobs do not qualify a candidate, and an unselected Mac or upgrade job must be skipped.
+A draft PR runs the development selection on Linux: `test-logic`, the native unit roots the change reaches (`test-native`, `test-store`, both as `test`, `test-h2`, `test-pg`), the matched live rules' targets and the upgrade and installer fixtures for their paths; no other fixture, long suite or Mac job.
 Draft development checks never satisfy admission.
 Correctness failures are fixed on the PR before it reaches `main`.
 
