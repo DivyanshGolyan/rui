@@ -2,6 +2,7 @@ const std = @import("std");
 const socket_os = @import("os/socket.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const activity_reply = @import("activity_reply.zig");
 const configure_input = @import("configure_input.zig");
 const ConfigureInput = configure_input.ConfigureInput;
 const OptionalPolicy = configure_input.OptionalPolicy;
@@ -264,7 +265,7 @@ pub const Requests = struct {
         const fd = try openRead(self, &paths, "/v1/activity-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {
-            buffer: protocol.FixedJsonBuffer(protocol.max_activity_page_response_bytes) = .{},
+            buffer: protocol.FixedJsonBuffer(activity_reply.max_page_bytes) = .{},
             pub fn feed(s: *@This(), bytes: []const u8) !void {
                 try s.buffer.append(bytes);
             }

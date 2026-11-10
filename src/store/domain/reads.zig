@@ -8,7 +8,7 @@ const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const word_search = @import("../../word_search.zig");
 const pages = @import("../../os/pages.zig");
-const protocol = @import("../../protocol.zig");
+const activity_facts = @import("../../activity_facts.zig");
 const conversation_read = @import("../../conversation_read.zig");
 const activity_read = @import("../../activity_read.zig");
 const session_field = @import("../../session_field.zig");
@@ -244,7 +244,7 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
 const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 15) - 2});
 
 /// The kind codes the sources number, for each Activity kind.
-fn activityKindCode(kind: protocol.ActivityItem.Kind) u5 {
+fn activityKindCode(kind: activity_facts.Item.Kind) u5 {
     return switch (kind) {
         .admission => 1,
         .user => 2,
@@ -778,7 +778,7 @@ const PublicContentRead = struct {
     position: u64,
     ordinal: u64,
     /// Where an entry's sender goes, for a caller that shows it.
-    sender: ?*?protocol.NamedPeer = null,
+    sender: ?*?activity_facts.NamedPeer = null,
     content: PublicContent = undefined,
     missing: missing_assistant_entry.Result = null,
     metadata: content_metadata.Row = undefined,
@@ -1024,7 +1024,7 @@ const page_session = rsql.Read(.{
 /// noinline: its row buffers (about 2.4 KB) stay out of the read's Queue.run
 /// frame, which also drains queued writes and so sits under the deepest
 /// write on every engine chain that reads a page (read_transcript).
-pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.ActivityPage, page: *protocol.ActivityFacts) !void {
+pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.ActivityPage, page: *activity_facts.Page) !void {
     page.* = .{ .end = 0, .direction = request.direction, .work = .{ .workspace = .{ .len = 0 } } };
     const session_ref = request.session.slice();
     var session: page_session.Row = undefined;
@@ -1097,7 +1097,7 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     // Work as of this same read, so the footer, consent and first Action
     // always describe the page they arrive with.
     try report_domain.readWorks(a, (&work)[0..1]);
-    page.work.work = .fromCore(try work.work(session.created_at.get(), std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange));
+    page.work.work = try work.work(session.created_at.get(), std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange);
     page.work.revision = session.revision.get();
 }
 
@@ -1108,13 +1108,13 @@ pub const activity_search_budget = 8 * 1024 * 1024;
 const SearchScratch = struct {
     window: [content_domain.ContentReader.content_window_bytes]u8 = undefined,
     matcher: word_search.Matcher = undefined,
-    item: protocol.ActivityItem = undefined,
+    item: activity_facts.Item = undefined,
     workspace: Bounded(workspace_path.max_bytes) = undefined,
 };
 
 /// Searches the page's public sources in one read access. SQL chooses only
 /// candidate identities; the functional matcher alone decides text matches.
-pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySearch, out: *activity_facts.Search) !void {
     out.count = 0;
     out.next = null;
     const mapped = try pages.Mapped(SearchScratch).map();
@@ -1174,7 +1174,7 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
                 const item = &out.items[out.count];
                 item.position = at.position;
                 item.ordinal = at.ordinal;
-                item.kind = std.meta.stringToEnum(protocol.ActivityItem.Kind, @tagName(scratch.item.value)).?;
+                item.kind = std.meta.stringToEnum(activity_facts.Item.Kind, @tagName(scratch.item.value)).?;
                 item.count = scratch.matcher.count;
                 for (scratch.matcher.hits[0..scratch.matcher.count], item.hits[0..item.count]) |*hit, *dest| {
                     dest.snippet = hit.snippet;
@@ -1294,14 +1294,14 @@ const call_outcomes = ToolOutcome(call_candidates_sql ++ ", ", "SELECT DISTINCT 
 /// then that acceptance. It keeps no row, so its read steps every row the
 /// statement returns: a count has no smaller bound.
 const CallRows = struct {
-    activity: *protocol.CallActivity,
+    activity: *activity_facts.CallActivity,
     args: CallArgs,
     /// The candidates' first Operations, in order, and how many there
     /// are, up to one past what it holds.
     operations: [max_operations]u64 = undefined,
     operation_count: usize = 0,
     check: ToolOutcomeCheck = .{},
-    presentations: [@typeInfo(@FieldType(protocol.CallActivity, "entries")).array.len]PresentationRead = undefined,
+    presentations: [@typeInfo(@FieldType(activity_facts.CallActivity, "entries")).array.len]PresentationRead = undefined,
 
     const max_operations = 32;
 
@@ -1366,7 +1366,7 @@ const CallRows = struct {
 /// boundary's ordinal changes nothing. It keeps no row, only the count
 /// and its ends.
 pub const QueuedMessages = struct {
-    queued: protocol.Queued = .{},
+    queued: activity_facts.Queued = .{},
 
     pub fn visit(messages: *QueuedMessages, row: *const queued.Row) bool {
         if (row.taken) return false;
@@ -1523,7 +1523,7 @@ const session_stop = rsql.Read(.{
 /// other rows. A failed send can name a Session this Store never held,
 /// which has no label.
 const LabelRead = struct {
-    peer: *protocol.NamedPeer,
+    peer: *activity_facts.NamedPeer,
     count: RowCount = .{},
 
     fn queue(read: *LabelRead, a: *ReadAccess) void {
@@ -1549,7 +1549,7 @@ const LabelRead = struct {
 /// An admitted Message (kinds 1 and 2), read into `message`; the content
 /// it names is the next round's.
 const MessageRead = struct {
-    message: *protocol.ActivityItem.Message,
+    message: *activity_facts.Item.Message,
     content_id: u64 = 0,
     count: RowCount = .{},
 
@@ -1577,7 +1577,7 @@ const MessageRead = struct {
 /// A Message this Session sent (kind 8), read into `sent`.
 const SentRead = struct {
     position: u64,
-    sent: *protocol.ActivityItem.Sent,
+    sent: *activity_facts.Item.Sent,
     content_id: u64 = 0,
     count: RowCount = .{},
 
@@ -1600,7 +1600,7 @@ const SentRead = struct {
 /// A send this Session's target refused (kind 9), read into `failed`.
 const FailureRead = struct {
     position: u64,
-    failed: *protocol.ActivityItem.SendFailed,
+    failed: *activity_facts.Item.SendFailed,
     at: u64 = 0,
     count: RowCount = .{},
 
@@ -1630,7 +1630,7 @@ const FailureRead = struct {
 const OutcomeRead = struct {
     position: u64,
     turn: u64,
-    outcome: *protocol.ActivityItem.TurnEnded,
+    outcome: *activity_facts.Item.TurnEnded,
     content_id: ?u64 = null,
     at: u64 = 0,
     count: RowCount = .{},
@@ -1663,7 +1663,7 @@ const OutcomeRead = struct {
 const StopRead = struct {
     position: u64,
     end: u64,
-    stop: *protocol.ActivityItem.Stop,
+    stop: *activity_facts.Item.Stop,
     at: u64 = 0,
     count: RowCount = .{},
 
@@ -1694,9 +1694,9 @@ const StopRead = struct {
 const ItemRead = struct {
     position: u64,
     ordinal: u64,
-    item: *protocol.ActivityItem,
+    item: *activity_facts.Item,
     /// The content the item exposes, once its metadata is read.
-    content: ?struct { id: u64, value: *const protocol.ActivityItem.Content } = null,
+    content: ?struct { id: u64, value: *const activity_facts.Item.Content } = null,
     round: u8 = 0,
     done: bool = false,
     kind: u8 = 0,
@@ -1822,7 +1822,7 @@ const ItemRead = struct {
                         try content.read.takeMetadata();
                         const found = content.read.content;
                         item.at = found.at;
-                        const value: protocol.ActivityItem.Content = .{ .length = found.metadata.length, .digest = found.metadata.digest };
+                        const value: activity_facts.Item.Content = .{ .length = found.metadata.length, .digest = found.metadata.digest };
                         if (read.kind == 3) {
                             item.value = .{ .assistant = .{ .content = value, .final = content.answer != null } };
                             read.exposes(@intCast(found.id), &item.value.assistant.content);
@@ -1971,7 +1971,7 @@ const ItemRead = struct {
         }
     }
 
-    fn exposes(read: *ItemRead, id: u64, value: *const protocol.ActivityItem.Content) void {
+    fn exposes(read: *ItemRead, id: u64, value: *const activity_facts.Item.Content) void {
         read.content = .{ .id = id, .value = value };
     }
 
@@ -1992,7 +1992,7 @@ const Located = struct { id: i64, metadata: ContentMetadata };
 /// keeps a page's state out of its frame; `located`, when given, receives
 /// the content the first item exposes. Not inlined, so this state takes
 /// no slot in its caller's frame.
-noinline fn readItems(comptime max: usize, a: *ReadAccess, session: []const u8, end: u64, at: []const ItemAt, items: []protocol.ActivityItem, calls: ?*CallRows, located: ?*?Located) !void {
+noinline fn readItems(comptime max: usize, a: *ReadAccess, session: []const u8, end: u64, at: []const ItemAt, items: []activity_facts.Item, calls: ?*CallRows, located: ?*?Located) !void {
     var reads: [max]ItemRead = undefined;
     for (at, items, reads[0..at.len]) |place, *item, *read| read.* = .{ .position = place.position, .ordinal = place.ordinal, .item = item };
     var round: u8 = 0;
@@ -2033,7 +2033,7 @@ pub fn openActivityContent(a: *ReadAccess, request: *const activity_read.ReadAct
         };
         break :located .{ .id = found.id, .metadata = found.metadata };
     } else located: {
-        var item: protocol.ActivityItem = undefined;
+        var item: activity_facts.Item = undefined;
         var located: ?Located = null;
         readItems(1, a, request.session.slice(), std.math.maxInt(i64), &.{.{ .position = request.position, .ordinal = 0 }}, (&item)[0..1], null, &located) catch |err| switch (err) {
             error.ContentNotFound => return err,

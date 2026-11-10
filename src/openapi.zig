@@ -17,6 +17,7 @@ const wire_request = @import("wire_request.zig");
 const model_list = @import("model_list.zig");
 const store = @import("store.zig");
 const session_report_reply = @import("session_report_reply.zig");
+const activity_reply = @import("activity_reply.zig");
 const launch_frame = @import("launch_frame.zig");
 const core_tools = @import("core_tools.zig");
 const Hole = protocol.Hole;
@@ -239,14 +240,14 @@ pub const routes = [_]Route{
         .kind = .activity_search,
         .summary = "Search public Session activity newest first with bounded snippets.",
         .variants = &.{variant(protocol.activity_search_request, .{})},
-        .reply = jsonReply(.{protocol.ActivitySearchFacts.head ++ .{ListOf(ActivitySearchItem)} ++ protocol.ActivitySearchFacts.tail}),
+        .reply = jsonReply(.{activity_reply.search_reply.head ++ .{ListOf(ActivitySearchItem)} ++ activity_reply.search_reply.tail}),
     },
     .{
         .path = "/v1/activity-page",
         .kind = .activity_page,
         .summary = "One page of a Session's activity feed, with its work and queue at the page's boundary.",
         .variants = &.{ variant(protocol.activity_page_request, .{}), variant(protocol.activity_page_since_request, .{}) },
-        .reply = jsonReply(.{ protocol.ActivityFacts.head ++ .{ListOf(protocol.ActivityItem)} ++ protocol.ActivityFacts.tail, protocol.ActivityFacts.unchanged }),
+        .reply = jsonReply(.{ activity_reply.page_reply.head ++ .{ListOf(activity_reply.ItemJson)} ++ activity_reply.page_reply.tail, activity_reply.page_reply.unchanged }),
     },
     .{
         .path = "/v1/activity-content",
@@ -599,14 +600,13 @@ pub const Document = struct {
             };
             return d.shapeSchema(T.head ++ .{Calls} ++ T.tail);
         }
-        if (T == protocol.CallActivity) return d.shapeSchema(T.head ++ .{ListOf(T.entry_shape)} ++ T.tail);
-        if (T == protocol.ActivityItem) {
+        if (T == activity_reply.CallActivityJson) return d.shapeSchema(T.head ++ .{ListOf(T.entry_shape)} ++ T.tail);
+        if (T == activity_reply.ItemJson) {
             const kinds = comptime std.meta.tags(protocol.ActivityItem.Kind);
             var values: [kinds.len]Value = undefined;
             inline for (kinds, 0..) |kind, index| values[index] = try d.shapeSchema(tuple(T.head(kind)) ++ @field(T.value_shapes, @tagName(kind)) ++ T.tail);
             return d.anyOf(&values);
         }
-        if (T == protocol.Queued) return d.shapeSchema(T.shape);
         if (T == protocol.SessionRow) return d.shapeSchemaWith(T.json_shape, ToolNames);
         if (@hasDecl(T, "json_shape")) return d.shapeSchema(T.json_shape);
         @compileError("no wire schema for " ++ @typeName(T));
@@ -1321,7 +1321,7 @@ test "replies the Host renders conform to their schemas" {
     facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = .{ .length = 3, .digest = @splat(1) }, .admitted_at = 7 } } };
     facts.items[1] = .{ .position = 2, .ordinal = 1, .at = 8, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = @fromBackingInt(@intCast(0)), .code = .{}, .content = null } } };
     facts.work.work.state = .{ .failed = .{ .since = 3, .code = .{}, .resets_at = 4 } };
-    try facts.writeJson(&out.writer);
+    try activity_reply.writePage(&out.writer, &facts);
     try Case.check(schemas, "ActivityPageReply", out.written(), a);
 
     out.clearRetainingCapacity();
@@ -1410,7 +1410,7 @@ test "statuses, media types and required headers match what the Host sends" {
 }
 
 const ActivitySearchItem = struct {
-    pub const openapi_shape = protocol.ActivitySearchFacts.Item.head ++ .{ ListOf(protocol.ActivitySearchFacts.Hit), "]}" };
+    pub const openapi_shape = activity_reply.SearchMatchJson.head ++ .{ ListOf(activity_reply.SearchHitJson), "]}" };
 };
 
 test "Command observation schema requires full metadata or a token-only repeat" {
