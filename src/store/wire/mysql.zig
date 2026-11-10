@@ -580,6 +580,10 @@ pub const Client = struct {
         next.packet_left -= prefix_len;
         if (len > next.packet_left) return error.ProtocolViolation;
         next.columns_left -= 1;
+        // The last value ends its packet. Refusing one that does not here,
+        // before its bytes, makes the refusal independent of how the
+        // value's bytes arrive.
+        if (next.columns_left == 0 and len != next.packet_left) return error.ProtocolViolation;
         next.value_left = len;
         try self.advanceRow(next);
         return .{ .consumed = prefix_len, .event = .{ .value = len } };
@@ -625,10 +629,15 @@ pub const Client = struct {
 fn checkVersion(version: []const u8) Error!void {
     if (std.mem.indexOf(u8, version, "MariaDB") != null) return error.UnsupportedServer;
     var parts = std.mem.splitScalar(u8, version, '.');
-    const major = std.fmt.parseInt(u16, parts.next().?, 10) catch return error.UnsupportedServer;
-    const minor_text = parts.next() orelse return error.UnsupportedServer;
-    const minor = std.fmt.parseInt(u16, minor_text, 10) catch return error.UnsupportedServer;
+    const major = decimal(parts.next().?) orelse return error.UnsupportedServer;
+    const minor = decimal(parts.next() orelse return error.UnsupportedServer) orelse return error.UnsupportedServer;
     if (major < 8 or (major == 8 and minor < 4)) return error.UnsupportedServer;
+}
+
+/// Decimal digits only: parseInt also takes a sign and underscores.
+fn decimal(text: []const u8) ?u16 {
+    if (text.len == 0 or std.mem.indexOfNone(u8, text, "0123456789") != null) return null;
+    return std.fmt.parseInt(u16, text, 10) catch null;
 }
 
 /// caching_sha2_password: SHA256(p) XOR SHA256(SHA256(SHA256(p)) || nonce).
@@ -1023,6 +1032,8 @@ test "MariaDB and MySQL before 8.4 are refused" {
     try checkVersion("8.4.0");
     try std.testing.expectError(error.UnsupportedServer, checkVersion("8.3.0"));
     try std.testing.expectError(error.UnsupportedServer, checkVersion("5.7.44-log"));
+    try std.testing.expectError(error.UnsupportedServer, checkVersion("+9.1.0"));
+    try std.testing.expectError(error.UnsupportedServer, checkVersion("8.0_4.0"));
 }
 
 fn authSwitch(comptime body: []const u8) *const [5 + body.len]u8 {
@@ -1098,13 +1109,15 @@ test "malformed results are refused" {
     client.state = .rows;
     try std.testing.expectEqual(Event.row, (try readOne(&client, "\x02\x00\x00\x01\x05ab")).event.?);
     try std.testing.expectError(error.ProtocolViolation, readOne(&client, "\x05ab"));
-    // A row with bytes after its last value.
-    client = try querying();
-    client.column_count = 1;
-    client.state = .rows;
-    _ = try readOne(&client, "\x03\x00\x00\x01\x01ab");
-    try std.testing.expectEqual(@as(?u32, 1), (try readOne(&client, "\x01ab")).event.?.value);
-    try std.testing.expectError(error.ProtocolViolation, readOne(&client, "ab"));
+    // A row with bytes after its last value is refused at that value's
+    // length, before any of its bytes, however many of them have arrived.
+    for ([_][]const u8{ "\x01ab", "\x01a", "\x01" }) |rest| {
+        client = try querying();
+        client.column_count = 1;
+        client.state = .rows;
+        _ = try readOne(&client, "\x03\x00\x00\x01\x01ab");
+        try std.testing.expectError(error.ProtocolViolation, readOne(&client, rest));
+    }
 }
 
 test "a query that needs a continuation packet is refused" {

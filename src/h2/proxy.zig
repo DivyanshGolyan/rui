@@ -167,8 +167,9 @@ pub const Address = struct {
         const gap = std.mem.indexOf(u8, text, "::");
         if (gap) |at| if (std.mem.indexOfPos(u8, text, at + 1, "::") != null) return null;
         const before = if (gap) |at| text[0..at] else text;
-        if (!groups(before, &head, &head_len)) return null;
-        if (gap) |at| if (!groups(text[at + 2 ..], &tail, &tail_len)) return null;
+        // A dotted quad is only ever the last 32 bits.
+        if (!groups(before, &head, &head_len, gap == null)) return null;
+        if (gap) |at| if (!groups(text[at + 2 ..], &tail, &tail_len, true)) return null;
         if (gap == null and head_len != 16) return null;
         if (gap != null and head_len + tail_len > 14) return null;
         var bytes: [16]u8 = @splat(0);
@@ -177,19 +178,22 @@ pub const Address = struct {
         return bytes;
     }
 
-    /// Colon-separated hex groups, the last of which may be a dotted quad.
-    fn groups(text: []const u8, out: *[16]u8, len: *usize) bool {
+    /// Colon-separated hex groups, the last of which may be a dotted quad
+    /// when `quad` allows it.
+    fn groups(text: []const u8, out: *[16]u8, len: *usize, quad: bool) bool {
         if (text.len == 0) return true;
         var parts = std.mem.splitScalar(u8, text, ':');
         while (parts.next()) |part| {
-            if (parts.peek() == null and std.mem.indexOfScalar(u8, part, '.') != null) {
-                const quad = parse4(part) orelse return false;
+            if (quad and parts.peek() == null and std.mem.indexOfScalar(u8, part, '.') != null) {
+                const dotted = parse4(part) orelse return false;
                 if (len.* + 4 > 16) return false;
-                @memcpy(out[len.*..][0..4], &quad);
+                @memcpy(out[len.*..][0..4], &dotted);
                 len.* += 4;
                 return true;
             }
             if (part.len == 0 or part.len > 4 or len.* + 2 > 16) return false;
+            // parseInt would also take a sign or an underscore.
+            for (part) |digit| if (!std.ascii.isHex(digit)) return false;
             const group = std.fmt.parseInt(u16, part, 16) catch return false;
             out[len.*] = @intCast(group >> 8);
             out[len.* + 1] = @truncate(group);
@@ -208,7 +212,11 @@ const Range = struct {
         var text = entry[0 .. slash orelse entry.len];
         if (text.len > 2 and text[0] == '[' and text[text.len - 1] == ']') text = text[1 .. text.len - 1];
         const base = Address.parse(text) orelse return null;
-        const prefix_bits = if (slash) |at| std.fmt.parseInt(u8, entry[at + 1 ..], 10) catch return null else base.len * 8;
+        const prefix_bits = if (slash) |at| bits: {
+            const digits = entry[at + 1 ..];
+            if (digits.len == 0 or std.mem.indexOfNone(u8, digits, "0123456789") != null) return null;
+            break :bits std.fmt.parseInt(u8, digits, 10) catch return null;
+        } else base.len * 8;
         if (prefix_bits > base.len * 8) return null;
         return .{ .base = base, .prefix_bits = prefix_bits };
     }
@@ -361,7 +369,7 @@ test "addresses: dotted quads and IPv6 text, nothing else" {
         try std.testing.expectEqual(@as(u8, 16), address.len);
         try std.testing.expectEqualSlices(u8, &case.bytes, &address.bytes);
     }
-    for ([_][]const u8{ "", "1.2.3", "1.2.3.4.5", "256.1.1.1", "01.1.1.1", "1.2.3.-4", "1::2::3", "1:2:3:4:5:6:7:8:9", "1:2:3:4:5:6:7", "12345::", "::g", ":1", "1:", "1:2:3:4:5:6:7::8:9", "example.com", "[::1]" }) |text| {
+    for ([_][]const u8{ "", "1.2.3", "1.2.3.4.5", "256.1.1.1", "01.1.1.1", "1.2.3.-4", "1::2::3", "1:2:3:4:5:6:7:8:9", "1:2:3:4:5:6:7", "12345::", "::g", ":1", "1:", "1:2:3:4:5:6:7::8:9", "example.com", "[::1]", "1.2.3.4::", "10.0.0.10::10.0.0.1", "+12f:127::", "1_2::" }) |text| {
         if (Address.parse(text) != null) {
             std.debug.print("parsed {s}\n", .{text});
             return error.TestUnexpectedResult;
@@ -417,6 +425,9 @@ test "NO_PROXY: everything, names and the names below them, addresses and ranges
         .{ .no_proxy = "[2001:db8::1]", .host = "2001:db8::1", .bypass = true },
         .{ .no_proxy = "10.0.0.0/8", .host = "fd12::1", .bypass = false },
         .{ .no_proxy = "10.0.0.0/33", .host = "10.0.0.1", .bypass = false },
+        // A prefix length is decimal digits, without a sign or separator.
+        .{ .no_proxy = "10.0.0.0/+8", .host = "10.200.0.1", .bypass = false },
+        .{ .no_proxy = "10.0.0.0/0_8", .host = "10.200.0.1", .bypass = false },
         // A name entry does not cover an address, nor an address a name.
         .{ .no_proxy = "10.1.2.3", .host = "host.10.1.2.3", .bypass = false },
     };

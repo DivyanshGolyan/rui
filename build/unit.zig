@@ -122,6 +122,37 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     );
     logic_test_step.dependOn(&run_logic_tests.step);
 
+    // The fuzz tests of the parsers that read peer bytes. test-logic runs
+    // their seeds, with Zig's runner so a filter for another root's test
+    // passes here; fuzz-parsers owns filtered runs and builds them with
+    // LLVM, whose coverage counters a live campaign (--fuzz) steers by.
+    // Their root links no C: --fuzz instruments every object it links, and
+    // the stock compiler gives C objects no `__sanitizer_cov_trace_*` hooks.
+    const parser_fuzz_step = b.step(
+        "fuzz-parsers",
+        "Run the peer-byte parser fuzz tests with LLVM coverage; add --fuzz for a live campaign",
+    );
+    for ([_]struct { []const u8, *std.Build.Step, ?bool, ?std.Build.Step.Compile.TestRunner }{
+        .{ "parser-fuzz", logic_test_step, if (target.result.cpu.arch == .x86_64) false else null, null },
+        .{ "parser-fuzz-llvm", parser_fuzz_step, true, filtered_runner },
+    }) |entry| {
+        const name, const step, const use_llvm, const runner = entry;
+        const parser_fuzz = b.addTest(.{
+            .name = name,
+            .use_llvm = use_llvm,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/parser_fuzz_tests.zig"),
+                .target = target,
+                .optimize = .ReleaseSafe,
+            }),
+            .filters = test_filters,
+            .test_runner = runner,
+        });
+        const run = ci.run(parser_fuzz);
+        run.has_side_effects = true;
+        step.dependOn(&run.step);
+    }
+
     const test_actor_llvm: ?bool = if (target.result.cpu.arch == .x86_64) false else null;
     const renderer_allocation = b.addExecutable(.{
         .name = "rui-answer-renderer-allocation-test",
