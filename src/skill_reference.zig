@@ -65,11 +65,16 @@ pub const References = struct {
         return std.ascii.isWhitespace(byte) or std.mem.indexOfScalar(u8, ".,;:!?)", byte) != null;
     }
 
-    fn follow(self: *References, byte: u8) void {
-        self.state = if (std.ascii.isWhitespace(byte) or byte == '(') .boundary else .prose;
+    /// Whether a `/` after `byte` may start a reference.
+    pub fn opens(byte: u8) bool {
+        return std.ascii.isWhitespace(byte) or byte == '(';
     }
 
-    fn nameByte(byte: u8) bool {
+    fn follow(self: *References, byte: u8) void {
+        self.state = if (opens(byte)) .boundary else .prose;
+    }
+
+    pub fn nameByte(byte: u8) bool {
         return (byte >= 'a' and byte <= 'z') or (byte >= '0' and byte <= '9') or byte == '-';
     }
 };

@@ -23,20 +23,23 @@ pub const Word = struct {
 /// reference, then name bytes up to the caret, through any name bytes after
 /// it. Null when the caret is in no such word.
 pub fn atCaret(draft: []const u8, caret: usize) ?Word {
-    var scanner: skill_reference.References = .{};
-    var slash: usize = 0;
-    for (draft[0..caret], 0..) |byte, index| {
-        _ = scanner.feed(byte);
-        if (scanner.state == .slash) slash = index;
+    // The rule reads only a word's own bytes and the byte before its `/`,
+    // so the caret's word is found near it, at any draft length.
+    const References = skill_reference.References;
+    const longest = @typeInfo(@FieldType(References, "name")).array.len;
+    var start = caret;
+    while (start > 0 and References.nameByte(draft[start - 1])) : (start -= 1) {
+        if (caret - start == longest) return null;
     }
-    if (scanner.state != .slash and scanner.state != .name) return null;
+    if (start == 0 or draft[start - 1] != '/') return null;
+    const slash = start - 1;
+    if (slash != 0 and !References.opens(draft[slash - 1])) return null;
     var end = caret;
-    while (end < draft.len) : (end += 1) {
-        _ = scanner.feed(draft[end]);
-        if (scanner.state != .name) break;
+    while (end < draft.len and References.nameByte(draft[end])) : (end += 1) {
+        if (end - start == longest) return null;
     }
     // A name the Host would read as prose, as in `/re/file`, is no word.
-    if (end < draft.len and !skill_reference.References.ends(draft[end])) return null;
+    if (end < draft.len and !References.ends(draft[end])) return null;
     return .{ .slash = slash, .end = end };
 }
 
