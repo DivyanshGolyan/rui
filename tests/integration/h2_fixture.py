@@ -65,6 +65,9 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.flow_release = threading.Event()
         self.flow_ping_acked = threading.Event()
         self.flow_body_sent = threading.Event()
+        # Isolation: the sibling's answer, queued when the target resets, is
+        # withheld until `isolation_release` is set.
+        self.isolation_release = threading.Event()
         self.ready = threading.Event()
         self.lock = threading.Lock()
 
@@ -142,6 +145,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
         held_bodies = {}
         held_models = []
         flow_bodies = {}
+        isolation_bodies = {}
         flow_open = set()
         get_headers = {}
 
@@ -167,7 +171,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
             try:
                 data = sock.recv(65536)
             except TimeoutError:
-                if not held_bodies and not held_models and not flow_bodies:
+                if not held_bodies and not held_models and not flow_bodies and not isolation_bodies:
                     return
                 data = None  # Polling for release.
             except OSError:
@@ -182,6 +186,10 @@ class StreamHandler(socketserver.BaseRequestHandler):
             if held_bodies and self.server.release.is_set():
                 outgoing_bodies.update(held_bodies)
                 held_bodies.clear()
+                sock.settimeout(45)
+            if isolation_bodies and self.server.isolation_release.is_set():
+                outgoing_bodies.update(isolation_bodies)
+                isolation_bodies.clear()
                 sock.settimeout(45)
             if flow_bodies and self.server.flow_release.is_set():
                 outgoing_bodies.update(flow_bodies)
@@ -347,7 +355,8 @@ class StreamHandler(socketserver.BaseRequestHandler):
                         payload, _, _ = dispatch.sse_answer(
                             "sibling", "reasoning-sibling", "message-sibling", "unaffected sibling",
                         )
-                        outgoing_bodies[self.server.stream_ids["isolation-sibling"]] = payload
+                        isolation_bodies[self.server.stream_ids["isolation-sibling"]] = payload
+                        sock.settimeout(0.05)  # Poll for release.
             for stream, body in list(outgoing_bodies.items()):
                 # A single frame per recv can deadlock: no peer event need
                 # arrive while an incomplete response waits in this queue.

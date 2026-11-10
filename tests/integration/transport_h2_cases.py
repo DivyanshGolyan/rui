@@ -748,6 +748,17 @@ def isolated_terminal_stream(root, endpoint, mode):
             ("cancelled", "cancelled") if mode == "cancel" else ("failed", "response_scratch_exhausted")
         ), target
         result_deadline = target_deadline
+        # The transport thread reads on while execution settles the target, so
+        # the sibling's answer waits until the target's custody, and with it
+        # its scratch charge, is released; until then the shared limit may
+        # refuse it too.
+        dispatch.wait_for(
+            lambda: dispatch.command("session", "inspect", "--store", store, "--session", sessions["target"],
+                                     timeout=max(result_deadline - time.monotonic(), 0.1),
+                                     )["execution"]["custody_occupied"] in ("0", "1"),
+            f"{mode} target custody released", deadline=result_deadline,
+        )
+        endpoint.isolation_release.set()
         sibling = dispatch.wait_for(
             lambda: dispatch.observe(
                 store, f"{mode}-sibling-message", deadline=result_deadline,
