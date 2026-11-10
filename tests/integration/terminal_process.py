@@ -63,18 +63,22 @@ def drain_ready(master, feed):
             raise
 
 
+def capture_descriptors():
+    """Only registered masters whose reader belongs to this thread."""
+    with PTY_LOCK:
+        return [master for master, owner in PTY_MASTERS.items()
+                if owner is threading.current_thread() and master in CAPTURES]
+
+
 def drain_captures():
     with PTY_LOCK:
-        for master, owner in list(PTY_MASTERS.items()):
-            if owner is not threading.current_thread():
-                continue
+        for master in capture_descriptors():
             capture = CAPTURES.get(master)
-            if capture is None:
-                continue
-            drain_ready(master, capture.feed)
+            if capture is not None:
+                drain_ready(master, capture.feed)
 
 
-WAIT_HOOKS.append(drain_captures)
+WAIT_HOOKS.append((drain_captures, capture_descriptors))
 
 
 def open_pty(columns=COLUMNS, rows=ROWS):

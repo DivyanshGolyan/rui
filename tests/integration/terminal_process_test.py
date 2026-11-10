@@ -19,7 +19,8 @@ import unittest
 from unittest.mock import patch
 
 from host_process import stop_process, wait_for
-from terminal_process import close_pty, CAPTURES, answers_to, open_pty, register_capture, spawn, terminal_process
+from terminal_process import (close_pty, CAPTURES, answers_to, capture_descriptors, open_pty,
+                              register_capture, spawn, terminal_process)
 from terminal_screen import ScreenCapture
 
 
@@ -59,8 +60,10 @@ class TerminalProcessTest(unittest.TestCase):
 
     def test_wait_drains_writer_and_opt_out_preserves_output(self):
         master, slave = open_pty()
+        self.assertNotIn(master, capture_descriptors())
         received = bytearray()
         register_capture(master, type("Capture", (), {"feed": received.extend})())
+        self.assertIn(master, capture_descriptors())
         os.write(slave, b"pending")
         # The opt-out must leave PTY output unread.
         wait_for(lambda: True, "without drainage", drain=False)
@@ -72,16 +75,57 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertEqual(writer.returncode, 0)
         wait_for(lambda: len(received) == 131079, "all PTY output")
 
+    def test_wait_wakes_for_small_terminal_refills(self):
+        master, slave = open_pty()
+        received = bytearray()
+        register_capture(master, type("Capture", (), {"feed": received.extend})())
+        writer = subprocess.Popen([sys.executable, "-c", "import os; os.write(1, b'x' * 131072)"], stdout=slave)
+        self.addCleanup(stop_process, writer, timeout=5)
+        real_read, real_select = os.read, select.select
+        just_read = False
+
+        def small_read(fd, size):
+            nonlocal just_read
+            chunk = real_read(fd, min(size, 1024) if fd == master else size)
+            if fd == master and chunk:
+                just_read = True
+            return chunk
+
+        def refilling(readers, writers, errors, timeout=None):
+            nonlocal just_read
+            if readers == [master] and timeout == 0 and just_read:
+                # Model Darwin's writer not having refilled its small PTY
+                # buffer yet: every bounded drain batch ends after one read.
+                just_read = False
+                return [], [], []
+            return real_select(readers, writers, errors, timeout)
+
+        with patch("terminal_process.os.read", side_effect=small_read), \
+             patch("terminal_process.select.select", side_effect=refilling):
+            # Blind 25ms sleeps need at least 128 polls (3.2s). Readability
+            # must wake the waiter instead, without enlarging the drain batch.
+            wait_for(lambda: writer.poll() is not None and len(received) == 131072,
+                     "small-buffer PTY writer", timeout=2)
+            self.assertEqual(writer.returncode, 0)
+        self.assertEqual(received, b"x" * 131072)
+
     def test_other_thread_wait_does_not_steal_terminal_output(self):
         master, slave = open_pty()
         received = bytearray()
         register_capture(master, type("Capture", (), {"feed": received.extend})())
         os.write(slave, b"for the reader")
         self.assertTrue(select.select([master], [], [], 5)[0])
-        worker = threading.Thread(target=lambda: wait_for(lambda: True, "worker observation"))
+        watched = []
+
+        def worker_wait():
+            watched.extend(capture_descriptors())
+            wait_for(lambda: True, "worker observation")
+
+        worker = threading.Thread(target=worker_wait)
         worker.start()
         worker.join(timeout=5)
         self.assertFalse(worker.is_alive(), "worker wait did not finish")
+        self.assertEqual(watched, [], "worker monitored another reader's PTY")
         self.assertEqual(received, b"")
         self.assertTrue(select.select([master], [], [], 0)[0], "worker stole the reader's bytes")
         self.assertEqual(os.read(master, 14), b"for the reader")
@@ -131,6 +175,7 @@ class TerminalProcessTest(unittest.TestCase):
         wait_for(lambda: True, "unrelated pipe")
         self.assertEqual(os.read(master, 4), b"keep")
         self.assertNotIn(master, CAPTURES)
+        self.assertNotIn(master, capture_descriptors())
 
     def test_reused_other_pty_is_not_drained(self):
         master, slave = open_pty()
@@ -142,6 +187,7 @@ class TerminalProcessTest(unittest.TestCase):
         wait_for(lambda: True, "unrelated PTY")
         self.assertEqual(os.read(other_master, 4), b"keep")
         self.assertNotIn(master, CAPTURES)
+        self.assertNotIn(master, capture_descriptors())
 
     def test_read_terminal_accepts_already_drained_frame(self):
         import human_cli_fixture as human
