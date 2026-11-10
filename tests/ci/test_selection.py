@@ -705,8 +705,8 @@ class SelectionTest(unittest.TestCase):
         # reaches every case check runs; a fixture script selects only the
         # targets that run it.
         for path, owners in (("host_process.py", {"check", "launch-frame-integration", "ts-client"}),
-                             ("control_fixture.py", {"control-integration", "human-cli-integration",
-                                                     "dispatch-integration", "transport-h2-integration"}),
+                             ("control_fixture.py", {"control-integration", "dispatch-integration",
+                                                     "transport-h2-integration"}),
                              ("canonical_fixture.py", {"human-cli-integration", "request-wait-integration"})):
             with self.subTest(path=path):
                 result = select([f"tests/integration/{path}"], "review", AVAILABLE)

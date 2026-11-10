@@ -24,8 +24,9 @@ RESTORE = b"\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?25h\x1b[?1049l"
 
 # One drawn cell. `data` is its grapheme in NFC, " " where nothing was drawn
 # and "" for a wide character's second cell; `fg` is None for the default
-# foreground, a palette index, or "rrggbb".
-Cell = collections.namedtuple("Cell", "data fg bold")
+# foreground, a palette index, or "rrggbb". `reverse`: drawn in reverse
+# video, the only mark of a highlighted button.
+Cell = collections.namedtuple("Cell", "data fg bold reverse", defaults=(False,))
 Cursor = collections.namedtuple("Cursor", "x y")
 # The screen as it stands outside a synchronized frame: `display` holds one
 # string per row, a character per drawn cell.
@@ -55,7 +56,7 @@ ROW_DIRTY, ROW_CELLS = 1, 3
 CELL_RAW, CELL_STYLE, CELL_GRAPHEMES_UTF8 = 1, 2, 9
 CELL_WIDE, WIDE_SPACER_TAIL = 3, 2
 COLOR_PALETTE, COLOR_RGB = 1, 2
-STYLE_BOLD = 1
+STYLE_BOLD, STYLE_INVERSE = 1, 1 << 4
 OUT_OF_SPACE = -3
 
 
@@ -236,7 +237,7 @@ class ScreenCapture:
             colour = style.fg
             fg = (colour.value[0] if colour.tag == COLOR_PALETTE
                   else bytes(colour.value).hex() if colour.tag == COLOR_RGB else None)
-            cells.append(Cell(data, fg, bool(style.flags & STYLE_BOLD)))
+            cells.append(Cell(data, fg, bool(style.flags & STYLE_BOLD), bool(style.flags & STYLE_INVERSE)))
         assert len(cells) == self.columns, (len(cells), self.columns)
         return tuple(cells)
 

@@ -3167,7 +3167,9 @@ test "Shift-Enter and Alt-Enter add a line in every encoding, and a paste keeps 
         try expectStarted(rig, try std.fmt.bufPrint(&bytes, "one{s}two\r", .{chord}), "one\ntwo");
     }
     try expectStarted(rig, "\x1b[200~one\ntwo\n\x1b[201~\r", "one\ntwo\n");
-    try std.testing.expectEqual(@as(usize, 9), Seen.now.starts);
+    // Terminals send a pasted line break as CR, and a CRLF clipboard as both.
+    try expectStarted(rig, "\x1b[200~one\rtwo\r\nthree\x1b[201~\r", "one\ntwo\nthree");
+    try std.testing.expectEqual(@as(usize, 10), Seen.now.starts);
 }
 
 test "a paste past the editor's capacity leaves the draft unchanged" {
