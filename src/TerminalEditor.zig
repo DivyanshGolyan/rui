@@ -801,6 +801,9 @@ fn insertText(self: *Editor, text: []const u8, pasted_input: bool) KeyOutcome {
 
 fn insert(self: *Editor, byte: u8, pasted_input: bool) KeyOutcome {
     if (self.rejected != null) return .none;
+    // Pasted bytes stay contiguous even when they join the original suffix.
+    // The visible caret follows grapheme boundaries, not this byte offset.
+    const insertion = if (self.pasting) self.paste_start.cursor + self.length - self.paste_start.length else self.cursor;
     if (self.partial_length == 0) {
         self.partial_need = std.unicode.utf8ByteSequenceLength(byte) catch {
             self.reject(.invalid);
@@ -829,9 +832,9 @@ fn insert(self: *Editor, byte: u8, pasted_input: bool) KeyOutcome {
         // Inspect the actual renderer's boundary rather than rejecting valid
         // decomposed accents, variation selectors or joined emoji generally.
         var pair: [8]u8 = undefined;
-        var start = self.cursor -| 1;
+        var start = insertion -| 1;
         while (start > 0 and self.buffer[start] & 0xc0 == 0x80) start -= 1;
-        const prefix = self.buffer[start..self.cursor];
+        const prefix = self.buffer[start..insertion];
         @memcpy(pair[0..prefix.len], prefix);
         @memcpy(pair[prefix.len..][0..self.partial_length], self.partial[0..self.partial_length]);
         var clusters = vaxis.unicode.graphemeIterator(pair[0 .. prefix.len + self.partial_length]);
@@ -845,17 +848,16 @@ fn insert(self: *Editor, byte: u8, pasted_input: bool) KeyOutcome {
             return .{ .refused = .edit_rejected };
         }
     }
-    const at_end = self.cursor == self.length;
-    std.mem.copyBackwards(u8, self.buffer[self.cursor + self.partial_length .. self.length + self.partial_length], self.buffer[self.cursor..self.length]);
-    @memcpy(self.buffer[self.cursor .. self.cursor + self.partial_length], self.partial[0..self.partial_length]);
+    const at_end = insertion == self.length;
+    std.mem.copyBackwards(u8, self.buffer[insertion + self.partial_length .. self.length + self.partial_length], self.buffer[insertion..self.length]);
+    @memcpy(self.buffer[insertion .. insertion + self.partial_length], self.partial[0..self.partial_length]);
     self.length += self.partial_length;
     self.edits +%= 1;
-    self.cursor += self.partial_length;
+    self.cursor = insertion + self.partial_length;
     self.partial_length = 0;
-    if (!at_end and !self.pasting) {
+    if (!at_end) {
         // A combining mark or joiner can merge the inserted scalar with the
-        // suffix. Keep a paste contiguous until its end before snapping the
-        // caret, so later bytes never interleave with the original suffix.
+        // suffix. A frame may be drawn before the next byte arrives.
         const cluster_end = self.next(self.previous(self.cursor));
         self.cursor = @max(self.cursor, cluster_end);
     }

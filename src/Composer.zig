@@ -107,6 +107,34 @@ test "Composer keeps the caret visible between rules without changing draft byte
     try std.testing.expectEqualStrings("one\ntwo\nthree\nfour\nfive\nsix", &bytes);
 }
 
+test "Composer draws between paste fragments that join the original suffix" {
+    const keys: @import("keymap.zig").Keymap(void) = comptime .{ .meanings = .initFill(null) };
+    for ([_]struct { initial: []const u8, first: []const u8, second: []const u8, expected: []const u8 }{
+        .{ .initial = "L👩TAIL", .first = "👨‍", .second = "👧", .expected = "L👨‍👧👩TAIL" },
+        .{ .initial = "L🇧TAIL", .first = "🇦", .second = "🇨", .expected = "L🇦🇨🇧TAIL" },
+    }) |case| {
+        var bytes: [64]u8 = undefined;
+        @memcpy(bytes[0..case.initial.len], case.initial);
+        var editor: Editor = .{ .buffer = &bytes, .length = case.initial.len, .cursor = 1 };
+        var composer: Self = .{ .editor = &editor };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 8 }, .cell_size = .{} };
+        _ = editor.appEvent(keys, .paste_start, true);
+        _ = editor.appEvent(keys, .{ .key_press = .{ .codepoint = 0, .text = case.first } }, true);
+        const joined = try composer.widget().draw(ctx);
+        try std.testing.expectEqual(@as(u16, 5), joined.cursor.?.col);
+        _ = editor.appEvent(keys, .{ .key_press = .{ .codepoint = 0, .text = case.second } }, true);
+        const continued = try composer.widget().draw(ctx);
+        try std.testing.expectEqualStrings(case.expected, bytes[0..editor.length]);
+        try std.testing.expectEqual(@as(u16, 5), continued.cursor.?.col);
+        _ = editor.appEvent(keys, .paste_end, false);
+        const ended = try composer.widget().draw(ctx);
+        try std.testing.expectEqualDeep(continued.cursor, ended.cursor);
+        try std.testing.expectEqualStrings(case.expected, bytes[0..editor.length]);
+    }
+}
+
 test "Composer empty draft shows the screen's placeholder and an input cursor" {
     var bytes: [32]u8 = undefined;
     const editor: Editor = .{ .buffer = &bytes };
