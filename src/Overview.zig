@@ -296,7 +296,7 @@ ops: Operations,
 state: view.State,
 caps: view.Caps,
 app: ?*TerminalApp = null,
-/// Records and notifications beside App's frames.
+/// Program status records beside App's frames.
 attention: *TerminalApp.Attention = undefined,
 root: Root = undefined,
 app_screen: AppScreen.Overview = undefined,
@@ -828,10 +828,6 @@ fn event(self: *Self, value: view.Event) !?Next {
             .refused => |why| refused = why,
             else => {},
         },
-        .notify => |alert| {
-            if (self.state.left or self.root.focused or !(preferences.load(self.options.home) catch preferences.Values{}).notifications) continue;
-            try self.attention.notify(alert.name, alert.kind, alert.more);
-        },
         .exit => return .leave,
     };
     if (refused) |why| if (next == null) return self.event(.{ .composed = .{ .input = .{ .composer = .{ .refused = why } }, .draft = self.composerDraft() } });
@@ -1193,18 +1189,18 @@ fn conversed(raw: *anyopaque, kind: view.Kind, input: view.ConversationInput) !v
     try self.dispatch(.lent);
 }
 
-/// A read the opened Session's conversation applied, recorded as the
-/// listing's are, so its news is notified once whichever reads it first.
-fn observed(raw: *anyopaque, read: protocol.session_work.Work, name: []const u8, opening: bool) !void {
+/// A read the opened Session's conversation applied: the outcome it opened
+/// on is one the person has seen.
+fn observed(raw: *anyopaque, read: protocol.session_work.Work, opening: bool) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
-    const next = try self.event(.{ .observed = .{ .reference = self.opened, .work = read, .name = name, .opening = opening } });
+    const next = try self.event(.{ .observed = .{ .reference = self.opened, .work = read, .opening = opening } });
     std.debug.assert(next == null);
 }
 
 /// While a conversation holds the terminal the overview goes on without
 /// the screen or input: its ticks keep the listing going, so another
-/// Session's news still notifies, and a finished job is answered here, so a
+/// Session's records stay current, and a finished job is answered here, so a
 /// stop never waits behind a listing. Starts wait for the overview.
 fn service(raw: *anyopaque) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
@@ -1653,7 +1649,7 @@ const Rig = struct {
         rig.overview = try create(rig.init, options, undefined, ops, interrupted);
         rig.overview.session_screen = rig.screen;
         rig.out = .init(std.testing.allocator);
-        rig.attention = .{ .vx = &rig.screen.vx, .out = &rig.out.writer, .signal = .osc9 };
+        rig.attention = .{ .vx = &rig.screen.vx, .out = &rig.out.writer };
         rig.overview.attention = &rig.attention;
         // As App's first frame does, at the size a PTY opens with.
         _ = try view.step(&rig.overview.state, .{ .resized = .{ .width = 80, .height = 24 } });
@@ -1681,7 +1677,7 @@ const Rig = struct {
     }
 
     /// What the overview wrote beside App's frames since the last call:
-    /// records and notifications.
+    /// program status records.
     fn signalled(rig: *Rig) []const u8 {
         const written = rig.out.written();
         @memcpy(rig.taken[0..written.len], written);
@@ -2795,7 +2791,7 @@ test "while a conversation holds the terminal its stop goes first, the listing g
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.job));
-    // The listing goes on under the conversation, so its news notifies; the
+    // The listing goes on under the conversation, so records stay current; the
     // stop's answer asks for another at once.
     try rig.lend();
     try std.testing.expect(Seen.now.hosts >= 1 and Seen.now.lists >= 1);
@@ -2822,7 +2818,7 @@ test "while a conversation holds the terminal its stop goes first, the listing g
     try std.testing.expectEqualStrings("", try finishedWith(failing, error.CanonicalStoreFailure, error.CanonicalStoreFailure, &buffer));
 }
 
-test "a finish the conversation notified is no news to the listing that reads it after Esc, out of focus" {
+test "a terminal that answers the program status probe gets each Session's record, and nothing else" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2843,69 +2839,27 @@ test "a finish the conversation notified is no news to the listing that reads it
     defer rig.close();
     const overview = rig.overview;
     rig.overview.options.home = home;
-    try std.testing.expect(try rig.press("\x1b[O") == null);
-    // The overview opens on k7m2qx working.
-    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("", rig.signalled());
-    // Its conversation reads the finish before any listing does.
-    overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 }, "Fix the flaky test", false);
-    try std.testing.expectEqualStrings("\x1b]9;Rui: Fix the flaky test finished\x07", rig.signalled());
-    // Esc, back in focus, then away again before the listing catches up.
-    try std.testing.expect(try rig.press("\x1b[I") == null);
-    try std.testing.expect(try rig.press("\x1b[O") == null);
-    Listing.finished = true;
-    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(overview.state.find("k7m2qx".*).?.state == .finished);
-    try std.testing.expectEqualStrings("", rig.signalled());
-}
-
-test "a terminal that answers the program status probe gets each Session's record, and no notification" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
-    const Listing = struct {
-        var finished = false;
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            _ = try fake_operations.list(self, requests, cursor, page);
-            if (finished) page.rows[0].work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 };
-            return null;
-        }
-    };
-    Listing.finished = false;
-    var ops = fake_operations;
-    ops.list = Listing.list;
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
-    defer rig.close();
-    const overview = rig.overview;
-    rig.overview.options.home = home;
-    rig.screen.vx.caps.program_status = true;
     // The probe's answer and the device attributes behind it are reports:
     // the composer takes none of their bytes, nor the key after them.
     try std.testing.expect(try rig.press("\x1b]7501;?\x1b\\\x1b[?62;22cx\x1b[O") == null);
     try std.testing.expectEqualStrings("x", overview.composerDraft().bytes);
     try std.testing.expect(try rig.press("\x7f") == null);
     // The overview opens on k7m2qx working: its record, named by its first
-    // line once read, while away. No notification.
+    // line once read, while away.
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     var written = rig.signalled();
     const working = "\x1b]7501;state=working:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\";
     try std.testing.expect(std.mem.indexOf(u8, written, working) != null);
-    // Its finish replaces the record and writes no OSC 9, away as it is.
+    // Its finish replaces the record, away as it is.
     Listing.finished = true;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     written = rig.signalled();
     try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]7501;state=done:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
-    try std.testing.expect(std.mem.indexOf(u8, written, "\x1b]9;") == null);
-    // The conversation reading it first gives no OSC 9 either.
+    // The conversation reading it first writes nothing.
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 }, "Fix the flaky test", false);
+    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
     // Opening the Session shows the person its outcome.
     try std.testing.expect(try overview.event(.{ .open = "k7m2qx".* }) != null);
@@ -2938,7 +2892,6 @@ test "turning notifications off clears records already sent, with no Session cha
     defer rig.close();
     const overview = rig.overview;
     rig.overview.options.home = home;
-    rig.screen.vx.caps.program_status = true;
     try std.testing.expect(try rig.press("\x1b]7501;?\x1b\\\x1b[?62;22c") == null);
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
@@ -2973,7 +2926,6 @@ test "a Session's record takes its new name when only its Label changes" {
     defer rig.close();
     const overview = rig.overview;
     rig.overview.options.home = home;
-    rig.screen.vx.caps.program_status = true;
     try std.testing.expect(try rig.press("\x1b]7501;?\x1b\\\x1b[?62;22c\x1b[O") == null);
     const by_line = "\x1b]7501;state=working:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\";
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
@@ -3015,7 +2967,6 @@ test "each later finish, and each later wait, is a record again though no listin
     defer rig.close();
     const overview = rig.overview;
     rig.overview.options.home = home;
-    rig.screen.vx.caps.program_status = true;
     try std.testing.expect(try rig.press("\x1b]7501;?\x1b\\\x1b[?62;22c\x1b[O") == null);
     const done = "\x1b]7501;state=done:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\";
     const blocked = "\x1b]7501;state=blocked:id=rui/k7m2qx:kind=permission:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\";
@@ -3073,7 +3024,6 @@ test "a later Turn's finish the conversation read first is still a record when t
     defer rig.close();
     const overview = rig.overview;
     rig.overview.options.home = home;
-    rig.screen.vx.caps.program_status = true;
     try std.testing.expect(try rig.press("\x1b]7501;?\x1b\\\x1b[?62;22c\x1b[O") == null);
     // Opened on Turn 1's finish, then a listing that reads it again: no record.
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
@@ -3083,7 +3033,7 @@ test "a later Turn's finish the conversation read first is still a record when t
     try std.testing.expect(std.mem.indexOf(u8, rig.signalled(), "\x1b]7501;") == null);
     // Turn 2 finishes and its conversation reads that before any listing.
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 }, "Fix the flaky test", false);
+    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
     Listing.finished_turn = 2;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 120_000 }) == null);
@@ -3112,7 +3062,6 @@ test "a finish the conversation opened on is no done record when a listing reads
     defer rig.close();
     const overview = rig.overview;
     rig.overview.options.home = home;
-    rig.screen.vx.caps.program_status = true;
     try std.testing.expect(try rig.press("\x1b]7501;?\x1b\\\x1b[?62;22c\x1b[O") == null);
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
@@ -3122,7 +3071,7 @@ test "a finish the conversation opened on is no done record when a listing reads
     Listing.finished_turn = 1;
     try std.testing.expect(try overview.event(.{ .open = "k7m2qx".* }) != null);
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 }, "Fix the flaky test", true);
+    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 }, true);
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(std.mem.startsWith(u8, rig.signalled(), "\x1b]7501;state=idle:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
@@ -3137,7 +3086,7 @@ test "a finish the conversation opened on is no done record when a listing reads
     try std.testing.expect(std.mem.startsWith(u8, rig.signalled(), "\x1b]7501;state=done:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
 }
 
-test "a terminal without program status gets the notification instead of records" {
+test "records go out though the terminal never answered the probe, and nothing else does, inside tmux or screen too" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -3145,15 +3094,20 @@ test "a terminal without program status gets the notification instead of records
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
     defer rig.close();
+    try rig.environ.put("TMUX", "/tmp/tmux-1000/default,1,0");
+    try rig.environ.put("STY", "1.pts-0.host");
     const overview = rig.overview;
     rig.overview.options.home = home;
+    // Away, with no answer to the probe.
     try std.testing.expect(try rig.press("\x1b[O") == null);
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("", rig.signalled());
+    const written = rig.signalled();
+    try std.testing.expect(std.mem.indexOf(u8, written, "\x1b]7501;state=working:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\") != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, written, 0x07) == null);
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 }, "Fix the flaky test", false);
-    try std.testing.expectEqualStrings("\x1b]9;Rui: Fix the flaky test finished\x07", rig.signalled());
+    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 }, false);
+    try std.testing.expectEqualStrings("", rig.signalled());
 }
 
 test "a stop answered under a conversation says so there, and goes before a listing" {

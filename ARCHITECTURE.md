@@ -128,7 +128,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
 | Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
 | Session overview | `src/Overview.zig` owns the terminal surface and its reader; `src/overview_view.zig` is its presentation core. |
-| Desktop notifications | `src/attention.zig` decides which states are news and words them, and what program status record each Session has; `src/TerminalApp.zig`'s `Attention` writes notifications and program status records through vaxis, and `Root` keeps the terminal's focus from App's focus events. |
+| Desktop notifications | `src/attention.zig` decides what program status record (OSC 7501) each Session has; `src/TerminalApp.zig`'s `Attention` writes the records through vaxis. |
 | Functional cores | The `cores` list in `src/logic_tests.zig`; `src/core_boundary.zig` defines what a core may name. |
 
 ## Admission and public requests
@@ -2459,45 +2459,18 @@ The editor does not promise linear total work for arbitrary Unicode editing.
 
 #### Desktop notifications
 
-Divyansh approved one behavior on 2026-10-31 (front-end plan PR 8): Rui notifies through the terminal (OSC 9/777, bell fallback) when a Session finishes or needs approval while the window is out of focus.
-The rest of this section records how this build meets it; those are builder choices, not his approval.
-While its terminal is out of focus, an open overview or conversation also notifies when a Session fails.
-The `attention` core decides both screens alike, against one record per Session in the overview's core (`State.seen`): the latest state that wanted the person any read showed, the listing's or the open conversation's.
-The record only moves forward, in the order a Session reaches such states: by Turn, then within a Turn each wait for approval by its earliest Action awaiting a decision (`first_action`), and the Turn's finish or failure after every wait in it.
-Turn and Action ids only grow, and the earliest Action awaiting moves only forward as decisions land.
-A state is news when it comes after the record; a read of an earlier one, as a listing read before a finish the conversation already announced, is no news and leaves the record, so that finish is not news again.
-A finished or failed work state is news once, by its Turn, so a later Turn's finish is news again even within the same second.
-An Action awaiting a decision, in the approval state or beside running Bash, is news once by its earliest Action, so one Action's wait is one notification as its Bash ends and the approval state begins, and the next Action to wait after a decision is news again.
-Rereading the same state, stopping, and other work under way are not news, and a read of work under way between two reads of one finish, as a slower listing's, leaves the record as it was.
-The state a screen opens on is not news: the overview's first listing and the conversation's opening page notify nothing, while a Session first seen in a later listing can.
-The overview's core returns one `notify` effect per listing, naming the most urgent Session (approval, then failure, then finish) by its row title and counting the others.
-Divyansh decided on 2026-11-01 that while a conversation is open, Rui still notifies when any Session finishes or needs approval.
-So the overview's listing jobs keep running under the conversation, which steps them between its frames.
-The conversation hands each read it applies to the overview through its lender, and the core records it as it records the listing's; news the conversation reads first is named as its Session line names the Session.
-Whichever reads a state first notifies, and the other finds it recorded, so no news comes twice: not when the listing catches up after Esc, nor when it first lists a Session the conversation already read.
-
-App delivers focus changes as events, never keys: `Root` keeps the terminal's focus from them, so a focus change counts as no keypress and keeps a notice.
-Rui starts focused and stays so until a report says otherwise: a terminal that never reports, such as tmux without `focus-events on`, never notifies rather than notifying while the person watches.
-The text is `Rui: NAME finished`, `failed` or `needs approval`, with `, and N more` when one listing brings several; the name is cut to 80 bytes and escaped through `TerminalText` as one line, so no byte of it ends or extends the sequence.
-The signal follows the environment: OSC 9 for iTerm2, kitty, WezTerm and Ghostty (`TERM_PROGRAM` or `TERM`), OSC 777 `notify` for foot, and a bell elsewhere.
-Inside tmux or screen (`TMUX`, `STY`, or a `tmux`/`screen` `TERM`) it is always a bell: a multiplexer drops an unknown OSC unless passthrough is configured, but passes a bell to the outer terminal.
-Under a multiplexer that sends no focus reports Rui stays focused, so it never rings.
-`Attention.notify` writes each notification the overview hands it and flushes it at once.
-Each notification rereads the preference, so `/setup --notifications off` applies at once; unreadable preferences leave the default, on.
-
-Divyansh asked on 2026-11-02 for Mitchell Hashimoto's program status protocol, OSC 7501 (https://www.superlogical.com/rex/docs/build/program-status).
-Rui uses it alongside the signal above, not instead of it, because few terminals take it yet (Rex; Ghostty and kitty unreleased); that, and what follows, are builder choices.
-vaxis asks the terminal whether it takes program status and keeps the answer in `caps.program_status`; until it says so, Rui notifies as above.
-Where the terminal takes it, Rui writes one record per Session, `id=rui/REFERENCE` with `app=rui` and the Session's row title in base64 as `msg`: `working` for pending, working, retrying, stopping and Bash work; `blocked` with `kind=permission` while an Action awaits a decision; `done` for a finish the person has not opened; `error` for a failure; `idle` after a stop, or once the person opens a Session whose outcome the record shows.
-Each record changes when the Session's state does, whether or not the terminal has focus: the terminal chooses how to show it and how often to tell the person.
-Then Rui writes no OSC 9, OSC 777 or bell, so no news comes twice.
-The records come from listings alone, which read in order, so a slower read never sets a record back.
+Divyansh decided on 2026-11-10 that Rui tells the terminal about its Sessions only through Mitchell Hashimoto's program status protocol, OSC 7501 (https://www.superlogical.com/rex/docs/build/program-status): Rui writes no OSC 9, OSC 777 or bell, inside tmux or screen too, and the terminal chooses how to show each record and how often to tell the person.
+Records go out whether or not the terminal answered vaxis's program status query; a terminal that does not take them ignores them.
+Rui writes one record per Session, `id=rui/REFERENCE` with `app=rui` and the Session's row title in base64 as `msg`: `working` for pending, working, retrying, stopping and Bash work; `blocked` with `kind=permission` while an Action awaits a decision; `done` for a finish the person has not opened; `error` for a failure; `idle` after a stop, or once the person opens a Session whose outcome the record shows.
+Each record changes when the Session's state does, whether or not the terminal has focus.
+The records come from listings alone, which read in order, so a slower read never sets a record back; the overview's listing jobs keep running while a conversation is open.
 `State.seen` keeps, per Session, the record Rui wants on the terminal (a status and a version that names it) and what the terminal holds of it (no record, the version of a report a frame wrote whole, or unknown after a clear that may have landed); each time the overview steps, `Overview.sendStatuses` reports exactly the Sessions where the two differ.
-A record follows each change a listing reads, and a later finish, failure or wait in the same state is a change, even when the open conversation read it first: a listing compares what it reads with what the listing before it read, not with the news notifications keep.
-An outcome the conversation's first read shows as the person opens the Session is one they have seen, even when no listing had read it yet: `State.seen` keeps the latest such state, a listing that reads that outcome or an earlier one gives `idle`, and only a later Turn's finish or failure is `done` or `error` again.
+A record follows each change a listing reads, and a later finish, failure or wait in the same state is a change: a listing compares what it reads with what the listing before it read, ordered by Turn, then within a Turn by the earliest Action awaiting a decision (`first_action`), with the Turn's finish or failure after every wait in it.
+An outcome the conversation's first read shows as the person opens the Session is one they have seen, even when no listing had read it yet: the conversation hands that read to the overview through its lender, `State.seen` keeps the latest such state, a listing that reads that outcome or an earlier one gives `idle`, and only a later Turn's finish or failure is `done` or `error` again.
 The listing the overview opens on gives a record only to work under way or waiting, so an outcome from before Rui opened never gets one, and a Session at rest gets none until it does something; a Session a full listing no longer shows has its record cleared.
 A new title, from a Label or a first line read later, is a new version, so the record is written again with that name.
 `Attention.report` writes each record and flushes it, and only then does the overview count it as held.
+Each step rereads the preference, so `/setup --notifications off` applies at once; unreadable preferences leave the default, on.
 With notifications off Rui wants no record: while any record of Rui's may be on the terminal it writes one clear (`state=clear:id=rui`, which clears Rui's records and no other program's), and from the frame that carries it until one writes it whole, what the terminal holds of each record is unknown; on again, it writes every record again.
 Leaving clears Rui's records too whenever one may be on the terminal, though the spec lets `done` and `error` outlive the program: a record of a Session no Rui watches would not change again.
 

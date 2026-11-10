@@ -8,7 +8,6 @@ const Self = @This();
 overview: vxfw.Widget,
 session: ?vxfw.Widget = null,
 pasting: bool = false,
-focused: bool = true,
 frames: u64 = 0,
 
 pub fn widget(self: *Self) vxfw.Widget {
@@ -36,8 +35,6 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     switch (input) {
         .paste_start => self.pasting = true,
         .paste_end => self.pasting = false,
-        .focus_in => self.focused = true,
-        .focus_out => self.focused = false,
         .color_report, .color_scheme => {
             try self.overview.handleEvent(ctx, input);
             ctx.consumeEvent();

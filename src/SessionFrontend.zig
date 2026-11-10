@@ -289,11 +289,10 @@ pub const Lender = struct {
     service: *const fn (context: *anyopaque) anyerror!bool,
     /// What the overview says under the input, until its next step.
     line: *const fn (context: *anyopaque, work: protocol.session_work.Kind) Said,
-    /// Hands the overview each read of the Session's work, which it records
-    /// against what its listing read of the Session and notifies of as
-    /// news, named `name`, unless it is the read the conversation opens on.
-    /// Its failure is the overview's and ends the conversation.
-    observed: *const fn (context: *anyopaque, work: protocol.session_work.Work, name: []const u8, opening: bool) anyerror!void,
+    /// Hands the overview each read of the Session's work; the read the
+    /// conversation opens on is an outcome the person has seen. Its failure
+    /// is the overview's and ends the conversation.
+    observed: *const fn (context: *anyopaque, work: protocol.session_work.Work, opening: bool) anyerror!void,
 
     upgrade: ?*const fn (context: *anyopaque, handoff: UpgradeHandoff) anyerror!bool = null,
 
@@ -2062,7 +2061,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
     // A /status asked for during this read is the next read's, at once.
     self.poll_at = reader_policy.scanDue(std.Io.Clock.awake.now(self.init.io).nanoseconds, self.inspection.status_requested);
     // News goes out first in the next frame, once the read is applied.
-    if (observed) |read| try self.lender.observed(self.lender.context, read.work, if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session, read.opening);
+    if (observed) |read| try self.lender.observed(self.lender.context, read.work, read.opening);
     self.dirty = true;
 }
 
@@ -3003,7 +3002,7 @@ const quiet_overview: Lender = .{ .context = undefined, .step = struct {
         return .{};
     }
 }.line, .observed = struct {
-    fn observed(_: *anyopaque, _: protocol.session_work.Work, _: []const u8, _: bool) !void {}
+    fn observed(_: *anyopaque, _: protocol.session_work.Work, _: bool) !void {}
 }.observed };
 
 /// An overview that lent the terminal, reduced to one Session's stop
