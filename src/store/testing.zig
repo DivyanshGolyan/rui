@@ -127,6 +127,11 @@ pub const Engine = enum { sqlite, mysql };
 /// One run of a conformance test's body, on one engine.
 pub const Case = struct {
     engine: Engine,
+    /// MySQL's second run: every queued write batch loses its connection
+    /// before its COMMIT, so the Queue runs each one twice (`queue.zig`).
+    /// A test that counts work the rerun repeats, such as rounds or
+    /// reads, returns before counting on it.
+    rerun: bool = false,
 };
 
 pub const EngineName = required_engines.EngineName;
@@ -176,7 +181,14 @@ pub fn forEachEngine(comptime run: anytype) !void {
                 std.debug.print("conformance test failed on engine {s}\n", .{@tagName(engine)});
                 return err;
             };
-            if (engine == .mysql) mysql_dialect_check.conformancePassed();
+            if (engine == .mysql) {
+                mysql_dialect_check.conformancePassed();
+                case.rerun = true;
+                run(&case) catch |err| {
+                    std.debug.print("conformance test failed on engine mysql, every write run twice\n", .{});
+                    return err;
+                };
+            }
         }
     }
 }
@@ -202,7 +214,10 @@ pub const TestingStoreOptions = struct {
 /// `testingStore` with `options`.
 pub fn testingStoreWith(case: *const Case, storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: TestingStoreOptions) !void {
     switch (case.engine) {
-        .mysql => return mysql_testing.open(storage, tmp, io, options),
+        .mysql => {
+            try mysql_testing.open(storage, tmp, io, options);
+            storage.engine.mysql.state.testing_drop_armed = case.rerun;
+        },
         .sqlite => return openSqlite(storage, tmp, io, options),
     }
 }

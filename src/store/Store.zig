@@ -216,7 +216,7 @@ pub const Store = struct {
         ids.* = .{ .next = undefined };
         self.* = .{ .io = io, .engine = .{ .sqlite = opened }, .selector = stored_selector, .changes = changes };
         self.served = options.served;
-        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch });
+        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .arm = armRerun, .recover = recoverRerun });
         // The Store is in final storage, so the function may keep its address.
         try self.engine.sqlite.serve(&self.served);
         // Tells this opening's `since` tokens from another's. It grants
@@ -330,7 +330,7 @@ pub const Store = struct {
             if (connection.database.len >= self.engine.mysql.state.testing_database.len) return error.MysqlConfigTooLong;
             @memcpy(self.engine.mysql.state.testing_database[0..connection.database.len], connection.database);
         }
-        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch });
+        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .arm = armRerun, .recover = recoverRerun });
         io.random(&self.instance);
         try loadIdentities(self, .full);
         self.queue().opened();
@@ -694,7 +694,7 @@ pub const Store = struct {
 
     /// Called, on whichever thread holds the Store, once a fresh Message
     /// admission's write succeeds and before the Store runs another request, so whatever reads the Store next also sees its effect.
-    /// In a batch it runs before the batch's COMMIT; a COMMIT that fails fences the Store, so no Turn reads the admission.
+    /// In a batch it runs once the batch's COMMIT succeeds, before any of its writers hears an answer, so a batch that fails or runs again calls nothing for the attempt that saved nothing.
     /// A replayed or rejected Message calls nothing. It cannot fail.
     pub const MessageCommitted = struct {
         context: *anyopaque,
@@ -1934,7 +1934,9 @@ pub const Entry = struct {
 /// `.requested` before it queued. A test may open an Entry without an entry
 /// point, which holds the Store until `release`.
 pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
-    if (self.isFenced()) return error.StoreFenced;
+    // A batch that lost its connection runs nothing more: either it runs
+    // again whole on a new one, or the Store fences.
+    if (self.isFenced() or self.batch == .lost) return error.StoreFenced;
     const borrowed = if (@import("builtin").is_test) borrowed: {
         const off = !self.queue().owned();
         if (off) self.queue().borrow();
@@ -2016,13 +2018,60 @@ fn finishBatch(context: *anyopaque) bool {
         self.batch = .none;
         self.identities().taken = .empty;
         self.identities().second = 0;
+        self.identities().admitted_len = 0;
         if (self.release_bulk_memory) {
             self.release_bulk_memory = false;
             self.engine.releaseUnusedMemory(model_facts_domain.save_statements);
         }
     }
     commitBatch(self) catch return false;
+    const values = self.identities();
+    for (values.admitted[0..values.admitted_len]) |*admission| admission.tell();
     return true;
+}
+
+/// Tells `callback` of a fresh admission its write saved: at once after a
+/// lone write's COMMIT, or in a batch once the batch's COMMIT succeeds, so
+/// a batch that runs again, or fails, tells nothing twice or wrongly.
+pub fn admitted(self: *Store, callback: Store.MessageCommitted, admission: Store.MessageAdmission) void {
+    if (self.batch == .none) return callback.call(callback.context, admission);
+    const values = self.identities();
+    values.admitted[values.admitted_len] = .{
+        .callback = callback,
+        .session = admission.session[0..session_id.bytes].*,
+        .admission_id = admission.admission_id,
+        .from_peer = admission.from_peer,
+    };
+    values.admitted_len += 1;
+}
+
+fn armRerun(context: *anyopaque, on: bool) void {
+    const self: *Store = @ptrCast(@alignCast(context));
+    if (self.engine == .mysql) self.engine.mysql.state.armed = on;
+}
+
+/// `Queue.Batch.recover`: after a batch, whether it lost its connection
+/// with nothing saved and runs again on a new one. A loss that cannot be
+/// recovered fences now.
+fn recoverRerun(context: *anyopaque) bool {
+    const self: *Store = @ptrCast(@alignCast(context));
+    if (self.engine != .mysql) return false;
+    const mysql = &self.engine.mysql;
+    if (mysql.recover()) {
+        // As after a rollback, the lost attempt gives back the ids it took.
+        // A finished batch has already forgotten which, so all are reread.
+        self.savepoint = false;
+        self.identities().second = 0;
+        loadIdentities(self, .full) catch |err| {
+            _ = @errorName(fence(self, err));
+            return false;
+        };
+        return true;
+    }
+    if (mysql.state.failure) |err| if (err == error.StoreConnectionLost or err == error.OwnershipLost or err == error.CommitOutcomeUnknown) {
+        _ = @errorName(fence(self, err));
+    };
+    return false;
 }
 
 fn commitBatch(self: *Store) !void {
@@ -2075,8 +2124,11 @@ fn clearTouchOracleForTesting(self: *Store) void {
     }
 }
 
-/// The only fence setter. Returns `err` so callers can propagate it.
+/// The only fence setter. Returns `err` so callers can propagate it. A
+/// connection lost in an attempt the Queue can still run again fences only
+/// if `recoverRerun` cannot replace it.
 pub fn fence(self: *Store, err: anytype) @TypeOf(err) {
+    if (self.engine == .mysql and self.engine.mysql.defersFence()) return err;
     self.fenced.store(true, .release);
     return err;
 }
@@ -2182,6 +2234,21 @@ const HostValues = struct {
     /// use. A u32 holds seconds until 2106 and fits the padding after
     /// `taken`, so the Store does not grow.
     second: u32 = 0,
+    /// The batch's fresh admissions, told once its COMMIT succeeds
+    /// (`Store.admitted`): one per write at most.
+    admitted: [Queue.drain_limit + 1]Admitted = undefined,
+    admitted_len: u8 = 0,
+};
+
+const Admitted = struct {
+    callback: Store.MessageCommitted,
+    session: [session_id.bytes]u8,
+    admission_id: u64,
+    from_peer: bool,
+
+    fn tell(self: *const Admitted) void {
+        self.callback.call(self.callback.context, .{ .session = &self.session, .admission_id = self.admission_id, .from_peer = self.from_peer });
+    }
 };
 
 /// The next value of `column`, inside the open transaction. The one place

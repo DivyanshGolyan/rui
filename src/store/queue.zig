@@ -10,6 +10,11 @@
 //! transaction, each write in a savepoint of its own, one COMMIT. No writer
 //! hears its answer before that COMMIT, and when it fails every writer in
 //! the batch hears the failure.
+//!
+//! A batch whose connection was lost with nothing saved runs once more on
+//! a new one (`Batch.recover`), so its writers never see the loss: every
+//! write in it reruns, in order, in one new transaction. Only writes: a
+//! read may already have streamed part of its answer to its caller.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -32,6 +37,14 @@ pub const Queue = struct {
         context: *anyopaque,
         start: *const fn (*anyopaque) void,
         finish: *const fn (*anyopaque) bool,
+        /// Whether the batch that runs until the next `arm(false)` may run
+        /// again: while armed, a lost connection defers its fence to
+        /// `recover`.
+        arm: *const fn (*anyopaque, bool) void,
+        /// After an armed batch: whether its connection was lost with
+        /// nothing saved and a new one replaced it, so it runs again. A
+        /// loss it cannot recover fences the Store.
+        recover: *const fn (*anyopaque) bool,
     };
 
     /// One waiting caller's request, on its stack until `done`.
@@ -55,7 +68,7 @@ pub const Queue = struct {
 
     /// Bodies one holder runs for others before it hands the Store to the
     /// next waiter, so no caller's own work waits behind an endless queue.
-    const drain_limit = 64;
+    pub const drain_limit = 64;
 
     /// The opening thread holds the Store until open returns.
     pub fn init(io: std.Io, batch: Batch) Queue {
@@ -85,9 +98,9 @@ pub const Queue = struct {
     pub noinline fn write(self: *Queue, comptime body: anytype, args: anytype) Answer(body) {
         var request: Write(body, @TypeOf(args)) = .{ .args = args, .job = .{ .run = Write(body, @TypeOf(args)).run, .own = false } };
         if (self.take(&request.job)) {
-            self.batch.start(self.batch.context);
-            const answer = @call(.auto, body, args);
-            return if (self.drain(true)) answer else lostAnswer(Answer(body), answer);
+            // The holder's own write opens the batch it then drains.
+            const committed = self.drain(&request.job);
+            return if (committed) request.answer else lostAnswer(Answer(body), request.answer);
         }
         return if (request.job.lost) lostAnswer(Answer(body), request.answer) else request.answer;
     }
@@ -105,26 +118,37 @@ pub const Queue = struct {
     /// Runs the queued writes, up to `drain_limit`, in batches, then lets
     /// the Store go or hands it to the next waiter.
     pub fn release(self: *Queue) void {
-        _ = self.drain(false);
+        _ = self.drain(null);
     }
 
-    /// `release`, after a write of the holder's own when `open`: then the
-    /// answer is whether the batch that write joined committed.
-    noinline fn drain(self: *Queue, open: bool) bool {
+    /// `release`, after running `own`, a write of the holder's own, first:
+    /// then the answer is whether the batch it opened committed.
+    noinline fn drain(self: *Queue, own: ?*Job) bool {
         std.debug.assert(self.owned());
-        var batching = open;
+        var batching = false;
         var first = true;
         var committed = true;
         var ran: u32 = 0;
-        // The batch's writers, answered once it commits.
+        // The batch's writers, newest first, answered once it commits.
         var batched: ?*Job = null;
+        if (own) |job| {
+            self.batch.start(self.batch.context);
+            self.batch.arm(self.batch.context, true);
+            batching = true;
+            job.run.?(job);
+            job.next = null;
+            batched = job;
+        }
         while (true) {
             self.mutex.lockUncancelable(self.io);
             const next = self.head;
             if (next) |job| if (!job.own and ran < drain_limit) {
                 self.pop();
                 self.mutex.unlock(self.io);
-                if (!batching) self.batch.start(self.batch.context);
+                if (!batching) {
+                    self.batch.start(self.batch.context);
+                    self.batch.arm(self.batch.context, true);
+                }
                 batching = true;
                 job.run.?(job);
                 ran += 1;
@@ -134,8 +158,17 @@ pub const Queue = struct {
             };
             if (batching) {
                 self.mutex.unlock(self.io);
-                const ok = self.batch.finish(self.batch.context);
-                if (first and open) committed = ok;
+                var ok = self.batch.finish(self.batch.context);
+                self.batch.arm(self.batch.context, false);
+                if (self.batch.recover(self.batch.context)) {
+                    // Nothing was saved: every write runs again, in order.
+                    batched = reversed(batched);
+                    self.batch.start(self.batch.context);
+                    var at = batched;
+                    while (at) |job| : (at = job.next) job.run.?(job);
+                    ok = self.batch.finish(self.batch.context);
+                }
+                if (first and own != null) committed = ok;
                 first = false;
                 batching = false;
                 answerBatch(self.io, batched, ok);
@@ -156,6 +189,17 @@ pub const Queue = struct {
             job.done.set(self.io);
             return committed;
         }
+    }
+
+    fn reversed(list: ?*Job) ?*Job {
+        var result: ?*Job = null;
+        var at = list;
+        while (at) |job| {
+            at = job.next;
+            job.next = result;
+            result = job;
+        }
+        return result;
     }
 
     fn pop(self: *Queue) void {
@@ -264,7 +308,7 @@ pub const Queue = struct {
 
 const Probe = struct {
     io: std.Io,
-    log: [16]u8 = undefined,
+    log: [32]u8 = undefined,
     len: std.atomic.Value(usize) = .init(0),
     lost: bool = false,
 
@@ -296,7 +340,7 @@ const Probe = struct {
     }
 };
 
-fn waitQueued(queue: *Queue, count: usize) void {
+pub fn waitQueued(queue: *Queue, count: usize) void {
     while (true) {
         queue.mutex.lockUncancelable(queue.io);
         defer queue.mutex.unlock(queue.io);
@@ -350,12 +394,27 @@ const Batches = struct {
     started: u32 = 0,
     finished: u32 = 0,
     fail: bool = false,
+    armed: u32 = 0,
+    rerun: u32 = 0,
 
     var ignored: Batches = .{};
     const none: Queue.Batch = hooks(&ignored);
 
     fn hooks(self: *Batches) Queue.Batch {
-        return .{ .context = self, .start = start, .finish = finish };
+        return .{ .context = self, .start = start, .finish = finish, .arm = arm, .recover = recover };
+    }
+
+    fn arm(context: *anyopaque, on: bool) void {
+        const self: *Batches = @ptrCast(@alignCast(context));
+        if (on) self.armed += 1;
+    }
+
+    /// Reports a recoverable loss for the next `rerun` batches.
+    fn recover(context: *anyopaque) bool {
+        const self: *Batches = @ptrCast(@alignCast(context));
+        if (self.rerun == 0) return false;
+        self.rerun -= 1;
+        return true;
     }
 
     fn start(context: *anyopaque) void {
@@ -400,4 +459,32 @@ test "writes queued behind the holder share one batch and hear it fail together"
     lost.join();
     try std.testing.expect(probe.lost);
     try std.testing.expectError(error.StoreFenced, queue.write(Probe.note, .{ &probe, 'f' }));
+}
+
+test "a batch that lost its connection with nothing saved runs once more, whole and in order" {
+    const io = std.testing.io;
+    var batches: Batches = .{};
+    var queue: Queue = .init(io, batches.hooks());
+    queue.opened();
+    var probe: Probe = .{ .io = io };
+    // A read never runs again: it may have streamed part of its answer.
+    try queue.run(Probe.note, .{ &probe, 'r' });
+    try std.testing.expectEqual(@as(u32, 0), batches.armed);
+    // Writes queued behind a held read rerun as one batch, in order.
+    try queue.callHeld(Probe.note, .{ &probe, 'h' });
+    var threads: [3]std.Thread = undefined;
+    for (&threads, "bcd", 1..) |*thread, mark, queued| {
+        thread.* = try std.Thread.spawn(.{}, Probe.other, .{ &probe, &queue, mark, .write });
+        waitQueued(&queue, queued);
+    }
+    batches.rerun = 1;
+    const started = batches.started;
+    queue.release();
+    for (threads) |thread| thread.join();
+    try std.testing.expectEqualStrings("rhbcdbcd", probe.logged());
+    try std.testing.expectEqual(started + 2, batches.started);
+    // The holder's own write reruns with its batch.
+    batches.rerun = 1;
+    try queue.write(Probe.note, .{ &probe, 'w' });
+    try std.testing.expectEqualStrings("rhbcdbcdww", probe.logged());
 }
