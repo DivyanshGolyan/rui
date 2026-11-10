@@ -269,15 +269,43 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return if (std.mem.startsWith(u8, uri, TerminalText.session_link)) uri[TerminalText.session_link.len..] else null;
         }
 
-        /// The last position in `[from, to)` on a peer's name, if any.
-        pub fn lastSession(self: *const Self, from: usize, to: usize) ?usize {
+        /// The last position in `[from, to)` on a peer's name that its line,
+        /// laid out at `layout`, shows in a cell. A name clipped off its row
+        /// entirely is not on screen, so it is not there to open.
+        pub fn lastShownSession(self: *const Self, gpa: std.mem.Allocator, layout: Layout, from: usize, to: usize) !?usize {
             comptime std.debug.assert(styled);
-            var index = @min(to, self.text().len);
-            while (index > from) {
-                index -= 1;
-                if (self.sessionAt(index) != null) return index;
+            var end = @min(to, self.text().len);
+            while (end > from) {
+                end -= 1;
+                const id = self.sessionAt(end) orelse continue;
+                var start = end;
+                while (start > from) : (start -= 1) {
+                    const before = self.sessionAt(start - 1) orelse break;
+                    if (!std.mem.eql(u8, before, id)) break;
+                }
+                if (try self.shows(gpa, layout, start, end + 1)) return end;
+                end = start;
             }
             return null;
+        }
+
+        /// Whether laying out the line holding `[from, to)` puts any of
+        /// those bytes in a cell.
+        fn shows(self: *const Self, gpa: std.mem.Allocator, layout: Layout, from: usize, to: usize) !bool {
+            const line = if (std.mem.lastIndexOfScalar(u8, self.text()[0..from], '\n')) |at| at + 1 else 0;
+            const rows = self.lineRows(layout, line);
+            const cells = try gpa.alloc(vaxis.Cell, @as(usize, layout.width) * rows);
+            defer gpa.free(cells);
+            @memset(cells, .{});
+            var screen: vaxis.Screen = .{ .width = layout.width, .height = rows, .width_method = layout.method, .buf = cells };
+            const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = layout.width, .height = rows, .screen = &screen };
+            _ = self.printLine(window, 0, line, true, false, .{}, .default);
+            const base = @intFromPtr(&self.bytes);
+            for (cells) |cell| {
+                const at = @intFromPtr(cell.char.grapheme.ptr);
+                if (cell.char.grapheme.len != 0 and at >= base + from and at < base + to) return true;
+            }
+            return false;
         }
 
         /// The text of `[from, to)` as the view shows it, for the clipboard:
