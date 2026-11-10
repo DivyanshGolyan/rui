@@ -256,11 +256,11 @@ class StackFramesTest(unittest.TestCase):
             self.assertEqual(spec["chain_ceiling"] % PAGE, 0, label)
         modules = rules["host_modules"]
         self.assertEqual(len(modules), len(set(modules)))
-        # Each names a source file by its Zig namespace; the h2 package's
-        # files are named from its own root.
+        # Each names a source file by its Zig namespace; the h2 and tls_client
+        # packages' files are named from their own roots.
         for module in modules:
             path = module.replace(".", "/") + ".zig"
-            self.assertTrue((ROOT / "src" / path).exists() or (ROOT / "src/h2" / path).exists(), module)
+            self.assertTrue(any((ROOT / root / path).exists() for root in ("src", "src/h2", "src/tls_client")), module)
 
     def test_repository_allowance_does_not_grow_from_trusted_base(self):
         self.assertEqual(allowance_growth(), [])
@@ -286,15 +286,20 @@ class StackFramesTest(unittest.TestCase):
             subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
             path.write_text(json.dumps(policy({"a.big": 0x3000})))
             self.assertEqual(allowance_growth(root, path), [])
-            path.write_text(json.dumps(policy({"a.big": 0x5000, "b.new": 0x3000},
-                                              ceilings={"main thread": 0x7000, "engine": 0x1000},
+            # A thread new to the Host seeds its own ceiling, like the file's first introduction.
+            path.write_text(json.dumps(policy({"a.big": 0x4000}, ceilings={"engine": 0x2000},
                                               threads={"worker": "worker.receive", "engine": "engine.run"})))
+            self.assertEqual(allowance_growth(root, path), [])
+            # Relabelling an existing thread's anchor is not a new thread.
+            path.write_text(json.dumps(policy({"a.big": 0x5000, "b.new": 0x3000},
+                                              ceilings={"main thread": 0x7000, "renamed": 0x7000},
+                                              threads={"renamed": "worker.receive"})))
             commit("candidate grows allowance")
             self.assertEqual(allowance_growth(root, path), [
                 "a.big: frame_bytes 20480 exceeds the trusted 16384",
                 "b.new: frame_bytes 12288 exceeds the trusted absence",
                 "main thread: chain_ceiling 28672 exceeds the trusted 24576",
-                "engine: chain_ceiling 4096 exceeds the trusted absence",
+                "renamed: chain_ceiling 28672 exceeds the trusted absence",
             ])
             rules = policy({"a.big": 0x4000})
             rules["budget_bytes"] = 16384

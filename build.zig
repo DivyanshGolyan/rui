@@ -1,6 +1,7 @@
 const std = @import("std");
 const Translator = @import("translate_c").Translator;
 const unit_partition = @import("src/unit_test_partition.zig");
+const darwin = @import("build/darwin.zig");
 
 pub fn build(b: *std.Build) void {
     // PR fixtures need ReleaseSafe checks, not shipped LLVM code generation.
@@ -51,25 +52,31 @@ pub fn build(b: *std.Build) void {
         generate.addFileArg(std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig"));
         break :runner generate.addOutputFileArg("unit_test_runner.zig");
     } else null;
+    // A filter that names no test in a unit step fails instead of passing empty.
+    const filtered_runner: ?std.Build.Step.Compile.TestRunner = if (test_filters.len != 0) runner: {
+        const generate = b.addSystemCommand(&.{ "python3", "-B" });
+        generate.addFileArg(b.path("tests/ci/unit_test_runner.py"));
+        generate.addArg("--filtered");
+        generate.addFileArg(std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig"));
+        break :runner .{ .path = generate.addOutputFileArg("filtered_test_runner.zig"), .mode = .server };
+    } else null;
+    const native_step = b.step("test-native", "Run non-Store unit tests");
+    const store_step = b.step("test-store", "Run Store unit tests");
     var run_tests: *std.Build.Step.Run = undefined;
     for (tests, 0..) |*entry, index| {
         const root = unit_partition.roots[index];
         const compile = b.addTest(.{
             .name = if (test_filters.len != 0) "test" else b.fmt("unit-{s}", .{@tagName(root)}),
-            // Leave headroom for the OS on the 7 GiB Mac unit producer.
-            .max_rss = if (test_filters.len == 0 and target.result.os.tag == .macos) 3 * 1024 * 1024 * 1024 else 0,
+            .max_rss = darwin.unitMaxRss(test_filters.len, target),
             .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/tests.zig"),
                 .target = target,
                 .optimize = .ReleaseSafe,
-                // LLVM DWARF dominates memory. Only Mac unit roots omit it;
-                // checks/optimization stay unchanged, and filtered reproductions
-                // keep full debug info. Never strip the stack-trace probes.
-                .strip = if (test_filters.len == 0 and target.result.os.tag == .macos) true else null,
+                .strip = darwin.unitStrip(test_filters.len, target),
             }),
             .filters = if (test_filters.len != 0) test_filters else unit_filters[index],
-            .test_runner = if (unit_runner) |path| .{ .path = path, .mode = .server } else null,
+            .test_runner = if (unit_runner) |path| .{ .path = path, .mode = .server } else filtered_runner,
         });
         entry.* = compile;
         if (unit_runner != null) {
@@ -92,6 +99,15 @@ pub fn build(b: *std.Build) void {
         const run = ci.run(compile);
         run.has_side_effects = true;
         run.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
+        if (test_filters.len != 0) {
+            native_step.dependOn(&run.step);
+            store_step.dependOn(&run.step);
+        } else {
+            const standalone = ci.run(compile);
+            standalone.has_side_effects = true;
+            standalone.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
+            (if (root == .native) native_step else store_step).dependOn(&standalone.step);
+        }
         // Compile in parallel, execute serially: the MySQL dialect fixture owns
         // fixed database names. Store runs last and owns the acceptance record
         // (including migrations/conformance); never mask an earlier failure.
@@ -114,6 +130,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSafe,
         }),
         .filters = if (test_filters.len != 0) test_filters else &.{"Host processing wait does not consume response transfer inactivity"},
+        .test_runner = filtered_runner,
     });
     configureSqlite(b, deadline_witness);
     configureYaml(b, deadline_witness);
@@ -136,6 +153,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSafe,
         }),
         .filters = test_filters,
+        .test_runner = filtered_runner,
     });
     configureTerminalEditor(b, logic_tests);
     const run_logic_tests = ci.run(logic_tests);
@@ -177,12 +195,13 @@ pub fn build(b: *std.Build) void {
 
     const h2_test_step = b.step("test-h2", "Run the HTTP/2 client's own tests");
     const pg_test_step = b.step("test-pg", "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
-    if (addH2(b, target, .ReleaseSafe, pinned_transport, addTestPoll(b))) |h2| {
+    if (addTlsClient(b, target, .ReleaseSafe, pinned_transport)) |tls_client| {
+        const h2 = addH2(b, target, .ReleaseSafe, pinned_transport, addTestPoll(b), tls_client);
         const h2_tests = b.addTest(.{ .root_module = h2, .filters = test_filters });
         const run_h2_tests = ci.run(h2_tests);
         run_h2_tests.has_side_effects = true;
         h2_test_step.dependOn(&run_h2_tests.step);
-        const pg_tests = b.addTest(.{ .root_module = addPg(b, target, .ReleaseSafe, h2), .filters = test_filters });
+        const pg_tests = b.addTest(.{ .root_module = addPg(b, target, .ReleaseSafe, tls_client), .filters = test_filters });
         const run_pg_tests = ci.run(pg_tests);
         run_pg_tests.has_side_effects = true;
         pg_test_step.dependOn(&run_pg_tests.step);
@@ -211,6 +230,7 @@ pub fn build(b: *std.Build) void {
     const run_renderer_allocation = ci.run(renderer_allocation);
     logic_test_step.dependOn(&run_renderer_allocation.step);
     test_step.dependOn(&run_renderer_allocation.step);
+    native_step.dependOn(&run_renderer_allocation.step);
 
     const terminal_notice = b.addExecutable(.{
         .name = "rui-terminal-notice-test",
@@ -233,11 +253,20 @@ pub fn build(b: *std.Build) void {
     }));
     signal_stack_probe.has_side_effects = true;
     test_step.dependOn(&signal_stack_probe.step);
+    native_step.dependOn(&signal_stack_probe.step);
 
     const production_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
     const release_safe = if (pr_ci) addRui(b, target, .ReleaseSafe, "rui-pr-check", pinned_transport) else production_safe;
     if (pr_ci) release_safe.use_llvm = false;
-    const terminal_restoration = b.addSystemCommand(&.{"env"});
+    // The PTY screen observer (tests/integration/terminal_screen.py) loads
+    // libghostty-vt through ctypes. Its test-only package in screen-emulator
+    // keeps it out of this manifest, which installs fetch whole; only steps
+    // that run the observer build it, and no product artifact links it.
+    const screen_emulator = addScreenEmulator(b, ci, ci_mode);
+    const screen = screen_emulator.library;
+    const screen_emulator_step = b.step("screen-emulator", "Install the PTY screen observer's libghostty-vt, for harnesses outside build steps");
+    screen_emulator_step.dependOn(&b.addInstallLibFile(screen_emulator.library, screen_emulator.name).step);
+    const terminal_restoration = screenCommand(b, screen, &.{});
     terminal_restoration.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
     terminal_restoration.addArg("python3");
     terminal_restoration.addFileArg(b.path("tests/integration/terminal_restoration_integration.py"));
@@ -266,23 +295,23 @@ pub fn build(b: *std.Build) void {
         "tests/integration/session_sequence_model_test.py",
         "tests/ci/renderer_mutation_test.py",
     }) |path| {
-        const selftest = b.addSystemCommand(&.{ "python3", "-B" });
+        const selftest = screenCommand(b, screen, &.{ "python3", "-B" });
         selftest.addFileArg(b.path(path));
         selftest.has_side_effects = true;
         renderer_selftests.dependOn(&selftest.step);
     }
     b.step(
         "direct-pty",
-        "Run the synthetic direct-PTY key matrix and tmux smoke (nonblocking)",
-    ).dependOn(&addPtyHarness(b, "tests/qualification/direct-pty/matrix.py", ci.path(release_safe)).step);
+        "Run the synthetic direct-PTY key matrix (nonblocking)",
+    ).dependOn(&addPtyHarness(b, screen, "tests/qualification/direct-pty/matrix.py", ci.path(release_safe)).step);
     b.step(
         "direct-pty-controls",
         "Run direct-PTY driver and disposal controls (nonblocking)",
-    ).dependOn(&addPtyHarness(b, "tests/qualification/direct-pty/controls.py", ci.path(release_safe)).step);
+    ).dependOn(&addPtyHarness(b, screen, "tests/qualification/direct-pty/controls.py", ci.path(release_safe)).step);
     b.step(
         "input-equivalence",
         "Run TD2 original-recovery encodings through the direct-PTY matrix (nonblocking)",
-    ).dependOn(&addPtyHarness(b, "tests/integration/input_equivalence.py", ci.path(release_safe)).step);
+    ).dependOn(&addPtyHarness(b, screen, "tests/integration/input_equivalence.py", ci.path(release_safe)).step);
 
     const session_list_client = b.addExecutable(.{
         .name = "rui-session-list-client-test",
@@ -340,7 +369,7 @@ pub fn build(b: *std.Build) void {
     );
     dispatch_integration_step.dependOn(&dispatch_integration.step);
 
-    const skills_integration = b.addSystemCommand(&.{"python3"});
+    const skills_integration = screenCommand(b, screen, &.{"python3"});
     skills_integration.addFileArg(b.path("tests/integration/skills_integration.py"));
     skills_integration.addFileArg(ci.path(release_safe));
     b.step("skills-integration", "Run isolated native skills capture, replay and creation cases").dependOn(&skills_integration.step);
@@ -360,7 +389,7 @@ pub fn build(b: *std.Build) void {
     request_wait_integration.addFileArg(ci.path(release_safe));
     b.step("request-wait-integration", "Run request wait completion, recovery and conditional polling witnesses").dependOn(&request_wait_integration.step);
 
-    const canonical_failure_integration = b.addSystemCommand(&.{"python3"});
+    const canonical_failure_integration = screenCommand(b, screen, &.{"python3"});
     canonical_failure_integration.addFileArg(b.path("tests/integration/canonical_failure_integration.py"));
     canonical_failure_integration.addFileArg(ci.path(release_safe));
     b.step("canonical-failure-integration", "Run canonical invocation failure at real producer and caller boundaries").dependOn(&canonical_failure_integration.step);
@@ -428,7 +457,7 @@ pub fn build(b: *std.Build) void {
     );
     bash_lifecycle_integration_step.dependOn(&bash_lifecycle_integration.step);
 
-    const bash_recovery_integration = b.addSystemCommand(&.{"python3"});
+    const bash_recovery_integration = screenCommand(b, screen, &.{"python3"});
     bash_recovery_integration.addFileArg(b.path("tests/integration/bash_recovery_integration.py"));
     bash_recovery_integration.addFileArg(ci.path(release_safe));
     const bash_recovery_integration_step = b.step(
@@ -509,8 +538,8 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
         .link_libc = true,
     });
-    // TLS: the connection's tls.zig is on h2's OpenSSL.
-    if (addH2(b, target, .ReleaseSafe, pinned_transport, addTestPoll(b))) |h2| mysql_connection.addImport("h2", h2);
+    // TLS: the connection's tls.zig is on tls_client's OpenSSL.
+    if (addTlsClient(b, target, .ReleaseSafe, pinned_transport)) |tls_client| mysql_connection.addImport("tls_client", tls_client);
     mysql_wire_tests.root_module.addImport("mysql_connection", mysql_connection);
     const mysql_wire_integration = b.addSystemCommand(&.{"python3"});
     mysql_wire_integration.addFileArg(b.path("tests/integration/mysql_wire_integration.py"));
@@ -566,7 +595,7 @@ pub fn build(b: *std.Build) void {
     const host_status_step = b.step("host-status-integration", "Run native Host information and lease observation cases");
     host_status_step.dependOn(&host_status_integration.step);
 
-    const host_launch_integration = b.addSystemCommand(&.{"python3"});
+    const host_launch_integration = screenCommand(b, screen, &.{"python3"});
     host_launch_integration.addFileArg(b.path("tests/integration/host_launch_integration.py"));
     host_launch_integration.addFileArg(ci.path(release_safe));
     const host_launch_step = b.step("host-launch-integration", "Run detached Host launch, alias convergence and startup-failure cases");
@@ -583,7 +612,7 @@ pub fn build(b: *std.Build) void {
     });
     const upgrade_fixture_step = b.step("upgrade-fixture", "Build the same-source native actor with synthetic release identity for upgrade evidence");
     upgrade_fixture_step.dependOn(&b.addInstallArtifact(upgrade_release, .{}).step);
-    const upgrade_integration = b.addSystemCommand(&.{"python3"});
+    const upgrade_integration = screenCommand(b, screen, &.{"python3"});
     upgrade_integration.addFileArg(b.path("tests/integration/upgrade_integration.py"));
     upgrade_integration.addFileArg(ci.path(upgrade_release));
     const upgrade_step = b.step("upgrade-integration", "Run isolated release publication and exact Host upgrade lifecycle cases");
@@ -628,6 +657,29 @@ pub fn build(b: *std.Build) void {
     const host_stop_step = b.step("host-stop-integration", "Run native exact-instance Host shutdown and custody drain");
     host_stop_step.dependOn(&host_stop_integration.step);
 
+    // check runs these cases among its process integrations; each step runs
+    // the same case alone, so selection can name only the ones a change reaches.
+    b.step("peer-integration", "Run the peer round trip through Rui-launched Bash")
+        .dependOn(&addFixture(b, "tests/integration/peer_integration.py", ci.path(release_safe)).step);
+    b.step("sender-identity-integration", "Run Action sender authority through the installed CLI, exit, stop and restart")
+        .dependOn(&addFixture(b, "tests/integration/sender_identity_integration.py", ci.path(release_safe)).step);
+    b.step("conversation-page-integration", "Run public Conversation wire reads against a real Host and canonical Store")
+        .dependOn(&addFixture(b, "tests/integration/conversation_page_integration.py", ci.path(release_safe)).step);
+    b.step("host-allocator-integration", "Observe the Host allocator environment before main")
+        .dependOn(&addFixture(b, "tests/integration/host_allocator_test.py", ci.path(release_safe)).step);
+    const human_cli = screenCommand(b, screen, &.{});
+    human_cli.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
+    human_cli.addArg("python3");
+    human_cli.addFileArg(b.path("tests/integration/human_cli_integration.py"));
+    human_cli.addFileArg(ci.path(release_safe));
+    b.step(
+        "human-cli-integration",
+        "Run public caller recovery, the interactive frontend and exact Bash authorization (includes terminal restoration and canonical failure)",
+    ).dependOn(&human_cli.step);
+    const host_process_test = b.addSystemCommand(&.{"python3"});
+    host_process_test.addFileArg(b.path("tests/integration/host_process_test.py"));
+    b.step("host-process-test", "Run the bounded Host process fixture's own failure checks").dependOn(&host_process_test.step);
+
     const debug = addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
     const debug_integration = b.addSystemCommand(&.{"sh"});
     debug_integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
@@ -663,7 +715,7 @@ pub fn build(b: *std.Build) void {
     format.addFileArg(b.path("build.zig"));
     format.addDirectoryArg(b.path("src"));
     const release_small = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
-    const fast_integrations = b.addSystemCommand(&.{"sh"});
+    const fast_integrations = screenCommand(b, screen, &.{"sh"});
     fast_integrations.addFileArg(b.path("tests/integration/check.sh"));
     fast_integrations.addFileArg(ci.path(release_safe));
     fast_integrations.addFileArg(ci.path(debug));
@@ -703,7 +755,7 @@ pub fn build(b: *std.Build) void {
         "Run routine native tests and process integrations serially (long witnesses are separate)",
     );
     const check_part = b.option(enum { all, execution, callers }, "check-part", "Isolated full-check part (default all)") orelse .all;
-    const process_integrations = b.addSystemCommand(&.{"sh"});
+    const process_integrations = screenCommand(b, screen, &.{"sh"});
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
     process_integrations.addFileArg(ci.path(release_safe));
     process_integrations.addFileArg(ci.path(debug));
@@ -746,6 +798,15 @@ pub fn build(b: *std.Build) void {
     const sqlite_shell = addSqliteShell(b, target, .ReleaseSmall);
     queue_audit_test.addFileArg(ci.path(sqlite_shell));
     measurement_test_step.dependOn(&queue_audit_test.step);
+
+    // The runners' configure call against the current CLI and Host, so a change
+    // to either fails here rather than in the next measurement campaign.
+    const configure_contract = b.addSystemCommand(&.{"python3"});
+    configure_contract.addFileArg(b.path("tests/integration/host_process.py"));
+    configure_contract.addArgs(&.{ "exec", "env", "GOTOOLCHAIN=local", "go", "test", "-count=1", "-mod=readonly", "-run", "^TestConfigureContract$", "./measurement", "-args", "-rui" });
+    configure_contract.setCwd(b.path("tests/qualification"));
+    configure_contract.addFileArg(ci.path(release_safe));
+    measurement_test_step.dependOn(&configure_contract.step);
 
     const linux_cross_step = b.step(
         "cross-check-linux",
@@ -931,7 +992,7 @@ pub fn build(b: *std.Build) void {
             const cpu_manifest = b.addWriteFiles().add("ci-cpu.json", ci_cpu);
             ci_build.dependOn(&b.addInstallBinFile(cpu_manifest, "ci-cpu.json").step);
         }
-        var collection: CiCollection = .{ .b = b, .destination = ci_build, .part = ci_part, .unit = tests };
+        var collection: CiCollection = .{ .b = b, .destination = ci_build, .part = ci_part, .unit = tests, .screen = screen_emulator };
         var names = std.mem.splitScalar(u8, selected, ',');
         while (names.next()) |name| {
             const root = b.top_level_steps.get(name) orelse @panic("Unknown CI target");
@@ -1031,6 +1092,7 @@ const CiCollection = struct {
     destination: *std.Build.Step,
     part: CiPart,
     unit: []const *std.Build.Step.Compile,
+    screen: ScreenEmulator,
     visited: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty,
     reached_unit: bool = false,
 
@@ -1049,6 +1111,13 @@ const CiCollection = struct {
             if (emit) collection.destination.dependOn(&b.addInstallBinFile(compile.getEmittedBin(), ciName(b, compile)).step);
             return;
         }
+        // The child build's library rides with the executables, so consumers
+        // neither fetch ghostty's packages nor build it again.
+        if (collection.screen.child) |child| if (source == &child.step) {
+            if (collection.part != .unit)
+                collection.destination.dependOn(&b.addInstallBinFile(collection.screen.library, collection.screen.name).step);
+            return;
+        };
         for (source.dependencies.items) |dependency| collection.collect(dependency);
     }
 };
@@ -1081,6 +1150,42 @@ const CiArtifacts = struct {
     }
 };
 
+const ScreenEmulator = struct {
+    library: std.Build.LazyPath,
+    name: []const u8,
+    /// The child build; null in a CI consumer, whose producer ran it.
+    child: ?*std.Build.Step.Run,
+};
+
+/// libghostty-vt's shared library for the PTY screen observer, which a child
+/// `zig build` of screen-emulator builds from its pinned release tarball.
+/// A CI producer builds it for the baseline CPU, as its executables are.
+fn addScreenEmulator(b: *std.Build, ci: CiArtifacts, baseline: bool) ScreenEmulator {
+    const name = darwin.screenLibraryName(b.graph.host.result.os.tag);
+    if (ci.directory) |directory|
+        return .{ .library = .{ .cwd_relative = b.pathJoin(&.{ directory, name }) }, .name = name, .child = null };
+    const child = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "install", "--summary", "none", "--build-file" });
+    child.addFileArg(b.path("screen-emulator/build.zig"));
+    child.addFileInput(b.path("screen-emulator/build.zig.zon"));
+    if (baseline) child.addArg("-Dcpu=baseline");
+    child.addArg("--cache-dir");
+    child.addDirectoryArg(std.Build.LazyPath.cache_root);
+    child.addArg("--prefix");
+    const prefix = child.addOutputDirectoryArg("screen");
+    // Zig refuses ghostty's path dependencies from a package directory
+    // outside screen-emulator, so the child keeps its own screen-emulator/zig-pkg.
+    child.removeEnvironmentVariable("ZIG_LOCAL_PKG_DIR");
+    return .{ .library = prefix.path(b, b.pathJoin(&.{ "lib", name })), .name = name, .child = child };
+}
+
+/// A fixture command whose environment names the screen observer's library.
+fn screenCommand(b: *std.Build, screen: std.Build.LazyPath, argv: []const []const u8) *std.Build.Step.Run {
+    const run = b.addSystemCommand(&.{"env"});
+    run.addPrefixedFileArg("RUI_TEST_GHOSTTY_VT=", screen);
+    run.addArgs(argv);
+    return run;
+}
+
 /// Runs a direct-PTY harness against the build-owned ReleaseSafe Rui; callers
 /// pass the harness's own options, including a fresh --output, after `--`.
 // A Go measurement launches Rui, so it enters the fixture boundary like every
@@ -1094,8 +1199,8 @@ fn addMeasurement(b: *std.Build, arguments: []const []const u8) *std.Build.Step.
     return run;
 }
 
-fn addPtyHarness(b: *std.Build, harness: []const u8, rui: std.Build.LazyPath) *std.Build.Step.Run {
-    const run = b.addSystemCommand(&.{"python3"});
+fn addPtyHarness(b: *std.Build, screen: std.Build.LazyPath, harness: []const u8, rui: std.Build.LazyPath) *std.Build.Step.Run {
+    const run = screenCommand(b, screen, &.{"python3"});
     run.addFileArg(b.path(harness));
     run.addFileArg(rui);
     run.addPassthruArgs();
@@ -1107,6 +1212,14 @@ fn sameTransportTarget(a: std.Build.ResolvedTarget, b: std.Build.ResolvedTarget)
     return a.result.cpu.arch == b.result.cpu.arch and
         a.result.os.tag == b.result.os.tag and
         a.result.abi == b.result.abi;
+}
+
+/// A Python process fixture run against one Rui executable.
+fn addFixture(b: *std.Build, script: []const u8, rui: std.Build.LazyPath) *std.Build.Step.Run {
+    const run = b.addSystemCommand(&.{"python3"});
+    run.addFileArg(b.path(script));
+    run.addFileArg(rui);
+    return run;
 }
 
 fn addRui(
@@ -1218,8 +1331,10 @@ fn configureTransportWithIdentity(
     compile.root_module.addOptions("transport_options", options);
     const test_poll = addTestPoll(b);
     compile.root_module.addImport("test_poll", test_poll);
-    const h2 = addH2(b, target, compile.root_module.optimize.?, maybe_pinned, test_poll) orelse return;
-    compile.root_module.addImport("h2", h2);
+    const optimize = compile.root_module.optimize.?;
+    const tls_client = addTlsClient(b, target, optimize, maybe_pinned) orelse return;
+    compile.root_module.addImport("tls_client", tls_client);
+    compile.root_module.addImport("h2", addH2(b, target, optimize, maybe_pinned, test_poll, tls_client));
 }
 
 /// The one helper Rui's and h2's tests poll through. A module, so both
@@ -1228,26 +1343,24 @@ fn addTestPoll(b: *std.Build) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("src/testing/poll.zig") });
 }
 
-/// The HTTP/2 client module, linked against the pinned nghttp2 and OpenSSL,
-/// or null where the pinned transport is not built. With only headers it
-/// type-checks and links nothing.
-fn addH2(
+/// TLS client settings, host naming and trust loading, linked against the
+/// pinned OpenSSL, or null where the pinned transport is not built. The one
+/// module that links OpenSSL: h2 and the Store's wire import it. With only
+/// headers it type-checks and links nothing.
+fn addTlsClient(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     maybe_pinned: ?PinnedTransport,
-    test_poll: *std.Build.Module,
 ) ?*std.Build.Module {
     if (!transportEnabled(target)) return null;
     const module = b.createModule(.{
-        .root_source_file = b.path("src/h2/h2.zig"),
+        .root_source_file = b.path("src/tls_client/tls_client.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    module.addImport("test_poll", test_poll);
-    const bindings = addBindings(b, module, "h2_c",
-        \\#include <nghttp2/nghttp2.h>
+    const bindings = addBindings(b, module, "openssl_c",
         \\#include <openssl/ssl.h>
         \\#include <openssl/err.h>
         \\#include <openssl/x509v3.h>
@@ -1257,34 +1370,69 @@ fn addH2(
         bindings.addIncludePath(addTransportHeaders(b, target));
         return module;
     };
-    bindings.addIncludePath(pinned.output.path(b, "include"));
-    module.addObjectFile(pinned.output.path(b, "lib/libnghttp2.a"));
+    addPinnedPaths(b, target, pinned, module, bindings);
     module.addObjectFile(pinned.output.path(b, "lib/libssl.a"));
     module.addObjectFile(pinned.output.path(b, "lib/libcrypto.a"));
+    return module;
+}
+
+/// The HTTP/2 client module, linked against the pinned nghttp2, on
+/// `tls_client`'s OpenSSL. With only headers it type-checks and links
+/// nothing.
+fn addH2(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    maybe_pinned: ?PinnedTransport,
+    test_poll: *std.Build.Module,
+    tls_client: *std.Build.Module,
+) *std.Build.Module {
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/h2/h2.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    module.addImport("test_poll", test_poll);
+    module.addImport("tls_client", tls_client);
+    const bindings = addBindings(b, module, "h2_c",
+        \\#include <nghttp2/nghttp2.h>
+        \\
+    );
+    const pinned = maybe_pinned orelse {
+        bindings.addIncludePath(addTransportHeaders(b, target));
+        return module;
+    };
+    addPinnedPaths(b, target, pinned, module, bindings);
+    module.addObjectFile(pinned.output.path(b, "lib/libnghttp2.a"));
+    // SecTrust verifies h2's sessions under system trust on macOS.
     if (target.result.os.tag == .macos) {
-        module.addSystemFrameworkPath(pinned.output.path(b, "sdk/System/Library/Frameworks"));
-        module.addSystemIncludePath(pinned.output.path(b, "sdk/usr/include"));
-        module.addLibraryPath(pinned.output.path(b, "sdk/usr/lib"));
-        bindings.addSystemFrameworkPath(pinned.output.path(b, "sdk/System/Library/Frameworks"));
-        bindings.addSystemIncludePath(pinned.output.path(b, "sdk/usr/include"));
-        module.linkFramework("Security", .{});
-        module.linkFramework("CoreFoundation", .{});
-    } else {
-        module.linkSystemLibrary("pthread", .{});
-        module.linkSystemLibrary("dl", .{});
+        darwin.linkTrust(module);
     }
     return module;
 }
 
-/// The Store's Postgres wire client, on h2's OpenSSL.
-fn addPg(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, h2: *std.Build.Module) *std.Build.Module {
+/// The pinned headers and the system libraries a module on the pinned
+/// transport compiles and links against: the bundled SDK on macOS.
+fn addPinnedPaths(b: *std.Build, target: std.Build.ResolvedTarget, pinned: PinnedTransport, module: *std.Build.Module, bindings: Translator) void {
+    bindings.addIncludePath(pinned.output.path(b, "include"));
+    if (target.result.os.tag == .macos) {
+        darwin.addSdkPaths(b, module, bindings, pinned.output);
+    } else {
+        module.linkSystemLibrary("pthread", .{});
+        module.linkSystemLibrary("dl", .{});
+    }
+}
+
+/// The Store's Postgres wire client, on `tls_client`'s OpenSSL.
+fn addPg(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, tls_client: *std.Build.Module) *std.Build.Module {
     const module = b.createModule(.{
         .root_source_file = b.path("src/store/wire/pg.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    module.addImport("h2", h2);
+    module.addImport("tls_client", tls_client);
     return module;
 }
 

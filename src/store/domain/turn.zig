@@ -2,7 +2,8 @@
 //! continuations.
 
 const std = @import("std");
-const protocol = @import("../../protocol.zig");
+const turn_ending = @import("../../turn_ending.zig");
+const session_id = @import("../../session_id.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const store_access = @import("../access.zig");
@@ -57,7 +58,7 @@ pub const TurnOutcome = union(enum) {
     /// The ending the feed names. A cancelled Turn was `stopped` when a
     /// Session stop selected it, and otherwise interrupted by a Model
     /// Interruption.
-    pub fn ending(outcome: TurnOutcome, stopped: bool) protocol.TurnEnding {
+    pub fn ending(outcome: TurnOutcome, stopped: bool) turn_ending.TurnEnding {
         return switch (outcome) {
             .completed => .done,
             .cancelled => if (stopped) .stopped else .interrupted,
@@ -175,7 +176,7 @@ const owe_child_stops = rsql.Write(.{
 /// Queues the stop each of `parent`'s `unowed` attached children owes
 /// (D38), because `parent` stopped or ran out of context at `position`.
 /// The Host runs each as the child's own stop (`Store.nextCoreWork`).
-pub fn queueOwedStops(a: anytype, parent: *const [protocol.session_id_bytes]u8, position: u64, unowed: u64) void {
+pub fn queueOwedStops(a: anytype, parent: *const [session_id.bytes]u8, position: u64, unowed: u64) void {
     if (unowed != 0) a.writeCount(owe_child_stops, .{ .parent = parent, .position = position }, unowed);
 }
 

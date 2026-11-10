@@ -11,30 +11,16 @@ import os
 import pathlib
 import pty
 import re
-from terminal_process import open_pty
+from terminal_process import open_pty, spawn
 import subprocess
 import sys
 import tempfile
 
-import human_cli_integration as cli
+import human_cli_fixture as cli
 import host_process
 from host_process import start_ready_process, stop_process
 import os_semantics
-
-
-def sample(pid):
-    root = pathlib.Path(f"/proc/{pid}")
-    fields = dict(line.split(":", 1) for line in (root / "status").read_text().splitlines())
-    descriptors = []
-    for descriptor in (root / "fd").iterdir():
-        try:
-            descriptors.append(os.readlink(descriptor))
-        except FileNotFoundError:
-            pass  # The independently polling activity reader closed its socket.
-    return {"rss_kib": int(fields["VmRSS"].split()[0]),
-        "peak_kib": int(fields["VmHWM"].split()[0]), "fds": len(descriptors),
-        "retained_fds": sum(not descriptor.startswith("socket:") for descriptor in descriptors),
-        "sockets": sum(descriptor.startswith("socket:") for descriptor in descriptors)}
+from proc_sample import sample
 
 
 def capture(state, binary, label, size, repetition):
@@ -101,7 +87,7 @@ def retained(state, binary, label):
     # Keep the historical baseline's original entry; migrate only the candidate.
     entry = (["session", "--store", str(state / "live-store"), "--session", "resources/original"]
         if label == "baseline" else ["session", "resume", "--store", str(state / "live-store"), "--", "resources/original"])
-    process = subprocess.Popen([str(binary), *entry], env={**os.environ, "HOME": str(home)},
+    process = spawn([str(binary), *entry], env={**os.environ, "HOME": str(home)},
         stdin=slave, stdout=slave, stderr=slave)
     os.close(slave)
     try:

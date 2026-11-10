@@ -14,31 +14,13 @@ import tempfile
 import threading
 import time
 
-import bash_integration as bash
+import bash_fixture as bash
 import model_fixture as fixture
+from product_defaults import DEFAULTS, compaction_trigger, start_effort
 import host_process
 from host_process import HostDiagnostics, retain_failure_state, start_ready_process
-from control_integration import raw_request
-
-
-ACCESS = "e30.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln"
-ID = "e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJydWktdGVzdC1hY2NvdW50In0.c2ln"
-FEDRAMP_ID = "e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoicnVpLXRlc3QtYWNjb3VudCIsImNoYXRncHRfYWNjb3VudF9pc19mZWRyYW1wIjp0cnVlfX0.c2ln"
-ACCOUNT = "rui-test-account"
-
-
-def expected_user_agent():
-    if not (fixture.ROOT / ".git").exists() or shutil.which("git") is None:
-        return "rui/unknown"
-    identity = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel", "HEAD"], cwd=fixture.ROOT,
-        capture_output=True, text=True,
-    )
-    lines = identity.stdout.splitlines()
-    revision = lines[1] if (identity.returncode == 0 and len(lines) == 2
-                           and pathlib.Path(lines[0]).resolve() == fixture.ROOT
-                           and re.fullmatch(r"[0-9a-f]{40}", lines[1])) else "unknown"
-    return "rui/" + revision
+from control_fixture import raw_request
+from codex_fixture import ACCESS, ACCOUNT, OPENAI_KEY, credentials, expected_user_agent
 
 
 class ManagedHandler(fixture.SuccessHandler):
@@ -52,16 +34,6 @@ class ManagedHandler(fixture.SuccessHandler):
             if hasattr(self.server, "turn_states"):
                 self.server.turn_states.append(self.headers.get_all("x-codex-turn-state") or [])
         super().do_POST()
-
-
-def credentials(path, *, state="ready", access=ACCESS, fedramp=False, generation=1):
-    path.write_text(
-        "version=3\ngeneration=" + str(generation) + "\naccount_id=" + ACCOUNT +
-        "\nfedramp=" + str(int(fedramp)) + "\nid_token=" + (FEDRAMP_ID if fedramp else ID) +
-        "\naccess_token=" + access + "\nrefresh_token=synthetic-not-real\n"
-        "expires_at=4102444800\nrefreshed_at=1750000000\nstate=" + state + "\n"
-    )
-    path.chmod(0o600)
 
 
 def credential_facts(path):
@@ -172,7 +144,7 @@ def run():
         action = fixture.wait_for(lambda: bash.action_for(store, session), "managed Bash proposal")
         assert fixture.read_action(store, session, action["action"], "call-id") == b"managed-call"
         assert json.loads(fixture.read_action(store, session, action["action"], "arguments"))["cmd"] == command
-        assert json.loads(endpoint.requests[0])["reasoning"] == {"effort": "low"}
+        assert json.loads(endpoint.requests[0])["reasoning"] == {"effort": start_effort("gpt-6-sol")}
         configured = fixture.command(
             "session", "configure", "--store", store, "--session", session,
             "--record", state / "effort-high.json", "--key", "effort-high",
@@ -195,7 +167,7 @@ def run():
         continuation = json.loads(endpoint.requests[1])
         # openai-responses/2 keeps the starting effort on top, so the prefix
         # stays cached, and writes the change into the input once.
-        assert continuation["reasoning"] == {"effort": "low"}, continuation
+        assert continuation["reasoning"] == {"effort": start_effort("gpt-6-sol")}, continuation
         assert [item for item in continuation["input"] if item.get("type") == "configuration_update"] == [
             {"type": "configuration_update", "reasoning": {"effort": "high"}}
         ], continuation["input"]
@@ -259,7 +231,7 @@ def run():
         assert fixture.read_result(store, "later") == b"later answer"
         assert len(endpoint.requests) == 3 and proof.read_text() == "once\n"
         later = json.loads(endpoint.requests[2])
-        assert later["reasoning"] == {"effort": "low"}, later
+        assert later["reasoning"] == {"effort": start_effort("gpt-6-sol")}, later
         assert any(item.get("type") == "function_call_output" and item["call_id"] == "managed-call" for item in later["input"])
         # Another owner commits a newer credential generation while this
         # Attempt is in flight: the rejected lease is not refreshed and the
@@ -370,16 +342,14 @@ def run():
         fixture.stop_host(host)
         host = start(stop_store, url)
         diagnostics = None
-        # Independent catalog expectations, exercised through real managed POSTs
-        # and public effective settings rather than capability helpers alone.
+        # Catalog defaults, exercised through real managed POSTs and public
+        # effective settings; the expected values come from the catalog and
+        # product defaults, so a catalog refresh needs no edit here.
         expected_agent = expected_user_agent()
         mismatches = []
-        for index, (model, effort, trigger) in enumerate((
-            ("gpt-6-luna", "low", "244800"), ("gpt-6.1-sol", "low", "244800"), ("gpt-6.1-terra", "low", "244800"),
-            ("gpt-6-sol", "low", "244800"), ("gpt-6-astra", "low", "244800"),
-            ("gpt-5.6-sol", "low", "244800"), ("gpt-5.6-terra", "low", "244800"),
-            ("gpt-5.6-luna", "low", "244800"), ("gpt-5.5", "low", "244800"),
-        )):
+        for index, model in enumerate(("gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra",
+                                       "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")):
+            effort, trigger = start_effort(model), str(compaction_trigger("codex", model))
             key = f"envelope-{index}"
             with endpoint.lock:
                 endpoint.responses.append(fixture.sse_answer(key, key + "-r", key + "-m", key)[0])
@@ -404,7 +374,7 @@ def run():
             assert observation["result"]["status"] == "completed" and answer == key.encode(), observation
             request = json.loads(endpoint.requests[4 + index])
             assert request["model"] == model, request
-            if settings["compaction_trigger"] != trigger or settings["output_reservation"] != "0":
+            if settings["compaction_trigger"] != trigger or settings["output_reservation"] != str(DEFAULTS.output_reservation):
                 mismatches.append((model, "compaction defaults", settings["compaction_trigger"], settings["output_reservation"]))
             if settings["reasoning_effort"] != effort or settings["reasoning_effort_override"] != effort:
                 mismatches.append((model, "effort settings", settings["reasoning_effort"], settings["reasoning_effort_override"]))
@@ -447,7 +417,7 @@ def run():
             request = json.loads(endpoint.requests[-1])
             assert request["model"] == "unlisted-effort-model" and request["reasoning"] == {"effort": effort}, request
         print("unlisted effort passed: all grammar values forwarded, provider refusal preserved without fallback or resend")
-        print(f"codex request envelopes passed: nine exact model IDs, client low effort, ChatGPT 244800-token compaction/0 defaults, low verbosity, explicit parallel calls, User-Agent={expected_agent}")
+        print(f"codex request envelopes passed: nine exact model IDs, client default effort, ChatGPT compaction/reservation defaults, low verbosity, explicit parallel calls, User-Agent={expected_agent}")
         print("codex synthetic managed journey passed: approved effect once, private continuation, fresh Host, post-restart dispatch, no authentication resend, stopped authentication/handoff and unsupported settings never launch")
         complete = True
     finally:
@@ -705,9 +675,6 @@ def forced_refresh_journey():
             raise errors[0]
 
 
-OPENAI_KEY = "sk-synthetic-openai-key"
-
-
 def openai_journey():
     """One Host serves Codex and an OpenAI API key side by side. The key goes
     out as a bearer with no ChatGPT account, the body matches a Codex
@@ -767,9 +734,9 @@ def openai_journey():
             assert configured["answer"]["status"] == "accepted", configured
             sessions[provider] = configured["answer"]["session"]
             settings = fixture.command("session", "inspect", "--store", store, "--session", sessions[provider])["session"]
-            expected_trigger = "244800" if provider == "codex" else "945000"
+            expected_trigger = str(compaction_trigger(provider, "gpt-6.1-sol"))
             assert settings["compaction_trigger"] == settings["compaction_trigger_override"] == expected_trigger, settings
-            assert settings["reasoning_effort"] == settings["reasoning_effort_override"] == "low", settings
+            assert settings["reasoning_effort"] == settings["reasoning_effort_override"] == start_effort("gpt-6.1-sol"), settings
             fixture.message(state, store, f"same-{provider}", sessions[provider], "same turn")
             fixture.wait_for(lambda: fixture.completed_observation(store, f"same-{provider}"), f"{provider} answer")
             assert fixture.read_result(store, f"same-{provider}") == b"same answer"

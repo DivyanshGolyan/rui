@@ -18,11 +18,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
    $V build FULLSHA --source ../rui-verify-pin-SHORT --pkg-dir "$ZIG_LOCAL_PKG_DIR"
    ```
 
-   The build refuses a dirty or mismatched checkout. It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It also writes `manifest.json` with the SHA, tree and binary sha256 values. A cold build takes about 5 minutes on an M-series Mac. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. The first use creates `~/.cache/verify-rui/venv` with `pyte==0.8.2` and `wcwidth==0.2.13`, matching CI's `.github/actions/setup`:
-
-   ```sh
-   python3 -m venv ~/.cache/verify-rui/venv && ~/.cache/verify-rui/venv/bin/pip install 'pyte==0.8.2' 'wcwidth==0.2.13'
-   ```
+   The build refuses a dirty or mismatched checkout. It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. A build made before the library existed has none; rebuild it with `--force`.
 
 2. **New run, one per experiment.**
 
@@ -132,7 +128,7 @@ Everything lives under `$RUN/evidence/`:
 - `terms/NAME/input.jsonl` and `input.bin`: the bytes Rui actually received, with monotonic `t_ns` and offsets. In tmux they include terminal replies such as `ESC[?2027;0$y`.
 - `terms/NAME/output.bin` and `output.jsonl`: every output byte.
 - `terms/NAME/frames.jsonl`: every committed frame, with `t_ns`, generation, cursor and output offset. Use it for initial and draft cells and for timing.
-- `committed.txt` and `display.txt`: the latest committed frame and the latest raw pyte display.
+- `committed.txt` and `display.txt`: the latest committed frame and the latest screen, frame or not.
 - `meta.json`, `exit.json`: the wrapper and Rui PIDs, target rc, `stty -g` before and after with PENDIN/FLUSHO masked like `terminal_restoration_integration.py`, whether the alternate screen was active at exit, and the main-screen tail (resume hint).
 - `shots/`: snapshots.
 - `provider.jsonl` and `provider/request-NNNN.json`: every model request, with the exact user text, kind, headers (minus Authorization) and the full body.

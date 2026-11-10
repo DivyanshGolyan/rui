@@ -4,6 +4,10 @@ const std = @import("std");
 pub const bytes = 6;
 pub const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
 
+/// The most bytes a Session reference holds as received, before its
+/// grammar is checked, so a refusal can name what was sent.
+pub const max_reference_bytes = 128;
+
 pub fn valid(value: []const u8) bool {
     if (value.len != bytes) return false;
     for (value) |byte| if (std.mem.indexOfScalar(u8, alphabet, byte) == null) return false;

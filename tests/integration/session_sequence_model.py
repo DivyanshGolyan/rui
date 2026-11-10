@@ -211,7 +211,11 @@ test "TD1 sequence model {name}" {{
     try @import("session_sequence_model_test.zig").run(Self, .{{
         .step = step, .draw = drawFrame, .navigation = perform,
         .beginTranscript = beginTranscript, .settleReader = settleReader,
-        .olderWanted = olderWanted,
+        .olderWanted = struct {{
+            fn wanted(self: *const Self) bool {{
+                return reader_policy.background(self.idleReader()) == .history;
+            }}
+        }}.wanted,
         .showStaged = showStaged, .applyReader = applyReader,
         .presentAdmission = presentAdmission, .freeze = freeze,
         .receipt = consentReceipt, .showInspection = showInspection,

@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import threading
 
-import bash_integration as bash
+import bash_fixture as bash
 import model_fixture as caller
 import host_process
 from host_process import start_ready_process

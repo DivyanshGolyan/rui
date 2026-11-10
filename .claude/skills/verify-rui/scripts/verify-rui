@@ -6,6 +6,7 @@ makes passes an explicit --store under the run's synthetic HOME; nothing reads
 or writes the user's default Store, credentials or tmux server.
 """
 import argparse
+import functools
 import hashlib
 import json
 import os
@@ -22,7 +23,6 @@ import threading
 import time
 
 CACHE = pathlib.Path(os.environ.get("VERIFY_RUI_CACHE", pathlib.Path.home() / ".cache/verify-rui"))
-VENV_PYTHON = CACHE / "venv/bin/python"
 SCRATCH_PARENT = pathlib.Path("/private/tmp")  # short paths: Unix socket limits
 HERE = pathlib.Path(__file__).resolve()
 REPO_URL = "https://github.com/DivyanshGolyan/rui.git"
@@ -186,14 +186,20 @@ def cmd_build(args):
     with open(log, "w") as handle:
         result = subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe", "--summary", "all"], cwd=source,
                                 env=env, stdout=handle, stderr=subprocess.STDOUT)
+        if result.returncode == 0:
+            # The committed-screen observer's terminal emulator, for the tap.
+            result = subprocess.run(["zig", "build", "screen-emulator", "--prefix", str(build / "screen"), "--summary", "all"],
+                                    cwd=source, env=env, stdout=handle, stderr=subprocess.STDOUT)
     if result.returncode != 0:
         die(f"zig build failed (rc={result.returncode}); see {log}")
+    screen_library = next(path for path in sorted((build / "screen/lib").iterdir()) if not path.is_symlink())
     bin_dir = build / "bin"
     if bin_dir.exists():
         shutil.rmtree(bin_dir)
     shutil.copytree(source / "zig-out/bin", bin_dir, symlinks=False)
     files = {p.name: sha256(p) for p in sorted(bin_dir.iterdir())}
     record = {"sha": sha, "tree": tree, "source": str(source), "binary": str(bin_dir / "rui"),
+              "screen_library": str(screen_library), "screen_library_sha256": sha256(screen_library),
               "files_sha256": files, "optimize": "ReleaseSafe", "built_at": wall(),
               "build_seconds": round(time.monotonic() - started, 1),
               "zig": subprocess.run(["zig", "version"], capture_output=True, text=True).stdout.strip(),
@@ -408,8 +414,11 @@ def tap_main(args):
     source = pathlib.Path(args.source)
     sys.path.insert(0, str(source / "tests/integration"))
     try:
+        head = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
+        build = json.loads((CACHE / "builds" / head.stdout.strip() / "manifest.json").read_text())
+        os.environ["RUI_TEST_GHOSTTY_VT"] = build["screen_library"]  # Absent from builds made before it.
         from terminal_screen import ScreenCapture
-    except Exception as error:  # pyte missing: still record bytes
+    except Exception as error:  # no observer library: still record bytes
         ScreenCapture = None
         append_jsonl(term / "tap-events.jsonl", {"t_ns": now_ns(), "event": "screen-capture-unavailable", "error": repr(error)})
     terminal = args.mode == "terminal"
@@ -450,7 +459,10 @@ def tap_main(args):
             "argv": args.argv, "mode": args.mode, "columns": columns, "rows": rows,
             "child_lstart": (process_start(pid) or [None])[0], "attrs_before": repr(attrs_before)}
     atomic_write(term / "meta.json", json.dumps(meta, indent=1))
-    capture = ScreenCapture(columns, rows) if ScreenCapture else None
+    # Headless, the observer is the terminal and answers queries; inside a
+    # terminal, that terminal answers them.
+    reply = None if terminal else functools.partial(os.write, master)
+    capture = ScreenCapture(columns, rows, reply=reply) if ScreenCapture else None
     frames = open(term / "frames.jsonl", "a")
     inputs = open(term / "input.jsonl", "a")
     outputs = open(term / "output.jsonl", "a")
@@ -503,9 +515,7 @@ def tap_main(args):
                     select.select([], [1], [], 1)
         if capture_ok:
             try:
-                # pyte rejects private DSR queries (tmux clients send ESC[?6n); the raw
-                # bytes stay in output.bin, only the decoded view skips them.
-                capture.feed(re.sub(rb"\x1b\[\?[0-9;]*n", b"", chunk))
+                capture.feed(chunk)
             except Exception as error:
                 capture_ok = False
                 append_jsonl(term / "tap-events.jsonl", {"t_ns": now_ns(), "event": "screen-capture-failed", "error": repr(error)})
@@ -660,7 +670,7 @@ def cmd_new(args):
     sys.path.insert(0, str(pathlib.Path(run.meta["source"]) / "tests/integration"))
     import codex_integration as codex_fixture
     codex_fixture.credentials(run.home / ".config/rui/codex.json")
-    python = str(VENV_PYTHON if VENV_PYTHON.exists() else sys.executable)
+    python = sys.executable
     fixture = subprocess.Popen([python, str(HERE), "_fixture", str(root)], stdout=open(run.evidence / "fixture.log", "w"),
                                stderr=subprocess.STDOUT, start_new_session=True, env={**run.env(), "PATH": os.environ["PATH"]})
     run.own("fixture", fixture.pid)
@@ -815,7 +825,7 @@ def cmd_term(args):
     term.mkdir(parents=True)
     argv = session_argv(run, args.session) if not args.argv else args.argv
     columns, rows = (int(v) for v in args.size.split("x"))
-    python = str(VENV_PYTHON if VENV_PYTHON.exists() else sys.executable)
+    python = sys.executable
     child_env = run.env(COLORTERM="truecolor")
     for assignment in args.setenv:
         key, _, value = assignment.partition("=")
@@ -877,7 +887,7 @@ def attach_client(run, name, size):
     client = f"{name}.client"
     term = run.term_dir(client)
     term.mkdir(parents=True)
-    python = str(VENV_PYTHON if VENV_PYTHON.exists() else sys.executable)
+    python = sys.executable
     argv = [shutil.which("tmux") or "/opt/homebrew/bin/tmux", "-S", str(run.sock), "attach-session", "-t", f"=verify-rui:={name}"]
     process = subprocess.Popen([python, str(HERE), "_tap", str(term), "--source", run.meta["source"], "--cwd", str(run.project),
                                 "--env", json.dumps(run.env()), "--size", size, "--mode", "fifo", "--", *argv],
@@ -1507,7 +1517,7 @@ def cmd_physical(args):
     print(f"run: {run.root}\nmode: {mode}\nbuild: {run.meta['sha']} rui sha256 {run.meta['binary_sha256']}")
     results = {"mode": mode, "rehearsal": args.rehearse, "sha": run.meta["sha"], "binary_sha256": run.meta["binary_sha256"],
                "run": str(run.root), "app": args.app, "started": wall(), "steps": []}
-    python = str(VENV_PYTHON if VENV_PYTHON.exists() else sys.executable)
+    python = sys.executable
 
     def open_gui_tap(name, argv, columns_rows="100x30"):
         term = run.term_dir(name)
@@ -1799,7 +1809,4 @@ def main():
 
 
 if __name__ == "__main__":
-    if VENV_PYTHON.exists() and pathlib.Path(sys.prefix).resolve() != (CACHE / "venv").resolve() and os.environ.get("VERIFY_RUI_REEXEC") != "1":
-        os.environ["VERIFY_RUI_REEXEC"] = "1"
-        os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(HERE), *sys.argv[1:]])
     main()

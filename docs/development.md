@@ -2,7 +2,7 @@
 
 ## Build from source
 
-You need Zig 0.17.0, Python 3.11 or newer, Git, curl, Perl, `patch`, a C toolchain and Make.
+You need Zig 0.17.1, Python 3.11 or newer, Git, curl, Perl, `patch`, a C toolchain and Make.
 On macOS, install the Xcode command-line tools with `xcode-select --install`.
 Make sure `python3` on `PATH` is the newer Python, not Apple's Python 3.9.
 
@@ -48,7 +48,7 @@ Build and dependency changes, and release qualification, need more evidence.
 An old test result is not a pass for new code.
 For a build with empty caches, follow the [empty-cache steps](../VERIFICATION.md#canonical-gates).
 
-The build uses stock Zig 0.17.0 and the pinned official `translate-c` package for C bindings.
+The build uses stock Zig 0.17.1 and the pinned official `translate-c` package for C bindings.
 Compiler objects go in `ZIG_GLOBAL_CACHE_DIR`.
 Extracted dependencies go in `zig-pkg`, or in `ZIG_LOCAL_PKG_DIR` if set.
 Zig 0.17 removed `--global-cache-dir` from `zig build` and `zig fetch`.

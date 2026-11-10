@@ -1,64 +1,99 @@
 name: Renderer contracts
-# Nonblocking: Selected checks and merging never require these.
+# Nonblocking on PRs: Selected checks and merging never require these. PRs run
+# them only for renderer and frontend owners; every promotion requires them.
 # Manual runs also execute the mutation campaign.
 on:
   pull_request:
     paths:
-      - 'src/**'
+      - 'src/AnswerRenderer.zig'
+      - 'src/SessionFrontend.zig'
+      - 'src/SessionSubmission.zig'
+      - 'src/session_consent.zig'
+      - 'src/session_departure.zig'
+      - 'src/SessionScreen.zig'
+      - 'src/SessionTerminal.zig'
+      - 'src/session_view.zig'
+      - 'src/session_history.zig'
+      - 'src/session_reads.zig'
+      - 'src/ClientTask.zig'
+      - 'src/ConversationViewport.zig'
+      - 'src/Terminal*'
+      - 'src/session_sequence_model_test.zig'
+      - 'src/overview_view.zig'
+      - 'src/Overview.zig'
+      - 'src/keymap.zig'
+      - 'src/status_page.zig'
+      - 'src/command_value.zig'
+      - 'src/home_path.zig'
+      - 'src/os/**'
       - 'build.zig'
       - 'tests/ci/renderer_mutation*'
       - 'tests/integration/session_sequence_model*'
       - 'tests/integration/input_equivalence.py'
       - 'tests/integration/terminal_input_replay.py'
-      - 'tests/integration/terminal_restoration_integration.py'
+      - 'tests/integration/terminal_restoration_*'
       - 'tests/qualification/direct-pty/**'
       - '.github/workflows/renderer-contracts.yml'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Immutable promotion candidate
+        required: true
+        type: string
+      batch-base:
+        description: Last promoted commit; a failure bisects base..ref
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: renderer-contracts-${{ github.event_name }}-${{ github.ref }}
+  group: renderer-contracts-${{ github.event_name }}-${{ github.ref }}${{ inputs.ref && '-promotion' || '' }}
   cancel-in-progress: true
 
 jobs:
   contracts:
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: ${{ inputs.batch-base && 300 || 45 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup
         with:
           targets: '["terminal-restoration-integration"]'
           check-part: renderer-contracts
-      - name: Install tmux for the smoke rows
-        run: command -v tmux || { sudo apt-get update -q && sudo apt-get install -yq tmux; }
-      - name: Harness self-tests
-        run: zig build renderer-contracts-selftest -j2 --summary all
-      - name: Direct-PTY key matrix and tmux smoke
-        if: ${{ !cancelled() }}
-        run: zig build direct-pty -j2 --summary all -- --output "$RUNNER_TEMP/contracts/pty" --jobs 2
-      - name: Ghostty primary input vectors
-        if: ${{ !cancelled() }}
-        run: zig build direct-pty -j2 --summary all -- --output "$RUNNER_TEMP/contracts/ghostty" --jobs 2 --vectors "$PWD/tests/qualification/direct-pty/ghostty.json"
-      - name: Driver and disposal controls
-        if: ${{ !cancelled() }}
-        run: zig build direct-pty-controls -j2 --summary all -- --output "$RUNNER_TEMP/contracts/controls"
-      - name: Original-recovery input encodings
-        if: ${{ !cancelled() }}
-        run: zig build input-equivalence -j2 --summary all -- --output "$RUNNER_TEMP/contracts/recovery"
-      - name: Unattended input replay
-        if: ${{ !cancelled() }}
-        run: zig build terminal-restoration-integration -j2 --summary all -- input-replay
-      - name: Sequence models through frontend transitions
-        if: ${{ !cancelled() }}
+      - name: Self-tests, direct-PTY, Ghostty, controls, recovery encodings, input replay and sequence models
+        # Each contract's only copy. Every one runs even after another fails;
+        # steps.py records the failed ones for a promotion to replay.
         run: |
-          ulimit -Sn 256
-          zig build sequence-model -j2 --summary all -- --output "$RUNNER_TEMP/contracts/sequence"
+          python3 -B tests/ci/steps.py --output-root "$RUNNER_TEMP/contracts" \
+            'selftest=zig build renderer-contracts-selftest -j2 --summary all' \
+            'pty=zig build direct-pty -j2 --summary all -- --output "$STEP_OUTPUT" --jobs 2' \
+            'ghostty=zig build direct-pty -j2 --summary all -- --output "$STEP_OUTPUT" --jobs 2 --vectors "$PWD/tests/qualification/direct-pty/ghostty.json"' \
+            'controls=zig build direct-pty-controls -j2 --summary all -- --output "$STEP_OUTPUT"' \
+            'recovery=zig build input-equivalence -j2 --summary all -- --output "$STEP_OUTPUT"' \
+            'replay=zig build terminal-restoration-integration -j2 --summary all -- input-replay' \
+            'sequence=ulimit -Sn 256; zig build sequence-model -j2 --summary all -- --output "$STEP_OUTPUT"'
+      - name: Bisect the promotion batch with each failed step
+        if: ${{ failure() && inputs.batch-base }}
+        timeout-minutes: 240
+        env:
+          BASE: ${{ inputs.batch-base }}
+          HEAD_SHA: ${{ inputs.ref }}
+        run: python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect"
+      - name: Retain the bisect's verdict and replay logs
+        if: ${{ failure() && inputs.batch-base }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: promotion-bisect-renderer-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/promotion-bisect
+          retention-days: 14
+          if-no-files-found: ignore
       - name: Retain contract results
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -68,7 +103,8 @@ jobs:
           retention-days: 3
           if-no-files-found: ignore
   mutations:
-    if: ${{ !github.event.repository.private && github.event_name == 'workflow_dispatch' }}
+    # A promotion's workflow_call carries its dispatch event but runs no mutations.
+    if: ${{ !github.event.repository.private && github.event_name == 'workflow_dispatch' && !inputs.ref }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:

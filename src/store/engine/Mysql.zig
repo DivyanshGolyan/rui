@@ -2,7 +2,8 @@
 const std = @import("std");
 const engine = @import("../engine.zig");
 const Store = @import("../Store.zig");
-const protocol = @import("../../protocol.zig");
+const provider_route = @import("../../provider_route.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
 const rsql = @import("../rsql.zig");
 const wire = @import("../wire/mysql_connection.zig");
 const row_decoder = @import("../mysql_row.zig");
@@ -27,7 +28,7 @@ state: *State,
 pub const State = struct {
     connection: wire.Connection,
     testing_shape: if (is_test) QueryShape else void = if (is_test) .{} else {},
-    served: *const protocol.Routes = &unserved,
+    served: *const provider_route.Routes = &unserved,
     epoch: u64 = 0,
     commit_seq: u64 = 0,
     changes: i64 = 0,
@@ -42,7 +43,7 @@ pub const State = struct {
     prefix_results: u8 = 0,
     committing: bool = false,
     sink: content.SinkState = .{},
-    doublewrite: protocol.Bounded(32) = .{},
+    doublewrite: Bounded(32) = .{},
     store_id: [32]u8 = undefined,
     testing_database: if (is_test) [40]u8 else void = if (is_test) @splat(0) else {},
     fence_result: u8 = 0,
@@ -71,7 +72,7 @@ const Begin = union(enum) {
 /// A new SAVEPOINT rui_write not yet sent. An older one already sent
 /// stays independent of it (`Begin.sent.savepoint`).
 const Replacement = enum { none, pending, buffered };
-const unserved = protocol.routesAll(.unserved);
+const unserved = provider_route.all(.unserved);
 pub const ContentSink = content.ContentSink;
 pub const insert_chunk = rsql.Write(.{
     .sql = "INSERT INTO content_chunk(content_id,chunk_index,bytes) VALUES(?1,?2,?3)",
@@ -432,7 +433,7 @@ pub fn writePayload(self: *Mysql, id: u64, bytes: []const u8) Failure!void {
     }
 }
 
-pub const Diagnostic = struct { doublewrite: protocol.Bounded(32), queries: u64, state_bytes: usize };
+pub const Diagnostic = struct { doublewrite: Bounded(32), queries: u64, state_bytes: usize };
 pub fn diagnostic(self: *const Mysql) Diagnostic {
     return .{ .doublewrite = self.state.doublewrite, .queries = self.state.connection.queries, .state_bytes = @sizeOf(State) };
 }

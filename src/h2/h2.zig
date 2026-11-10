@@ -4,11 +4,12 @@
 //! reaches it only as `@import("h2")`. A file belongs to one module, so a
 //! path import of these files from Rui fails the build.
 //!
-//! Shape: a polled engine for one owner thread. The owner calls `drive` to
-//! do all ready work and `wait` to block until there is some; nothing here
-//! runs on its own. Other threads may only call `Client.wake`. `exchange`
-//! is one blocking request on a private Client, for callers that send one
-//! request at a time.
+//! Shape: a polled engine for one owner at a time. The owner calls `drive`
+//! to do all ready work and `wait` to block until there is some; nothing
+//! here runs on its own. Other threads may only call `Client.wake`, unless
+//! the owner shares the Client under its own lock (`Client.armWait`).
+//! `exchange` is one blocking request on a private Client, for callers that
+//! send one request at a time.
 //!
 //! What the engine owns, so its caller does not:
 //! - one connection pool per origin, opening another connection only when
@@ -42,19 +43,7 @@ const c = @import("h2_c");
 const policy = @import("policy.zig");
 const Record = @import("Stream.zig");
 const Engine = @import("Engine.zig");
-const tls = @import("tls.zig");
-
-/// What the Store's Postgres TLS shares with this module: one copy of
-/// OpenSSL, its client settings, host naming and trust loading. Its
-/// `.system` trust is the bundle OpenSSL reads, never SecTrust, which
-/// verifies only this module's sessions on its job threads.
-pub const openssl_client = struct {
-    pub const c = @import("h2_c");
-    pub const HostKind = tls.HostKind;
-    pub const newContext = tls.newContext;
-    pub const nameHost = tls.nameHost;
-    pub const loadTrust = tls.loadTrust;
-};
+const tls_client = @import("tls_client");
 
 /// The library versions this client is written and tested against.
 pub const nghttp2_version = "1.70.0";
@@ -62,7 +51,7 @@ pub const openssl_version = "3.6.3";
 
 pub const max_url_bytes = 2048;
 /// The longest DNS name; IP literals are shorter.
-pub const max_host_bytes = 253;
+pub const max_host_bytes = tls_client.max_host_bytes;
 pub const max_endpoints = 4;
 /// Request fields a caller may set; pseudo-headers, content-length and
 /// accept-encoding are the client's own.
@@ -87,7 +76,7 @@ pub const read_allowance_bytes = 64 * 1024;
 pub fn checkLibraries() error{UnexpectedLibraryVersion}!void {
     const nghttp2: *const c.nghttp2_info = c.nghttp2_version(0) orelse return error.UnexpectedLibraryVersion;
     if (!std.mem.eql(u8, std.mem.span(nghttp2.version_str), nghttp2_version)) return error.UnexpectedLibraryVersion;
-    const linked = c.OpenSSL_version(c.OPENSSL_VERSION_STRING) orelse return error.UnexpectedLibraryVersion;
+    const linked = tls_client.c.OpenSSL_version(tls_client.c.OPENSSL_VERSION_STRING) orelse return error.UnexpectedLibraryVersion;
     if (!std.mem.eql(u8, std.mem.span(linked), openssl_version)) return error.UnexpectedLibraryVersion;
 }
 
@@ -183,16 +172,10 @@ pub const Endpoint = enum(u8) { _ };
 
 pub const Liveness = policy.Liveness;
 
-/// What verifies an `https://` peer. Verification is never off.
-pub const Trust = union(enum) {
-    /// Apple SecTrust on macOS. On Linux, OpenSSL's `SSL_CERT_FILE` (a
-    /// PEM bundle) and `SSL_CERT_DIR` (colon-separated hashed directories)
-    /// when either is set and not empty, read when trust loads; otherwise
-    /// the first readable bundle among the host's usual CA bundle paths.
-    system,
-    /// Only the certificates in this PEM file (`--provider-ca-file`).
-    ca_file: []const u8,
-};
+/// What verifies an `https://` peer. Verification is never off. `.system`
+/// is Apple SecTrust on macOS, and elsewhere what `tls_client.Trust`
+/// describes; `.ca_file` is only that file (`--provider-ca-file`).
+pub const Trust = tls_client.Trust;
 
 pub const Options = struct {
     /// Most streams alive at once. Sizes the connection table: one
@@ -234,6 +217,13 @@ pub const Proxy = struct {
 /// environment's.
 pub fn proxyFromEnvironment() ?Proxy {
     return proxyFrom(std.c.getenv);
+}
+
+/// Fails exactly as `Client.init` would on `proxy`, so a caller can refuse
+/// an unusable proxy before it reports readiness.
+pub fn checkProxy(allocator: std.mem.Allocator, proxy: Proxy) InitError!void {
+    var route = try Engine.ProxyRoute.init(allocator, proxy);
+    route.deinit(allocator);
 }
 
 fn proxyFrom(comptime lookup: fn ([*:0]const u8) callconv(.c) ?[*:0]u8) ?Proxy {
@@ -418,7 +408,7 @@ pub const Stream = extern struct {
 // ------------------------------------------------------------------- Client
 
 pub const InitError = error{ OutOfMemory, SystemResources, HttpsProxyInvalid, HttpsProxySchemeUnsupported };
-pub const EndpointError = UrlError || error{ OutOfMemory, TooManyEndpoints, TrustUnavailable, InvalidCaFile, InvalidSslCertFile, InvalidSslCertDir };
+pub const EndpointError = UrlError || tls_client.TrustError || error{ OutOfMemory, TooManyEndpoints };
 pub const PrepareError = error{ OutOfMemory, InvalidRequest };
 pub const DriveError = error{PollFailed};
 
@@ -487,6 +477,19 @@ pub const Client = extern struct {
     pub fn wait(self: *Client, timeout_ms: u32) DriveError!void {
         return Engine.of(self).wait(timeout_ms);
     }
+
+    /// `wait` in two halves, for an owner that guards the Client with its
+    /// own lock so another thread can call it between drives. `armWait`
+    /// reads the Client, so it runs under that lock; the `Armed.block` it
+    /// returns reads only the poll set it filled, so the thread that armed
+    /// it may block with the lock released. Every other thread's call that
+    /// gives `drive` work (launch, cancel, retireConnections) is followed by
+    /// `wake`, so the block ends and the next arm sees it.
+    pub fn armWait(self: *Client, timeout_ms: u32) Armed {
+        return Engine.of(self).armWait(timeout_ms);
+    }
+
+    pub const Armed = Engine.Armed;
 
     /// Ends the current or next `wait` early. The one call any thread may make.
     pub fn wake(self: *Client) void {

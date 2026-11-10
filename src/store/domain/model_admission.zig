@@ -3,7 +3,9 @@
 
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
-const protocol = @import("../../protocol.zig");
+const outcome_code = @import("../../outcome_code.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
+const provider_name = @import("../../provider_name.zig");
 const model_capability = @import("../../model_capability.zig");
 const product_defaults = @import("../../product_defaults.zig");
 const output_format = @import("../../output_format.zig");
@@ -87,6 +89,8 @@ const Selection = struct {
     first_admission: rsql.Positive,
     cutoff: rsql.Positive,
     selected: u64,
+    /// The skills the selected Messages bound, each projected after its Message.
+    skills: u64,
     turn_id: ?rsql.Positive,
 };
 
@@ -99,6 +103,7 @@ fn RunnableSelection(comptime eligibility: []const u8) type {
             "@served((SELECT provider FROM session WHERE session_ref=m.session_ref))" ++ " AND " ++ eligibility ++
             " ORDER BY m.admission_id LIMIT 1) " ++
             "SELECT " ++ rsql.session_head_columns ++ ",min(m.admission_id) AS first_admission,max(m.admission_id) AS cutoff,count(*) AS selected," ++
+            "coalesce(sum((SELECT count(*) FROM message_skill k WHERE k.admission_id=m.admission_id)),0) AS skills," ++
             "(SELECT active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
             "WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
             "AND " ++ continues_with_input_sql ++ ") AS turn_id " ++
@@ -123,7 +128,7 @@ pub const runnable_selection_sql = runnable_selection.sql;
 // continues_without_input inside continues_with_input. It also trusts the stored
 // column, which `disagreeing_continuation` fences.
 pub const tool_continuation_selection = rsql.Read(.{
-    .sql = "SELECT " ++ rsql.session_head_columns ++ ",active.first_admission_id AS first_admission,active.input_cutoff AS cutoff,0 AS selected,active.turn_id " ++
+    .sql = "SELECT " ++ rsql.session_head_columns ++ ",active.first_admission_id AS first_admission,active.input_cutoff AS cutoff,0 AS selected,0 AS skills,active.turn_id " ++
         "FROM turn active @index(turn_tool_continuation) JOIN session s ON s.session_ref=active.session_ref " ++
         "WHERE active.outcome_code IS NULL AND active.continuation_operation_id=active.operation_id AND " ++ "@served(s.provider)" ++
         " AND NOT EXISTS(SELECT 1 FROM message_admission m " ++
@@ -169,7 +174,7 @@ const latest_turn = rsql.Read(.{
     .Args = struct { session: []const u8 },
     .Row = struct {
         purpose: u1,
-        resolution_code: ?protocol.Bounded(protocol.max_code_bytes),
+        resolution_code: ?Bounded(outcome_code.max_bytes),
         operation_id: rsql.Positive,
         active: bool,
         first_admission_id: rsql.Positive,
@@ -205,7 +210,7 @@ pub const CompactionRead = struct {
     session: []const u8,
     /// The Session's next position, provider and model.
     boundary: u64,
-    provider: protocol.Provider,
+    provider: provider_name.Provider,
     model: []const u8,
     facts: turn_policy.CompactionFacts,
     stage: enum { latest, first, context, done } = .latest,
@@ -213,7 +218,7 @@ pub const CompactionRead = struct {
     first: first_runnable.Result = undefined,
     context: admission_context.Result = undefined,
 
-    pub fn init(session: []const u8, boundary: u64, provider: protocol.Provider, model: []const u8, policy: model_capability.CompactionPolicy) CompactionRead {
+    pub fn init(session: []const u8, boundary: u64, provider: provider_name.Provider, model: []const u8, policy: model_capability.CompactionPolicy) CompactionRead {
         return .{ .session = session, .boundary = boundary, .provider = provider, .model = model, .facts = .{
             .trigger = policy.compaction_trigger,
             .context_changed = false,
@@ -318,7 +323,7 @@ fn latestUsageSql(comptime frontier: []const u8, comptime provider: []const u8, 
 fn uncoveredBytesSql(comptime usage_position: []const u8, comptime frontier: []const u8, comptime result_admission: []const u8) []const u8 {
     const later = "max(" ++ usage_position ++ "," ++ frontier ++ ")";
     return "(SELECT coalesce(sum(c.byte_length),0) FROM conversation_entry e JOIN content c ON c.content_id=e.content_id " ++
-        "WHERE e.session_ref=?1 AND e.entry_kind IN (1,2) AND e.session_position>" ++ usage_position ++ ") + " ++
+        "WHERE e.session_ref=?1 AND e.entry_kind IN (1,2,4) AND e.session_position>" ++ usage_position ++ ") + " ++
         "(SELECT coalesce(sum(" ++ history_floor_domain.item_bytes_sql ++ "),0) FROM model_output_item i " ++
         "WHERE i.session_ref=?1 AND i.session_position>=max(" ++ usage_position ++ "+1,coalesce((SELECT max(anchor.session_position) " ++
         "FROM model_operation b @index(model_operation_compaction_bases) JOIN model_output_item anchor ON anchor.operation_id=b.operation_id " ++
@@ -331,6 +336,8 @@ fn uncoveredBytesSql(comptime usage_position: []const u8, comptime frontier: []c
         "WHERE a.session_ref=?1 AND a.acceptance_position>" ++ later ++ ") + " ++
         "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN content c ON c.content_id=m.content_id " ++
         "WHERE m.session_ref=?1 AND " ++ runnable_eligibility_sql ++ ") + " ++
+        "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN message_skill k ON k.admission_id=m.admission_id " ++
+        "JOIN content c ON c.content_id=k.content_id WHERE m.session_ref=?1 AND " ++ runnable_eligibility_sql ++ ") + " ++
         "(SELECT coalesce(sum(c.byte_length),0) FROM session_revision r JOIN content c ON c.content_id=r.instructions_content_id " ++
         "WHERE r.session_ref=?1 AND r.revision>coalesce((SELECT max(e.source_revision) FROM conversation_entry e WHERE e.session_ref=?1),1) " ++
         "AND r.instructions_updated=1) + " ++
@@ -349,7 +356,7 @@ const compaction_base_sql = "base AS (SELECT admission_position FROM model_opera
 /// belongs to every older base, so older bases cannot change the answer.
 const changed_since_base_sql = "NOT EXISTS(SELECT 1 FROM base " ++
     "WHERE NOT EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=?1 " ++
-    "AND e.entry_kind IN (1,2) AND e.session_position>base.admission_position AND e.session_position<?2) " ++
+    "AND e.entry_kind IN (1,2,4) AND e.session_position>base.admission_position AND e.session_position<?2) " ++
     "AND NOT EXISTS(SELECT 1 FROM model_output_item item @index(model_output_history) " ++
     "CROSS JOIN model_operation suffix ON suffix.operation_id=item.operation_id " ++
     "WHERE item.session_ref=?1 AND suffix.session_ref=?1 AND suffix.purpose=0 " ++
@@ -410,18 +417,18 @@ const admission_facts = rsql.Read(.{
     .Row = struct {
         session: rsql.SessionHead,
         revision: rsql.Positive,
-        provider: protocol.Provider,
-        model: protocol.Bounded(protocol.max_model_bytes),
+        provider: provider_name.Provider,
+        model: Bounded(model_capability.max_model_bytes),
         compaction_trigger: ?rsql.Positive,
         output_reservation: ?u64,
-        reasoning_effort: ?protocol.ReasoningEffort,
-        previous_reasoning_effort: ?protocol.ReasoningEffort,
+        reasoning_effort: ?model_capability.ReasoningEffort,
+        previous_reasoning_effort: ?model_capability.ReasoningEffort,
         latest_turn: ?rsql.Positive,
         latest_active: bool,
         latest_first: ?rsql.Positive,
         latest_operation: ?rsql.Positive,
         latest_compaction: ?bool,
-        latest_resolution: ?protocol.Bounded(protocol.max_code_bytes),
+        latest_resolution: ?Bounded(outcome_code.max_bytes),
         instructions: u64,
     },
     .cardinality = .one,
@@ -453,7 +460,7 @@ const admission_context = rsql.Read(.{
         "SELECT measured.changed,measured.uncached,measured.cache_read,measured.cache_write,measured.output,measured.usage_position,measured.result_admission," ++
         "CASE WHEN measured.changed THEN " ++ uncoveredBytesSql("measured.covered", "measured.frontier", "measured.results") ++ " ELSE 0 END AS uncovered_bytes " ++
         "FROM measured",
-    .Args = struct { session: []const u8, boundary: u64, provider: protocol.Provider, model: []const u8 },
+    .Args = struct { session: []const u8, boundary: u64, provider: provider_name.Provider, model: []const u8 },
     .Row = struct {
         changed: bool,
         uncached: ?u64,
@@ -492,14 +499,33 @@ const bind_messages = rsql.Write(.{
 const entry_columns = "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id," ++
     "source_revision,source_operation_id,content_id,recorded_at) ";
 
+/// The selected Messages `m` that come before `ahead` in admission order:
+/// a later one's entry sits after theirs and after each of their skills'.
+fn selectedBeforeSql(comptime ahead: []const u8) []const u8 {
+    return "prior.session_ref=" ++ ahead ++ ".session_ref AND prior.turn_id=?2 AND prior.admission_id>=?4 AND prior.admission_id<" ++ ahead ++ ".admission_id";
+}
+
 /// Projects the Turn's bound Messages into the Conversation, in admission
 /// order, after its last entry ordinal and from the position
-/// `position_base`: the selection's count.
+/// `position_base`, each leaving room after it for the skills its text
+/// bound: the selection's count.
 const project_messages = rsql.Write(.{
-    .sql = entry_columns ++ "SELECT session_ref," ++ lastOrdinalSql("@session(?1)") ++ "+row_number() OVER (ORDER BY admission_id)," ++
-        "?3+row_number() OVER (ORDER BY admission_id)-1,1,?2,admission_id,NULL,NULL,content_id,@now " ++
-        "FROM message_admission WHERE session_ref=@session(?1) AND turn_id=?2 AND admission_id>=?4 ORDER BY admission_id",
+    .sql = entry_columns ++ "SELECT m.session_ref," ++ lastOrdinalSql("@session(?1)") ++ "+row_number() OVER (ORDER BY m.admission_id)+" ++ prior_skills_sql ++ "," ++
+        "?3+row_number() OVER (ORDER BY m.admission_id)-1+" ++ prior_skills_sql ++ ",1,?2,m.admission_id,NULL,NULL,m.content_id,@now " ++
+        "FROM message_admission m WHERE m.session_ref=@session(?1) AND m.turn_id=?2 AND m.admission_id>=?4 ORDER BY m.admission_id",
     .Args = struct { session: rsql.SessionHead, turn_id: u64, position_base: u64, first_admission: u64 },
+    .expect = .{ .counted = .{ .otherwise = error.ProjectionFailed } },
+});
+const prior_skills_sql = "(SELECT count(*) FROM message_admission prior JOIN message_skill k ON k.admission_id=prior.admission_id WHERE " ++ selectedBeforeSql("m") ++ ")";
+
+/// Projects each skill the Turn's bound Messages bound right after its
+/// Message's entry, in the text's order: the selection's skill count.
+const project_skills = rsql.Write(.{
+    .sql = "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_skill_admission_id,source_skill_position,content_id,recorded_at) " ++
+        "SELECT owner.session_ref,owner.entry_ordinal+k.position,owner.session_position+k.position,4,?2,k.admission_id,k.position,k.content_id,@now " ++
+        "FROM message_admission m JOIN conversation_entry owner ON owner.session_ref=m.session_ref AND owner.source_admission_id=m.admission_id JOIN message_skill k ON k.admission_id=m.admission_id " ++
+        "WHERE m.session_ref=@session(?1) AND m.turn_id=?2 AND m.admission_id>=?3 ORDER BY m.admission_id,k.position",
+    .Args = struct { session: rsql.SessionHead, turn_id: u64, first_admission: u64 },
     .expect = .{ .counted = .{ .otherwise = error.ProjectionFailed } },
 });
 
@@ -528,7 +554,7 @@ const insert_operation = rsql.Write(.{
         compaction: bool,
         compaction_trigger: ?u64,
         output_reservation: u64,
-        reasoning_effort: ?protocol.ReasoningEffort,
+        reasoning_effort: ?model_capability.ReasoningEffort,
         history_floor: ?u64,
         history_level: ?u8,
         history_dropped: ?u64,
@@ -629,13 +655,15 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
     }
     const positions = try writer.positions(facts.session);
     if (selected != 0) {
+        const inputs = selected + selection.skills;
         writer.writeCount(bind_messages, .{ .turn_id = turn_id, .session = facts.session, .cutoff = cutoff }, selected);
         writer.writeCount(project_messages, .{
             .session = facts.session,
             .turn_id = turn_id,
-            .position_base = try positions.take(selected),
+            .position_base = try positions.take(inputs),
             .first_admission = first_admission,
         }, selected);
+        if (selection.skills != 0) writer.writeCount(project_skills, .{ .session = facts.session, .turn_id = turn_id, .first_admission = first_admission }, selection.skills);
     }
     if (instructions != 0) {
         writer.writeCount(project_instructions, .{

@@ -1,6 +1,7 @@
 package measurement
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -135,6 +136,23 @@ func (c Client) Configure(key, session string, extra ...string) (string, error) 
 		err = fmt.Errorf("configuration changed Session: %q != %q", allocated, session)
 	}
 	return allocated, err
+}
+
+// ConfigureRecord is the wire body the CLI saved for Configure(key, ...): the
+// current request shape with the CLI's creation defaults filled in. Sent again
+// under another key, it creates one more identically configured Session.
+func (c Client) ConfigureRecord(key string) (map[string]any, error) {
+	data, err := os.ReadFile(filepath.Join(c.Artifacts, key+"-configure.json"))
+	if err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var record map[string]any
+	if err := decoder.Decode(&record); err != nil {
+		return nil, fmt.Errorf("configure record %s: %w", key, err)
+	}
+	return record, nil
 }
 
 // ConfigurationSession validates the identity returned at the allocation boundary.

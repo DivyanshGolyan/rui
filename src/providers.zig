@@ -204,11 +204,11 @@ fn validateKeyEndpoint(target: []const u8, ca_file: ?[]const u8, fixture: bool) 
 }
 
 /// The fields the Host writes after the codec's headers: the credential's,
-/// which its sign-in source writes (`Credential.fields`), user-agent, and the
-/// Turn's routing value, each named in `provider.host_request_fields` so no
-/// codec header can name it.
+/// which its sign-in source writes (`Credential.fields`), and user-agent,
+/// each named in `provider.host_request_fields` so no codec header can name
+/// it. `provider.Transfer.start` adds the Turn's routing value after them.
 pub const Headers = struct {
-    entries: [5]h2.Field = undefined,
+    entries: [4]h2.Field = undefined,
     length: usize = 0,
     credentials: *provider_transport.Credentials = undefined,
     /// A use of the Reactor's copy of this credential, owned until
@@ -266,12 +266,6 @@ pub const Headers = struct {
     /// only when the Turn has one: whatever credential the request carries,
     /// a provider that never sent the header is never sent one. Borrowed
     /// until Transfer.start, like the others.
-    pub fn routing(self: *Headers, name: []const u8, value: []const u8) void {
-        if (name.len == 0 or value.len == 0) return;
-        self.entries[self.length] = .{ .name = name, .value = value };
-        self.length += 1;
-    }
-
     pub fn fields(self: *const Headers) []const h2.Field {
         return self.entries[0..self.length];
     }
@@ -309,6 +303,21 @@ pub const Providers = struct {
     pub fn any(self: *const Providers) bool {
         for (self.table.values) |served| if (served != null) return true;
         return false;
+    }
+
+    /// Why the environment's HTTPS proxy, which every served provider's
+    /// transport uses, cannot be used; null when it can or none is served.
+    /// The Host starts the transport only after readiness, so startup asks
+    /// first. A provider-free Host needs it only for optional discovery.
+    pub fn proxyRefusal(self: *const Providers, allocator: std.mem.Allocator) error{ OutOfMemory, SystemResources }!?[]const u8 {
+        if (!self.any()) return null;
+        const proxy = h2.proxyFromEnvironment() orelse return null;
+        h2.checkProxy(allocator, proxy) catch |err| return switch (err) {
+            error.HttpsProxySchemeUnsupported => "names a scheme other than http://",
+            error.HttpsProxyInvalid => "is not a usable proxy URL",
+            error.OutOfMemory, error.SystemResources => |other| other,
+        };
+        return null;
     }
 
     /// The one leased sign-in whose leases and refreshes this Host's
@@ -359,7 +368,7 @@ fn testRecord(account_id: []const u8, fedramp: bool, access: []const u8, generat
 }
 
 test "an API key goes only over https or to a loopback fixture, with no account" {
-    var credentials: provider_transport.Credentials = .{ .allocator = std.testing.allocator };
+    var credentials: provider_transport.Credentials = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     const own = "https://api.openai.com/v1/responses";
     {
         var headers: Headers = .{};
@@ -372,10 +381,6 @@ test "an API key goes only over https or to a loopback fixture, with no account"
         try std.testing.expect(entries[0].sensitive);
         try std.testing.expectEqualStrings("user-agent", entries[1].name);
         for (entries) |entry| try std.testing.expect(provider_transport.hostField(entry.name));
-        // A key's request echoes a routing value the same way a sign-in's does.
-        headers.routing("x-codex-turn-state", "sticky");
-        try std.testing.expectEqual(@as(usize, 3), headers.fields().len);
-        try std.testing.expectEqualStrings("sticky", headers.fields()[2].value);
     }
     {
         var headers: Headers = .{};
@@ -389,28 +394,22 @@ test "an API key goes only over https or to a loopback fixture, with no account"
     try std.testing.expectEqual(@as(?*provider_transport.SharedCredential, null), credentials.head);
 }
 
-test "ChatGPT headers carry the routing value only when the Turn has one" {
+test "ChatGPT headers carry the credential, user-agent and FedRAMP fields" {
     var credential: Lease = undefined;
-    var credentials: provider_transport.Credentials = .{ .allocator = std.testing.allocator };
+    var credentials: provider_transport.Credentials = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     for ([_]bool{ false, true }) |fedramp| {
         credential.record = try testRecord(codex_auth.fixture_account_id, fedramp, codex_auth.fixture_access_token, 1);
-        for ([_][]const u8{ "", "sticky value", &@as([provider_transport.max_turn_state_bytes]u8, @splat('v')) }) |turn_state| {
+        {
             var headers: Headers = .{};
             defer headers.deinit();
             try headers.initSignIn("http://127.0.0.1:1/responses", null, .{ .path = "unused", .fixture = true }, &credential, &credentials);
-            headers.routing("x-codex-turn-state", turn_state);
             const entries = headers.fields();
-            var found: ?[]const u8 = null;
             var fedramp_found = false;
             for (entries) |entry| {
                 // h2 sends names as given, and HTTP/2 requires them lowercase.
                 for (entry.name) |byte| try std.testing.expect(!std.ascii.isUpper(byte));
                 try std.testing.expectEqual(std.mem.eql(u8, entry.name, "authorization") or
                     std.mem.eql(u8, entry.name, "chatgpt-account-id"), entry.sensitive);
-                if (std.mem.eql(u8, entry.name, "x-codex-turn-state")) {
-                    try std.testing.expect(found == null);
-                    found = entry.value;
-                }
                 if (std.mem.eql(u8, entry.name, "x-openai-fedramp")) fedramp_found = std.mem.eql(u8, entry.value, "true");
                 if (std.mem.eql(u8, entry.name, "authorization"))
                     try std.testing.expectEqualStrings("Bearer " ++ codex_auth.fixture_access_token, entry.value);
@@ -419,10 +418,9 @@ test "ChatGPT headers carry the routing value only when the Turn has one" {
             }
             // The credential is the Reactor's one copy, which h2 borrows;
             // only the per-request values are copied into each stream.
-            for (entries) |entry| try std.testing.expectEqual(entry.name.len + entry.value.len > 16 and
-                !std.mem.eql(u8, entry.name, "x-codex-turn-state"), entry.borrowed);
+            for (entries) |entry| try std.testing.expectEqual(entry.name.len + entry.value.len > 16, entry.borrowed);
             // They follow the codec's headers: the credential, user-agent,
-            // FedRAMP, turn state.
+            // FedRAMP. The Transfer adds the Turn's routing value last.
             const shared = headers.credential.?;
             try std.testing.expectEqualStrings("authorization", entries[0].name);
             try std.testing.expectEqual(shared.authorization().ptr, entries[0].value.ptr);
@@ -430,10 +428,8 @@ test "ChatGPT headers carry the routing value only when the Turn has one" {
             try std.testing.expectEqual(shared.accountId().ptr, entries[1].value.ptr);
             try std.testing.expectEqualStrings("user-agent", entries[2].name);
             if (fedramp) try std.testing.expectEqualStrings("x-openai-fedramp", entries[3].name);
-            if (turn_state.len != 0) try std.testing.expectEqualStrings("x-codex-turn-state", entries[entries.len - 1].name);
             try std.testing.expectEqual(fedramp, fedramp_found);
-            try std.testing.expectEqual(@as(usize, 3) + @intFromBool(fedramp) + @intFromBool(turn_state.len != 0), entries.len);
-            try std.testing.expectEqualStrings(turn_state, found orelse "");
+            try std.testing.expectEqual(@as(usize, 3) + @intFromBool(fedramp), entries.len);
         }
     }
 }
@@ -454,7 +450,7 @@ test "each sign-in source says whether it waits for a lease and what a 401 means
     try std.testing.expectError(error.InsecureKeyEndpoint, keyed.validate("http://127.0.0.1:9/responses", null));
     try Credential.validate(.none, "http://127.0.0.1:9/responses", null);
     // No credential writes no fields.
-    var shared: provider_transport.Credentials = .{ .allocator = std.testing.allocator };
+    var shared: provider_transport.Credentials = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     var headers: Headers = .{};
     defer headers.deinit();
     try Credential.fields(.none, "http://127.0.0.1:9/responses", null, null, &shared, &headers);

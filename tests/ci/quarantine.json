@@ -1,0 +1,12 @@
+{
+  "flakes": [
+    {
+      "signature": "tests/integration/human_cli_integration.py: caller = spawn([str(fixture.RUI), *arguments], cwd=workspace, env=env, pass_fds=(() if ready_write is None else (ready_write,)), stdin=slave, stdout=slave, stderr=subprocess.PIPE) raised PermissionError",
+      "path": "tests/integration/human_cli_integration.py",
+      "issue": 1147,
+      "owner": "DivyanshGolyan",
+      "added": "2026-11-09",
+      "expires": "2026-11-23"
+    }
+  ]
+}

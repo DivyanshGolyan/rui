@@ -13,8 +13,11 @@
 //! Host and client write in code rather than as one shape.
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const wire_request = @import("wire_request.zig");
 const model_list = @import("model_list.zig");
 const store = @import("store.zig");
+const session_report_reply = @import("session_report_reply.zig");
+const activity_reply = @import("activity_reply.zig");
 const launch_frame = @import("launch_frame.zig");
 const core_tools = @import("core_tools.zig");
 const Hole = protocol.Hole;
@@ -115,10 +118,8 @@ pub const routes = [_]Route{
     .{
         .path = protocol.CommandKind.message.route(),
         .kind = .message,
-        .summary = "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
+        .summary = "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
         .variants = &.{
-            variant(protocol.message_request.head ++ protocol.message_request.skill, .{}),
-            variant(protocol.message_request.sender_head ++ protocol.message_request.skill, .{ .{ 3, "\"/s\"" }, .{ 4, "\"aaaaaa\"" } }),
             variant(protocol.message_request.head ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{}),
             // A sending Session's address: an absolute Store path and a Session id.
             variant(protocol.message_request.sender_head ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{ .{ 3, "\"/s\"" }, .{ 4, "\"aaaaaa\"" } }),
@@ -239,14 +240,14 @@ pub const routes = [_]Route{
         .kind = .activity_search,
         .summary = "Search public Session activity newest first with bounded snippets.",
         .variants = &.{variant(protocol.activity_search_request, .{})},
-        .reply = jsonReply(.{protocol.ActivitySearchFacts.head ++ .{ListOf(ActivitySearchItem)} ++ protocol.ActivitySearchFacts.tail}),
+        .reply = jsonReply(.{activity_reply.search_reply.head ++ .{ListOf(ActivitySearchItem)} ++ activity_reply.search_reply.tail}),
     },
     .{
         .path = "/v1/activity-page",
         .kind = .activity_page,
         .summary = "One page of a Session's activity feed, with its work and queue at the page's boundary.",
         .variants = &.{ variant(protocol.activity_page_request, .{}), variant(protocol.activity_page_since_request, .{}) },
-        .reply = jsonReply(.{ protocol.ActivityFacts.head ++ .{ListOf(protocol.ActivityItem)} ++ protocol.ActivityFacts.tail, protocol.ActivityFacts.unchanged }),
+        .reply = jsonReply(.{ activity_reply.page_reply.head ++ .{ListOf(activity_reply.ItemJson)} ++ activity_reply.page_reply.tail, activity_reply.page_reply.unchanged }),
     },
     .{
         .path = "/v1/activity-content",
@@ -254,6 +255,13 @@ pub const routes = [_]Route{
         .summary = "The content of one activity row.",
         .variants = &.{variant(protocol.activity_content_request, .{})},
         .reply = .bytes,
+    },
+    .{
+        .path = "/v1/skill-suggestions",
+        .kind = .skill_suggestions,
+        .summary = "Bounded skill metadata from a Session catalog or prospective Workspace discovery.",
+        .variants = &.{ variant(protocol.skill_suggestions_session_request, .{.{ 1, "\"k7m2qx\"" }}), variant(protocol.skill_suggestions_workspace_request, .{}) },
+        .reply = jsonReply(.{protocol.skill_suggestions_reply.head ++ .{BoundedListOf(protocol.skill_suggestions_reply.entry, 24, false)} ++ .{protocol.skill_suggestions_reply.tail}}),
     },
     .{
         .path = "/v1/model-list",
@@ -286,6 +294,19 @@ fn ListOf(comptime item: anytype) type {
         pub fn openapi_inline(d: *Document) !Value {
             const items = if (@TypeOf(item) == type) try d.typeRef(item) else try d.shapeSchema(item);
             return d.object(.{ .type = Value{ .string = "array" }, .items = items });
+        }
+    };
+}
+
+fn BoundedListOf(comptime item: anytype, comptime capacity: usize, comptime unique: bool) type {
+    return struct {
+        pub const is_list = true;
+        pub fn openapi_example(out: *std.Io.Writer) !void {
+            try out.writeAll("[]");
+        }
+        pub fn openapi_inline(d: *Document) !Value {
+            const items = if (@TypeOf(item) == type) try d.typeRef(item) else try d.shapeSchema(item);
+            return d.object(.{ .type = Value{ .string = "array" }, .items = items, .maxItems = Value{ .integer = capacity }, .uniqueItems = Value{ .bool = unique } });
         }
     };
 }
@@ -337,10 +358,7 @@ const ToolNameList = struct {
     pub fn openapi_inline(d: *Document) !Value {
         return d.object(.{
             .type = Value{ .string = "array" },
-            .items = try d.object(.{
-                .type = Value{ .string = "string" },
-                .pattern = Value{ .string = std.fmt.comptimePrint("^[A-Za-z0-9_-]{{1,{d}}}$", .{protocol.max_tool_name_bytes}) },
-            }),
+            .items = try toolName(d),
             .maxItems = Value{ .integer = protocol.max_tools },
             .uniqueItems = Value{ .bool = true },
             .@"x-rui-max-bytes" = Value{ .integer = protocol.max_tool_list_name_bytes },
@@ -351,6 +369,14 @@ const ToolNameList = struct {
         try out.print("[\"{s}\"]", .{@tagName(std.meta.tags(Tool)[0])});
     }
 };
+
+/// A tool name (`tool_name.valid`).
+fn toolName(d: *Document) !Value {
+    return d.object(.{
+        .type = Value{ .string = "string" },
+        .pattern = Value{ .string = std.fmt.comptimePrint("^[A-Za-z0-9_-]{{1,{d}}}$", .{protocol.max_tool_name_bytes}) },
+    });
+}
 
 /// Fields after `output_schema` are optional to the parser, in any order;
 /// the client always sends all four, in this order. Creation requires model,
@@ -521,6 +547,7 @@ pub const Document = struct {
         if (@hasDecl(T, "openapi_inline")) return T.openapi_inline(d);
         if (@hasDecl(T, "openapi_list")) return d.object(.{ .type = Value{ .string = "array" }, .items = try d.typeRef(T.openapi_list) });
         if (@hasDecl(T, "openapi_tools")) return ToolNameList.openapi_inline(d);
+        if (@hasDecl(T, "openapi_tool_name")) return toolName(d);
         if (@hasDecl(T, "openapi_content")) return Content.openapi_inline(d);
         const name = comptime componentName(T);
         if (!d.schemas.contains(name)) {
@@ -573,14 +600,13 @@ pub const Document = struct {
             };
             return d.shapeSchema(T.head ++ .{Calls} ++ T.tail);
         }
-        if (T == protocol.CallActivity) return d.shapeSchema(T.head ++ .{ListOf(T.entry_shape)} ++ T.tail);
-        if (T == protocol.ActivityItem) {
+        if (T == activity_reply.CallActivityJson) return d.shapeSchema(T.head ++ .{ListOf(T.entry_shape)} ++ T.tail);
+        if (T == activity_reply.ItemJson) {
             const kinds = comptime std.meta.tags(protocol.ActivityItem.Kind);
             var values: [kinds.len]Value = undefined;
             inline for (kinds, 0..) |kind, index| values[index] = try d.shapeSchema(tuple(T.head(kind)) ++ @field(T.value_shapes, @tagName(kind)) ++ T.tail);
             return d.anyOf(&values);
         }
-        if (T == protocol.Queued) return d.shapeSchema(T.shape);
         if (T == protocol.SessionRow) return d.shapeSchemaWith(T.json_shape, ToolNames);
         if (@hasDecl(T, "json_shape")) return d.shapeSchema(T.json_shape);
         @compileError("no wire schema for " ++ @typeName(T));
@@ -813,7 +839,7 @@ pub const Document = struct {
                 .report => {
                     var content: ObjectMap = .empty;
                     const reply_name = try std.fmt.allocPrint(d.arena, "{s}Reply", .{base});
-                    const shapes = store.session_report_shapes;
+                    const shapes = session_report_reply.shapes;
                     try d.schemas.put(d.arena, reply_name, try d.anyOf(&.{
                         try d.shapeSchema(shapes.current),
                         try d.shapeSchema(shapes.full),
@@ -1078,7 +1104,7 @@ test "the Host parses a generated example of every request variant" {
             const bytes = body.written();
             var used = std.atomic.Value(u64).init(0);
             var retained: ?@import("named_scratch.zig").Owner = null;
-            var ingress: protocol.Ingress = undefined;
+            var ingress: wire_request.Ingress = undefined;
             ingress.init(std.testing.allocator, .{
                 .io = io,
                 .content_length = bytes.len,
@@ -1295,7 +1321,7 @@ test "replies the Host renders conform to their schemas" {
     facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = .{ .length = 3, .digest = @splat(1) }, .admitted_at = 7 } } };
     facts.items[1] = .{ .position = 2, .ordinal = 1, .at = 8, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = @fromBackingInt(@intCast(0)), .code = .{}, .content = null } } };
     facts.work.work.state = .{ .failed = .{ .since = 3, .code = .{}, .resets_at = 4 } };
-    try facts.writeJson(&out.writer);
+    try activity_reply.writePage(&out.writer, &facts);
     try Case.check(schemas, "ActivityPageReply", out.written(), a);
 
     out.clearRetainingCapacity();
@@ -1384,7 +1410,7 @@ test "statuses, media types and required headers match what the Host sends" {
 }
 
 const ActivitySearchItem = struct {
-    pub const openapi_shape = protocol.ActivitySearchFacts.Item.head ++ .{ ListOf(protocol.ActivitySearchFacts.Hit), "]}" };
+    pub const openapi_shape = activity_reply.SearchMatchJson.head ++ .{ ListOf(activity_reply.SearchHitJson), "]}" };
 };
 
 test "Command observation schema requires full metadata or a token-only repeat" {
@@ -1462,11 +1488,11 @@ test "catalog full report schema represents turnless catalog source facts" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var document: Document = .init(arena.allocator());
-    const shape = try document.shapeSchema(store.session_report_shapes.conversation);
+    const shape = try document.shapeSchema(session_report_reply.FullJson.Conversation.json_shape);
     const json = try std.json.parseFromSliceLeaky(
         Value,
         arena.allocator(),
-        "{\"ordinal\":\"1\",\"position\":\"1\",\"kind\":\"settings\",\"turn\":null,\"source_admission\":null,\"source_revision\":null,\"source_catalog_position\":\"1\",\"source_operation\":null,\"content\":{\"bytes\":\"12\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"}}",
+        "{\"ordinal\":\"1\",\"position\":\"1\",\"kind\":\"settings\",\"turn\":null,\"source_admission\":null,\"source_revision\":null,\"source_catalog_position\":\"1\",\"source_skill_position\":null,\"source_operation\":null,\"content\":{\"bytes\":\"12\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"}}",
         .{},
     );
     try std.testing.expect(conforms(document.schemas, shape, json));

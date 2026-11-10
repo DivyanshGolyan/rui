@@ -4,6 +4,7 @@
 const std = @import("std");
 const yaml = @import("yaml");
 const json_scalar = @import("json_scalar.zig");
+const skill_reference = @import("skill_reference.zig");
 const Allocator = std.mem.Allocator;
 
 // Per scan: at most two roots, 4096 direct children each, and 4096 winners.
@@ -247,7 +248,7 @@ fn parseMetadata(allocator: Allocator, raw: []const u8) !?Metadata {
     }
     const parsed_name = name orelse return null;
     const parsed_description = description orelse return null;
-    if (!validName(parsed_name)) return null;
+    if (!skill_reference.validName(parsed_name)) return null;
     if (parsed_description.len == 0) return null;
     const description_view = std.unicode.Utf8View.init(parsed_description) catch return null;
     // A commented document separator is YAML syntax, not a Markdown closing
@@ -277,21 +278,6 @@ fn scalar(node: [*c]yaml.yaml_node_t) []const u8 {
     return node.*.data.scalar.value[0..node.*.data.scalar.length];
 }
 
-fn validName(name: []const u8) bool {
-    if (name.len == 0 or name.len > 64 or name[0] == '-' or name[name.len - 1] == '-') return false;
-    var hyphen = false;
-    for (name) |byte| {
-        if (byte == '-') {
-            if (hyphen) return false;
-            hyphen = true;
-        } else {
-            if (!(byte >= 'a' and byte <= 'z') and !(byte >= '0' and byte <= '9')) return false;
-            hyphen = false;
-        }
-    }
-    return true;
-}
-
 fn validDescription(description: []const u8) bool {
     const count = std.unicode.utf8CountCodepoints(description) catch return false;
     return count > 0 and count <= max_description_characters;
@@ -310,6 +296,8 @@ pub fn invocation(allocator: Allocator, io: std.Io, entry: Entry) ![]const u8 {
     return readSkillPrefixed(allocator, io, entry, true);
 }
 
+/// Same single-descriptor capture as invocation; exposes raw extent separately
+/// so a batch can charge body bytes without counting escaped path framing.
 fn invocationPrefix(writer: *std.Io.Writer, path: []const u8) !void {
     try writer.writeAll("Skill file: ");
     try std.json.Stringify.value(path, .{}, writer);
@@ -363,18 +351,43 @@ pub fn diff(allocator: Allocator, before: Catalog, after: Catalog) !Delta {
     defer removed.deinit(allocator);
     var changed: std.ArrayList(Entry) = .empty;
     defer changed.deinit(allocator);
-    for (after.entries) |entry| {
-        if (findEntry(before.entries, entry.name)) |old| {
-            if (!std.mem.eql(u8, old.description, entry.description) or !std.mem.eql(u8, old.path, entry.path))
-                try changed.append(allocator, entry);
-        } else try added.append(allocator, entry);
+    // One merge of both catalogs in name order; each list comes out sorted.
+    const old_order = try byName(allocator, before.entries);
+    defer allocator.free(old_order);
+    const new_order = try byName(allocator, after.entries);
+    defer allocator.free(new_order);
+    var old_index: usize = 0;
+    var new_index: usize = 0;
+    while (old_index < old_order.len or new_index < new_order.len) {
+        if (new_index == new_order.len) {
+            try removed.append(allocator, before.entries[old_order[old_index]]);
+            old_index += 1;
+            continue;
+        }
+        const entry = after.entries[new_order[new_index]];
+        if (old_index == old_order.len) {
+            try added.append(allocator, entry);
+            new_index += 1;
+            continue;
+        }
+        const old = before.entries[old_order[old_index]];
+        switch (std.mem.order(u8, old.name, entry.name)) {
+            .lt => {
+                try removed.append(allocator, old);
+                old_index += 1;
+            },
+            .gt => {
+                try added.append(allocator, entry);
+                new_index += 1;
+            },
+            .eq => {
+                if (!std.mem.eql(u8, old.description, entry.description) or !std.mem.eql(u8, old.path, entry.path))
+                    try changed.append(allocator, entry);
+                old_index += 1;
+                new_index += 1;
+            },
+        }
     }
-    for (before.entries) |entry| {
-        if (findEntry(after.entries, entry.name) == null) try removed.append(allocator, entry);
-    }
-    std.sort.heap(Entry, added.items, {}, entryLessThan);
-    std.sort.heap(Entry, removed.items, {}, entryLessThan);
-    std.sort.heap(Entry, changed.items, {}, entryLessThan);
     const owned_added = try copyEntries(allocator, added.items);
     errdefer freeEntries(allocator, owned_added);
     const owned_removed = try copyEntries(allocator, removed.items);
@@ -426,15 +439,32 @@ fn freeEntries(allocator: Allocator, entries: []const Entry) void {
 
 fn validateCatalog(catalog: Catalog) !void {
     if (catalog.entries.len > max_entries) return error.SkillCatalogLimit;
-    for (catalog.entries, 0..) |entry, index| {
-        if (!validName(entry.name) or !validDescription(entry.description) or
+    for (catalog.entries) |entry| {
+        if (!skill_reference.validName(entry.name) or !validDescription(entry.description) or
             !std.fs.path.isAbsolute(entry.path) or entry.path.len > std.fs.max_path_bytes or
             !std.unicode.utf8ValidateSlice(entry.path) or
             std.mem.indexOfScalar(u8, entry.path, 0) != null) return error.InvalidSkillCatalog;
-        for (catalog.entries[0..index]) |other| {
-            if (std.mem.eql(u8, entry.name, other.name)) return error.InvalidSkillCatalog;
-        }
     }
+    // Names are unique when no two neighbours in name order are equal. The
+    // order is scratch, so it never lands in a caller's request arena.
+    const order = try byName(std.heap.c_allocator, catalog.entries);
+    defer std.heap.c_allocator.free(order);
+    for (1..@max(order.len, 1)) |index| {
+        if (std.mem.eql(u8, catalog.entries[order[index - 1]].name, catalog.entries[order[index]].name))
+            return error.InvalidSkillCatalog;
+    }
+}
+
+/// Indices of `entries`, at most `max_entries`, in name order.
+fn byName(allocator: Allocator, entries: []const Entry) ![]u16 {
+    const order = try allocator.alloc(u16, entries.len);
+    for (order, 0..) |*slot, index| slot.* = @intCast(index);
+    std.sort.pdq(u16, order, entries, struct {
+        fn lessThan(context: []const Entry, a: u16, b: u16) bool {
+            return std.mem.lessThan(u8, context[a].name, context[b].name);
+        }
+    }.lessThan);
+    return order;
 }
 
 /// Persist only names, descriptions and canonical paths, never raw skill text.
@@ -550,13 +580,13 @@ test "skills libyaml ignores valid unknown nested metadata without granting auth
 
 test "skills validates name byte grammar and Unicode character description bounds" {
     const valid = [_][]const u8{ "a", "0", "a-b", "1-2-three", &@as([64]u8, @splat('a')) };
-    for (valid) |name| try std.testing.expect(validName(name));
+    for (valid) |name| try std.testing.expect(skill_reference.validName(name));
     const invalid = [_][]const u8{ "", "-a", "a-", "a--b", "A", "a_b", "a.b", "a/b", "a b", "é", &@as([65]u8, @splat('a')) };
-    for (invalid) |name| try std.testing.expect(!validName(name));
+    for (invalid) |name| try std.testing.expect(!skill_reference.validName(name));
     for (0..256) |value| {
         const name = [_]u8{ @intCast(value), 'x' };
         const allowed = (value >= 'a' and value <= 'z') or (value >= '0' and value <= '9');
-        try std.testing.expectEqual(allowed, validName(&name));
+        try std.testing.expectEqual(allowed, skill_reference.validName(&name));
     }
     const unicode_1025 = try std.testing.allocator.alloc(u8, 1025 * "😀".len);
     defer std.testing.allocator.free(unicode_1025);
@@ -718,14 +748,14 @@ test "skills discovery reload compares advertised prefixes and invokes current t
     try std.testing.expect(std.mem.endsWith(u8, prefix_delta.changed[0].description, "z…"));
 }
 
-fn fixturePath(allocator: Allocator, dir: std.Io.Dir) ![]const u8 {
+pub fn fixturePath(allocator: Allocator, dir: std.Io.Dir) ![]const u8 {
     const buffer = try allocator.alloc(u8, std.fs.max_path_bytes);
     defer allocator.free(buffer);
     const length = try dir.realPath(std.testing.io, buffer);
     return allocator.dupe(u8, buffer[0..length]);
 }
 
-fn fixtureSkill(dir: std.Io.Dir, path: []const u8, name: []const u8, description: []const u8) !void {
+pub fn fixtureSkill(dir: std.Io.Dir, path: []const u8, name: []const u8, description: []const u8) !void {
     const allocator = std.testing.allocator;
     try dir.createDirPath(std.testing.io, path);
     const file_path = try std.fs.path.join(allocator, &.{ path, "SKILL.md" });
@@ -1123,12 +1153,12 @@ test "skills root child bound rejects rather than truncating the scan" {
 // Counts requested backing bytes, not allocator internals/RSS or libyaml's C
 // allocations. Both child allocators really reclaim memory; the result owner
 // is an arena, matching the production caller rather than individual frees.
-const TestHighWaterAllocator = struct {
+pub const TestHighWaterAllocator = struct {
     child: Allocator,
     live: usize = 0,
     peak: usize = 0,
 
-    fn allocator(self: *TestHighWaterAllocator) Allocator {
+    pub fn allocator(self: *TestHighWaterAllocator) Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
     }
 
@@ -1397,6 +1427,22 @@ test "skills catalog wire rejects byte arrays and numeric coercions for every te
     try std.testing.expectEqualDeep(decoded.entries, roundtrip.entries);
 }
 
+test "skills catalog rejects a repeated name wherever it appears" {
+    // The repeats are not neighbours in input order, only in name order.
+    const encoded =
+        \\{"entries":[{"name":"b","description":"one","path":"/b/SKILL.md"},
+        \\{"name":"a","description":"two","path":"/a/SKILL.md"},
+        \\{"name":"b","description":"three","path":"/c/SKILL.md"}]}
+    ;
+    try std.testing.expectError(error.InvalidSkillCatalog, decodeCatalog(std.testing.allocator, encoded));
+    const distinct = try decodeCatalog(std.testing.allocator,
+        \\{"entries":[{"name":"b","description":"one","path":"/b/SKILL.md"},
+        \\{"name":"a","description":"two","path":"/a/SKILL.md"}]}
+    );
+    defer freeEntries(std.testing.allocator, distinct.entries);
+    try std.testing.expectEqual(@as(usize, 2), distinct.entries.len);
+}
+
 test "skills catalog full bounded population has deterministic unique-name order" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1421,134 +1467,6 @@ test "skills catalog full bounded population has deterministic unique-name order
     }
     const delta = try diff(allocator, .{ .entries = entries }, decoded);
     try std.testing.expect(delta.isEmpty());
-}
-
-// These witnesses wrap the actual request arena, not just the scanner's scratch.
-// Backing high-water includes arena slack and ignored frees until settlement.
-test "skills creation capture shares one materialized catalog in the request arena" {
-    const owner = @import("session_skills.zig");
-    const io = std.testing.io;
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try fixturePath(allocator, tmp.dir);
-    defer allocator.free(root);
-    try tmp.dir.createDirPath(io, ".git");
-    const description = try allocator.alloc(u8, 4 * 1024);
-    for (0..1024) |index| @memcpy(description[4 * index ..][0..4], "😀");
-    defer allocator.free(description);
-    var oracle: std.Io.Writer.Allocating = .init(allocator);
-    defer oracle.deinit();
-    try oracle.writer.writeAll("{\"entries\":[");
-    const population = 128;
-    for (0..population) |index| {
-        var name_buffer: [32]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buffer, "dense-{d:0>4}", .{index});
-        const directory = try std.fs.path.join(allocator, &.{ ".agents/skills", name });
-        defer allocator.free(directory);
-        try fixtureSkill(tmp.dir, directory, name, description);
-        if (index != 0) try oracle.writer.writeByte(',');
-        try oracle.writer.print("{{\"name\":\"{s}\",\"description\":\"{s}\",\"path\":\"{s}/{s}/SKILL.md\"}}", .{ name, description, root, directory });
-    }
-    try oracle.writer.writeAll("]}");
-    var backing: TestHighWaterAllocator = .{ .child = allocator };
-    var scratch: TestHighWaterAllocator = .{ .child = allocator };
-    {
-        var arena: std.heap.ArenaAllocator = .init(backing.allocator());
-        defer arena.deinit();
-        var requested = std.testing.FailingAllocator.init(arena.allocator(), .{});
-        const started = std.Io.Clock.awake.now(io);
-        const captured = try owner.captureInitial(requested.allocator(), scratch.allocator(), io, root, null);
-        const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
-        try std.testing.expect(captured.* == .ready);
-        const ready = captured.ready;
-        try std.testing.expectEqualStrings(oracle.written(), ready.encoded);
-        const instruction = ready.instruction.?;
-        try std.testing.expect(std.mem.endsWith(u8, instruction, ready.encoded));
-        std.debug.print("creation capture: entries={d} json={d} requested={d} backing_peak={d} backing_live={d} scratch_peak={d} ns={d}\n", .{ population, ready.encoded.len, requested.allocated_bytes, backing.peak, backing.live, scratch.peak, elapsed });
-        // Complete bytes have one owner. The independently rendered JSON is a
-        // borrowed suffix, never a second allocation with the same payload.
-        try std.testing.expectEqual(@intFromPtr(instruction.ptr) + instruction.len - ready.encoded.len, @intFromPtr(ready.encoded.ptr));
-        const metadata = population * (@sizeOf(Entry) + "dense-0000".len + description.len + root.len + "/.agents/skills/dense-0000/SKILL.md".len);
-        try std.testing.expect(requested.allocated_bytes < instruction.len + 2 * metadata);
-        try std.testing.expectEqual(@as(usize, 0), scratch.live);
-    }
-    try std.testing.expectEqual(@as(usize, 0), backing.live);
-    {
-        var arenas: [4]std.heap.ArenaAllocator = undefined;
-        for (&arenas) |*arena| arena.* = .init(backing.allocator());
-        defer for (&arenas) |*arena| arena.deinit();
-        var held: [4]*const @import("store.zig").InitialSkills = undefined;
-        for (&arenas, &held) |*arena, *capture| capture.* = try owner.captureInitial(arena.allocator(), scratch.allocator(), io, root, null);
-        for (held) |capture| try std.testing.expectEqualStrings(oracle.written(), capture.ready.encoded);
-        std.debug.print("creation held captures: live_exchanges=4 backing_peak={d} backing_live={d}\n", .{ backing.peak, backing.live });
-    }
-    try std.testing.expectEqual(@as(usize, 0), backing.live);
-}
-
-test "skills invocation capture retains only final max-body bytes in the request arena" {
-    const owner = @import("session_skills.zig");
-    const protocol = @import("protocol.zig");
-    const store = @import("store.zig");
-    const io = std.testing.io;
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try fixturePath(allocator, tmp.dir);
-    defer allocator.free(root);
-    try tmp.dir.createDirPath(io, ".git");
-    // Escaping, CRLF, BOM, Unicode and trailing bytes belong to the raw suffix.
-    const directory = ".agents/skills/demo";
-    try fixtureSkill(tmp.dir, directory, "demo", "metadata");
-    var initial_memory: std.heap.ArenaAllocator = .init(allocator);
-    defer initial_memory.deinit();
-    const initial = try owner.captureInitial(initial_memory.allocator(), allocator, io, root, null);
-    var storage: store.Store = undefined;
-    try store.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, io, .{});
-    defer storage.close() catch unreachable;
-    var create = try store.testingCompleteConfiguration("capture-memory-create", "", root, "model-a");
-    const session = storage.configureWithInitialSkills(&create, null, initial, .{}).accepted.session;
-    const raw = try allocator.alloc(u8, max_skill_bytes);
-    defer allocator.free(raw);
-    @memset(raw, 'x');
-    const header = "\xef\xbb\xbf---\r\nname: demo\r\ndescription: metadata\r\n---\r\n雪 e\xcc\x81\r\n";
-    @memcpy(raw[0..header.len], header);
-    @memcpy(raw[raw.len - 5 ..], "\r\n\n \n");
-    try tmp.dir.writeFile(io, .{ .sub_path = directory ++ "/SKILL.md", .data = raw });
-    const path = try std.fmt.allocPrint(allocator, "{s}/{s}/SKILL.md", .{ root, directory });
-    defer allocator.free(path);
-    const expected = try std.fmt.allocPrint(allocator, "Skill file: \"{s}\"\n\n{s}", .{ path, raw });
-    defer allocator.free(expected);
-    var backing: TestHighWaterAllocator = .{ .child = allocator };
-    {
-        var arena: std.heap.ArenaAllocator = .init(backing.allocator());
-        defer arena.deinit();
-        var requested = std.testing.FailingAllocator.init(arena.allocator(), .{});
-        var name: protocol.Bounded(64) = .{};
-        try name.set("demo");
-        const started = std.Io.Clock.awake.now(io);
-        const captured = try owner.capture(requested.allocator(), allocator, io, &storage, session.slice(), &.{ .operation = .invoke, .name = name }, null);
-        const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
-        try std.testing.expect(captured == .invocation);
-        try std.testing.expectEqualStrings(expected, captured.invocation);
-        std.debug.print("invocation capture: raw={d} final={d} requested={d} backing_peak={d} backing_live={d} ns={d}\n", .{ raw.len, captured.invocation.len, requested.allocated_bytes, backing.peak, backing.live, elapsed });
-        // Small decoded catalog/state is necessary; another complete body is not.
-        try std.testing.expect(requested.allocated_bytes < captured.invocation.len + 32 * 1024);
-        try std.testing.expect(backing.peak < 2 * captured.invocation.len);
-    }
-    try std.testing.expectEqual(@as(usize, 0), backing.live);
-    {
-        var arenas: [4]std.heap.ArenaAllocator = undefined;
-        for (&arenas) |*arena| arena.* = .init(backing.allocator());
-        defer for (&arenas) |*arena| arena.deinit();
-        var held: [4]owner.Capture = undefined;
-        var name: protocol.Bounded(64) = .{};
-        try name.set("demo");
-        for (&arenas, &held) |*arena, *capture| capture.* = try owner.capture(arena.allocator(), allocator, io, &storage, session.slice(), &.{ .operation = .invoke, .name = name }, null);
-        for (held) |capture| try std.testing.expectEqualStrings(expected, capture.invocation);
-        std.debug.print("invocation held captures: live_exchanges=4 backing_peak={d} backing_live={d}\n", .{ backing.peak, backing.live });
-    }
-    try std.testing.expectEqual(@as(usize, 0), backing.live);
 }
 
 test "skills descriptor-bound reads preserve paths and reject growth shrink and invalid UTF8" {

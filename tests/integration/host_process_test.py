@@ -12,6 +12,7 @@ import os
 import pathlib
 import select
 import socket
+import os_semantics
 import struct
 import subprocess
 import sys
@@ -460,7 +461,7 @@ def prove_short_optional_receipt():
         os.close(writer)
         stop_process(process)
         diagnostics.close()
-        process.stdin.close()
+        host_process.close_stdin(process)
     print("Host optional receipt: short write visible with writer open and no filler, no native evidence")
 
 
@@ -1270,7 +1271,7 @@ def prove_execution_release_oracles():
 
 
 def prove_bash_cleanup_population():
-    from bash_integration import assert_cleanup_population
+    from bash_fixture import assert_cleanup_population
 
     # A model owner completes once; the Bash owner starts, releases and completes.
     records = [dict(rui_test_phase="cleanup_completed", turn="7", operation="11", attempt="1", action=None)]
@@ -1371,45 +1372,9 @@ def prove_capacity_refusal_oracle(probe):
     print("Capacity refusal oracle: pre-write close and classified replies; empty, truncated, wrong status/code/framing refused")
 
 
-def prove_control_disposal_oracle(dispose):
-    module = sys.modules[dispose.__module__]
-    for broken in ((), ("connection",), ("stop",), ("gate",), ("diagnostics",),
-                   ("shutdown",), ("server",), ("join",), ("stop", "gate", "shutdown")):
-        for failing_body in (False, True):
-            closed = set()
-            failures = {name: RuntimeError(name) for name in broken}
-            primary = AssertionError("original Control assertion")
-
-            def close(name):
-                closed.add(name)
-                if name in failures:
-                    raise failures[name]
-
-            endpoint = SimpleNamespace(release=SimpleNamespace(set=lambda: close("release")),
-                                       shutdown=lambda: close("shutdown"), server_close=lambda: close("server"))
-            thread = SimpleNamespace(join=lambda timeout: close("join"), is_alive=lambda: "join" not in closed)
-            diagnostics = SimpleNamespace(close=lambda: close("diagnostics"))
-            connection = SimpleNamespace(close=lambda: close("connection"))
-            with patch.object(module, "stop_process", lambda process: close("stop")), \
-                    contextlib.redirect_stderr(io.StringIO()):
-                try:
-                    try:
-                        if failing_body:
-                            raise primary
-                    finally:
-                        dispose(object(), diagnostics, endpoint, thread, lambda: close("gate"),
-                                connections=[connection])
-                except BaseException as error:
-                    assert error is (primary if failing_body else failures[broken[0]]), error
-                else:
-                    assert not failing_body and not broken
-            assert closed == {"connection", "stop", "gate", "diagnostics", "release", "shutdown", "server", "join"}, closed
-    print("Control disposal oracle: original assertion survives every cleanup failure; every owned resource still receives disposal")
-
-
 def prove_renderer_comparison_retention():
     with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
-        import terminal_restoration_integration as terminal
+        import terminal_restoration_fixture as terminal
 
     before = b"\x1b[?1049h\x1b[?2026hConfigured.\r\n\xe2\x80\xba \x1b[?2026l"
     for delta in (b"\x1b[?2026hConfigured.\x1b[?2026l", b"\x1b[?1049lREPLAY\x00\xff"):
@@ -1459,7 +1424,7 @@ def prove_renderer_comparison_retention():
 def prove_terminal_stop_budget():
     """Drive the actual stop caller; only external work uses a virtual clock."""
     with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
-        import terminal_restoration_integration as terminal
+        import terminal_restoration_fixture as terminal
 
     for late_stage in (None, "read", "release"):
         clock = [100.0]
@@ -1531,9 +1496,9 @@ def prove_terminal_stop_budget():
 
 def prove_caller_disposal():
     with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
-        import dispatch_integration as dispatch
-        import conversation_page_integration as page
-        import bash_owner_integration as bash
+        import model_fixture as dispatch
+        import conversation_page_fixture as page
+        import bash_fixture as bash
 
     for owner in (dispatch, page, bash):
         for body_failed in (False, True):
@@ -1705,7 +1670,7 @@ import threading
 from unittest.mock import patch
 sys.path.insert(0, sys.argv[1])
 sys.argv = [sys.argv[0], "unused-rui"]
-import conversation_page_integration as page
+import conversation_page_fixture as page
 primary = AssertionError("whole-stream startup failure")
 serving = threading.Event()
 real_dispose = page.dispose_page
@@ -1813,7 +1778,7 @@ def prove_peer_disconnects():
     # Exercise the real provider handler: a cancelled consumer is an observed
     # disconnect, whereas broken fixture I/O must still fail the caller.
     with patch.object(sys, "argv", [__file__, "/bin/false"]):
-        import control_integration as control
+        import control_fixture as control
 
     accepted = (BrokenPipeError("closed"), ConnectionResetError("closed"),
                 OSError(errno.EPIPE, "closed"), OSError(errno.ECONNRESET, "closed"),
@@ -1845,7 +1810,7 @@ def prove_peer_disconnects():
     assert not any(is_peer_disconnect(error) for error in rejected)
 
     with patch.object(sys, "argv", [__file__, "/bin/false", "/bin/false"]):
-        import host_stop_integration as stop
+        import host_status_fixture as stop
 
     # Completion keeps every observed byte, including an acceptance prefix
     # that the shutdown caller must reject even if a reset follows it.
@@ -1865,7 +1830,7 @@ def prove_peer_disconnects():
             else:
                 assert error in accepted and observed == received
 
-    from host_status_integration import complete_response
+    from host_status_fixture import complete_response
     for body in (b"xy", b"x"):
         stream = MagicMock()
         stream.recv.side_effect = [b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n" + body,
@@ -1901,7 +1866,7 @@ def prove_one_reply():
                 + b"x" * padding + b"\r\n\r\n")
 
     def connect(path):
-        client = socket.socket(socket.AF_UNIX)
+        client = os_semantics.unix_stream()
         client.settimeout(2)
         client.connect(str(path))
         assert accepted.wait(2), "one-reply worker never accepted"

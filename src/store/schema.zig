@@ -3,8 +3,11 @@
 //! stored DDL is compared with it when it opens.
 
 const std = @import("std");
-const protocol = @import("../protocol.zig");
-const tool_catalog = @import("../tools.zig");
+const store_path = @import("../store_path.zig");
+const tool_name = @import("../tool_name.zig");
+const Bounded = @import("../bounded.zig").Bounded;
+const wire_version = @import("../wire_version.zig").wire_version;
+const tool_catalog = @import("../tool_record.zig");
 const prefix_seal = @import("../prefix_seal.zig");
 const retry_policy = @import("../retry_policy.zig");
 const turn_policy = @import("../turn_policy.zig");
@@ -16,10 +19,10 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 59;
+pub const schema_version: u32 = 60;
 
 pub const IdentityMismatch = struct {
-    saved_selector: protocol.Bounded(protocol.max_store_bytes) = .{},
+    saved_selector: Bounded(store_path.max_bytes) = .{},
 };
 
 /// `digest()` of each schema_version, oldest first. Each format PR appends
@@ -42,6 +45,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 57, .digest = 0x75359f28a14f23a9 },
     .{ .schema_version = 58, .digest = 0x4cd0a6b38d4904ed },
     .{ .schema_version = 59, .digest = 0xa3ebc37622ed945b },
+    .{ .schema_version = 60, .digest = 0x6b696b3423202987 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -288,6 +292,33 @@ pub const migrations = [_]Migration{
         .mysql = &.{
             "CREATE TABLE session_skill_catalog(\n session_ref VARCHAR(6) NOT NULL,\n position BIGINT NOT NULL,\n catalog_content_id BIGINT NOT NULL,\n PRIMARY KEY(session_ref,position),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(catalog_content_id) REFERENCES content(content_id),\n CHECK(position>=0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "ALTER TABLE conversation_entry MODIFY turn_id BIGINT NULL, ADD COLUMN source_catalog_position BIGINT AFTER source_revision, ADD UNIQUE(session_ref,source_catalog_position), ADD FOREIGN KEY(session_ref,source_catalog_position) REFERENCES session_skill_catalog(session_ref,position), DROP CHECK conversation_entry_chk_7, ADD CHECK((turn_id IS NULL)=(source_catalog_position IS NOT NULL)), ADD CHECK(source_catalog_position IS NULL OR source_catalog_position=session_position), ADD CHECK((entry_kind=1 AND source_admission_id IS NOT NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL) OR (entry_kind=2 AND source_admission_id IS NULL AND ((source_revision IS NOT NULL AND source_catalog_position IS NULL) OR (source_revision IS NULL AND source_catalog_position IS NOT NULL)) AND source_operation_id IS NULL) OR (entry_kind=3 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NOT NULL))",
+        },
+    },
+    // Schema 60 (wire 11): a Message's `/name` words bind skills after
+    // send. message_skill keeps each bound skill's body, and a skill entry
+    // (kind 4) projects it right after its Message's entry. MySQL rebuilds
+    // conversation_entry too, in a fresh Store's order, so no CHECK is
+    // dropped by a name MySQL generated.
+    .{
+        .from = 59,
+        .sqlite = &.{
+            "CREATE TABLE message_skill(\n admission_id INTEGER NOT NULL REFERENCES message_admission(admission_id),\n position INTEGER NOT NULL CHECK(position>0),\n name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64 AND (name NOT GLOB '*[^a-z0-9-]*' AND length(name)=length(CAST(name AS BLOB)))),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n PRIMARY KEY(admission_id,position)\n) STRICT, WITHOUT ROWID",
+            "ALTER TABLE conversation_entry RENAME TO conversation_entry_59",
+            "CREATE TABLE conversation_entry(\n session_ref TEXT NOT NULL,\n entry_ordinal INTEGER NOT NULL CHECK(entry_ordinal>0),\n session_position INTEGER NOT NULL CHECK(session_position>0),\n entry_kind INTEGER NOT NULL CHECK(entry_kind BETWEEN 1 AND 4),\n turn_id INTEGER REFERENCES turn(turn_id),\n source_admission_id INTEGER UNIQUE REFERENCES message_admission(admission_id),\n source_revision INTEGER,\n source_catalog_position INTEGER,\n source_skill_admission_id INTEGER,\n source_skill_position INTEGER,\n source_operation_id INTEGER REFERENCES model_operation(operation_id),\n source_item_ordinal INTEGER CHECK(source_item_ordinal IS NULL OR source_item_ordinal>=0),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n recorded_at INTEGER NOT NULL CHECK(recorded_at>0),\n PRIMARY KEY(session_ref,entry_ordinal),\n UNIQUE(session_ref,session_position),\n UNIQUE(session_ref,source_revision),\n UNIQUE(session_ref,source_catalog_position),\n UNIQUE(source_skill_admission_id,source_skill_position),\n FOREIGN KEY(session_ref,source_revision) REFERENCES session_revision(session_ref,revision),\n FOREIGN KEY(session_ref,source_catalog_position) REFERENCES session_skill_catalog(session_ref,position),\n FOREIGN KEY(source_skill_admission_id,source_skill_position) REFERENCES message_skill(admission_id,position),\n FOREIGN KEY(source_operation_id,source_item_ordinal) REFERENCES model_output_item(operation_id,item_ordinal),\n CHECK((entry_kind=3)=(source_item_ordinal IS NOT NULL)),\n CHECK((turn_id IS NULL)=(source_catalog_position IS NOT NULL)),\n CHECK(source_catalog_position IS NULL OR source_catalog_position=session_position),\n CHECK((source_skill_admission_id IS NULL)=(source_skill_position IS NULL)),\n CHECK((entry_kind=4)=(source_skill_position IS NOT NULL)),\n CHECK((entry_kind=1 AND source_admission_id IS NOT NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL) OR (entry_kind=2 AND source_admission_id IS NULL AND ((source_revision IS NOT NULL AND source_catalog_position IS NULL) OR (source_revision IS NULL AND source_catalog_position IS NOT NULL)) AND source_operation_id IS NULL) OR (entry_kind=3 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NOT NULL) OR (entry_kind=4 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL))\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_catalog_position,source_operation_id,source_item_ordinal,content_id,recorded_at) SELECT session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_catalog_position,source_operation_id,source_item_ordinal,content_id,recorded_at FROM conversation_entry_59",
+            "DROP TABLE conversation_entry_59",
+            "CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position)",
+            "UPDATE store_meta SET meta_value='11' WHERE meta_key='wire_version' AND meta_value='10'",
+        },
+        .mysql = &.{
+            "CREATE TABLE message_skill(\n admission_id BIGINT NOT NULL,\n position BIGINT NOT NULL,\n name TEXT NOT NULL,\n content_id BIGINT NOT NULL,\n PRIMARY KEY(admission_id,position),\n FOREIGN KEY(admission_id) REFERENCES message_admission(admission_id),\n FOREIGN KEY(content_id) REFERENCES content(content_id),\n CHECK(position>0),\n CHECK(OCTET_LENGTH(name) BETWEEN 1 AND 64 AND (NOT REGEXP_LIKE(name,'[^a-z0-9-]','c')))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE TABLE conversation_entry_60(\n session_ref VARCHAR(6) NOT NULL,\n entry_ordinal BIGINT NOT NULL,\n session_position BIGINT NOT NULL,\n entry_kind BIGINT NOT NULL,\n turn_id BIGINT,\n source_admission_id BIGINT,\n source_revision BIGINT,\n source_catalog_position BIGINT,\n source_skill_admission_id BIGINT,\n source_skill_position BIGINT,\n source_operation_id BIGINT,\n source_item_ordinal BIGINT,\n content_id BIGINT NOT NULL,\n recorded_at BIGINT NOT NULL,\n PRIMARY KEY(session_ref,entry_ordinal),\n UNIQUE(source_admission_id),\n UNIQUE(session_ref,session_position),\n UNIQUE(session_ref,source_revision),\n UNIQUE(session_ref,source_catalog_position),\n UNIQUE(source_skill_admission_id,source_skill_position),\n FOREIGN KEY(turn_id) REFERENCES turn(turn_id),\n FOREIGN KEY(source_admission_id) REFERENCES message_admission(admission_id),\n FOREIGN KEY(source_operation_id) REFERENCES model_operation(operation_id),\n FOREIGN KEY(content_id) REFERENCES content(content_id),\n FOREIGN KEY(session_ref,source_revision) REFERENCES session_revision(session_ref,revision),\n FOREIGN KEY(session_ref,source_catalog_position) REFERENCES session_skill_catalog(session_ref,position),\n FOREIGN KEY(source_skill_admission_id,source_skill_position) REFERENCES message_skill(admission_id,position),\n CHECK(entry_ordinal>0),\n CHECK(session_position>0),\n CHECK(entry_kind BETWEEN 1 AND 4),\n CHECK(source_item_ordinal IS NULL OR source_item_ordinal>=0),\n CHECK(recorded_at>0),\n CHECK((entry_kind=3)=(source_item_ordinal IS NOT NULL)),\n CHECK((turn_id IS NULL)=(source_catalog_position IS NOT NULL)),\n CHECK(source_catalog_position IS NULL OR source_catalog_position=session_position),\n CHECK((source_skill_admission_id IS NULL)=(source_skill_position IS NULL)),\n CHECK((entry_kind=4)=(source_skill_position IS NOT NULL)),\n CHECK((entry_kind=1 AND source_admission_id IS NOT NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL) OR (entry_kind=2 AND source_admission_id IS NULL AND ((source_revision IS NOT NULL AND source_catalog_position IS NULL) OR (source_revision IS NULL AND source_catalog_position IS NOT NULL)) AND source_operation_id IS NULL) OR (entry_kind=3 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NOT NULL) OR (entry_kind=4 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "INSERT INTO conversation_entry_60(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_catalog_position,source_operation_id,source_item_ordinal,content_id,recorded_at) SELECT session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_catalog_position,source_operation_id,source_item_ordinal,content_id,recorded_at FROM conversation_entry",
+            "DROP TABLE conversation_entry",
+            "RENAME TABLE conversation_entry_60 TO conversation_entry",
+            "CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position)",
+            "ALTER TABLE conversation_entry ADD FOREIGN KEY(source_operation_id,source_item_ordinal) REFERENCES model_output_item(operation_id,item_ordinal)",
+            "UPDATE store_meta SET meta_value='11' WHERE meta_key='wire_version' AND meta_value='10'",
         },
     },
 };
@@ -548,7 +579,7 @@ pub const tables = [_]Table{
         },
     },
     // An ordered set of tool records, saved once: `digest` names its
-    // members' content (tools.zig `SetDigest`). A Session's set holds at
+    // members' content (tool_record.zig `SetDigest`). A Session's set holds at
     // most max_tools, the wire's bound; the Host's catalog set up to
     // max_catalog_records.
     .{
@@ -575,7 +606,7 @@ pub const tables = [_]Table{
         },
         .without_rowid = true,
     },
-    // The Host's catalog: the set its last open saved (tools.zig
+    // The Host's catalog: the set its last open saved (tool_record.zig
     // `Catalog`), which the next start reads back. One row.
     .{
         .name = "host_catalog",
@@ -995,6 +1026,24 @@ pub const tables = [_]Table{
         },
     },
     .{
+        // A skill a Message's `/name` word bound, in order after the
+        // Message: its name and its body as read at send. A Turn that takes
+        // the Message projects each as its own entry right after it.
+        .name = "message_skill",
+        .columns = &.{
+            .{ .name = "admission_id", .type = .int },
+            .{ .name = "position", .type = .int, .check = "position>0" },
+            .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = 64 } }, .check = "@charset(name,'a-z0-9-')" },
+            .{ .name = "content_id", .type = .int },
+        },
+        .primary_key = &.{ "admission_id", "position" },
+        .foreign_keys = &.{
+            references("admission_id", "message_admission", &.{"admission_id"}),
+            references("content_id", "content", content_reference),
+        },
+        .without_rowid = true,
+    },
+    .{
         .name = "session_skill_catalog",
         .columns = &.{
             .{ .name = "session_ref", .type = .{ .text = null } },
@@ -1014,18 +1063,20 @@ pub const tables = [_]Table{
             .{ .name = "session_ref", .type = .{ .text = null } },
             .{ .name = "entry_ordinal", .type = .int, .check = "entry_ordinal>0" },
             .{ .name = "session_position", .type = .int, .check = "session_position>0" },
-            .{ .name = "entry_kind", .type = .int, .check = "entry_kind BETWEEN 1 AND 3" },
+            .{ .name = "entry_kind", .type = .int, .check = "entry_kind BETWEEN 1 AND 4" },
             .{ .name = "turn_id", .type = .int, .nullable = true },
             .{ .name = "source_admission_id", .type = .int, .nullable = true },
             .{ .name = "source_revision", .type = .int, .nullable = true },
             .{ .name = "source_catalog_position", .type = .int, .nullable = true },
+            .{ .name = "source_skill_admission_id", .type = .int, .nullable = true },
+            .{ .name = "source_skill_position", .type = .int, .nullable = true },
             .{ .name = "source_operation_id", .type = .int, .nullable = true },
             .{ .name = "source_item_ordinal", .type = .int, .nullable = true, .check = "source_item_ordinal IS NULL OR source_item_ordinal>=0" },
             .{ .name = "content_id", .type = .int },
             .{ .name = "recorded_at", .type = .int, .check = "recorded_at>0" },
         },
         .primary_key = &.{ "session_ref", "entry_ordinal" },
-        .uniques = &.{ &.{"source_admission_id"}, &.{ "session_ref", "session_position" }, &.{ "session_ref", "source_revision" }, &.{ "session_ref", "source_catalog_position" } },
+        .uniques = &.{ &.{"source_admission_id"}, &.{ "session_ref", "session_position" }, &.{ "session_ref", "source_revision" }, &.{ "session_ref", "source_catalog_position" }, &.{ "source_skill_admission_id", "source_skill_position" } },
         .foreign_keys = &.{
             references("turn_id", "turn", &.{"turn_id"}),
             references("source_admission_id", "message_admission", &.{"admission_id"}),
@@ -1033,15 +1084,19 @@ pub const tables = [_]Table{
             references("content_id", "content", content_reference),
             .{ .columns = &.{ "session_ref", "source_revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
             .{ .columns = &.{ "session_ref", "source_catalog_position" }, .references = "session_skill_catalog", .referenced = &.{ "session_ref", "position" } },
+            .{ .columns = &.{ "source_skill_admission_id", "source_skill_position" }, .references = "message_skill", .referenced = &.{ "admission_id", "position" } },
             .{ .columns = &.{ "source_operation_id", "source_item_ordinal" }, .references = "model_output_item", .referenced = &.{ "operation_id", "item_ordinal" } },
         },
         .checks = &.{
             "(entry_kind=3)=(source_item_ordinal IS NOT NULL)",
             "(turn_id IS NULL)=(source_catalog_position IS NOT NULL)",
             "source_catalog_position IS NULL OR source_catalog_position=session_position",
+            "(source_skill_admission_id IS NULL)=(source_skill_position IS NULL)",
+            "(entry_kind=4)=(source_skill_position IS NOT NULL)",
             "(entry_kind=1 AND source_admission_id IS NOT NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL) OR " ++
                 "(entry_kind=2 AND source_admission_id IS NULL AND ((source_revision IS NOT NULL AND source_catalog_position IS NULL) OR (source_revision IS NULL AND source_catalog_position IS NOT NULL)) AND source_operation_id IS NULL) OR " ++
-                "(entry_kind=3 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NOT NULL)",
+                "(entry_kind=3 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NOT NULL) OR " ++
+                "(entry_kind=4 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL)",
         },
         .without_rowid = true,
     },
@@ -1443,7 +1498,7 @@ pub const mysql_session = [_][:0]const u8{
     "SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin",
     "SET SESSION sql_mode='ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'",
     // `@list` of a Session's tool names whole: MySQL's default cuts at 1024.
-    std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{protocol.max_tool_names_bytes}),
+    std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{tool_name.max_names_bytes}),
 };
 
 const MysqlObjects = union(enum) { refused: []const u8, objects: []const Object };
@@ -1953,7 +2008,7 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     try sqlite.exec(database, version_sql);
     const statement = try sqlite.prepare(database, store_meta_sql);
     defer _ = c.sqlite3_finalize(statement);
-    try sqlite.bindText(statement, 1, protocol.wire_version);
+    try sqlite.bindText(statement, 1, wire_version);
     try sqlite.bindText(statement, 2, selector);
     try sqlite.expectDone(statement);
     try sqlite.exec(database, "COMMIT");
@@ -2104,9 +2159,9 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'");
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreVersion;
-        var version: protocol.Bounded(16) = .{};
+        var version: Bounded(16) = .{};
         try sqlite.readText(statement, 0, &version);
-        if (!version.eql(protocol.wire_version)) return error.WrongStoreVersion;
+        if (!version.eql(wire_version)) return error.WrongStoreVersion;
     }
     {
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_id'");
@@ -2118,7 +2173,7 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_selector'");
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreIdentity;
-        var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
+        var stored_selector: Bounded(store_path.max_bytes) = .{};
         try sqlite.readText(statement, 0, &stored_selector);
         if (!stored_selector.eql(selector)) {
             if (identity_mismatch) |out| out.saved_selector = stored_selector;
@@ -2352,9 +2407,9 @@ test "schema 57 migration creates the canonical archive objects on SQLite and My
 test "schema 57 preserves Commands and stop references while adding nullable archive intent" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var path_buffer: [protocol.max_store_bytes + 32]u8 = undefined;
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
     const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/store.sqlite3", .{root}, 0);
     var raw: ?*c.sqlite3 = null;
     defer _ = c.sqlite3_close(raw);
@@ -2411,7 +2466,7 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try openExisting(std.testing.io, database, root, null);
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
-    try std.testing.expect(try metaEquals(database, "wire_version", protocol.wire_version));
+    try std.testing.expect(try metaEquals(database, "wire_version", wire_version));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT * FROM core_command)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM original_commands)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at FROM session_stop)"));
