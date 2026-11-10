@@ -72,7 +72,9 @@ requests: Requests = undefined,
 status: Status = undefined,
 terminal: *Terminal = undefined,
 screen: *Screen = undefined,
-app_content: Transcript = undefined,
+// `begin` points it at the live Document. Shared paths such as `idleReader`
+// ask whether it drags, so until then it holds no press or drag.
+app_content: Transcript = .{ .document = undefined },
 app_input: InputArea = undefined,
 app_screen: AppScreen.Session = undefined,
 app_preview: Transcript = undefined,
