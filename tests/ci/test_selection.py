@@ -122,7 +122,11 @@ class BuildModuleTest(unittest.TestCase):
             with self.subTest(module=module):
                 result = select([module], "review", AVAILABLE)
                 selected = set(result["targets"])
-                self.assertTrue(selected)
+                # An edit to the build always type-checks it for Darwin, and
+                # selects a target whenever the module defines one a PR runs.
+                self.assertTrue(result["typecheck_macos"])
+                owned = {step for step, owner in defined.items() if owner == module}
+                self.assertEqual(bool(selected), bool(owned & selectable) or bool(targets), module)
                 self.assertLessEqual(set(targets) if targets != BUILD_HUB else set(), AVAILABLE)
                 covered = (selected | {case for broad, cases in FIXTURE_COVERS.items() if broad in selected for case in cases}
                            | (CHECK_COVERS if selected & {"check", "check-full"} else set())

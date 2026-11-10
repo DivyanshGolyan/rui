@@ -454,6 +454,11 @@ BUILD_MODULES = {
     # portable logic root. check and check-full run the same unit binaries,
     # and test runs them alone.
     "build/unit.zig": ("test", "test-full", "test-logic"),
+    # The Go measurement packages and the macOS measure-* campaigns, which no PR runs.
+    "build/measurement.zig": ("measurement-check",),
+    # Cross-compiles and the Darwin type-check. The typecheck-macos job runs it
+    # on every Zig edit (TYPECHECK_INPUTS); promotion builds every cross target.
+    "build/cross.zig": (),
     # Darwin linking, the screen library's name and the Mac unit-root limits.
     # The unit roots and one screen fixture link and load what it names; it is
     # a Mac path, so ready PRs run these on Mac too.
