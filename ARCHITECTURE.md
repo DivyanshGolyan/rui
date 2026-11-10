@@ -904,8 +904,10 @@ Each stream grants 16 KiB of receive credit, and the connection window is that t
 Every socket read lands in one shared 16 KiB buffer; the response body bytes for a stream are written from it straight to that Attempt's capture file and charged to shared scratch, and the stream's window reopens only after that write returned.
 Rui therefore holds no pending capture queue: in-flight response bytes are bounded by the open windows.
 
-Writes are synchronous on the execution owner.
-A disk that stalls on a write pauses the whole Host until it returns; this is the accepted trade for no writer thread and no queued capture bytes.
+The HTTP/2 Client runs on its own transport thread, so streams, PING answers and flow control keep moving while the execution owner waits on a Store round, a remote MySQL included.
+The execution owner still makes every decision, each as a short call into the transport under its lock: it launches a stream only after that Attempt's admission commits, cancels it, and takes each finished stream to seal and settle; it never holds that lock across a Store call, and the transport thread never touches the Store.
+Writes are synchronous on the transport thread.
+A disk that stalls on a write pauses every stream, and any execution step waiting on the transport's lock, until it returns; this is the accepted trade for no writer thread and no queued capture bytes.
 A failed write, or scratch exhaustion, ends only that stream, and its Attempt settles with `response_write_failed` or `response_scratch_exhausted`.
 
 Inactivity is per stream, in one shared timer list, with one PING per quiet connection.
@@ -1556,7 +1558,7 @@ Every later control or settlement rechecks its own canonical authority.
 
 ### Effect interfaces and evidence
 
-One reactor multiplexes provider streams and subprocess pipes.
+One reactor multiplexes provider streams on its own thread; the execution owner services subprocess pipes.
 Effect modules own handles, bounded windows and charged scratch, never SQLite or permission/retry policy.
 After commit, adapters materialize outbound requests from manifests/content into unlinked scratch; execution streams output to scratch.
 No transaction spans request construction, provider/process execution, target mutation or delivery.
