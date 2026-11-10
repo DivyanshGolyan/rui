@@ -14,8 +14,8 @@ the entire aggregate for native. When both are reached, selection emits `test`
 instead of the pair.
 Native tests that call the Store's engine-conformance seam also keep `test`
 for native-only changes in their import closure, so their MySQL pass runs in
-Linux CI. Shared Store inputs follow the Store rule in development and select
-both roots in review.
+Linux CI. Drafts run the roots a change reaches on Linux too, as review does;
+shared Store inputs select both roots, as `test`, in either phase.
 The Store root alone starts and verifies the live MySQL dialect check in Linux CI.
 
 Module ownership preserves each module's process globals. Executions are

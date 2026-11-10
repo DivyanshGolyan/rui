@@ -6,6 +6,7 @@ test {
     _ = @import("GroupedList.zig");
     _ = @import("OverviewLines.zig");
     _ = @import("Palette.zig");
+    _ = @import("skill_palette_tests.zig");
     _ = @import("Composer.zig");
     _ = @import("Transcript.zig");
     _ = @import("Root.zig");
