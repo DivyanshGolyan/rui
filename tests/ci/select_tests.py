@@ -442,6 +442,20 @@ RULES += ((("src/store.zig", "src/store/*", "!src/store/wire/*", "src/server_exe
 # builds. test_selection.BuildModuleTest holds every module and every target a
 # module defines to this map.
 BUILD_HUB = "build.zig"
+FIXTURE_TABLE = "build/fixtures.zig"
+FIXTURE_ROW = re.compile(r'^ *\.\{ \.step = "([a-z0-9-]+)",.*\},\n', re.M)
+
+
+def fixture_rows(before, after):
+    """The fixtures whose FIXTURE_TABLE row changed, or None when the edit
+    also changed something outside the rows. A removed row selects nothing."""
+    before, after = before or "", after or ""
+    if FIXTURE_ROW.sub("", before) != FIXTURE_ROW.sub("", after):
+        return None
+    rows = {match[1]: match[0] for match in FIXTURE_ROW.finditer(before)}
+    return {match[1] for match in FIXTURE_ROW.finditer(after) if rows.get(match[1]) != match[0]}
+
+
 BUILD_MODULES = {
     # The Rui every target builds or runs, and the libraries it links.
     "build/product.zig": BUILD_HUB,
@@ -456,6 +470,9 @@ BUILD_MODULES = {
     "build/unit.zig": ("test", "test-full", "test-logic"),
     # The Go measurement packages and the macOS measure-* campaigns, which no PR runs.
     "build/measurement.zig": ("measurement-check",),
+    # The table of simple process fixtures: an edit to one row selects that
+    # fixture alone (fixture_rows), any other edit every fixture it defines.
+    FIXTURE_TABLE: tuple(sorted(step for step, owner in build_files.steps().items() if owner == FIXTURE_TABLE)),
     # Cross-compiles and the Darwin type-check. The typecheck-macos job runs it
     # on every Zig edit (TYPECHECK_INPUTS); promotion builds every cross target.
     "build/cross.zig": (),
@@ -559,11 +576,12 @@ def matches(path, patterns):
 
 
 def select(paths, phase, available, graph=None, contents=None):
-    """`contents` maps a `CONTENT_RULES` path to its (before, after) text;
-    a path it leaves out counts as changed."""
+    """`contents` maps a `CONTENT_RULES` path or FIXTURE_TABLE to its
+    (before, after) text; a path it leaves out counts as changed throughout."""
     graph = graph or tree_graph()
     paths = [BUILD_HUB if BUILD_MODULES.get(path) == BUILD_HUB else path for path in paths]
     contents = contents or {}
+    rows = fixture_rows(*contents[FIXTURE_TABLE]) if FIXTURE_TABLE in paths and FIXTURE_TABLE in contents else None
     content_changed = {path for path, changed in CONTENT_RULES.items()
                        if path in paths and (path not in contents or changed(*contents[path]))}
     targets, native_targets, reasons = set(), set(), set()
@@ -571,6 +589,8 @@ def select(paths, phase, available, graph=None, contents=None):
     manual_checks = set()
     linux_memory_checks = False
     for path in paths:
+        if path == FIXTURE_TABLE and rows is not None:
+            continue
         reached = graph.targets(path)
         # A shortcut only adds its reason, and stops the fallbacks below; every
         # rule, LIVE_RULES included, still matches the path.
@@ -635,6 +655,10 @@ def select(paths, phase, available, graph=None, contents=None):
         if path in ("src/client.zig", "src/ResponseTiming.zig"):
             targets.add("test-full")  # Response wait/inactivity owner.
             native_targets.add("test-full")
+    if rows:
+        targets.update(rows)
+        native_targets.update(rows - LINUX_ONLY)
+        reasons.add("Fixture table: the fixtures whose rows changed")
     for checks in (targets, native_targets):
         if "test" in checks or {"test-native", "test-store"} <= checks:
             checks.difference_update({"test-native", "test-store"})
@@ -721,7 +745,7 @@ def main():
     head = subprocess.check_output(["git", "rev-parse", args.head], text=True).strip()
     result = select(paths, args.phase, available,
                     contents={path: (revision_text(base, path), revision_text(head, path))
-                              for path in CONTENT_RULES if path in paths})
+                              for path in (*CONTENT_RULES, FIXTURE_TABLE) if path in paths})
     result["base"] = base
     result["head"] = head
     print(json.dumps(result, indent=2))
