@@ -28,6 +28,8 @@ MAC_PATHS = (
     # The PTY launcher: Darwin revokes a terminal when its session leader
     # exits and keeps different hangup and EOF rules, so Linux can't vouch.
     "tests/integration/terminal_process.py", "tests/integration/terminal_leader.py",
+    # PTY backpressure and terminal restoration differ between kernels.
+    "tests/integration/terminal_restoration_cases.py",
     # The self-contained HTTP/2 client cannot import src/os, so its sockets,
     # waker and trust paths name the platform themselves.
     "src/h2/*",

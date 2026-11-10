@@ -2431,13 +2431,13 @@ Ctrl-P past the oldest says `No earlier message.` While an Action's choice holds
 Ctrl-B and Ctrl-F move the caret a character left and right, as in readline.
 Any Ctrl, Alt, Super, Hyper or Meta chord with no binding, a typed C0 control among them, on a character, a control or a named key such as an arrow, is dropped as it arrives, with a notice, and the draft stays: ESC followed by a key (Option as Meta, an Esc pressed just before a key, or a chord tmux re-encodes that way) and Kitty Alt chords, even with associated text, never insert the bare key, reject the draft or send it.
 ESC before a key that starts no sequence is Alt on that key as decoded alone: ESC ^H is Alt-Backspace, ESC CR (which arrives as ESC LF under ICRNL) is Alt-Enter, and ESC before a multibyte scalar drops that scalar; a combining mark or joined scalar that arrives after it is ordinary text.
-Alt-Enter adds a line like Shift-Enter and Alt-J in every form (ESC CR, ESC LF, Kitty `CSI 13;3u` and `CSI 27;3;13~`) and never sends: Ghostty sends Shift-Enter as ESC CR.
+Alt-Enter adds a line like Shift-Enter and Ctrl-J in every form (ESC CR, ESC LF, Kitty `CSI 13;3u` and `CSI 27;3;13~`) and never sends: Ghostty sends Shift-Enter as ESC CR.
 A bare Esc that expires (80 ms) before Enter is Esc, then Enter, which sends.
 Every binding needs its exact modifiers: a Kitty key that reports Shift is never its unshifted binding, even when its associated text or shifted key equals the base key, so Ctrl-Shift-J does not send and Ctrl-Shift-R does not recover.
 ESC ESC is Esc, and the second ESC starts whatever follows: an Esc just before a marked paste or an arrow keeps that input whole, so an ESC ESC arrow (urxvt Meta-arrow) is Esc then that arrow.
 ESC before P, X, ], ^ or _ begins a terminal string, never typed text.
 A pending ESC before Ctrl-C or Ctrl-D is discarded, so those still interrupt or end input.
-A terminal path can change a key before Rui reads it: tmux delivers Shift-Enter as Enter and Hyper or Meta chords as their bare keys, so while a draft is composed inside tmux the status says `In tmux, Shift-Enter sends · Alt-J adds a line`, and `/help` says so too.
+A terminal path can change a key before Rui reads it: tmux delivers Shift-Enter as Enter and Hyper or Meta chords as their bare keys, so while a draft is composed inside tmux the status says `In tmux, Shift-Enter sends · Ctrl-J adds a line`, and `/help` says so too.
 At an Action's choice any chord is refused, spends freshness and authorizes nothing.
 Shift alone stays text.
 An xterm modifyOtherKeys key (`CSI 27 ; modifier ; code ~`, which Ghostty's legacy table sends for modified Enter without being asked) decodes as the Kitty key with the same modifiers and no associated text, so its bindings mean the same: Shift-Enter adds a line, Ctrl-A moves to the line start, Ctrl-J sends, and an unbound Ctrl, Alt or Super chord is dropped as its Kitty form is.
@@ -3599,8 +3599,9 @@ The frame requires a private
 The URL travels only in stdin, never in argv, environment, files or
 refusal messages.
 Parsing wipes all JSON allocations, including failed
-parses; the connection handshake wipes the password and authentication
-buffer as soon as login finishes or fails.
+parses; the connection handshake wipes its authentication buffer as soon as
+login finishes or fails.
+The Store keeps its own copy of the login in Host memory for the Host's life, wiped when the Store closes, so it can reconnect.
 
 On MySQL the `store_owner` row owns the Store: open raises its `epoch`, and every write transaction first advances `commit_seq` only where both match what this Host last saw, so a Host that lost the Store fails its next write.
 `GET_LOCK` only refuses early a second Host on the same database.
@@ -3630,7 +3631,11 @@ Admission refusals use a single stdout
 or `mysql_binlog_unsafe`.
 Messages are static, never server diagnostics.
 A running MySQL Store that fences writes the same envelope with
-`store_fenced` before draining and exits 1 (D211); it does not reconnect.
+`store_fenced` before draining and exits 1 (D211).
+When the connection is lost around a COMMIT, the Store first reconnects, up to three times a second apart: it ends the old server session with `KILL`, takes `GET_LOCK` again once that session is gone, and reads `store_owner.commit_seq`.
+Every write transaction advances it by exactly one, so the value says whether the COMMIT landed.
+Landed is success and the Store carries on; not landed is reported as a lost connection, which still fences.
+Only when no reconnect succeeds does the outcome stay unknown (`CommitOutcomeUnknown`).
 
 Host information is a read-only, bounded `/v1/host-info` exchange for the canonical selected Store.
 A client first probes the existing `host.lock` with a nonblocking shared lock, without creating a Store or lock: no owner means unavailable even if a stale socket exists; an exclusive owner permits a protected socket request.
