@@ -401,6 +401,12 @@ pub fn browse(self: *Self, down: bool, page: bool) bool {
     return (end and self.newer_trimmed) or (!self.newer_trimmed and document.atBottom(self.textLayout(), self.height));
 }
 
+/// A drag held at the top or bottom row moves the view one row through
+/// the text it already holds: it never reads older pages or changes view.
+pub fn dragScroll(self: *Self, up: bool) void {
+    self.viewed().browse(self.textLayout(), !up, 1, self.height, null);
+}
+
 /// Scrolls the inspection page so line `line` begins in view, as little as
 /// it takes.
 pub fn revealLine(self: *Self, line: usize) void {

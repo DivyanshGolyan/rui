@@ -343,7 +343,7 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .screen = screen, .interrupted = interrupted, .lender = lender, .colour = screen.colour };
     self.startInput();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
-    self.app_content = .{ .document = &screen.live, .colour = self.colour };
+    self.app_content = .{ .document = &screen.live, .colour = self.colour, .handler = .{ .userdata = self, .on_notice = appNotice, .on_scroll = appDragScroll } };
     self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
     self.app_screen = .{ .content = &self.app_content, .input = &self.app_input, .userdata = self, .on_event = appEvent };
 }
@@ -367,6 +367,20 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = appEvent, .drawFn = appDraw };
+}
+
+/// What a drag in the Transcript did, on the status bar.
+fn appNotice(raw: *anyopaque, ctx: *vxfw.EventContext, text: []const u8) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const length = @min(text.len, self.notice_buffer.len);
+    @memcpy(self.notice_buffer[0..length], text[0..length]);
+    self.notice = self.notice_buffer[0..length];
+    ctx.redraw = true;
+}
+
+fn appDragScroll(raw: *anyopaque, _: *vxfw.EventContext, up: bool) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    self.screen.dragScroll(up);
 }
 
 fn appDecision(raw: *anyopaque, ctx: *vxfw.EventContext, decision: ConsentPolicy.Decision) !void {
@@ -490,6 +504,9 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .message => &screen.staging,
         .transcript, .inspection, .action => &screen.browsing,
     };
+    // Live output follows the latest rows; only a drag held at its top
+    // edge moves it, until the drag ends.
+    if (screen.view == .live and !self.app_content.dragging()) screen.live.top = null;
     const facts = try ctx.arena.create(vxfw.Text);
     const status = try ctx.arena.create(vxfw.Text);
     const facts_buffer = try ctx.arena.create([session_line.capacity]u8);
@@ -658,6 +675,109 @@ test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps th
         _ = self.submission.join();
         self.submission.close();
     }
+}
+
+test "App Session drag copies the live rows it crosses once, says so and clears" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const page = try tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+    defer page.close(std.testing.io);
+    var init: std.process.Init = undefined;
+    init.io = std.testing.io;
+    init.gpa = std.testing.allocator;
+    init.environ_map = &environ;
+    var interrupted: client.Cancellation = .{};
+    const self = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(self);
+    self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
+    const Hooks = struct {
+        fn leave(_: *anyopaque, _: *vxfw.EventContext, _: Outcome) !void {
+            return error.UnexpectedLeave;
+        }
+        fn upgrade(_: *anyopaque, _: *vxfw.EventContext) !void {
+            return error.UnexpectedUpgrade;
+        }
+        fn copy(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
+            return error.UnexpectedCopy;
+        }
+    };
+    var root: Root = .{ .overview = empty_app_text.widget() };
+    const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .upgrade = Hooks.upgrade, .copy = Hooks.copy }, .{ .depth = .none });
+    self.reading.opening = false;
+    self.poll_at = std.math.maxInt(i96);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
+    defer ctx.cmds.deinit(std.testing.allocator);
+    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+    for (0..40) |index| {
+        var line: [16]u8 = undefined;
+        try screen.live.append(try std.fmt.bufPrint(&line, "row {d}\n", .{index}));
+    }
+    _ = try widget_.draw(draw_context);
+    const shown = self.app_content.size.height;
+    try std.testing.expect(shown > 3 and shown < 40);
+    const content = self.app_content.widget();
+    const Clip = struct {
+        fn take(context: *vxfw.EventContext, buffer: []u8) []const u8 {
+            var length: usize = 0;
+            for (context.cmds.items) |command| if (command == .copy_to_clipboard) {
+                @memcpy(buffer[length..][0..command.copy_to_clipboard.len], command.copy_to_clipboard);
+                length += command.copy_to_clipboard.len;
+                std.testing.allocator.free(command.copy_to_clipboard);
+            };
+            context.cmds.clearRetainingCapacity();
+            return buffer[0..length];
+        }
+    };
+    var copied: [256]u8 = undefined;
+    const press = struct {
+        fn at(kind: vaxis.Mouse.Type, col: i16, row: u16) vxfw.Event {
+            return .{ .mouse = .{ .col = col, .row = @intCast(row), .button = .left, .mods = .{}, .type = kind } };
+        }
+    }.at;
+    // Rows drawn end "row 37", "row 38", "row 39"; the last row is an edge.
+    try content.handleEvent(&ctx, press(.press, 0, shown - 3));
+    try content.handleEvent(&ctx, press(.drag, 4, shown - 2));
+    _ = try widget_.draw(draw_context);
+    try std.testing.expect(self.app_content.dragging());
+    try content.handleEvent(&ctx, press(.release, 4, shown - 2));
+    try std.testing.expectEqualStrings("row 37\nrow 3", Clip.take(&ctx, &copied));
+    try std.testing.expectEqualStrings("Copied 2 lines", self.notice.?);
+    try std.testing.expect(!self.app_content.dragging());
+    // Held at the top edge, the live view scrolls through rows it already
+    // holds; released, it follows the latest rows again.
+    try content.handleEvent(&ctx, press(.press, 2, 1));
+    try content.handleEvent(&ctx, press(.drag, 0, 0));
+    for (ctx.cmds.items) |command| std.debug.assert(command != .copy_to_clipboard);
+    ctx.cmds.clearRetainingCapacity();
+    const before = self.app_content.first;
+    for (0..2) |_| {
+        try content.handleEvent(&ctx, .tick);
+        _ = try widget_.draw(draw_context);
+    }
+    ctx.cmds.clearRetainingCapacity();
+    try std.testing.expectEqual(Screen.ViewKind.live, screen.view);
+    try std.testing.expect(self.app_content.first.order(before) == .lt);
+    try content.handleEvent(&ctx, press(.release, 0, 0));
+    const first_row = 40 - @as(usize, shown) - 2;
+    var expected: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "row {d}\nrow {d}\nrow {d}\nrow", .{ first_row, first_row + 1, first_row + 2 }), Clip.take(&ctx, &copied));
+    _ = try widget_.draw(draw_context);
+    try std.testing.expect(self.app_content.first.order(screen.live.bottom(.{ .width = 80, .method = self.app_caps.width }, shown)) == .eq);
+    // A transcript at its top reads an older page in, but not under a
+    // press or drag: that waits for the release.
+    screen.view = .transcript;
+    defer screen.view = .live;
+    try std.testing.expect(self.idleReader().at_top);
+    try content.handleEvent(&ctx, press(.press, 0, 0));
+    try std.testing.expect(!self.idleReader().at_top);
 }
 
 /// A Session's input starts empty, and no frame of it has drawn a list yet:
@@ -1790,7 +1910,8 @@ fn idleReader(self: *const Self) reader_policy.Idle {
         .opening = self.reading.opening,
         .older_remain = self.transcript.plan.next() != null or self.transcript.older != null,
         .older_failed = self.transcript.older_failed,
-        .at_top = self.screen.transcriptAtTop(),
+        // An older page waits until a press or drag over the text ends.
+        .at_top = self.screen.transcriptAtTop() and !self.app_content.dragging(),
         .choice_open = self.screen.consent != null or self.app_consent.request != null,
         .action_named = self.live.work.first_action != null,
         .submission = self.submission.view() != null,

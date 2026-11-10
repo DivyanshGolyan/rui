@@ -33,7 +33,7 @@ pub const Handler = struct {
     userdata: *anyopaque,
     /// A click on a peer's name: the ID of the Session it names, which is
     /// the document's bytes, so copy it before the document changes.
-    on_open: *const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void,
+    on_open: ?*const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void = null,
     /// What a release did: `Copied N lines`, or why nothing was copied.
     on_notice: *const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void,
     /// A drag held at the top or bottom row moves the view one row, through
@@ -137,7 +137,7 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) anyerror!void
             ctx.consumeAndRedraw();
             if (selection.dragging) return copy(ctx, handler, try selecting.copy(ctx.alloc, self.document, .of(selection.anchor, selection.head)));
             if (!std.meta.eql(at, selection.press)) return;
-            if (selecting.opens(self.document, selection.anchor)) |id| return handler.on_open(handler.userdata, ctx, id);
+            if (selecting.opens(self.document, selection.anchor)) |id| return if (handler.on_open) |open| open(handler.userdata, ctx, id);
             const clicked = handler.on_click orelse return;
             if (at.row >= 0) if (self.rowPosition(self.laidFirst(), @intCast(at.row))) |position| try clicked(handler.userdata, ctx, position);
         },
