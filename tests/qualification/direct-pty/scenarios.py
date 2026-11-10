@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -201,7 +202,7 @@ def navigation(fixture, row):
     captures = set((fixture.home / ".config/rui/requests").glob("*.json"))
     def scrolled_back():
         # The answer's last line leaves the screen once the view is above the
-        # latest; the `↓` marker that says so is PR 2's.
+        # latest.
         return "TD4 history end" not in tty.screen.completed
 
     def history(first, browsing):
@@ -217,9 +218,15 @@ def navigation(fixture, row):
         # show; scrolled back, 19 do. These literal fixture anchors are
         # independent of Rui's viewport.
         expected = [f"History line {number:03d}" for number in range(first, min(first + (19 if browsing else 18), 100))]
-        actual = [line.strip() for line in tty.screen.completed.splitlines()
-                  if line.strip().startswith("History line ")]
+        lines = tty.screen.completed.splitlines()
+        actual = [found.group(0) for found in (re.match(r"History line \d{3}", line.strip()) for line in lines) if found]
         assert actual == expected, ("navigation history anchor/distance", actual, expected)
+        # Scrolled back, the `↓` marker sits at the right of the transcript's
+        # bottom row, and nothing new arrived below; at the latest it is gone.
+        marked = [line for line in lines if re.search(r"↓( \d+ new)?\s*$", line)]
+        assert len(marked) == (1 if browsing else 0), ("navigation marker", marked)
+        assert not browsing or (expected[-1] in marked[0] and marked[0].rstrip().endswith(" ↓")), \
+            ("navigation marker row", marked, expected[-1])
         tty.send(b"\x15")
         tty.draft("", 2)
     history(82, False)
@@ -236,7 +243,8 @@ def navigation(fixture, row):
         for step in row.get("middle", []):
             generation = tty.screen.generation
             chunks(tty, step["chunks"])
-            tty.wait(scrolled_back, label="navigation intermediate movement", after=generation)
+            if not step.get("still"):
+                tty.wait(scrolled_back, label="navigation intermediate movement", after=generation)
             history(step["first_history"], True)
     generation = tty.screen.generation
     chunks(tty, row["return_chunks"])
