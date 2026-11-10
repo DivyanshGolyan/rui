@@ -232,7 +232,7 @@ class AdmissionTest(unittest.TestCase):
         env = dict(CHANGE_KIND='documentation', PLAN_RESULT='success', POLICY_RESULT='skipped',
                    TARGETS='[]', SPLIT='false', CODEGEN='false', BUILD_RESULT='skipped',
                    UNIT_RESULT='skipped', CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped',
-                   TYPECHECK_RESULT='skipped')
+                   TYPECHECK='false', TYPECHECK_RESULT='skipped')
 
         def run(values):
             return subprocess.run(['bash', '-euc', script], env=values,
@@ -255,7 +255,7 @@ class AdmissionTest(unittest.TestCase):
         script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
         env = dict(PLAN_RESULT='success', POLICY_RESULT='success', TARGETS='[]', SPLIT='false',
                    CODEGEN='false', BUILD_RESULT='skipped', UNIT_RESULT='skipped',
-                   CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped', TYPECHECK_RESULT='skipped')
+                   CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped', TYPECHECK='false', TYPECHECK_RESULT='skipped')
         self.assertEqual(subprocess.run(['bash', '-euc', script], env=env).returncode, 0)
         for kind in ('', 'docs', 'unknown'):
             with self.subTest(kind=kind):
@@ -424,6 +424,7 @@ class CandidatePlanTest(unittest.TestCase):
                         self.assertEqual(output['linux_split'], str(split_build(linux)).lower())
                         self.assertEqual(output['linux_codegen'], str(codegen).lower())
                         self.assertEqual(output['cache_execution'], str(selection['cache_execution_checks']).lower())
+                        self.assertEqual(output['typecheck_macos'], str(selection['typecheck_macos']).lower())
                         self.assertEqual(output['linux_memory'], str(selection['linux_memory_checks']).lower())
                         self.assertEqual(json.loads(output['policy_skips']), selection['policy_skips'])
                         required = event == 'pull_request' and phase == 'review'
@@ -460,7 +461,7 @@ class CandidatePlanTest(unittest.TestCase):
         for key in ('linux_matrix', 'macos_matrix'):
             self.assertEqual(output[key], '{"include": []}', key)
         for key in ('native', 'upgrade', 'retry', 'linux_split', 'macos_split', 'linux_codegen',
-                    'linux_memory', 'cache_execution'):
+                    'linux_memory', 'cache_execution', 'typecheck_macos'):
             self.assertEqual(output[key], 'false', key)
 
     def test_executed_plan_uses_pinned_tree_and_recomputes_after_base_change(self):
@@ -540,7 +541,7 @@ class CandidatePlanTest(unittest.TestCase):
     def test_future_selector_obligations_veto_documentation(self):
         for key, value in (('targets', ['test-logic']), ('native_targets', ['test-logic']),
                            ('native_required', True), ('mac_required', True), ('upgrade_required', True),
-                           ('server_targets', ['test-logic']), ('cache_execution_checks', True),
+                           ('server_targets', ['test-logic']), ('cache_execution_checks', True), ('typecheck_macos', True),
                            ('linux_memory_checks', True), ('manual_checks', ['diagnostic'])):
             with self.subTest(obligation=key), PlanFixture() as fixture:
                 path = fixture.repo / 'tests/ci/select_tests.py'
