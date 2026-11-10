@@ -66,6 +66,8 @@ const observeUnprocessedCompletions = server_host.observeUnprocessedCompletions;
 const AttemptOwner = struct {
     token: execution.CustodyToken = undefined,
     binding: store_module.AttemptBinding = undefined,
+    /// What the response settles as, read when the view opened.
+    purpose: store_module.ModelOperationKind = undefined,
 };
 
 const ProviderSlot = struct {
@@ -119,6 +121,8 @@ const BashPreparingSlot = struct {
 const ModelPreparingSlot = struct {
     token: execution.CustodyToken,
     binding: store_module.AttemptBinding,
+    /// Set once the view opens, before preparation starts.
+    purpose: ?store_module.ModelOperationKind = null,
 };
 
 /// A prepared request waiting for its credential. The request stays where
@@ -1852,7 +1856,7 @@ fn beginAdmittedAttempt(
     };
     // The view opens where it lives for the whole preparation; it never
     // moves.
-    host.store.openHistoricalView(binding, &preparation.view) catch |err| {
+    slot.model_preparing.purpose = host.store.openHistoricalView(binding, &preparation.view) catch |err| {
         if (err == error.SupersededByControl) {
             finishCustodyNow(host, slot);
             return .admitted;
@@ -2084,7 +2088,7 @@ fn launchPreparedRequest(
     // h2 holds the Transfer's stream from launch, so construct it in its
     // final slot and keep that union arm active through completion and deinit.
     moveSlot(host, slot, .provider, .{
-        .owner = .{ .token = token, .binding = binding },
+        .owner = .{ .token = token, .binding = binding, .purpose = owner.purpose.? },
         .rejection = served.credential.rejection(lease),
     });
     const active = &slot.provider;
@@ -2335,10 +2339,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
     };
     defer event_data.deinit();
     traceOperation(host, "validation_started", owner.binding);
-    const operation = host.store.modelOperationKind(owner.binding) catch |err| {
-        if (err != error.SupersededByControl) fenceDispatch(host, "model operation purpose", err);
-        return .cleanup;
-    };
+    const operation = owner.purpose;
     metadata.fail_writes = host.hooks.fails(.response_metadata);
     output_decode.interpret(&workspace.interpret, codec, host.io, response.file, response.length, &metadata, event_data, operation, .{
         .openai = openai_model.slice(),
@@ -3614,7 +3615,7 @@ test "preparing slots belong to their live preparations" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: model_adapter.Preparation = undefined;
-    try storage.openHistoricalView(binding_a, &preparation.view);
+    _ = try storage.openHistoricalView(binding_a, &preparation.view);
     try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     var preparation_active = true;
     defer if (preparation_active) preparation.cancel();
@@ -3948,7 +3949,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     var slots = [_]ExecutionSlot{.{ .model_preparing = .{ .token = token, .binding = binding } }};
     var preparation: model_adapter.Preparation = undefined;
     var retained: ?named_scratch.Owner = null;
-    try storage.openHistoricalView(binding, &preparation.view);
+    _ = try storage.openHistoricalView(binding, &preparation.view);
     try preparation.init(
         std.testing.io,
         root,

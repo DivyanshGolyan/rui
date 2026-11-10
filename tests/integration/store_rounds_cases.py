@@ -48,9 +48,10 @@ BUDGET = {
     # Each later operation, exact.
     "commits": 3,
     "write_round_trips": 22,
-    # Any operation, upper bound: today's timer polls and the observe loop
-    # below make the total vary (58 to 82 over three runs on main 59d5c7b3).
-    "round_trips": 90,
+    # Any operation, upper bound: timer polls, the observe loop below and
+    # history read one round at a time make the total vary (59 to 75 over
+    # four runs once preparation stopped re-checking its Attempt).
+    "round_trips": 85,
     # Over IDLE_SECONDS with no Session, upper bound (10 on main 59d5c7b3).
     "idle_round_trips": 10,
 }

@@ -1439,9 +1439,11 @@ pub const Store = struct {
 
     /// Opens the view in `out`, where it stays until it closes: a view
     /// borrows its own buffers, so it never moves.
-    pub fn openHistoricalView(self: *Store, binding: AttemptBinding, out: *HistoricalView) !void {
-        _ = try model_settlement_domain.checkAttempt(self, binding);
+    /// Returns the Attempt's purpose, which its settlement decodes by.
+    pub fn openHistoricalView(self: *Store, binding: AttemptBinding, out: *HistoricalView) !ModelOperationKind {
+        const purpose = try model_settlement_domain.checkAttempt(self, binding);
         out.* = .{ .store = self, .binding = binding };
+        return purpose;
     }
 
     pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
