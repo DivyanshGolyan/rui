@@ -1430,7 +1430,7 @@ fn Settlement(comptime A: type) type {
         /// The row of an identity: the batch's, inserting it at its first
         /// use when the lookup found none. An identity the batch did not
         /// collect (a first item too big for one) costs its own lookup
-        /// round, and a second when it inserts.
+        /// round; its insert joins the next.
         fn content(s: *Self, batch: *Batch, imported: content_domain.Import) !ContentRow {
             if (batch.find(&imported)) |identity| {
                 if (identity.row.content_id != 0) return .{ .id = identity.row.content_id, .fresh = false };
@@ -1443,7 +1443,6 @@ fn Settlement(comptime A: type) type {
             try runSettlement(s.a);
             if (value.found) |found| return .{ .id = found.content_id.get(), .fresh = false };
             const id = try content_domain.insertRow(s.a, &value);
-            try s.a.run();
             return .{ .id = id, .fresh = true };
         }
 

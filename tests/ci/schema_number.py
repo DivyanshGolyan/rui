@@ -13,7 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from test_store_schema_version import SCHEMA, schema_version
+from release_numbers import SCHEMA, schema_version
 
 ROOT = Path(__file__).resolve().parents[2]
 

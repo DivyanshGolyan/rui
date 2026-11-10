@@ -16,7 +16,7 @@ from textwrap import dedent
 from unittest.mock import patch
 
 import build_files
-from select_tests import (BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES,
+from select_tests import (BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES,
                           POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, TEST_CODE, UNIT_ROOTS, Graph, execution_batches, matches, select,
                           setup_requirements, tree_graph)
 from qualification import NATIVE, RESOURCES, qualification, shards
@@ -99,6 +99,19 @@ class BuildModuleTest(unittest.TestCase):
         modules = {path.relative_to(build_files.ROOT).as_posix() for path in build_files.files()}
         self.assertEqual(modules - {"build.zig"}, BUILD_MODULES.keys())
 
+    def test_a_hub_module_edit_selects_what_a_build_zig_edit_does(self):
+        hub = select(["build.zig"], "review", AVAILABLE)
+        for module, targets in BUILD_MODULES.items():
+            if targets == BUILD_HUB:
+                with self.subTest(module=module):
+                    self.assertEqual(select([module], "review", AVAILABLE), hub)
+
+    def test_checks_read_every_build_file(self):
+        # A read of build.zig alone misses the targets and calls build/ modules hold.
+        read = re.compile(r"""build\.zig["']\)\.read_text\(""")
+        readers = [path.name for path in Path(__file__).parent.glob("*.py") if read.search(path.read_text())]
+        self.assertEqual(readers, [], "read the build with build_files.steps() or build_files.source()")
+
     def test_a_module_edit_selects_the_targets_it_defines(self):
         # Targets some selection can name. A module that defines one and does
         # not select it would let an edit to that target's wiring skip it.
@@ -109,13 +122,18 @@ class BuildModuleTest(unittest.TestCase):
             with self.subTest(module=module):
                 result = select([module], "review", AVAILABLE)
                 selected = set(result["targets"])
-                self.assertTrue(selected)
-                self.assertLessEqual(set(targets), AVAILABLE)
+                # An edit to the build always type-checks it for Darwin, and
+                # selects a target whenever the module defines one a PR runs.
+                self.assertTrue(result["typecheck_macos"])
+                owned = {step for step, owner in defined.items() if owner == module}
+                self.assertEqual(bool(selected), bool(owned & selectable) or bool(targets), module)
+                self.assertLessEqual(set(targets) if targets != BUILD_HUB else set(), AVAILABLE)
                 covered = (selected | {case for broad, cases in FIXTURE_COVERS.items() if broad in selected for case in cases}
                            | (CHECK_COVERS if selected & {"check", "check-full"} else set())
                            | ({"test-native", "test-store"} if "test" in selected else set()))
                 self.assertLessEqual({step for step, owner in defined.items() if owner == module} & selectable, covered)
-                self.assertLessEqual(set(targets), covered)
+                if targets != BUILD_HUB:
+                    self.assertLessEqual(set(targets), covered)
 
 
 class SelectionTest(unittest.TestCase):
@@ -476,9 +494,20 @@ class SelectionTest(unittest.TestCase):
                                              ('false', 'success', 'failure')):
                 cases.append((targets, 'success', 'success', build, native, False, expected,
                               typecheck, 'false', 'skipped', codegen, result))
-        for targets, plan, policy, build, native, private, expected, typecheck, split, unit, codegen, codegen_result in cases:
+        # Above, the plan selects the type-check exactly when it selects targets.
+        cases = [(*case, 'false' if case[0] in ('', '[]') else 'true') for case in cases]
+        # A selection without compile inputs runs targets but no type-check,
+        # and a type-check the plan did not select must not have run.
+        for typecheck, expected in (('skipped', 'success'), ('success', 'failure'), ('failure', 'failure')):
+            cases.append(('["test-logic"]', 'success', 'success', 'success', 'success', False, expected,
+                          typecheck, 'false', 'skipped', 'false', 'skipped', 'false'))
+        for typecheck, expected in (('success', 'success'), ('skipped', 'failure'), ('failure', 'failure')):
+            cases.append(('[]', 'success', 'success', 'skipped', 'skipped', False, expected,
+                          typecheck, 'false', 'skipped', 'false', 'skipped', 'true'))
+        for (targets, plan, policy, build, native, private, expected, typecheck, split, unit, codegen, codegen_result,
+             typecheck_selected) in cases:
             with self.subTest(targets=targets, plan=plan, policy=policy, build=build, native=native, private=private,
-                              typecheck=typecheck, split=split, unit=unit):
+                              typecheck=typecheck, typecheck_selected=typecheck_selected, split=split, unit=unit):
                 needs = SimpleNamespace(plan=SimpleNamespace(result=plan, outputs=SimpleNamespace(targets=targets)))
                 github = SimpleNamespace(event=SimpleNamespace(repository=SimpleNamespace(private=private)))
                 admitted = eval(expression, {'__builtins__': {}, 'always': lambda: True,
@@ -493,6 +522,7 @@ class SelectionTest(unittest.TestCase):
                                             env={**os.environ, 'TARGETS': targets, 'PLAN_RESULT': plan,
                                                  'POLICY_RESULT': policy, 'BUILD_RESULT': build,
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
+                                                 'TYPECHECK': typecheck_selected,
                                                  'SPLIT': split, 'UNIT_RESULT': unit,
                                                  'CODEGEN': codegen, 'CODEGEN_RESULT': codegen_result})
                     actual = 'success' if result.returncode == 0 else 'failure'
@@ -1229,6 +1259,18 @@ fi
             ["host-launch-integration"], ["check-full"],
         ])
         self.assertEqual(execution_batches([]), [])
+
+    def test_macos_type_check_runs_only_for_what_it_compiles(self):
+        for path in ("src/TerminalText.zig", "build.zig", "build/darwin.zig", "build.zig.zon", "src/host_launch.c",
+                     "src/vaxis-parser.patch", "src/fetch_dependencies.sh", ".github/actions/setup/action.yml",
+                     # Embedded, or a module build.zig adds and Zig embeds.
+                     "src/model_instructions.txt", "src/store/migration_baseline_rows.sql", "openapi.json"):
+            self.assertTrue(select([path], "review", AVAILABLE)["typecheck_macos"], path)
+        for path in ("tests/integration/terminal_leader.py", "tests/ci/quarantine.json", "tests/ci/select_tests.py",
+                     ".github/workflows/check.yml", "clients/ts/src/wire.ts", "README.md"):
+            self.assertFalse(select([path], "review", AVAILABLE)["typecheck_macos"], path)
+        self.assertTrue(select(["tests/ci/quarantine.json", "src/TerminalText.zig"], "development",
+                               AVAILABLE)["typecheck_macos"])
 
     def test_cache_proof_tracks_cache_policy_not_every_runtime_edit(self):
         for path in ("build.zig", ".github/actions/setup/action.yml", "tests/ci/cache_execution.py",
