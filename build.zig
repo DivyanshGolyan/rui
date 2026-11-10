@@ -533,6 +533,20 @@ pub fn build(b: *std.Build) void {
     overview_integration.addFileArg(ci.path(release_safe));
     b.step("overview-integration", "Run the overview's groups, counts line, memory and clicks as a real terminal shows them")
         .dependOn(&overview_integration.step);
+    const model_picker_integration = b.step("model-picker-integration", "Run the model picker through a plain PTY");
+    const model_picker = screen_module.screenCommand(b, screen, &.{"python3"});
+    model_picker.addFileArg(b.path("tests/integration/model_picker_integration.py"));
+    model_picker.addFileArg(ci.path(release_safe));
+    model_picker_integration.dependOn(&model_picker.step);
+    for ([_][]const u8{
+        "tests/integration/model_picker_signin_integration.py",
+        "tests/integration/model_picker_failure_integration.py",
+    }) |path| {
+        const run = screen_module.screenCommand(b, screen, &.{"python3"});
+        run.addFileArg(b.path(path));
+        run.addFileArg(ci.path(release_safe));
+        model_picker_integration.dependOn(&run.step);
+    }
     const host_process_test = b.addSystemCommand(&.{"python3"});
     host_process_test.addFileArg(b.path("tests/integration/host_process_test.py"));
     b.step("host-process-test", "Run the bounded Host process fixture's own failure checks").dependOn(&host_process_test.step);

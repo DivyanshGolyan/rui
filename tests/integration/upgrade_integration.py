@@ -841,7 +841,9 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
                 receipt = exit_on_sigint(screen, process, "restored primary and retained cleanup receipt after SIGINT")
                 assert b"ReleaseChecksumMismatch" in receipt, receipt.decode()
                 assert b"cleanup also failed (AccessDenied)" in receipt, receipt.decode()
-                assert os.fsencode(retained) in receipt, ("restored output lost retained cleanup custody", receipt.decode())
+                # Rui names the stage by its real path: macOS's temporary
+                # directory sits under the /var -> /private/var link.
+                assert os.fsencode(retained.resolve()) in receipt, ("restored output lost retained cleanup custody", receipt.decode())
                 assert retained.is_dir() and c.link.resolve() == c.original
                 assert host.poll() is None and c.status()["instance"] == previous["instance"]
                 assert (c.home / ".config/rui/codex.json").read_bytes() == credential

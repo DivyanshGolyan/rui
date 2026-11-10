@@ -128,6 +128,9 @@ FIXTURES = {
                               I + "overview_clicks_cases.py"), (),
                              ("src/Overview.zig", "src/overview_view.zig", "src/OverviewLines.zig", "src/GroupedList.zig",
                               "src/process_memory.zig", "src/host_identity.zig", "src/host_identity.c")),
+    "model-picker-integration": ((I + "model_picker_integration.py", I + "model_picker_signin_integration.py",
+                                  I + "model_picker_failure_integration.py"), (),
+                                 ("src/Overview.zig", "src/SessionFrontend.zig", "src/model_picker_view.zig")),
     "human-cli-integration": ((I + "human_cli_integration.py",), ("src/terminal_notice_test.zig",),
                               (CALLER, "src/SessionFrontend.zig", "src/Overview.zig", "src/request_wait.zig",
                                "src/cli_args.zig", "src/slash_commands.zig")),
@@ -554,7 +557,7 @@ CHECK_COVERS = {
     "descriptor-capacity-integration", "request-wait-integration",
     "activity-integration", "preference-policy-integration", "session-list-integration",
     "peer-integration", "sender-identity-integration", "conversation-page-integration",
-    "host-allocator-integration", "host-process-test", "human-cli-integration",
+    "host-allocator-integration", "host-process-test", "human-cli-integration", "model-picker-integration",
     "canonical-failure-integration",  # human_cli_integration.main executes all cases.
     "terminal-restoration-integration",  # Same full fixture in the human CLI gate.
 }
@@ -588,6 +591,7 @@ POLICY_SELF_CHECKS = (
 # A step missing here still builds, fetching them on demand.
 SCREEN_TARGETS = frozenset({"check", "check-full", "terminal-restoration-integration", "canonical-failure-integration",
                             "host-launch-integration", "upgrade-integration", "human-cli-integration", "overview-integration",
+                            "model-picker-integration",
                             "skills-integration", "bash-recovery-integration", "renderer-contracts-selftest",
                             "direct-pty", "direct-pty-controls", "input-equivalence", "screen-emulator"})
 
