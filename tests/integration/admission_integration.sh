@@ -33,7 +33,9 @@ session_refs() {
 wire_configure() {
     PYTHONPATH="$root/tests/integration" python3 - "$rui" "$store" "$ready" "$@" <<'PYWIRE'
 import json, pathlib, socket, subprocess, sys
+import os_semantics
 from host_process import WIRE_VERSION
+from product_defaults import compaction_trigger
 binary, store, ready, key, record, encoded, *drop = sys.argv[1:]
 values = json.loads(encoded)
 fields = ('workspace', 'provider', 'model', 'instructions', 'tools', 'permission_mode', 'output_schema')
@@ -42,7 +44,7 @@ configuration = {name: {'state': 'value', 'value': values[name]} if name in valu
 # domain rejections, which the parser only reaches with a complete spec.
 if configuration['tools']['state'] == 'omitted': configuration['tools'] = {'state': 'value', 'value': []}
 if configuration['permission_mode']['state'] == 'omitted': configuration['permission_mode'] = {'state': 'value', 'value': 'bypass'}
-configuration['compaction_trigger'] = {'state': 'value', 'value': '115200'}
+configuration['compaction_trigger'] = {'state': 'value', 'value': str(compaction_trigger('codex', None))}
 configuration['reasoning_effort'] = {'state': 'null'}
 body = json.dumps({'version': WIRE_VERSION, 'kind': 'configure', 'store': store,
                    'key': key, 'session': '', 'configuration': configuration}, separators=(',', ':')).encode()
@@ -54,7 +56,7 @@ if not drop:
         '--record', record, '--kind', 'configure'], timeout=15).returncode)
 assert drop == ['after-commit'], drop
 socket_path = dict(part.split('=', 1) for part in pathlib.Path(ready).read_text().split()[1:])['socket']
-with socket.socket(socket.AF_UNIX) as client:
+with os_semantics.unix_stream() as client:
     client.settimeout(15)
     client.connect(socket_path)
     client.sendall(('POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\n'
@@ -195,8 +197,9 @@ if [ "$mode" = fresh-defaults ]; then
 fi
 
 # SIGKILL skips capture.abort; revisiting the same record recovers its temporary.
-capture_session=$(python3 - "$rui" "$store" "$records" "$root" <<'PYCAPTURE'
+capture_session=$(PYTHONPATH="$root/tests/integration" python3 - "$rui" "$store" "$records" "$root" <<'PYCAPTURE'
 import json, pathlib, subprocess, sys, time
+from host_process import close_stdin
 binary, store, records, workspace = sys.argv[1:]
 record = pathlib.Path(records) / 'capture-recovery.json'
 args = [binary, 'session', 'configure', '--store', store, '--record', str(record),
@@ -218,7 +221,7 @@ try:
 finally:
     writer.kill()
     writer.wait(timeout=5)
-    writer.stdin.close()
+    close_stdin(writer)
 assert temporary.exists()
 recovered = subprocess.run(args, input=b'new capture', capture_output=True, timeout=10)
 assert recovered.returncode == 0, recovered.stderr
@@ -305,7 +308,9 @@ done
 drain_socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$drain_ready")
 PYTHONPATH="$root/tests/integration" python3 - "$rui" "$drain_socket" "$drain_store" "$root" "$state" <<'PY'
 import json, os, pathlib, socket, subprocess, sys, time
+import os_semantics
 from host_process import WIRE_VERSION, is_peer_disconnect, preserve_failure_metadata, stop_process
+from product_defaults import compaction_trigger
 rui, socket_path, store, workspace, state = sys.argv[1:]
 state = pathlib.Path(state)
 body = json.dumps({
@@ -322,11 +327,11 @@ body = json.dumps({
         "tools": {"state": "value", "value": ["bash"]},
         "permission_mode": {"state": "value", "value": "bypass"},
         "output_schema": {"state": "omitted"},
-        "compaction_trigger": {"state": "value", "value": "244800"},
+        "compaction_trigger": {"state": "value", "value": str(compaction_trigger("codex", "gpt-6-sol"))},
         "reasoning_effort": {"state": "value", "value": "medium"},
     },
 }, separators=(",", ":")).encode()
-client = socket.socket(socket.AF_UNIX)
+client = os_semantics.unix_stream()
 client.settimeout(3)
 client.connect(socket_path)
 header = (
@@ -381,7 +386,8 @@ stop_host
 python3 - "$rui" "$store" <<'PY'
 import json, pathlib, select, socket, sys, time
 sys.path.insert(0, "tests/integration")
-import control_integration as control
+import control_fixture as control
+import os_semantics
 from host_process import WIRE_VERSION, HostDiagnostics, PeerCensus, dispose_all, stop_process
 
 store = pathlib.Path(sys.argv[2])
@@ -395,7 +401,7 @@ try:
         ordinary.append(peers.open("configure", lambda: control.open_partial(
             socket_path, "/v1/configure"), timeout=3))
     for _ in range(3):
-        client = socket.socket(socket.AF_UNIX)
+        client = os_semantics.unix_stream()
         client.settimeout(3)
         classification.append(client)
         client.connect(socket_path)
@@ -419,7 +425,7 @@ try:
     # Leave the next field unfinished so the streaming parser must await input.
     body = body[:-1] + b","
     def partial():
-        client = socket.socket(socket.AF_UNIX)
+        client = os_semantics.unix_stream()
         try:
             client.settimeout(3)
             client.connect(socket_path)
@@ -601,6 +607,7 @@ before_session=$(printf '%s' "$before_retry" | session_id)
 socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$ready")
 PYTHONPATH="$root/tests/integration" python3 - "$socket" "$store" "$main_session" <<'PY'
 import json, socket, sys
+import os_semantics
 from host_process import WIRE_VERSION
 socket_path, store, session = sys.argv[1:]
 body = json.dumps({
@@ -613,7 +620,7 @@ body = json.dumps({
     "sender_handle": None,
     "text": {"state": "value", "value": "unterminated"},
 }, separators=(",", ":")).encode()
-client = socket.socket(socket.AF_UNIX)
+client = os_semantics.unix_stream()
 client.connect(socket_path)
 client.sendall(
     ("POST /v1/message HTTP/1.1\r\n"
@@ -816,12 +823,13 @@ stop_host
 start_host
 PYTHONPATH="$root/tests/integration" python3 - "$ready" "$store" "$host_pid" <<'PYCRASH'
 import json, os, signal, socket, sys, time
+import os_semantics
 from host_process import WIRE_VERSION
 ready, store, pid = sys.argv[1:]
 fields = dict(part.split("=", 1) for part in open(ready).read().split()[1:])
 request = {"version":WIRE_VERSION, "kind":"configure", "store":store, "key":"crashed-first", "session":"", "configuration":{"workspace":{"state":"omitted"}, "provider":{"state":"omitted"}, "model":{"state":"omitted"}}}
 prefix = json.dumps(request)[:-2] + ',"instructions":{"state":"value","value":"'
-with socket.socket(socket.AF_UNIX) as connection:
+with os_semantics.unix_stream() as connection:
     connection.connect(fields["socket"])
     body = prefix.encode() + b'x' * 32768
     connection.sendall(b'POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: 1000000\r\nX-Rui-Wire-Version: ' + WIRE_VERSION.encode() + b'\r\n\r\n' + body)

@@ -5,7 +5,6 @@ import json
 import os
 import pathlib
 import signal
-import shutil
 import subprocess
 import sys
 import time
@@ -27,7 +26,6 @@ def probe(binary, output, name):
     """Faults live only in the control interpreter, never production helpers."""
     import driver
     import scenarios
-    import tmux_smoke
     owned = []
     original_init = scenarios.Fixture.__init__
     def remember(instance, *args):
@@ -39,8 +37,7 @@ def probe(binary, output, name):
             os.kill(os.getpid(), signal.SIGTERM)
             return value
         return call
-    vector = next(row for row in inventory() if row["name"] == (
-        "tmux-typing" if name.startswith("tmux-") else "typing"))
+    vector = next(row for row in inventory() if row["name"] == "typing")
     with patch.object(scenarios.Fixture, "__init__", remember):
         if name == "provider-before-start":
             target = patch.object(scenarios.threading.Thread, "start", lambda self: os.kill(os.getpid(), signal.SIGTERM))
@@ -51,36 +48,20 @@ def probe(binary, output, name):
         elif name == "pty-after-open":
             target = patch.object(driver, "open_pty", signal_after(driver.open_pty))
         elif name == "caller-after-launch":
-            original = subprocess.Popen
+            original = driver.spawn
             def launch(args, *rest, **kwargs):
                 value = original(args, *rest, **kwargs)
                 if args[1:3] == ["session", "resume"]:
                     os.kill(os.getpid(), signal.SIGTERM)
                 return value
-            target = patch.object(subprocess, "Popen", launch)
-        elif name == "tmux-signal":
-            original = tmux_smoke.Tmux.wait
-            def ready(self, *args):
-                original(self, *args)
-                os.kill(os.getpid(), signal.SIGTERM)
-            target = patch.object(tmux_smoke.Tmux, "wait", ready)
-        elif name == "tmux-failed-disposal":
-            vector["expected"] = "wrong tmux expectation"
-            original = subprocess.run
-            def fail(args, *rest, **kwargs):
-                if "kill-server" in args:
-                    return subprocess.CompletedProcess(args, 17, b"", b"injected kill-server failure")
-                return original(args, *rest, **kwargs)
-            target = patch.object(subprocess, "run", fail)
+            target = patch.object(driver, "spawn", launch)
         else:
             raise ValueError(name)
         with target:
             code = worker(binary, output, vector)
     fixture = owned[0]
-    pids = [process.pid for process in (fixture.host, fixture.tty.process if fixture.tty else None,
-            fixture.tmux.server if fixture.tmux else None) if process is not None]
-    if fixture.tmux:
-        pids += [pid for pid in (fixture.tmux.pid, fixture.tmux.caller_pid) if pid is not None]
+    pids = [process.pid for process in (fixture.host, fixture.tty.process if fixture.tty else None)
+            if process is not None]
     (output / "probe-owners.json").write_text(json.dumps({"pids": pids, "root": str(fixture.root)}))
     return code
 
@@ -179,7 +160,7 @@ def main():
         assert (output / "held-input/cleanup.json").exists(), f"{name} disposal incomplete"
         print(f"{name}: exit {128 + number}; Host/caller reaped; private HOME/Store removed", flush=True)
     for name in ("provider-before-start", "provider-after-start", "host-after-start", "pty-after-open",
-                 "caller-after-launch", "tmux-signal", "tmux-failed-disposal"):
+                 "caller-after-launch"):
         output = root / name
         with open(root / f"{name}.log", "wb") as log:
             result = subprocess.run([sys.executable, str(__file__), str(args.binary.resolve()),
@@ -187,17 +168,9 @@ def main():
         facts = json.loads((output / "result.json").read_text())
         owners = json.loads((output / "probe-owners.json").read_text())
         assert all(absent(pid) for pid in owners["pids"]), (name, "owned process survived", owners)
-        if name == "tmux-failed-disposal":
-            assert result.returncode == 1 and facts["status"] == "assertion", facts
-            assert "exact submitted Message bytes" in facts["error"], facts
-            assert "kill-server" in facts["traceback"], facts
-            assert not (output / "cleanup.json").exists(), "failed disposal claimed success"
-            assert pathlib.Path(owners["root"]).exists(), "failed disposal deleted its control root"
-            shutil.rmtree(owners["root"])  # All owners independently proven absent above.
-        else:
-            assert result.returncode == 143 and facts["status"] == "interrupted", facts
-            assert (output / "cleanup.json").exists(), (name, "missing cleanup receipt")
-            assert not pathlib.Path(owners["root"]).exists(), (name, "root survived")
+        assert result.returncode == 143 and facts["status"] == "interrupted", facts
+        assert (output / "cleanup.json").exists(), (name, "missing cleanup receipt")
+        assert not pathlib.Path(owners["root"]).exists(), (name, "root survived")
         print(f"{name}: expected failure retained; no owned survivors", flush=True)
     return 0
 

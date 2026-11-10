@@ -16,6 +16,7 @@ import time
 
 import host_process
 from host_process import HostDiagnostics, PeerCensus, ReleaseGate, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process, wait_for_execution_release
+from product_defaults import DEFAULTS, compaction_trigger, start_effort
 from model_fixture import (
     ROOT, RUI, FailureEndpoint, ResponseSpec, SuccessEndpoint,
     assert_model_cleanup_census, classification_population, command,
@@ -25,6 +26,7 @@ from model_fixture import (
     sse_answer, sse_many, sse_tool_calls, start_command, start_host, stop_host,
     wait_for, wait_for_result_release, wait_model_cleanup,
 )
+from model_fixture import dispose_dispatch, stop_endpoint
 
 
 def history(items):
@@ -142,7 +144,8 @@ def failed_response_export_case(state, processes, endpoints):
                                  "--failed-response", part, *extra], capture_output=True, timeout=15,
                                 preexec_fn=fd256)
         if error is not None:
-            assert result.returncode == status and result.stdout == b"" and error.encode() in result.stderr, result
+            assert result.returncode == status and result.stdout == b"", result
+            assert all(part.encode() in result.stderr for part in ((error,) if isinstance(error, str) else error)), result
         else:
             assert result.returncode == 0 and result.stderr == b"", result
         return result.stdout
@@ -170,7 +173,7 @@ def failed_response_export_case(state, processes, endpoints):
     export("999999", "metadata", error="ContentNotFound")
     export(records[0][0]["operation"], "body", extra=("--profile", "full"), error="[profile_excludes_failed_response]", status=2)
     export(records[0][0]["operation"], "unknown", error="Accepted: body, metadata.", status=2)
-    export("0", "body", error="--operation 0: That is not an ID.", status=2)
+    export("0", "body", error=("--operation 0: ", "[id_malformed]"), status=2)
     stop_host(host)
     processes.remove(host)
     assert snapshot() == before, "export mutated canonical data, retained bytes or write timestamps"
@@ -344,45 +347,6 @@ def decode_model_evidence(value):
     return tuple(fields)
 
 
-def stop_endpoint(endpoint, endpoints):
-    thread = endpoints[endpoint]
-
-    def shutdown():
-        if thread.ident is not None:
-            try:
-                endpoint.shutdown()
-            except BaseException:
-                # A pre-effect refusal leaves serve_forever alive. Retry once,
-                # retaining the first failure even if retirement then succeeds.
-                dispose_all(endpoint.shutdown)
-                raise
-
-    def join():
-        if thread.ident is not None:
-            thread.join(timeout=5)
-            assert not thread.is_alive(), "Dispatch endpoint thread did not retire"
-
-    # shutdown/server_close may block; the join timeout is not a shutdown bound.
-    dispose_all(
-        shutdown,
-        endpoint.server_close,
-        join,
-    )
-    # dispose_all retains an active body error; inspect retirement rather than
-    # treating its return as proof that every disposal succeeded.
-    if endpoint.fileno() == -1 and not thread.is_alive():
-        del endpoints[endpoint]
-
-
-def dispose_dispatch(processes, endpoints, releases, *after):
-    dispose_all(
-        *(lambda process=process: stop_host(process) for process in processes),
-        *releases,
-        *(lambda endpoint=endpoint: stop_endpoint(endpoint, endpoints) for endpoint in tuple(endpoints)),
-        *after,
-    )
-
-
 def compaction_cases(state, processes, endpoints, releases):
     """Exercise compaction through ordinary intake, transport and recovery."""
     def compact_response(label, *, extra=None):
@@ -435,7 +399,8 @@ def compaction_cases(state, processes, endpoints, releases):
         processes.append(host)
         session = configure(state, store, f"{route}-config", None, "gpt-6-sol", instructions="baseline")
         settings = command("session", "inspect", "--store", store, "--session", session)["session"]
-        assert settings["compaction_trigger"] == "244800" and settings["output_reservation"] == "0", settings
+        assert settings["compaction_trigger"] == str(compaction_trigger("codex", "gpt-6-sol")), settings
+        assert settings["output_reservation"] == str(DEFAULTS.output_reservation), settings
         message(state, store, f"{route}-first", session, "covered user input")
         wait_for(lambda: len(endpoint.requests) == 2, "overflow followed by explicit compaction")
         compaction = json.loads(endpoint.requests[1])
@@ -487,7 +452,7 @@ def compaction_cases(state, processes, endpoints, releases):
         processes.append(host)
         patch(store, session, f"{route}-reset", "--compaction-trigger", "default", "--output-reservation", "default")
         current = command("session", "inspect", "--store", store, "--session", session)["session"]
-        assert current["compaction_trigger"] == "244800" and current["compaction_trigger_override"] == "244800", current
+        assert current["compaction_trigger"] == current["compaction_trigger_override"] == str(compaction_trigger("codex", "gpt-6-sol")), current
         assert current["output_reservation"] == "0" and current["output_reservation_override"] is None, current
         overflowed = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")["full"]["model_operations"][0]
         assert overflowed["request_id"] == (overflow_request_id if route == "http" else "request-1"), overflowed
@@ -3558,7 +3523,7 @@ def main(mode="all", correlation_case="all"):
             "stream": True,
             "parallel_tool_calls": True,
             "include": ["reasoning.encrypted_content"],
-            "reasoning": {"effort": "low"},
+            "reasoning": {"effort": start_effort("gpt-6-sol")},
             "instructions": model_instructions(ROOT, "A", store=store, session=main_session),
             "input": [
                 {
@@ -5169,7 +5134,7 @@ def main(mode="all", correlation_case="all"):
         def empty_messages(host, store, session, prefix):
             # Empty CLI stdin sends nothing. Seed these zero-byte framing
             # cases through the Message protocol without changing their input.
-            from control_integration import raw_request
+            from control_fixture import raw_request
             for index in range(40):
                 wire = {"version": host_process.WIRE_VERSION, "kind": "message", "store": str(store),
                     "key": f"{prefix}-{index}", "session": session, "sender": None, "sender_handle": None,

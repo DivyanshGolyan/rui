@@ -36,9 +36,17 @@ def semantics(platform_name):
     # restores user configuration, never the kernel's input history.
     _TERMIOS_HISTORY = (getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)) if DARWIN else 0
 
-    # XNU xnu-11417.140.69 exposes kernel-only FWASWRITTEN through F_GETFL. A
-    # positive write sets it; a successful F_SETFL cannot clear write history.
-    FILE_FLAG_HISTORY = 0x00010000 if DARWIN else 0
+    # XNU xnu-11417.140.69 exposes two kernel-only bits through F_GETFL, and
+    # F_SETFL can neither set nor clear either:
+    # - FWASWRITTEN (0x10000): a positive write sets it.
+    # - FMARK (0x1000): the unix-socket garbage collector marks every file in
+    #   flight in an SCM_RIGHTS message when it runs, and the mark stays after
+    #   the file is received. Test PTY leaders receive each slave that way, and
+    #   any socket closed with rights in flight runs the collector. Reproduced
+    #   on macOS 27.2: a slave in flight across a collection reads 0x2, then
+    #   0x1002, and still 0x1002 once received; passed and received before the
+    #   collection, it stays 0x2.
+    FILE_FLAG_HISTORY = 0x00010000 | 0x00001000 if DARWIN else 0
 
     # Each h2 Client has one waker: an eventfd on Linux, a pipe (two
     # descriptors) on Darwin. These mirror descriptor_capacity.zig
@@ -87,6 +95,35 @@ vars(_module).update(semantics(sys.platform))
 def simulate(platform_name):
     """Patch these facts to `platform_name`'s, so Linux tests check Darwin arithmetic."""
     return mock.patch.multiple(_module, **semantics(platform_name))
+
+
+def unix_stream():
+    """A Unix stream with Darwin-shaped send capacity on Linux (#605, #619)."""
+    stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        if _module.PROC_FS:
+            # Linux doubles SO_SNDBUF. With 4096 set, a nonblocking send with
+            # no reader accepted 8064 bytes on x86-64 Linux in this orb.
+            stream.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        return stream
+    except BaseException:
+        stream.close()
+        raise
+
+
+TRUST_VARIABLES = ("SSL_CERT_FILE", "SSL_CERT_DIR")
+
+
+def system_trust(certificate):
+    """Environment that adds `certificate` to a child Host's system trust.
+
+    Only Linux's system trust reads it (SSL_CERT_FILE_TRUST); Darwin's SecTrust
+    would ignore it and quietly test the system roots instead, so this refuses
+    there. A fixture that must run on both passes --provider-ca-file or the
+    launch frame's caFile instead.
+    """
+    assert _module.SSL_CERT_FILE_TRUST, "Darwin system trust ignores SSL_CERT_FILE; pass the CA explicitly"
+    return {"SSL_CERT_FILE": str(certificate)}
 
 
 def user_termios(attributes):

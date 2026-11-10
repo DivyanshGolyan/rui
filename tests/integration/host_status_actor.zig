@@ -20,8 +20,22 @@ pub fn main(init: std.process.Init) !void {
         try std.Io.File.stdout().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), @tagName(result));
         return;
     }
-    if (args.len != 2) return error.ExpectedStorePath;
-    const status = client.hostStatus(std.Io.Threaded.global_single_threaded.io(), args[1]);
+    // `untimed STORE` reads time from a clock that never advances, so no
+    // Host-info deadline expires and the status depends only on the bytes
+    // the peer sends. A loaded runner can schedule a fixture's peer after
+    // the real 1 s budget (#967); only probes of that budget run timed.
+    const untimed = args.len == 3 and std.mem.eql(u8, args[1], "untimed");
+    if (args.len != 2 and !untimed) return error.ExpectedStorePath;
+    const Frozen = struct {
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            return .fromNanoseconds(0);
+        }
+    };
+    const timed = std.Io.Threaded.global_single_threaded.io();
+    var vtable = timed.vtable.*;
+    vtable.now = Frozen.now;
+    const io: std.Io = if (untimed) .{ .userdata = timed.userdata, .vtable = &vtable } else timed;
+    const status = client.hostStatus(io, args[args.len - 1]);
     var buffer: [256]u8 = undefined;
     const line = switch (status) {
         .ready => |ready| try std.fmt.bufPrint(&buffer, "ready {s} {d} {s} {s} {d} {d}\n", .{

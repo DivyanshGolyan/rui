@@ -6,13 +6,13 @@ import select
 import shlex
 import shutil
 import signal
-import socket
+import os_semantics
 import subprocess
 import sys
 import tempfile
 import threading
 
-import bash_integration as bash_fixture
+import bash_fixture
 import model_fixture as fixture
 import host_process
 from host_process import canonical_fixture_root, is_peer_disconnect, retain_failure_state
@@ -143,7 +143,7 @@ def hold_incomplete_connection(host, store, session):
         json.dumps(request)[:-2]
         + ',"instructions":{"state":"value","value":"'
     ).encode() + b"x" * 32768
-    connection = socket.socket(socket.AF_UNIX)
+    connection = os_semantics.unix_stream()
     connection.settimeout(5)
     connection.connect(socket_path)
     connection.sendall(

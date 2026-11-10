@@ -14,12 +14,13 @@ import tempfile
 import threading
 import time
 
-import bash_integration as bash_fixture
+import bash_fixture
 import model_fixture as fixture
 import host_process
 from host_process import HostDiagnostics, ReleaseGate, canonical_fixture_root, dispose_all, is_peer_disconnect, stop_process
-from host_status_integration import socket_path, status
+from host_status_fixture import socket_path, status
 import os_semantics
+from host_status_fixture import finish
 
 
 RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
@@ -86,26 +87,11 @@ def request(sock, store, identity=None, *, extra=b""):
     )
     if identity is not None:
         header += f"X-Rui-Host-Instance: {identity}\r\n".encode()
-    stream = socket.socket(socket.AF_UNIX)
+    stream = os_semantics.unix_stream()
     stream.settimeout(5)
     stream.connect(str(sock))
     stream.sendall(header + extra + b"\r\n")
     return stream, body
-
-
-def finish(stream, body):
-    response = bytearray()
-    with stream:
-        try:
-            stream.sendall(body)
-            while chunk := stream.recv(4096):
-                response.extend(chunk)
-                assert len(response) < 8192
-        except OSError as error:
-            if not is_peer_disconnect(error):
-                raise
-            # A late reset must not erase a captured acceptance prefix.
-    return bytes(response)
 
 
 def mixed_effect_drain(provider_first):
@@ -133,7 +119,7 @@ def mixed_effect_drain(provider_first):
         proposal = fixture.sse_tool_calls("bash-proposal", [
             ("bash", "bash-call", json.dumps({"cmd": command, "timeout_ms": None, "description": "Write Host stop lifecycle events"}))
         ])
-        large = fixture.sse_answer("held-provider", "private-reason", "answer", "x" * 128000)[0]
+        large = fixture.sse_answer("held-provider", "private-reason", "answer", "x" * (125 * 1024))[0]
         provider_release = threading.Event()
         endpoint = fixture.SuccessEndpoint([], responses_by_input={
             "bash": proposal, "provider": (fixture.ResponseSpec(large, {}), provider_release)})
@@ -291,7 +277,7 @@ def main():
                         + b"Content-Type: application/json\r\nX-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\n"
                         + (b"X-Rui-Environment-Bytes: 0\r\n" if kind == "message" else b"")
                         + f"Content-Length: {len(body)}\r\n\r\n".encode())
-                    upload = socket.socket(socket.AF_UNIX)
+                    upload = os_semantics.unix_stream()
                     uploads.append((upload, b"\r\n" + body if phase == "header" else body[-3:]))
                     upload.settimeout(5)
                     upload.connect(str(sock))
@@ -311,7 +297,7 @@ def main():
                                            subject_kind="request_number")
             assert not diagnostics.matching("connection_resources_released", subject=pending_phase["subject"])
             began_ns = time.monotonic_ns()
-            transferred = socket.socket(socket.AF_UNIX)
+            transferred = os_semantics.unix_stream()
             transferred.settimeout(5)
             transferred.connect(str(sock))
             transferred.sendall(b"POST /v1/observe-command HTTP/1.1\r\n")
@@ -335,7 +321,7 @@ def main():
                 response = finish(upload, remainder)
                 assert b'"status":"accepted"' not in response, ("admitted after Host stop", response)
             fixture.wait_for(lambda: not sock.exists(), "listener closure before cleanup")
-            with socket.socket(socket.AF_UNIX) as newcomer:
+            with os_semantics.unix_stream() as newcomer:
                 try:
                     newcomer.connect(str(sock))
                 except (FileNotFoundError, ConnectionRefusedError):

@@ -49,6 +49,8 @@ FRAME = re.compile(r'^  File "([^"]+)", line \d+, in \S+$')
 # check.yml's linux and macos aggregates only require their needs' results; a
 # suite's failure fails them too, and the suite's own log carries the cause.
 AGGREGATE_STEP = "Require every selected "
+# promotion.py's verdicts on a failed promotion job: one per failed step it replayed.
+BISECT = re.compile(r"^Promotion bisect: .+$", re.M)
 # Seconds before each repeated log download; a log can lag its job's completion.
 LOG_RETRY_DELAYS = (10, 30)
 
@@ -102,10 +104,14 @@ def zig_paths(test):
 
 
 def raising_line(parsed, path):
-    """The last traceback's deepest source line inside the fixture, with its exception."""
+    """The last traceback's deepest source line inside the fixture, with its exception.
+
+    A fixture's own code is its script and the cases library it runs, if any
+    (canonical_failure_integration.py runs canonical_failure_cases.py)."""
+    own = tuple("/" + name for name in (path, re.sub(r"_integration\.py$", "_cases.py", path)))
     found = None
     for frames, error in parsed:
-        inside = [code for file, code in frames if file.endswith("/" + path)]
+        inside = [code for file, code in frames if file.endswith(own)]
         if inside:
             found = inside[-1], error
     return found
@@ -135,8 +141,13 @@ def fixture_cause(path, spans):
     return None
 
 
-def failure_causes(log, cases):
-    """Every failure signature in one job's log, without repeats."""
+def failure_causes(log, cases, keep_unexplained=False):
+    """Every failure signature in one job's log, without repeats.
+
+    A failed case without a traceback or a known fixture is dropped once
+    another cause explains the log, unless keep_unexplained, as the flake
+    quarantine needs: there, an unexplained failure must stay a failure.
+    """
     log = untimed(log)
     found, unparsed = [], []
     records = list(RECORD.finditer(log))
@@ -181,7 +192,7 @@ def failure_causes(log, cases):
         found.append(Cause("whitespace check (git diff --check) failed", paths[:WHITESPACE_PATHS],
                            f"{len(problems)} problems in {len(paths)} files, first:\n{detail}"))
     # A record the logs explain elsewhere (a Zig binary's case) adds nothing.
-    found += [cause for cause in unparsed if cause.paths or not found]
+    found += [cause for cause in unparsed if keep_unexplained or cause.paths or not found]
     unique = {}
     for cause in found:
         unique.setdefault(cause.signature, cause)
@@ -320,7 +331,15 @@ def main():
         if job["conclusion"] not in ("failure", "timed_out") or aggregate_only(job):
             continue
         log = job_log(repository, job["id"])
-        for cause in job_causes(log, cases, args.workflow, job):
+        verdicts = BISECT.findall(untimed(log)) if log is not None else []
+        causes = job_causes(log, cases, args.workflow, job)
+        for cause in causes:
+            if verdicts:
+                # Each verdict bisects one failed step; a step can hold several causes.
+                scope = ([f"The job '{job['name']}' failed with {len(causes)} causes; each line above bisects one "
+                          "failed step, and a step with several causes names only its earliest."]
+                         if len(causes) > 1 else [])
+                cause.detail = "\n".join(filter(None, (cause.detail, *verdicts, *scope)))
             print(file_cause(repository, issues, cause, args.workflow, args.sha, url, args.label))
 
 

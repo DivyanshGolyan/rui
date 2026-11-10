@@ -11,6 +11,7 @@ import threading
 import time
 
 from host_process import HeldReplies, TestHTTPServer, hold, is_peer_disconnect, start_ready_process, stop_process, wait_for, wait_for_execution_release
+from host_process import dispose_all
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -760,3 +761,42 @@ def wait_model_cleanup(diagnostics, store, session, observation, deadline, *, pe
 
 def assert_model_cleanup_census(diagnostics, *observations):
     diagnostics.assert_model_cleanup_census(*(value["binding"] for value in observations))
+
+
+def stop_endpoint(endpoint, endpoints):
+    thread = endpoints[endpoint]
+
+    def shutdown():
+        if thread.ident is not None:
+            try:
+                endpoint.shutdown()
+            except BaseException:
+                # A pre-effect refusal leaves serve_forever alive. Retry once,
+                # retaining the first failure even if retirement then succeeds.
+                dispose_all(endpoint.shutdown)
+                raise
+
+    def join():
+        if thread.ident is not None:
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "Dispatch endpoint thread did not retire"
+
+    # shutdown/server_close may block; the join timeout is not a shutdown bound.
+    dispose_all(
+        shutdown,
+        endpoint.server_close,
+        join,
+    )
+    # dispose_all retains an active body error; inspect retirement rather than
+    # treating its return as proof that every disposal succeeded.
+    if endpoint.fileno() == -1 and not thread.is_alive():
+        del endpoints[endpoint]
+
+
+def dispose_dispatch(processes, endpoints, releases, *after):
+    dispose_all(
+        *(lambda process=process: stop_host(process) for process in processes),
+        *releases,
+        *(lambda endpoint=endpoint: stop_endpoint(endpoint, endpoints) for endpoint in tuple(endpoints)),
+        *after,
+    )

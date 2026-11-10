@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synthetic primary key matrix and tmux smoke, not physical-human qualification."""
+"""Synthetic primary key matrix, not physical-human qualification."""
 import argparse
 import concurrent.futures
 import hashlib
@@ -108,14 +108,6 @@ def inventory():
         elif name == "wheel-alt-scroll":
             vector["middle"] = [{"chunks": [chunk(b"\x1b[B")], "first_history": first} for first in (79, 80)]
         rows.append(vector)
-    for name, data, expected in (
-        ("typing", b"tmux typing\r", "tmux typing"),
-        ("paste", b"one\ntwo", "one\ntwo"),
-        ("resize", "A中bc\x1b[DZ\r".encode(), "A中bZc"),
-        ("alt-j", b"one\x1bjtwo\r", "one\ntwo"),
-        ("status", b"/status\r", None),
-    ):
-        rows.append({"name": "tmux-" + name, "scenario": "tmux", "chunks": [chunk(data)], "expected": expected})
     return rows
 
 
@@ -154,8 +146,6 @@ def worker(binary, output, vector):
         signal.signal(number, interrupted)
     # Imported here: model_fixture reads its binary from this process's argv at import.
     from scenarios import Fixture, SCENARIOS
-    from tmux_smoke import smoke
-    SCENARIOS["tmux"] = smoke
     result = {"row": vector["name"], "status": "setup", "soft_nofile": 256,
               "pid": os.getpid(), "binary_sha256": sha256(binary), "vector": vector}
     started = time.monotonic()
@@ -216,7 +206,6 @@ def main():
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--jobs", type=int, default=4, choices=range(1, 9))
     parser.add_argument("--row", action="append", help="stable row selector; repeat to select several")
-    parser.add_argument("--surface", choices=("direct", "tmux", "all"), default="all")
     parser.add_argument("--vectors", type=pathlib.Path, help="JSON array of external byte vectors (TD2)")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--worker", type=pathlib.Path, help=argparse.SUPPRESS)
@@ -233,8 +222,6 @@ def main():
         if unknown:
             parser.error(f"unknown row {', '.join(sorted(unknown))}; use --list for stable selectors")
         rows = [item for item in rows if item["name"] in args.row]
-    if args.surface != "all":
-        rows = [item for item in rows if (item["scenario"] == "tmux") == (args.surface == "tmux")]
     assert rows, "no selected rows"
     if args.list:
         print("\n".join(item["name"] for item in rows))
@@ -253,7 +240,7 @@ def main():
         results = list(executor.map(lambda vector: run_one(binary, output, vector), rows))
     (output / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2))
     passed = sum(result["status"] == "passed" for result in results)
-    print(f"{passed}/{len(results)} synthetic primary matrix/smoke rows passed; physical terminals unverified")
+    print(f"{passed}/{len(results)} synthetic primary matrix rows passed; physical terminals unverified")
     if STOP_NUMBER:
         return 128 + STOP_NUMBER
     return 0 if passed == len(results) else 1

@@ -48,6 +48,15 @@ pub fn Keymap(comptime A: type) type {
     };
 }
 
+/// What one input means at a choice drawn in place of the draft, through the
+/// draft's own classification: a typed `Key` means what the screen's keymap
+/// says, the arrows and Enter are the choice's own, typed text and a marked
+/// paste begin typing, a chord, control or malformed input is refused, and
+/// the draft's other unmodified edit keys do nothing. Nothing here edits.
+pub fn Selection(comptime A: type) type {
+    return union(enum) { none, action: A, left, right, enter, text, refused };
+}
+
 /// Why the editor refused input.
 pub const Refusal = enum {
     /// Enter on a line rejected earlier because it held input that is not

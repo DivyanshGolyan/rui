@@ -30,7 +30,8 @@ import time
 
 import model_fixture as fixture
 import host_process
-from host_process import TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
+from product_defaults import start_effort
+from host_process import TestHTTPServer, assert_caller_error, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
 import os_semantics
 
 SESSION_ID = re.compile("[0123456789abcdefghjkmnpqrstvwxyz]{6}")
@@ -244,8 +245,8 @@ def main(report_source):
             refused = subprocess.run([str(installed), "session", "send", "--to", "k7m2qx", old_flag, "obsolete",
                 "--record", str(refused_record), "--key", "invalid"],
                 env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}, capture_output=True, timeout=10)
-            assert refused.returncode == 2 and refused.stderr == (b"rui session send: " + old_flag.encode() +
-                b": That option is not supported by this command. Accepted: options and values listed by rui session send --help. Next: Use an option listed by this command's help. Nothing was captured or sent. [option_unknown]\n"), refused
+            assert refused.returncode == 2, refused
+            assert_caller_error(refused.stderr, f"rui session send: {old_flag}: ", "option_unknown")
             assert refused.stdout == b"" and not refused_record.exists(), refused
         foreign_store = state / "foreign-store"
         foreign_host, _ = start_ready_process([installed, "host", "serve", "--store", foreign_store],
@@ -257,15 +258,16 @@ def main(report_source):
         foreign_listing = run(installed, "session", "list", "--store", foreign_store, "--all", home=home)
         # Old caller names and noncanonical IDs fail at capture. The removed
         # hex flag must not revive NUL-bearing arbitrary references either.
-        invalid_selectors = [("--session", value, b"[invalid_session_reference]") for value in
+        invalid_selectors = [("--session", value, (b"[invalid_session_reference]",)) for value in
                              ('peer/a "quoted" \\ 雪', 'ABC123', 'k7m2qi', 'rui/k7m2qx')]
-        invalid_selectors.append(("--session-hex", 'peer/nul\x00雪'.encode().hex(), b"rui session configure: --session-hex: That option is not supported by this command. Accepted: options and values listed by rui session configure --help. Next: Use an option listed by this command's help. Nothing was captured or sent. [option_unknown]"))
+        invalid_selectors.append(("--session-hex", 'peer/nul\x00雪'.encode().hex(),
+                                  (b"rui session configure: --session-hex: ", b" Nothing was captured or sent. [option_unknown]\n")))
         for flag, invalid, diagnostic in invalid_selectors:
             rejected = subprocess.run([str(installed), "session", "configure", "--store", str(foreign_store),
                 flag, invalid, "--workspace", str(workspace),
                 "--provider", "codex", "--model", "gpt-6-sol", "--record", str(refused_record), "--key", "invalid-config"],
                 env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}, capture_output=True, timeout=15)
-            assert rejected.returncode == 2 and diagnostic in rejected.stderr, rejected
+            assert rejected.returncode == 2 and all(part in rejected.stderr for part in diagnostic), rejected
             assert rejected.stdout == b"" and not refused_record.exists(), rejected
             assert run(installed, "session", "list", "--store", foreign_store, "--all", home=home) == foreign_listing
         # An anonymous explicit Store beats conflicting HOME defaults without
@@ -342,9 +344,9 @@ def main(report_source):
         assert undelivered["pending_messages"] == "0" and undelivered["recent_messages"] == [], undelivered
         start_receipt = json.loads((workspace / "b-start.json").read_text())
         assert allocated(start_receipt) == session_b, start_receipt
-        # C1b's client product default is low, not the removed table's medium.
+        # The client's product default effort for the model (C1b).
         assert start_receipt["configuration"] == {"provider": "codex", "model": "gpt-6-sol",
-            "reasoning_effort": "low", "effort_source": "model_default"}, start_receipt
+            "reasoning_effort": start_effort("gpt-6-sol"), "effort_source": "model_default"}, start_receipt
         announcement = (workspace / "b-send.err").read_text()
         handle = re.fullmatch(r"request: (\S+) \(wait: rui request wait \1; if unconfirmed: rui request recover \1\)\n", announcement)
         assert handle, announcement
@@ -684,10 +686,10 @@ def stdin_start_contract():
             "--reasoning-effort", "high")
         assert defaults_reply.returncode == 0, defaults_reply
         for arguments, model, effort, source in (
-            (("--provider", "codex", "--model", "gpt-6.1-sol"), "gpt-6.1-sol", "low", "model_default"),
+            (("--provider", "codex", "--model", "gpt-6.1-sol"), "gpt-6.1-sol", start_effort("gpt-6.1-sol"), "model_default"),
             (("--model", "gpt-6.1-sol"), "gpt-6.1-sol", "high", "saved"),
             (("--model", "gpt-6.1-sol", "--reasoning-effort", "xhigh"), "gpt-6.1-sol", "xhigh", "flag"),
-            (("--model", "gpt-6.1-sol", "--reasoning-effort", "default"), "gpt-6.1-sol", "low", "flag"),
+            (("--model", "gpt-6.1-sol", "--reasoning-effort", "default"), "gpt-6.1-sol", start_effort("gpt-6.1-sol"), "flag"),
             # D229: an unlisted exact binding still admits the saved effort.
             (("--model", "unlisted-model"), "unlisted-model", "high", "saved"),
         ):

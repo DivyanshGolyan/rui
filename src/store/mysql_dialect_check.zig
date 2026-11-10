@@ -21,7 +21,7 @@
 //! nothing, so literal typing, guards, row counts, transactions and query
 //! plans are not checked here.
 const std = @import("std");
-const protocol = @import("../protocol.zig");
+const wire_version = @import("../wire_version.zig").wire_version;
 const rsql = @import("rsql.zig");
 const schema = @import("schema.zig");
 const sqlite = @import("sqlite.zig");
@@ -562,7 +562,7 @@ test "schema 55 migrates recovery index and wire 8 together to the current schem
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
-    try std.testing.expectEqualStrings(std.fmt.comptimePrint("\n {d}:{s}", .{ protocol.wire_version.len, protocol.wire_version }), result.written());
+    try std.testing.expectEqualStrings(std.fmt.comptimePrint("\n {d}:{s}", .{ wire_version.len, wire_version }), result.written());
     try expectCatalog(migrated_database);
     done.migrations += 1;
     writeRecord();
@@ -616,7 +616,7 @@ test "skills schema 56 wire 9 MySQL migration preserves ordinary rows and reache
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
-    const current_wire = @import("../protocol.zig").wire_version;
+    const current_wire = wire_version;
     try std.testing.expectEqualStrings(std.fmt.comptimePrint("\n {d}:{s}", .{ current_wire.len, current_wire }), result.written());
     var after: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer after.deinit();
@@ -686,7 +686,7 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
-    const current_wire = @import("../protocol.zig").wire_version;
+    const current_wire = wire_version;
     try std.testing.expectEqualStrings(std.fmt.comptimePrint("\n {d}:{s}", .{ current_wire.len, current_wire }), result.written());
     var after: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer after.deinit();

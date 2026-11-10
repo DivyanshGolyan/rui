@@ -19,6 +19,8 @@ const provider = @import("provider.zig");
 const providers = @import("providers.zig");
 const turn_states_module = @import("turn_states.zig");
 const protocol = @import("protocol.zig");
+const ScratchBudget = @import("ScratchBudget.zig");
+const wire_request = @import("wire_request.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
@@ -1249,7 +1251,21 @@ noinline fn runOwedStop(host: *Host, owed: *const store_module.OwedStop) executi
 /// Delivers an attached child's Turn ending to its parent, or settles one
 /// its parent's stop caused (D39, D139). One Store command does it all.
 noinline fn runOwedEnding(host: *Host, owed: *const store_module.OwedEnding) execution_turn.Admission {
-    _ = host.store.deliverChildEnding(owed.turn_id, host.hooks.storeFaults(.action_result)) catch |err| {
+    var arena_state: std.heap.ArenaAllocator = .init(host.allocator);
+    defer arena_state.deinit();
+    // A done Turn's answer is the Message; its `/name` words bind the
+    // parent's skills as any Message's do. Other endings are Rui's line.
+    const captured: ?store_module.CapturedMessageSkills = if (owed.answer != null and !owed.quiet)
+        @import("session_skills.zig").bindTo(arena_state.allocator(), host.io, host.store, owed.parent.slice(), .{ .stored = .{ .store = host.store, .reference = owed.answer.? } }) catch |err| switch (err) {
+            error.OutOfMemory => return .retry_later,
+            else => {
+                fenceDispatch(host, "child ending", err);
+                return .retry_later;
+            },
+        }
+    else
+        null;
+    _ = host.store.deliverChildEndingBound(owed.turn_id, if (captured) |*value| value else null, host.hooks.storeFaults(.action_result)) catch |err| {
         fenceDispatch(host, "child ending", err);
         return .retry_later;
     };
@@ -1298,7 +1314,16 @@ noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionIn
             return .retry_later;
         },
     };
-    _ = host.store.deliverAgentMessage(input.binding, arguments.id.slice(), text.list.items, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    var arena_state: std.heap.ArenaAllocator = .init(host.allocator);
+    defer arena_state.deinit();
+    const captured = @import("session_skills.zig").bindTo(arena_state.allocator(), host.io, host.store, arguments.id.slice(), .{ .bytes = text.list.items }) catch |err| switch (err) {
+        error.OutOfMemory => return .retry_later,
+        else => {
+            fenceDispatch(host, "core tool command", err);
+            return .retry_later;
+        },
+    };
+    _ = host.store.deliverAgentMessageBound(input.binding, arguments.id.slice(), text.list.items, if (captured) |*value| value else null, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         // A stop resolved the call first.
         error.StaleActionAttemptBinding => return .admitted,
         else => {
@@ -1366,6 +1391,8 @@ noinline fn runSkill(host: *Host, input: *const store_module.CoreActionInput) ex
         };
     _ = host.store.settleSkillTool(input.binding, arena, &captured, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         error.StaleActionAttemptBinding => return .admitted,
+        // A reload's write rolled back; the call runs again later.
+        error.OutOfMemory => return .retry_later,
         else => {
             fenceDispatch(host, "skill core settlement", err);
             return .retry_later;
@@ -1426,8 +1453,9 @@ noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInpu
         break :committed .{ .context = &install, .call = Install.call };
     } else null;
     const parent_skills = host.store.readSkills(arena, input.session.slice()) catch return .retry_later;
-    const initial_skills = @import("session_skills.zig").captureInitial(arena, host.allocator, host.io, parent_skills.workspace.slice(), host.bash_facts.home) catch return .retry_later;
-    _ = host.store.startAgentWithInitialSkills(input.binding, input.session.slice(), start.task, start.attached, &start.configuration, committed, initial_skills, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    // The task binds against the catalog the new Session starts with.
+    const prepared = @import("session_skills.zig").prepareCreation(arena, host.allocator, host.io, parent_skills.workspace.slice(), host.bash_facts.home, .{ .bytes = start.task }) catch return .retry_later;
+    _ = host.store.startAgentWithInitialSkills(input.binding, input.session.slice(), start.task, start.attached, &start.configuration, committed, prepared.initial, if (prepared.captured) |*value| value else null, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         // A stop resolved the call first.
         error.StaleActionAttemptBinding => return .admitted,
         else => {
@@ -2778,7 +2806,7 @@ test "HTTP error capture retires before execution custody" {
     defer workspace.unmap();
     for (0..3) |kind| {
         var used: std.atomic.Value(u64) = .init(17);
-        const budget = protocol.ScratchBudget{ .used = &used, .limit = 4096 };
+        const budget = ScratchBudget{ .used = &used, .limit = 4096 };
         var records: [1]execution.CustodyRecord = @splat(.{});
         var host = Host{
             .io = io,
@@ -2950,7 +2978,7 @@ test "cleanup publication follows complete execution retirement" {
     var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
     try workspace.set(root);
     var used: std.atomic.Value(u64) = .init(0);
-    const budget = protocol.ScratchBudget{ .used = &used, .limit = 4096 };
+    const budget = ScratchBudget{ .used = &used, .limit = 4096 };
     var entries: [2]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
@@ -3318,7 +3346,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
             defer directory.close(std.testing.io);
             const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
-            var command: protocol.ConfigureCommand = .{};
+            var command: wire_request.ConfigureCommand = .{};
             try command.key.set("failed-admission-config");
             command.configuration.workspace.state = .value;
             try command.configuration.workspace.value.set(workspace);
@@ -3332,12 +3360,12 @@ test "failed admission releases its reservation and fences the Store and dispatc
             command.configuration.compaction_trigger.state = .value;
             try command.configuration.compaction_trigger.value.set("115200");
             command.configuration.reasoning_effort.state = .explicit_null;
-            const configured = storage.configure(&command, .{});
+            const configured = try storage.configure(&command, .{});
             try std.testing.expect(configured == .accepted);
             const file = try tmp.dir.createFile(std.testing.io, "failed-admission-message", .{ .read = true });
             try file.writeStreamingAll(std.testing.io, "hello");
             try file.sync(std.testing.io);
-            var message: protocol.MessageCommand = .{};
+            var message: wire_request.MessageCommand = .{};
             try message.key.set("failed-admission-key");
             message.session = configured.accepted.session;
             message.text = .{
@@ -3545,7 +3573,7 @@ test "preparing slots belong to their live preparations" {
     var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
     defer directory.close(std.testing.io);
     const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
-    var command: protocol.ConfigureCommand = .{};
+    var command: wire_request.ConfigureCommand = .{};
     try command.key.set("prep-belong-config");
     command.configuration.workspace.state = .value;
     try command.configuration.workspace.value.set(workspace);
@@ -3559,12 +3587,12 @@ test "preparing slots belong to their live preparations" {
     command.configuration.compaction_trigger.state = .value;
     try command.configuration.compaction_trigger.value.set("115200");
     command.configuration.reasoning_effort.state = .explicit_null;
-    const configured = storage.configure(&command, .{});
+    const configured = try storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "prep-belong-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
     try file.sync(std.testing.io);
-    var message: protocol.MessageCommand = .{};
+    var message: wire_request.MessageCommand = .{};
     try message.key.set("prep-belong-key");
     message.session = configured.accepted.session;
     message.text = .{
@@ -3753,7 +3781,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used: std.atomic.Value(u64) = .init(0);
-    const root_budget = protocol.ScratchBudget{ .used = &used, .limit = 104 };
+    const root_budget = ScratchBudget{ .used = &used, .limit = 104 };
     var entries: [2]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, root_budget, &entries);
     defer retention.cleanupAll();
@@ -3872,7 +3900,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
     defer directory.close(std.testing.io);
     const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
-    var command: protocol.ConfigureCommand = .{};
+    var command: wire_request.ConfigureCommand = .{};
     try command.key.set("encode-failure-config");
     command.configuration.workspace.state = .value;
     try command.configuration.workspace.value.set(workspace);
@@ -3886,12 +3914,12 @@ test "an encode failure settles unanswered and releases request scratch" {
     command.configuration.compaction_trigger.state = .value;
     try command.configuration.compaction_trigger.value.set("115200");
     command.configuration.reasoning_effort.state = .explicit_null;
-    const configured = storage.configure(&command, .{});
+    const configured = try storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
     try file.sync(std.testing.io);
-    var message: protocol.MessageCommand = .{};
+    var message: wire_request.MessageCommand = .{};
     try message.key.set("encode-failure-key");
     message.session = configured.accepted.session;
     message.text = .{
@@ -4183,7 +4211,7 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
     command.configuration.tools = try .of(&.{ "bash", "fetch_page" });
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("bypass");
-    const configured = storage.configure(&command, .{});
+    const configured = try storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
     try store_module.testingSubmitMessage(&storage, &tmp, "host-mcp-message", "host-mcp-message", session.slice(), "fetch");
@@ -4230,4 +4258,60 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
     try std.testing.expect(std.mem.indexOf(u8, report, "mcp_server_unavailable") != null);
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
+}
+
+test "a skill tool reload under heap exhaustion runs again later without fencing" {
+    const skills = @import("skills.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io, .{});
+    defer storage.close() catch unreachable;
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    // The workspace's skills are not these 65, so the reload replaces a saved
+    // catalog large enough that reading it allocates inside the held write.
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = workspace_buffer[0..try tmp.dir.realPath(std.testing.io, &workspace_buffer)];
+    var entries: [65]skills.Entry = undefined;
+    var names: [65][6]u8 = undefined;
+    for (&entries, &names, 0..) |*entry, *name, index| {
+        _ = try std.fmt.bufPrint(name, "pad-{d:0>2}", .{index});
+        entry.* = .{ .name = name, .description = "Metadata", .path = "/never-read" };
+    }
+    const initial = try skills.initialCatalog(memory.allocator(), .{ .entries = &entries });
+    var command = try store_module.testingCompleteConfiguration("skill-reload-config", "", workspace, "model-a");
+    command.configuration.tools = try .of(&.{"skill"});
+    const configured = try storage.configureWithInitialSkills(&command, null, &.{ .ready = .{ .encoded = initial.encoded, .instruction = initial.instruction } }, .{});
+    const session = configured.accepted.session;
+    try store_module.testingSubmitMessage(&storage, &tmp, "skill-reload-message", "skill-reload-message", session.slice(), "reload");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, binding, "skill-reload-calls", &.{.{
+        .item_id = "item-1",
+        .name = "skill",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}",
+        .decoded_arguments = "{\"operation\":\"reload\"}",
+    }});
+    const input = (try storage.nextCoreWork()).?.action;
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    // Each allocation in turn fails, the settlement's held write included,
+    // until the call settles: the call waits, and nothing fences.
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        host.allocator = failing.allocator();
+        const admission = runSkill(&host, &input);
+        host.allocator = std.testing.allocator;
+        try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+        if (!failing.has_induced_failure) {
+            try std.testing.expectEqual(execution_turn.Admission.admitted, admission);
+            break;
+        }
+        try std.testing.expectEqual(execution_turn.Admission.retry_later, admission);
+        try std.testing.expectEqual(entries.len, (try storage.readSkills(memory.allocator(), session.slice())).catalog.entries.len);
+    }
+    try std.testing.expect(fail_index > 2);
+    try std.testing.expect((try storage.readSkills(memory.allocator(), session.slice())).catalog.entries.len != entries.len);
 }

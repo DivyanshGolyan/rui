@@ -68,15 +68,16 @@ def model(selector):
 # Exact anchors intentionally fail closed when the protection changes. Add or
 # revise a mutation alongside its maintained owning test, not a copied oracle.
 MUTATIONS = (
-    # 11f02d17 moved transcript Marks from SessionFrontend to session_reads.
+    # 11f02d17 moved transcript Marks from SessionFrontend to session_reads,
+    # and they now live in the session_transcript core.
     Mutation("mark-collision", "latest read replaces a same-offset boundary", "f15c2b57",
-             "src/session_reads.zig",
+             "src/session_transcript.zig",
              "self.items[self.count - 1] = mark;", "// Keep the stale mark.",
-             native("a transcript joins at the first retained boundary or shows the gap after the newest evicted one")),
+             logic("a transcript joins at the first retained boundary or shows the gap after the newest evicted one")),
     Mutation("mark-eviction-edge", "a boundary exactly at retained origin is usable", "4d5cf8ba",
-             "src/session_reads.zig", "if (mark.offset >= front) return .{ .joined = mark };",
+             "src/session_transcript.zig", "if (mark.offset >= front) return .{ .joined = mark };",
              "if (mark.offset > front) return .{ .joined = mark };",
-             native("a transcript joins at the first retained boundary or shows the gap after the newest evicted one")),
+             logic("a transcript joins at the first retained boundary or shows the gap after the newest evicted one")),
     Mutation("conversation-cursor", "Admission rows are not Conversation cursors", "a68b4c76",
              "src/session_reads.zig", "return if (first.position > 1) .{ .end = first.position - 1 } else null;",
              "return .{ .end = first.position };",
@@ -117,8 +118,8 @@ MUTATIONS = (
              'if (false and !self.paste and std.mem.startsWith(u8, bytes, "\\x1b[M")) {',
              logic("fragmented X10 mouse reports are consumed whole, never as typed text")),
     Mutation("stale-details", "a delayed details page cannot cover a later Message", "67f80e38",
-             "src/SessionFrontend.zig", "self.admission.details_sent == self.admission.sent", "true",
-             model("pages")),
+             "src/session_reading.zig", "return asked_sent == sent;", "return true or asked_sent == sent;",
+             logic("a /details page shows only before the next send")),
     Mutation("stale-transcript", "a delayed history page belongs to its transcript generation", "4d5cf8ba",
              "src/SessionFrontend.zig", "self.job.transcript == self.transcript.id", "true",
              model("pages")),

@@ -4,6 +4,7 @@ import contextlib
 import pathlib
 import select
 import socket
+import os_semantics
 import threading
 import time
 
@@ -35,7 +36,7 @@ def one_reply(path, response, *, timeout=10):
     bound = False
     errors = []
     try:
-        listener = socket.socket(socket.AF_UNIX)
+        listener = os_semantics.unix_stream()
         sockets.append(listener)
         cancel, wake = socket.socketpair()
         sockets.extend((cancel, wake))

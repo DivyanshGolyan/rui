@@ -2,8 +2,12 @@
 //! reports, and fencing Attempts superseded by a control.
 
 const std = @import("std");
-const protocol = @import("../../protocol.zig");
-const tool_catalog = @import("../../tools.zig");
+const tool_proposal = @import("../../tool_proposal.zig");
+const content_string = @import("../../content_string.zig");
+const idempotency_key = @import("../../idempotency_key.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
+const tool_catalog = @import("../../call_classification.zig");
+const tool_record = @import("../../tool_record.zig");
 const tool_set = @import("tool_set.zig");
 const output_format = @import("../../output_format.zig");
 const retry_policy = @import("../../retry_policy.zig");
@@ -64,7 +68,7 @@ pub const ModelFailure = union(enum) {
     pub const Correlated = struct {
         code: []const u8,
         /// The provider's own correlation; empty when it sent none.
-        request_id: protocol.Bounded(256),
+        request_id: Bounded(256),
         /// The provider's own words, `code: message`; empty when it sent
         /// none. A terminal failure keeps it as its outcome's report.
         report: []const u8,
@@ -74,7 +78,7 @@ pub const ModelFailure = union(enum) {
         code: []const u8,
         // Borrowed for settlement only; never Turn output or model continuation.
         diagnostic: []const u8,
-        request_id: protocol.Bounded(256),
+        request_id: Bounded(256),
         report: []const u8,
     };
 
@@ -122,10 +126,10 @@ pub const ValidatedOutput = struct {
     answer_item_ordinal: ?u64 = null,
     answer_length: u64,
     answer_digest: [32]u8,
-    response_id: protocol.Bounded(256),
+    response_id: Bounded(256),
     /// Adapter-certified opaque observations; Store never decodes provider grammar.
-    model_evidence: protocol.Bounded(775),
-    request_id: protocol.Bounded(256),
+    model_evidence: Bounded(775),
+    request_id: Bounded(256),
 };
 
 /// The purpose of the Attempt `binding` names, in an Entry of its own,
@@ -256,7 +260,7 @@ pub fn currentAttemptSession(a: anytype, binding: AttemptBinding) !rsql.SessionH
 const superseding_control = rsql.Read(.{
     .sql = "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",
     .Args = struct { operation_id: u64 },
-    .Row = struct { turn_id: i64, attempt_ordinal: i64, interrupted_by_command_key: ?protocol.Bounded(protocol.max_key_bytes) },
+    .Row = struct { turn_id: i64, attempt_ordinal: i64, interrupted_by_command_key: ?Bounded(idempotency_key.max_bytes) },
     .cardinality = .optional,
 });
 
@@ -726,7 +730,7 @@ const insert_item = rsql.Write(.{
         extras_content_id: u64,
         part_count: u64,
         message_content_id: ?u64,
-        description: ?tool_catalog.Description,
+        description: ?tool_record.Description,
         call_failed: bool,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
@@ -750,11 +754,11 @@ const insert_call = rsql.Write(.{
         name_content_id: u64,
         call_id_content_id: u64,
         arguments_content_id: u64,
-        rejection_code: ?protocol.ProposalRejection,
+        rejection_code: ?tool_proposal.Rejection,
         rejection_content_id: ?u64,
         acceptance_position: ?u64,
         action_kind: ?u64,
-        description: ?tool_catalog.Description,
+        description: ?tool_record.Description,
         field_metadata: [120]u8,
         session: rsql.SessionHead,
     },
@@ -882,7 +886,7 @@ const historical_mcp = rsql.Read(.{
         "JOIN tool_set_member member ON member.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE o.operation_id=?1 AND tool.owner='mcp' AND tool.name IN (" ++ parameters(2, batch_items) ++ ") GROUP BY tool.name",
     .Args = NameArgs(),
-    .Row = struct { name: protocol.Bounded(tool_catalog.max_name_bytes), offered: bool },
+    .Row = struct { name: Bounded(tool_record.max_name_bytes), offered: bool },
     .cardinality = .each,
 });
 
@@ -893,7 +897,7 @@ fn NameArgs() type {
     types[0] = u64;
     for (0..batch_items) |index| {
         names[index + 1] = std.fmt.comptimePrint("n{d}", .{index});
-        types[index + 1] = protocol.Bounded(tool_catalog.max_name_bytes);
+        types[index + 1] = Bounded(tool_record.max_name_bytes);
     }
     return @Struct(.auto, null, &names, &types, &@splat(.{}));
 }
@@ -943,9 +947,9 @@ pub const Batch = struct {
     duplicates: DuplicateVisitor,
 
     /// The fixed SQL fields also own the stable names selected call facts borrow.
-    fn names(batch: *Batch) *[batch_items]protocol.Bounded(tool_catalog.max_name_bytes) {
+    fn names(batch: *Batch) *[batch_items]Bounded(tool_record.max_name_bytes) {
         @setEvalBranchQuota(20_000);
-        const Name = protocol.Bounded(tool_catalog.max_name_bytes);
+        const Name = Bounded(tool_record.max_name_bytes);
         comptime {
             std.debug.assert(@sizeOf(historical_mcp.Args) == @sizeOf(u64) + batch_items * @sizeOf(Name));
             for (0..batch_items) |index| {
@@ -1142,7 +1146,7 @@ fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
 /// each call's name, call_id and arguments, and, when the catalog rejects
 /// it, its rejection text. A call imports at most four identities, so
 /// `batch_items` calls always fit `batch_identities`.
-fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, offered: *const tool_catalog.Offered) void {
+fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, offered: *const tool_record.Offered) void {
     @setEvalBranchQuota(20_000);
     comptime std.debug.assert(batch_identities >= 4 * batch_items);
     batch.reset(.calls, start);
@@ -1182,9 +1186,9 @@ fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
                         } else |_| {}
                     };
                 } else |_| {}
-                var name_buffer: [tool_catalog.max_name_bytes]u8 = undefined;
+                var name_buffer: [tool_record.max_name_bytes]u8 = undefined;
                 const call_name = excerpt(io, output.source, name_record, &name_buffer) catch |err| return batch.stop(err, record_start);
-                if (name_record.decoded_length <= tool_catalog.max_name_bytes) {
+                if (name_record.decoded_length <= tool_record.max_name_bytes) {
                     batch.names()[batch.digest_count].set(call_name) catch unreachable;
                 }
                 batch.ids.digests[batch.digest_count] = call_id_record.content_digest;
@@ -1206,7 +1210,7 @@ fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
 /// which reports them in call order rather than during speculative collection.
 /// Noinline: inspection scratch must not grow the import frame that drains
 /// queued writes and opens SQLite content sinks.
-noinline fn collectFinalRejections(batch: *Batch, output: *const ValidatedOutput, io: std.Io, offered: *const tool_catalog.Offered) void {
+noinline fn collectFinalRejections(batch: *Batch, output: *const ValidatedOutput, io: std.Io, offered: *const tool_record.Offered) void {
     var reader = OutputMetadataReader.init(io, output.metadata, output.item_count) catch return;
     reader.offset = batch.start;
     var name: ?OutputMetadataRecord = null;
@@ -1237,7 +1241,7 @@ noinline fn collectFinalRejections(batch: *Batch, output: *const ValidatedOutput
 }
 
 /// A rejected call's result text, from its name in the source.
-fn rejectionText(io: std.Io, output: *const ValidatedOutput, code: protocol.ProposalRejection, facts: *const tool_catalog.CallFacts, name: OutputMetadataRecord, buffer: *[192]u8) ![]const u8 {
+fn rejectionText(io: std.Io, output: *const ValidatedOutput, code: tool_proposal.Rejection, facts: *const tool_catalog.CallFacts, name: OutputMetadataRecord, buffer: *[192]u8) ![]const u8 {
     var rejected_name: output_format.NameReader = .{ .io = io, .file = output.source, .position = name.start, .end = try name.end() };
     return tool_catalog.rejectionResult(code, facts, &rejected_name, name.decoded_length, name.content_digest, buffer);
 }
@@ -1366,7 +1370,7 @@ fn Settlement(comptime A: type) type {
         positions: *store_access.Positions,
         first_item_position: u64,
         purpose: ModelOperationKind,
-        tools: tool_catalog.Offered,
+        tools: tool_record.Offered,
         settling: success_facts.Row,
         imported_items: u64 = 0,
         imported_calls: u64 = 0,
@@ -1470,7 +1474,7 @@ fn Settlement(comptime A: type) type {
                 if (record.ordinal != s.imported_items) return error.CorruptOutputMetadata;
                 if (index == batch.digest_count) return error.CorruptOutputMetadata;
                 if (batch.duplicate(index)) return error.InvalidProviderEnvelope;
-                var description: tool_catalog.Description = .{};
+                var description: tool_record.Description = .{};
                 const neutral = try s.importItem(batch, record, region_start, reader.offset, &description);
                 s.a.write(insert_item, .{
                     .operation_id = s.binding.operation_id,
@@ -1535,7 +1539,7 @@ fn Settlement(comptime A: type) type {
         /// provider bags and, for a message, its text (every text part's
         /// decoded text back to back, one row its parts are lengths of).
         /// A hosted call's description goes to `description`.
-        fn importItem(s: *Self, batch: *Batch, item: OutputMetadataRecord, metadata_start: u64, metadata_end: u64, description: *tool_catalog.Description) !ImportedNeutral {
+        fn importItem(s: *Self, batch: *Batch, item: OutputMetadataRecord, metadata_start: u64, metadata_end: u64, description: *tool_record.Description) !ImportedNeutral {
             var metadata = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
             metadata.offset = metadata_start;
             metadata.length = metadata_end;
@@ -1771,7 +1775,7 @@ const ImportedNeutral = struct { bag: u64, part_count: u64, text: ?u64, text_len
 
 /// A hosted call's description from its action and pattern records.
 /// noinline: its excerpt windows live in this frame only.
-noinline fn describeWebSearch(io: std.Io, source: std.Io.File, call: OutputMetadataRecord, pattern: ?OutputMetadataRecord) !tool_catalog.Description {
+noinline fn describeWebSearch(io: std.Io, source: std.Io.File, call: OutputMetadataRecord, pattern: ?OutputMetadataRecord) !tool_record.Description {
     var target: [tool_catalog.WebSearchCall.excerpt_bytes]u8 = undefined;
     var found: [tool_catalog.WebSearchCall.excerpt_bytes]u8 = undefined;
     return tool_catalog.describe(.{ .web_search = .{
@@ -1803,7 +1807,7 @@ fn writeChecked(sink: ?store_access.ContentSink, hash: *std.crypto.hash.sha2.Sha
 /// checking its digest. noinline with a small window, so the settlement
 /// frame stays small.
 noinline fn streamSourceRange(io: std.Io, file: std.Io.File, start: u64, length: u64, digest: *const [32]u8, sink: ?store_access.ContentSink, faults: Faults) !void {
-    var copy: content_domain.HashedWindow(import_window_bytes) = .{ .hash = protocol.contentHasher() };
+    var copy: content_domain.HashedWindow(import_window_bytes) = .{ .hash = content_string.hasher() };
     var offset: u64 = 0;
     while (offset < length) {
         const wanted: usize = @intCast(@min(length - offset, copy.window.len));
@@ -1823,7 +1827,7 @@ noinline fn streamBag(io: std.Io, output: *const ValidatedOutput, trailer: Outpu
     var members = try OutputMetadataReader.init(io, output.metadata, output.item_count);
     members.offset = start;
     members.length = end;
-    var copy: content_domain.HashedWindow(import_window_bytes) = .{ .hash = protocol.contentHasher() };
+    var copy: content_domain.HashedWindow(import_window_bytes) = .{ .hash = content_string.hasher() };
     var written: u64 = 0;
     var first = true;
     while (try members.next()) |member| {
@@ -1850,7 +1854,7 @@ noinline fn streamMessageText(io: std.Io, output: *const ValidatedOutput, text: 
     var parts = try OutputMetadataReader.init(io, output.metadata, output.item_count);
     parts.offset = start;
     parts.length = end;
-    var decoded: content_domain.HashedWindow(import_window_bytes) = .{ .hash = protocol.contentHasher() };
+    var decoded: content_domain.HashedWindow(import_window_bytes) = .{ .hash = content_string.hasher() };
     var written: u64 = 0;
     while (try parts.next()) |part| {
         if (part.tag != .part or (part.part_kind != .output_text and part.part_kind != .refusal)) continue;
@@ -1862,7 +1866,7 @@ noinline fn streamMessageText(io: std.Io, output: *const ValidatedOutput, text: 
 
 /// Decodes one saved string into `sink`.
 noinline fn streamDecoded(io: std.Io, output: *const ValidatedOutput, part: OutputMetadataRecord, sink: store_access.ContentSink, faults: Faults) !void {
-    var decoded: content_domain.HashedWindow(import_window_bytes) = .{ .hash = protocol.contentHasher() };
+    var decoded: content_domain.HashedWindow(import_window_bytes) = .{ .hash = content_string.hasher() };
     var written: u64 = 0;
     try writeDecoded(io, output, sink, &decoded, part, &written, part.decoded_length);
     if (faults.output_import) return error.InjectedOutputImportFailure;
@@ -1888,11 +1892,11 @@ fn writeDecoded(io: std.Io, output: *const ValidatedOutput, sink: store_access.C
 
 /// Noinline: description rendering does not retain its bounded scratch on
 /// the import frame while that frame opens SQLite content sinks.
-noinline fn callDescription(facts: *const tool_catalog.CallFacts) !?tool_catalog.Description {
+noinline fn callDescription(facts: *const tool_catalog.CallFacts) !?tool_record.Description {
     if (facts.tool) |*tool| if (tool.runner() == .mcp) {
         // Keep the existing 100-byte description; the richer 200-byte MCP
         // projection is deferred. The raw arguments remain unchanged.
-        var fallback: tool_catalog.Description = .{ .len = 0 };
+        var fallback: tool_record.Description = .{ .len = 0 };
         try fallback.set(tool.name);
         return fallback;
     };
@@ -1902,7 +1906,7 @@ noinline fn callDescription(facts: *const tool_catalog.CallFacts) !?tool_catalog
 /// One function call's catalog facts: its name and, for bash, its
 /// arguments. noinline: the arguments' content window lives in this frame
 /// only, not in the settlement frame that walks the output's metadata.
-noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetadataRecord, arguments: OutputMetadataRecord, offered: *const tool_catalog.Offered) !tool_catalog.CallFacts {
+noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetadataRecord, arguments: OutputMetadataRecord, offered: *const tool_record.Offered) !tool_catalog.CallFacts {
     var call_name: output_format.NameReader = .{ .io = io, .file = source, .position = name.start, .end = try name.end() };
     var encoded: output_format.JsonStringSource = .{
         .encoded = .{ .io = io, .file = source, .position = arguments.start, .end = try arguments.end() },
@@ -1916,29 +1920,29 @@ noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetad
 pub fn validateJsonBytes(bytes: []const u8) !bool {
     var scanner = std.json.Scanner.initCompleteInput(std.heap.c_allocator, bytes);
     defer scanner.deinit();
-    try scanner.ensureTotalStackCapacity(protocol.max_json_depth);
+    try scanner.ensureTotalStackCapacity(@import("../../json_limits.zig").max_depth);
     while (true) {
         const token = scanner.next() catch |err| switch (err) {
             error.SyntaxError, error.UnexpectedEndOfInput => return false,
             else => return err,
         };
-        if (scanner.stackHeight() > protocol.max_json_depth) return false;
+        if (scanner.stackHeight() > @import("../../json_limits.zig").max_depth) return false;
         if (token == .end_of_document) return true;
     }
 }
 
 pub noinline fn validateJsonFile(io: std.Io, file: std.Io.File) !bool {
-    var read_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var read_buffer: [@import("../../conversation_read.zig").content_window_bytes]u8 = undefined;
     var file_reader = file.reader(io, &read_buffer);
     var json_reader = std.json.Reader.init(std.heap.c_allocator, &file_reader.interface);
     defer json_reader.deinit();
-    try json_reader.ensureTotalStackCapacity(protocol.max_json_depth);
+    try json_reader.ensureTotalStackCapacity(@import("../../json_limits.zig").max_depth);
     while (true) {
         const token = json_reader.next() catch |err| switch (err) {
             error.SyntaxError, error.UnexpectedEndOfInput => return false,
             else => return err,
         };
-        if (json_reader.stackHeight() > protocol.max_json_depth) return false;
+        if (json_reader.stackHeight() > @import("../../json_limits.zig").max_depth) return false;
         if (token == .end_of_document) return true;
     }
 }

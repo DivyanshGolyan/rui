@@ -14,7 +14,8 @@ import time
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "integration"))
-import transport_h2_integration as fixture
+import h2_fixture
+import transport_h2_cases as fixture
 
 
 def counters(text):
@@ -149,7 +150,7 @@ def main():
         result.update(platform=list(os.uname()), glibc=os.confstr("CS_GNU_LIBC_VERSION"),
                       binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest())
         result["before"] = system_snapshot()
-        sources = [Path(__file__), Path(fixture.__file__), Path(fixture.dispatch.__file__), Path(__file__).with_name("malloc_probe.c")]
+        sources = [Path(__file__), Path(fixture.__file__), Path(h2_fixture.__file__), Path(fixture.dispatch.__file__), Path(__file__).with_name("malloc_probe.c")]
         if args.probe:
             sources.append(args.probe.resolve())
         result["source_sha256"] = {str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}

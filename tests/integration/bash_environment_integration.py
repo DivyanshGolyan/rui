@@ -20,7 +20,7 @@ import os
 import pathlib
 import re
 import shutil
-import socket
+import os_semantics
 import subprocess
 import sys
 import tempfile
@@ -112,7 +112,7 @@ def raw_message(socket_path, store, key, session, header, entries):
     body = json.dumps({"version": host_process.WIRE_VERSION, "kind": "message", "store": str(store), "key": key, "session": session,
                        "sender": None, "sender_handle": None, "text": {"state": "value", "value": "show"}},
                       separators=(",", ":")).encode()
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+    with os_semantics.unix_stream() as connection:
         connection.settimeout(10)
         connection.connect(socket_path)
         # The refusal comes before the Host reads the request itself, so its

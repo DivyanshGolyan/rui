@@ -200,6 +200,27 @@ class CauseTest(unittest.TestCase):
                          ["tests/integration/human_cli_integration.py: assert caller_ok raised AssertionError",
                           "tests/integration/human_cli_integration.py: exit without a parsed traceback"])
 
+    def test_a_fixture_whose_cases_live_in_its_cases_library_keeps_their_raising_lines(self):
+        # canonical_failure_integration.py only calls canonical_failure_cases.main;
+        # the raising line is the case's, and the signature keeps the entry's path.
+        def case(statement):
+            return logged("canonical-failure failed: exit=1 elapsed=4.000s",
+                          "Traceback (most recent call last):",
+                          '  File "/w/rui/tests/integration/canonical_failure_integration.py", line 9, in <module>',
+                          '    main(sys.argv[2] if len(sys.argv) == 3 else "all")',
+                          '  File "/w/rui/tests/integration/canonical_failure_cases.py", line 80, in main',
+                          "    binding_cases(state)",
+                          '  File "/w/rui/tests/integration/canonical_failure_cases.py", line 40, in binding_cases',
+                          f"    {statement}",
+                          '  File "/w/rui/tests/integration/host_process.py", line 900, in wait_for',
+                          "    raise AssertionError(label)",
+                          "AssertionError")
+        cases = dict(self.cases, **{"canonical-failure": "tests/integration/canonical_failure_integration.py"})
+        self.assertEqual([report_issue.failure_causes(case(statement), cases)[0].signature
+                          for statement in ("wait_for(bound, 'binding')", "wait_for(fenced, 'fence')")],
+                         ["tests/integration/canonical_failure_integration.py: wait_for(bound, 'binding') raised AssertionError",
+                          "tests/integration/canonical_failure_integration.py: wait_for(fenced, 'fence') raised AssertionError"])
+
     def test_a_standalone_gate_is_named_by_its_script_and_raising_line(self):
         def gate(statement):
             return logged("Traceback (most recent call last):",
@@ -370,6 +391,37 @@ class ReportTest(unittest.TestCase):
             self.run_main(fake)
             self.assertEqual([call[2] for call in fake.made('reopen')], ['6'])
 
+    def test_a_promotion_bisect_verdict_rides_on_the_failure_it_located(self):
+        verdict = 'Promotion bisect: check: first fails at ' + 'd' * 40 + ' (Change the bash owner)'
+        fake = FakeGitHub([dict(id=1, name='linux suites (check)', conclusion='failure')],
+                          {1: BASH + logged('check: replay at ' + 'd' * 40 + ': failed (exit 1)') + logged(verdict)})
+        self.run_main(fake, '--label', 'promotion-red')
+        [create] = fake.made('create')
+        body = create[create.index('--body') + 1]
+        self.assertIn('bash_integration.py: assert process_exists', create[create.index('--title') + 1])
+        self.assertIn(verdict, body)
+        self.assertNotIn('replay at', body)
+        self.assertEqual(report_issue.signature_state(body)['signature'],
+                         'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError')
+        # One cause: its step's verdict is its own.
+        self.assertNotIn('causes', body)
+
+    def test_a_job_with_several_causes_carries_every_steps_verdict(self):
+        # Each failed step is bisected on its own; the filer cannot tell which step
+        # raised which cause, so every issue gets every verdict and says so.
+        verdicts = ['Promotion bisect: bash-integration: first fails at ' + 'd' * 40 + ' (Change the bash owner)',
+                    'Promotion bisect: host-stop-integration: first fails at ' + 'e' * 40 + ' (Change Host stop)']
+        fake = FakeGitHub([dict(id=1, name='linux suites (check)', conclusion='failure')],
+                          {1: BASH + HOST_STOP + ''.join(logged(line) for line in verdicts)})
+        self.run_main(fake, '--label', 'promotion-red')
+        creates = fake.made('create')
+        self.assertEqual(len(creates), 2)
+        for create in creates:
+            body = create[create.index('--body') + 1]
+            for line in verdicts:
+                self.assertIn(line, body)
+            self.assertIn("The job 'linux suites (check)' failed with 2 causes", body)
+
     def test_only_failed_jobs_are_read(self):
         passing = (logged('::warning::check failed (exit 1); one automatic retry. A pass after this retry '
                           'is a flake to fix, not a clean pass.') + BASH)
@@ -395,6 +447,9 @@ class ReportTest(unittest.TestCase):
         steps = re.findall(r'^      - name: (Require every selected .+)$', Path('.github/workflows/check.yml').read_text(),
                            re.M)
         self.assertEqual(len(steps), 2)
+        promotion = re.findall(r'^      - name: (Require every selected .+)$', Path('.github/workflows/promote.yml').read_text(),
+                               re.M)
+        self.assertEqual(promotion, ['Require every selected promotion tier'])
         # A real gate that fails is still filed.
         gate = dict(id=3, name='mutations', conclusion='failure',
                     steps=[dict(name='Require behavioral kills in isolated source copies', conclusion='failure')])
