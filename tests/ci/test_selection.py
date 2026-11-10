@@ -214,12 +214,20 @@ class SelectionTest(unittest.TestCase):
                     self.assertIn("test-logic", targets)
                     self.assertNotIn("check", targets)
 
-    def test_development_does_not_claim_native_acceptance(self):
-        # The Store keeps its root for the live MySQL check; nothing else widens.
-        result = select(["src/bash_platform.c", "src/store.zig"], "development", AVAILABLE)
-        self.assertEqual(result["targets"], ["test-logic", "test-store"])
+    def test_development_runs_the_reached_unit_roots_on_linux_only(self):
+        # A frontend file reaches the native root alone: no fixture, no Store, no Mac.
+        result = select(["src/SessionFrontend.zig"], "development", AVAILABLE)
+        self.assertIn("human-cli-integration", select(["src/SessionFrontend.zig"], "review", AVAILABLE)["targets"])
+        self.assertEqual(result["targets"], ["test-logic", "test-native", "upgrade-integration"])
         self.assertFalse(result["native_required"])
-        self.assertEqual(select(["src/bash_platform.c"], "development", AVAILABLE)["targets"], ["test-logic"])
+        # A source both roots reach runs them as `test`, with its live MySQL.
+        result = select(["src/bash_platform.c", "src/store.zig"], "development", AVAILABLE)
+        self.assertEqual(result["targets"], ["test", "test-logic"])
+        self.assertEqual(result["server_targets"], ["test"])
+        self.assertFalse(result["native_required"])
+        # A path no unit root reaches keeps the cheap root alone.
+        self.assertEqual(select(["tests/integration/human_cli_integration.py"], "development", AVAILABLE)["targets"],
+                         ["test-logic"])
 
     def test_a_store_change_starts_mysql_for_the_live_dialect_check_in_every_phase(self):
         for phase in ("development", "review"):
@@ -1821,6 +1829,8 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             "peer_integration.py release", "bash_environment_integration.py release",
             "sender_identity_integration.py release",
             "human_cli_integration.py release", "preference_policy_integration.py preferences",
+            "model_picker_integration.py release", "model_picker_signin_integration.py release",
+            "model_picker_failure_integration.py release",
             "request_wait_integration.py release",
             "bash_lifecycle_integration.py release", "bash_recovery_integration.py release",
             "codex_integration.py release", "control_integration.py release",
