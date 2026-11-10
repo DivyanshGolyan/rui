@@ -11,7 +11,7 @@ const upgrade_status = @import("upgrade_status.zig");
 const UpgradeStep = @import("overview_view.zig").UpgradeStep;
 const Self = @This();
 
-pub const Outcome = enum { unchanged, compatible, incompatible };
+pub const Outcome = @import("session_upgrade.zig").Outcome;
 const Operation = enum { check, install };
 
 init: std.process.Init = undefined,
@@ -171,7 +171,7 @@ pub fn news(self: *const Self, heard: *Heard, working: usize) ?UpgradeStep {
     }
     if (!self.finished) return null;
     heard.ended = true;
-    return .{ .ended = self.ending() };
+    return .{ .ended = .{ .how = self.ending(), .outcome = self.outcome } };
 }
 
 /// The selected build already is the release and no running Host would
@@ -549,7 +549,7 @@ test "the core hears a found release once, then each restart step forward, then 
     try std.testing.expectEqual(@as(usize, 0), heardAll(&job, &heard, 2, &out).len);
     job.result = .{ .installation = .{ .installed = .{ .operation_build = "/b", .selected_after = "/b" } }, .activation = .{ .ready = .{ .instance = @splat(0), .pid = 1 } }, .store = "/s" };
     job.finish();
-    try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .ended = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 1 }, .restarted = true } } }}), heardAll(&job, &heard, 2, &out));
+    try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 1 }, .restarted = true } }, .outcome = .compatible } }}), heardAll(&job, &heard, 2, &out));
     try std.testing.expectEqual(@as(usize, 0), heardAll(&job, &heard, 2, &out).len);
     job.result = null;
     job.checked = null;
@@ -585,25 +585,29 @@ test "how a run ends, as the status bar names it" {
     const unchanged: @FieldType(upgrade.Result, "installation") = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b" } };
     const ready: @FieldType(upgrade.Result, "activation") = .{ .ready = .{ .instance = @splat(0), .pid = 1 } };
     const v: upgrade_status.Version = .{ .schema = 60, .patch = 1 };
-    const Case = struct { job: Self, ended: upgrade_status.Ended };
+    const already_ready: @FieldType(upgrade.Result, "activation") = .{ .already_ready = .{ .instance = @splat(0), .pid = 1 } };
+    const Case = struct { job: Self, ended: upgrade_status.Ended, outcome: Outcome };
     for ([_]Case{
         // Installed: restarted only when the new Host came up.
-        .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .activation = ready, .store = "" } }, .ended = .{ .upgraded = .{ .version = v, .restarted = true } } },
-        .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .activation = .not_needed, .store = "" } }, .ended = .{ .upgraded = .{ .version = v, .restarted = false } } },
+        .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .activation = ready, .store = "" } }, .ended = .{ .upgraded = .{ .version = v, .restarted = true } }, .outcome = .compatible },
+        .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .activation = .not_needed, .store = "" } }, .ended = .{ .upgraded = .{ .version = v, .restarted = false } }, .outcome = .compatible },
         // Installed and published, though the run was cancelled after.
-        .{ .job = .{ .operation = .install, .cancelling = true, .result = .{ .installation = installed, .activation = .cancelled, .store = "" } }, .ended = .{ .upgraded = .{ .version = v, .restarted = false } } },
+        .{ .job = .{ .operation = .install, .cancelling = true, .result = .{ .installation = installed, .activation = .cancelled, .store = "" } }, .ended = .{ .upgraded = .{ .version = v, .restarted = false } }, .outcome = .compatible },
         // Already the selected build: up to date, unless the Host restarted
         // onto it.
-        .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .activation = .not_needed, .store = "" } }, .ended = .{ .up_to_date = v } },
-        .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .activation = ready, .store = "" } }, .ended = .{ .upgraded = .{ .version = v, .restarted = true } } },
+        // Up to date still admits the Host it left: a retry after an
+        // Upgrade blocked requests lifts the block.
+        .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .activation = .not_needed, .store = "" } }, .ended = .{ .up_to_date = v }, .outcome = .compatible },
+        .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .activation = already_ready, .store = "" } }, .ended = .{ .up_to_date = v }, .outcome = .compatible },
+        .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .activation = ready, .store = "" } }, .ended = .{ .upgraded = .{ .version = v, .restarted = true } }, .outcome = .compatible },
         // The Host left cannot serve this client.
-        .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .activation = .{ .unconfirmed = .verifying }, .store = "" } }, .ended = .{ .incompatible = v } },
-        .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .activation = .replacement_observed, .store = "" } }, .ended = .{ .incompatible = v } },
+        .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .activation = .{ .unconfirmed = .verifying }, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
+        .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .activation = .replacement_observed, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
         // No receipt: a cancel says so before a failure does.
-        .{ .job = .{ .operation = .install, .cancelling = true, .failure = error.Cancelled }, .ended = .cancelled },
-        .{ .job = .{ .operation = .install, .failure = error.ReleaseChecksumMismatch }, .ended = .failed },
-        .{ .job = .{ .failure = error.ConnectionRefused }, .ended = .failed },
-        .{ .job = .{ .cancelling = true }, .ended = .cancelled },
+        .{ .job = .{ .operation = .install, .cancelling = true, .failure = error.Cancelled }, .ended = .cancelled, .outcome = .unchanged },
+        .{ .job = .{ .operation = .install, .failure = error.ReleaseChecksumMismatch }, .ended = .failed, .outcome = .unchanged },
+        .{ .job = .{ .failure = error.ConnectionRefused }, .ended = .failed, .outcome = .unchanged },
+        .{ .job = .{ .cancelling = true }, .ended = .cancelled, .outcome = .unchanged },
     }) |case| {
         var job = case.job;
         job.started = true;
@@ -611,7 +615,7 @@ test "how a run ends, as the status bar names it" {
         job.finish();
         var heard: Heard = .{ .found = true };
         var out: [8]UpgradeStep = undefined;
-        try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .ended = case.ended }}), heardAll(&job, &heard, 0, &out));
+        try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .ended = .{ .how = case.ended, .outcome = case.outcome } }}), heardAll(&job, &heard, 0, &out));
         job.result = null;
         job.checked = null;
     }
@@ -629,7 +633,7 @@ test "a check that may not install here names why" {
         job.finish();
         var heard: Heard = .{};
         var out: [8]UpgradeStep = undefined;
-        try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .ended = .{ .refused = case[1] } }}), heardAll(&job, &heard, 0, &out));
+        try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .ended = .{ .how = .{ .refused = case[1] }, .outcome = .unchanged } }}), heardAll(&job, &heard, 0, &out));
         job.checked = null;
     }
 }
@@ -643,7 +647,7 @@ test "the selected build already current installs quietly: no found release, the
     try std.testing.expectEqual(@as(usize, 0), heardAll(&job, &heard, 0, &out).len);
     job.result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b" } }, .activation = .not_needed, .store = "" };
     job.finish();
-    try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .ended = .{ .up_to_date = .{ .schema = 60, .patch = 1 } } }}), heardAll(&job, &heard, 0, &out));
+    try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 60, .patch = 1 } }, .outcome = .compatible } }}), heardAll(&job, &heard, 0, &out));
     job.result = null;
     job.checked = null;
 }

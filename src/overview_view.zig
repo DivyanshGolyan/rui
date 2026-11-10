@@ -619,7 +619,9 @@ pub const Commands = struct {
 pub const UpgradeStep = union(enum) {
     found: upgrade_status.Found,
     step: upgrade_status.Step,
-    ended: upgrade_status.Ended,
+    /// How it ended, as the status bar says it, and what it leaves Host
+    /// requests: the job's own outcome, never read back from the words.
+    ended: struct { how: upgrade_status.Ended, outcome: session_upgrade.Outcome },
 };
 
 /// A command read's answer: the Action's command, or null when the read
@@ -1744,18 +1746,14 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .upgrade => |reported| switch (reported) {
             .found => |release| state.upgrade.found(release),
             .step => |next| state.upgrade.step(next),
-            .ended => |how| {
-                state.upgrade.ended(how);
+            .ended => |ended| {
+                state.upgrade.ended(ended.how);
                 // An ending that is only news is a notice, which the next
                 // key clears; one that holds stays as the Upgrade's line.
                 var said: [upgrade_status.max_line_bytes]u8 = undefined;
                 if (state.upgrade.line(&said, .unicode)) |line| if (line.lasts == .notice)
                     state.say(if (line.tone == .attention) .attention else .normal, "{s}", .{line.text});
-                state.upgraded(switch (how) {
-                    .upgraded => .compatible,
-                    .incompatible => .incompatible,
-                    .up_to_date, .refused, .cancelled, .failed => .unchanged,
-                });
+                state.upgraded(ended.outcome);
             },
         },
         .models => |read| readModels(state, read),
@@ -7394,14 +7392,14 @@ test "/upgrade runs inline: Esc cancels it before the draft, checking or prepari
     try std.testing.expect(shownCommands(&state, typed) != null);
     try expectEffects(&.{.cancel_upgrade}, try press(&state, typed, .clear));
     const draft = try typeText(&state, "keep me");
-    _ = try step(&state, .{ .upgrade = .{ .ended = .cancelled } });
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } });
     try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", state.notice.?.text());
     try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
     _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } });
     // Esc cancels the Upgrade and keeps the draft.
     try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
     try std.testing.expectEqualStrings("Cancelling…", state.upgrade.line(&buffer, .unicode).?.text);
-    _ = try step(&state, .{ .upgrade = .{ .ended = .cancelled } });
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } });
     try std.testing.expect(!state.upgrade_blocked);
     // Once it ended, Esc clears the draft again.
     try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
@@ -7411,14 +7409,25 @@ test "/upgrade runs inline: Esc cancels it before the draft, checking or prepari
     _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .{ .running = 1 } } } });
     _ = try step(&state, .{ .upgrade = .{ .step = .publishing } });
     try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
-    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .incompatible = .{ .schema = 61, .patch = 0 } } } });
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
     try std.testing.expect(state.upgrade_blocked);
     try std.testing.expectEqual(upgrade_status.Lasts.persistent, state.upgrade.line(&buffer, .unicode).?.lasts);
 
+    // A retry that installs nothing keeps the hold unless the job found
+    // the Host it left usable, though both say up to date.
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 61, .patch = 0 } }, .outcome = .unchanged } } });
+    try std.testing.expect(state.upgrade_blocked);
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 61, .patch = 0 } }, .outcome = .compatible } } });
+    try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending);
+
     // Another /upgrade that upgrades lifts the hold until the next listing.
     _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
     _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 61, .patch = 1 }, .host = .{ .running = 0 } } } });
-    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .upgraded = .{ .version = .{ .schema = 61, .patch = 1 }, .restarted = true } } } });
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 61, .patch = 1 }, .restarted = true } }, .outcome = .compatible } } });
     try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending);
 }
 
@@ -7460,14 +7469,14 @@ test "the status bar says the newest notice, else the Upgrade at work or held, e
     try expectStatus(&state, "Upgrading to 0.60.0 · no Host running · esc cancels", .normal);
     // An ending that is news is a notice: it goes with the next key and
     // the unconfirmed send shows again.
-    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 0 }, .restarted = false } } } });
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 0 }, .restarted = false } }, .outcome = .compatible } } });
     try expectStatus(&state, "Upgraded to 0.60.0", .normal);
     _ = try press(&state, .{}, .next);
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
     // A release this client cannot use stays until another /upgrade.
     _ = try submit(&state, try typeText(&state, "/upgrade"));
     _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none } } });
-    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .incompatible = .{ .schema = 61, .patch = 0 } } } });
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
     _ = try press(&state, .{}, .next);
     try expectStatus(&state, "Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave", .attention);
     // ASCII spells the line's dots.
