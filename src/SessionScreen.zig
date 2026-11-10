@@ -774,24 +774,24 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     self.drawn = .{ .first = layout.first, .rows = @intCast(layout.document_rows) };
     self.commands = footer.commands;
     if (self.commands) |*commands| commands.drew(layout.list_height != 0);
-    _ = layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet));
-    _ = document.draw(window.child(.{ .y_off = layout.navigation_height + layout.document_offset, .height = @intCast(layout.document_rows) }), layout.first, true, self.colour, .{});
+    _ = layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet), self.style(.quiet).fg);
+    _ = document.draw(window.child(.{ .y_off = layout.navigation_height + layout.document_offset, .height = @intCast(layout.document_rows) }), layout.first, true, self.colour, .{}, self.style(.quiet).fg);
     if (layout.document_offset != 0) {
         // The conversation's latest rows fill the rows above a whole Action;
         // they are context, never read rows of the Action.
         try self.live.prepare();
-        _ = self.live.draw(window.child(.{ .y_off = layout.navigation_height, .height = layout.document_offset }), self.live.bottom(self.textLayout(), layout.document_offset), true, self.colour, .{});
+        _ = self.live.draw(window.child(.{ .y_off = layout.navigation_height, .height = layout.document_offset }), self.live.bottom(self.textLayout(), layout.document_offset), true, self.colour, .{}, self.style(.quiet).fg);
     }
     const failure = std.mem.startsWith(u8, status, "!") or std.mem.startsWith(u8, status, "Rejected");
-    _ = layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status_height }), .{}, true, self.colour, self.style(if (selector) .attention else .quiet));
+    _ = layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status_height }), .{}, true, self.colour, self.style(if (selector) .attention else .quiet), self.style(.quiet).fg);
     // Only a failure's own line is marked; standing notices below stay quiet.
-    if (failure and !selector) _ = layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status.lineRows(self.textLayout(), 0) }), .{}, true, self.colour, self.style(.failure));
+    if (failure and !selector) _ = layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status.lineRows(self.textLayout(), 0) }), .{}, true, self.colour, self.style(.failure), self.style(.quiet).fg);
     var call_row = layout.calls_row;
     for (0..layout.used) |index| {
-        _ = layout.calls[index].draw(window.child(.{ .y_off = call_row, .height = layout.call_heights[index] }), .{}, true, self.colour, self.style(live.style(index)));
+        _ = layout.calls[index].draw(window.child(.{ .y_off = call_row, .height = layout.call_heights[index] }), .{}, true, self.colour, self.style(live.style(index)), self.style(.quiet).fg);
         call_row += layout.call_heights[index];
     }
-    _ = layout.heading.draw(window.child(.{ .y_off = call_row, .height = layout.overflow_height }), .{}, true, self.colour, self.style(.quiet));
+    _ = layout.heading.draw(window.child(.{ .y_off = call_row, .height = layout.overflow_height }), .{}, true, self.colour, self.style(.quiet), self.style(.quiet).fg);
     // Cells borrow the clock's bytes until the frame is rendered.
     var live_clock: [work_line.max_clock_bytes]u8 = undefined;
     if (layout.live_height != 0) self.drawLive(window.child(.{ .y_off = layout.live_row, .height = 1 }), size.col, footer.live.?, &live_clock);
@@ -826,7 +826,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     // reason's frame offer the denial.
     var says_deny = false;
     if (layout.notice.length != 0) {
-        _ = layout.notice.draw(window.child(.{ .y_off = line_row, .height = layout.line_height }), .{}, true, self.colour, self.style(if (std.mem.startsWith(u8, footer.notice, "!")) .failure else .normal));
+        _ = layout.notice.draw(window.child(.{ .y_off = line_row, .height = layout.line_height }), .{}, true, self.colour, self.style(if (std.mem.startsWith(u8, footer.notice, "!")) .failure else .normal), self.style(.quiet).fg);
         says_deny = std.mem.indexOf(u8, footer.notice, ConsentPolicy.deny_words) != null;
     } else if (layout.line_height != 0) {
         // While an Action waits, the line under the input says how to decide it.
