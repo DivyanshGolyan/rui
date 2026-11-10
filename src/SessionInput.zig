@@ -81,6 +81,15 @@ pub fn append(self: *Self, text: []const u8) Editor.KeyOutcome {
     return outcome;
 }
 
+/// Puts `change`'s text in place of its range, as Tab's completion does.
+pub fn replace(self: *Self, change: Editor.Replacement) Editor.KeyOutcome {
+    const editor = &self.editors[self.active];
+    const edits = editor.edits;
+    const outcome = editor.replace(change);
+    if (editor.edits != edits) self.changed();
+    return outcome;
+}
+
 pub fn composition(self: *const Self) View {
     const editor = &self.editors[self.active];
     return .{ .bytes = editor.buffer[0..editor.length], .cursor = editor.cursor };
