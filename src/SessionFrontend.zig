@@ -357,7 +357,7 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .screen = screen, .interrupted = interrupted, .lender = lender, .colour = screen.colour };
     self.startInput();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
-    self.app_content = .{ .document = &screen.live, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll } };
+    self.app_content = .{ .document = &screen.live, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick } };
     self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
     self.app_screen = .{ .content = &self.app_content, .input = &self.app_input, .userdata = self, .on_event = appEvent };
 }
@@ -434,9 +434,7 @@ pub fn widget(self: *Self) vxfw.Widget {
 /// What a drag in the Transcript did, on the status bar.
 fn appNotice(raw: *anyopaque, ctx: *vxfw.EventContext, text: []const u8) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const length = @min(text.len, self.notice_buffer.len);
-    @memcpy(self.notice_buffer[0..length], text[0..length]);
-    self.notice = self.notice_buffer[0..length];
+    self.shown_notice.show(text, self.nowMs());
     ctx.redraw = true;
 }
 
@@ -464,6 +462,22 @@ fn follow(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
             try self.depart(ctx);
         },
     }
+}
+
+/// A click on a `┄ N more lines` row opens that Message, as Ctrl-O opens
+/// the lowest one in view; a click anywhere else does nothing.
+fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, at: @import("ConversationViewport.zig").Position) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.leaving != null or self.pagePlace() == .elsewhere) return;
+    const index = self.app_content.document.summaryAt(at.offset) orelse return;
+    self.shown_notice.dismiss();
+    if (self.upgrade.held()) {
+        self.notice = upgrade_recovery;
+    } else {
+        self.dropMessageRequest();
+        self.openCollapsed(index);
+    }
+    try self.afterInput(ctx);
 }
 
 fn appDragScroll(raw: *anyopaque, _: *vxfw.EventContext, up: bool) !void {
@@ -894,7 +908,7 @@ test "App Session drag copies the live rows it crosses once, says so and clears"
     try std.testing.expect(self.app_content.dragging());
     try content.handleEvent(&ctx, press(.release, 4, shown - 2));
     try std.testing.expectEqualStrings("row 37\nrow 3", Clip.take(&ctx, &copied));
-    try std.testing.expectEqualStrings("Copied 2 lines", self.notice.?);
+    try std.testing.expectEqualStrings("Copied 2 lines", self.shown_notice.current(self.nowMs()).?);
     try std.testing.expect(!self.app_content.dragging());
     // Held at the top edge, the live view scrolls through rows it already
     // holds; released, it follows the latest rows again.
@@ -2168,14 +2182,21 @@ fn expand(self: *Self) !?[session_id.bytes]u8 {
         .message => |index| index,
         .session => |id| return id,
     };
+    self.openCollapsed(index);
+    return null;
+}
+
+/// Asks for the collapsed Message `index` from the shown document's end.
+fn openCollapsed(self: *Self, index: usize) void {
+    const screen = self.screen;
+    self.dirty = true;
     const blocks = if (screen.view == .live) &self.live.blocks else &self.transcript.blocks;
     const target = blocks.fromEnd(index) orelse {
         self.notice = "! That message's full text is no longer held here; /history shows it again.";
-        return null;
+        return;
     };
     self.expansion.queued = .{ .ready = .{ .target = target, .asked = self.pageAsked() } };
     self.notice = "Opening message…";
-    return null;
 }
 
 /// Freezes live output for scrolling. The copy starts at a recorded read
@@ -4528,4 +4549,37 @@ test "App Session ? on an empty draft shows the shortcuts; the next key closes t
     _ = try fixture.draw();
     try std.testing.expect(self.app_screen.overlay == null);
     try std.testing.expectEqualStrings("?", self.input.composition().bytes);
+}
+
+test "App Session opens the collapsed Message whose ┄ row was clicked, as Ctrl-O does" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    try fixture.screen.live.append("› first\n  \x1b[2;8m┄ 2 more lines\x1b[0m\n› second\n  \x1b[2;8m┄ 3 more lines\x1b[0m\nTail line\n");
+    const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
+    for ([_]u64{ 40, 50 }) |position| self.live.blocks.append(.{ .source = .activity, .position = position, .ordinal = 0, .content = content, .row = false });
+    _ = try fixture.draw();
+    const text = fixture.screen.live.text();
+    const handler = self.app_content.handler.?;
+    // Any other row opens nothing.
+    try handler.on_click.?(handler.userdata, &fixture.ctx, .{ .offset = std.mem.indexOf(u8, text, "Tail line").? });
+    try std.testing.expect(self.expansion.queued == .none);
+    const older = std.mem.lastIndexOfScalar(u8, text[0..std.mem.indexOf(u8, text, "┄ 2").?], '\n').? + 1;
+    try handler.on_click.?(handler.userdata, &fixture.ctx, .{ .offset = older });
+    try std.testing.expectEqual(@as(u64, 40), self.expansion.queued.ready.target.position);
+}
+
+test "App Session drag-copy notices follow the notice rule" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    const handler = self.app_content.handler.?;
+    try handler.on_notice(handler.userdata, &fixture.ctx, "Copied 3 lines");
+    _ = try fixture.draw();
+    try std.testing.expectEqualStrings("Copied 3 lines", self.chrome.status.bar.left);
+    try std.testing.expect(self.shown_notice.expire(ChromeFixture.now() + 5_000));
+    _ = try fixture.draw();
+    try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
 }
