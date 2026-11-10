@@ -121,6 +121,10 @@ FIXTURES = {
                                          ("src/SessionFrontend.zig", "src/SessionTerminal.zig", "src/TerminalEditor.zig")),
     "canonical-failure-integration": ((I + "canonical_failure_integration.py",), (),
                                       (CALLER, "src/SessionFrontend.zig", "src/failure_class.zig", "src/model_adapter.zig")),
+    "overview-integration": ((I + "overview_integration.py", I + "overview_groups_cases.py", I + "overview_counts_cases.py",
+                              I + "overview_clicks_cases.py"), (),
+                             ("src/Overview.zig", "src/overview_view.zig", "src/OverviewLines.zig", "src/GroupedList.zig",
+                              "src/process_memory.zig", "src/host_identity.zig", "src/host_identity.c")),
     "human-cli-integration": ((I + "human_cli_integration.py",), ("src/terminal_notice_test.zig",),
                               (CALLER, "src/SessionFrontend.zig", "src/Overview.zig", "src/request_wait.zig",
                                "src/cli_args.zig", "src/slash_commands.zig")),
@@ -461,7 +465,7 @@ POLICY_SELF_CHECKS = (
 # test-only package in screen-emulator: setup fetches its packages for these only.
 # A step missing here still builds, fetching them on demand.
 SCREEN_TARGETS = frozenset({"check", "check-full", "terminal-restoration-integration", "canonical-failure-integration",
-                            "host-launch-integration", "upgrade-integration", "human-cli-integration",
+                            "host-launch-integration", "upgrade-integration", "human-cli-integration", "overview-integration",
                             "skills-integration", "bash-recovery-integration", "renderer-contracts-selftest",
                             "direct-pty", "direct-pty-controls", "input-equivalence", "screen-emulator"})
 

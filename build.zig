@@ -676,6 +676,11 @@ pub fn build(b: *std.Build) void {
         "human-cli-integration",
         "Run public caller recovery, the interactive frontend and exact Bash authorization (includes terminal restoration and canonical failure)",
     ).dependOn(&human_cli.step);
+    const overview_integration = screenCommand(b, screen, &.{"python3"});
+    overview_integration.addFileArg(b.path("tests/integration/overview_integration.py"));
+    overview_integration.addFileArg(ci.path(release_safe));
+    b.step("overview-integration", "Run the overview's groups, counts line, memory and clicks as a real terminal shows them")
+        .dependOn(&overview_integration.step);
     const host_process_test = b.addSystemCommand(&.{"python3"});
     host_process_test.addFileArg(b.path("tests/integration/host_process_test.py"));
     b.step("host-process-test", "Run the bounded Host process fixture's own failure checks").dependOn(&host_process_test.step);
