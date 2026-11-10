@@ -39,6 +39,9 @@ const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
 const session_list_read_domain = @import("domain/session_list_read.zig");
 const session_list_reply = @import("../session_list_reply.zig");
+const session_report = @import("../session_report.zig");
+const session_report_read_domain = @import("domain/session_report_read.zig");
+const session_report_reply = @import("../session_report_reply.zig");
 const store_schema = @import("schema.zig");
 const store_testing = @import("testing.zig");
 const turn_domain = @import("domain/turn.zig");
@@ -575,12 +578,12 @@ fn testingSessionReportWithExecution(
     session_ref: []const u8,
     limit: u64,
     profile: protocol.ReportProfile,
-    execution: report_domain.SessionReportExecution,
+    execution: session_report.Execution,
 ) ![]u8 {
     var root: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root);
     var used = std.atomic.Value(u64).init(0);
-    var report = try storage.captureSessionReport(session_ref, .{
+    var report = try testingCaptureSessionReport(storage, session_ref, .{
         .scratch_path = root[0..root_length],
         .scratch_budget = .{ .used = &used, .limit = limit },
         .request_number = 1,
@@ -601,7 +604,8 @@ fn testingSessionReportWithExecution(
 }
 
 /// Visits real Current and Full captures, including absent, idle, terminal
-/// and active approval work. The caller supplies the schema checker.
+/// and active approval work and a pending MCP call. The caller supplies the
+/// schema checker.
 pub fn checkSessionReportsForTesting(context: anytype) !void {
     const Fixture = struct {
         fn run(engine: *store_testing.Case, checker: @TypeOf(context)) !void {
@@ -642,6 +646,46 @@ pub fn checkSessionReportsForTesting(context: anytype) !void {
             try deny.session.set(session.slice());
             try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
             try Profiles.check(checker, &storage, &tmp, session.slice());
+            try mcp(engine, checker, Profiles);
+        }
+
+        /// An unresolved MCP call, which names an MCP tool and its server.
+        fn mcp(engine: *store_testing.Case, checker: @TypeOf(context), comptime Profiles: type) !void {
+            const records = comptime testingCatalogRecords(&.{
+                .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a docs page.", .input_schema = "{\"type\":\"object\"}" },
+            });
+            const digests = comptime blk: {
+                @setEvalBranchQuota(1_000_000);
+                var out: [records.len][32]u8 = undefined;
+                for (&records, &out) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+                break :blk out;
+            };
+            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var command = try completeConfiguration("schema-mcp", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            command.configuration.tools = try .of(&.{"fetch_page"});
+            const configured = try storage.configure(&command, .{});
+            try std.testing.expect(configured == .accepted);
+            const session = configured.accepted.session;
+            try submitTestMessage(&storage, &tmp, "schema-mcp-input", "schema-mcp-key", session.slice(), "fetch a page");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCallsForTesting(&storage, &tmp, binding, "schema-mcp-calls", &.{
+                .{ .item_id = "mcp-item", .name = "fetch_page", .encoded_call_id = "mcp-call", .decoded_call_id = "mcp-call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            });
+            const pending = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+            defer std.testing.allocator.free(pending);
+            const json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, pending, .{});
+            defer json.deinit();
+            const unresolved = json.value.object.get("actions").?.object.get("unresolved").?.array.items;
+            try std.testing.expectEqual(@as(usize, 1), unresolved.len);
+            try std.testing.expectEqualStrings("fetch_page", unresolved[0].object.get("tool").?.string);
+            try std.testing.expectEqualStrings("docs", unresolved[0].object.get("server").?.string);
+            try Profiles.check(checker, &storage, &tmp, session.slice());
         }
     };
     inline for (comptime std.enums.values(store_testing.Engine)) |engine| {
@@ -650,6 +694,28 @@ pub fn checkSessionReportsForTesting(context: anytype) !void {
             try Fixture.run(&case, context);
         }
     }
+}
+
+const TestingReportReply = session_report_reply.Reply(report_domain.SessionReportCapture);
+
+pub const TestingReportOptions = struct {
+    scratch_path: []const u8,
+    scratch_budget: ScratchBudget,
+    request_number: u64,
+    profile: protocol.ReportProfile = .current,
+    execution: session_report.Execution,
+    fail_unlink: bool = false,
+};
+
+/// A report captured as the server captures one: the Store's read
+/// written by the Host's reply into an unlinked scratch file.
+pub fn testingCaptureSessionReport(storage: *Store, session_ref: []const u8, options: TestingReportOptions) !SessionReport {
+    var capture: report_domain.SessionReportCapture = .{ .io = storage.io, .writer = null, .budget = options.scratch_budget };
+    try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
+    errdefer capture.deinit();
+    var reply: TestingReportReply = .{ .capture = &capture, .execution = options.execution };
+    try storage.readSessionReport(session_ref, options.profile, &reply);
+    return capture.seal();
 }
 
 const TestingListReply = session_list_reply.Reply(report_domain.SessionReportCapture);
@@ -2390,7 +2456,7 @@ test "report scratch exhaustion is an observation failure without Store fencing"
             var root: [protocol.max_store_bytes]u8 = undefined;
             const root_length = try tmp.dir.realPath(std.testing.io, &root);
             var used = std.atomic.Value(u64).init(0);
-            try std.testing.expectError(error.ReportScratchExhausted, storage.captureSessionReport(session.slice(), .{
+            try std.testing.expectError(error.ReportScratchExhausted, testingCaptureSessionReport(&storage, session.slice(), .{
                 .scratch_path = root[0..root_length],
                 .scratch_budget = .{ .used = &used, .limit = 1 },
                 .request_number = 1,
@@ -2415,7 +2481,7 @@ test "report unlink failure retains a startup-owned zero-request file" {
             var root: [protocol.max_store_bytes]u8 = undefined;
             const root_length = try tmp.dir.realPath(std.testing.io, &root);
             var used = std.atomic.Value(u64).init(0);
-            try std.testing.expectError(error.ReportScratchCleanupFailed, storage.captureSessionReport(session.slice(), .{
+            try std.testing.expectError(error.ReportScratchCleanupFailed, testingCaptureSessionReport(&storage, session.slice(), .{
                 .scratch_path = root[0..root_length],
                 .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
                 .request_number = 0,
@@ -2489,6 +2555,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("domain/report.zig"),
         @embedFile("domain/report_full_shape.zig"),
         @embedFile("domain/session_list_read.zig"),
+        @embedFile("domain/session_report_read.zig"),
         @embedFile("domain/skills.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
@@ -8153,8 +8220,10 @@ fn reportRoundsForTesting(case: *store_testing.Case, shape: TestingWorkShape) !u
     defer entry.release();
     var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
+    var reply: TestingReportReply = .{ .capture = &capture, .execution = .{ .dispatch_fenced = false, .custody_occupied = 0, .scratch_used_bytes = 0 } };
+    var watched: session_report_read_domain.Watched(*TestingReportReply) = .{ .visitor = &reply };
     const before = storage.testing_content_work.rounds;
-    try std.testing.expect(try report_domain.renderHead(&a, session.slice(), .current, &capture));
+    try std.testing.expect(try session_report_read_domain.readHead(&a, session.slice(), .current, &watched));
     return storage.testing_content_work.rounds - before;
 }
 
@@ -8961,7 +9030,7 @@ const EntryPoint = enum {
     openActivityContent,
     activityTool,
     failedResponseBinding,
-    captureSessionReport,
+    readSessionReport,
     readSessionList,
     actionContent,
     admitModelAttempt,
@@ -9032,7 +9101,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .openActivityContent = 4,
     .activityTool = 4,
     .failedResponseBinding = 1,
-    .captureSessionReport = 5,
+    .readSessionReport = 5,
     .readSessionList = 6,
     .actionContent = 2,
     .admitModelAttempt = 3,
@@ -9135,6 +9204,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/report.zig"),
         @embedFile("domain/report_full_shape.zig"),
         @embedFile("domain/session_list_read.zig"),
+        @embedFile("domain/session_report_read.zig"),
         @embedFile("domain/skills.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
@@ -9792,7 +9862,7 @@ test "each Store entry point takes its round budget on its common path" {
             meter.stop(.openActivityContent);
             meter.start();
             std.testing.allocator.free(try testingSessionReport(storage, tmp, session.slice(), 1024 * 1024));
-            meter.stop(.captureSessionReport);
+            meter.stop(.readSessionReport);
             var used = std.atomic.Value(u64).init(0);
             meter.start();
             std.testing.allocator.free(try testingSessionList(storage, tmp, .{}, &used, 2));
@@ -10206,7 +10276,7 @@ test "Current report work is independent of terminal tool history, in rounds" {
             const root_length = try tmp.dir.realPath(std.testing.io, &root);
             var used = std.atomic.Value(u64).init(0);
             const counter = TwinRounds.start(&storage);
-            var report = try storage.captureSessionReport(session.slice(), .{
+            var report = try testingCaptureSessionReport(&storage, session.slice(), .{
                 .scratch_path = root[0..root_length],
                 .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
                 .request_number = 1,

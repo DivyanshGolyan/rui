@@ -676,6 +676,16 @@ pub const FirstMessage = struct {
     pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = ActivityItem.Content }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
+    pub fn fromCore(first: session_list.FirstMessage) FirstMessage {
+        return .{
+            .position = first.position,
+            .admission = first.admission,
+            .admitted_at = first.admitted_at,
+            .sender = if (first.sender) |sender| .{ .session = sender } else null,
+            .content = .{ .length = first.length, .digest = first.digest },
+        };
+    }
+
     pub fn writeJson(self: *const FirstMessage, out: *std.Io.Writer) !void {
         try writeShape(out, json_shape, .{ self.position, self.admission, self.admitted_at, self.sender, self.content });
     }
