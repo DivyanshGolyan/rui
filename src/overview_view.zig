@@ -442,6 +442,20 @@ pub fn unconfirmedLine(state: *const State, buffer: *[max_unconfirmed_line_bytes
     return null;
 }
 
+pub const StatusBuffer = [@max(upgrade_status.max_line_bytes, max_unconfirmed_line_bytes)]u8;
+pub const StatusLine = struct { text: []const u8, colour: Colour };
+
+/// The overview's status bar: the newest notice, else the Upgrade while it
+/// runs or holds, else the newest unconfirmed send; null when all is quiet.
+/// Borrows `state` and `buffer`.
+pub fn statusLine(state: *const State, caps: Caps, buffer: *StatusBuffer) ?StatusLine {
+    if (state.notice) |*notice| return .{ .text = notice.firstLine(), .colour = notice.colour };
+    if (state.upgrade.line(buffer[0..upgrade_status.max_line_bytes], if (caps.unicode) .unicode else .ascii)) |line| if (line.lasts != .notice)
+        return .{ .text = line.text, .colour = if (line.tone == .attention) .attention else .normal };
+    const unconfirmed = unconfirmedLine(state, buffer[0..max_unconfirmed_line_bytes]) orelse return null;
+    return .{ .text = unconfirmed, .colour = .attention };
+}
+
 /// The ledger can hold a conversation's unconfirmed original.
 pub fn canHoldSend(state: *const State) bool {
     return state.request_count < max_requests;
@@ -1739,6 +1753,11 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             .step => |next| state.upgrade.step(next),
             .ended => |how| {
                 state.upgrade.ended(how);
+                // An ending that is only news is a notice, which the next
+                // key clears; one that holds stays as the Upgrade's line.
+                var said: [upgrade_status.max_line_bytes]u8 = undefined;
+                if (state.upgrade.line(&said, .unicode)) |line| if (line.lasts == .notice)
+                    state.say(if (line.tone == .attention) .attention else .normal, "{s}", .{line.text});
                 state.upgraded(switch (how) {
                     .upgraded => .compatible,
                     .incompatible => .incompatible,
@@ -4255,6 +4274,15 @@ fn segmentsOf(arena: Allocator, spans: []const Span, width: u16, fill: Style) er
 /// right, live memory and the archive view when it is not the default.
 /// Memory drops first on a narrow screen, `rui` before `tools`.
 pub fn countsSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
+    return (try countsLine(arena, state, width, caps)).segments;
+}
+
+/// The counts line, and the columns its view name takes, `start` up to
+/// `end`, when it shows one: a click there returns to the default view.
+pub const CountsLine = struct { segments: []const Segment, view: ?struct { start: u16, end: u16 } = null };
+
+pub fn countsLine(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!CountsLine {
+    var result: CountsLine = .{ .segments = &.{} };
     var painter: Painter = .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = 0 };
     painter.begin(false);
     const bar: Style = .{ .background = .bar };
@@ -4297,10 +4325,12 @@ pub fn countsSegments(arena: Allocator, state: *const State, width: u16, caps: C
         if (text.len != 0 and column + 2 + cells > end) continue;
         try painter.pad(end -| cells, bar);
         try painter.putRight(end, text, bar);
+        if (view.len != 0) result.view = .{ .start = @intCast(end - painter.measure(view)), .end = @intCast(end) };
         break;
     }
     try painter.pad(painter.width, bar);
-    return segmentsOf(arena, try painter.finish(), width, bar);
+    result.segments = try segmentsOf(arena, try painter.finish(), width, bar);
+    return result;
 }
 
 /// Memory in whole mebibytes, or gibibytes to a tenth, as `42 MB` or `1.8 GB`.
@@ -8450,6 +8480,73 @@ test "/upgrade runs inline: Esc cancels it before the draft, until publishing, a
     _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 61, .patch = 1 }, .host = .{ .running = 0 } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .upgraded = .{ .version = .{ .schema = 61, .patch = 1 }, .restarted = true } } } });
     try std.testing.expect(!state.upgrade_blocked and state.upgrade_pending);
+}
+
+test "the status bar says the newest notice, else the Upgrade at work or held, else an unconfirmed send" {
+    var state = try opened(&.{session("k7m2qx", .{ .working = ago(10) }, .{})});
+    defer state.deinit();
+    var buffer: StatusBuffer = undefined;
+    try std.testing.expectEqual(null, statusLine(&state, .{}, &buffer));
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    _ = try step(&state, .{ .unconfirmed = .{ .reference = "k7m2qx".*, .recovery = .{ .saved = .{ .original = .{ .kind = .message, .key = key }, .rejected = false } } } });
+    try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    try expectStatus(&state, "Checking for updates…", .normal);
+    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } });
+    try expectStatus(&state, "Upgrading to 0.60.0 · no Host running · esc cancels", .normal);
+    // A notice is newer, and the next key clears it.
+    state.say(.attention, "! Select a Session first.", .{});
+    try expectStatus(&state, "! Select a Session first.", .attention);
+    _ = try press(&state, .{}, .next);
+    try expectStatus(&state, "Upgrading to 0.60.0 · no Host running · esc cancels", .normal);
+    // An ending that is news is a notice: it goes with the next key and
+    // the unconfirmed send shows again.
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 0 }, .restarted = false } } } });
+    try expectStatus(&state, "Upgraded to 0.60.0", .normal);
+    _ = try press(&state, .{}, .next);
+    try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
+    // A release this client cannot use stays until another /upgrade.
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none } } });
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .incompatible = .{ .schema = 61, .patch = 0 } } } });
+    _ = try press(&state, .{}, .next);
+    try expectStatus(&state, "Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave", .attention);
+    // ASCII spells the line's dots.
+    var ascii: StatusBuffer = undefined;
+    try std.testing.expectEqualStrings("Rui 0.61.0 installed - restart rui to continue - your draft is kept until you leave", statusLine(&state, .{ .unicode = false }, &ascii).?.text);
+}
+
+fn expectStatus(state: *const State, text: []const u8, colour: Colour) !void {
+    var buffer: StatusBuffer = undefined;
+    const line = statusLine(state, .{}, &buffer).?;
+    try std.testing.expectEqualStrings(text, line.text);
+    try std.testing.expectEqual(colour, line.colour);
+}
+
+test "the counts line says where its view name sits, for a click" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqual(null, (try countsLine(arena.allocator(), &state, 100, .{ .unicode = false })).view);
+    state.archive = .archived;
+    state.memory = .{ .rui = 42 * mib, .tools = null };
+    for ([_]u16{ 100, 40 }) |width| {
+        const line = try countsLine(arena.allocator(), &state, width, .{ .unicode = false });
+        const text = try segmentText(arena.allocator(), line.segments);
+        const view = line.view.?;
+        // ASCII text, so a column is a byte.
+        try std.testing.expectEqualStrings("Archived", text[view.start..view.end]);
+        try std.testing.expectEqual(@as(u16, width - 1), view.end);
+    }
+    // Too narrow for the name: nothing to click.
+    try std.testing.expectEqual(null, (try countsLine(arena.allocator(), &state, 12, .{ .unicode = false })).view);
+}
+
+fn segmentText(arena: Allocator, segments: []const Segment) ![]const u8 {
+    var texts = try arena.alloc([]const u8, segments.len);
+    for (segments, 0..) |segment, n| texts[n] = segment.text;
+    return std.mem.concat(arena, u8, texts);
 }
 
 test "upgrade protocol hold refuses starts opens stops and Host commands but permits local recovery" {

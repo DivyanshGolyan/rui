@@ -4,6 +4,7 @@ test {
     _ = @import("widget_style.zig");
     _ = @import("InputArea.zig");
     _ = @import("GroupedList.zig");
+    _ = @import("OverviewLines.zig");
     _ = @import("Palette.zig");
     _ = @import("Composer.zig");
     _ = @import("Transcript.zig");
