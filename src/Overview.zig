@@ -31,6 +31,7 @@ const app_events = @import("testing/app_events.zig");
 const view = @import("overview_view.zig");
 const ClientTask = @import("ClientTask.zig");
 const UpgradePanel = @import("UpgradePanel.zig");
+const session_chrome = @import("session_chrome.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const session_reads = @import("session_reads.zig");
 const SessionInput = @import("SessionInput.zig");
@@ -329,6 +330,9 @@ done: [2]c_int = .{ -1, -1 },
 
 worker: ClientTask = .{},
 upgrade_requested: bool = false,
+/// The terminal title as last set: the open Session's name, if any, and how
+/// many Sessions need the person.
+title: session_chrome.Title = .{},
 jobs: [max_jobs]Job = undefined,
 job_count: usize = 0,
 /// The job the worker runs or last ran, and its output.
@@ -452,6 +456,8 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 try self.dispatch(.all);
             }
             if (self.upgrade_requested) try self.appUpgrade(ctx);
+            const open: ?[]const u8 = if (self.app_session) |shown| if (shown.frontend) |frontend| frontend.titleName() else null else null;
+            if (self.title.next(open, self.state.summary.counts.needs_you)) |text| try ctx.setTitle(text);
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
             const selected = TerminalEditor.selectEvent(view.keys, input, self.root.pasting);
@@ -2981,6 +2987,24 @@ test "a listing failure under a conversation ends the overview once the terminal
     const written = try finishedWith(rig, error.CanonicalStoreFailure, error.CanonicalStoreFailure, &buffer);
     // The failure is the overview's: no guidance to resume the Session.
     try std.testing.expectEqualStrings("", written);
+}
+
+test "App sets the terminal title once per change, with how many Sessions need the person" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try appEvent(rig.overview, &ctx, .tick);
+    try appEvent(rig.overview, &ctx, .tick);
+    rig.overview.state.summary.counts.needs_you = 2;
+    try appEvent(rig.overview, &ctx, .tick);
+    var titles: std.ArrayList([]const u8) = .empty;
+    for (ctx.cmds.items) |command| if (command == .set_title) try titles.append(arena.allocator(), command.set_title);
+    try std.testing.expectEqual(@as(usize, 2), titles.items.len);
+    try std.testing.expectEqualStrings("rui", titles.items[0]);
+    try std.testing.expectEqualStrings("rui · 2 needs you", titles.items[1]);
 }
 
 test "leaving while a start is queued or running says what became of it" {

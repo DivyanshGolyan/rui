@@ -5,7 +5,6 @@
 //! reads a clock or the terminal; the shell passes the time and widths.
 const std = @import("std");
 const session_line = @import("session_line.zig");
-const session_work = @import("session_work.zig");
 const TerminalText = @import("TerminalText.zig");
 
 pub const Method = session_line.Method;
@@ -20,56 +19,55 @@ pub const notice_ms = 5_000;
 /// and the next key dismisses it before the key acts, so a key's own
 /// notice survives it. Anything the person must act on is never a notice:
 /// it is the status bar's `needs` text, which lasts until resolved.
-pub const Notice = struct {
-    pub const capacity = 256;
-    bytes: [capacity]u8 = undefined,
-    len: usize = 0,
-    /// When it was shown, on the shell's clock; null when none is held.
-    shown_ms: ?u64 = null,
+pub fn Notice(comptime capacity: usize) type {
+    return struct {
+        const Self = @This();
+        bytes: [capacity]u8 = undefined,
+        len: usize = 0,
+        /// When it was shown, on the shell's clock; null when none is held.
+        shown_ms: ?u64 = null,
 
-    /// Holds `text`, shown at `now_ms`, in place of any notice. A longer
-    /// text is cut on a character.
-    pub fn show(self: *Notice, text: []const u8, now_ms: u64) void {
-        const len = cutUtf8(text, capacity);
-        @memcpy(self.bytes[0..len], text[0..len]);
-        self.len = len;
-        self.shown_ms = now_ms;
-    }
+        /// Holds `text`, shown at `now_ms`, in place of any notice. A longer
+        /// text is cut on a character.
+        pub fn show(self: *Self, text: []const u8, now_ms: u64) void {
+            const len = cutUtf8(text, capacity);
+            std.mem.copyForwards(u8, self.bytes[0..len], text[0..len]);
+            self.len = len;
+            self.shown_ms = now_ms;
+        }
 
-    /// The next key: the notice goes.
-    pub fn dismiss(self: *Notice) void {
-        self.shown_ms = null;
-    }
+        /// The next key: the notice goes.
+        pub fn dismiss(self: *Self) void {
+            self.shown_ms = null;
+        }
 
-    /// The text that shows at `now_ms`, or null once it went.
-    pub fn current(self: *const Notice, now_ms: u64) ?[]const u8 {
-        const shown = self.shown_ms orelse return null;
-        return if (now_ms -| shown < notice_ms) self.bytes[0..self.len] else null;
-    }
+        /// The text that shows at `now_ms`, or null once it went.
+        pub fn current(self: *const Self, now_ms: u64) ?[]const u8 {
+            const shown = self.shown_ms orelse return null;
+            return if (now_ms -| shown < notice_ms) self.bytes[0..self.len] else null;
+        }
 
-    /// Milliseconds until it goes by itself, so the shell can wake to
-    /// redraw; null when nothing shows.
-    pub fn wake(self: *const Notice, now_ms: u64) ?u64 {
-        _ = self.current(now_ms) orelse return null;
-        return notice_ms - (now_ms -| self.shown_ms.?);
-    }
-};
+        /// Drops a notice whose time ran out at `now_ms`; true when one
+        /// went, so the shell redraws without it.
+        pub fn expire(self: *Self, now_ms: u64) bool {
+            if (self.shown_ms == null or self.current(now_ms) != null) return false;
+            self.shown_ms = null;
+            return true;
+        }
+    };
+}
 
 // --- Status bar -----------------------------------------------------------
 
 /// The stop key the last row offers while work can be stopped.
 pub const stop_key = "ctrl+x stop";
 
-/// Whether Ctrl-X has work to stop: a tool or the model running, a retry
-/// counting down, queued work, or an Action waiting. Not while a stop is
-/// already settling (the Host's `stopping`, or one the person asked for
-/// that the Host has not reported yet), and not once work has ended.
-pub fn stoppable(kind: session_work.Kind, stop_requested: bool) bool {
-    if (stop_requested) return false;
-    return switch (kind) {
-        .pending, .working, .retrying, .bash, .approval => true,
-        .idle, .stopping, .finished, .failed, .stopped => false,
-    };
+/// The key that ends what needs the person, which the status bar makes
+/// clickable: the part after its last ` · ` (`! Not confirmed · ctrl+r
+/// retries` → `ctrl+r retries`), or nothing when it names none.
+pub fn needsKey(needs: []const u8) []const u8 {
+    const at = std.mem.lastIndexOf(u8, needs, " · ") orelse return "";
+    return needs[at + " · ".len ..];
 }
 
 pub const Tone = enum { quiet, attention };
@@ -304,14 +302,16 @@ test "? on an empty draft shows the shortcuts; the next key closes them; ?? type
 }
 
 test "a notice goes after about five seconds or at the next key; the newest replaces it; what needs the person stays" {
-    var notice: Notice = .{};
+    var notice: Notice(256) = .{};
     try std.testing.expectEqual(@as(?[]const u8, null), notice.current(0));
     notice.show("Copied 12 lines", 10_000);
     try std.testing.expectEqualStrings("Copied 12 lines", notice.current(10_000).?);
     try std.testing.expectEqualStrings("Copied 12 lines", notice.current(14_999).?);
     try std.testing.expectEqual(@as(?[]const u8, null), notice.current(15_000));
-    try std.testing.expectEqual(@as(?u64, 1), notice.wake(14_999));
-    try std.testing.expectEqual(@as(?u64, null), notice.wake(15_000));
+    try std.testing.expect(!notice.expire(14_999));
+    try std.testing.expect(notice.expire(15_000));
+    try std.testing.expect(!notice.expire(15_001));
+    notice.show("Copied 12 lines", 10_000);
     // A clock that reads earlier than the notice still shows it.
     try std.testing.expect(notice.current(9_000) != null);
     notice.show("! Unknown command /x · /help", 12_000);
@@ -331,15 +331,6 @@ test "a notice goes after about five seconds or at the next key; the newest repl
 }
 
 test "the stop key shows on the right while work can be stopped, and drops first when the row is short" {
-    for (std.enums.values(session_work.Kind)) |kind| {
-        const expected = switch (kind) {
-            .pending, .working, .retrying, .bash, .approval => true,
-            else => false,
-        };
-        try std.testing.expectEqual(expected, stoppable(kind, false));
-        // Once the person asked, Ctrl-X does nothing until the Host reports.
-        try std.testing.expect(!stoppable(kind, true));
-    }
     const alone = bar(.{ .stoppable = true, .width = 80 });
     try std.testing.expect(alone.stop);
     try std.testing.expectEqual(@as(u16, 80 - 11 - 1), alone.stop_column);
@@ -357,6 +348,12 @@ test "the stop key shows on the right while work can be stopped, and drops first
     try std.testing.expect(!bar(.{ .stoppable = true, .width = 11 }).stop);
     try std.testing.expect(bar(.{ .stoppable = true, .width = 12 }).stop);
     try std.testing.expect(!bar(.{ .stoppable = false, .width = 80 }).stop);
+}
+
+test "the key that ends what needs the person is the part after its last separator" {
+    try std.testing.expectEqualStrings("Ctrl-R retries original", needsKey("! Not confirmed · Ctrl-R retries original"));
+    try std.testing.expectEqualStrings("/discard", needsKey("Rejected · /discard"));
+    try std.testing.expectEqualStrings("", needsKey("Sending…"));
 }
 
 test "Shift-Up/Down move half the transcript, at least a row" {
