@@ -128,6 +128,9 @@ def shape(queries):
     commits = write_round_trips = 0
     open_transaction = 0
     for text in queries:
+        # Every message starts with the session settings, none holding ';'.
+        while text.lstrip().upper().startswith("SET "):
+            text = text.split(";", 1)[1] if ";" in text else ""
         if open_transaction == 0 and not text.lstrip().startswith("START TRANSACTION"):
             continue
         open_transaction += 1
