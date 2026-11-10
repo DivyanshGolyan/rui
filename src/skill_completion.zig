@@ -308,7 +308,9 @@ test "skill reads ask once per name, one at a time, and not while the held page 
     try std.testing.expectEqual(@as(u64, 2), reads.ask("r").?.read);
     const replaced = reads.answer(2, .{ .entries = entries[0..1], .total = 30 }, "r").?;
     try std.testing.expectEqual(@as(usize, 2), replaced.entries.len);
-    try std.testing.expectEqual(@as(u64, 3), reads.ask("r").?.read);
+    // That page was cut off at the Host's row limit, so it may leave out
+    // skills a longer name matches: `/rev` reads again too.
+    try std.testing.expectEqual(@as(u64, 3), reads.ask("rev").?.read);
     // A name longer than the Host reads asks nothing.
     var fresh: Reads = .{};
     try std.testing.expectEqual(@as(?Ask, null), fresh.ask(&@as([max_prefix_bytes + 1]u8, @splat('a'))));
