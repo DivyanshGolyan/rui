@@ -16,7 +16,7 @@ from textwrap import dedent
 from unittest.mock import patch
 
 import build_files
-from select_tests import (BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES,
+from select_tests import (BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES,
                           POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, TEST_CODE, UNIT_ROOTS, Graph, execution_batches, matches, select,
                           setup_requirements, tree_graph)
 from qualification import NATIVE, RESOURCES, qualification, shards
@@ -99,6 +99,13 @@ class BuildModuleTest(unittest.TestCase):
         modules = {path.relative_to(build_files.ROOT).as_posix() for path in build_files.files()}
         self.assertEqual(modules - {"build.zig"}, BUILD_MODULES.keys())
 
+    def test_a_hub_module_edit_selects_what_a_build_zig_edit_does(self):
+        hub = select(["build.zig"], "review", AVAILABLE)
+        for module, targets in BUILD_MODULES.items():
+            if targets == BUILD_HUB:
+                with self.subTest(module=module):
+                    self.assertEqual(select([module], "review", AVAILABLE), hub)
+
     def test_checks_read_every_build_file(self):
         # A read of build.zig alone misses the targets and calls build/ modules hold.
         read = re.compile(r"""build\.zig["']\)\.read_text\(""")
@@ -116,12 +123,13 @@ class BuildModuleTest(unittest.TestCase):
                 result = select([module], "review", AVAILABLE)
                 selected = set(result["targets"])
                 self.assertTrue(selected)
-                self.assertLessEqual(set(targets), AVAILABLE)
+                self.assertLessEqual(set(targets) if targets != BUILD_HUB else set(), AVAILABLE)
                 covered = (selected | {case for broad, cases in FIXTURE_COVERS.items() if broad in selected for case in cases}
                            | (CHECK_COVERS if selected & {"check", "check-full"} else set())
                            | ({"test-native", "test-store"} if "test" in selected else set()))
                 self.assertLessEqual({step for step, owner in defined.items() if owner == module} & selectable, covered)
-                self.assertLessEqual(set(targets), covered)
+                if targets != BUILD_HUB:
+                    self.assertLessEqual(set(targets), covered)
 
 
 class SelectionTest(unittest.TestCase):
@@ -989,7 +997,7 @@ class SelectionTest(unittest.TestCase):
                 fixture = FIXTURES[target][0][0]
                 run = re.search(r'(\w+)\.addFileArg\(b\.path\("' + re.escape(fixture) + r'"\)\)', build)
                 self.assertIsNotNone(run, fixture)
-                self.assertIn(f"const {run[1]} = screenCommand(", build, fixture)
+                self.assertIn(f"const {run[1]} = screen_build.screenCommand(", build, fixture)
         # install.sh fetches the graph fetch_dependencies.sh walks from the root
         # manifest; ghostty's path dependencies would also make it exit 1.
         root = Path(__file__).parents[2]

@@ -498,19 +498,28 @@ RULES += ((("src/store.zig", "src/store/*", "!src/store/wire/*", "src/server_exe
            ("launch-frame-integration",), (),
            "The Store's MySQL round trips per model operation and while idle stay within their budget"),)
 
-# build.zig wires every target and builds the Rui every fixture runs, so an
-# edit to it selects the full gate (RULES above). A module under build/
-# selects only what it can change: the targets it defines and those that use
-# what it builds. test_selection.BuildModuleTest holds every module and every
-# target a module defines to this map.
+# build.zig wires every target, so an edit to it selects the full gate (RULES
+# above). A hub module is build.zig's code split out for size, and an edit to
+# it selects what a build.zig edit does. Any other module under build/ selects
+# only what it can change: the targets it defines and those that use what it
+# builds. test_selection.BuildModuleTest holds every module and every target a
+# module defines to this map.
+BUILD_HUB = "build.zig"
 BUILD_MODULES = {
+    # The Rui every target builds or runs, and the libraries it links.
+    "build/product.zig": BUILD_HUB,
+    # How every CI producer hands executables to the shards that run them.
+    "build/ci.zig": BUILD_HUB,
+    # The PTY screen observer: what check-full and these fixtures load to read
+    # the terminal. Its renderer harnesses are nonblocking (renderer-contracts.yml).
+    "build/screen.zig": ("check-full", "skills-integration", "upgrade-integration"),
     # Darwin linking, the screen library's name and the Mac unit-root limits.
     # The unit roots and one screen fixture link and load what it names; it is
     # a Mac path, so ready PRs run these on Mac too.
     "build/darwin.zig": ("test", "host-launch-integration"),
 }
 RULES += tuple(((module,), targets, targets, "Build module: the targets it defines or builds for")
-               for module, targets in BUILD_MODULES.items())
+               for module, targets in BUILD_MODULES.items() if targets != BUILD_HUB)
 
 
 # Inputs to the Host's ReleaseSafe frames or to their gate: Zig source the
@@ -599,6 +608,7 @@ def select(paths, phase, available, graph=None, contents=None):
     """`contents` maps a path a `CONTENT_RULES` entry matches to its
     (before, after) text; a path it leaves out counts as changed."""
     graph = graph or tree_graph()
+    paths = [BUILD_HUB if BUILD_MODULES.get(path) == BUILD_HUB else path for path in paths]
     contents = contents or {}
     content_changed = {rule for rule, (patterns, changed) in CONTENT_RULES.items()
                        if any(matches(path, patterns) and (path not in contents or changed(path, *contents[path]))

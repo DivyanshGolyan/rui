@@ -611,11 +611,11 @@ def fixture_imports(root):
     fixtures = {path.relative_to(root).as_posix() for path in directory.glob("*.py")
                 if any(isinstance(node, ast.If) and ast.unparse(node.test) == "__name__ == '__main__'"
                        for node in ast.parse(path.read_text()).body)}
-    for launcher, launched in (("build.zig", r'"(tests/integration/\w+\.py)"'),
-                               ("tests/integration/check.sh", r'\$directory/(\w+\.py)')):
-        if (root / launcher).exists():
-            fixtures |= {name if name.startswith("tests/") else f"tests/integration/{name}"
-                         for name in re.findall(launched, (root / launcher).read_text())}
+    check = root / "tests/integration/check.sh"
+    for source, launched in ((build_files.source(root) if (root / "build.zig").exists() else "", r'"(tests/integration/\w+\.py)"'),
+                             (check.read_text() if check.exists() else "", r'\$directory/(\w+\.py)')):
+        fixtures |= {name if name.startswith("tests/") else f"tests/integration/{name}"
+                     for name in re.findall(launched, source)}
     fixtures -= FIXTURE_LIBRARY_ENTRIES.keys()
     found = set()
     for path in sorted([*directory.glob("*.py"), *directory.glob("*.sh"),
