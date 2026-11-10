@@ -1678,7 +1678,7 @@ A caller that finds the Store free holds it and runs its entry point on its own 
 A holder runs at most 64 requests for others, then hands the Store to the next waiter.
 Writes the holder runs back to back share one transaction and one fsync: each later write runs in a savepoint, so a write that fails rolls back alone, and no caller hears its answer until the batch's COMMIT; a failed COMMIT fences the Store and every write in the batch hears the Store as fenced.
 A lone write costs BEGIN and COMMIT, as before.
-A Message's commit callback runs at its write's end, before the batch's COMMIT.
+A Message's commit callback runs once the batch's COMMIT succeeds, before any of its writers hears an answer.
 A dispatch check is never run for its caller: the holder hands that caller the Store, which keeps it until it has launched the Attempt or Action, so no stop commits between the check and the launch.
 
 The Host opens the Store database with `locking_mode=EXCLUSIVE`, `journal_mode=WAL`, `synchronous=FULL` (with `fullfsync` on macOS) and a 4-MiB `journal_size_limit`.
@@ -3634,7 +3634,9 @@ A running MySQL Store that fences writes the same envelope with
 `store_fenced` before draining and exits 1 (D211).
 When the connection is lost around a COMMIT, the Store first reconnects, up to three times a second apart: it ends the old server session with `KILL`, takes `GET_LOCK` again once that session is gone, and reads `store_owner.commit_seq`.
 Every write transaction advances it by exactly one, so the value says whether the COMMIT landed.
-Landed is success and the Store carries on; not landed is reported as a lost connection, which still fences.
+Landed is success and the Store carries on.
+Not landed means nothing was saved: the Store keeps the new connection, gives back the ids the attempt took, and runs the attempt again once, a batch whole and in order, so its callers never see the loss.
+A second loss in that rerun fences, as does a loss outside a queued attempt.
 Only when no reconnect succeeds does the outcome stay unknown (`CommitOutcomeUnknown`).
 
 Host information is a read-only, bounded `/v1/host-info` exchange for the canonical selected Store.

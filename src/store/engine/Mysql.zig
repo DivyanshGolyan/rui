@@ -55,8 +55,17 @@ pub const State = struct {
     /// The server session holding the Store's GET_LOCK.
     connection_id: u64 = 0,
     io: std.Io = undefined,
+    /// Whether the Queue may run the current attempt again, so a lost
+    /// connection defers its fence to `recover` (`queue.Batch.arm`).
+    armed: bool = false,
+    /// A reconnect already replaced the lost connection, finding nothing
+    /// saved (`settleLostCommit`).
+    replaced: bool = false,
+    /// Tests: lose the connection before every armed COMMIT, so each batch
+    /// runs twice.
+    testing_drop_armed: if (is_test) bool else void = if (is_test) false else {},
     /// Tests: where the next COMMIT loses its connection.
-    testing_drop: if (is_test) enum { none, before_commit, after_commit } else void = if (is_test) .none else {},
+    testing_drop: if (is_test) enum { none, before_commit, after_commit, next_pass } else void = if (is_test) .none else {},
 
     /// Commit, rollback or a server abort ends the transaction, and with
     /// it every savepoint and any control not yet sent.
@@ -281,6 +290,10 @@ fn appendControls(self: *Mysql) Failure!void {
 
 pub fn startPass(self: *Mysql) Failure!void {
     try self.check();
+    if (is_test and self.state.testing_drop == .next_pass) {
+        self.state.testing_drop = .none;
+        self.state.connection.disconnect();
+    }
     if (!self.state.long_query and self.state.connection.batchLen() != 0) {
         self.state.connection.sendBatch() catch return self.lost();
         if (self.state.begin == .buffered) self.state.begin = .{ .sent = .{} };
@@ -455,16 +468,21 @@ pub fn control(self: *Mysql, comptime which: engine.Control) Failure!void {
     self.state.committing = which == .commit;
     defer self.state.committing = false;
     if (is_test) self.state.testing_shape.controls += 1;
-    if (is_test and which == .commit and self.state.testing_drop == .before_commit) self.state.connection.disconnect();
+    if (is_test and which == .commit and (self.state.testing_drop == .before_commit or
+        (self.state.testing_drop_armed and self.state.armed)))
+    {
+        self.state.testing_drop = .none;
+        self.state.connection.disconnect();
+    }
     self.state.connection.query(text) catch {
         const err = self.lost();
         return if (which == .commit) self.settleLostCommit() else err;
     };
     if (is_test and which == .commit and self.state.testing_drop == .after_commit) {
-        // Once COMMIT's OK is readable, the server has committed: the
-        // drop then loses only the acknowledgement.
-        var ready = [1]std.posix.pollfd{.{ .fd = self.state.connection.fd, .events = std.posix.POLL.IN, .revents = 0 }};
-        _ = std.posix.poll(&ready, 60_000) catch 0;
+        // Reads past the message's settings to COMMIT's own OK, so the
+        // server has committed, then loses the connection: only the
+        // acknowledgement is lost.
+        _ = self.state.connection.next() catch {};
         self.state.connection.disconnect();
     }
     if (is_test and which == .commit) self.state.testing_drop = .none;
@@ -497,12 +515,45 @@ fn settleLostCommit(self: *Mysql) Failure!void {
         s.failure = null;
         s.commit_seq += 1;
         return;
-    } else if (owner.commit_seq == s.commit_seq)
-        error.StoreConnectionLost
-    else
-        error.OwnershipLost;
+    } else if (owner.commit_seq == s.commit_seq) blk: {
+        s.replaced = true;
+        break :blk error.StoreConnectionLost;
+    } else error.OwnershipLost;
     s.failure = err;
     return err;
+}
+
+/// Whether a fence now would end an attempt the Queue can still run again
+/// on a new connection: the connection was lost while armed.
+pub fn defersFence(self: *const Mysql) bool {
+    const s = self.state;
+    return s.armed and s.login != null and s.failure != null and s.failure.? == error.StoreConnectionLost;
+}
+
+/// After an armed attempt that lost its connection: replaces it, unless a
+/// lost COMMIT already did, and answers whether nothing was saved, so the
+/// attempt may run again. Otherwise the loss stays, and fences.
+pub fn recover(self: *Mysql) bool {
+    const s = self.state;
+    defer s.replaced = false;
+    if (s.login == null or s.failure == null or s.failure.? != error.StoreConnectionLost) return false;
+    if (!s.replaced) {
+        const owner = self.reconnect() catch return false;
+        if (owner.epoch != s.epoch or owner.commit_seq != s.commit_seq) {
+            s.failure = error.OwnershipLost;
+            return false;
+        }
+    }
+    s.endTransaction();
+    s.sink.close();
+    s.long_query = false;
+    s.prefix_results = 0;
+    s.fence_result = 0;
+    s.pass_failure = null;
+    s.statement_done = false;
+    s.committing = false;
+    s.failure = null;
+    return true;
 }
 
 /// Replaces the lost connection with a new one that holds the Store's
