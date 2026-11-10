@@ -99,18 +99,14 @@ def terminal_capture(master, *, fresh=False, silent=False):
 
 
 def draining(master, observe, feed=None):
-    """`observe`, after reading what the terminal holds: a fixture waiting on
+    """`observe`, after reading ready terminal output: a fixture waiting on
     the Host still drains the PTY as a terminal does. Darwin's holds 1 KiB, so
     a screen that stopped being read blocks mid-frame and runs no new work.
     `feed` takes the bytes; by default the master's registered capture."""
     feed = feed or terminal_capture(master).feed
 
     def drained():
-        while select.select([master], [], [], 0)[0]:
-            chunk = os.read(master, 65536)
-            if not chunk:
-                break
-            feed(chunk)
+        terminal_process_module.drain_ready(master, feed)
         return observe()
     return drained
 

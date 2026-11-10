@@ -48,6 +48,18 @@ def register_capture(master, capture):
             PTY_MASTERS[master] = threading.current_thread()
 
 
+def drain_ready(master, feed):
+    """Feed at most one ready chunk, then yield to the waiting observer."""
+    try:
+        if select.select([master], [], [], 0)[0]:
+            chunk = os.read(master, 65536)
+            if chunk:
+                feed(chunk)
+    except OSError as error:
+        if error.errno != errno.EIO:
+            raise
+
+
 def drain_captures():
     with PTY_LOCK:
         for master, owner in list(PTY_MASTERS.items()):
@@ -56,15 +68,7 @@ def drain_captures():
             capture = CAPTURES.get(master)
             if capture is None:
                 continue
-            try:
-                while select.select([master], [], [], 0)[0]:
-                    chunk = os.read(master, 65536)
-                    if not chunk:
-                        break
-                    capture.feed(chunk)
-            except OSError as error:
-                if error.errno != errno.EIO:
-                    raise
+            drain_ready(master, capture.feed)
 
 
 WAIT_HOOKS.append(drain_captures)

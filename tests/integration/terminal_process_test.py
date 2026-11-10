@@ -88,6 +88,20 @@ class TerminalProcessTest(unittest.TestCase):
         os.write(slave, b"owner drains")
         wait_for(lambda: received == b"owner drains", "owner drainage")
 
+    def test_continuously_readable_terminal_yields_to_observer(self):
+        import human_cli_fixture as human
+        master, slave = open_pty()
+        received = bytearray()
+        register_capture(master, type("Capture", (), {"feed": received.extend})())
+        # Simulate a chatty PTY without a timing-dependent writer. The last
+        # empty chunk bounds the old unbounded loop for the negative control.
+        for observe in (lambda: wait_for(lambda: len(received), "continuous output"),
+                        lambda: human.draining(master, lambda: len(received), received.extend)()):
+            received.clear()
+            with patch("terminal_process.select.select", return_value=([master], [], [])), \
+                 patch("terminal_process.os.read", side_effect=[b"x"] * 10 + [b""]):
+                self.assertEqual(observe(), 1)
+
     def test_reused_pipe_is_not_drained(self):
         master, slave = open_pty()
         register_capture(master, type("Capture", (), {"feed": lambda _, data: self.fail(data)})())

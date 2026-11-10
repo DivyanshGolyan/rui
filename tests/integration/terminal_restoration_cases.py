@@ -2030,7 +2030,7 @@ def app_full_pty_case():
         print("App full PTY SIGTERM: exited and terminal restored after draining resumed", flush=True)
     finally:
         dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                    lambda: os.close(master), lambda: os.close(slave))
+                    lambda: close_pty(master), lambda: close_pty(slave))
 
 
 def app_resize_cases():
