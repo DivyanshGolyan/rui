@@ -1159,6 +1159,12 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     try std.testing.expect(held.self.skill_task.thread == null);
     try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "/recap") == null);
     try held.keys("\x15");
+    // So are its arguments: Enter sends the whole line as the command.
+    try held.keys("/rename /re");
+    try held.settle();
+    try std.testing.expectEqual(@as(usize, 0), Fake.calls);
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "/recap") == null);
+    try held.keys("\x15");
     // The draft Q2 typed in a real terminal: the caret moved back to just
     // after `/re`, in the middle of a Message. The page comes in while the
     // caret is in the word; one that came in after it left would be

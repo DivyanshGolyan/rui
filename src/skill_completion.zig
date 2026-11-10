@@ -43,11 +43,11 @@ pub fn atCaret(draft: []const u8, caret: usize) ?Word {
     return .{ .slash = slash, .end = end };
 }
 
-/// The `/word` at `caret` a skill can fill: any but the draft's first,
-/// which makes the draft a command line that Enter runs, not a Message.
+/// The `/word` at `caret` a skill can fill: none in a draft that starts
+/// with one `/`, which Enter runs whole as a command line, not a Message.
 pub fn skillWordAt(draft: []const u8, caret: usize) ?Word {
-    const word = atCaret(draft, caret) orelse return null;
-    return if (word.slash == 0) null else word;
+    if (draft.len != 0 and draft[0] == '/' and !std.mem.startsWith(u8, draft, "//")) return null;
+    return atCaret(draft, caret);
 }
 
 /// The longest name prefix the Host reads suggestions for.
@@ -329,6 +329,11 @@ test "a draft's first /word is the command's: it lists commands, never skills" {
     for (shown.list.shown()) |entry| try std.testing.expect(!std.mem.eql(u8, entry.shown, "/status-report"));
     // A later word lists the skill.
     try std.testing.expectEqualStrings("/status-report", reads.shown(&rows, "x /sta", "x /sta".len, 2, null, null).?.list.entries[0].shown);
+    // Every word of a command line is the command's, its arguments too.
+    for ([_][]const u8{ "/rename /sta", "/configure --workspace /sta" }) |line| {
+        try std.testing.expectEqual(@as(?Word, null), skillWordAt(line, line.len));
+        if (reads.shown(&rows, line, line.len, 3, null, null)) |listed| try std.testing.expectEqual(@as(usize, 0), listed.list.count);
+    }
 }
 
 test "a caret moved to another /word is another list, which no key takes until drawn" {

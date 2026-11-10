@@ -2314,6 +2314,15 @@ test "a /word reads the Workspace's skills on the worker, lists them over the dr
         defer shown.deinit();
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "/recap") == null);
     }
+    // So are its arguments: Enter runs the whole line as the command.
+    try std.testing.expect(try rig.press("\x15/configure --workspace /re") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.skill_reads);
+    {
+        var shown = try rig.shown(60, 24);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "/recap") == null);
+    }
     try std.testing.expect(try rig.press("\x15") == null);
     try std.testing.expect(try rig.press("use /re") == null);
     try std.testing.expect(try rig.settle() == null);
