@@ -19,6 +19,7 @@ from import_architecture import scoped_imports
 from platform_boundary import mac_path
 from qualification import RESOURCES
 from strict_paths import strict
+from release_numbers import SCHEMA as STORE_SCHEMA, digest_rows, migration_steps, schema_version
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -278,12 +279,27 @@ INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_
 
 # Ready PRs run the previous installed-release upgrade only when they change
 # what it exercises: installation, the upgrade and Host lifecycle owners, the
-# Store format, the build or the check itself. Promotion runs it for every batch.
+# Store format (`store_format`), the build or the check itself. Its own unit
+# test runs in policy. Promotion runs it for every batch.
 UPGRADE_CHECK_PATHS = ("src/upgrade*.zig", "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
                        "src/HostLifecycle.zig", "src/host_identity.*", "src/host_launch.c",
-                       "src/store/schema.zig", "src/store/migration_*", "install.sh", "release/*", "build.zig", "build.zig.zon",
-                       "tests/integration/previous_release_upgrade.py", "tests/ci/test_previous_release_upgrade.py",
-                       ".github/workflows/previous-release-upgrade.yml", ".github/workflows/cache-maintenance.yml")
+                       "src/store/migration_*", "install.sh", "release/*", "build.zig", "build.zig.zon",
+                       "tests/integration/previous_release_upgrade.py", ".github/workflows/previous-release-upgrade.yml")
+
+
+def store_format(source):
+    """What an installed release's Store meets in schema.zig: the version, each
+    version's digest and the forward steps. Imports and comments are not it."""
+    return schema_version(source), digest_rows(source), migration_steps(source)
+
+
+def store_format_changed(before, after):
+    return before is None or after is None or store_format(before) != store_format(after)
+
+
+# Paths selection judges by content: path -> whether a (before, after) text
+# pair changes what the path's checks exercise. `main` reads both sides.
+CONTENT_RULES = {STORE_SCHEMA: store_format_changed}
 
 # Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
 RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py",
@@ -509,8 +525,13 @@ def matches(path, patterns):
     return included and not any(fnmatch.fnmatchcase(path, pattern[1:]) for pattern in patterns if pattern.startswith("!"))
 
 
-def select(paths, phase, available, graph=None):
+def select(paths, phase, available, graph=None, contents=None):
+    """`contents` maps a `CONTENT_RULES` path to its (before, after) text;
+    a path it leaves out counts as changed."""
     graph = graph or tree_graph()
+    contents = contents or {}
+    content_changed = {path for path, changed in CONTENT_RULES.items()
+                       if path in paths and (path not in contents or changed(*contents[path]))}
     targets, native_targets, reasons = set(), set(), set()
     live_targets, live_reasons = set(), set()
     manual_checks = set()
@@ -599,7 +620,8 @@ def select(paths, phase, available, graph=None):
     mac_required = phase == "review" and any(mac_path(path) for path in paths)
     if mac_required:
         reasons.add("Mac-specific path: PR runs Mac Selected (tests/ci/platform_boundary.py)")
-    upgrade_required = phase == "review" and any(matches(path, UPGRADE_CHECK_PATHS) for path in paths)
+    upgrade_required = phase == "review" and (any(matches(path, UPGRADE_CHECK_PATHS) for path in paths)
+                                              or STORE_SCHEMA in content_changed)
     if upgrade_required:
         reasons.add("Upgrade, installer or Store-format path: PR runs the previous installed-release upgrade")
     if phase == "development":
@@ -648,6 +670,12 @@ def changed_paths(base, head):
     return [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p], base_commit
 
 
+def revision_text(commit, path):
+    """The path's text at commit, or None where the commit has no such file."""
+    shown = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True, text=True)
+    return shown.stdout if shown.returncode == 0 else None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True)
@@ -656,9 +684,12 @@ def main():
     args = parser.parse_args()
     available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path("build.zig").read_text()))
     paths, base = changed_paths(args.base, args.head)
-    result = select(paths, args.phase, available)
+    head = subprocess.check_output(["git", "rev-parse", args.head], text=True).strip()
+    result = select(paths, args.phase, available,
+                    contents={path: (revision_text(base, path), revision_text(head, path))
+                              for path in CONTENT_RULES if path in paths})
     result["base"] = base
-    result["head"] = subprocess.check_output(["git", "rev-parse", args.head], text=True).strip()
+    result["head"] = head
     print(json.dumps(result, indent=2))
 
 
