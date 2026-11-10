@@ -3,6 +3,8 @@ const product = @import("build/product.zig");
 const ci_module = @import("build/ci.zig");
 const screen_module = @import("build/screen.zig");
 const unit_module = @import("build/unit.zig");
+const measurement_module = @import("build/measurement.zig");
+const cross_module = @import("build/cross.zig");
 
 pub fn build(b: *std.Build) void {
     // PR fixtures need ReleaseSafe checks, not shipped LLVM code generation.
@@ -630,204 +632,9 @@ pub fn build(b: *std.Build) void {
     if (!pr_ci) process_integrations.addFileInput(ci.path(release_small));
     full_check_step.dependOn(&process_integrations.step);
 
-    const measurement_tests = b.addSystemCommand(&.{
-        "go", "test", "-count=1", "-mod=readonly", "./...",
-    });
-    measurement_tests.setCwd(b.path("tests/qualification"));
-    measurement_tests.setEnvironmentVariable("GOTOOLCHAIN", "local");
-    const measurement_test_step = b.step(
-        "measurement-check",
-        "Compile and test the pinned Go measurement packages",
-    );
-    measurement_test_step.dependOn(&measurement_tests.step);
-
-    const queue_audit_test = b.addSystemCommand(&.{
-        "go", "test", "-count=1", "-mod=readonly", "-run", "^TestExecutionAuditQueryRejectsHiddenEntities$", "./model-queue", "-args", "-sqlite",
-    });
-    queue_audit_test.setCwd(b.path("tests/qualification"));
-    queue_audit_test.setEnvironmentVariable("GOTOOLCHAIN", "local");
-    const sqlite_shell = product.addSqliteShell(b, target, .ReleaseSmall);
-    queue_audit_test.addFileArg(ci.path(sqlite_shell));
-    measurement_test_step.dependOn(&queue_audit_test.step);
-
-    // The runners' configure call against the current CLI and Host, so a change
-    // to either fails here rather than in the next measurement campaign.
-    const configure_contract = b.addSystemCommand(&.{"python3"});
-    configure_contract.addFileArg(b.path("tests/integration/host_process.py"));
-    configure_contract.addArgs(&.{ "exec", "env", "GOTOOLCHAIN=local", "go", "test", "-count=1", "-mod=readonly", "-run", "^TestConfigureContract$", "./measurement", "-args", "-rui" });
-    configure_contract.setCwd(b.path("tests/qualification"));
-    configure_contract.addFileArg(ci.path(release_safe));
-    measurement_test_step.dependOn(&configure_contract.step);
-
-    const linux_cross_step = b.step(
-        "cross-check-linux",
-        "Compile Linux x86-64 and experimental Linux ARM64",
-    );
-    const yaml_linux_step = b.step(
-        "yaml-linux-compile",
-        "Compile pinned libyaml as strict C99 for Linux x86-64 and ARM64 without running it",
-    );
-    for ([_]std.Target.Cpu.Arch{ .x86_64, .aarch64 }) |arch| {
-        const yaml_linux = b.addLibrary(.{
-            .name = b.fmt("yaml-linux-{s}", .{@tagName(arch)}),
-            .linkage = .static,
-            .root_module = b.createModule(.{
-                .target = b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .linux, .abi = .gnu }),
-                .optimize = .ReleaseSafe,
-                .link_libc = true,
-            }),
-        });
-        product.configureYaml(b, yaml_linux);
-        yaml_linux_step.dependOn(&yaml_linux.step);
-    }
-    const macos_cross_step = b.step(
-        "cross-check-macos",
-        "Compile Apple Silicon macOS and experimental Intel macOS (requires Xcode/Command Line Tools)",
-    );
-    const cross_step = b.step(
-        "cross-check",
-        "Compile supported native and experimental Linux/macOS architectures (not runtime qualification)",
-    );
-    cross_step.dependOn(linux_cross_step);
-    cross_step.dependOn(macos_cross_step);
-    const macos_types_step = b.step(
-        "typecheck-macos",
-        "Type-check Rui and its unit tests for Apple Silicon macOS on any host (no SDK, link or run)",
-    );
-    {
-        const apple = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
-        macos_types_step.dependOn(&product.addRui(b, apple, .ReleaseSafe, "rui-typecheck-macos", null).step);
-        const apple_tests = b.addTest(.{
-            .name = "test-typecheck-macos",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/tests.zig"),
-                .target = apple,
-                .optimize = .ReleaseSafe,
-            }),
-        });
-        product.configureUnitRoot(b, apple_tests, apple, null);
-        macos_types_step.dependOn(&apple_tests.step);
-    }
-    const targets = [_]std.Target.Query{
-        .{ .cpu_arch = .aarch64, .os_tag = .macos },
-        .{ .cpu_arch = .x86_64, .os_tag = .macos },
-        .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu },
-        .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu },
-    };
-    for (targets) |query| {
-        const resolved = b.resolveTargetQuery(query);
-        const cross_transport = if (product.sameTransportTarget(target, resolved))
-            pinned_transport
-        else
-            product.addPinnedTransport(b, resolved);
-        const executable = product.addRui(
-            b,
-            resolved,
-            .ReleaseSmall,
-            b.fmt("rui-{s}-{s}", .{
-                @tagName(resolved.result.cpu.arch),
-                @tagName(resolved.result.os.tag),
-            }),
-            cross_transport,
-        );
-        switch (resolved.result.os.tag) {
-            .linux => {
-                linux_cross_step.dependOn(&executable.step);
-            },
-            .macos => {
-                macos_cross_step.dependOn(&executable.step);
-            },
-            else => unreachable,
-        }
-    }
-
-    const measure = addMeasurement(b, &.{"./configuration-admission"});
-    measure.addFileArg(ci.path(release_safe));
-    const measure_step = b.step(
-        "measure-admission",
-        "Measure macOS Host and direct-client memory for configuration admission",
-    );
-    measure_step.dependOn(&measure.step);
-
-    const measure_messages = addMeasurement(b, &.{"./message-admission"});
-    measure_messages.addFileArg(ci.path(release_safe));
-    const measure_messages_step = b.step(
-        "measure-message-admission",
-        "Measure macOS message admission and observation scaling",
-    );
-    measure_messages_step.dependOn(&measure_messages.step);
-
-    const measure_dispatch = addMeasurement(b, &.{"./model-dispatch"});
-    measure_dispatch.addFileArg(ci.path(release_safe));
-    const measure_dispatch_step = b.step(
-        "measure-model-dispatch",
-        "Measure macOS frozen-request transport, scratch, descriptors, and custody",
-    );
-    measure_dispatch_step.dependOn(&measure_dispatch.step);
-
-    const measure_output = addMeasurement(b, &.{"./model-output"});
-    measure_output.addPassthruArgs();
-    measure_output.addFileArg(ci.path(release_safe));
-    const measure_output_step = b.step(
-        "measure-model-output",
-        "Measure macOS model-output bytes, item counts, storage, and retained memory",
-    );
-    measure_output_step.dependOn(&measure_output.step);
-
-    const measure_repeat_work = addMeasurement(b, &.{ "./model-output", "--repeat-work" });
-    measure_repeat_work.addFileArg(ci.path(release_safe));
-    const measure_repeat_work_step = b.step(
-        "measure-repeat-work",
-        "Measure 20 same-Host waves across 100 stable Sessions with growing history",
-    );
-    measure_repeat_work_step.dependOn(&measure_repeat_work.step);
-
-    const measure_retry = addMeasurement(b, &.{"./model-retry"});
-    measure_retry.addFileArg(ci.path(release_safe));
-    const measure_retry_step = b.step(
-        "measure-model-retry",
-        "Measure macOS retry discovery, launch separation, churn, and custody",
-    );
-    measure_retry_step.dependOn(&measure_retry.step);
-
-    const measure_queue = addMeasurement(b, &.{"./model-queue"});
-    if (model_queue_output) |output| {
-        measure_queue.addArgs(&.{ "-output", output });
-    }
-    measure_queue.addFileArg(ci.path(release_safe));
-    measure_queue.addFileArg(ci.path(sqlite_shell));
-    const measure_queue_step = b.step(
-        "measure-model-queue",
-        "Measure model queue discovery, ordering, settlement, and portable mixed resources",
-    );
-    measure_queue_step.dependOn(&measure_queue.step);
-
-    const measure_control = addMeasurement(b, &.{"./model-control"});
-    measure_control.addFileArg(ci.path(release_safe));
-    const measure_control_step = b.step(
-        "measure-model-control",
-        "Measure control headroom, acknowledgment latency, and cleanup resources",
-    );
-    measure_control_step.dependOn(&measure_control.step);
-
-    const measure_call_classification = addMeasurement(b, &.{"./call-classification"});
-    measure_call_classification.addPassthruArgs();
-    measure_call_classification.addFileArg(ci.path(release_safe));
-    measure_call_classification.addFileArg(ci.path(sqlite_shell));
-    const measure_call_classification_step = b.step(
-        "measure-call-classification",
-        "Measure production call classification, exact denial, recovery, and population scaling",
-    );
-    measure_call_classification_step.dependOn(&measure_call_classification.step);
-
-    const measure_execution_service = addMeasurement(b, &.{"./execution-service"});
-    measure_execution_service.addPassthruArgs();
-    measure_execution_service.addFileArg(ci.path(release_safe));
-    const measure_execution_service_step = b.step(
-        "measure-execution-service",
-        "Measure production execution service across completions, history, replay fields, and owner populations",
-    );
-    measure_execution_service_step.dependOn(&measure_execution_service.step);
+    const sqlite_shell = measurement_module.addCheck(b, ci, target, release_safe);
+    cross_module.add(b, target, pinned_transport);
+    measurement_module.add(b, ci, release_safe, sqlite_shell, model_queue_output);
 
     // Compile the selected gates once, without executing their fixture Run
     // steps. Workers still execute the original gates and their assertions.
@@ -849,17 +656,6 @@ pub fn build(b: *std.Build) void {
         if (ci_part != .all and !collection.reached_unit)
             @panic("Split CI producers selected without the unit test compile; update UNIT_TARGETS");
     }
-}
-
-// A Go measurement launches Rui, so it enters the fixture boundary like every
-// fixture: root is refused and the environment is built there.
-fn addMeasurement(b: *std.Build, arguments: []const []const u8) *std.Build.Step.Run {
-    const run = b.addSystemCommand(&.{"python3"});
-    run.addFileArg(b.path("tests/integration/host_process.py"));
-    run.addArgs(&.{ "exec", "env", "GOTOOLCHAIN=local", "go", "run", "-mod=readonly" });
-    run.addArgs(arguments);
-    run.setCwd(b.path("tests/qualification"));
-    return run;
 }
 
 /// A Python process fixture run against one Rui executable.
