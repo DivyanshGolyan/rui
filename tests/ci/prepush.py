@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 
+import build_files
 from caller_errors import inventory_path
 from platform_boundary import SCANNED as PLATFORM_SCANNED
 from select_tests import changed_paths, matches, select
@@ -61,7 +62,7 @@ def policy_tests(paths):
                 focused.setdefault(test, set()).add("*")
             else:
                 return None
-        elif path.startswith(("tests/ci/", ".github/", ".claude/")) or path in ("build.zig", "build.zig.zon", ".agents/setup"):
+        elif path.startswith(("tests/ci/", ".github/", ".claude/")) or path in ("build.zig", "build.zig.zon", ".agents/setup") or path.startswith("build/"):
             return None
     for patterns, tests in SOURCE_POLICY:
         if any(matches(path, patterns) for path in paths):
@@ -205,7 +206,7 @@ def main():
         raise SystemExit(fix_whitespace(args.fix_whitespace))
     if args.regenerate:
         raise SystemExit(regenerate())
-    available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', (ROOT / "build.zig").read_text()))
+    available = set(build_files.steps())
     base = subprocess.check_output(["git", "merge-base", "HEAD", args.base], cwd=ROOT, text=True).strip()
     paths, _ = changed_paths(base, "HEAD")
     planned = list(checks(paths, available, base, args.quick))

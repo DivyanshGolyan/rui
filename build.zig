@@ -713,6 +713,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(h2_test_step);
     check_step.dependOn(pg_test_step);
     format.addFileArg(b.path("build.zig"));
+    format.addDirectoryArg(b.path("build"));
     format.addDirectoryArg(b.path("src"));
     const release_small = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
     const fast_integrations = screenCommand(b, screen, &.{"sh"});

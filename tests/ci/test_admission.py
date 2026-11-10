@@ -10,6 +10,7 @@ import shlex
 import shutil
 import unittest
 
+import build_files
 from select_tests import select
 import steps
 from strict_paths import STRICT, strict
@@ -57,14 +58,14 @@ class PlanFixture:
         self.git('init', '-q', '-b', 'main')
         self.write('.git/info/exclude', 'selection.json\n__pycache__/\n')
         for name in ('select_tests.py', 'docs_only.py', 'qualification.py', 'strict_paths.py', 'platform_boundary.py',
-                     'import_architecture.py', 'release_numbers.py', 'stack_frames.json'):
+                     'import_architecture.py', 'build_files.py', 'release_numbers.py', 'stack_frames.json'):
             self.write('tests/ci/' + name, (ROOT / 'tests/ci' / name).read_text())
         # The selector's import graph reads the source tree.
-        for name in subprocess.check_output(['git', 'ls-files', '-z', 'src', 'tests/integration'], cwd=ROOT).decode().split('\0'):
+        for name in subprocess.check_output(['git', 'ls-files', '-z', 'src', 'tests/integration', 'build'], cwd=ROOT).decode().split('\0'):
             if name and (ROOT / name).is_file():
                 (self.repo / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / name, self.repo / name)
-        self.write('build.zig', (ROOT / 'build.zig').read_text())
+        shutil.copyfile(ROOT / 'build.zig', self.repo / 'build.zig')
         self.write('README.md', 'Base. Another sentence on one line.\n')
         self.base = self.commit()
         return self
@@ -384,7 +385,7 @@ class StrictPathTest(unittest.TestCase):
 
     def test_selected_runs_mac_for_every_strict_path(self):
         # Strict native owner mappings remain available before workflow core acceptance is added.
-        available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path('build.zig').read_text()))
+        available = set(build_files.steps())
         for pattern in STRICT:
             path = pattern.replace('*', '_x')
             self.assertEqual(strict([path]), [path])
@@ -394,7 +395,7 @@ class CandidatePlanTest(unittest.TestCase):
     def test_ready_plan_preserves_owner_selection_and_core_superset(self):
         from qualification import shards, split_build
         from select_tests import CHECK_COVERS
-        available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', (ROOT / 'build.zig').read_text()))
+        available = set(build_files.steps())
         with PlanFixture() as fixture:
             for path in ('README.md', 'docs/guide.md', 'docs/assets/diagram.svg',
                          'src/store.zig', 'build.zig', 'src/os/descriptor_limit.zig',
@@ -443,7 +444,7 @@ class CandidatePlanTest(unittest.TestCase):
                                 self.assertEqual(output['retry'], 'false')
 
     def test_ready_prs_run_the_upgrade_only_for_what_it_exercises(self):
-        available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', (ROOT / 'build.zig').read_text()))
+        available = set(build_files.steps())
         for path, required in (('src/store/schema.zig', True), ('src/upgrade_process.zig', True),
                                ('install.sh', True), ('build.zig', True),
                                ('.github/workflows/previous-release-upgrade.yml', True),
@@ -459,7 +460,7 @@ class CandidatePlanTest(unittest.TestCase):
                 self.assertFalse(select([path], 'review', available)['upgrade_required'])
 
     def test_schema_edits_run_the_upgrade_only_when_the_store_format_changes(self):
-        available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', (ROOT / 'build.zig').read_text()))
+        available = set(build_files.steps())
         schema = 'src/store/schema.zig'
         source = (ROOT / schema).read_text()
         version = int(re.search(r'^pub const schema_version: u32 = (\d+);$', source, re.M)[1])

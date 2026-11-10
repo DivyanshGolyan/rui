@@ -15,6 +15,7 @@ import re
 import subprocess
 import tokenize
 
+import build_files
 from import_architecture import scoped_imports
 from platform_boundary import mac_path
 from qualification import RESOURCES
@@ -434,6 +435,20 @@ RULES += ((("src/store.zig", "src/store/*", "!src/store/wire/*", "src/server_exe
            ("launch-frame-integration",), (),
            "The Store's MySQL round trips per model operation and while idle stay within their budget"),)
 
+# build.zig wires every target and builds the Rui every fixture runs, so an
+# edit to it selects the full gate (RULES above). A module under build/
+# selects only what it can change: the targets it defines and those that use
+# what it builds. test_selection.BuildModuleTest holds every module and every
+# target a module defines to this map.
+BUILD_MODULES = {
+    # Darwin linking, the screen library's name and the Mac unit-root limits.
+    # The unit roots and one screen fixture link and load what it names; it is
+    # a Mac path, so ready PRs run these on Mac too.
+    "build/darwin.zig": ("test", "host-launch-integration"),
+}
+RULES += tuple(((module,), targets, targets, "Build module: the targets it defines or builds for")
+               for module, targets in BUILD_MODULES.items())
+
 
 # Inputs to the Host's ReleaseSafe frames or to their gate: Zig source the
 # Host imports (`Graph.host`), and anything else under src/. check runs
@@ -641,7 +656,7 @@ def select(paths, phase, available, graph=None, contents=None):
     typecheck_macos = any(matches(path, TYPECHECK_INPUTS) or path in graph.compiled for path in paths)
     missing = (targets | native_targets) - available
     if missing:
-        raise ValueError(f"Selected targets absent from build.zig: {sorted(missing)}")
+        raise ValueError(f"Selected targets absent from the build: {sorted(missing)}")
     return {"phase": phase, "targets": sorted(targets),
             # The selected targets that start a live server in CI (`LIVE_RULES`).
             "server_targets": sorted((targets & live_targets) | ({"test"} if "test" in targets and "test-store" in live_targets else set())),
@@ -682,7 +697,7 @@ def main():
     parser.add_argument("--head", default="HEAD")
     parser.add_argument("--phase", choices=("development", "review"), default="review")
     args = parser.parse_args()
-    available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path("build.zig").read_text()))
+    available = set(build_files.steps())
     paths, base = changed_paths(args.base, args.head)
     head = subprocess.check_output(["git", "rev-parse", args.head], text=True).strip()
     result = select(paths, args.phase, available,

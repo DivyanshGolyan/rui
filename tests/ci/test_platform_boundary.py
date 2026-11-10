@@ -13,11 +13,12 @@ import unittest
 sys.path.insert(0, str(Path(__file__).parent))
 from platform_boundary import (bind_sites, build_violations, mac_path, python_sites, shell_sites, sites, typescript_sites,  # noqa: E402
                                unlistened_binds, violations, zig_sites)
+import build_files  # noqa: E402
 from select_tests import select  # noqa: E402
 from qualification import split_build  # noqa: E402
 
 
-AVAILABLE = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', (Path(__file__).parents[2] / "build.zig").read_text()))
+AVAILABLE = set(build_files.steps())
 
 
 @contextmanager
@@ -52,8 +53,10 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertEqual(violations(sites()), [])
 
     def test_darwin_build_branches_delegate_to_mac_path(self):
-        source = (Path(__file__).parents[2] / "build.zig").read_text()
-        self.assertEqual(build_violations(source), [])
+        for path in build_files.files():
+            name = path.relative_to(build_files.ROOT).as_posix()
+            if not mac_path(name):
+                self.assertEqual(build_violations(path.read_text(), name), [], name)
         for inline in (
                 'if (target.result.os.tag == .macos) { module.linkFramework("Security", .{}); }',
                 'if (host.isDarwin()) "lib.dylib" else "lib.so"',

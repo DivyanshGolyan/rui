@@ -16,6 +16,8 @@ import re
 import sys
 import tokenize
 
+import build_files
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -67,7 +69,7 @@ TS_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
 ZIG_TOKEN = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|@?[A-Za-z_][A-Za-z_0-9]*|[^\s]')
 
 
-def build_violations(source):
+def build_violations(source, name="build.zig"):
     """Keep Darwin-only build branches in the native Mac CI path."""
     tokens = [m.group() for m in ZIG_TOKEN.finditer(source) if not m.group().startswith(("//", "\\\\", '"', "'"))]
     code = " ".join(tokens)
@@ -84,7 +86,7 @@ def build_violations(source):
                   r'= = \. macos \) \{ (?:' + call + r' ; )+\}',
                   'darwin_delegation', code)
     if re.search(r'\bisDarwin\b|\. (?:macos|ios|tvos|watchos|visionos|driverkit)\b', code):
-        return ["build.zig: move Darwin-only build logic to build/darwin.zig"]
+        return [f"{name}: move Darwin-only build logic to build/darwin.zig"]
     return []
 
 
@@ -229,7 +231,9 @@ def bind_violations(found):
 
 def main():
     argparse.ArgumentParser(description=__doc__).parse_args()
-    messages = build_violations((ROOT / "build.zig").read_text()) + violations(sites()) + bind_violations(bind_sites())
+    builds = [(path.relative_to(ROOT).as_posix(), path.read_text()) for path in build_files.files()]
+    messages = ([message for name, source in builds if not mac_path(name) for message in build_violations(source, name)]
+                + violations(sites()) + bind_violations(bind_sites()))
     for message in messages:
         print(message, file=sys.stderr)
     return 1 if messages else 0
