@@ -118,7 +118,7 @@ FIXTURES = {
     "installer-integration": ((I + "installer_integration.py",), (),
                               ("src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig")),
     "upgrade-integration": ((I + "upgrade_integration.py",), (),
-                            ("src/upgrade.zig", "src/upgrade_process.zig", "src/UpgradePanel.zig",
+                            ("src/upgrade.zig", "src/upgrade_process.zig", "src/UpgradePanel.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig",
                              "src/HostLifecycle.zig", "src/Installation.zig")),
     "terminal-restoration-integration": ((I + "terminal_restoration_integration.py",), ("src/terminal_notice_test.zig",),
                                          ("src/SessionFrontend.zig", "src/SessionTerminal.zig", "src/TerminalEditor.zig")),
@@ -277,7 +277,7 @@ CLI_GRAMMAR = ("src/cli_grammar.zig", "src/cli_option_names.zig", "src/serve_gra
 # The upgrade fixture is standalone, including when a composed gate is selected.
 UPGRADE_PATHS = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
                  "src/upgrade_process.zig", "src/HostLifecycle.zig", "src/host_identity.zig",
-                 "src/host_identity.c", "src/UpgradePanel.zig", "src/host_launch.c",
+                 "src/host_identity.c", "src/UpgradePanel.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig", "src/stderr.zig", "src/host_launch.c",
                  "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/client.zig", "src/slash_commands.zig",
                  "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
                  "tests/integration/upgrade_integration.py", "release/*", "install.sh", "build.zig")
