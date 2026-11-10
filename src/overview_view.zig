@@ -3457,6 +3457,7 @@ fn hints(painter: *Painter, state: *const State, draft: Draft, listed: bool) err
     const dot = painter.glyphs.dot;
     // What Esc does here, as `compose` reads it: a list or a panel closes
     // before the draft and the held settings clear.
+    var status: StatusBuffer = undefined;
     const esc_does: ?[]const u8 = if (listed or state.panel != null) "esc close" else if (draft.bytes.len != 0 or !state.settings.empty()) "esc clear" else null;
     if (state.shownPicker()) |picker| {
         // A notice shares the row, so the picker's keys stay in view.
@@ -3466,8 +3467,10 @@ fn hints(painter: *Painter, state: *const State, draft: Draft, listed: bool) err
         else
             try std.fmt.allocPrint(painter.arena, "{s}{s} choose {s} enter pick {s} esc close", .{ if (used != 0) " " else "", painter.glyphs.arrows, dot, dot });
         _ = try painter.put(used, text, room -| used, .{ .colour = .quiet });
-    } else if (state.notice) |*notice| {
-        _ = try painter.put(1, notice.firstLine(), room, .{ .colour = notice.colour });
+    } else if (statusLine(state, painter.caps, &status)) |line| {
+        // A notice, else the Upgrade at work or held, else an unconfirmed
+        // send: each says what the keys below cannot.
+        _ = try painter.put(1, line.text, room, .{ .colour = line.colour });
     } else if (state.starting()) {
         _ = try painter.put(1, try std.fmt.allocPrint(painter.arena, "Starting{s}", .{painter.glyphs.ellipsis}), room, .{ .colour = .quiet });
     } else if (!state.settings.empty()) {
@@ -7611,6 +7614,21 @@ test "the status bar says the newest notice, else the Upgrade at work or held, e
     // ASCII spells the line's dots.
     var ascii: StatusBuffer = undefined;
     try std.testing.expectEqualStrings("Rui 0.61.0 installed - restart rui to continue - your draft is kept until you leave", statusLine(&state, .{ .unicode = false }, &ascii).?.text);
+}
+
+test "the status row under the input says the status bar's line" {
+    var state = try opened(&.{session("k7m2qx", .{ .working = ago(10) }, .{})});
+    defer state.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    _ = try step(&state, .{ .unconfirmed = .{ .reference = "k7m2qx".*, .recovery = .{ .saved = .{ .original = .{ .kind = .message, .key = key }, .rejected = false } } } });
+    const unconfirmed = try segmentText(arena.allocator(), try statusSegments(arena.allocator(), &state, .{}, 120, .{}));
+    try std.testing.expect(std.mem.startsWith(u8, unconfirmed, " ! Not confirmed · rui request recover " ++ key));
+    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } });
+    const upgrading = try segmentText(arena.allocator(), try statusSegments(arena.allocator(), &state, .{}, 120, .{ .unicode = false }));
+    try std.testing.expect(std.mem.startsWith(u8, upgrading, " Upgrading to 0.60.0 - no Host running - esc cancels"));
 }
 
 fn expectStatus(state: *const State, text: []const u8, colour: Colour) !void {
