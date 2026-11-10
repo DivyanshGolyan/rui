@@ -1,9 +1,8 @@
 const std = @import("std");
-const unit_partition = @import("src/unit_test_partition.zig");
-const darwin = @import("build/darwin.zig");
 const product = @import("build/product.zig");
 const ci_module = @import("build/ci.zig");
-const screen_build = @import("build/screen.zig");
+const screen_module = @import("build/screen.zig");
+const unit_module = @import("build/unit.zig");
 
 pub fn build(b: *std.Build) void {
     // PR fixtures need ReleaseSafe checks, not shipped LLVM code generation.
@@ -44,115 +43,7 @@ pub fn build(b: *std.Build) void {
     const test_filters = b.option([]const []const u8, "test-filter", "Run tests whose names contain this text (repeatable)") orelse &.{};
     if (ci.directory != null and test_filters.len != 0) @panic("CI artifacts contain unfiltered tests");
     const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
-    // Filtered developer/mutation runs retain the single aggregate binary and
-    // its filter/global conventions. Unfiltered CI compiles independent roots.
-    const tests = b.allocator.alloc(*std.Build.Step.Compile, if (test_filters.len == 0) unit_partition.roots.len else 1) catch @panic("OOM");
-    const unit_filters = if (test_filters.len == 0) unitFilters(b) else undefined;
-    const unit_runner: ?std.Build.LazyPath = if (test_filters.len == 0) runner: {
-        const generate = b.addSystemCommand(&.{ "python3", "-B" });
-        generate.addFileArg(b.path("tests/ci/unit_test_runner.py"));
-        generate.addFileArg(std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig"));
-        break :runner generate.addOutputFileArg("unit_test_runner.zig");
-    } else null;
-    // A filter that names no test in a unit step fails instead of passing empty.
-    const filtered_runner: ?std.Build.Step.Compile.TestRunner = if (test_filters.len != 0) runner: {
-        const generate = b.addSystemCommand(&.{ "python3", "-B" });
-        generate.addFileArg(b.path("tests/ci/unit_test_runner.py"));
-        generate.addArg("--filtered");
-        generate.addFileArg(std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig"));
-        break :runner .{ .path = generate.addOutputFileArg("filtered_test_runner.zig"), .mode = .server };
-    } else null;
-    const native_step = b.step("test-native", "Run non-Store unit tests");
-    const store_step = b.step("test-store", "Run Store unit tests");
-    var run_tests: *std.Build.Step.Run = undefined;
-    for (tests, 0..) |*entry, index| {
-        const root = unit_partition.roots[index];
-        const compile = b.addTest(.{
-            .name = if (test_filters.len != 0) "test" else b.fmt("unit-{s}", .{@tagName(root)}),
-            .max_rss = darwin.unitMaxRss(test_filters.len, target),
-            .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/tests.zig"),
-                .target = target,
-                .optimize = .ReleaseSafe,
-                .strip = darwin.unitStrip(test_filters.len, target),
-            }),
-            .filters = if (test_filters.len != 0) test_filters else unit_filters[index],
-            .test_runner = if (unit_runner) |path| .{ .path = path, .mode = .server } else filtered_runner,
-        });
-        entry.* = compile;
-        if (unit_runner != null) {
-            const options = b.addOptions();
-            options.addOption(usize, "root", index);
-            compile.root_module.addOptions("unit_test_options", options);
-            compile.root_module.addImport("unit_test_partition", b.createModule(.{
-                .root_source_file = b.path("src/unit_test_partition.zig"),
-                .target = target,
-                .optimize = .ReleaseSafe,
-            }));
-        }
-        product.configureUnitRoot(b, compile, target, pinned_transport);
-        const run = ci.run(compile);
-        run.has_side_effects = true;
-        run.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
-        if (test_filters.len != 0) {
-            native_step.dependOn(&run.step);
-            store_step.dependOn(&run.step);
-        } else {
-            const standalone = ci.run(compile);
-            standalone.has_side_effects = true;
-            standalone.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
-            (if (root == .native) native_step else store_step).dependOn(&standalone.step);
-        }
-        // Compile in parallel, execute serially: the MySQL dialect fixture owns
-        // fixed database names. Store runs last and owns the acceptance record
-        // (including migrations/conformance); never mask an earlier failure.
-        if (index != 0) run.step.dependOn(&run_tests.step);
-        run_tests = run;
-    }
-
-    const test_step = b.step("test", "Run unit, Store, and protocol tests");
-    test_step.dependOn(&run_tests.step);
-    // Selection pairs test-full with check or check-full, which already run every
-    // other native test, so this binary contains only the real-time witness.
-    // Like normal units, the x86_64 witness uses the self-hosted backend;
-    // other targets retain LLVM. ReleaseSafe checks stay enabled.
-    const deadline_witness = b.addTest(.{
-        .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
-        .name = "deadline-witness",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests.zig"),
-            .target = target,
-            .optimize = .ReleaseSafe,
-        }),
-        .filters = if (test_filters.len != 0) test_filters else &.{"Host processing wait does not consume response transfer inactivity"},
-        .test_runner = filtered_runner,
-    });
-    product.configureUnitRoot(b, deadline_witness, target, pinned_transport);
-    const run_full_tests = ci.run(deadline_witness);
-    run_full_tests.has_side_effects = true;
-    run_full_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "1");
-    const full_test_step = b.step("test-full", "Run the real 60-second client deadline witness");
-    full_test_step.dependOn(&run_full_tests.step);
-
-    const logic_tests = b.addTest(.{
-        .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/logic_tests.zig"),
-            .target = target,
-            .optimize = .ReleaseSafe,
-        }),
-        .filters = test_filters,
-        .test_runner = filtered_runner,
-    });
-    product.configureTerminalEditor(b, logic_tests);
-    const run_logic_tests = ci.run(logic_tests);
-    run_logic_tests.has_side_effects = true;
-    const logic_test_step = b.step(
-        "test-logic",
-        "Run the shared execution turn and portable owner tests without Host, Bash, or transport fixtures",
-    );
-    logic_test_step.dependOn(&run_logic_tests.step);
+    const units = unit_module.add(b, ci, target, pinned_transport, test_filters);
 
     const openapi_emitter = b.addExecutable(.{
         .name = "openapi",
@@ -203,25 +94,6 @@ pub fn build(b: *std.Build) void {
     // actors exhausts memory, so Apple Silicon keeps LLVM. Product binaries and
     // codegen witnesses such as the signal-stack probe always use LLVM.
     const test_actor_llvm: ?bool = if (target.result.cpu.arch == .x86_64) false else null;
-    const renderer_allocation = b.addExecutable(.{
-        .name = "rui-answer-renderer-allocation-test",
-        .use_llvm = test_actor_llvm,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/integration/answer_renderer_allocation.zig"),
-            .target = target,
-            .optimize = .ReleaseSafe,
-        }),
-    });
-    renderer_allocation.root_module.addImport("AnswerRenderer", b.createModule(.{
-        .root_source_file = b.path("src/AnswerRenderer.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-    }));
-    const run_renderer_allocation = ci.run(renderer_allocation);
-    logic_test_step.dependOn(&run_renderer_allocation.step);
-    test_step.dependOn(&run_renderer_allocation.step);
-    native_step.dependOn(&run_renderer_allocation.step);
-
     const terminal_notice = b.addExecutable(.{
         .name = "rui-terminal-notice-test",
         .use_llvm = test_actor_llvm,
@@ -233,18 +105,6 @@ pub fn build(b: *std.Build) void {
     });
     product.configureTerminalEditor(b, terminal_notice);
 
-    const signal_stack_probe = ci.run(b.addExecutable(.{
-        .name = "rui-signal-stack-probe",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/signal_stack_probe.zig"),
-            .target = target,
-            .optimize = .ReleaseSafe,
-        }),
-    }));
-    signal_stack_probe.has_side_effects = true;
-    test_step.dependOn(&signal_stack_probe.step);
-    native_step.dependOn(&signal_stack_probe.step);
-
     const production_safe = product.addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
     const release_safe = if (pr_ci) product.addRui(b, target, .ReleaseSafe, "rui-pr-check", pinned_transport) else production_safe;
     if (pr_ci) release_safe.use_llvm = false;
@@ -252,11 +112,11 @@ pub fn build(b: *std.Build) void {
     // libghostty-vt through ctypes. Its test-only package in screen-emulator
     // keeps it out of this manifest, which installs fetch whole; only steps
     // that run the observer build it, and no product artifact links it.
-    const screen_emulator = screen_build.addScreenEmulator(b, ci, ci_mode);
+    const screen_emulator = screen_module.addScreenEmulator(b, ci, ci_mode);
     const screen = screen_emulator.library;
     const screen_emulator_step = b.step("screen-emulator", "Install the PTY screen observer's libghostty-vt, for harnesses outside build steps");
     screen_emulator_step.dependOn(&b.addInstallLibFile(screen_emulator.library, screen_emulator.name).step);
-    const terminal_restoration = screen_build.screenCommand(b, screen, &.{});
+    const terminal_restoration = screen_module.screenCommand(b, screen, &.{});
     terminal_restoration.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
     terminal_restoration.addArg("python3");
     terminal_restoration.addFileArg(b.path("tests/integration/terminal_restoration_integration.py"));
@@ -285,7 +145,7 @@ pub fn build(b: *std.Build) void {
         "tests/integration/session_sequence_model_test.py",
         "tests/ci/renderer_mutation_test.py",
     }) |path| {
-        const selftest = screen_build.screenCommand(b, screen, &.{ "python3", "-B" });
+        const selftest = screen_module.screenCommand(b, screen, &.{ "python3", "-B" });
         selftest.addFileArg(b.path(path));
         selftest.has_side_effects = true;
         renderer_selftests.dependOn(&selftest.step);
@@ -293,15 +153,15 @@ pub fn build(b: *std.Build) void {
     b.step(
         "direct-pty",
         "Run the synthetic direct-PTY key matrix (nonblocking)",
-    ).dependOn(&screen_build.addPtyHarness(b, screen, "tests/qualification/direct-pty/matrix.py", ci.path(release_safe)).step);
+    ).dependOn(&screen_module.addPtyHarness(b, screen, "tests/qualification/direct-pty/matrix.py", ci.path(release_safe)).step);
     b.step(
         "direct-pty-controls",
         "Run direct-PTY driver and disposal controls (nonblocking)",
-    ).dependOn(&screen_build.addPtyHarness(b, screen, "tests/qualification/direct-pty/controls.py", ci.path(release_safe)).step);
+    ).dependOn(&screen_module.addPtyHarness(b, screen, "tests/qualification/direct-pty/controls.py", ci.path(release_safe)).step);
     b.step(
         "input-equivalence",
         "Run TD2 original-recovery encodings through the direct-PTY matrix (nonblocking)",
-    ).dependOn(&screen_build.addPtyHarness(b, screen, "tests/integration/input_equivalence.py", ci.path(release_safe)).step);
+    ).dependOn(&screen_module.addPtyHarness(b, screen, "tests/integration/input_equivalence.py", ci.path(release_safe)).step);
 
     const session_list_client = b.addExecutable(.{
         .name = "rui-session-list-client-test",
@@ -359,7 +219,7 @@ pub fn build(b: *std.Build) void {
     );
     dispatch_integration_step.dependOn(&dispatch_integration.step);
 
-    const skills_integration = screen_build.screenCommand(b, screen, &.{"python3"});
+    const skills_integration = screen_module.screenCommand(b, screen, &.{"python3"});
     skills_integration.addFileArg(b.path("tests/integration/skills_integration.py"));
     skills_integration.addFileArg(ci.path(release_safe));
     b.step("skills-integration", "Run isolated native skills capture, replay and creation cases").dependOn(&skills_integration.step);
@@ -379,7 +239,7 @@ pub fn build(b: *std.Build) void {
     request_wait_integration.addFileArg(ci.path(release_safe));
     b.step("request-wait-integration", "Run request wait completion, recovery and conditional polling witnesses").dependOn(&request_wait_integration.step);
 
-    const canonical_failure_integration = screen_build.screenCommand(b, screen, &.{"python3"});
+    const canonical_failure_integration = screen_module.screenCommand(b, screen, &.{"python3"});
     canonical_failure_integration.addFileArg(b.path("tests/integration/canonical_failure_integration.py"));
     canonical_failure_integration.addFileArg(ci.path(release_safe));
     b.step("canonical-failure-integration", "Run canonical invocation failure at real producer and caller boundaries").dependOn(&canonical_failure_integration.step);
@@ -447,7 +307,7 @@ pub fn build(b: *std.Build) void {
     );
     bash_lifecycle_integration_step.dependOn(&bash_lifecycle_integration.step);
 
-    const bash_recovery_integration = screen_build.screenCommand(b, screen, &.{"python3"});
+    const bash_recovery_integration = screen_module.screenCommand(b, screen, &.{"python3"});
     bash_recovery_integration.addFileArg(b.path("tests/integration/bash_recovery_integration.py"));
     bash_recovery_integration.addFileArg(ci.path(release_safe));
     const bash_recovery_integration_step = b.step(
@@ -585,7 +445,7 @@ pub fn build(b: *std.Build) void {
     const host_status_step = b.step("host-status-integration", "Run native Host information and lease observation cases");
     host_status_step.dependOn(&host_status_integration.step);
 
-    const host_launch_integration = screen_build.screenCommand(b, screen, &.{"python3"});
+    const host_launch_integration = screen_module.screenCommand(b, screen, &.{"python3"});
     host_launch_integration.addFileArg(b.path("tests/integration/host_launch_integration.py"));
     host_launch_integration.addFileArg(ci.path(release_safe));
     const host_launch_step = b.step("host-launch-integration", "Run detached Host launch, alias convergence and startup-failure cases");
@@ -602,7 +462,7 @@ pub fn build(b: *std.Build) void {
     });
     const upgrade_fixture_step = b.step("upgrade-fixture", "Build the same-source native actor with synthetic release identity for upgrade evidence");
     upgrade_fixture_step.dependOn(&b.addInstallArtifact(upgrade_release, .{}).step);
-    const upgrade_integration = screen_build.screenCommand(b, screen, &.{"python3"});
+    const upgrade_integration = screen_module.screenCommand(b, screen, &.{"python3"});
     upgrade_integration.addFileArg(b.path("tests/integration/upgrade_integration.py"));
     upgrade_integration.addFileArg(ci.path(upgrade_release));
     const upgrade_step = b.step("upgrade-integration", "Run isolated release publication and exact Host upgrade lifecycle cases");
@@ -657,7 +517,7 @@ pub fn build(b: *std.Build) void {
         .dependOn(&addFixture(b, "tests/integration/conversation_page_integration.py", ci.path(release_safe)).step);
     b.step("host-allocator-integration", "Observe the Host allocator environment before main")
         .dependOn(&addFixture(b, "tests/integration/host_allocator_test.py", ci.path(release_safe)).step);
-    const human_cli = screen_build.screenCommand(b, screen, &.{});
+    const human_cli = screen_module.screenCommand(b, screen, &.{});
     human_cli.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
     human_cli.addArg("python3");
     human_cli.addFileArg(b.path("tests/integration/human_cli_integration.py"));
@@ -706,23 +566,23 @@ pub fn build(b: *std.Build) void {
     format.addDirectoryArg(b.path("build"));
     format.addDirectoryArg(b.path("src"));
     const release_small = product.addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
-    const fast_integrations = screen_build.screenCommand(b, screen, &.{"sh"});
+    const fast_integrations = screen_module.screenCommand(b, screen, &.{"sh"});
     fast_integrations.addFileArg(b.path("tests/integration/check.sh"));
     fast_integrations.addFileArg(ci.path(release_safe));
     fast_integrations.addFileArg(ci.path(debug));
     fast_integrations.addArg("parallel");
-    fast_integrations.addFileArg(ci.path(tests[0]));
+    fast_integrations.addFileArg(ci.path(units.tests[0]));
     fast_integrations.addFileArg(ci.path(host_status_actor));
     fast_integrations.addFileArg(ci.path(session_list_client));
     fast_integrations.addFileArg(ci.path(activity_client));
     fast_integrations.addFileArg(ci.path(preference_policy_actor));
     fast_integrations.addFileArg(ci.path(terminal_notice));
-    for (tests[1..]) |compile| fast_integrations.addFileArg(ci.path(compile));
+    for (units.tests[1..]) |compile| fast_integrations.addFileArg(ci.path(compile));
     fast_integrations.step.dependOn(&format.step);
     // Release compilation coverage stays in qualification, not PR fixture startup.
     if (!pr_ci) fast_integrations.addFileInput(ci.path(release_small));
-    fast_integrations.step.dependOn(&run_renderer_allocation.step);
-    fast_integrations.step.dependOn(&signal_stack_probe.step);
+    fast_integrations.step.dependOn(&units.run_renderer_allocation.step);
+    fast_integrations.step.dependOn(&units.signal_stack_probe.step);
     check_step.dependOn(&fast_integrations.step);
     // The gate reads x86-64 prologues; other targets have no frame reader.
     const stack_frames_step = b.step(
@@ -746,7 +606,7 @@ pub fn build(b: *std.Build) void {
         "Run routine native tests and process integrations serially (long witnesses are separate)",
     );
     const check_part = b.option(enum { all, execution, callers }, "check-part", "Isolated full-check part (default all)") orelse .all;
-    const process_integrations = screen_build.screenCommand(b, screen, &.{"sh"});
+    const process_integrations = screen_module.screenCommand(b, screen, &.{"sh"});
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
     process_integrations.addFileArg(ci.path(release_safe));
     process_integrations.addFileArg(ci.path(debug));
@@ -762,8 +622,8 @@ pub fn build(b: *std.Build) void {
     // the callers partition isolated on its own runner. Both peers must pass.
     const native_gate = if (check_part == .execution) full_check_step else &process_integrations.step;
     if (check_part != .callers) {
-        native_gate.dependOn(&run_tests.step);
-        native_gate.dependOn(&run_renderer_allocation.step);
+        native_gate.dependOn(&units.run_tests.step);
+        native_gate.dependOn(&units.run_renderer_allocation.step);
         native_gate.dependOn(h2_test_step);
         native_gate.dependOn(pg_test_step);
     }
@@ -977,7 +837,7 @@ pub fn build(b: *std.Build) void {
             const cpu_manifest = b.addWriteFiles().add("ci-cpu.json", ci_cpu);
             ci_build.dependOn(&b.addInstallBinFile(cpu_manifest, "ci-cpu.json").step);
         }
-        var collection: ci_module.CiCollection = .{ .b = b, .destination = ci_build, .part = ci_part, .unit = tests, .screen = screen_emulator };
+        var collection: ci_module.CiCollection = .{ .b = b, .destination = ci_build, .part = ci_part, .unit = units.tests, .screen = screen_emulator };
         var names = std.mem.splitScalar(u8, selected, ',');
         while (names.next()) |name| {
             const root = b.top_level_steps.get(name) orelse @panic("Unknown CI target");
@@ -989,84 +849,6 @@ pub fn build(b: *std.Build) void {
         if (ci_part != .all and !collection.reached_unit)
             @panic("Split CI producers selected without the unit test compile; update UNIT_TARGETS");
     }
-}
-
-// Compiler filters are a superset of exact runner ownership. Module-only
-// substrings are too broad: "tests." also matches "store.tests." and recompiles
-// most of the suite. Tokenize declarations so new tests need no second manifest.
-// Compiler filters avoid analyzing/code-generating other roots' named tests.
-// Use module.test. rather than module.: "tests." also matches Store's tests!
-// Anonymous tests bypass Zig filters; the generated runner partitions those.
-// Keep discovery imports in tests.zig eager (not hidden inside a named test).
-fn unitFilters(b: *std.Build) [unit_partition.roots.len][]const []const u8 {
-    const io = b.graph.io;
-    var lists: [unit_partition.roots.len]std.ArrayList([]const u8) = @splat(.empty);
-    var directory = b.root.openDir(io, "src", .{ .iterate = true }) catch @panic("Cannot open unit sources");
-    defer directory.close(io);
-    b.dependOnDirectoryContents(b.path("src"));
-    var walker = directory.walk(b.allocator) catch @panic("OOM");
-    defer walker.deinit();
-    while (walker.next(io) catch @panic("Cannot enumerate unit sources")) |entry| {
-        if (entry.kind == .directory) b.dependOnDirectoryContents(b.path(b.fmt("src/{s}", .{entry.path})));
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
-        const prefix = b.fmt("{s}.", .{entry.path[0 .. entry.path.len - 4]});
-        std.mem.replaceScalar(u8, prefix, std.fs.path.sep, '.');
-        const index = @backingInt(unit_partition.owner(prefix));
-        b.dependOnFileContents(b.path(b.fmt("src/{s}", .{entry.path})));
-        const source = entry.dir.readFileAllocOptions(io, entry.basename, b.allocator, .limited(16 * 1024 * 1024), .of(u8), 0) catch @panic("Cannot read unit source");
-        var tokenizer = std.zig.Tokenizer.init(source);
-        var depth: usize = 0;
-        var top_level_added = false;
-        while (true) {
-            const token = tokenizer.next();
-            switch (token.tag) {
-                .eof => break,
-                .l_brace => depth += 1,
-                .r_brace => depth -= 1,
-                .keyword_test => {
-                    const name = tokenizer.next();
-                    if (name.tag == .l_brace) {
-                        depth += 1; // Anonymous discovery tests bypass compiler filters.
-                        continue;
-                    }
-                    if (depth == 0 and !std.mem.eql(u8, entry.path, "tests.zig")) {
-                        if (!top_level_added) lists[index].append(b.allocator, b.fmt("{s}test.", .{prefix})) catch @panic("OOM");
-                        top_level_added = true;
-                        continue;
-                    }
-                    const spelling = source[name.loc.start..name.loc.end];
-                    const text = switch (name.tag) {
-                        .string_literal => std.zig.string_literal.parseAlloc(b.allocator, spelling) catch @panic("Invalid test name"),
-                        .identifier => if (std.mem.startsWith(u8, spelling, "@\""))
-                            std.zig.string_literal.parseAlloc(b.allocator, spelling[1..]) catch @panic("Invalid test name")
-                        else
-                            spelling,
-                        else => @panic("Invalid test declaration"),
-                    };
-                    // Nested container names are compiler-owned. Use a literal
-                    // fragment for these rare cases; runner ownership resolves
-                    // overlap. Avoid quotes/backslashes in Zig response files.
-                    var fragments = std.mem.tokenizeAny(u8, text, "'\"\\\n\r\t");
-                    var fragment: []const u8 = "";
-                    while (fragments.next()) |part| if (part.len > fragment.len) {
-                        fragment = part;
-                    };
-                    lists[index].append(b.allocator, if (fragment.len != 0) fragment else ".test.") catch @panic("OOM");
-                },
-                else => {},
-            }
-        }
-    }
-    var filters: [unit_partition.roots.len][]const []const u8 = undefined;
-    for (&lists, &filters) |*list, *result| {
-        std.mem.sort([]const u8, list.items, {}, struct {
-            fn lessThan(_: void, a: []const u8, c: []const u8) bool {
-                return std.mem.lessThan(u8, a, c);
-            }
-        }.lessThan);
-        result.* = list.toOwnedSlice(b.allocator) catch @panic("OOM");
-    }
-    return filters;
 }
 
 // A Go measurement launches Rui, so it enters the fixture boundary like every

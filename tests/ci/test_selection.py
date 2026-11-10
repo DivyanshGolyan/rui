@@ -971,7 +971,7 @@ class SelectionTest(unittest.TestCase):
                 fixture = FIXTURES[target][0][0]
                 run = re.search(r'(\w+)\.addFileArg\(b\.path\("' + re.escape(fixture) + r'"\)\)', build)
                 self.assertIsNotNone(run, fixture)
-                self.assertIn(f"const {run[1]} = screen_build.screenCommand(", build, fixture)
+                self.assertIn(f"const {run[1]} = screen_module.screenCommand(", build, fixture)
         # install.sh fetches the graph fetch_dependencies.sh walks from the root
         # manifest; ghostty's path dependencies would also make it exit 1.
         root = Path(__file__).parents[2]
