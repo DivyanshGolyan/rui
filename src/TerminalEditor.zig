@@ -349,7 +349,13 @@ pub fn appEvent(self: *Editor, comptime keys: anytype, event: vaxis.vxfw.Event, 
             break :blk .none;
         },
         .paste_end => if (self.pasting) self.finishPaste() else .none,
-        .key_press => |pressed| if (pasting and !self.pasting) .none else self.key(pressed, pasting),
+        .key_press => |pressed| if (pasting and !self.pasting) .none else if (!pasting and pressed.text != null and !std.unicode.utf8ValidateSlice(pressed.text.?)) blk: {
+            // Vaxis decodes whole characters and reports malformed bytes as
+            // U+FFFD carrying them; as text they would wait for a character
+            // that never comes and swallow every key after.
+            self.reject(.invalid);
+            break :blk .none;
+        } else self.key(pressed, pasting),
         .invalid_key => .{ .refused = .invalid },
         else => .none,
     };

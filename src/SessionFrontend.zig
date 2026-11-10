@@ -3889,3 +3889,24 @@ test "upgrade reobservation retains a refused archive command from the completio
         try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
     }
 }
+
+test "malformed UTF-8 rejects its line, and typing after it reaches the draft" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try held.settle();
+    // A lead byte cut short by a character, then by Enter: vaxis reports
+    // each as U+FFFD carrying the malformed bytes.
+    for ([_][]const u8{ "\xc3(\r", "\xc3\r" }) |invalid| {
+        errdefer std.debug.print("invalid={x}\n", .{invalid});
+        try held.keys(invalid);
+        try held.settle();
+        const shown = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, shown, "Input rejected; nothing sent.") != null);
+        try std.testing.expectEqual(null, held.self.input.submitted);
+        try held.keys("hi");
+        try held.settle();
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "› hi") != null);
+        try held.keys("\x15");
+        try held.settle();
+    }
+}
