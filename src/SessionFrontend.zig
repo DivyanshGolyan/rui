@@ -1097,7 +1097,7 @@ test "frontend /model shows the Session's model and sign-in within 60 columns an
     };
 }
 
-test "frontend reads the Session's skills for the caret's /word on its own worker, lists them, and Tab completes" {
+test "a Session lists the skills it saved for the caret's /word, and Tab or Enter on a drawn row replaces the name" {
     const Fake = struct {
         var calls: usize = 0;
         var session: [6]u8 = undefined;
@@ -1110,50 +1110,55 @@ test "frontend reads the Session's skills for the caret's /word on its own worke
             try std.testing.expectEqualStrings("", prefix);
             return .{ .entries = entries, .total = 2 };
         }
-        fn done(self: *Self) bool {
-            return self.skill_task.completed();
+        /// App's ticks until the worker's page is in and drawn.
+        fn answered(held: *HeldFrontend) !void {
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &held.self, struct {
+                fn done(self: *Self) bool {
+                    return self.skill_task.completed();
+                }
+            }.done);
+            try held.settle();
+            try std.testing.expect(held.self.skill_task.thread == null);
         }
     };
-    var self: Self = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .skill_read = Fake.read };
-    self.init.io = std.testing.io;
-    self.init.gpa = std.testing.allocator;
-    var environ = try std.testing.environ.createMap(std.testing.allocator);
-    defer environ.deinit();
-    self.screen = try std.testing.allocator.create(Screen);
-    defer std.testing.allocator.destroy(self.screen);
-    try self.screen.init(std.testing.io, &environ, false);
-    defer self.screen.deinit();
-    self.startInput();
-    defer self.dropSkills();
-    for ("use /") |byte| _ = self.input.feed(byte);
-    try self.serviceSkills();
-    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &self, Fake.done);
-    for ("re") |byte| _ = self.input.feed(byte);
-    try self.serviceSkills();
+    Fake.calls = 0;
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    held.self.session = "k7m2qx";
+    held.self.skill_read = Fake.read;
+    // The draft Q2 typed in a real terminal: the caret moved back to just
+    // after `/re`, in the middle of a Message. The page comes in while the
+    // caret is in the word; one that came in after it left would be
+    // dropped and read again.
+    try held.keys("please /re");
+    try Fake.answered(held);
+    try held.keys(" now\x1b[D\x1b[D\x1b[D\x1b[D");
+    try held.settle();
     try std.testing.expectEqual(@as(usize, 1), Fake.calls);
     try std.testing.expectEqualStrings("k7m2qx", &Fake.session);
-    const shown = self.nextCommands(null).?;
-    try std.testing.expectEqual(@as(usize, 2), shown.list.count);
-    try std.testing.expectEqualStrings("/review", shown.list.entries[1].shown);
-    // The page holds the whole catalog: narrowing reads nothing.
-    _ = self.input.feed('v');
-    try self.serviceSkills();
-    try std.testing.expect(self.skill_task.thread == null);
-    _ = self.input.feed('\t');
-    try std.testing.expectEqualStrings("use /review ", self.input.composition().bytes);
-    // Enter in a list the latest frame drew puts the highlighted skill in
-    // and sends nothing; a hidden list leaves Enter to the Message.
-    for ("and /") |byte| _ = self.input.feed(byte);
-    self.screen.commands = self.nextCommands(null);
-    try std.testing.expect(!self.takeShownRow());
-    self.screen.commands.?.drew(true);
-    try std.testing.expect(self.takeShownRow());
-    try std.testing.expectEqualStrings("use /review and /recap ", self.input.composition().bytes);
-    // Mid-draft, Tab replaces the caret's name and adds no space.
-    self.input.clear();
-    for ("a /rev b\x1b[D\x1b[D") |byte| _ = self.input.feed(byte);
-    _ = self.input.feed('\t');
-    try std.testing.expectEqualStrings("a /review b", self.input.composition().bytes);
+    var shown = try held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, shown, "/recap") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "Review a change") != null);
+    // The page held every skill: narrowing reads nothing and lists fewer.
+    try held.keys("v");
+    try held.settle();
+    try std.testing.expectEqual(@as(usize, 1), Fake.calls);
+    shown = try held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, shown, "/recap") == null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "Review a change") != null);
+    // Mid-draft, Tab replaces the caret's name, adds no space and leaves
+    // the caret after it.
+    try held.keys("\t");
+    try std.testing.expectEqualStrings("please /review now", held.self.input.composition().bytes);
+    try std.testing.expectEqual("please /review".len, held.self.input.composition().cursor);
+    // At the draft's end, Enter on the drawn row puts the highlighted skill
+    // in with a space, and sends nothing.
+    try held.keys("\x1b[F and /");
+    try held.settle();
+    try held.keys("\r");
+    try std.testing.expectEqualStrings("please /review now and /recap ", held.self.input.composition().bytes);
+    try std.testing.expect(held.self.submission.view() == null);
+    try std.testing.expectEqual(@as(usize, 1), Fake.calls);
 }
 
 test "frontend lists the efforts of the Session's model once it is read, the one in force marked" {
@@ -2842,6 +2847,7 @@ const HeldFrontend = struct {
     }
 
     fn destroy(held: *HeldFrontend) void {
+        held.self.dropSkills();
         held.self.submission.cancel();
         _ = held.self.submission.join();
         held.self.submission.close();
