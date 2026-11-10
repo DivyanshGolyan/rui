@@ -1,6 +1,7 @@
 //! The bytes a terminal sends, delivered to a screen as App delivers them:
 //! vaxis's own Parser decodes them, Root's capture sees each event first,
 //! and the focused screen gets what Root leaves unconsumed.
+const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 
@@ -31,4 +32,36 @@ pub fn send(ctx: *vxfw.EventContext, bytes: []const u8, root: vxfw.Widget, focus
         ctx.phase = .at_target;
         try focused.handleEvent(ctx, event);
     }
+}
+
+/// A mouse report delivered as App delivers it: hit-tested against the
+/// frame `frame` drew, through each hit widget's capture, then the deepest
+/// hit, then back up the hits until one consumes it.
+pub fn mouse(ctx: *vxfw.EventContext, frame: vxfw.Surface, report: vaxis.Mouse) !void {
+    var hits: std.ArrayList(vxfw.HitResult) = .empty;
+    defer hits.deinit(ctx.alloc);
+    if (report.row < 0 or report.col < 0 or report.row >= frame.size.height or report.col >= frame.size.width) return;
+    try frame.hitTest(ctx.alloc, &hits, .{ .row = @intCast(report.row), .col = @intCast(report.col) });
+    const target = hits.pop() orelse return;
+    ctx.consume_event = false;
+    ctx.phase = .capturing;
+    for (hits.items) |hit| {
+        try hit.widget.captureEvent(ctx, .{ .mouse = local(report, hit) });
+        if (ctx.consume_event) return;
+    }
+    ctx.phase = .at_target;
+    try target.widget.handleEvent(ctx, .{ .mouse = local(report, target) });
+    if (ctx.consume_event) return;
+    ctx.phase = .bubbling;
+    while (hits.pop()) |hit| {
+        try hit.widget.handleEvent(ctx, .{ .mouse = local(report, hit) });
+        if (ctx.consume_event) return;
+    }
+}
+
+fn local(report: vaxis.Mouse, hit: vxfw.HitResult) vaxis.Mouse {
+    var moved = report;
+    moved.col = @intCast(hit.local.col);
+    moved.row = @intCast(hit.local.row);
+    return moved;
 }

@@ -1499,6 +1499,9 @@ pub const mysql_session = [_][:0]const u8{
     "SET SESSION sql_mode='ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'",
     // `@list` of a Session's tool names whole: MySQL's default cuts at 1024.
     std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{tool_name.max_names_bytes}),
+    // Reads after a COMMIT in the same message (`Mysql.queueCommit`) run
+    // in autocommit, whatever the server's default.
+    "SET SESSION autocommit=1",
 };
 
 const MysqlObjects = union(enum) { refused: []const u8, objects: []const Object };

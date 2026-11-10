@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import build_files
 from select_tests import (BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES,
-                          POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, TEST_CODE, UNIT_ROOTS, Graph, execution_batches, matches, select,
+                          POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, Graph, execution_batches, matches, select,
                           setup_requirements, tree_graph)
 from qualification import NATIVE, RESOURCES, qualification, shards
 
@@ -96,7 +96,8 @@ class BuildModuleTest(unittest.TestCase):
     BUILD_MODULES entry, which must name every target the module defines."""
 
     def test_every_build_module_is_mapped(self):
-        modules = {path.relative_to(build_files.ROOT).as_posix() for path in build_files.files()}
+        modules = {path.relative_to(build_files.ROOT).as_posix()
+                   for path in [*build_files.files(), *build_files.ROOT.glob(SETUP_PARTS)]}
         self.assertEqual(modules - {"build.zig"}, BUILD_MODULES.keys())
 
     def test_a_hub_module_edit_selects_what_a_build_zig_edit_does(self):
@@ -146,7 +147,7 @@ class BuildModuleTest(unittest.TestCase):
                 selected = set(result["targets"])
                 # An edit to the build always type-checks it for Darwin, and
                 # selects a target whenever the module defines one a PR runs.
-                self.assertTrue(result["typecheck_macos"])
+                self.assertEqual(result["typecheck_macos"], module.endswith(".zig"))
                 owned = {step for step, owner in defined.items() if owner == module}
                 self.assertEqual(bool(selected), bool(owned & selectable) or bool(targets), module)
                 self.assertLessEqual(set(targets) if targets != BUILD_HUB else set(), AVAILABLE)
@@ -186,10 +187,10 @@ class SelectionTest(unittest.TestCase):
     def test_upgrade_owners_select_standalone_fixture_in_both_phases(self):
         paths = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
                  "src/upgrade_process.zig", "src/HostLifecycle.zig", "src/host_identity.zig",
-                 "src/host_identity.c", "src/UpgradePanel.zig", "src/host_launch.c",
+                 "src/host_identity.c", "src/UpgradePanel.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig", "src/stderr.zig", "src/host_launch.c",
                  "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/slash_commands.zig",
                  "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
-                 "tests/integration/upgrade_integration.py", "tests/ci/test_upgrade_fixture.py", "release/publish.sh", "release/install.sh",
+                 "tests/integration/upgrade_integration.py", "release/publish.sh", "release/install.sh",
                  "install.sh", "build.zig")
         for path in paths:
             for phase in ("development", "review"):
@@ -1096,7 +1097,7 @@ class SelectionTest(unittest.TestCase):
                     self.assertIn("targets: ${{ needs.plan.outputs.", setup)
 
     def test_tmux_setup_checks_and_installs_real_command(self):
-        setup = Path(".github/actions/setup/action.yml").read_text()
+        setup = Path(".github/actions/setup/fixtures/action.yml").read_text()
         step = setup.split("    - name: Install tmux for upgrade integration\n", 1)[1].split("    - uses:", 1)[0]
         self.assertIn("steps.requirements.outputs.tmux == 'true' && inputs.check-part != 'compiled'", step)
         script = dedent(step.split("      run: |\n", 1)[1])
@@ -1265,7 +1266,8 @@ fi
                     self.assertIn('python3 -B tests/ci/caller_errors.py --bootstrap-needed', policy)
                     workflow = workflow.replace(bootstrap, '', 1)
                 self.assertNotIn('publish-caches', workflow, f'{path.name} native checks must keep publishing')
-        setup = Path('.github/actions/setup/action.yml').read_text()
+        self.assertNotIn('actions/cache', Path('.github/actions/setup/action.yml').read_text())
+        setup = Path('.github/actions/setup/caches/action.yml').read_text()
         self.assertNotIn('actions/cache/save@', setup)
         steps = re.findall(r'(?m)^    - uses: actions/cache(/restore)?@.*\n((?:      .*\n)+)', setup)
         def guard(body):
@@ -1332,9 +1334,11 @@ fi
         self.assertFalse(cache("build.zig", build, build + "    // A build comment.\n    const other = b.step(\"x\", \"y\");\n"))
         self.assertTrue(cache("build.zig", build, build.replace("    run.has_side_effects = true;\n", "")))
         action = Path(".github/actions/setup/action.yml").read_text()
-        self.assertFalse(cache(".github/actions/setup/action.yml", action,
-                               action.replace("name: Select fixture dependencies", "name: Select the fixture dependencies")))
-        self.assertTrue(cache(".github/actions/setup/action.yml", action, action.replace("~/.cache/zig", "~/.cache/zig2", 1)))
+        fixtures = Path(".github/actions/setup/fixtures/action.yml").read_text()
+        self.assertFalse(cache(".github/actions/setup/fixtures/action.yml", fixtures,
+                               fixtures.replace("name: Select fixture dependencies", "name: Select the fixture dependencies")))
+        caches = Path(".github/actions/setup/caches/action.yml").read_text()
+        self.assertTrue(cache(".github/actions/setup/caches/action.yml", caches, caches.replace("~/.cache/zig", "~/.cache/zig2", 1)))
         check = Path(".github/workflows/check.yml").read_text()
         policy_step = "Reject undefined fixture names before native builds"
         self.assertFalse(cache(".github/workflows/check.yml", check, check.replace(policy_step, policy_step + " here")))
@@ -1350,8 +1354,8 @@ fi
         self.assertFalse(cache(".github/workflows/check.yml", check, check.replace(actionlint, actionlint + "-2")))
         self.assertFalse(cache("build/new.zig", None, 'const std = @import("std");\n'))
         # A value inside a cache step or input counts, though the line names no cache.
-        deps = re.search(r"(?m)^\s+DEPS: rui-build-v2-", action)[0]
-        self.assertTrue(cache(".github/actions/setup/action.yml", action, action.replace(deps, deps.replace("v2", "v3"))))
+        deps = re.search(r"(?m)^\s+DEPS: rui-build-v2-", caches)[0]
+        self.assertTrue(cache(".github/actions/setup/caches/action.yml", caches, caches.replace(deps, deps.replace("v2", "v3"))))
         default = re.search(r"(?ms)^  publish-caches:\n.*?default: (.*?)$", action)
         self.assertTrue(cache(".github/actions/setup/action.yml", action,
                               action[:default.start(1)] + "'false'" + action[default.end(1):]))

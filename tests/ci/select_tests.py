@@ -118,12 +118,16 @@ FIXTURES = {
     "installer-integration": ((I + "installer_integration.py",), (),
                               ("src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig")),
     "upgrade-integration": ((I + "upgrade_integration.py",), (),
-                            ("src/upgrade.zig", "src/upgrade_process.zig", "src/UpgradePanel.zig",
+                            ("src/upgrade.zig", "src/upgrade_process.zig", "src/UpgradePanel.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig",
                              "src/HostLifecycle.zig", "src/Installation.zig")),
     "terminal-restoration-integration": ((I + "terminal_restoration_integration.py",), ("src/terminal_notice_test.zig",),
                                          ("src/SessionFrontend.zig", "src/SessionTerminal.zig", "src/TerminalEditor.zig")),
     "canonical-failure-integration": ((I + "canonical_failure_integration.py",), (),
                                       (CALLER, "src/SessionFrontend.zig", "src/failure_class.zig", "src/model_adapter.zig")),
+    "overview-integration": ((I + "overview_integration.py", I + "overview_fixture.py", I + "overview_groups_cases.py", I + "overview_counts_cases.py",
+                              I + "overview_clicks_cases.py"), (),
+                             ("src/Overview.zig", "src/overview_view.zig", "src/OverviewLines.zig", "src/GroupedList.zig",
+                              "src/process_memory.zig", "src/host_identity.zig", "src/host_identity.c")),
     "model-picker-integration": ((I + "model_picker_integration.py", I + "model_picker_signin_integration.py",
                                   I + "model_picker_failure_integration.py"), (),
                                  ("src/Overview.zig", "src/SessionFrontend.zig", "src/model_picker_view.zig")),
@@ -273,10 +277,10 @@ CLI_GRAMMAR = ("src/cli_grammar.zig", "src/cli_option_names.zig", "src/serve_gra
 # The upgrade fixture is standalone, including when a composed gate is selected.
 UPGRADE_PATHS = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
                  "src/upgrade_process.zig", "src/HostLifecycle.zig", "src/host_identity.zig",
-                 "src/host_identity.c", "src/UpgradePanel.zig", "src/host_launch.c",
+                 "src/host_identity.c", "src/UpgradePanel.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig", "src/stderr.zig", "src/host_launch.c",
                  "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/client.zig", "src/slash_commands.zig",
                  "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
-                 "tests/integration/upgrade_integration.py", "tests/ci/test_upgrade_fixture.py", "release/*", "install.sh", "build.zig")
+                 "tests/integration/upgrade_integration.py", "release/*", "install.sh", "build.zig")
 
 # The source and release installers exercise real publication and PATH decisions.
 # Keep this standalone even beside check, which does not run the installer driver.
@@ -507,13 +511,15 @@ RULES += ((("src/store.zig", "src/store/*", "!src/store/wire/*", "src/server_exe
            ("launch-frame-integration",), (),
            "The Store's MySQL round trips per model operation and while idle stay within their budget"),)
 
-# build.zig wires every target, so an edit to it selects the full gate (RULES
+# build.zig wires every target, and the setup action installs the compiler and
+# fetches the packages, so an edit to either selects the full gate (RULES
 # above). A hub module is build.zig's code split out for size, and an edit to
-# it selects what a build.zig edit does. Any other module under build/ selects
-# only what it can change: the targets it defines and those that use what it
-# builds. test_selection.BuildModuleTest holds every module and every target a
-# module defines to this map.
+# it selects what a build.zig edit does. Any other module under build/, or a
+# part of the setup action, selects only what it can change: the targets it
+# defines and those that use what it builds. test_selection.BuildModuleTest
+# holds every module and every target a module defines to this map.
 BUILD_HUB = "build.zig"
+SETUP_PARTS = ".github/actions/setup/*/action.yml"
 FIXTURE_TABLE = "build/fixtures.zig"
 FIXTURE_ROW = re.compile(r'^ *\.\{ \.step = "([a-z0-9-]+)",.*\},\n', re.M)
 
@@ -552,6 +558,13 @@ BUILD_MODULES = {
     # The unit roots and one screen fixture link and load what it names; it is
     # a Mac path, so ready PRs run these on Mac too.
     "build/darwin.zig": ("test", "host-launch-integration"),
+    # Every job restores and saves through it, and a key or path error fails
+    # its setup. Zig's cache is content-addressed and acceptance runs are never
+    # cached (cache_execution checks that), so a restore cannot pass a stale test.
+    ".github/actions/setup/caches/action.yml": ("test-logic",),
+    # One target for each tool it installs: Python packages, Go, Node and tmux.
+    ".github/actions/setup/fixtures/action.yml":
+        ("dispatch-integration", "measurement-check", "ts-client", "upgrade-integration"),
 }
 RULES += tuple(((module,), targets, tuple(target for target in targets if target not in LINUX_ONLY),
                 "Build module: the targets it defines or builds for")
@@ -604,7 +617,8 @@ POLICY_SELF_CHECKS = (
 # test-only package in screen-emulator: setup fetches its packages for these only.
 # A step missing here still builds, fetching them on demand.
 SCREEN_TARGETS = frozenset({"check", "check-full", "terminal-restoration-integration", "canonical-failure-integration",
-                            "host-launch-integration", "upgrade-integration", "human-cli-integration", "model-picker-integration",
+                            "host-launch-integration", "upgrade-integration", "human-cli-integration", "overview-integration",
+                            "model-picker-integration",
                             "skills-integration", "bash-recovery-integration", "renderer-contracts-selftest",
                             "direct-pty", "direct-pty-controls", "input-equivalence", "screen-emulator",
                             "peer-integration"})

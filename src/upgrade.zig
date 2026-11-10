@@ -68,7 +68,8 @@ pub const Check = struct {
     host: HostLifecycle.Observation,
     home: []const u8,
     store: []const u8,
-    running_executable: []const u8,
+    /// As `executablePathAlloc` allocates it, so `deinit` frees all of it.
+    running_executable: [:0]const u8,
     path: installation_path.Observation = .{ .state = .unavailable },
 
     pub fn deinit(self: *Check, allocator: std.mem.Allocator) void {
@@ -116,6 +117,12 @@ pub fn canInstall(checked: *const Check) bool {
     return checked.selected == .released;
 }
 
+/// The selected build already is the release, or newer: an install
+/// reselects it and prepares nothing.
+pub fn holdsRelease(checked: *const Check) bool {
+    return checked.selected == .released and checked.selected.released.version.order(checked.candidate.version) != .lt;
+}
+
 const ActivationProgress = struct {
     progress: ?Progress,
 
@@ -137,13 +144,17 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
     errdefer allocator.free(store);
     var installation: Installation.InstallationOutcome = undefined;
     const selected = checked.selected.released;
-    if (selected.version.order(checked.candidate.version) != .lt) {
+    if (holdsRelease(checked)) {
+        // Reselecting the installed build publishes too.
+        Progress.send(progress, .publishing);
+        try process.check(cancellation);
         installation = try Installation.publishExistingWithReporter(allocator, init.io, checked.home, selected.build, .released_upgrade, cancellation, cleanup.reporter(.publication));
     } else {
         Progress.send(progress, .preparing);
         var prepared = try Installation.prepareWithReporter(allocator, init.io, checked.home, &checked.candidate, cancellation, cleanup.reporter(.preparation));
         defer prepared.disposeWithReporter(allocator, init.io, cleanup.reporter(.disposal)) catch {};
         Progress.send(progress, .publishing);
+        try process.check(cancellation);
         installation = try Installation.publishWithReporter(allocator, init.io, checked.home, &prepared, .released_upgrade, cancellation, cleanup.reporter(.publication));
     }
     errdefer installation.deinit(allocator);
@@ -249,6 +260,19 @@ pub fn writeResult(writer: *std.Io.Writer, result: *const Result) !void {
         },
         else => try writer.writeAll("\n"),
     }
+}
+
+test "a check frees exactly the executable path the system gave it" {
+    const allocator = std.testing.allocator;
+    var checked: Check = .{
+        .candidate = .{ .version = .{ .schema = 99, .patch = 0 }, .tag = try allocator.dupe(u8, "v0.99.0"), .archive_name = try allocator.dupe(u8, "fixture"), .archive_url = try allocator.dupe(u8, "fixture"), .checksum_url = try allocator.dupe(u8, "fixture"), .sha256 = @splat(0) },
+        .selected = .absent,
+        .host = .absent,
+        .home = try allocator.dupe(u8, "/synthetic/home"),
+        .store = try allocator.dupe(u8, "/synthetic/store"),
+        .running_executable = try std.process.executablePathAlloc(std.testing.io, allocator),
+    };
+    checked.deinit(allocator);
 }
 
 test "upgrade activation and publication are independent result facts" {
