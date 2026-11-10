@@ -2449,6 +2449,8 @@ fn startUpgrade(state: *State, effects: *Effects) void {
         .idle, .ended => {},
     }
     state.upgrade_pending = true;
+    // The run's line is newer than any notice.
+    state.notice = null;
     state.upgrade.begin();
     effects.add(.upgrade);
 }
@@ -2463,17 +2465,17 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         },
         else => {},
     };
-    if (!admitHostRequest(state)) {
-        if (parsed) |result| switch (result) {
-            .command => |command| switch (command.name) {
-                .upgrade => return startUpgrade(state, effects),
-                .exit => return effects.add(.exit),
-                else => {},
-            },
+    // The Upgrade's own command and leaving are no Host requests, so no
+    // hold refuses them.
+    if (parsed) |result| switch (result) {
+        .command => |command| switch (command.name) {
+            .upgrade => return startUpgrade(state, effects),
+            .exit => return effects.add(.exit),
             else => {},
-        };
-        return;
-    }
+        },
+        else => {},
+    };
+    if (!admitHostRequest(state)) return;
     // As in a conversation, the draft is sent byte for byte; only a blank
     // draft opens the selected row instead.
     if (std.mem.trim(u8, text, " \t\r\n").len == 0) {
@@ -7488,6 +7490,24 @@ test "the status row under the input says the status bar's line" {
     _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } });
     const upgrading = try segmentText(arena.allocator(), try statusSegments(arena.allocator(), &state, .{}, 120, .{ .unicode = false }));
     try std.testing.expect(std.mem.startsWith(u8, upgrading, " Upgrading to 0.60.0 - no Host running - esc cancels"));
+}
+
+test "/upgrade is never refused as a Host request: the status bar shows its run at first, while it runs and after a hold" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectStatus(&state, "Checking for updates…", .normal);
+    // Enter again while it runs starts nothing and hides nothing.
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectStatus(&state, "Checking for updates…", .normal);
+    _ = try step(&state, .{ .upgrade = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none } } });
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
+    try std.testing.expect(state.upgrade_blocked);
+    // A Host request is refused in words; the retry shows its own progress.
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "start this")));
+    try expectStatus(&state, upgrade_recovery, .attention);
+    try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectStatus(&state, "Checking for updates…", .normal);
 }
 
 fn expectStatus(state: *const State, text: []const u8, colour: Colour) !void {
