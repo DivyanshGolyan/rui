@@ -31,7 +31,14 @@ const FactsRow = struct {
     bin: bool,
     bin_format: Bounded(32),
     doublewrite: Bounded(32),
+    max_allowed_packet: u64,
     database: Bounded(64),
+};
+
+const session_settings = blk: {
+    var all: []const u8 = "";
+    for (schema.mysql_session) |sql| all = all ++ sql ++ ";";
+    break :blk all;
 };
 
 pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []const u8) !State {
@@ -40,22 +47,21 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     // GET_LOCK accepts at most 64 characters; do not truncate and collide.
     if (options.database.len == 0 or options.database.len > 64) return error.WrongStoreIdentity;
     if (selector.len > store_path.max_bytes) return error.WrongStoreIdentity;
+    // Every message carries the settings, so none relies on the server
+    // connection a proxy sent the last one on.
+    conn.useSettings(session_settings, schema.mysql_session.len);
     const w = conn.batch();
-    for (schema.mysql_session) |sql| {
-        try w.writeAll(sql);
-        try w.writeByte(';');
-    }
-    try w.writeAll("SELECT @@version,@@version_comment,@@global.read_only,@@global.super_read_only,@@global.innodb_flush_log_at_trx_commit,@@global.sync_binlog,@@global.log_bin,@@global.binlog_format,@@global.innodb_doublewrite,DATABASE();SELECT GET_LOCK(");
+    try w.writeAll("SELECT @@version,@@version_comment,@@global.read_only,@@global.super_read_only,@@global.innodb_flush_log_at_trx_commit,@@global.sync_binlog,@@global.log_bin,@@global.binlog_format,@@global.innodb_doublewrite,@@max_allowed_packet,DATABASE();SELECT GET_LOCK(");
     try text(w, options.database);
     try w.writeAll(",0)");
     try conn.sendBatch();
-    for (schema.mysql_session) |_| try expectOk(conn);
     const facts = try one(FactsRow, conn);
     const lock = try one(struct { acquired: ?u64 }, conn);
     if (!facts.database.eql(options.database)) return error.WrongStoreIdentity;
     const acquired = lock.acquired orelse return error.StoreConnectionLost;
     if (acquired == 0) return error.StoreLocked;
     if (acquired != 1) return error.CorruptStore;
+    conn.limitBatch(facts.max_allowed_packet);
     if (policy.refusal(.{
         .server_version = facts.version.slice(),
         .version_comment = facts.version_comment.slice(),

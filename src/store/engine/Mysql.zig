@@ -74,6 +74,7 @@ const Begin = union(enum) {
 const Replacement = enum { none, pending, buffered };
 const unserved = provider_route.all(.unserved);
 pub const ContentSink = content.ContentSink;
+pub const ContentHost = content.Host;
 pub const insert_chunk = rsql.Write(.{
     .sql = "INSERT INTO content_chunk(content_id,chunk_index,bytes) VALUES(?1,?2,?3)",
     .Args = struct { content_id: u64, chunk_index: u64, bytes: rsql.Bytes },
@@ -413,12 +414,33 @@ pub fn readRaw(self: *Mysql, id: u64, offset: u64, destination: []u8) Failure!vo
         return err;
     };
 }
-pub fn openSink(self: *Mysql, id: u64, length: u64) Failure!ContentSink {
-    return content.openSink(self, id, length, self.contentObserver()) catch |err| {
-        if (err == error.StoreConnectionLost) self.state.failure = err;
-        return err;
-    };
+/// A sink on the payload of the content row `id`, whose chunk INSERTs
+/// ride `host`'s batches (`content.Host`).
+pub fn openSink(self: *Mysql, id: u64, length: u64, host: content.Host) Failure!ContentSink {
+    try self.check();
+    return content.openSink(&self.state.sink, id, length, host);
 }
+
+/// Whether the open batch has room for a chunk INSERT of `n` payload
+/// bytes, with the transaction's opening statements if they are due.
+pub fn chunkFits(self: *Mysql, id: u64, index: u64, n: usize) bool {
+    const controls = 256;
+    if (self.state.long_query) return false;
+    return content.chunkStatementBytes(id, index, n) + controls <= self.state.connection.batchRoom();
+}
+
+/// Begins a chunk INSERT in the open batch, after any opening statements
+/// due, and returns the batch's writer with the text up to its payload
+/// written: the sink writes the payload's hex and the suffix. `chunkFits`
+/// was true.
+pub fn beginChunk(self: *Mysql, id: u64, index: u64) Failure!*std.Io.Writer {
+    try self.check();
+    try self.appendControls();
+    const w = self.state.connection.batch();
+    w.print(content.insert_prefix, .{ id, index }) catch return error.BindFailed;
+    return w;
+}
+
 pub fn writePayload(self: *Mysql, id: u64, bytes: []const u8) Failure!void {
     try self.check();
     var at: usize = 0;

@@ -20,6 +20,7 @@ from import_architecture import scoped_imports
 from platform_boundary import mac_path
 from qualification import RESOURCES
 from strict_paths import strict
+from release_numbers import SCHEMA as STORE_SCHEMA, digest_rows, migration_steps, schema_version
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -166,6 +167,9 @@ class Graph:
                                       for module in (match[1] and [match[1]] or re.split(r"\s*,\s*", match[2]))}
                                      | set(SOURCE_READ.findall(strings))
                                      | {"src/" + joined for joined in SOURCE_JOIN.findall(source)}) & names - {name}
+        # Every file a Zig compilation reads: sources, and what they import
+        # or embed that is not Zig (openapi.json, SQL baselines, prompt text).
+        self.compiled = set(self.every).union(*self.every.values())
         self.cores = {"src/" + core for core in re.findall(
             r'\.\{ "([^"]+\.zig)", @import', read(FUNCTIONAL_CORES).split("const cores = .{", 1)[1].split("\n};", 1)[0])}
         # Rui's code: its production imports, less test code that a
@@ -217,7 +221,8 @@ class Graph:
                                  "or list it in PACKAGES")
             return {os.path.normpath(directory / imported)}
 
-        embedded = {os.path.normpath(directory / path) for path in EMBED.findall(source)}
+        # An embed names a file, or a module build.zig adds (`MODULES`).
+        embedded = {MODULES.get(path) or os.path.normpath(directory / path) for path in EMBED.findall(source)}
         self.production[name] = embedded.union(*map(resolve, production))
         self.every[name] = self.production[name].union(*map(resolve, tested))
 
@@ -275,12 +280,27 @@ INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_
 
 # Ready PRs run the previous installed-release upgrade only when they change
 # what it exercises: installation, the upgrade and Host lifecycle owners, the
-# Store format, the build or the check itself. Promotion runs it for every batch.
+# Store format (`store_format`), the build or the check itself. Its own unit
+# test runs in policy. Promotion runs it for every batch.
 UPGRADE_CHECK_PATHS = ("src/upgrade*.zig", "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
                        "src/HostLifecycle.zig", "src/host_identity.*", "src/host_launch.c",
-                       "src/store/schema.zig", "src/store/migration_*", "install.sh", "release/*", "build.zig", "build.zig.zon",
-                       "tests/integration/previous_release_upgrade.py", "tests/ci/test_previous_release_upgrade.py",
-                       ".github/workflows/previous-release-upgrade.yml", ".github/workflows/cache-maintenance.yml")
+                       "src/store/migration_*", "install.sh", "release/*", "build.zig", "build.zig.zon",
+                       "tests/integration/previous_release_upgrade.py", ".github/workflows/previous-release-upgrade.yml")
+
+
+def store_format(source):
+    """What an installed release's Store meets in schema.zig: the version, each
+    version's digest and the forward steps. Imports and comments are not it."""
+    return schema_version(source), digest_rows(source), migration_steps(source)
+
+
+def store_format_changed(before, after):
+    return before is None or after is None or store_format(before) != store_format(after)
+
+
+# Paths selection judges by content: path -> whether a (before, after) text
+# pair changes what the path's checks exercise. `main` reads both sides.
+CONTENT_RULES = {STORE_SCHEMA: store_format_changed}
 
 # Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
 RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py",
@@ -415,19 +435,28 @@ RULES += ((("src/store.zig", "src/store/*", "!src/store/wire/*", "src/server_exe
            ("launch-frame-integration",), (),
            "The Store's MySQL round trips per model operation and while idle stay within their budget"),)
 
-# build.zig wires every target and builds the Rui every fixture runs, so an
-# edit to it selects the full gate (RULES above). A module under build/
-# selects only what it can change: the targets it defines and those that use
-# what it builds. test_selection.BuildModuleTest holds every module and every
-# target a module defines to this map.
+# build.zig wires every target, so an edit to it selects the full gate (RULES
+# above). A hub module is build.zig's code split out for size, and an edit to
+# it selects what a build.zig edit does. Any other module under build/ selects
+# only what it can change: the targets it defines and those that use what it
+# builds. test_selection.BuildModuleTest holds every module and every target a
+# module defines to this map.
+BUILD_HUB = "build.zig"
 BUILD_MODULES = {
+    # The Rui every target builds or runs, and the libraries it links.
+    "build/product.zig": BUILD_HUB,
+    # How every CI producer hands executables to the shards that run them.
+    "build/ci.zig": BUILD_HUB,
+    # The PTY screen observer: what check-full and these fixtures load to read
+    # the terminal. Its renderer harnesses are nonblocking (renderer-contracts.yml).
+    "build/screen.zig": ("check-full", "skills-integration", "upgrade-integration"),
     # Darwin linking, the screen library's name and the Mac unit-root limits.
     # The unit roots and one screen fixture link and load what it names; it is
     # a Mac path, so ready PRs run these on Mac too.
     "build/darwin.zig": ("test", "host-launch-integration"),
 }
 RULES += tuple(((module,), targets, targets, "Build module: the targets it defines or builds for")
-               for module, targets in BUILD_MODULES.items())
+               for module, targets in BUILD_MODULES.items() if targets != BUILD_HUB)
 
 
 # Inputs to the Host's ReleaseSafe frames or to their gate: Zig source the
@@ -456,6 +485,13 @@ CACHE_POLICY = {
     ".github/workflows/previous-release-upgrade.yml", ".github/workflows/qualify-macos.yml",
     ".github/workflows/release.yml", "tests/ci/cache_execution.py",
 }
+
+
+# What `zig build typecheck-macos` compiles: Zig and C sources, the build
+# and its pinned packages, and the patches and scripts that prepare them.
+# Files Zig imports or embeds count too (`Graph.compiled`). No other change can alter
+# whether Rui type-checks for Apple Silicon.
+TYPECHECK_INPUTS = ("*.zig", "*.zon", "*.c", "*.h", "src/*.patch", "src/*.sh", ".github/actions/setup/action.yml")
 
 
 # tests/ci units that read no repository file outside their inputs (traced).
@@ -513,8 +549,14 @@ def matches(path, patterns):
     return included and not any(fnmatch.fnmatchcase(path, pattern[1:]) for pattern in patterns if pattern.startswith("!"))
 
 
-def select(paths, phase, available, graph=None):
+def select(paths, phase, available, graph=None, contents=None):
+    """`contents` maps a `CONTENT_RULES` path to its (before, after) text;
+    a path it leaves out counts as changed."""
     graph = graph or tree_graph()
+    paths = [BUILD_HUB if BUILD_MODULES.get(path) == BUILD_HUB else path for path in paths]
+    contents = contents or {}
+    content_changed = {path for path, changed in CONTENT_RULES.items()
+                       if path in paths and (path not in contents or changed(*contents[path]))}
     targets, native_targets, reasons = set(), set(), set()
     live_targets, live_reasons = set(), set()
     manual_checks = set()
@@ -603,7 +645,8 @@ def select(paths, phase, available, graph=None):
     mac_required = phase == "review" and any(mac_path(path) for path in paths)
     if mac_required:
         reasons.add("Mac-specific path: PR runs Mac Selected (tests/ci/platform_boundary.py)")
-    upgrade_required = phase == "review" and any(matches(path, UPGRADE_CHECK_PATHS) for path in paths)
+    upgrade_required = phase == "review" and (any(matches(path, UPGRADE_CHECK_PATHS) for path in paths)
+                                              or STORE_SCHEMA in content_changed)
     if upgrade_required:
         reasons.add("Upgrade, installer or Store-format path: PR runs the previous installed-release upgrade")
     if phase == "development":
@@ -620,6 +663,7 @@ def select(paths, phase, available, graph=None):
         if not targets & served_by:
             raise ValueError(f"{reason!r} selected none of the targets that start its server: {sorted(served_by)}")
     cache_execution_checks = phase == "review" and any(path in CACHE_POLICY for path in paths)
+    typecheck_macos = any(matches(path, TYPECHECK_INPUTS) or path in graph.compiled for path in paths)
     missing = (targets | native_targets) - available
     if missing:
         raise ValueError(f"Selected targets absent from the build: {sorted(missing)}")
@@ -631,6 +675,8 @@ def select(paths, phase, available, graph=None):
             # Store, recovery and upgrade changes fail for real; never rerun them.
             "retry": not strict(paths),
             "cache_execution_checks": cache_execution_checks,
+            # Whether the change can alter what `typecheck-macos` compiles.
+            "typecheck_macos": typecheck_macos,
             "linux_memory_checks": linux_memory_checks, "manual_checks": sorted(manual_checks),
             "policy_skips": [unit for unit, inputs in POLICY_SELF_CHECKS
                              if not any(matches(path, inputs) for path in paths)],
@@ -649,6 +695,12 @@ def changed_paths(base, head):
     return [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p], base_commit
 
 
+def revision_text(commit, path):
+    """The path's text at commit, or None where the commit has no such file."""
+    shown = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True, text=True)
+    return shown.stdout if shown.returncode == 0 else None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True)
@@ -657,9 +709,12 @@ def main():
     args = parser.parse_args()
     available = set(build_files.steps())
     paths, base = changed_paths(args.base, args.head)
-    result = select(paths, args.phase, available)
+    head = subprocess.check_output(["git", "rev-parse", args.head], text=True).strip()
+    result = select(paths, args.phase, available,
+                    contents={path: (revision_text(base, path), revision_text(head, path))
+                              for path in CONTENT_RULES if path in paths})
     result["base"] = base
-    result["head"] = subprocess.check_output(["git", "rev-parse", args.head], text=True).strip()
+    result["head"] = head
     print(json.dumps(result, indent=2))
 
 
