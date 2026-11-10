@@ -246,6 +246,20 @@ def pty_close_violations(source, name="fixture.py"):
             for target in node.targets:
                 targets = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
                 owned.update(ast.unparse(item) for item in targets if isinstance(item, (ast.Name, ast.Attribute)))
+        # Track descriptor lists across methods, then their loop variables (including
+        # comprehensions used to construct deferred cleanup callbacks).
+        containers = set()
+        for node in ast.walk(scope):
+            if isinstance(node, ast.AugAssign) and any(ast.unparse(item) in owned for item in ast.walk(node.value)):
+                containers.add(ast.unparse(node.target))
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ("append", "extend")
+                    and any(ast.unparse(item) in owned for arg in node.args for item in ast.walk(arg))):
+                containers.add(ast.unparse(node.func.value))
+        for node in ast.walk(scope):
+            if (isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension))
+                    and ast.unparse(node.iter) in containers):
+                owned.add(ast.unparse(node.target))
         for node in ast.walk(scope):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "close"
                     and isinstance(node.func.value, ast.Name) and node.func.value.id == "os" and node.args

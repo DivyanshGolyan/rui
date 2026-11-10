@@ -55,6 +55,10 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertIn("close_pty", pty_close_violations(bad)[0])
         self.assertEqual(pty_close_violations(good), [])
         self.assertIn("close_pty", pty_close_violations(
+            "class Chrome:\n    def open(self):\n        master, slave = open_pty()\n"
+            "        self.descriptors += [master, slave]\n"
+            "    def close(self):\n        return (lambda fd=fd: os.close(fd) for fd in self.descriptors)\n")[0])
+        self.assertIn("close_pty", pty_close_violations(
             "class P:\n    def open(self):\n        self.master, self.slave = open_pty()\n"
             "    def close(self):\n        os.close(self.master)\n")[0])
         for folder in ("integration", "qualification"):
