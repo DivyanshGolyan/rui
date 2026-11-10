@@ -1017,18 +1017,19 @@ test "a peer's name links to its Session inside Rui, never through the terminal"
     var storage: [256]u8 = undefined;
     // The hidden ID takes no cell: the row reads, fits and clips as the
     // name alone, with its time in the margin.
-    _ = view.draw(test_screen.window(60, 1), .{}, true, true, .{});
+    _ = view.draw(test_screen.window(60, 1), .{}, true, true, .{}, .default);
     try std.testing.expectEqualStrings("→ Messaged Review the WAL" ++ @as([55 - 25]u8, @splat(' ')) ++ "08:00", test_screen.row(0, &storage));
-    _ = view.draw(test_screen.window(20, 1), .{}, true, true, .{});
+    _ = view.draw(test_screen.window(20, 1), .{}, true, true, .{}, .default);
     try std.testing.expectEqualStrings("→ Messaged Review t…", test_screen.row(0, &storage));
-    _ = view.draw(test_screen.window(25, 1), .{}, true, true, .{});
+    _ = view.draw(test_screen.window(25, 1), .{}, true, true, .{}, .{ .index = 59 });
     try std.testing.expectEqualStrings("→ Messaged Review the WAL", test_screen.row(0, &storage));
-    // Only the name is underlined, and no cell carries an OSC 8 address.
+    // Only the name is underlined, the row stays quiet, and no cell carries
+    // an OSC 8 address.
     for (0..25) |column| {
         const cell = test_screen.screen.readCell(@intCast(column), 0).?;
         try std.testing.expectEqualStrings("", cell.link.uri);
         try std.testing.expectEqual(column >= 11, cell.style.ul_style == .single);
-        try std.testing.expect(cell.style.dim);
+        try std.testing.expectEqual(vaxis.Color{ .index = 59 }, cell.style.fg);
     }
     const text = view.text();
     const at = std.mem.indexOf(u8, text, "Review").?;

@@ -172,7 +172,7 @@ fn layOut(document: *const Document, first: viewport.Position, width: u16, count
     @memset(cells, .{});
     var screen: vaxis.Screen = .{ .width = width, .height = count, .width_method = .unicode, .buf = cells };
     const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = count, .screen = &screen };
-    _ = document.draw(window, first, true, false, .{});
+    _ = document.draw(window, first, true, false, .{}, .default);
 }
 
 test "a row's columns map to the clusters they show, indents and wide cells included" {
