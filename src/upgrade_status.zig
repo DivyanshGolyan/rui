@@ -29,6 +29,9 @@ pub const Step = enum { preparing, publishing, restarting };
 
 pub const Ended = union(enum) {
     up_to_date: Version,
+    /// Another install selected a build newer than the release found:
+    /// nothing changed and nothing restarted.
+    superseded,
     refused: Refusal,
     /// Cancelled before publishing: nothing changed.
     cancelled,
@@ -149,6 +152,10 @@ pub const Upgrade = struct {
                     writer.print("Rui is up to date ({f})", .{version}) catch unreachable;
                     break :said .{ .normal, .notice };
                 },
+                .superseded => said: {
+                    writer.writeAll("A newer Rui is already installed; nothing changed") catch unreachable;
+                    break :said .{ .normal, .notice };
+                },
                 .refused => |why| said: {
                     writer.print("Can't upgrade here: {s} {s} {s}", .{ refusals.get(why), dot, shell }) catch unreachable;
                     break :said .{ .attention, .notice };
@@ -260,10 +267,12 @@ test "with nothing working or no Host, the first line says so" {
     try expectLine(&run, &buffer, "Upgraded to 0.60.0", .normal, .notice);
 }
 
-test "a check that installs nothing ends as a notice: up to date, refused or failed" {
+test "a check that installs nothing ends as a notice: up to date, superseded, refused or failed" {
     var buffer: [max_line_bytes]u8 = undefined;
     for ([_]struct { Ended, []const u8, Tone }{
         .{ .{ .up_to_date = .{ .schema = 59, .patch = 7 } }, "Rui is up to date (0.59.7)", .normal },
+        // Another install selected a newer build: no version of ours to name.
+        .{ .superseded, "A newer Rui is already installed; nothing changed", .normal },
         .{ .{ .refused = .first_install }, "Can't upgrade here: no managed install · run rui upgrade in a shell for details", .attention },
         .{ .{ .refused = .source_build }, "Can't upgrade here: a source build · run rui upgrade in a shell for details", .attention },
         .{ .{ .refused = .unknown_build }, "Can't upgrade here: an unknown build · run rui upgrade in a shell for details", .attention },

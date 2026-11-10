@@ -174,12 +174,16 @@ pub fn news(self: *const Self, heard: *Heard, working: usize) ?UpgradeStep {
     return .{ .ended = .{ .how = self.ending(), .outcome = self.outcome } };
 }
 
-/// The selected build already is the release and no running Host would
-/// restart onto it, so the run has nothing to show until it ends.
+/// The selected build already is the release, or newer, and no running
+/// Host would restart onto it, so the run has nothing to show until it
+/// ends. A newer selected build is never restarted onto the older release.
 fn current(checked: *const upgrade.Check) bool {
-    const selected = checked.selected == .released and checked.selected.released.version.order(checked.candidate.version) == .eq;
-    const restarts = checked.host == .managed and checked.host.managed.version.order(checked.candidate.version) == .lt;
-    return selected and !restarts;
+    if (checked.selected != .released) return false;
+    return switch (checked.selected.released.version.order(checked.candidate.version)) {
+        .lt => false,
+        .gt => true,
+        .eq => !(checked.host == .managed and checked.host.managed.version.order(checked.candidate.version) == .lt),
+    };
 }
 
 fn version(of: @FieldType(@FieldType(upgrade.Check, "candidate"), "version")) upgrade_status.Version {
@@ -191,6 +195,7 @@ fn ending(self: *const Self) upgrade_status.Ended {
     const release = version(checked.candidate.version);
     if (self.result) |*result| {
         if (!upgrade.compatible(result)) return .{ .incompatible = release };
+        if (result.activation == .superseded) return .superseded;
         const restarted = result.activation == .ready;
         if (result.installation == .unchanged and !restarted) return .{ .up_to_date = release };
         return .{ .upgraded = .{ .version = release, .restarted = restarted } };
@@ -600,6 +605,9 @@ test "how a run ends, as the status bar names it" {
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .activation = .not_needed, .store = "" } }, .ended = .{ .up_to_date = v }, .outcome = .compatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .activation = already_ready, .store = "" } }, .ended = .{ .up_to_date = v }, .outcome = .compatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .activation = ready, .store = "" } }, .ended = .{ .upgraded = .{ .version = v, .restarted = true } }, .outcome = .compatible },
+        // Another install selected a newer build: not up to date with the
+        // older candidate, and nothing restarted.
+        .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .activation = .superseded, .store = "" } }, .ended = .superseded, .outcome = .compatible },
         // The Host left cannot serve this client.
         .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .activation = .{ .unconfirmed = .verifying }, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .activation = .replacement_observed, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
@@ -636,6 +644,20 @@ test "a check that may not install here names why" {
         try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .ended = .{ .how = .{ .refused = case[1] }, .outcome = .unchanged } }}), heardAll(&job, &heard, 0, &out));
         job.checked = null;
     }
+}
+
+test "a newer build already selected installs quietly: no older release found, then superseded" {
+    var job: Self = .{ .started = true, .operation = .install, .checked = news_check };
+    job.checked.?.selected.released.version = .{ .schema = 60, .patch = 2 };
+    job.phase.store(.publishing, .release);
+    var heard: Heard = .{};
+    var out: [8]UpgradeStep = undefined;
+    try std.testing.expectEqual(@as(usize, 0), heardAll(&job, &heard, 0, &out).len);
+    job.result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b" } }, .activation = .superseded, .store = "" };
+    job.finish();
+    try std.testing.expectEqualDeep(@as([]const UpgradeStep, &.{.{ .ended = .{ .how = .superseded, .outcome = .compatible } }}), heardAll(&job, &heard, 0, &out));
+    job.result = null;
+    job.checked = null;
 }
 
 test "the selected build already current installs quietly: no found release, then up to date" {
