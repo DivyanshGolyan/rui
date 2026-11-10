@@ -3615,8 +3615,9 @@ The frame requires a private
 The URL travels only in stdin, never in argv, environment, files or
 refusal messages.
 Parsing wipes all JSON allocations, including failed
-parses; the connection handshake wipes the password and authentication
-buffer as soon as login finishes or fails.
+parses; the connection handshake wipes its authentication buffer as soon as
+login finishes or fails.
+The Store keeps its own copy of the login in Host memory for the Host's life, wiped when the Store closes, so it can reconnect.
 
 On MySQL the `store_owner` row owns the Store: open raises its `epoch`, and every write transaction first advances `commit_seq` only where both match what this Host last saw, so a Host that lost the Store fails its next write.
 `GET_LOCK` only refuses early a second Host on the same database.
@@ -3646,7 +3647,11 @@ Admission refusals use a single stdout
 or `mysql_binlog_unsafe`.
 Messages are static, never server diagnostics.
 A running MySQL Store that fences writes the same envelope with
-`store_fenced` before draining and exits 1 (D211); it does not reconnect.
+`store_fenced` before draining and exits 1 (D211).
+When the connection is lost around a COMMIT, the Store first reconnects, up to three times a second apart: it ends the old server session with `KILL`, takes `GET_LOCK` again once that session is gone, and reads `store_owner.commit_seq`.
+Every write transaction advances it by exactly one, so the value says whether the COMMIT landed.
+Landed is success and the Store carries on; not landed is reported as a lost connection, which still fences.
+Only when no reconnect succeeds does the outcome stay unknown (`CommitOutcomeUnknown`).
 
 Host information is a read-only, bounded `/v1/host-info` exchange for the canonical selected Store.
 A client first probes the existing `host.lock` with a nonblocking shared lock, without creating a Store or lock: no owner means unavailable even if a stale socket exists; an exclusive owner permits a protected socket request.
