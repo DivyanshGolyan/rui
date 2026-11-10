@@ -4,6 +4,8 @@ const std = @import("std");
 
 extern "c" fn rui_host_peer_pid(socket: c_int, pid: *c_int) c_int;
 extern "c" fn rui_process_generation(pid: c_int, started: *c_ulonglong) c_int;
+extern "c" fn rui_process_footprint(pid: c_int, bytes: *c_ulonglong) c_int;
+extern "c" fn rui_process_children(pid: c_int, pids: [*]c_int, cap: usize, count: *usize) c_int;
 extern "c" fn rui_process_snapshot(pid: c_int, exe: [*]u8, exe_cap: usize, data: [*]u8, cap: usize, length: *usize, argc: *usize, env_offset: *usize, started: *c_ulonglong) c_int;
 
 const executable_capacity = 4096;
@@ -36,6 +38,20 @@ pub fn generation(pid: c_int) !u64 {
     if (rui_process_generation(pid, &started) != 0 or started == 0) return error.HostProcessSnapshotUnavailable;
     return started;
 }
+
+/// The live process table `process_memory.read` walks: each answer is
+/// null once the process is gone or unreadable.
+pub const Processes = struct {
+    pub fn footprint(_: *Processes, pid: i32) ?u64 {
+        var bytes: c_ulonglong = 0;
+        return if (rui_process_footprint(pid, &bytes) == 0) bytes else null;
+    }
+
+    pub fn children(_: *Processes, pid: i32, buffer: []i32) ?[]const i32 {
+        var count: usize = 0;
+        return if (rui_process_children(pid, buffer.ptr, buffer.len, &count) == 0) buffer[0..count] else null;
+    }
+};
 
 pub fn peer(fd: c_int) !c_int {
     var pid: c_int = 0;
@@ -100,6 +116,24 @@ test "host identity rejects absent process and invalid peer without reading laun
     try std.testing.expect(rui_process_generation(-1, &started) != 0);
     try std.testing.expectEqual(@as(c_ulonglong, 0), started);
     try std.testing.expectError(error.HostProcessSnapshotUnavailable, snapshot(std.testing.allocator, -1));
+}
+
+test "the live process table reads this process's memory and a child it starts" {
+    var processes: Processes = .{};
+    const self = std.c.getpid();
+    try std.testing.expect(processes.footprint(self).? > 0);
+    try std.testing.expectEqual(null, processes.footprint(-1));
+    var child = try std.process.spawn(std.testing.io, .{ .argv = &.{ "sleep", "30" } });
+    defer {
+        child.kill(std.testing.io);
+    }
+    var buffer: [64]i32 = undefined;
+    const listed = processes.children(self, &buffer).?;
+    try std.testing.expect(std.mem.indexOfScalar(i32, listed, child.id.?) != null);
+    try std.testing.expect(processes.footprint(child.id.?) != null);
+    // Walked from this process as a Host, the child counts as a tool.
+    const memory = @import("process_memory.zig").read(&processes, self, self);
+    try std.testing.expect(memory.tools != null and memory.rui > 0);
 }
 
 test "host identity decoder preserves synthetic empty args and private environment" {

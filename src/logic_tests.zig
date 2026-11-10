@@ -66,6 +66,7 @@ const cores = .{
     .{ "outcome_code.zig", @import("outcome_code.zig") },
     .{ "overview_view.zig", @import("overview_view.zig") },
     .{ "path_list.zig", @import("path_list.zig") },
+    .{ "process_memory.zig", @import("process_memory.zig") },
     .{ "product_defaults.zig", @import("product_defaults.zig") },
     .{ "protocol.zig", @import("protocol.zig") },
     .{ "provider_name.zig", @import("provider_name.zig") },

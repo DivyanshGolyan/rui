@@ -329,10 +329,8 @@ pub const FirstLine = struct {
 /// Bytes in a mebibyte, the unit memory shows in below a gibibyte.
 pub const mib = 1024 * 1024;
 
-/// Live physical memory, as the shell reads it about once a second:
-/// `rui` is this TUI plus its Host; `tools` the tool processes the Host
-/// runs, null while none runs.
-pub const Memory = struct { rui: u64, tools: ?u64 };
+/// Live physical memory, as the shell reads it about once a second.
+pub const Memory = @import("process_memory.zig").Memory;
 
 pub const Host = struct {
     /// Unix seconds.
