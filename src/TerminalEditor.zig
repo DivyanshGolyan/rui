@@ -548,7 +548,7 @@ fn classify(value: vaxis.Key) Press {
     if (value.matchExact(vaxis.Key.tab, .{})) return .{ .edit = .tab };
     // Alt-Enter adds a line in every form: Ghostty and other terminals send
     // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.
-    if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .alt = true }) or value.matchExact('j', .{ .ctrl = true })) return .{ .edit = .newline };
+    if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .ctrl = true })) return .{ .edit = .newline };
     if (value.matchExact(vaxis.Key.left, .{}) or value.matchExact('b', .{ .ctrl = true })) return .{ .edit = .left };
     if (value.matchExact(vaxis.Key.right, .{}) or value.matchExact('f', .{ .ctrl = true })) return .{ .edit = .right };
     if (value.matchExact('a', .{ .ctrl = true })) return .{ .edit = .line_start };
@@ -1150,7 +1150,7 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
     // Bound chords, plain text and marked paste keep their meaning.
     var editor: Editor = .{ .buffer = &storage };
     var stream: Input = .{};
-    for ("a. b\x1bb\x1bj\x1b[200~c. d\x1b[201~") |byte| _ = editor.feed(&stream, byte);
+    for ("a. b\x1bb\n\x1b[200~c. d\x1b[201~") |byte| _ = editor.feed(&stream, byte);
     try std.testing.expectEqualStrings("a. \nc. db", storage[0..editor.length]);
     try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
 }

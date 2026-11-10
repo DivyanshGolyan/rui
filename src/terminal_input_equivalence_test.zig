@@ -57,7 +57,7 @@ const cases = [_]Case{
     .{ .name = "Alt-Escape", .event = .{ .action = .escape }, .wires = .{ bytes("\x1b\x1b"), bytes("\x1b[27;3u"), bytes("\x1b[27;3;27~"), no_raw } },
     .{ .name = "Tab", .event = .redraw, .after = "one t\two!", .cursor = 6, .wires = .{ no_alt, bytes("\x1b[9u"), bytes("\x1b[27;1;9~"), bytes("\t") } },
     .{ .name = "Shift-Enter", .event = .redraw, .after = "one t\nwo!", .cursor = 6, .wires = .{ .{ .unavailable = .collapses_to_enter }, bytes("\x1b[13;2u"), bytes("\x1b[27;2;13~"), no_raw } },
-    .{ .name = "Alt-J", .event = .redraw, .after = "one t\nwo!", .cursor = 6, .wires = .{ bytes("\x1bj"), bytes("\x1b[106;3u"), bytes("\x1b[27;3;106~"), no_raw } },
+    .{ .name = "Alt-J unbound", .event = .{ .refused = .unbound }, .wires = .{ bytes("\x1bj"), bytes("\x1b[106;3u"), bytes("\x1b[27;3;106~"), no_raw } },
     .{ .name = "PgUp", .event = .{ .action = .page_up }, .wires = .{ bytes("\x1b[5~"), bytes("\x1b[5;1~"), no_case27, no_raw } },
     .{ .name = "Shift-PgUp", .event = .{ .action = .page_up }, .wires = .{ bytes("\x1b[5;2~"), bytes("\x1b[5;2~"), no_case27, no_raw } },
     .{ .name = "PgDn", .event = .{ .action = .page_down }, .wires = .{ bytes("\x1b[6~"), bytes("\x1b[6;1~"), no_case27, no_raw } },

@@ -475,6 +475,7 @@ pub const Panel = union(enum) {
 /// commands, which its table lists.
 const help_text = "Up/Down select · Shift-Up/Down always · Home/End first/last on empty draft\n" ++
     "Enter opens · Alt-A archives · Ctrl-X twice stops · Type a task to start\n" ++
+    "Shift-Enter or Ctrl-J adds a line\n" ++
     "/ lists commands · Up/Down choose · Tab or Enter takes it\n" ++
     "Esc/Ctrl-G closes list, panel, draft, settings · Ctrl-C/Ctrl-D leaves\n" ++
     "\n" ++ std.mem.trimEnd(u8, commands.help, "\n");
@@ -956,6 +957,8 @@ pub const State = struct {
     lines: Vec(Bounded(max_line_bytes)) = .{},
 
     selected: ?Reference = null,
+    /// The Session whose conversation holds the terminal, if any.
+    conversing: ?Reference = null,
     notice: ?Notice = null,
     settings: StartSettings = .{},
     /// Every start and stop without an answer the overview showed, oldest first.
@@ -2125,13 +2128,16 @@ fn readFirstLines(state: *State, effects: *Effects) error{OutOfMemory}!void {
     if (reads.len != 0) effects.add(.{ .read_first_lines = reads });
 }
 
-/// Asks for the commands of up to eight needs-you rows not yet read.
+/// Asks for the commands of up to eight needs-you rows not yet read. The
+/// open conversation's row waits: that conversation reads its Action, and
+/// a second read could meet the failure the conversation must report.
 fn readCommands(state: *State, effects: *Effects) void {
     var reads: Commands = .{};
     for (state.order.items) |at| {
         if (reads.len == reads.items.len) break;
         const row = &state.rows.items[at];
         if (!row.needsYou() or row.command != .unread) continue;
+        if (state.conversing) |open| if (std.mem.eql(u8, &open, &row.reference)) continue;
         const action = row.first_action orelse continue;
         row.command = .requested;
         reads.items[reads.len] = .{ .reference = row.reference, .action = action };
@@ -4646,6 +4652,17 @@ test "a needs-you row reads its waiting Action's command once, and again only wh
     _ = try step(&state, .{ .command = .{ .reference = "a5k1ng".*, .action = 42, .text = null } });
     for ((try refresh(&state, .changed, testToken(5), &.{next})).slice()) |effect| try std.testing.expect(effect != .read_commands);
     try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .ink }, .{ "2m", .quiet } });
+    // While its conversation is open, that conversation alone reads the
+    // Action; the row asks once the conversation returns.
+    next.first_action = 43;
+    state.conversing = "a5k1ng".*;
+    for ((try refresh(&state, .changed, testToken(6), &.{next})).slice()) |effect| try std.testing.expect(effect != .read_commands);
+    state.conversing = null;
+    var returned: ?Commands = null;
+    for ((try refresh(&state, .changed, testToken(7), &.{next})).slice()) |effect| if (effect == .read_commands) {
+        returned = effect.read_commands;
+    };
+    try std.testing.expectEqual(@as(u64, 43), returned.?.items[0].action);
 }
 
 /// The rows the picker tests open on: work, ends and an approval.
@@ -6908,6 +6925,7 @@ test "/help shows the overview's keys and commands in the Sessions' rows until E
     for ([_][]const u8{
         " Up/Down select · Shift-Up/Down always · Home/End first/last on empty draft",
         " Enter opens · Alt-A archives · Ctrl-X twice stops · Type a task to start",
+        " Shift-Enter or Ctrl-J adds a line",
         " / lists commands · Up/Down choose · Tab or Enter takes it",
         " Esc/Ctrl-G closes list, panel, draft, settings · Ctrl-C/Ctrl-D leaves",
         "",
