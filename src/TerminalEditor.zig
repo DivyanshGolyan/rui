@@ -227,7 +227,10 @@ pub fn select(comptime keys: anytype, decoded: Input.Decoded) Selection(@TypeOf(
 pub fn selectEvent(comptime keys: anytype, event: vaxis.vxfw.Event, pasting: bool) Selection(@TypeOf(keys).Action) {
     return switch (event) {
         .paste_start => .text,
-        .paste_end, .invalid_key => .refused,
+        .paste_end => .refused,
+        // A malformed key sequence is malformed text: the composer rejects
+        // its line.
+        .invalid_key => .text,
         .key_press => |pressed| if (pasting) .text else selectKey(keys, pressed),
         else => .none,
     };
@@ -356,7 +359,12 @@ pub fn appEvent(self: *Editor, comptime keys: anytype, event: vaxis.vxfw.Event, 
             self.reject(.invalid);
             break :blk .none;
         } else self.key(pressed, pasting),
-        .invalid_key => .{ .refused = .invalid },
+        // A malformed key sequence rejects the line as malformed text does;
+        // the line stays shown until Enter reports and clears it.
+        .invalid_key => blk: {
+            self.reject(.invalid);
+            break :blk .none;
+        },
         else => .none,
     };
     const Outcome = keymap.Outcome(@TypeOf(keys).Action);
