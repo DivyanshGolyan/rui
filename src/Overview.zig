@@ -3069,6 +3069,25 @@ test "a paste past the editor's capacity leaves the draft unchanged" {
     try expectStarted(rig, "\r", "kept");
 }
 
+test "a full-capacity draft of spaces keeps the composer's caret on screen" {
+    const rig = try openComposer();
+    defer rig.close();
+    const pasted = "\x1b[200~" ++ @as([SessionInput.capacity]u8, @splat(' ')) ++ "\x1b[201~";
+    _ = try rig.press(pasted);
+    try std.testing.expectEqual(@as(usize, SessionInput.capacity), rig.overview.composerDraft().bytes.len);
+    var shown = try rig.shown(80, 24);
+    defer shown.deinit();
+    // The composer sits between the rules at rows 18 and 21; the caret
+    // shows inside it.
+    for ([_]u16{ 18, 21 }) |row| {
+        const line = try shown.line(row);
+        try std.testing.expectEqual(@as(usize, 80), std.mem.count(u8, line, "─"));
+        try std.testing.expectEqual(@as(usize, 80 * "─".len), line.len);
+    }
+    const caret = shown.cursor() orelse return error.TestExpectedCaret;
+    try std.testing.expect(caret.row > 18 and caret.row < 21 and caret.col < 80);
+}
+
 test "the composer edits at its caret, as a conversation's draft does" {
     const rig = try openComposer();
     defer rig.close();
