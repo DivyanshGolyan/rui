@@ -408,12 +408,16 @@ pub const Event = union(enum) {
     observed: Observed,
     /// The command `step` asked the shell to run ended.
     ran: Ran,
-    /// A pointer press on the Sessions list's line `listItem` names.
-    clicked: usize,
+    /// A pointer press on something a click acts on.
+    clicked: Click,
     /// Esc left a conversation whose original is unconfirmed. The shell
     /// sends it only while `canHoldSend` says the ledger has room.
     unconfirmed: Unconfirmed,
 };
+
+/// What a click lands on: a Sessions list line `listItem` names, or the
+/// counts line's view name, which shows only off the default view.
+pub const Click = union(enum) { line: usize, view };
 
 pub const Unconfirmed = struct { reference: Reference, recovery: submission.Recovery };
 
@@ -1624,7 +1628,11 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             },
         },
         .first_line => |result| try firstLine(state, result),
-        .clicked => |line| try click(state, line, &effects),
+        .clicked => |clicked| switch (clicked) {
+            .line => |line| try click(state, line, &effects),
+            // As `/sessions` does; the default view shows no name.
+            .view => if (state.archive != .active) try changeArchiveView(state, .active, &effects),
+        },
         .unconfirmed => |left| {
             std.debug.assert(canHoldSend(state));
             state.requests[state.request_count] = .{ .kind = .send, .session = left.reference, .status = .unknown, .sent = left.recovery };
@@ -2403,20 +2411,20 @@ fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *co
 }
 
 /// Moves the selection where the Sessions show.
-/// A click selects its row; on the selected row it opens it, as Enter on
-/// a blank draft does. A folded group's "more" line opens the group at its
-/// first hidden row, as moving into them does.
+/// One click on a row opens it, as selecting it and Enter on a blank draft
+/// do. A folded group's "more" line opens the group at its first hidden
+/// row, as moving into them does. Headings and gaps take no click.
 fn click(state: *State, line: usize, effects: *Effects) error{OutOfMemory}!void {
-    const at = switch (listItem(state, line) orelse return) {
+    const item = listItem(state, line) orelse return;
+    const at = switch (item) {
         .gap, .heading => return,
         .row => |at| at,
         .more => |more| state.runs.get(more.group).start + fold_rows,
     };
-    const ref = state.rows.items[state.order.items[at]].reference;
-    if (state.selected) |selected| if (std.mem.eql(u8, &selected, &ref)) return enter(state, "", effects);
     state.closePanel();
     state.unfolded.insert(state.rows.items[state.order.items[at]].group());
-    state.selected = ref;
+    state.selected = state.rows.items[state.order.items[at]].reference;
+    if (item == .row) try enter(state, "", effects);
 }
 
 fn select(state: *State, action: Action) void {
@@ -6188,19 +6196,15 @@ fn lineOfRow(state: *const State, ref: *const [6]u8) !usize {
     return error.TestUnexpectedResult;
 }
 
-test "a click selects its row, and a click on the selected row opens it" {
+test "one click on a row opens it, under Enter's rules" {
     var state = try opened(&mixed);
     defer state.deinit();
-    const line = try lineOfRow(&state, "b2c3d4");
-    try expectEffects(&.{}, try step(&state, .{ .clicked = line }));
+    try expectEffects(&.{.{ .open = "b2c3d4".* }}, try step(&state, .{ .clicked = .{ .line = try lineOfRow(&state, "b2c3d4") } }));
     try expectSelected(&state, "b2c3d4");
-    try expectEffects(&.{.{ .open = "b2c3d4".* }}, try step(&state, .{ .clicked = line }));
     // While Host requests wait on an Upgrade, the click selects but does
     // not open, as Enter would not.
     state.upgrade_pending = true;
-    const other = try lineOfRow(&state, "g7h8j9");
-    _ = try step(&state, .{ .clicked = other });
-    try expectEffects(&.{}, try step(&state, .{ .clicked = other }));
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = try lineOfRow(&state, "g7h8j9") } }));
     try expectSelected(&state, "g7h8j9");
 }
 
@@ -6214,7 +6218,7 @@ test "a click on a folded group's more line opens it at its first hidden row" {
     } else return error.TestUnexpectedResult;
     // Seven finished rows show five, then "2 more".
     try std.testing.expectEqual(More{ .group = .finished, .hidden = 2 }, more);
-    try expectEffects(&.{}, try step(&state, .{ .clicked = line }));
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = line } }));
     try std.testing.expect(!folded(&state, .finished));
     try expectSelected(&state, "v8w9x0");
 }
@@ -6229,9 +6233,22 @@ test "a click on a heading, a gap or past the list changes nothing" {
     try std.testing.expectEqual(Item.gap, listItem(&state, line).?);
     const selected = state.selected.?;
     for ([_]usize{ 0, line, line + 1000 }) |clicked| {
-        try expectEffects(&.{}, try step(&state, .{ .clicked = clicked }));
+        try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .line = clicked } }));
         try expectSelected(&state, &selected);
     }
+}
+
+test "a click on the counts line's view name returns to the default view, as /sessions does" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    // The default view names nothing to click.
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .view }));
+    try std.testing.expectEqual(ArchiveFilter.active, state.archive);
+    _ = try submit(&state, .{ .bytes = "/sessions archived" });
+    try std.testing.expectEqual(ArchiveFilter.archived, state.archive);
+    _ = try respond(&state, .full, testToken(2), &.{});
+    try expectEffects(&.{.{ .list = null }}, try step(&state, .{ .clicked = .view }));
+    try std.testing.expectEqual(ArchiveFilter.active, state.archive);
 }
 
 /// Each row once in `rows`, `by_reference` and `order`.
