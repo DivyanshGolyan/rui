@@ -461,6 +461,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     errdefer self.state.deinit();
     errdefer self.closePipes();
     for ([_]*[2]c_int{ &self.done, &self.signalled }) |pipe| try openPipe(pipe);
+    self.worker.notify = self.done[1];
     return self;
 }
 
@@ -692,10 +693,6 @@ fn dispatch(self: *Self, jobs: enum { all, lent }) !void {
 /// result is the job's outcome, which `complete` settles.
 fn work(raw: *anyopaque, task: *ClientTask) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    defer {
-        const byte = [1]u8{0};
-        _ = std.c.write(self.done[1], &byte, 1);
-    }
     return self.runJob(task.requests());
 }
 
