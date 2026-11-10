@@ -33,6 +33,7 @@ const slash_commands = @import("slash_commands.zig");
 const submission = @import("submission_state.zig");
 pub const commands = slash_commands.overview;
 const TerminalText = @import("TerminalText.zig");
+const theme = @import("theme.zig");
 const work_line = @import("work_line.zig");
 const unicode = @import("terminal_unicode");
 const gwidth = @import("terminal_width");
@@ -2981,27 +2982,6 @@ pub const palettes = std.enums.EnumArray(Skin, Palette).init(.{
     },
 });
 
-/// The 256-colour entry nearest `rgb`, from the 6x6x6 cube and the grey
-/// ramp. Entries 0-15 are left out: each terminal themes its own.
-pub fn nearestIndex(rgb: Rgb) u8 {
-    const levels = [_]u8{ 0, 95, 135, 175, 215, 255 };
-    var best: u8 = 16;
-    var best_distance: u32 = std.math.maxInt(u32);
-    for (16..256) |index| {
-        const candidate: Rgb = if (index < 232) .{ levels[(index - 16) / 36], levels[(index - 16) / 6 % 6], levels[(index - 16) % 6] } else @splat(@intCast(8 + 10 * (index - 232)));
-        var distance: u32 = 0;
-        for (rgb, candidate) |want, have| {
-            const delta = @as(i32, want) - have;
-            distance += @intCast(delta * delta);
-        }
-        if (distance < best_distance) {
-            best = @intCast(index);
-            best_distance = distance;
-        }
-    }
-    return best;
-}
-
 /// The same tables as 256-colour entries.
 pub const indexed = blk: {
     @setEvalBranchQuota(400_000);
@@ -3009,8 +2989,8 @@ pub const indexed = blk: {
     for (std.enums.values(Skin)) |skin| {
         const palette = palettes.get(skin);
         var table = tables.getPtr(skin);
-        for (std.enums.values(Colour)) |role| table.colours.set(role, nearestIndex(palette.colours.get(role)));
-        for (std.enums.values(Background)) |role| table.backgrounds.set(role, nearestIndex(palette.backgrounds.get(role)));
+        for (std.enums.values(Colour)) |role| table.colours.set(role, theme.nearestIndex(palette.colours.get(role)));
+        for (std.enums.values(Background)) |role| table.backgrounds.set(role, theme.nearestIndex(palette.backgrounds.get(role)));
     }
     break :blk tables;
 };
@@ -3018,6 +2998,7 @@ pub const indexed = blk: {
 pub const Caps = struct {
     /// Unicode marks and text; false draws ASCII only, a cell a character.
     unicode: bool = true,
+    devanagari: bool = false,
     /// How the terminal measures Unicode text, from its report.
     width: gwidth.Method = .wcwidth,
     /// How many colours the terminal draws.
@@ -4005,8 +3986,9 @@ pub fn factsSegments(arena: Allocator, state: *const State, width: u16, caps: Ca
     const model = state.nextBinding().model orelse "no model";
     const effort = state.heldEffort();
     const text = try std.fmt.allocPrint(arena, "new Session {s} {s}{s}{s} {s} {s}{s}", .{ built.glyphs.dot, model, if (effort != null) " " else "", effort orelse "", built.glyphs.dot, path.prefix, path.rest });
-    _ = try built.put(1, text, width -| 2, .{ .colour = .quiet });
-    return segmentsOf(arena, try built.finish(), width, .{});
+    const facts_style: Style = .{ .colour = .quiet, .background = .bar };
+    _ = try built.put(1, text, width -| 2, facts_style);
+    return segmentsOf(arena, try built.finish(), width, plain(caps, facts_style));
 }
 
 /// A panel or model picker supplies its own rows instead of Session groups.
@@ -4080,9 +4062,10 @@ pub fn countsLine(arena: Allocator, state: *const State, width: u16, caps: Caps)
     const bar: Style = .{ .background = .bar };
     const end = built.width -| 1;
     var column: usize = 1;
-    // रुई beside rui, as on a station board; ASCII has rui alone.
-    const wordmark: Style = .{ .colour = .strong, .background = .bar, .bold = true };
-    if (caps.unicode) column += try built.put(column, "रुई", end -| column, wordmark) + 1;
+    // रुई beside rui, as on a station board, where the terminal draws it;
+    // elsewhere rui alone.
+    const wordmark: Style = .{ .colour = .strong, .background = .bar };
+    if (caps.unicode and caps.devanagari) column += try built.put(column, "रुई", end -| column, .{ .colour = .ink, .background = .bar }) + 1;
     column += try built.put(column, "rui", end -| column, wordmark);
     const counts_ = state.summary.counts;
     const shown = [_]struct { Mark, usize, Colour }{
@@ -4863,7 +4846,7 @@ test "the counts line counts by mark, leaves zeros out, and colours only needs y
         failedRow("f4iled", 60, "provider_output_invalid", null),
     });
     defer state.deinit();
-    const line = try countsSegments(a, &state, 100, .{});
+    const line = try countsSegments(a, &state, 100, .{ .devanagari = true });
     try expectLine(line, 100, &.{ "रुई rui", "? 1", "● 2", "× 1" });
     try std.testing.expectEqual(Colour.attention, (try styleOf(line, "? 1")).colour);
     try std.testing.expectEqual(Colour.normal, (try styleOf(line, "● 2")).colour);
@@ -4884,18 +4867,18 @@ test "the counts line shows the slots only while something queues, and memory on
     });
     defer state.deinit();
     // No Host facts yet: the queue counts without slots.
-    try expectLine(try countsSegments(a, &state, 100, .{}), 100, &.{ "रुई rui", "● 1", "◌ 1" });
+    try expectLine(try countsSegments(a, &state, 100, .{ .devanagari = true }), 100, &.{ "रुई rui", "● 1", "◌ 1" });
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 60, .slots = 2, .slots_in_use = 2 } });
     _ = try step(&state, .{ .memory = .{ .rui = 42 * mib, .tools = 1843 * mib } });
-    try expectLine(try countsSegments(a, &state, 100, .{}), 100, &.{ "रुई rui", "● 1", "◌ 1 · slots 2/2", "rui 42 MB · tools 1.8 GB" });
+    try expectLine(try countsSegments(a, &state, 100, .{ .devanagari = true }), 100, &.{ "रुई rui", "● 1", "◌ 1 · slots 2/2", "rui 42 MB · tools 1.8 GB" });
     // Nothing queued: no slots, and no tools while none run.
     _ = try refresh(&state, .changed, testToken(2), &.{session("q00001", .{ .working = ago(0) }, .{ .label = "Queued" })});
     _ = try step(&state, .{ .memory = .{ .rui = 37 * mib, .tools = null } });
-    try expectLine(try countsSegments(a, &state, 100, .{}), 100, &.{ "रुई rui", "● 2", "rui 37 MB" });
+    try expectLine(try countsSegments(a, &state, 100, .{ .devanagari = true }), 100, &.{ "रुई rui", "● 2", "rui 37 MB" });
     // Narrow: memory drops before the counts, rui before tools.
     _ = try step(&state, .{ .memory = .{ .rui = 42 * mib, .tools = 1843 * mib } });
-    try expectLine(try countsSegments(a, &state, 30, .{}), 30, &.{ "रुई rui", "● 2", "tools 1.8 GB" });
-    try expectLine(try countsSegments(a, &state, 16, .{}), 16, &.{ "रुई rui", "● 2" });
+    try expectLine(try countsSegments(a, &state, 30, .{ .devanagari = true }), 30, &.{ "रुई rui", "● 2", "tools 1.8 GB" });
+    try expectLine(try countsSegments(a, &state, 16, .{ .devanagari = true }), 16, &.{ "रुई rui", "● 2" });
 }
 
 test "the counts line names the archive view only off the default" {
@@ -4904,11 +4887,11 @@ test "the counts line names the archive view only off the default" {
     const a = arena.allocator();
     var state = try opened(&.{});
     defer state.deinit();
-    try expectLine(try countsSegments(a, &state, 80, .{}), 80, &.{"रुई rui"});
+    try expectLine(try countsSegments(a, &state, 80, .{ .devanagari = true }), 80, &.{"रुई rui"});
     state.archive = .archived;
-    try expectLine(try countsSegments(a, &state, 80, .{}), 80, &.{ "रुई rui", "Archived" });
+    try expectLine(try countsSegments(a, &state, 80, .{ .devanagari = true }), 80, &.{ "रुई rui", "Archived" });
     state.archive = .all;
-    try expectLine(try countsSegments(a, &state, 80, .{}), 80, &.{ "रुई rui", "All" });
+    try expectLine(try countsSegments(a, &state, 80, .{ .devanagari = true }), 80, &.{ "रुई rui", "All" });
 }
 
 test "a needs-you row reads its waiting Action's command once, and again only when the Action changes" {
@@ -5515,7 +5498,7 @@ fn expectStatusLines(state: *State, expected: []const []const u8) !void {
 }
 
 fn expectScreenLine(state: *State, line: usize, expected: []const u8) !void {
-    const text = try screenText(state, 80, 24, .{});
+    const text = try screenText(state, 80, 24, .{ .devanagari = true });
     defer std.testing.allocator.free(text);
     var lines = std.mem.splitScalar(u8, text, '\n');
     for (0..line) |_| _ = lines.next();
@@ -6287,7 +6270,7 @@ test "a quota reset far in the future still draws its band" {
 test "the overview's rows draw each band" {
     const done = session("ffffff", .{ .finished = ago(600) }, .{ .label = "Summarize the CI failures" });
     try expectBand(&.{ done, failedRow("aaaaaa", 60, "provider_sign_in_refresh_token_expired", null) },
-        \\ रुई rui  × 1
+        \\ rui  × 1
         \\ Sign-in expired. Run rui auth login codex.
         \\ Finished · 1
         \\  ✓ Summarize the CI failures                                               10m
@@ -6297,18 +6280,18 @@ test "the overview's rows draw each band" {
         \\ new Session · no model · ~/code/rui
         \\ ↑↓ select · enter open
     ,
-        \\SSSSSSSfffffnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\ssssfffffnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
         \\.IIIIIIIIqqqq
         \\..m.qqqqqqqqqqqqqqqqqqqqqqqqq...............................................qqq
         \\
         \\.IIIIIIIIIIIIIIIIIqqqq
         \\..f.qqqqqqqqqqqqq....................................fffffffffffffff.........qq
-        \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\.qqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  × 1
+        \\ rui  × 1
         \\ Sign-in expired. Run rui auth login codex.
         \\ Finished · 1
         \\  ✓ Summarize the CI failures                                                                                                                                                                       10m
@@ -6319,7 +6302,7 @@ test "the overview's rows draw each band" {
         \\ ↑↓ select · enter open
     );
     try expectBand(&.{ done, failedRow("aaaaaa", 60, "provider_quota", test_now_s + 20 * 60) },
-        \\ रुई rui  × 1
+        \\ rui  × 1
         \\ Quota used up. Resets in 20m.
         \\ Finished · 1
         \\  ✓ Summarize the CI failures                                               10m
@@ -6329,18 +6312,18 @@ test "the overview's rows draw each band" {
         \\ new Session · no model · ~/code/rui
         \\ ↑↓ select · enter open
     ,
-        \\SSSSSSSfffffnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\ssssfffffnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
         \\.IIIIIIIIqqqq
         \\..m.qqqqqqqqqqqqqqqqqqqqqqqqq...............................................qqq
         \\
         \\.IIIIIIIIIIIIIIIIIqqqq
         \\..f.qqqqqqqqqqqqq....................................ffffffffffff............qq
-        \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\.qqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  × 1
+        \\ rui  × 1
         \\ Quota used up. Resets in 20m.
         \\ Finished · 1
         \\  ✓ Summarize the CI failures                                                                                                                                                                       10m
@@ -6351,7 +6334,7 @@ test "the overview's rows draw each band" {
         \\ ↑↓ select · enter open
     );
     try expectBand(&.{ retryRow("aaaaaa", "provider_temporary_http_429", 10), retryRow("bbbbbb", "provider_temporary_http_429", 20) },
-        \\ रुई rui  ● 2
+        \\ rui  ● 2
         \\ Rate limited. 2 Sessions will retry.
         \\ Active · 2
         \\  ● Ask the model again                        Rate limited · retry in 10s   5s
@@ -6359,16 +6342,16 @@ test "the overview's rows draw each band" {
         \\ new Session · no model · ~/code/rui
         \\ ↑↓ select · enter open · ctrl+x stop
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\ssssnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
         \\.IIIIIIqqqq
         \\..a.iiiiiiiiiiiiiiiiiii........................aaaaaaaaaaaaaaaaaaaaaaaaaaa...qq
         \\..a.iiiiiiiiiiiiiiiiiii........................aaaaaaaaaaaaaaaaaaaaaaaaaaa...qq
-        \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  ● 2
+        \\ rui  ● 2
         \\ Rate limited. 2 Sessions will retry.
         \\ Active · 2
         \\  ● Ask the model again                                                                                                                              Rate limited · retry in 10s                     5s
@@ -6382,18 +6365,18 @@ test "the overview's rows draw an empty Store" {
     var state = try opened(&.{});
     defer state.deinit();
     try expectScreens(&state, .{},
-        \\ रुई rui
+        \\ rui
         \\ No unarchived Sessions. /sessions archived shows the archive.
         \\ new Session · no model · ~/code/rui
         \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\ssssnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
-        \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\
         \\
     ,
-        \\ रुई rui
+        \\ rui
         \\ No unarchived Sessions. /sessions archived shows the archive.
         \\ new Session · no model · ~/code/rui
         \\
@@ -6404,7 +6387,7 @@ test "the overview's rows draw twenty mixed rows" {
     var state = try opened(&mixed);
     defer state.deinit();
     try expectScreens(&state, .{},
-        \\ रुई rui  ? 1  ● 6  ◌ 1  × 2
+        \\ rui  ? 1  ● 6  ◌ 1  × 2
         \\ Needs you · 1
         \\  ? Review PR 412                                                            3m
         \\
@@ -6438,7 +6421,7 @@ test "the overview's rows draw twenty mixed rows" {
         \\ new Session · no model · ~/code/rui
         \\ ↑↓ select · enter open · ctrl+x stop
     ,
-        \\SSSSSSSaaaaannnnnnnnnnfffffnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\ssssaaaaannnnnnnnnnfffffnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\.IIIIIIIIIqqqq
         \\..a.iiiiiiiiiiiii............................................................qq
         \\
@@ -6469,11 +6452,11 @@ test "the overview's rows draw twenty mixed rows" {
         \\..f.qqqqqqqqqqqqqqqqqqqqqqqqq......................fffffffffffffffffffffff..qqq
         \\..n.qqqqqqqqqqqqqqqqqqqqqqqqq...............................................qqq
         \\..f.qqqqqqqqqqqqqqqqqqqqqq...........................fffffffffffffffff......qqq
-        \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  ? 1  ● 6  ◌ 1  × 2
+        \\ rui  ? 1  ● 6  ◌ 1  × 2
         \\ Needs you · 1
         \\  ? Review PR 412                                                                                                                                                                                    3m
         \\
@@ -6549,7 +6532,7 @@ test "the overview's rows draw ASCII without colour" {
         \\ new Session - no model - ~/code/rui
         \\ ^v select - enter open - ctrl+x stop
     ,
-        \\nNNNnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\.NNNNNNNNNnnnn
         \\..n.nnnnnnnnnnnnn............................................................nn
         \\
@@ -6707,19 +6690,15 @@ test "your Sessions keep a bright title once they end" {
     try std.testing.expectEqual(Style{ .colour = .quiet }, screen.styleAt(5, 4).?);
 }
 
-test "every role has an entry in both skins, and its 256-colour entry is the nearest" {
-    for (std.enums.values(Skin)) |skin| {
-        const palette = palettes.get(skin);
-        for (std.enums.values(Colour)) |role| {
-            const index = indexed.get(skin).colours.get(role);
-            try std.testing.expect(index >= 16);
-            try std.testing.expectEqual(nearestIndex(palette.colours.get(role)), index);
-        }
-        for (std.enums.values(Background)) |role| try std.testing.expectEqual(nearestIndex(palette.backgrounds.get(role)), indexed.get(skin).backgrounds.get(role));
+test "the overview indexed palettes retain every colour" {
+    const expected = [_]struct { skin: Skin, colours: [9]u8, backgrounds: [4]u8 }{
+        .{ .skin = .day, .colours = .{ 235, 17, 239, 60, 103, 187, 94, 124, 233 }, .backgrounds = .{ 255, 253, 254, 214 } },
+        .{ .skin = .night, .colours = .{ 255, 188, 249, 247, 60, 237, 214, 210, 233 }, .backgrounds = .{ 234, 235, 238, 214 } },
+    };
+    for (expected) |case| {
+        for (std.enums.values(Colour), case.colours) |role, value| try std.testing.expectEqual(value, indexed.get(case.skin).colours.get(role));
+        for (std.enums.values(Background), case.backgrounds) |role, value| try std.testing.expectEqual(value, indexed.get(case.skin).backgrounds.get(role));
     }
-    try std.testing.expectEqual(@as(u8, 16), nearestIndex(.{ 0, 0, 0 }));
-    try std.testing.expectEqual(@as(u8, 231), nearestIndex(.{ 255, 255, 255 }));
-    try std.testing.expectEqual(@as(u8, 214), nearestIndex(hex("#f2c200")));
 }
 
 test "numbers group the Indian way" {
@@ -6757,10 +6736,12 @@ test "the top is the counts line, then the counted groups" {
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 7500, .slots = 100, .slots_in_use = 3 } });
     try expectScreenLine(&state, 0, " रुई rui  ? 1  ● 6  ◌ 1 · slots 3/100  × 2");
     try expectScreenLine(&state, 1, " Needs you · 1");
-    // The wordmark is the only bold on the top.
-    var shown: Frame = try .of(&state, 80, 24, .{}, 0);
+    // The Devanagari wordmark is indigo, while rui is strong, at equal weight.
+    var shown: Frame = try .of(&state, 80, 24, .{ .devanagari = true }, 0);
     defer shown.deinit();
-    for ([_]usize{ 1, 4 }) |column| try std.testing.expect(shown.styleAt(0, column).?.bold);
+    try std.testing.expectEqual(Colour.ink, shown.styleAt(0, 1).?.colour);
+    try std.testing.expectEqual(Colour.strong, shown.styleAt(0, 4).?.colour);
+    for ([_]usize{ 1, 4 }) |column| try std.testing.expect(!shown.styleAt(0, column).?.bold);
     try std.testing.expect(!shown.styleAt(0, 10).?.bold);
     // ASCII has rui alone.
     const text = try screenText(&state, 80, 24, .{ .unicode = false });
@@ -6771,7 +6752,7 @@ test "the top is the counts line, then the counted groups" {
 test "overview top stays compact through completion failure Host changes and input" {
     const Check = struct {
         fn screen(state: *State, top: []const u8, group: []const u8) !void {
-            const text = try screenText(state, 80, 24, .{});
+            const text = try screenText(state, 80, 24, .{ .devanagari = true });
             defer std.testing.allocator.free(text);
             var lines = std.mem.splitScalar(u8, text, '\n');
             for ([_][]const u8{ top, group }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
@@ -6825,7 +6806,7 @@ test "overview compact top leaves a failed row visible in a narrow viewport" {
     defer std.testing.allocator.free(text);
     var lines = std.mem.splitScalar(u8, text, '\n');
     for ([_][]const u8{
-        " रुई rui  × 1",
+        " rui  × 1",
         " Stopped or failed · 1",
         "  × Fail later                       0s",
     }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
@@ -6845,7 +6826,7 @@ test "overview compact top preserves both alarm bands before the list" {
     defer std.testing.allocator.free(text);
     var lines = std.mem.splitScalar(u8, text, '\n');
     for ([_][]const u8{
-        " रुई rui  × 1",
+        " rui  × 1",
         " Host stopped 1m ago. Run rui host start.",
         " Sign-in expired. Run rui auth login codex.",
         " Stopped or failed · 1",

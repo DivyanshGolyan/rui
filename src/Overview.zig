@@ -416,6 +416,14 @@ fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = appEvent, .drawFn = appDraw };
 }
 
+fn paintCursor(self: *Self) !void {
+    if (self.caps.depth == .none) return;
+    const theme = @import("theme.zig");
+    const mode: theme.Mode = if (self.caps.skin() == .day) .light else .dark;
+    const colour = theme.text(mode, .direct, .strong, .ground).direct;
+    try self.attention.vx.setTerminalCursorColor(self.attention.out, colour);
+}
+
 fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (input) {
@@ -423,12 +431,14 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             const app = &self.app.?.app;
             self.caps.width = app.vx.caps.unicode;
             try app.vx.queryColor(app.tty.writer(), .bg);
+            try self.paintCursor();
             try ctx.requestFocus(self.app_input.composer.widget());
             if (self.options.open) |reference| try self.appNext(ctx, try self.event(.{ .open = reference }));
         },
         .focus_in => try ctx.requestFocus(self.app_input.composer.widget()),
         .color_report => |report| if (report.kind == .bg) {
             self.caps.background = report.value;
+            try self.paintCursor();
             if (self.app_session) |left| left.frontend.?.app_caps = self.caps;
             ctx.redraw = true;
         },
@@ -697,8 +707,10 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const size = ctx.max.size();
     _ = try view.step(&self.state, .{ .resized = .{ .width = size.width, .height = size.height } });
     self.caps.width = self.attention.vx.caps.unicode;
+    self.caps.devanagari = std.mem.eql(u8, @import("theme.zig").wordmark(self.caps.unicode, self.attention.vx.terminalVersion(), self.init.environ_map.get("TERM_PROGRAM")), "रुई rui");
     const normal = @import("widget_style.zig").of(self.caps, .{});
     const quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
+    self.app_screen.style = normal;
     self.app_input.composer.style = normal;
     self.app_input.composer.quiet = quiet;
     self.app_input.composer.method = self.caps.width;
@@ -1811,6 +1823,104 @@ const Rig = struct {
         return error.TestUnexpectedResult;
     }
 };
+
+test "App overview paints its ground and both selvedge rows" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    for ([_]struct { caps: view.Caps, ground: vaxis.Color, band: vaxis.Color }{
+        .{ .caps = .{}, .ground = .{ .rgb = .{ 0x12, 0x19, 0x33 } }, .band = .{ .rgb = .{ 0x1a, 0x22, 0x46 } } },
+        .{ .caps = .{ .background = .{ 255, 255, 255 } }, .ground = .{ .rgb = .{ 0xf3, 0xee, 0xe2 } }, .band = .{ .rgb = .{ 0xe6, 0xdd, 0xc8 } } },
+        .{ .caps = .{ .depth = .indexed }, .ground = .{ .index = 234 }, .band = .{ .index = 236 } },
+        .{ .caps = .{ .depth = .none }, .ground = .default, .band = .default },
+    }) |case| {
+        rig.overview.caps = case.caps;
+        var shown = try rig.shown(80, 24);
+        defer shown.deinit();
+        try std.testing.expectEqual(case.band, shown.screen.readCell(79, 0).?.style.bg);
+        try std.testing.expectEqual(case.ground, shown.screen.readCell(79, 10).?.style.bg);
+        try std.testing.expectEqual(case.band, shown.screen.readCell(79, 22).?.style.bg);
+        try std.testing.expectEqual(case.ground, shown.screen.readCell(79, 23).?.style.bg);
+    }
+}
+
+test "App cursor contrasts with the painted ground after terminal theme reports" {
+    const Check = struct {
+        fn luminance(channels: [3]u8) f64 {
+            var result: f64 = 0;
+            for (channels, [_]f64{ 0.2126, 0.7152, 0.0722 }) |byte, weight| {
+                const value = @as(f64, @floatFromInt(byte)) / 255;
+                result += weight * (if (value <= 0.04045) value / 12.92 else std.math.pow(f64, (value + 0.055) / 1.055, 2.4));
+            }
+            return result;
+        }
+        fn rgb(colour: vaxis.Color) [3]u8 {
+            return switch (colour) {
+                .rgb => |value| value,
+                .index => |i| if (i < 232) blk: {
+                    const levels = [_]u8{ 0, 95, 135, 175, 215, 255 };
+                    const n: usize = i - 16;
+                    break :blk .{ levels[n / 36], levels[n / 6 % 6], levels[n % 6] };
+                } else @splat(@intCast(8 + 10 * (@as(u16, i) - 232))),
+                else => unreachable,
+            };
+        }
+    };
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    for ([_]view.Caps.Depth{ .direct, .indexed }) |depth| {
+        for ([_][3]u8{ .{ 255, 255, 255 }, .{ 0, 0, 0 } }) |terminal| {
+            rig.overview.caps.depth = depth;
+            var ctx = rig.context();
+            defer ctx.cmds.deinit(std.testing.allocator);
+            try appEvent(rig.overview, &ctx, .{ .color_report = .{ .kind = .bg, .value = terminal } });
+            const emitted = rig.signalled();
+            const prefix = "\x1b]12;rgb:";
+            const start = std.mem.indexOf(u8, emitted, prefix) orelse return error.TestUnexpectedResult;
+            const colour = emitted[start + prefix.len ..];
+            try std.testing.expect(colour.len >= 14);
+            const cursor: [3]u8 = .{
+                try std.fmt.parseInt(u8, colour[0..2], 16),
+                try std.fmt.parseInt(u8, colour[5..7], 16),
+                try std.fmt.parseInt(u8, colour[10..12], 16),
+            };
+            var shown = try rig.shown(80, 24);
+            defer shown.deinit();
+            const ground = Check.rgb(shown.screen.readCell(79, 10).?.style.bg);
+            const a = Check.luminance(cursor);
+            const b = Check.luminance(ground);
+            const contrast = (@max(a, b) + 0.05) / (@min(a, b) + 0.05);
+            if (contrast < 4.5) std.debug.print("cursor on {s}: {d:.3}\n", .{ @tagName(depth), contrast });
+            try std.testing.expect(contrast >= 4.5);
+        }
+    }
+    try rig.screen.vx.resetState(&rig.out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, rig.signalled(), "\x1b]112\x1b\\") != null);
+    rig.overview.caps.depth = .none;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    try appEvent(rig.overview, &ctx, .{ .color_report = .{ .kind = .bg, .value = .{ 255, 255, 255 } } });
+    try std.testing.expectEqualStrings("", rig.signalled());
+}
+
+test "App overview wordmark follows the reported terminal identity" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    rig.overview.caps = .{};
+    var unknown = try rig.shown(80, 24);
+    defer unknown.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try unknown.text(), "रुई") == null);
+    rig.screen.vx.setTerminalVersion("kitty(0.35)");
+    var kitty = try rig.shown(80, 24);
+    defer kitty.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try kitty.text(), "रुई") != null);
+    rig.screen.vx.setTerminalVersion("unknown 1");
+    var other = try rig.shown(80, 24);
+    defer other.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try other.text(), "रुई") == null);
+}
 
 test "each effect runs its client operation and each result reaches the core" {
     var cancellation: client.Cancellation = .{};
