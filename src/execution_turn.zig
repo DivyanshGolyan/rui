@@ -1,7 +1,5 @@
 const std = @import("std");
-const deadline = @import("deadline.zig");
 
-pub const control_reconciliation_interval_ms = 100;
 pub const retained_cleanup_retry_ms = 100;
 pub const retry_poll_interval_ns: u64 = std.time.ns_per_s;
 
@@ -31,9 +29,8 @@ pub const State = struct {
     preference: [4]Kind = .{ .bash, .retry, .message, .tool_continuation },
     retry_admission_due: bool = true,
     last_retry_poll: ?std.Io.Clock.Timestamp = null,
-    next_control_reconciliation: ?std.Io.Clock.Timestamp = null,
-    /// Commit generation read before the last complete reconciliation.
-    reconciled_generation: ?u64 = null,
+    /// Control generation read before the last reconciliation.
+    reconciled_controls: u64 = 0,
     /// An Action loses custody unsettled only once dispatch is fenced or the
     /// Host shuts down, so uncertain Actions come only from an earlier Host.
     uncertain_action_scan_exhausted: bool = false,
@@ -49,24 +46,18 @@ pub const State = struct {
     capacity_was_full: bool = false,
 };
 
-fn due(at: ?std.Io.Clock.Timestamp, now: std.Io.Clock.Timestamp) bool {
-    return if (at) |value| deadline.reached(now, value) else true;
-}
-
 pub fn serviceLifecycle(state: *State, context: anytype) bool {
     context.noteLifecycleOpportunity();
     const now = context.now();
     const hint = context.consumeControlHint();
     var made_progress = false;
-    if (hint or due(state.next_control_reconciliation, now)) {
-        // A lost hint still follows its control's commit, so the fallback
-        // reads controls only after the generation moved.
-        const generation = context.commitGeneration();
-        if (hint or state.reconciled_generation != generation) {
-            context.reconcileControls();
-            state.reconciled_generation = generation;
-        }
-        state.next_control_reconciliation = deadline.after(now, control_reconciliation_interval_ms);
+    // The Store advances the control generation after each accepted
+    // control commits, so a lost hint is found at the next service, and
+    // the loop's own commits read no controls.
+    const controls = context.controlGeneration();
+    if (hint or state.reconciled_controls != controls) {
+        context.reconcileControls();
+        state.reconciled_controls = controls;
         made_progress = hint;
     }
     if (context.advanceBashPreparation()) made_progress = true;
@@ -235,6 +226,7 @@ const Recording = struct {
     configured_allowance: Allowance = .{ .bytes = 16 * 1024, .items = 64 },
     lifecycle_count: usize = 0,
     reconcile_count: usize = 0,
+    controls: u64 = 0,
     live_bash_count: usize = 0,
     bash_prep_count: usize = 0,
     retained_cleanup_count: usize = 0,
@@ -274,6 +266,10 @@ const Recording = struct {
     fn commitGeneration(self: *Recording) u64 {
         self.generation += self.generation_advance;
         return self.generation;
+    }
+
+    fn controlGeneration(self: *Recording) u64 {
+        return self.controls;
     }
 
     fn reconcileControls(self: *Recording) void {
@@ -546,37 +542,25 @@ test "true idle work selects a wait rather than spinning" {
     try std.testing.expectEqual(Outcome{ .wait = .transport }, run(&state, &context));
 }
 
-test "absent control hint still reconciles when the fallback deadline is due" {
+test "controls reconcile on a hint or a moved control generation only" {
     var context = idle();
-    context.now_ns = 1_000;
     var state: State = .{};
     _ = run(&state, &context);
-    try std.testing.expectEqual(@as(usize, 1), context.reconcile_count);
-    context.now_ns = 1_000 + 99 * std.time.ns_per_ms;
-    context.auto_advance = 0;
-    const skipped = run(&state, &context);
-    _ = skipped;
-    try std.testing.expectEqual(@as(usize, 1), context.reconcile_count);
-    context.now_ns = 1_000 + 100 * std.time.ns_per_ms;
+    try std.testing.expectEqual(@as(usize, 0), context.reconcile_count);
+    // The loop's own commits and time read no controls.
+    context.generation += 5;
+    context.now_ns += std.time.ns_per_s;
     _ = run(&state, &context);
-    try std.testing.expectEqual(@as(usize, 2), context.reconcile_count);
-    // Without a commit, a due fallback has nothing a lost hint could hide.
-    context.generation_advance = 0;
-    context.generation += 1;
-    context.now_ns = 1_000 + 300 * std.time.ns_per_ms;
-    _ = run(&state, &context);
-    try std.testing.expectEqual(@as(usize, 3), context.reconcile_count);
-    context.now_ns = 1_000 + 500 * std.time.ns_per_ms;
-    _ = run(&state, &context);
-    try std.testing.expectEqual(@as(usize, 3), context.reconcile_count);
+    try std.testing.expectEqual(@as(usize, 0), context.reconcile_count);
     context.hint = true;
     _ = run(&state, &context);
-    try std.testing.expectEqual(@as(usize, 4), context.reconcile_count);
-    // A commit whose hint was lost is found by the next due fallback.
-    context.generation += 1;
-    context.now_ns = 1_000 + 700 * std.time.ns_per_ms;
+    try std.testing.expectEqual(@as(usize, 1), context.reconcile_count);
+    // A control whose hint was lost is found at the next service.
+    context.controls += 1;
     _ = run(&state, &context);
-    try std.testing.expectEqual(@as(usize, 5), context.reconcile_count);
+    try std.testing.expectEqual(@as(usize, 2), context.reconcile_count);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.reconcile_count);
 }
 
 test "uncertain Action recovery scans until one scan finds none" {

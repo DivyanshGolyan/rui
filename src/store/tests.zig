@@ -2865,6 +2865,9 @@ test "production turn preserves skipped continuation preference through actual S
                 pub fn commitGeneration(self: *@This()) u64 {
                     return self.storage.commitGeneration();
                 }
+                pub fn controlGeneration(self: *@This()) u64 {
+                    return self.storage.controlGeneration();
+                }
                 pub fn slotChanges(self: *@This()) u64 {
                     if (self.observed_open != self.preparation_open) self.slot_changes += 1;
                     self.observed_open = self.preparation_open;
@@ -3999,12 +4002,17 @@ test "accepted stop remains discoverable without a control hint" {
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "hintless-config");
             try submitTestMessage(&storage, &tmp, "hintless-file", "hintless-message", session.slice(), "work");
+            // The control generation moves only for a control, which is
+            // what lets the dispatch loop find a stop whose hint was lost.
+            const before = storage.controlGeneration();
             var admitted = (try storage.admitNextModelAttempt(.{})).?;
             const binding = try admitted.permit.consume();
             try std.testing.expect((try storage.operationSupersededByControl(binding)) == null);
+            try std.testing.expectEqual(before, storage.controlGeneration());
 
             var stop = try completeSessionStop("hintless-stop", session.slice());
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            try std.testing.expect(storage.controlGeneration() != before);
             const control = (try storage.operationSupersededByControl(binding)).?;
             try std.testing.expectEqualStrings("hintless-stop", control.command_key.slice());
         }

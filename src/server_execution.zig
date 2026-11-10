@@ -646,6 +646,10 @@ const NativeTurn = struct {
         return self.host.store.commitGeneration();
     }
 
+    pub fn controlGeneration(self: *const NativeTurn) u64 {
+        return self.host.store.controlGeneration();
+    }
+
     pub fn slotChanges(self: *const NativeTurn) u64 {
         return self.host.slot_changes;
     }
