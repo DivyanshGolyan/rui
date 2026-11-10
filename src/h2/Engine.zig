@@ -60,6 +60,10 @@ waker: Waker,
 tls_context: ?tls.Context,
 /// The proxy tunneled origins connect through, from `Options.proxy`.
 proxy_route: ?ProxyRoute,
+/// Tests only: seeded faults every socket transfer passes through.
+faults: if (builtin.is_test) ?*Faults else void = if (builtin.is_test) null else {},
+
+pub const Faults = @import("testing/Faults.zig");
 
 pub const size = @sizeOf(Engine);
 pub const alignment = @alignOf(Engine);
