@@ -28,7 +28,8 @@ from terminal_leader import HEADER, LIMITS, frame
 COLUMNS, ROWS = 80, 50
 # Screen observers by master descriptor.
 CAPTURES = {}
-PTY_MASTERS = set()
+# A capture is drained only by the thread that registered its reader.
+PTY_MASTERS = {}
 PTY_LOCK = threading.RLock()
 # The master of each slave open_pty made, and the input master that answers
 # go to for an output master whose process reads another PTY.
@@ -43,11 +44,15 @@ STARTING = threading.Lock()
 def register_capture(master, capture):
     with PTY_LOCK:
         CAPTURES[master] = capture
+        if master in PTY_MASTERS:
+            PTY_MASTERS[master] = threading.current_thread()
 
 
 def drain_captures():
     with PTY_LOCK:
-        for master in list(PTY_MASTERS):
+        for master, owner in list(PTY_MASTERS.items()):
+            if owner is not threading.current_thread():
+                continue
             capture = CAPTURES.get(master)
             if capture is None:
                 continue
@@ -70,7 +75,7 @@ def open_pty(columns=COLUMNS, rows=ROWS):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
     with PTY_LOCK:
-        PTY_MASTERS.add(master)
+        PTY_MASTERS[master] = None
         MASTERS[slave] = master
     return master, slave
 
@@ -81,7 +86,7 @@ def close_pty(*fds):
         for fd in fds:
             CAPTURES.pop(fd, None)
             if fd in PTY_MASTERS:
-                PTY_MASTERS.remove(fd)
+                del PTY_MASTERS[fd]
                 for slave, master in list(MASTERS.items()):
                     if master == fd:
                         del MASTERS[slave]

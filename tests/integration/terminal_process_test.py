@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import termios
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -70,6 +71,22 @@ class TerminalProcessTest(unittest.TestCase):
         wait_for(lambda: writer.poll() is not None, "PTY writer", timeout=10)
         self.assertEqual(writer.returncode, 0)
         wait_for(lambda: len(received) == 131079, "all PTY output")
+
+    def test_other_thread_wait_does_not_steal_terminal_output(self):
+        master, slave = open_pty()
+        received = bytearray()
+        register_capture(master, type("Capture", (), {"feed": received.extend})())
+        os.write(slave, b"for the reader")
+        self.assertTrue(select.select([master], [], [], 5)[0])
+        worker = threading.Thread(target=lambda: wait_for(lambda: True, "worker observation"))
+        worker.start()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive(), "worker wait did not finish")
+        self.assertEqual(received, b"")
+        self.assertTrue(select.select([master], [], [], 0)[0], "worker stole the reader's bytes")
+        self.assertEqual(os.read(master, 14), b"for the reader")
+        os.write(slave, b"owner drains")
+        wait_for(lambda: received == b"owner drains", "owner drainage")
 
     def test_reused_pipe_is_not_drained(self):
         master, slave = open_pty()
