@@ -2884,10 +2884,21 @@ The Store looks the label up once per peer row; it is not copied into the Messag
 Peer rows group with tool rows: one after a tool row or another peer row follows it with no blank line, and a failed send stands apart as a failed tool row does.
 The line keeps one row and ends in `…` when it does not fit; it is never a collapsed block for Ctrl-O.
 Its admission time goes in the right margin as on a user block; below 60 columns it does not show.
+NAME alone is underlined and links to the peer's Session: the retained text keeps the ID as a hidden `rui-session:` address that takes no cells and is never sent to the terminal as an OSC 8 hyperlink.
+A click on NAME leaves this Session as Esc does and under the same rule (`session_notice.follow`), and also not while an Action waits or a command runs; a refused click says why and changes nothing.
+The overview then opens the peer as it opens any Session and remembers the Session left (`session_follow.Follow.return_to`, an ID, not a live widget): one level, so Esc in the peer reopens it and the next Esc reaches the overview, and following a second link replaces it.
+Reopening reads that Session's history again.
+A link to a Session that no longer opens ends as any failed open does.
 The label is the complete canonical ID, never an abbreviation or separate identity.
 Pages and Message selection retain that same ID, without abbreviation metadata.
 No colour carries meaning: the glyphs do.
 The Conversation pages that transcripts read hold received Messages only, so an older page shows `←` lines and no `→` lines; the Bash call that sent remains.
+
+In a Session's transcript, a press followed by a move to another cell starts a drag; the cells it crosses draw reversed, and release copies the shown text once through OSC 52 and clears the highlight; nothing persists.
+`transcript_selection` decides what the cells mean: wrapped rows join, and indents, margin times and link addresses are left out; above `TerminalText.clipboard_limit` nothing is copied and the status bar says `Too large for the clipboard · /copy file`, otherwise `Copied N lines`.
+A drag held at the top or bottom row moves the viewed document one row through text it already holds; in live view that moves `live.top` for the drag and live output returns to the latest rows on release, since switching to the transcript view would swap documents and drop the selection.
+No older page is read in under a press or drag; it waits for the release.
+A press or drag ends without copying when the pointer leaves the Transcript or its content is replaced, since vxfw sends no release then.
 
 Tool markers distinguish observed facts: `•` means unresolved, not proof that execution started; `?` means approval is required; `✓` means succeeded; `!` means failure or uncertainty with an explanation.
 Denied and rejected calls use neutral presentation with explicit outcome wording, distinct from execution failure.
