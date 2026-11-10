@@ -80,8 +80,6 @@ interrupted: *client.Cancellation = undefined,
 /// The overview this Session belongs to; a frame drawn without one says nothing.
 lender: Lender = quiet_overview,
 colour: bool,
-/// Inside tmux, /copy needs set-clipboard on; its notice says so.
-tmux: bool = false,
 input: Input = undefined,
 submission: Submission = undefined,
 /// What the latest /requests page offers to act on, which its list shows
@@ -313,7 +311,7 @@ pub const Lender = struct {
 pub const Outcome = enum { detached, interrupted, returned };
 
 pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, screen: *Screen, interrupted: *client.Cancellation, lender: Lender) void {
-    self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .screen = screen, .interrupted = interrupted, .lender = lender, .colour = screen.colour, .tmux = init.environ_map.get("TMUX") != null };
+    self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .screen = screen, .interrupted = interrupted, .lender = lender, .colour = screen.colour };
     self.startInput();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
     self.app_content = .{ .document = &screen.live, .colour = self.colour };
@@ -2201,7 +2199,7 @@ fn showCopy(self: *Self) !void {
         // Rui cannot see whether the clipboard took it.
         .clipboard => |range| sent: {
             try self.app_hooks.copy(self.app_hooks.context, self.files.scratch, range.start, range.length);
-            break :sent if (self.tmux) "Sent to clipboard · tmux needs set-clipboard on" else "Sent to clipboard";
+            break :sent "Sent to clipboard";
         },
         .saved => saved: {
             var name: [reads.copy_name_bytes]u8 = undefined;

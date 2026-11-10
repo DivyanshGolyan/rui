@@ -2436,7 +2436,7 @@ Every binding needs its exact modifiers: a Kitty key that reports Shift is never
 ESC ESC is Esc, and the second ESC starts whatever follows: an Esc just before a marked paste or an arrow keeps that input whole, so an ESC ESC arrow (urxvt Meta-arrow) is Esc then that arrow.
 ESC before P, X, ], ^ or _ begins a terminal string, never typed text.
 A pending ESC before Ctrl-C or Ctrl-D is discarded, so those still interrupt or end input.
-A terminal path can change a key before Rui reads it: tmux delivers Shift-Enter as Enter and Hyper or Meta chords as their bare keys, so while a draft is composed inside tmux the status says `In tmux, Shift-Enter sends · Alt-J adds a line`, and `/help` says so too.
+A terminal path can change a key before Rui reads it.
 At an Action's choice any chord is refused, spends freshness and authorizes nothing.
 Shift alone stays text.
 An xterm modifyOtherKeys key (`CSI 27 ; modifier ; code ~`, which Ghostty's legacy table sends for modified Enter without being asked) decodes as the Kitty key with the same modifiers and no associated text, so its bindings mean the same: Shift-Enter adds a line, Ctrl-A moves to the line start, Ctrl-J sends, and an unbound Ctrl, Alt or Super chord is dropped as its Kitty form is.
@@ -2854,7 +2854,6 @@ After a failure or an interruption partway, the next write, or restoration on le
 At most 75,000 bytes go to the clipboard: their base64 is 100,000 bytes, the most hterm's `osc52.sh` sends.
 Over that nothing is written and the notice says `Too large for the clipboard · /copy file`.
 Rui cannot see whether the terminal took the bytes.
-Inside tmux the sequence goes out unwrapped, like Rui's other terminal sequences, and reaches the outer terminal only with `set-clipboard on`, so there the notice reads `Sent to clipboard · tmux needs set-clipboard on`, and `/help` says so too.
 `/copy file` writes the last answer as it arrives to an exclusively created mode 0600 temporary file beside `rui-ID-answer.md` in the directory Rui runs in, then renames it over that name, so an earlier file or a link there is replaced and a link's target is never followed or changed.
 If the read fails the temporary file is removed and the name keeps what it had.
 It says `Saved to ./rui-ID-answer.md`.
