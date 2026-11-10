@@ -333,6 +333,10 @@ upgrade_requested: bool = false,
 /// print on exit.
 upgrade_job: UpgradeJob = .{},
 upgrade_heard: UpgradeJob.Heard = .{},
+/// The serving Host's pid, read once per Host start.
+host_process: ?struct { started_at: u64, pid: i32 } = null,
+/// Live memory from the latest host read, null until one succeeds.
+memory: ?view.Memory = null,
 upgrade_report: ?std.Io.Writer.Allocating = null,
 jobs: [max_jobs]Job = undefined,
 job_count: usize = 0,
@@ -1026,7 +1030,10 @@ fn complete(self: *Self) !?Next {
 
 fn deliver(self: *Self, outcome: anyerror!void) !?Next {
     switch (self.job) {
-        .host => return self.event(.{ .host = self.host }),
+        .host => {
+            if (self.memory) |memory| _ = try self.event(.{ .memory = memory });
+            return self.event(.{ .host = self.host });
+        },
         .list => {
             outcome catch return self.event(.{ .list = .failed });
             var rows: [view.max_page_rows]view.Listed = undefined;
@@ -1356,6 +1363,14 @@ fn hostFacts(self: *Self) ?view.Host {
         .ready => |ready| ready,
         else => return null,
     };
+    // The counts line's memory: this TUI, the Host and its tools.
+    if (self.host_process == null or self.host_process.?.started_at != ready.started_at) {
+        self.host_process = if (client.observeHostProcess(self.init.io, self.options.store, null)) |process|
+            .{ .started_at = ready.started_at, .pid = process.pid }
+        else |_| null;
+    }
+    var processes: @import("host_identity.zig").Processes = .{};
+    self.memory = @import("process_memory.zig").read(&processes, std.c.getpid(), if (self.host_process) |host| host.pid else null);
     return .{ .started_at = ready.started_at, .slots = ready.active_capacity, .slots_in_use = ready.custody_occupied };
 }
 
