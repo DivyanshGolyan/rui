@@ -1774,7 +1774,7 @@ def cmd_list(_args):
 # ---------------------------------------------------------------- named frames (plain tmux, no screen library)
 
 
-THEMES = {"night": ("#121933", "#d4cebf"), "day": ("#f3eee2", "#2f2b25")}
+THEMES = {"night": ("#121933", "#d4cebf"), "day": ("#f3eee2", "#2f2b25"), "mist": ("#e6e9ef", "#2f2b25")}
 ANSI_BASE = ["#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
              "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#ffffff"]
 
