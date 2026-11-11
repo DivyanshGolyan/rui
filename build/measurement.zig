@@ -15,7 +15,7 @@ pub fn addCheck(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget
     measurement_test_step.dependOn(&measurement_tests.step);
 
     const queue_audit_test = b.addSystemCommand(&.{
-        "go", "test", "-count=1", "-mod=readonly", "-run", "^TestExecutionAuditQueryRejectsHiddenEntities$", "./model-queue", "-args", "-sqlite",
+        "go", "test", "-count=1", "-mod=readonly", "-run", "^Test(ExecutionAuditQueryRejectsHiddenEntities|PopulateFreezesSessionOffer)$", "./model-queue", "-args", "-sqlite",
     });
     queue_audit_test.setCwd(b.path("tests/qualification"));
     queue_audit_test.setEnvironmentVariable("GOTOOLCHAIN", "local");
