@@ -35,7 +35,7 @@ const allowed_std = [_][]const u8{
 const value_modules = [_][]const u8{ "terminal_unicode", "terminal_width" };
 
 /// Allowed only inside `test` declarations, for failure diagnostics.
-const test_only_std = [_][]const u8{"std.debug.print"};
+const test_only_std = [_][]const u8{ "std.debug.print", "std.testing.expectEqualDeep" };
 
 /// Clock methods: every public function of a time value a core can hold that
 /// takes an `Io`, so it reads or waits on a clock. A member with one of these

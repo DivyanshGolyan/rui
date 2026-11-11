@@ -8703,6 +8703,44 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
     }.run);
 }
 
+test "an admission weighs uncovered bytes in its write, and admits the compaction they call for" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            // Usage leaves ten tokens of room under the trigger: the waiting
+            // Message's bytes decide the purpose, four to a token.
+            var seen = [_]bool{ false, false };
+            const filler: [64]u8 = @splat('x');
+            for ([_]usize{ 0, 32, 36, 39, 40, 41, 44, 64 }) |length| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "config");
+                var patch: wire_request.ConfigureCommand = .{};
+                try patch.key.set("heuristics");
+                try patch.session.set(session.slice());
+                patch.configuration.compaction_trigger.state = .value;
+                try patch.configuration.compaction_trigger.value.set("1000");
+                patch.configuration.output_reservation.state = .value;
+                try patch.configuration.output_reservation.value.set("0");
+                try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+                try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "original");
+                const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try submitTestMessage(&storage, &tmp, "two", "two", session.slice(), filler[0..length]);
+                try settleCallsForTestingWithFaults(&storage, &tmp, first, "usage-output", &.{}, .{}, "{\"input_tokens\":990,\"output_tokens\":0}");
+                // The report reads the bytes and compares; admission reads
+                // none and must agree at every count.
+                const compacts = (try testingContextEstimate(&storage, &tmp, session.slice())).? >= 1000;
+                seen[@intFromBool(compacts)] = true;
+                const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expectEqual(if (compacts) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
+            }
+            try std.testing.expect(seen[0] and seen[1]);
+        }
+    }.run);
+}
+
 test "compaction pressure anchors only usage of the selected replay recipe across model visits" {
     try store_testing.forEachEngine(struct {
         const Base = enum { none, compatible, incompatible };
@@ -10399,7 +10437,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readSessionReport = 5,
     .readSessionList = 6,
     .actionContent = 2,
-    .admitModelAttempt = 3,
+    .admitModelAttempt = 2,
     .admitNextActionAttempt = 2,
     .readBashExecutionInput = 2,
     .admitActionAttempt = 2,

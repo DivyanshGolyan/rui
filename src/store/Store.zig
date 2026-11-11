@@ -1102,9 +1102,20 @@ pub const Store = struct {
         defer entry.release();
         var reader: ReadAccess = .open(&entry);
         defer reader.deinit();
-        var writer: Access(.write, error{ SelectionChanged, ProjectionFailed, InstructionSelectionFailed }) = .open(&entry);
+        // An admission whose purpose rests on its context's size writes as
+        // an assistant response under a guard on that size, and so reads no
+        // size. Only the guard's failure, rolled back, admits again as the
+        // compaction it showed is due.
+        const first = admitModelAttemptOnce(&entry, &reader, admission_kind, .weighed, faults);
+        const due = if (first) |_| false else |err| err == error.CompactionDue;
+        return entry.finishTransaction(Ordinary.none, faults, if (due) admitModelAttemptOnce(&entry, &reader, admission_kind, .over, faults) else first);
+    }
+
+    /// Never inlined: the second admission reuses the first's frame.
+    noinline fn admitModelAttemptOnce(entry: *const Entry, reader: *ReadAccess, admission_kind: ModelAdmissionKind, pressure: model_admission_domain.Pressure, faults: Faults) !?AttemptAdmission {
+        var writer: Access(.write, error{ SelectionChanged, ProjectionFailed, InstructionSelectionFailed, CompactionDue }) = .open(entry);
         defer writer.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, writer.end(faults, model_admission_domain.admitNextModelAttempt(&reader, &writer, admission_kind, faults)));
+        return writer.end(faults, model_admission_domain.admitNextModelAttempt(reader, &writer, admission_kind, pressure, faults));
     }
 
     pub fn admitNextActionAttempt(
@@ -1692,6 +1703,8 @@ pub const OpenOptions = struct {
     found_schema_version: ?*u32 = null,
     /// Caller-owned evidence retained after a failed open destroys the Store.
     identity_mismatch: ?*store_schema.IdentityMismatch = null,
+    /// Told when a SQLite Store's startup migration begins and commits.
+    migration_notice: ?store_schema.MigrationNotice = null,
     /// The tools the Host offers, which it keeps for the Store's life.
     /// Null saves none: the Host reads the last one back (`readCatalog`)
     /// and saves its own (`saveCatalog`) before it serves.
