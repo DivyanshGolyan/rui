@@ -2,7 +2,7 @@
 //! they do not perform or stand in for restoration, cancellation or joins.
 const std = @import("std");
 
-pub const ReadPhase = enum { activity, details, inspection, permission, message, recall, retry };
+pub const ReadPhase = enum { activity, fill, details, inspection, permission, message, recall, retry };
 /// `inspection`: a pending inspection supersedes a silent read it cancelled.
 pub const Mode = enum { active, inspection, final_exit };
 pub const ReadEnd = union(enum) {
@@ -15,7 +15,7 @@ pub const ReadEnd = union(enum) {
 
     pub fn preparationFailure(self: ReadEnd) bool {
         return self == .failed and self.failed.err != error.CanonicalStoreFailure and
-            (self.failed.progress.phase == .details or self.failed.progress.phase == .inspection or self.failed.progress.phase == .message or self.failed.progress.phase == .recall) and
+            (self.failed.progress.phase == .fill or self.failed.progress.phase == .details or self.failed.progress.phase == .inspection or self.failed.progress.phase == .message or self.failed.progress.phase == .recall) and
             !self.failed.progress.rendering;
     }
 
@@ -138,4 +138,23 @@ test "retry settlement keeps substantive failures fatal in every supersession mo
         const cancelled: ReadEnd = .{ .cancelled = .{ .phase = .retry, .rendering = rendering } };
         try std.testing.expectEqual(if (mode == .active) @as(?anyerror, error.Cancelled) else null, cancelled.failure(mode));
     };
+}
+
+test "departure only historical fill preparation recovers while live scans and canonical failures remain fatal" {
+    for ([_]ReadPhase{ .fill, .activity, .permission }) |phase| {
+        for ([_]bool{ false, true }) |rendering| {
+            for ([_]anyerror{ error.ConnectionResetByPeer, error.CanonicalStoreFailure }) |err| {
+                const end: ReadEnd = .{ .failed = .{ .err = err, .progress = .{ .phase = phase, .rendering = rendering } } };
+                const recoverable = phase == .fill and !rendering and err != error.CanonicalStoreFailure;
+                try std.testing.expectEqual(recoverable, end.preparationFailure());
+                for ([_]Mode{ .active, .inspection }) |mode| {
+                    if (recoverable) try std.testing.expect(end.failure(mode) == null) else try std.testing.expect(end.failure(mode).? == err);
+                }
+                try std.testing.expectEqual(err, end.failure(.final_exit).?);
+                const cancelled: ReadEnd = .{ .cancelled = .{ .phase = phase, .rendering = rendering } };
+                try std.testing.expect(!cancelled.preparationFailure());
+                try std.testing.expectEqual(error.Cancelled, cancelled.failure(.active).?);
+            }
+        }
+    }
 }

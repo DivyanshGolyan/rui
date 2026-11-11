@@ -41,6 +41,47 @@ class NavigationTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "navigation marker"):
                 self.check(self.screen(74, 18, chip), 74, True)
 
+    def test_status_work_below_long_path_viewport(self):
+        with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
+            from scenarios import status_work
+
+        class Terminal:
+            def __init__(self, lines):
+                self.lines, self.top, self.generation = lines, 0, 1
+                self.screen = self
+                self.markers, self.sent = [], []
+
+            @property
+            def completed(self):
+                return "\n".join(self.lines[self.top:self.top + 18])
+
+            def reached(self, text):
+                return text in self.completed
+
+            def marker(self, text):
+                self.markers.append(text)
+                assert self.reached(text), text
+
+            def send(self, data):
+                self.sent.append(data)
+                self.top += 9
+                self.generation += 1
+
+            def wait(self, predicate, *, label, after):
+                assert self.generation > after and predicate(), label
+
+        lines = [" Status · aaaaaa", "Permissions     bypass"] + ["long path continuation"] * 27 + [" Work"]
+        tty = Terminal(lines)
+        status_work(tty, "aaaaaa", 1024)
+        self.assertEqual(tty.markers, [" Status · ", " · aaaaaa", "Permissions     "])
+        self.assertEqual(tty.sent, [b"\x1b[6~"] * 2)
+        self.assertTrue(tty.reached(" Work"))
+        # Missing Work must fail within a document-derived key budget.
+        missing = Terminal(lines[:-1] + ["missing heading"])
+        with self.assertRaisesRegex(AssertionError, "status Work within bounded page"):
+            status_work(missing, "aaaaaa", 1024)
+        self.assertLessEqual(len(missing.sent), (14 * 2 + 4 + 2 * 26 + 8) // 9)
+
     def test_all_navigation_vectors_keep_their_input_intent(self):
         rows = inventory()
         self.assertEqual(len(rows), 51)

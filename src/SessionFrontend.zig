@@ -132,6 +132,7 @@ reading: struct {
     opening: bool = true,
     output_started: bool = false,
     feed_read: feed_reads.Read = .opening,
+    fills: FeedPolicy.Fills = .{},
     // An Action the reader found, adopted once input is idle.
     prepared_action: ?u64 = null,
     prepared_summary: View.ActionSummary = .{},
@@ -178,7 +179,7 @@ live: struct {
     view: View.Live = .{},
     latest_ending: ?reads.LatestEnding = null,
     work: protocol.SessionWork = .{},
-    cursor: protocol_reply.ActivityCursor = .{},
+    scan: FeedPolicy.Cycle = .{},
     queued: protocol.Queued = .{},
     queued_line: ?queued_line.Shown = null,
 } = .{},
@@ -262,7 +263,7 @@ test "a read freezes its viewport width method for live and historical answers" 
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread };
+    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.scanCursor(), .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread };
     const job = &self.job;
     job.latest_ending = self.live.latest_ending;
     if (phase == .activity or phase == .permission) {
@@ -736,6 +737,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
 /// After any App input: moves what was said into the notice, prepares the
 /// documents and, once the person asked to leave, leaves.
 fn afterInput(self: *Self, ctx: *vxfw.EventContext) !void {
+    self.observeFeed();
     if (self.notice) |text| {
         self.shown_notice.show(text, self.nowMs());
         self.notice = null;
@@ -852,6 +854,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const size = if (self.app_consent.request != null) self.app_preview.size else if (screen.view == .feed) self.app_content.size else self.app_document.size;
     screen.height = size.height;
     screen.vx.screen.width = size.width;
+    self.observeFeed();
     if (screen.view != .feed) screen.drawn = .{ .first = if (self.app_consent.request != null) self.app_preview.first else self.app_document.first, .rows = screen.height };
     surface.widget = self.widget();
     self.dirty = false;
@@ -1884,7 +1887,7 @@ fn quiesceUpgrade(self: *Self) !void {
         if (!self.inspection.command_running) self.reader.cancel();
         if (self.reader.completed()) try self.settleReader();
     }
-    if (self.reading.pending_diagnostic != null and self.reader.thread == null) try self.presentReadDiagnostic(self.screen);
+    if (self.reading.pending_diagnostic != null and self.reader.thread == null) try self.presentReadDiagnostic();
     if (self.dropSkills()) |err| return err;
 }
 
@@ -1969,7 +1972,7 @@ fn update(self: *Self) !Updated {
         self.withdrawDecided();
     }
     if (self.reading.pending_diagnostic) |pending| {
-        if (pending.recoverable) try self.presentReadDiagnostic(self.screen);
+        if (pending.recoverable) try self.presentReadDiagnostic();
     }
     try self.startQueuedCommand();
     try self.startRetry();
@@ -1998,7 +2001,7 @@ fn update(self: *Self) !Updated {
             if (read == .permission) {
                 try self.launch(self.freeze(.permission), reads.permission);
             } else {
-                const job = self.freeze(.activity);
+                const job = self.freeze(if (read == .fill_above or read == .fill_below) .fill else .activity);
                 self.reading.feed_read = read;
                 job.feed_page = FeedPolicy.request(read, self.feedState());
                 try self.launch(job, reads.scan);
@@ -2322,8 +2325,9 @@ fn scroll(self: *Self, down: bool, rows: usize) !void {
     if (screen.view == .feed) {
         const amount: i32 = @intCast(@min(rows, std.math.maxInt(i32)));
         self.app_content.scroll(if (down) amount else -amount);
+        self.reading.fills = self.reading.fills.scrolled(self.feedState(), down);
         if (screen.anchor.following()) self.new_below = 0;
-    } else for (0..rows) |_| _ = screen.browse(down, false);
+    } else for (0..rows) |_| screen.browse(down, false);
     self.dirty = true;
 }
 
@@ -2399,6 +2403,16 @@ fn openCollapsed(self: *Self, target: View.Collapsed) void {
     self.notice = "Opening message…";
 }
 
+/// The scan owner's progress translated once to the reader's wire cursor.
+fn scanCursor(self: *const Self) protocol_reply.ActivityCursor {
+    const scan = self.live.scan;
+    return .{
+        .position = if (scan.cursor) |cursor| cursor.position else 0,
+        .ordinal = if (scan.cursor) |cursor| if (cursor.ordinal == std.math.maxInt(u64)) null else cursor.ordinal else null,
+        .end = if (scan.catchup) |sweep| sweep.end else null,
+    };
+}
+
 /// Inputs to the single read policy, derived from the current anchor/window.
 fn feedState(self: *Self) FeedPolicy.State {
     const screen = self.screen;
@@ -2410,11 +2424,11 @@ fn feedState(self: *Self) FeedPolicy.State {
         .at_end = screen.feed.at_end,
         .low = screen.feed.low,
         .high = screen.feed.high,
-        .scan_cursor = if (self.live.cursor.position != 0) .{ .position = self.live.cursor.position, .ordinal = self.live.cursor.ordinal orelse std.math.maxInt(u64) } else null,
+        .scan = self.live.scan,
         .window_provisional = screen.feed.firstProvisional(),
-        .scan_continuing = self.live.cursor.end != null,
         .window_continuing = screen.feed.forward_partial,
         .selection_held = self.app_content.dragging(),
+        .fills = self.reading.fills,
         .choice_open = screen.consent != null or self.app_consent.request != null,
         .action_named = self.live.work.first_action != null,
         .submission = self.submission.view() != null,
@@ -2429,7 +2443,13 @@ fn jumpToEnd(self: *Self) !void {
         .opening_keep_frame => self.reading.opening = true,
     }
     self.new_below = 0;
+    self.reading.fills = .{};
     self.dirty = true;
+}
+
+/// Observe every anchor/window transition, including while a read is active.
+fn observeFeed(self: *Self) void {
+    self.reading.fills = self.reading.fills.observe(self.feedState());
 }
 
 /// The waiting Action, as the screen shows it now.
@@ -2648,6 +2668,7 @@ pub fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.
 /// Applies one page through the policy's single attachment decision. The
 /// resident window owns rows; neither the scan nor a fill owns another copy.
 fn showStaged(self: *Self) !void {
+    defer self.observeFeed();
     const page = self.job.feed_page orelse return;
     const read = self.reading.feed_read;
     const window = &self.screen.feed;
@@ -2672,6 +2693,7 @@ fn showStaged(self: *Self) !void {
     defer self.init.gpa.destroy(document);
     const backward = page.direction == .backward;
     var complete = true;
+    var inserted: usize = 0;
     for (0..result.row_count) |step| {
         const row = &result.rows[if (backward) result.row_count - step - 1 else step];
         document.* = .{ .sidenotes = true, .quotes = true, .width_method = self.screen.vx.caps.unicode };
@@ -2699,7 +2721,11 @@ fn showStaged(self: *Self) !void {
             complete = false;
             break;
         }
+        inserted += 1;
     }
+    // A fill the window had no room for waits like a failed one: asking for
+    // the same page again would read it again and place nothing.
+    if (!complete and inserted == 0) self.reading.fills = self.reading.fills.failed(read, page);
     if (backward) {
         window.low = if (complete) result.low else if (window.count != 0) window.entries[0].key else window.low;
         window.at_start = complete and result.at_start;
@@ -2719,18 +2745,23 @@ fn showStaged(self: *Self) !void {
     self.dirty = true;
 }
 
-/// Evict only outside the visible rows and their three-screen margins. A
-/// page larger than the bound stops at its last inserted key; need() resumes
-/// there later instead of discarding an anchor or silently skipping history.
+/// Makes room on the side away from the insertion only, so the window stays
+/// one contiguous run. A fill evicts only outside the view and its loading
+/// margins and otherwise stops at its last inserted key. A row arriving at
+/// the end being followed always goes in: capacity outranks the margin, and
+/// the oldest rows leave even from the view the new row is about to replace.
 fn insertFeed(self: *Self, entry: feed_window.Entry, backward: bool) bool {
     const window = &self.screen.feed;
     while (true) {
         const inserted = if (backward) window.prepend(&.{entry}) else window.append(&.{entry});
-        if (inserted) |_| return true else |_| {
-            const trim = self.screen.anchor.trim(window.heightsWith(self.screen.textLayout(), self.app_content.presentation()), self.screen.height, window.count -| 1);
-            if (trim.drop_front == 0 and trim.drop_back == 0) return false;
-            window.trim(trim.drop_front, trim.drop_back);
+        if (inserted) |_| return true else |_| {}
+        var trim = self.screen.anchor.trim(window.heightsWith(self.screen.textLayout(), self.app_content.presentation()), self.screen.height, window.count -| 1);
+        if (backward) trim.drop_front = 0 else trim.drop_back = 0;
+        if (trim.drop_front == 0 and trim.drop_back == 0) {
+            if (backward or window.count == 0 or !self.screen.anchor.following()) return false;
+            trim.drop_front = 1;
         }
+        window.trim(trim.drop_front, trim.drop_back);
     }
 }
 
@@ -2792,37 +2823,26 @@ test "read diagnostic shows the Host's type and code as escaped line text" {
     }
 }
 
-fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
+/// A read's diagnostic is a notice, never a feed row: the summary, then the
+/// Host's own words.
+fn presentReadDiagnostic(self: *Self) !void {
     const pending = self.reading.pending_diagnostic.?;
-    var bytes: [1024]u8 = undefined;
-    var out = std.Io.Writer.fixed(&bytes);
-    const summary = switch (pending.phase) {
+    var out = std.Io.Writer.fixed(&self.notice_buffer);
+    try out.writeAll(switch (pending.phase) {
         .details => "! Details unavailable; draft retained.",
         .inspection => if (self.inspection.kind == .copy) "! Copy unavailable; draft retained." else "! Inspection unavailable; draft retained.",
         .recall => "! Sent message unavailable; draft retained.",
         .retry => "! Retry unavailable; nothing sent. Draft retained.",
         else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
-    };
-    try out.writeAll(summary);
+    });
     try out.writeAll(" ");
     try self.writePendingDiagnostic(&out);
-    if (comptime @TypeOf(sink) == *Screen) {
-        // Read diagnostics are UI notices, not counterfeit Activity rows.
-        @memcpy(self.notice_buffer[0..out.buffered().len], out.buffered());
-        self.notice = self.notice_buffer[0..out.buffered().len];
-    } else {
-        try sink.append("\n");
-        try sink.append(View.Style.failure.code(self.colour));
-        try sink.append(out.buffered());
-        try sink.append(View.Style.normal.code(self.colour));
-        try sink.append("\n");
-        self.notice = summary;
-    }
+    self.notice = out.buffered();
     self.reading.pending_diagnostic = null;
     self.dirty = true;
 }
 
-test "frontend joined read diagnostic survives failed notice and worker reset" {
+test "frontend joined read diagnostic survives a worker reset and shows as the notice" {
     const Worker = struct {
         fn fail(_: *anyopaque, task: *Task) !void {
             var failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
@@ -2832,56 +2852,33 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
         }
         fn idle(_: *anyopaque, _: *Task) !void {}
     };
-    const Sink = struct {
-        bytes: [2048]u8 = undefined,
-        length: usize = 0,
-        calls: usize = 0,
-        fail_at: ?usize,
-
-        fn append(self: *@This(), bytes: []const u8) !void {
-            self.calls += 1;
-            if (self.fail_at == self.calls) return error.WriteFailed;
-            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
-            self.length += bytes.len;
-        }
-    };
-    for ([_]ReadPhase{.details}) |phase| {
-        for (1..6) |fail_at| {
-            var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .colour = false, .reading = .{ .phase = phase } };
-            self.init.io = std.testing.io;
-            self.input.init();
-            try self.reader.start(std.testing.io, &self, Worker.fail);
-            try self.settleReader(); // Preparation is recoverable, not fatal.
-            try std.testing.expect(self.reading.pending_diagnostic != null);
-            try std.testing.expect(self.reader.read_failure == null);
-            var sink: Sink = .{ .fail_at = fail_at };
-            try std.testing.expectError(error.WriteFailed, self.presentReadDiagnostic(&sink));
-            try std.testing.expect(self.reading.pending_diagnostic != null);
-            // Exercise the actual Task reset, also performed before spawn can fail.
-            try self.reader.start(std.testing.io, &self, Worker.idle);
-            try self.reader.join();
-            self.input.init();
-            self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
-            self.stop();
-            const settled = self.settle({});
-            for ([_]anyerror{ error.WriteFailed, error.SystemResources }) |cause|
-                try std.testing.expectEqual(cause, settled.failure(.final_exit, cause).?);
-            var bytes: [1024]u8 = undefined;
-            var out = std.Io.Writer.fixed(&bytes);
-            try self.writePendingDiagnostic(&out);
-            try std.testing.expectEqualStrings("HTTP 503; type: busy; code: host_busy\\x1b\\n", out.buffered());
-            sink = .{ .fail_at = null };
-            try self.presentReadDiagnostic(&sink);
-            try std.testing.expect(self.reading.pending_diagnostic == null);
-            try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], out.buffered()) != null);
-            try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], if (phase == .details) "Details unavailable" else "Earlier messages unavailable") != null);
-            try std.testing.expectEqualStrings(if (phase == .details) "! Details unavailable; draft retained." else "! Earlier messages unavailable; scroll up to retry. Draft retained.", self.notice.?);
-        }
-    }
+    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .colour = false, .reading = .{ .phase = .details } };
+    self.init.io = std.testing.io;
+    self.input.init();
+    try self.reader.start(std.testing.io, &self, Worker.fail);
+    try self.settleReader(); // Preparation is recoverable, not fatal.
+    try std.testing.expect(self.reading.pending_diagnostic != null);
+    try std.testing.expect(self.reader.read_failure == null);
+    // Exercise the actual Task reset, also performed before spawn can fail.
+    try self.reader.start(std.testing.io, &self, Worker.idle);
+    try self.reader.join();
+    self.input.init();
+    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+    self.stop();
+    const settled = self.settle({});
+    for ([_]anyerror{ error.WriteFailed, error.SystemResources }) |cause|
+        try std.testing.expectEqual(cause, settled.failure(.final_exit, cause).?);
+    try self.presentReadDiagnostic();
+    try std.testing.expect(self.reading.pending_diagnostic == null);
+    try std.testing.expectEqualStrings("! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy\\x1b\\n", self.notice.?);
 }
 
 fn applyReader(self: *Self, end: ReadEnd) !void {
     if (end.preparationFailure()) {
+        if (self.reading.phase == .fill) {
+            self.reading.fills = self.reading.fills.failed(self.reading.feed_read, self.job.feed_page.?);
+            self.observeFeed();
+        }
         if (self.reading.pending_diagnostic == null)
             self.notice = switch (reader_policy.unavailable(self.reading.phase, self.readInspection())) {
                 .say => |text| text,
@@ -2909,7 +2906,8 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             if (result.hint) |*hint| self.hint = hint.*;
             self.live.view = result.live;
             self.live.latest_ending = result.latest_ending;
-            self.live.cursor = result.cursor;
+            const cursor = result.cursor;
+            self.live.scan = self.live.scan.landed(self.job.feed_page.?, if (cursor.position != 0) .{ .position = cursor.position, .ordinal = cursor.ordinal orelse std.math.maxInt(u64) } else null, cursor.end);
             if (read == .opening) self.reading.opening = false;
             self.upgrade_stale = false;
             self.poll_at = feed_reads.scanDue(std.Io.Clock.awake.now(self.init.io).nanoseconds, self.inspection.status_requested);
@@ -2941,6 +2939,7 @@ test "archive badges follow only completed server snapshots and stay distinct fr
         self.job.result = .{ .line = .{ .read = .{ .revision = 1, .end = 2 }, .archive_state = case.archive }, .work = .{ .work = .{ .state = case.work } } };
         try self.applyReader(.{ .cancelled = .{ .phase = .activity, .rendering = false } });
         try std.testing.expectEqual(previous, self.line.archive_state);
+        self.job.feed_page = FeedPolicy.request(.scan, self.feedState());
         try self.applyReader(.complete);
         try std.testing.expectEqual(case.archive, self.line.archive_state);
         try std.testing.expectEqualDeep(case.work, self.live.work.state);
@@ -3521,6 +3520,8 @@ test "sending a Message drops a details read still waiting to start" {
     defer held.destroy();
     const self = &held.self;
     Worker.release.store(false, .release);
+    self.job.feed_page = FeedPolicy.request(.scan, self.feedState());
+    self.job.result = .{ .at_start = true, .at_end = true };
     try self.reader.start(std.testing.io, self, Worker.read);
     defer {
         Worker.release.store(true, .release);
@@ -3550,6 +3551,8 @@ test "sending a Message drops a /status read still waiting to start" {
     defer held.destroy();
     const self = &held.self;
     Worker.release.store(false, .release);
+    self.job.feed_page = FeedPolicy.request(.scan, self.feedState());
+    self.job.result = .{ .at_start = true, .at_end = true };
     try self.reader.start(std.testing.io, self, Worker.read);
     defer {
         Worker.release.store(true, .release);
@@ -5457,6 +5460,71 @@ test "App Session keeps its real draft browsing anchor and focused composer acro
     }
 }
 
+test "SessionFrontend failed historical fills retain the edge while scans approval and directed retries progress" {
+    const Worker = struct {
+        fn fail(_: *anyopaque, _: *Task) !void {
+            return error.ConnectionResetByPeer;
+        }
+        fn complete(frontend: *Self) bool {
+            return frontend.reader.completed();
+        }
+    };
+    for ([_]feed_reads.Read{ .fill_above, .fill_below }) |read| {
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const held = fixture.held;
+        const self = &held.self;
+        const down = read == .fill_below;
+        try fixture.longPage(.opening, 100);
+        _ = try held.draw();
+        if (down) {
+            try self.scroll(false, 1);
+            held.screen.feed.at_end = false;
+        } else try self.scroll(false, 200);
+        _ = try held.draw();
+        self.poll_at = std.math.maxInt(i96);
+        try std.testing.expectEqual(read, FeedPolicy.nextRead(self.feedState()).?);
+        const cycle = self.live.scan;
+        const text = try std.testing.allocator.dupe(u8, held.screen.feed.document.text());
+        defer std.testing.allocator.free(text);
+        const job = self.freeze(.fill);
+        self.reading.feed_read = read;
+        job.feed_page = FeedPolicy.request(read, self.feedState());
+        try self.launch(job, Worker.fail);
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), self, Worker.complete);
+        try self.settleReader();
+        try std.testing.expectEqual(ReadPhase.fill, self.reading.phase);
+        try std.testing.expectEqualDeep(cycle, self.live.scan);
+        try std.testing.expectEqualStrings(text, held.screen.feed.document.text());
+        try std.testing.expectEqualStrings("! Messages unavailable; scroll to retry. Draft retained.", self.notice.?);
+        try std.testing.expect(self.reading.fills.blocked != null);
+        for (0..3) |_| {
+            _ = try held.draw();
+            try std.testing.expect(FeedPolicy.nextRead(self.feedState()) == null);
+        }
+        // Successful unchanged live facts do not rearm the failed edge.
+        try fixture.page(.scan, &.{}, false, !down);
+        self.poll_at = std.math.maxInt(i96);
+        try std.testing.expect(FeedPolicy.nextRead(self.feedState()) == null);
+        self.poll_at = 0;
+        try std.testing.expectEqual(feed_reads.Read.scan, FeedPolicy.nextRead(self.feedState()).?);
+        self.live.work.first_action = 1;
+        try std.testing.expectEqual(feed_reads.Read.scan, FeedPolicy.nextRead(self.feedState()).?);
+        self.poll_at = std.math.maxInt(i96);
+        try std.testing.expectEqual(feed_reads.Read.permission, FeedPolicy.nextRead(self.feedState()).?);
+        self.live.work.first_action = null;
+        // User scroll in the other direction stays inside the same margin.
+        try self.scroll(!down, 1);
+        try std.testing.expect(FeedPolicy.nextRead(self.feedState()) == null);
+        try self.scroll(down, 1);
+        try std.testing.expectEqual(read, FeedPolicy.nextRead(self.feedState()).?);
+        // A deliberate jump starts a new lifecycle even at an unchanged edge.
+        self.reading.fills = self.reading.fills.failed(read, FeedPolicy.request(read, self.feedState()).?);
+        try self.jumpToEnd();
+        try std.testing.expect(self.reading.fills.blocked == null);
+    }
+}
+
 /// Feed-domain fixture: pages use the same staged-file handoff as the reader.
 const FeedFixture = struct {
     held: *HeldFrontend,
@@ -5482,7 +5550,7 @@ const FeedFixture = struct {
         // Freeze and settle exactly like the production read handoff. In
         // particular, fills must not advance the independent live cursor.
         if (read == .opening) frontend.reading.opening = true;
-        const job = frontend.freeze(.activity);
+        const job = frontend.freeze(if (read == .fill_above or read == .fill_below) .fill else .activity);
         frontend.reading.feed_read = read;
         job.feed_page = FeedPolicy.request(read, frontend.feedState());
         frontend.job.result.row_count = rows.len;
@@ -5499,7 +5567,7 @@ const FeedFixture = struct {
                 frontend.job.result.rows[i].collapsed_targets[0] = target;
                 frontend.job.result.rows[i].collapsed_count = 1;
             }
-            if (frontend.job.feed_page.?.started_from == null or row.key > frontend.job.feed_page.?.started_from.?.position) frontend.job.result.new_rows += 1;
+            if (row.text.len != 0 and FeedPolicy.isNew(frontend.job.feed_page.?, .{ .position = row.key })) frontend.job.result.new_rows += 1;
             offset += row.text.len;
         }
         try frontend.launch(job, struct {
@@ -5523,6 +5591,43 @@ fn firstRows(text: []const u8, count: usize) []const u8 {
     var end: usize = 0;
     for (0..count) |_| end = 1 + (std.mem.indexOfScalarPos(u8, text, end, '\n') orelse return text);
     return text[0..end];
+}
+
+test "SessionFrontend feed keeps following when full rows leave no room inside the margins" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const held = fixture.held;
+    const window = &held.screen.feed;
+    const dense = try std.testing.allocator.alloc(u8, 3 * 30_000);
+    defer std.testing.allocator.free(dense);
+    for (dense, 0..) |*byte, index| byte.* = if (index % 100 == 99) '\n' else "abc"[index / 30_000];
+    try fixture.page(.opening, &.{ .{ .key = 10, .text = dense[0..30_000] }, .{ .key = 11, .text = "between\n" }, .{ .key = 12, .text = dense[30_000..60_000] } }, true, true);
+    try std.testing.expectEqual(@as(usize, 3), window.count);
+    // On a pane so tall that every row is inside its loading margin, a row
+    // as large as the two before it arrives: the oldest leaves, it goes in.
+    _ = try held.shown();
+    held.screen.height = 500;
+    try fixture.page(.scan, &.{.{ .key = 13, .text = dense[60_000..] }}, false, true);
+    try std.testing.expect(held.screen.anchor.following() and window.at_end and !window.at_start);
+    try std.testing.expectEqual(@as(u64, 11), window.entries[0].key.position);
+    try std.testing.expectEqual(@as(u64, 13), window.entries[window.count - 1].key.position);
+    // The margin wants the row above back, and it no longer fits. Its fill
+    // places nothing, then waits for a scroll instead of being read again
+    // and again.
+    try std.testing.expectEqual(@as(?feed_reads.Read, .fill_above), idleRead(&held.self));
+    try fixture.page(.fill_above, &.{.{ .key = 10, .text = dense[0..30_000] }}, true, false);
+    try std.testing.expectEqual(@as(u64, 11), window.entries[0].key.position);
+    try std.testing.expectEqual(@as(?feed_reads.Read, null), idleRead(&held.self));
+    try held.self.scroll(false, 1);
+    try std.testing.expectEqual(@as(?feed_reads.Read, .fill_above), idleRead(&held.self));
+}
+
+/// The read the policy picks with no scan due.
+fn idleRead(self: *Self) ?feed_reads.Read {
+    var state = self.feedState();
+    state.now_ns = 0;
+    state.scan_due_ns = 1;
+    return FeedPolicy.nextRead(state);
 }
 
 test "SessionFrontend feed opens full bottom aligned and page round trip is an identical frame" {
@@ -5642,6 +5747,7 @@ test "SessionFrontend feed latest ending is live state, not window fill state" {
     for ([_]feed_reads.Read{ .opening, .scan, .fill_above, .fill_below }) |read| {
         self.live.latest_ending = ending;
         self.reading.feed_read = read;
+        self.job.feed_page = FeedPolicy.request(read, self.feedState());
         self.job.result = .{ .latest_ending = newer };
         try self.applyReader(.{ .cancelled = .{ .phase = .activity, .rendering = false } });
         try std.testing.expectEqualDeep(ending, self.live.latest_ending.?);
@@ -5886,7 +5992,7 @@ test "failed reply reopening during newer work hides retry tail and ignores Ctrl
         const self = &held.self;
         try seedFeed(held.screen, "× Model reply unreadable\n");
         self.reading.opening = true;
-        self.reading.feed_read = .opening;
+        _ = self.freeze(.activity);
         // An opening can find the old failure while the newer Turn has not
         // ended. No invocation-local submission history exists in this chat.
         self.job.result = .{
@@ -6069,9 +6175,9 @@ test "SessionFrontend backward fill supplies the scan replay boundary through th
         defer fixture.destroy();
         const held = fixture.held;
         try fixture.page(.opening, &.{ .{ .key = 100, .text = "older answer\n" }, .{ .key = 110, .text = "settled turn\n" } }, false, true);
-        const scan_cursor = held.self.live.cursor;
+        const scan = held.self.live.scan;
         try fixture.page(.fill_above, &.{.{ .key = 90, .text = pending, .provisional = true }}, true, false);
-        try std.testing.expectEqualDeep(scan_cursor, held.self.live.cursor);
+        try std.testing.expectEqualDeep(scan, held.self.live.scan);
         const replay: feed_window.Key = .{ .position = 90 };
         try std.testing.expectEqualDeep(@as(?feed_window.Key, replay), held.screen.feed.firstProvisional());
         const planned = FeedPolicy.request(.scan, held.self.feedState()).?;
@@ -6580,4 +6686,325 @@ test "failed reply retry settlement propagates transport errors and unexpected a
         try std.testing.expect(self.submission.intent == null and self.job.retry == null and self.retry_fence == null);
         try std.testing.expect(self.reading.pending_diagnostic == null);
     }
+}
+
+test "SessionFrontend fixed and growing end replay cycles count arrivals once across reader pages" {
+    const Host = struct {
+        fn respond(listener: *std.Io.net.Server, bytes: []const u8) !void {
+            const io = std.testing.io;
+            var fds = [_]std.posix.pollfd{.{ .fd = listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            if (try std.posix.poll(&fds, 2000) == 0) return error.TestUnexpectedResult;
+            const peer = try listener.accept(io);
+            defer peer.close(io);
+            var request: [4096]u8 = undefined;
+            var used: usize = 0;
+            while (true) {
+                const got = try std.posix.read(peer.socket.handle, request[used..]);
+                if (got == 0) return error.UnexpectedEof;
+                used += got;
+                if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| {
+                    const start = std.mem.indexOf(u8, request[0..end], "Content-Length: ").? + "Content-Length: ".len;
+                    const finish = std.mem.indexOfScalarPos(u8, request[0..end], start, '\r').?;
+                    if (used == end + 4 + try std.fmt.parseInt(usize, request[start..finish], 10)) break;
+                }
+            }
+            try std.testing.expectStringStartsWith(request[0..used], "POST /v1/activity-page HTTP/1.1\r\n");
+            var header: [256]u8 = undefined;
+            var writer = peer.writer(io, &.{});
+            try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{bytes.len}));
+            try writer.interface.writeAll(bytes);
+        }
+        fn page(frontend: *Self, listener: *std.Io.net.Server, read: feed_reads.Read, first: u64, last: u64, end: u64) !void {
+            var facts: protocol.ActivityFacts = .{ .end = end, .direction = if (read == .opening or read == .fill_above) .backward else .forward, .count = @intCast(last - first + 1), .queued = .{ .count = 1, .oldest_position = 1, .newest_admission = 1, .newest_position = 1 }, .work = .{ .revision = 1, .work = .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 1 } } };
+            facts.more = if (facts.direction == .backward) first != 1 else last < end;
+            try facts.work.workspace.set("/");
+            var peer: protocol.NamedPeer = .{ .session = .{} };
+            try peer.session.set("9f8e7d");
+            const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = protocol.contentDigest("") };
+            for (facts.items[0..facts.count], 0..) |*item, i| {
+                const position = if (facts.direction == .backward) last - i else first + i;
+                item.* = .{ .position = position, .ordinal = 0, .at = 1, .value = if (position == 1) .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1 } } else .{ .sent = .{ .admission = position, .admitted_at = 1, .target = peer, .content = content } } };
+            }
+            const job = frontend.freeze(.activity);
+            frontend.reading.feed_read = read;
+            job.feed_page = FeedPolicy.request(read, frontend.feedState());
+            // This fixture isolates feed pagination from unchanged Current
+            // fields. No scan progress or novelty state is supplied by it.
+            job.line_read = .{ .revision = 1, .end = end };
+            job.queued_line = 1;
+            try frontend.launch(job, reads.scan);
+            var buffer: [16384]u8 = undefined;
+            var out = std.Io.Writer.fixed(&buffer);
+            try activity_reply.writePage(&out, &facts);
+            try respond(listener, out.buffered());
+            if (read == .opening and facts.more) {
+                // This queued/sent-only history has no own ending. Opening
+                // asks for that live fact independently of its resident rows.
+                const endings: protocol.ActivityFacts = .{ .end = end, .direction = .backward, .work = facts.work };
+                var ending_out = std.Io.Writer.fixed(&buffer);
+                try activity_reply.writePage(&ending_out, &endings);
+                try respond(listener, ending_out.buffered());
+            }
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), frontend, struct {
+                fn complete(self: *Self) bool {
+                    return self.reader.completed();
+                }
+            }.complete);
+            try frontend.settleReader();
+        }
+    };
+    for ([_]bool{ false, true }) |growing| {
+        const io = std.testing.io;
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const held = fixture.held;
+        const self = &held.self;
+        var tmp = try @import("socket_fixture.zig").Directory.init();
+        defer tmp.cleanup();
+        const root = tmp.root[0..tmp.root_len];
+        var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+        defer lease.release();
+        try lease.prepareForServing(false);
+        const paths = lease.paths;
+        var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+        defer {
+            listener.deinit(io);
+            std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+        }
+        self.store = root;
+        self.session = "k7m2qx";
+        self.reading.opening = true;
+        defer {
+            self.reader.cancel();
+            self.reader.join() catch |err| switch (err) {
+                error.Cancelled => {},
+                else => @panic(@errorName(err)),
+            };
+        }
+        try Host.page(self, &listener, .opening, 33, 48, 48);
+        try Host.page(self, &listener, .fill_above, 17, 32, 48);
+        try Host.page(self, &listener, .fill_above, 1, 16, 48);
+        _ = try held.draw();
+        try self.scroll(false, 12);
+        try std.testing.expect(!held.screen.anchor.following());
+        var watermark: u64 = 48;
+        const ends: [2]u64 = if (growing) .{ 52, 54 } else .{ 48, 48 };
+        var expected_new: usize = 0;
+        for (ends) |frozen_end| {
+            var first: u64 = 1;
+            while (first <= frozen_end) : (first += 16) {
+                const last = @min(first + 15, frozen_end);
+                try Host.page(self, &listener, .scan, first, last, frozen_end);
+                try std.testing.expectEqualDeep(@as(?feed_window.Key, .{ .position = watermark, .ordinal = std.math.maxInt(u64) }), self.job.feed_page.?.novelty_after);
+                expected_new += @intCast(last - @min(last, @max(first - 1, watermark)));
+                try std.testing.expectEqual(expected_new, self.new_below);
+                if (last < frozen_end) {
+                    try std.testing.expectEqual(frozen_end, self.live.scan.catchup.?.end);
+                } else try std.testing.expect(self.live.scan.catchup == null);
+            }
+            watermark = frozen_end;
+        }
+        try std.testing.expectEqual(@as(usize, if (growing) 6 else 0), self.new_below);
+    }
+}
+
+test "SessionFrontend huge person source keeps the following short answer bottom aligned through the reader handoff" {
+    const Host = struct {
+        fn respond(listener: *std.Io.net.Server, route: []const u8, kind: []const u8, body: []const u8) !void {
+            const io = std.testing.io;
+            var fds = [_]std.posix.pollfd{.{ .fd = listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            if (try std.posix.poll(&fds, 2000) == 0) return error.TestUnexpectedResult;
+            const peer = try listener.accept(io);
+            defer peer.close(io);
+            var request: [4096]u8 = undefined;
+            var used: usize = 0;
+            while (true) {
+                const got = try std.posix.read(peer.socket.handle, request[used..]);
+                if (got == 0) return error.UnexpectedEof;
+                used += got;
+                if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| {
+                    const start = std.mem.indexOf(u8, request[0..end], "Content-Length: ").? + "Content-Length: ".len;
+                    const finish = std.mem.indexOfScalarPos(u8, request[0..end], start, '\r').?;
+                    if (used == end + 4 + try std.fmt.parseInt(usize, request[start..finish], 10)) break;
+                }
+            }
+            var prefix: [96]u8 = undefined;
+            try std.testing.expectStringStartsWith(request[0..used], try std.fmt.bufPrint(&prefix, "POST {s} HTTP/1.1\r\n", .{route}));
+            var header: [512]u8 = undefined;
+            var writer = peer.writer(io, &.{});
+            try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{ kind, body.len, body.len, body.len }));
+            try writer.interface.writeAll(body);
+        }
+        fn complete(frontend: *Self) !bool {
+            return frontend.reader.completed();
+        }
+    };
+    const io = std.testing.io;
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    const paths = lease.paths;
+    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+    defer {
+        listener.deinit(io);
+        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    }
+    const scratch = try held.tmp.dir.createFile(io, "person-source", .{ .read = true });
+    defer scratch.close(io);
+    const inspection = try held.tmp.dir.createFile(io, "person-answer-page", .{ .read = true });
+    defer inspection.close(io);
+    self.files = .{ .scratch = scratch, .inspection = inspection, .action = inspection, .status = inspection, .actions = .{ inspection, inspection } };
+    self.store = root;
+    self.session = "k7m2qx";
+    self.line.read = .{ .revision = 1, .end = 2 };
+    self.reading.opening = true;
+    defer {
+        self.reader.cancel();
+        self.reader.join() catch |err| switch (err) {
+            error.Cancelled => {},
+            else => @panic(@errorName(err)),
+        };
+    }
+    // A huge person SOURCE collapses before the row byte cap: production
+    // UserBody keeps two bounded preview lines, not an unbounded rendered row.
+    const person = try std.testing.allocator.alloc(u8, feed_window.row_capacity + 500);
+    defer std.testing.allocator.free(person);
+    @memset(person, 'x');
+    const answer = "SHORT ANSWER done.";
+    const person_reference: protocol.ActivityItem.Content = .{ .length = person.len, .digest = protocol.contentDigest(person) };
+    const answer_reference: protocol.ActivityItem.Content = .{ .length = answer.len, .digest = protocol.contentDigest(answer) };
+    var facts: protocol.ActivityFacts = .{ .end = 2, .direction = .backward, .count = 2, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    try facts.work.workspace.set("/");
+    facts.items[0] = .{ .position = 2, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = answer_reference, .final = true } } };
+    facts.items[1] = .{ .position = 1, .ordinal = 0, .at = 1, .value = .{ .user = .{ .admission = 1, .key = .{}, .turn = 1, .state = .applied, .content = person_reference, .admitted_at = 1 } } };
+    var buffer: [4096]u8 = undefined;
+    var page = std.Io.Writer.fixed(&buffer);
+    try activity_reply.writePage(&page, &facts);
+    _ = try self.update();
+    try Host.respond(&listener, "/v1/activity-page", "application/json", page.buffered());
+    try Host.respond(&listener, "/v1/activity-content", "application/octet-stream", person);
+    try Host.respond(&listener, "/v1/activity-content", "application/octet-stream", answer);
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), self, Host.complete);
+    try self.settleReader();
+    self.poll_at = std.math.maxInt(i96);
+    try std.testing.expectEqual(@as(usize, 2), self.job.result.row_count);
+    const person_row = self.job.result.rows[0];
+    const answer_row = self.job.result.rows[1];
+    try std.testing.expect(person_row.length < feed_window.row_capacity);
+    try std.testing.expectEqual(person_row.length, answer_row.offset);
+    try std.testing.expectEqual(@as(usize, 1), person_row.collapsed_count);
+    try std.testing.expectEqualDeep(person_reference, person_row.collapsed_targets[0].content);
+    try std.testing.expectEqual(@as(u64, 1), person_row.collapsed_targets[0].position);
+    try std.testing.expectEqual(@as(u64, 2), answer_row.key.position);
+    try std.testing.expectEqual(@as(usize, 2), held.screen.feed.count);
+    try std.testing.expect(held.screen.feed.at_start and held.screen.feed.at_end);
+    for ([_]vxfw.MaxSize{ .{ .width = 80, .height = 24 }, .{ .width = 30, .height = 12 } }) |size| {
+        held.size = size;
+        const frame = try held.shown();
+        errdefer std.debug.print("huge person and short answer frame:\n{s}\n", .{frame});
+        try std.testing.expect(held.screen.anchor.following());
+        var rows = std.mem.splitScalar(u8, frame, '\n');
+        var answer_line: ?usize = null;
+        var row: usize = 0;
+        while (rows.next()) |line| : (row += 1) {
+            if (std.mem.eql(u8, std.mem.trimEnd(u8, line, " "), answer)) answer_line = row;
+        }
+        try std.testing.expectEqual(@as(?usize, held.screen.height - 1), answer_line);
+        try std.testing.expect(std.mem.indexOf(u8, frame, "› ") != null);
+    }
+}
+
+test "SessionFrontend summary bounds keep Ctrl-O and clicks exact across sixteen and five hundred twelve targets" {
+    const Domain = struct {
+        const line_length = "┄ item 00\n".len;
+        fn target(key: u64, index: usize) View.Collapsed {
+            return .{ .source = if (index % 2 == 0) .activity else .conversation, .position = key * 1000 + index, .ordinal = index, .content = .{ .length = 100 + index, .digest = @splat(@intCast(index)) }, .row = index % 2 != 0 };
+        }
+        fn page(fixture: FeedFixture, key: u64, aggregate: bool) !void {
+            const frontend = &fixture.held.self;
+            errdefer std.debug.print("boundary page {d} failed; rows {d}, targets {d}\n", .{ key, frontend.screen.feed.count, frontend.screen.feed.target_count });
+            const read: feed_reads.Read = if (key == 1) .opening else .scan;
+            if (read == .opening) frontend.reading.opening = true;
+            const job = frontend.freeze(.activity);
+            frontend.reading.feed_read = read;
+            job.feed_page = FeedPolicy.request(read, frontend.feedState());
+            var bytes: [2048]u8 = undefined;
+            var out = std.Io.Writer.fixed(&bytes);
+            for (0..16) |index| try out.print(View.Mark.summary ++ "┄ item {d:0>2}" ++ View.Mark.reset ++ "\n", .{index});
+            if (aggregate) try out.writeAll(View.Mark.summary ++ "┄ 9 more summaries" ++ View.Mark.reset ++ "\n");
+            try fixture.file.writePositionalAll(std.testing.io, out.buffered(), 0);
+            job.result.row_count = 1;
+            job.result.rows[0] = .{ .key = .{ .position = key }, .offset = 0, .length = out.end, .tight = false, .provisional = false, .collapsed_count = 16 };
+            for (job.result.rows[0].collapsed_targets[0..16], 0..) |*item, index| item.* = target(key, index);
+            job.result.at_start = read == .opening;
+            job.result.at_end = true;
+            job.result.low = .{ .position = key };
+            job.result.high = .{ .position = key, .ordinal = std.math.maxInt(u64) };
+            job.result.cursor = .{ .position = key };
+            job.result.new_rows = 1;
+            try frontend.launch(job, struct {
+                fn complete(_: *anyopaque, _: *Task) !void {}
+            }.complete);
+            try frontend.settleReader();
+        }
+        fn ctrlO(held: *HeldFrontend, expected: ?View.Collapsed) !void {
+            held.self.dropMessageRequest();
+            _ = try held.draw();
+            try held.keys("\x0f");
+            try held.settle();
+            errdefer std.debug.print("boundary Ctrl-O expected {any}, got {s}\n{s}\n", .{ expected, @tagName(held.self.expansion.queued), held.shown() catch "frame unavailable" });
+            if (expected) |value| {
+                try std.testing.expect(held.self.expansion.queued == .ready);
+                try std.testing.expectEqualDeep(value, held.self.expansion.queued.ready.target);
+            } else try std.testing.expect(held.self.expansion.queued == .none);
+            held.self.dropMessageRequest();
+        }
+        fn click(held: *HeldFrontend, key: u64, index: usize, expected: ?View.Collapsed) !void {
+            held.self.dropMessageRequest();
+            var ctx = held.context();
+            // The feed's real click callback resolves this keyed byte position;
+            // the test does not inject an expansion target or count from end.
+            try appClick(&held.self, &ctx, .{ .key = .{ .position = key }, .offset = index * line_length });
+            errdefer std.debug.print("boundary click key {d} summary {d}, expected {any}, got {s}\n", .{ key, index, expected, @tagName(held.self.expansion.queued) });
+            if (expected) |value| {
+                try std.testing.expect(held.self.expansion.queued == .ready);
+                try std.testing.expectEqualDeep(value, held.self.expansion.queued.ready.target);
+            } else try std.testing.expect(held.self.expansion.queued == .none);
+            held.self.dropMessageRequest();
+        }
+    };
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const held = fixture.held;
+    for (1..33) |key| try Domain.page(fixture, key, false);
+    try std.testing.expectEqual(@as(usize, 32), held.screen.feed.count);
+    try std.testing.expectEqual(@as(usize, 512), held.screen.feed.target_count);
+    try Domain.ctrlO(held, Domain.target(32, 15));
+    try Domain.click(held, 32, 0, Domain.target(32, 0));
+    try Domain.click(held, 32, 15, Domain.target(32, 15));
+    // The 513th target reaches Window's actual atomic capacity refusal and
+    // frontend trim/retry, rather than losing a target after text admission.
+    try Domain.page(fixture, 33, false);
+    try std.testing.expect(held.screen.feed.count < 33);
+    try std.testing.expect(held.screen.feed.target_count <= 512);
+    try std.testing.expect(held.screen.feed.indexOf(.{ .position = 33 }) != null);
+    try std.testing.expect(held.screen.feed.messageAt(.{ .key = .{ .position = 1 }, .offset = 0 }) == null);
+    try Domain.click(held, 1, 0, null);
+    try Domain.ctrlO(held, Domain.target(33, 15));
+    try Domain.click(held, 33, 0, Domain.target(33, 0));
+    try Domain.click(held, 33, 15, Domain.target(33, 15));
+    // Sixteen exact actionables followed by the reader's one aggregate: its
+    // visible unkeyed mark blocks both Ctrl-O fallback and per-Message clicks.
+    try Domain.page(fixture, 34, true);
+    try Domain.ctrlO(held, null);
+    try Domain.click(held, 34, 16, null);
+    try Domain.click(held, 34, 0, Domain.target(34, 0));
+    try Domain.click(held, 34, 15, Domain.target(34, 15));
+    try std.testing.expect(held.screen.anchor.following());
 }

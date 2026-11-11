@@ -1,5 +1,5 @@
 //! Rui's resident feed text. Feed owns the anchor; this owner owns text,
-//! page-edge facts and the bounded set of opened tools. No reader is wired yet.
+//! page-edge facts and the bounded set of opened tools.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const unicode = @import("terminal_unicode");
@@ -39,20 +39,19 @@ pub const Entry = struct {
     text: Text,
     tight: bool = false,
     provisional: bool = false,
-    message: ?View.Collapsed = null,
     messages: []const MessageTarget = &.{},
 };
 
+/// One row's bound, applied twice for two reasons: the reader bounds the
+/// bytes it renders (session_reads.RowCapture, which keeps the Ctrl-O target),
+/// and the window bounds the prepared text, which display escaping can grow.
 pub const row_capacity = 32 * 1024;
 pub const entry_capacity = 512;
-// Account for styles AND worst-case one u32 per byte of newline-only text,
-// plus the entry and layout tables, within the old styled Document's footprint.
-// 65 KiB of text leaves room for bounded keyed Message metadata within the
-// existing styled Document footprint. At 80 columns this holds >800 typical
-// text rows, and 512 one-line entries hold
-// >three 140x40 screens even when every neighbour is tight. These independent
-// caps prevent a large row or many tiny entries from causing load/evict ping-pong.
-// No finite byte budget promises three screens at arbitrary terminal sizes.
+// Text, styles, one u32 per byte for newline-only text and the entry, layout
+// and target tables together fit the old styled Document's footprint. Two
+// full rows fit, and 512 one-line entries cover more than three 140x40
+// screens, so neither a large row nor many tiny ones makes loading and
+// eviction ping-pong.
 pub const byte_capacity = 65 * 1024;
 // Remember the latest 64 opened keys, including evicted entries; oldest-opened
 // is forgotten when full. Lookup does not mutate order. Closing releases a slot.
@@ -122,7 +121,6 @@ pub const Window = struct {
         length: usize,
         tight: bool,
         provisional: bool,
-        message: ?View.Collapsed,
     };
 
     document: Document = .{ .dirty = false, .sidenotes = true, .quotes = true },
@@ -192,7 +190,7 @@ pub const Window = struct {
     pub fn replace(self: *Window, key: Key, new_text: Text) Error!void {
         const index = self.indexOf(key) orelse unreachable;
         const old = self.entries[index];
-        try self.splice(index, 1, &.{.{ .key = key, .text = new_text, .tight = old.tight, .provisional = old.provisional, .message = old.message }});
+        try self.splice(index, 1, &.{.{ .key = key, .text = new_text, .tight = old.tight, .provisional = old.provisional }});
     }
 
     /// Forward reads restart at the first provisional row. The replacement may
@@ -319,10 +317,6 @@ pub const Window = struct {
         for (self.targets[0..self.target_count]) |target| {
             if (target.point.key.order(point.key) == .eq and entry.offset + target.point.offset == mark)
                 return target.target;
-        }
-        // The singular compatibility field belongs only to the last summary.
-        if (entry.message) |message| {
-            if (self.document.collapsed(entry.offset, entry.offset + entry.length).last == mark) return message;
         }
         return null;
     }
@@ -451,7 +445,7 @@ pub const Window = struct {
         const hidden_bytes = bytes[head..];
         const hidden = std.mem.count(u8, hidden_bytes, "\n") + @intFromBool(hidden_bytes.len != 0 and hidden_bytes[hidden_bytes.len - 1] != '\n');
         var result: Plan = .{ .head = head, .length = undefined };
-        const marker = std.fmt.bufPrint(&result.marker, "{s}┄ {d} more lines\n", .{ if (head != 0 and bytes[head - 1] == '\n') "" else "\n", hidden }) catch unreachable;
+        const marker = std.fmt.bufPrint(&result.marker, "{s}┄ {d} more line{s}\n", .{ if (head != 0 and bytes[head - 1] == '\n') "" else "\n", hidden, if (hidden == 1) "" else "s" }) catch unreachable;
         result.marker_length = marker.len;
         result.length = head + marker.len;
         return result;
@@ -478,6 +472,21 @@ pub const Window = struct {
         }
         const length = self.document.length - (old_end - old_start) + added;
         if (length > byte_capacity) return error.WindowFull;
+        // Text and all its actionable targets share this capacity decision.
+        // Reject before mutating, just as for byte/entry capacity; callers may
+        // trim and retry the complete entry instead of orphaning its summaries.
+        var targets_needed: usize = 0;
+        for (self.targets[0..self.target_count]) |target| {
+            const index = self.indexOf(target.point.key) orelse continue;
+            if (index < first or index >= first + remove) targets_needed += 1;
+        }
+        for (incoming) |entry| {
+            const p = entryPlan(entry);
+            for (entry.messages) |target| {
+                if (target.offset < p.head) targets_needed += 1;
+            }
+        }
+        if (targets_needed > self.targets.len) return error.WindowFull;
         var kept_targets: usize = 0;
         for (self.targets[0..self.target_count]) |target| {
             const index = self.indexOf(target.point.key) orelse continue;
@@ -519,14 +528,11 @@ pub const Window = struct {
                 const last = offset + p.length - 1;
                 self.document.styles[last] = viewport.seamStyle(self.document.styles[last]);
             }
-            // The singular shorthand is valid only for one complete summary.
-            // A capped/multi-summary row must use explicit paired targets.
-            const message = if (entry.messages.len == 0 and p.marker_length == 0) entry.message else null;
-            self.entries[first + i] = .{ .key = entry.key, .offset = offset, .length = p.length, .tight = entry.tight, .provisional = entry.provisional, .message = message };
+            self.entries[first + i] = .{ .key = entry.key, .offset = offset, .length = p.length, .tight = entry.tight, .provisional = entry.provisional };
             for (entry.messages) |target| {
-                // Oversized rows are capped; do not retain targets in omitted
-                // text. Capacity refusal loses a target, never mispairs one.
-                if (target.offset >= p.head or self.target_count == self.targets.len) continue;
+                // Oversized rows are capped; targets in omitted text disappear
+                // with their summaries. Capacity was checked before mutation.
+                if (target.offset >= p.head) continue;
                 self.targets[self.target_count] = .{ .point = .{ .key = entry.key, .offset = target.offset }, .target = target.target };
                 self.target_count += 1;
             }
@@ -534,9 +540,6 @@ pub const Window = struct {
         }
         self.document.length = length;
         self.count = count;
-        for (self.entries[first .. first + incoming.len]) |*entry| {
-            if (entry.message != null and self.document.collapsed(entry.offset, entry.offset + entry.length).count != 1) entry.message = null;
-        }
     }
 };
 
@@ -631,7 +634,7 @@ test "feed_window caps oversized rows at their head and counts omitted lines" {
     try testing.expect(head.bytes.len <= row_capacity);
     try testing.expect(std.unicode.utf8ValidateSlice(head.bytes));
     try testing.expect(std.mem.startsWith(u8, head.bytes, "界界"));
-    try testing.expect(std.mem.endsWith(u8, head.bytes, "\n┄ 1 more lines\n"));
+    try testing.expect(std.mem.endsWith(u8, head.bytes, "\n┄ 1 more line\n"));
 }
 
 test "feed_window open keys survive trimming either edge and reloading" {
@@ -956,4 +959,58 @@ test "feed_window invisible provisional keys own replay without adding rows or a
     window.trim(0, 1);
     try testing.expect(!window.forward_partial);
     try testing.expectEqual(@as(usize, 1), window.count);
+}
+
+test "feed_window target capacity admits whole entries atomically across trim reload and replacement" {
+    const window = try testing.allocator.create(Window);
+    defer testing.allocator.destroy(window);
+    window.* = .{};
+    var prepared: viewport.Sized(1024, true) = .{};
+    var targets: [16]MessageTarget = undefined;
+    const reference: View.Collapsed = .{ .source = .activity, .position = 1, .ordinal = 0, .content = .{ .length = 99, .digest = @splat(7) }, .row = false };
+    for (&targets, 0..) |*target, index| {
+        target.* = .{ .offset = index * "┄\n".len, .target = reference };
+        try prepared.append(View.Mark.summary ++ "┄" ++ View.Mark.reset ++ "\n");
+    }
+    try prepared.prepare();
+    for (0..32) |index| {
+        for (&targets, 0..) |*target, ordinal| {
+            target.target.position = 1000 + index * targets.len + ordinal;
+            target.target.ordinal = ordinal;
+        }
+        try window.append(&.{.{ .key = .{ .position = index + 1 }, .text = Text.fromDocument(&prepared), .messages = &targets }});
+    }
+    try testing.expectEqual(@as(usize, 512), window.target_count);
+    const length = window.document.length;
+    const last = window.messageAt(.{ .key = .{ .position = 32 }, .offset = targets[15].offset }).?;
+    try testing.expectEqual(@as(u64, 1511), last.position);
+    const next: Entry = .{ .key = .{ .position = 33 }, .text = Text.fromDocument(&prepared), .messages = &targets, .provisional = true };
+    try testing.expectError(error.WindowFull, window.append(&.{next}));
+    try testing.expectError(error.WindowFull, window.prepend(&.{.{ .key = .{ .position = 0 }, .text = Text.fromDocument(&prepared), .messages = &targets }}));
+    try testing.expectEqual(@as(usize, 32), window.count);
+    try testing.expectEqual(length, window.document.length);
+    try testing.expectEqual(@as(usize, 512), window.target_count);
+    try testing.expectEqualDeep(last, window.messageAt(.{ .key = .{ .position = 32 }, .offset = targets[15].offset }).?);
+    // Release exactly one entry's targets, then reload another complete entry.
+    window.trim(1, 0);
+    try testing.expect(window.messageAt(.{ .key = .{ .position = 1 }, .offset = 0 }) == null);
+    try testing.expectEqual(@as(usize, 496), window.target_count);
+    try window.append(&.{next});
+    try testing.expectEqual(@as(usize, 512), window.target_count);
+    // Failed suffix replacement also leaves the old text/targets provisional.
+    const before_replacement = window.document.length;
+    try testing.expectError(error.WindowFull, window.replaceFrom(next.key, &.{ next, .{ .key = .{ .position = 34 }, .text = Text.fromDocument(&prepared), .messages = &targets } }));
+    try testing.expectEqual(before_replacement, window.document.length);
+    try testing.expectEqualDeep(@as(?Key, next.key), window.firstProvisional());
+    try testing.expectEqual(@as(usize, 512), window.target_count);
+    // Replacing a provisional suffix reuses its old budget, not a second one.
+    targets[0].target.position = 9000;
+    try window.replaceFrom(next.key, &.{.{ .key = next.key, .text = Text.fromDocument(&prepared), .messages = &targets }});
+    try testing.expectEqual(@as(usize, 512), window.target_count);
+    try testing.expectEqual(@as(u64, 9000), window.messageAt(.{ .key = next.key, .offset = 0 }).?.position);
+    window.trim(0, 1);
+    try testing.expect(window.messageAt(.{ .key = next.key, .offset = 0 }) == null);
+    try window.prepend(&.{.{ .key = .{ .position = 1 }, .text = Text.fromDocument(&prepared), .messages = &targets }});
+    try testing.expectEqual(@as(usize, 512), window.target_count);
+    try testing.expectEqual(@as(u64, 9000), window.messageAt(.{ .key = .{ .position = 1 }, .offset = 0 }).?.position);
 }

@@ -106,7 +106,10 @@ pub fn openable(self: *Self, gpa: std.mem.Allocator) !?Openable {
                 if (peer.len == 6) return .{ .session = peer[0..6].* };
             }
             const mark = self.window.document.collapsed(offset, offset + cells[column].char.grapheme.len).last orelse continue;
-            if (self.window.messageAt(self.window.pointAt(mark) orelse continue)) |target| return .{ .message = target };
+            // A final aggregate is a deliberate, unkeyed summary. Do not
+            // fall through to an earlier Message when that is the lowest mark.
+            const target = self.window.messageAt(self.window.pointAt(mark) orelse continue) orelse return null;
+            return .{ .message = target };
         }
     }
     return null;
@@ -673,4 +676,31 @@ test "FeedView retry click accepts left and legacy no-button release only" {
         try std.testing.expectEqual(@as(usize, @intFromBool(button == .left or button == .none)), clicks.count);
         try std.testing.expect(view.retry_press == null);
     }
+}
+
+test "FeedView terminal aggregate blocks Ctrl-O and clicks without opening earlier Messages" {
+    const window = try testWindow();
+    defer std.testing.allocator.destroy(window);
+    var prepared: viewport.Sized(1024, true) = .{};
+    try prepared.append(View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ 4 more summaries" ++ View.Mark.reset ++ "\n");
+    try prepared.prepare();
+    const aggregate = prepared.collapsed(0, prepared.length).last.?;
+    const target: View.Collapsed = .{ .source = .activity, .position = 44, .ordinal = 3, .content = .{ .length = 10, .digest = @splat(2) }, .row = false };
+    try window.append(&.{.{ .key = .{ .position = 50 }, .text = resident.Text.fromDocument(&prepared), .messages = &.{.{ .offset = 0, .target = target }} }});
+    var anchor: Feed = .{};
+    var view: Self = .{ .window = window, .anchor = &anchor };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    _ = try testFrame(&view, arena.allocator(), 30, 2);
+    try std.testing.expect((try view.openable(arena.allocator())) == null);
+    try std.testing.expect(view.messageAt(.{ .key = .{ .position = 50 }, .offset = aggregate }) == null);
+    try std.testing.expectEqualDeep(target, view.messageAt(.{ .key = .{ .position = 50 }, .offset = 0 }).?);
+    // The same rule holds if only the aggregate fits in the painted frame.
+    _ = try testFrame(&view, arena.allocator(), 30, 1);
+    try std.testing.expect((try view.openable(arena.allocator())) == null);
+    window.trim(1, 0);
+    try window.append(&.{.{ .key = .{ .position = 50 }, .text = resident.Text.fromDocument(&prepared), .messages = &.{.{ .offset = 0, .target = target }} }});
+    _ = try testFrame(&view, arena.allocator(), 30, 2);
+    try std.testing.expect((try view.openable(arena.allocator())) == null);
+    try std.testing.expect(view.messageAt(.{ .key = .{ .position = 50 }, .offset = aggregate }) == null);
 }

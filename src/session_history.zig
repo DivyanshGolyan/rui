@@ -39,8 +39,8 @@ pub const Prepared = struct {
                 if (item.kind == .user) {
                     // Its line count is unknown without reading it.
                     try View.userPrefix(sink, colour, item.admitted_at.?);
-                    try View.noteCollapsed(sink, collapsed(item));
-                    try sink.feed(View.Mark.summary ++ "┄" ++ View.Mark.reset ++ "\n  " ++ View.Mark.summary);
+                    try View.writeCollapsed(sink, collapsed(item), View.Mark.summary ++ "┄" ++ View.Mark.reset);
+                    try sink.feed("\n  " ++ View.Mark.summary);
                 } else {
                     try sink.feed("\n");
                     try sink.feed(try std.fmt.bufPrint(&buffer, "Rui: Historical item omitted: position {d}, ordinal {d}, {d} raw bytes.\n", .{ item.position, item.ordinal, item.content.bytes }));
@@ -94,7 +94,7 @@ pub const Prepared = struct {
                     var body: View.UserBody(@TypeOf(sink)) = undefined;
                     try body.init(sink, item.content.bytes, true);
                     try staged.read(&body);
-                    if (try body.finish()) try View.noteCollapsed(sink, collapsed(item));
+                    try body.finishMessage(collapsed(item));
                 },
                 .assistant => {
                     try sink.feed("\n");
@@ -231,7 +231,8 @@ test "historical export preserves hex Store escaping and canonical Session IDs" 
             @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
             self.length += bytes.len;
         }
-        pub fn collapsed(self: *@This(), value: View.Collapsed) !void {
+        pub fn collapsedSummary(self: *@This(), value: View.Collapsed, bytes: []const u8) !void {
+            try self.feed(bytes);
             try std.testing.expect(value.source == .conversation and value.row);
             self.positions[self.notes] = value.position;
             self.notes += 1;

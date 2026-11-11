@@ -2729,7 +2729,7 @@ Explicit `request read-result` reads the Message's saved answer after completion
 Guidance preserves its exact handle and selectors.
 A current unresolved original takes precedence over that accepted fallback.
 Joined read borrowers transfer structured HTTP status, type and code into one bounded frontend owner, independent of worker reuse.
-Recoverable history/details preparation presents terminal-safe diagnostics through ordinary transcript output without losing the draft or older cursor.
+Recoverable fill/details preparation presents terminal-safe diagnostics without losing the draft or advancing the failed edge.
 The frontend retains the diagnostic until successful presentation; fatal fallback runs only after quiescence.
 Read errors grant no admission or absence certainty.
 Optional stderr diagnostics are bounded and nonblocking; reporting failure never replaces restoration or the original error.
@@ -2797,10 +2797,14 @@ Esc, Ctrl-G, clicking the `↓` chip and sending a Message return to `end`, or t
 At the end, Esc or Ctrl-G returns to the overview when nothing would be lost or dismissed: no pending Action, sub-view or running command, and no original still unsaved; a draft keeps the conversation open, and the status line says to clear it first.
 Sending also invalidates a page requested before it.
 
-`feed_reads.nextRead` fairly schedules scans and fills through one reader.
+`feed_reads.nextRead` schedules opening, due scans, pending permission and then eligible fills through one reader.
+A failed historical fill blocks only its captured edge until a user scroll toward that edge or a changed loading demand rearms it; scans and permission reads remain eligible.
+A press or drag selection holds fills, not live scans or permission.
 Opening reads backward with all kinds for live facts, paints at once bottom-aligned, then fills with filtered pages of 16 visible rows toward a three-screen margin above and below.
 A fill applies only while its starting edge still matches; a stale result cannot move the window.
-The live scan owns its own cursor and work, call and queued facts, independently of the window's high edge.
+The live scan owns its cycle progress and work, call and queued facts, independently of the window's high edge.
+A frozen, paginated scan cycle keeps its initial novelty watermark until exhaustion; advancing its page cursor cannot count already-seen replay rows as arrivals.
+The window alone owns the first provisional replay boundary.
 Exactly one forward-attach owner appends scan rows when the window high edge equals the scan's starting cursor; otherwise the scan only counts new rows.
 Settled rows render identically in either direction and across page splits; provisional Message rows may use current page facts, and each forward read replaces the suffix from its first provisional row.
 Applied Messages show at their user row; excluded Messages show at the stop, not their Admission; waiting Messages follow the page's admission and queue facts.
@@ -2810,6 +2814,9 @@ Jumping to an end whose high edge was evicted starts a fresh opening read and ke
 
 The window stays within the former 256-KiB text ceiling, with separate entry-count and per-row caps; it trims the side farther from the view and reloads those rows on demand.
 The three-screen margin is a loading target, not an unbounded promise at arbitrary terminal dimensions.
+Each oversized row retains a bounded head, not its tail; its complete saved source remains available through its exact Message target.
+Summary text and targets share one retention decision: each reader row admits at most 16 pairs, with omitted items represented by one final non-actionable aggregate.
+The window admits a complete row with all its targets or rejects it for normal trim-and-retry at its 512-target bound; it never silently drops a visible summary's target.
 Tool open state belongs to the window's bounded set of row keys and survives trim and reload while its key remains held.
 Inspection, Action and Message pages remain separate bounded documents.
 Ctrl-O opens the lowest collapsed Message the latest frame drew in the feed, as a Message page: it is read from the Store and shows only if its length and digest match.
@@ -2988,7 +2995,7 @@ Current is read for `/status` and for the Session line: on opening, and again wh
 Every input of the estimate (accepted output and usage, Tool Results, queued and admitted Messages, stops, compactions) takes a Session position and every settings change a revision, so the line follows each of them without reading Current on reads where nothing changed.
 A page delivered after a later change, such as another client's decision, still applies whole, and the next page supersedes it; a decision sent from its prompt for an already decided Action is refused by the Store.
 Accepted: decisions bind to the exact Action shown, so a stale prompt can only produce a rejected decision (`action_not_pending`), never one retargeted to another Action.
-An older transcript page applies only to the transcript it was loaded for.
+A historical fill applies only at its captured window edge; a stale fill never changes the current rows.
 The status bar never says `Sent`: an accepted Message's own row, or its waiting row, is its feedback (TUI rework plan, "drop Sent").
 The Store assigns admission IDs in Session position order, so a page that ends before it, or one read before a later Message's acceptance, does not clear it, and a page delivered before its acceptance joined does.
 

@@ -59,20 +59,14 @@ def native(name):
 # Exact anchors intentionally fail closed when the protection changes. Add or
 # revise a mutation alongside its maintained owning test, not a copied oracle.
 MUTATIONS = (
-    # 11f02d17 moved transcript Marks from SessionFrontend to session_reads,
-    # and they now live in the session_transcript core.
-    Mutation("mark-collision", "latest read replaces a same-offset boundary", "f15c2b57",
-             "src/session_transcript.zig",
-             "self.items[self.count - 1] = mark;", "// Keep the stale mark.",
-             logic("a transcript joins at the first retained boundary or shows the gap after the newest evicted one")),
-    Mutation("mark-eviction-edge", "a boundary exactly at retained origin is usable", "4d5cf8ba",
-             "src/session_transcript.zig", "if (mark.offset >= front) return .{ .joined = mark };",
-             "if (mark.offset > front) return .{ .joined = mark };",
-             logic("a transcript joins at the first retained boundary or shows the gap after the newest evicted one")),
-    Mutation("conversation-cursor", "Admission rows are not Conversation cursors", "a68b4c76",
-             "src/session_reads.zig", "return if (first.position > 1) .{ .end = first.position - 1 } else null;",
-             "return .{ .end = first.position };",
-             native("a live page's beginning precedes its first item, without repeating or skipping one")),
+    # Retired mark-collision and mark-eviction-edge: session_transcript's
+    # byte-offset Marks no longer exist. Replacing a same-offset seam mark and
+    # accepting a mark exactly at the retained byte origin have no keyed-feed
+    # equivalent; keyed suffix replacement and trimming are not those rules.
+    Mutation("conversation-cursor", "inclusive Activity replay starts before its ordinal-zero row", "a68b4c76",
+             "src/session_reads.zig", "cursor.position = from.position -| 1;",
+             "cursor.position = from.position;",
+             native("session_reads policy cursor is inclusive only for a fresh provisional replay")),
     Mutation("loan-cursor-owner", "releasing submission cannot erase next draft or caret", "1566667d",
              "src/SessionInput.zig",
              "self.editors[submitted.bank] = self.empty(submitted.bank);",
@@ -81,25 +75,30 @@ MUTATIONS = (
     Mutation("stale-details", "a delayed details page cannot cover a later Message", "67f80e38",
              "src/session_reading.zig", "return asked_sent == sent;", "return true or asked_sent == sent;",
              logic("a /details page shows only before the next send")),
-    Mutation("stale-transcript", "a delayed history page belongs to its transcript generation", "4d5cf8ba",
-             "src/SessionFrontend.zig", "self.job.transcript == self.transcript.id", "true",
-             native("a history page read for an earlier transcript never joins the current one")),
+    # Edge attachment now owns rejection of delayed older pages; transcript
+    # generations disappeared with the byte-offset transcript.
+    Mutation("stale-transcript", "a delayed older fill attaches only at its unchanged low edge", "4d5cf8ba",
+             "src/feed_reads.zig", ".fill_above => std.meta.eql(started_from, edge_now),",
+             ".fill_above => true or std.meta.eql(started_from, edge_now),",
+             logic("feed_reads policy: opening, fair fills, stale edges, live scan, jump and provisional replay")),
     Mutation("send-generation", "sending invalidates already running details work", "67f80e38",
              "src/SessionFrontend.zig", "self.admission.sent += 1;", "self.admission.sent += 0;",
              native("a details page read before a Message was sent never covers it")),
-    Mutation("send-queued-history", "sending discards a queued older-page request", "5bb24efe",
+    # Older conversation pages are derived from Feed.need, not queued panels.
+    # Keep the queued-inspection intent at its retained /details request owner.
+    Mutation("send-queued-history", "sending discards a queued details inspection request", "5bb24efe",
              "src/SessionFrontend.zig",
-             "self.inspection.status_requested = false;\n    self.transcript.history_requested = null;\n    self.dropMessageRequest();",
-             "self.inspection.status_requested = false;\n    self.dropMessageRequest();",
-             native("sending a Message drops an older-page read still waiting to start")),
+             "self.details_requested = false;\n    self.dropMessageRequest();",
+             "self.dropMessageRequest();",
+             native("sending a Message drops a details read still waiting to start")),
     Mutation("send-queued-status", "sending discards a queued status-page request", "67f80e38",
              "src/SessionFrontend.zig",
-             "self.inspection.status_requested = false;\n    self.transcript.history_requested = null;\n    self.dropMessageRequest();",
-             "self.transcript.history_requested = null;\n    self.dropMessageRequest();",
+             "self.inspection.status_requested = false;\n    self.details_requested = false;",
+             "self.details_requested = false;",
              native("sending a Message drops a /status read still waiting to start")),
     Mutation("send-latest-view", "sending leaves a frozen inspection for latest conversation", "67f80e38",
              "src/SessionFrontend.zig",
-             "self.dropMessageRequest();\n    try self.screen.latest();\n}",
+             "self.dropMessageRequest();\n    try self.jumpToEnd();\n}",
              "self.dropMessageRequest();\n}",
              native("sending a Message from a browsed page returns the screen to the latest conversation")),
     # 1f52ba94 split the paused draft: typing beside a shown Action is its reason.

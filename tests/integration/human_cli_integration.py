@@ -836,7 +836,7 @@ def persistent_copy_case():
             terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
             saved = here / name
             assert saved.read_bytes() == answer.encode() and saved.stat().st_mode & 0o777 == 0o600, saved
-            terminal_step(master, "Large request", "Large done.", composer=True)
+            terminal_step(master, "Large request", "More — Ctrl-O for whole message", composer=True)
             before = len(capture.clipboard)
             terminal_step(master, "/copy", "Too large for the clipboard · /copy file", composer=True)
             assert len(capture.clipboard) == before, "an answer over the limit is never sent"
