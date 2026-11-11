@@ -3617,11 +3617,14 @@ Scratch and diagnostics live in
 `runtimeDir`.
 Requests use the persistent `store_meta.store_id` (32 lowercase
 hex characters), never the URL or runtime path. This durable id survives a
-restore to a differently named database. MySQL ignores the legacy
-`store_selector` row whether present, missing or mismatched; it neither
-validates nor repairs that obsolete selector. A malformed saved id is refused
-before any write. SQLite still validates its saved id and canonical directory
-selector.
+restore to a differently named database, but canonical identity is validated
+separately: MySQL requires a saved `store_selector` to match the selector passed
+at admission (the database name for a launched Host). A mismatch or malformed
+saved id refuses startup before any write. A missing selector is repaired
+atomically with ownership acquisition without changing an existing durable id.
+Restoring under another database name therefore requires explicitly updating
+the saved selector to that name; the durable id remains unchanged. SQLite still
+validates its saved id and canonical directory selector.
 An initial MySQL
 `host_info` probe may send an empty `store` to discover that id; every other
 request must match it.
