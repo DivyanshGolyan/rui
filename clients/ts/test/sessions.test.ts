@@ -217,3 +217,29 @@ test("archive lists, explicit restore, replay and new Message restoration preser
 		await rui.close();
 	}
 });
+
+test("create parent inherits binding and refuses widening as field-specific request errors", { skip }, async () => {
+	const rui = await connect();
+	try {
+		await rui.pause();
+		const parent = await rui.sessions.create(spec, { idempotencyKey: "parent:root" });
+		const childSpec = { parent: parent.id, model: spec.model, effort: spec.effort, compactAt: spec.compactAt, tools: ["bash"], permissionMode: "ask" as const };
+		const child = await rui.sessions.create(childSpec, { idempotencyKey: "parent:child" });
+		assert.equal((await child.status()).parent, parent.id);
+		assert.equal((await child.status()).pendingMessages, "0");
+		assert.ok((await rui.sessions.list()).some((session) => session.id === child.id && session.parent === parent.id));
+		assert.equal((await rui.sessions.create(childSpec, { idempotencyKey: "parent:child" })).id, child.id);
+		for (const [overrides, code] of [
+			[{ tools: ["web_search"] }, "tools_not_in_parent"],
+			[{ permissionMode: "bypass" as const }, "permission_mode_wider_than_parent"],
+			[{ provider: "openai" as const }, "parent_provider_forbidden"],
+			[{ workspace: tmpdir() }, "parent_workspace_forbidden"],
+			[{ parent: "zzzzzz" }, "unknown_session"],
+		] as const) {
+			await assert.rejects(rui.sessions.create({ ...childSpec, ...overrides }, { idempotencyKey: `parent:${code}` }),
+				(error: unknown) => error instanceof RuiRequestError && error.code === code);
+		}
+	} finally {
+		await rui.close();
+	}
+});

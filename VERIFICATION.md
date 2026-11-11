@@ -180,6 +180,7 @@ Both must pass.
 The execution partition overlaps native tests with its serial process fixtures; the unsplit gate remains serial.
 Their disjoint fixtures cover the full gate once; callers run Host-process, allocator, launch and Debug smoke cases serially after the parallel batch.
 [qualification.py](tests/ci/qualification.py) packs other Linux targets so a Selected run never exceeds ten shards.
+A long gate (`check`, `check-full`, `test`, `stack-frames`) runs alone, and beside one the short targets share three shards: they end inside the gate's run, so more shards would only repeat setup.
 Only draft and manually dispatched runs whose diff touches no strict path rerun a failed batch once and report both results; a pass after the rerun is a flake to fix.
 Ready PRs, promotions and the documentation lane never rerun, except a batch that failed only on [listed flakes](#listed-flakes).
 Qualification keeps one job per target. macOS packs native work into at most three workers: execution plus portable logic, callers, and remaining native targets.
@@ -886,3 +887,14 @@ Creation refusal tests cover both Configure and initial Message: a missing Works
 The adapter lifecycle test checks complete >10,000-byte CRLF/Unicode skill results in saved ordinary content and actual sealed provider input, metadata-only body edits, revision-one/authored-baseline preservation, idle nullable-Turn reports, frozen admitted Operations, serialized history prefixes, memo/cold reconstruction and real reopen after source deletion.
 Negative controls revert each boundary fix and must fail its owner assertion or actual Host custody boundary, not fixture setup.
 These are synthetic local evidence, not live provider, remote filesystem or power-loss qualification.
+
+### Parent creation (D178)
+
+Focused `configure parent` Store tests cover inherited Workspace/provider, no task,
+child reporting and ending delivery, every widening field, missing/archived parents,
+update refusal and idempotent replay. The Host test covers inherited in-memory Bash
+environment and replay/refusal isolation. The create path retains the ordinary
+four-round budget, including selected catalog facts; run these and the unchanged `start_agent`, Store entry-point
+round-budget and Current report dependency-depth tests on SQLite and live MySQL.
+Mutating the shared tool narrowing refusal must fail both creation and start_agent.
+`openapi` focused tests cover generated examples, including the create-only relation.

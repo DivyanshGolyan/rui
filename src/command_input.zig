@@ -182,12 +182,14 @@ fn ConfigurationOf(comptime Custody: type) type {
         reasoning_effort: OptionalBounded(16) = .{},
         /// Display text only: never model input, an address or a selector.
         label: OptionalBounded(max_label_bytes) = .{},
+        /// Creation relation, never a revisioned setting.
+        parent: OptionalBounded(6) = .{},
 
         comptime {
             const fields = @typeInfo(Configuration).@"struct";
-            if (fields.field_names.len != session_settings.entries.len)
+            if (fields.field_names.len != session_settings.spec_entries.len)
                 @compileError("Session settings table must cover Configuration exactly");
-            for (session_settings.entries, fields.field_names, fields.field_types) |entry, name, Field| {
+            for (session_settings.spec_entries, fields.field_names, fields.field_types) |entry, name, Field| {
                 if (!std.mem.eql(u8, entry.field, name))
                     @compileError("Session settings table must follow Configuration field order: " ++ name);
                 const Expected = switch (entry.kind) {
@@ -275,6 +277,10 @@ fn configureDigest(session: []const u8, configuration: anytype, require_model: b
                 hashSetting(&hash, entry, field);
             }
         }
+    }
+    if (configuration.parent.state != .omitted) {
+        hashField(&hash, "rui/core/configure/parent/v1");
+        hashOptional(&hash, &configuration.parent);
     }
     return hash.finalResult();
 }
