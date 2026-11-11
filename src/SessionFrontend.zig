@@ -2074,19 +2074,15 @@ fn startRetry(self: *Self) !void {
     const ending = self.retry_requested orelse return;
     self.retry_requested = null;
     if (!self.retryable() or !self.live.latest_ending.?.matches(ending)) return;
-    const job = self.freeze(.recall);
+    const job = self.freeze(.retry);
     job.retry = ending;
     try self.launch(job, reads.retry);
 }
 
-/// Join before inspecting scratch; errors follow the conversation's failure
-/// boundary, not recall's skip/fallback policy. A changed ending sends nothing.
+/// Applies only a successful retry result, after the shared reader owner has
+/// joined, preserved its diagnostic and classified cancellation or failure.
 fn finishRetry(self: *Self) !void {
-    try self.reader.join();
     const completion = self.job.retryCompletion(self.live.latest_ending);
-    self.job.retry = null;
-    self.reading.phase = .activity;
-    self.dirty = true;
     switch (completion) {
         .stale => {},
         .failure => |failure| self.notice = switch (failure) {
@@ -2578,12 +2574,18 @@ fn heldFailure(self: *const Self) ?@TypeOf(self.failure.?) {
 }
 
 fn settleReader(self: *Self) !void {
-    if (self.reader.thread != null and self.job.retry != null) return self.finishRetry();
     const end = self.joinReader();
+    const phase = self.reading.phase;
+    // All terminal outcomes release the retry read, including supersession.
+    // Keep its phase through policy/application; diagnostics retain their own.
+    defer if (phase == .retry and end != .absent) {
+        self.job.retry = null;
+        self.reading.phase = .activity;
+        self.dirty = true;
+    };
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
     // A fatal failure leaves command output for exit to print.
     if (end.failure(reader_policy.settleMode(self.upgradePhase() == .quiescing, self.input.queuedCommand() != null))) |err| return err;
-    const phase = self.reading.phase;
     const inspection = self.readInspection();
     if (end == .complete) switch (reader_policy.shows(phase, inspection)) {
         .message => {
@@ -2592,6 +2594,7 @@ fn settleReader(self: *Self) !void {
             if (reader_policy.messageShows(request.asked, self.pageAsked())) try self.screen.showMessage(self.init.io, self.files.inspection);
         },
         .recalled => try self.showRecalled(),
+        .retried => try self.finishRetry(),
         .staged => try self.showStaged(),
         .copy => try self.showCopy(),
         .page => if (phase != .details or reader_policy.detailsShows(self.admission.details_sent, self.admission.sent)) try self.showInspection(),
@@ -2787,6 +2790,7 @@ fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
         .details => "! Details unavailable; draft retained.",
         .inspection => if (self.inspection.kind == .copy) "! Copy unavailable; draft retained." else "! Inspection unavailable; draft retained.",
         .recall => "! Sent message unavailable; draft retained.",
+        .retry => "! Retry unavailable; nothing sent. Draft retained.",
         else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
     };
     try out.writeAll(summary);
@@ -5647,7 +5651,7 @@ fn stageRetryForTest(self: *Self, completion: reads.RetryCompletion) !void {
     };
     const ending = self.retry_requested.?;
     self.retry_requested = null;
-    const job = self.freeze(.recall);
+    const job = self.freeze(.retry);
     job.retry = ending;
     job.result.retry = switch (completion) {
         .message => |message| .{ .message = message },
@@ -5794,36 +5798,6 @@ test "failed reply retry gesture waits behind a reader and drops a superseded en
     try self.startRetry();
     try std.testing.expect(self.retry_requested == null and self.reader.thread == null);
     try std.testing.expect(self.submission.intent == null);
-}
-
-test "failed reply retry propagates transport cancellation and Store join errors" {
-    const Worker = struct {
-        fn transport(_: *anyopaque, _: *Task) !void {
-            return error.ConnectionResetByPeer;
-        }
-        fn cancelled(_: *anyopaque, _: *Task) !void {
-            return error.Cancelled;
-        }
-        fn store(_: *anyopaque, _: *Task) !void {
-            return error.CanonicalStoreFailure;
-        }
-    };
-    for ([_]struct { Task.Run, anyerror }{
-        .{ Worker.transport, error.ConnectionResetByPeer },
-        .{ Worker.cancelled, error.Cancelled },
-        .{ Worker.store, error.CanonicalStoreFailure },
-    }) |case| {
-        const held = try HeldFrontend.create();
-        defer held.destroy();
-        const self = &held.self;
-        self.failedRetryForTest();
-        const job = self.freeze(.recall);
-        job.retry = self.live.latest_ending.?.key;
-        try self.launch(job, case[0]);
-        while (!self.reader.completed()) std.Thread.yield() catch {};
-        try std.testing.expectError(case[1], self.settleReader());
-        try std.testing.expect(self.submission.intent == null);
-    }
 }
 
 test "SessionFrontend backward fill supplies the scan replay boundary through the production handoff" {
@@ -6172,4 +6146,178 @@ test "failed reply retry click revalidates the frontend predicate before schedul
     try content.handleEvent(&ctx, .{ .mouse = .{ .row = at.row, .col = at.col, .button = .left, .mods = .{}, .type = .release } });
     try std.testing.expect(self.retry_requested == null and self.reader.thread == null);
     try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+}
+
+const RetrySettlementWorker = struct {
+    fn cancelled(_: *anyopaque, task: *Task) !void {
+        try test_poll.waitUntil(task.io, test_poll.after(task.io, .fromSeconds(10)), &task.cancellation.stopped, test_poll.isSet);
+        return error.Cancelled;
+    }
+    fn transport(_: *anyopaque, _: *Task) !void {
+        return error.ConnectionResetByPeer;
+    }
+    fn host(_: *anyopaque, task: *Task) !void {
+        return diagnostic(task, "retry_busy");
+    }
+    fn store(_: *anyopaque, task: *Task) !void {
+        return diagnostic(task, "canonical_store_failure");
+    }
+    fn diagnostic(task: *Task, code: []const u8) !void {
+        var failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
+        try failure.diagnostic.type.set("busy\x1b\n");
+        try failure.diagnostic.code.set(code);
+        return task.requests().failRead(failure);
+    }
+    fn idle(_: *anyopaque, _: *Task) !void {}
+    fn completed(task: *Task) bool {
+        return task.completed();
+    }
+    fn settled(self: *Self) !bool {
+        _ = try self.update();
+        return self.reader.thread == null and self.input.queuedCommand() == null and !self.inspection.command_running;
+    }
+    fn requests(_: std.process.Init, _: client.Requests, _: []const u8, _: []const u8, out: *std.Io.Writer, _: *reads.SavedRequests) !void {
+        try out.writeAll("RETRY-REQUESTS-PAGE\n");
+    }
+};
+
+/// Freeze the real retry phase while substituting just the worker's I/O.
+fn launchRetrySettlementForTest(self: *Self, worker: Task.Run) !void {
+    const ending = self.retry_requested.?;
+    self.retry_requested = null;
+    const job = self.freeze(.retry);
+    job.retry = ending;
+    try self.launch(job, worker);
+}
+
+test "failed reply retry settlement lets queued inspections cancel the read and run without sending" {
+    const io = std.testing.io;
+    for ([_][]const u8{ "/help", "/requests" }) |command| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        const file = try held.tmp.dir.createFile(io, "inspection", .{ .read = true });
+        defer file.close(io);
+        self.files.inspection = file;
+        self.requests = RetrySettlementWorker.requests;
+        try seedFeed(held.screen, "× Model reply unreadable\n");
+        self.failedRetryForTest();
+        self.live.latest_ending.?.key = held.screen.feed.high.?;
+        try held.keys("\x12");
+        try self.launchRetrySettlementForTest(RetrySettlementWorker.cancelled);
+        try held.keys(command);
+        try held.keys("\rdraft éZ\x1b[D");
+        const before = self.input.snapshot();
+        try std.testing.expectEqualStrings(command, self.input.queuedCommand().?);
+        try std.testing.expect(!self.retryable());
+        // Drive update's actual cancel -> join -> next-command launch sequence.
+        try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), self, RetrySettlementWorker.settled);
+        try std.testing.expect(self.reader.thread == null and self.job.retry == null);
+        try std.testing.expect(self.leaving == null and held.left == null);
+        try std.testing.expect(self.submission.intent == null);
+        try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+        try std.testing.expectEqualDeep(before, self.input.snapshot());
+        try std.testing.expectEqual(@as(@TypeOf(self.screen.view), .inspection), self.screen.view);
+        try std.testing.expect(std.mem.indexOf(u8, self.screen.browsing.text(), if (std.mem.eql(u8, command, "/help")) "Marks" else "RETRY-REQUESTS-PAGE") != null);
+        try held.keys("\x07");
+        try std.testing.expect(self.retryable());
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "× Model reply unreadable · ctrl+r retries") != null);
+    }
+}
+
+test "failed reply retry settlement accepts upgrade cancellation and returns the tail after reobservation" {
+    const io = std.testing.io;
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try seedFeed(held.screen, "× Model reply unreadable\n");
+    self.failedRetryForTest();
+    self.live.latest_ending.?.key = held.screen.feed.high.?;
+    const ending = self.live.latest_ending;
+    try held.keys("draft éZ\x1b[D\x12");
+    const before = self.input.snapshot();
+    try self.launchRetrySettlementForTest(RetrySettlementWorker.cancelled);
+    held.upgrade = .{ .run = .checking };
+    try std.testing.expectEqual(Updated.waiting, try self.update());
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), self, RetrySettlementWorker.settled);
+    try std.testing.expectEqual(Updated.waiting, try self.update());
+    try std.testing.expect(self.reader.thread == null and self.job.retry == null);
+    try std.testing.expectEqual(ReadPhase.activity, self.reading.phase);
+    try std.testing.expect(self.submission.intent == null and self.leaving == null);
+    try std.testing.expect(!self.retryable());
+    try std.testing.expectEqualDeep(before, self.input.snapshot());
+    try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+    // Host work resumes only after the normal observation clears the stale hold.
+    held.upgrade = .{};
+    const job = self.freeze(.activity);
+    self.reading.feed_read = .scan;
+    job.result.latest_ending = ending;
+    try self.applyReader(.complete);
+    try std.testing.expect(self.retryable());
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "× Model reply unreadable · ctrl+r retries") != null);
+}
+
+test "failed reply retry settlement preserves fatal Host diagnostics across supersession and worker reset" {
+    const io = std.testing.io;
+    const Context = enum { active, inspection, upgrade };
+    for ([_]struct { Task.Run, anyerror, []const u8 }{
+        .{ RetrySettlementWorker.host, error.HostInvocationFailed, "retry_busy" },
+        .{ RetrySettlementWorker.store, error.CanonicalStoreFailure, "canonical_store_failure" },
+    }) |case| for (std.enums.values(Context)) |context| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        self.failedRetryForTest();
+        try held.keys("draft éZ\x1b[D\x12");
+        const before = self.input.snapshot();
+        try self.launchRetrySettlementForTest(case[0]);
+        switch (context) {
+            .active => {},
+            .inspection => self.input.queueCommand("/help"),
+            .upgrade => held.upgrade = .{ .run = .checking },
+        }
+        try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &self.reader, RetrySettlementWorker.completed);
+        try std.testing.expectError(case[1], self.settleReader());
+        try std.testing.expect(self.reader.read_failure == null);
+        const pending = self.reading.pending_diagnostic.?;
+        try std.testing.expectEqual(ReadPhase.retry, pending.phase);
+        try std.testing.expect(!pending.recoverable);
+        try std.testing.expectEqual(@as(u16, 503), pending.failure.status);
+        try std.testing.expectEqualStrings("busy\x1b\n", pending.failure.diagnostic.type.slice());
+        try std.testing.expectEqualStrings(case[2], pending.failure.diagnostic.code.slice());
+        try std.testing.expect(self.job.retry == null and self.submission.intent == null);
+        try std.testing.expectEqualDeep(before, self.input.snapshot());
+        // A Task reset must not destroy the diagnostic already owned by the UI.
+        try self.reader.start(io, &self.job, RetrySettlementWorker.idle);
+        try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &self.reader, RetrySettlementWorker.completed);
+        try std.testing.expect(self.joinReader() == .complete);
+        var bytes: [1024]u8 = undefined;
+        var out = std.Io.Writer.fixed(&bytes);
+        try self.writePendingDiagnostic(&out);
+        try std.testing.expect(std.mem.startsWith(u8, out.buffered(), "HTTP 503; type: busy\\x1b\\n; code: "));
+        try std.testing.expect(std.mem.endsWith(u8, out.buffered(), case[2]));
+        const settled = self.settle({});
+        try std.testing.expectEqual(case[1], settled.failure(.final_exit, case[1]).?);
+        try std.testing.expect(self.reading.pending_diagnostic != null);
+    };
+}
+
+test "failed reply retry settlement propagates transport errors and unexpected active cancellation" {
+    const io = std.testing.io;
+    for ([_]struct { Task.Run, anyerror }{
+        .{ RetrySettlementWorker.transport, error.ConnectionResetByPeer },
+        .{ RetrySettlementWorker.cancelled, error.Cancelled },
+    }) |case| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        self.failedRetryForTest();
+        try held.keys("\x12");
+        try self.launchRetrySettlementForTest(case[0]);
+        if (case[1] == error.Cancelled) self.reader.cancel();
+        try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &self.reader, RetrySettlementWorker.completed);
+        try std.testing.expectError(case[1], self.settleReader());
+        try std.testing.expect(self.submission.intent == null and self.job.retry == null);
+        try std.testing.expect(self.reading.pending_diagnostic == null);
+    }
 }

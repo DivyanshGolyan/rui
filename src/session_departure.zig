@@ -2,7 +2,7 @@
 //! they do not perform or stand in for restoration, cancellation or joins.
 const std = @import("std");
 
-pub const ReadPhase = enum { activity, details, inspection, permission, message, recall };
+pub const ReadPhase = enum { activity, details, inspection, permission, message, recall, retry };
 /// `inspection`: a pending inspection supersedes a silent read it cancelled.
 pub const Mode = enum { active, inspection, final_exit };
 pub const ReadEnd = union(enum) {
@@ -78,7 +78,7 @@ test "departure settlement precedence and reader exit policies retain independen
         rendering.failed.progress.rendering = true;
         try std.testing.expectEqual(error.ConnectionResetByPeer, rendering.failure(.inspection).?);
     }
-    for ([_]ReadPhase{ .activity, .permission, .details }) |phase| {
+    for (std.enums.values(ReadPhase)) |phase| {
         const cancelled: ReadEnd = .{ .cancelled = .{ .phase = phase, .rendering = true } };
         try std.testing.expectEqual(error.Cancelled, cancelled.failure(.active).?);
         try std.testing.expect(cancelled.failure(.inspection) == null);
@@ -126,4 +126,16 @@ test "departure joined fact matrix preserves precedence and recovery" {
             }
         }
     }
+}
+
+test "retry settlement keeps substantive failures fatal in every supersession mode" {
+    for (std.enums.values(Mode)) |mode| for ([_]bool{ false, true }) |rendering| {
+        for ([_]anyerror{ error.ConnectionResetByPeer, error.HostInvocationFailed, error.CanonicalStoreFailure }) |err| {
+            const end: ReadEnd = .{ .failed = .{ .err = err, .progress = .{ .phase = .retry, .rendering = rendering } } };
+            try std.testing.expect(!end.preparationFailure());
+            try std.testing.expectEqual(err, end.failure(mode).?);
+        }
+        const cancelled: ReadEnd = .{ .cancelled = .{ .phase = .retry, .rendering = rendering } };
+        try std.testing.expectEqual(if (mode == .active) @as(?anyerror, error.Cancelled) else null, cancelled.failure(mode));
+    };
 }

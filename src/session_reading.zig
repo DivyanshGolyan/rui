@@ -31,6 +31,8 @@ pub const Shows = enum {
     message,
     /// Lands a recall step on the draft.
     recalled,
+    /// Submits the exact staged Message after retry eligibility is rechecked.
+    retried,
     /// Appends the staged live output.
     staged,
     /// Sends the answer to /copy's target.
@@ -43,6 +45,7 @@ pub fn shows(phase: ReadPhase, inspection: Inspection) Shows {
     return switch (phase) {
         .message => .message,
         .recall => .recalled,
+        .retry => .retried,
         .activity, .permission => .staged,
         .inspection => if (inspection == .copy) .copy else .page,
         .details => .page,
@@ -143,6 +146,7 @@ test "a completed read shows what its phase read; only /copy's inspection copies
     const cases = [_]struct { ReadPhase, Inspection, Shows }{
         .{ .message, .copy, .message },
         .{ .recall, .other, .recalled },
+        .{ .retry, .other, .retried },
         .{ .activity, .other, .staged },
         .{ .permission, .copy, .staged },
         .{ .inspection, .copy, .copy },
