@@ -11,9 +11,6 @@ const failure_class = @import("failure_class.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
 const unicode = @import("terminal_unicode");
-const mcp_arguments = @import("mcp/arguments.zig");
-const mcp_shape = @import("mcp/shape.zig");
-const mcp_document = @import("mcp/document.zig");
 
 /// Only presentation-owned foreground changes. Content cannot select a style.
 pub const Style = enum {
@@ -760,8 +757,7 @@ test "hanging indentation survives split windows and trusted styles" {
 
 /// What the Action's `?` row says, for keeping it beside the choice.
 pub const ActionSummary = struct {
-    // The UI keeps the full MCP label without changing the saved 100-byte wire.
-    description: protocol.Bounded(mcp_shape.description_max_bytes) = .{},
+    description: protocol.Bounded(protocol.max_tool_description_bytes) = .{},
 };
 
 /// A time limit as exactly as the model set it, in its largest whole unit.
@@ -802,9 +798,10 @@ test "a time limit shows in its largest whole unit, never rounded" {
 /// its stdin. ConversationViewport hangs wrapped rows under the text after it.
 pub const content_mark = "│ ";
 
-/// Identity from the call's frozen offer, never the Session's latest catalog.
+/// Frozen call identity and its saved conversation line, never the latest catalog.
 pub const ActionTool = struct {
     name: protocol.Bounded(protocol.max_tool_name_bytes),
+    description: protocol.Bounded(protocol.max_tool_description_bytes),
     server: ?protocol.Bounded(64) = null,
 
     pub fn runner(self: *const ActionTool) !tools.Runner {
@@ -819,7 +816,7 @@ pub const ActionTool = struct {
     }
 };
 
-/// Selects one frozen identity from an already verified immutable Current capture.
+/// Selects frozen identity and saved presentation from a verified Current capture.
 pub fn actionToolFromCapture(observed: *const protocol_reply.Current, io: std.Io, scratch: std.Io.File, action: u64) !?ActionTool {
     const Selection = struct {
         action: u64,
@@ -828,7 +825,7 @@ pub fn actionToolFromCapture(observed: *const protocol_reply.Current, io: std.Io
             switch (attention) {
                 .unresolved => |row| if (row.action.value == self.action) {
                     if (self.selected != null) return error.InvalidObservation;
-                    var tool: ActionTool = .{ .name = .{} };
+                    var tool: ActionTool = .{ .name = .{}, .description = row.presentation.value.description orelse return error.InvalidObservation };
                     try tool.name.set(row.tool.slice());
                     if (row.server.value) |server| {
                         tool.server = .{};
@@ -845,7 +842,7 @@ pub fn actionToolFromCapture(observed: *const protocol_reply.Current, io: std.Io
     return selection.selected;
 }
 
-/// Reads unresolved call identity before the arguments reuse the capture file.
+/// Reads unresolved call identity and saved line before arguments reuse the capture.
 /// A resolved or absent Action has no current approval metadata.
 pub fn actionTool(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File) !?ActionTool {
     const observed = try current(requests, store, session, scratch);
@@ -931,19 +928,7 @@ pub fn bashCommand(io: std.Io, scratch: std.Io.File, tool: *const ActionTool, bu
 fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !ActionSummary {
     var buffer: [4096]u8 = undefined;
     var reader = scratch.reader(io, &buffer);
-    var source: ArgumentSource = .{ .reader = &reader.interface };
-    const range = try mcp_arguments.descriptionRange(&source);
-    var summary: ActionSummary = .{};
-    if (range) |value| {
-        // A decoded byte needs at most six source bytes (a \uXXXX escape).
-        var encoded: [6 * mcp_shape.description_max_bytes]u8 = undefined;
-        if (value.length > encoded.len) return error.InvalidObservation;
-        const text = encoded[0..@intCast(value.length)];
-        if (try scratch.readPositionalAll(io, text, value.start) != text.len) return error.TruncatedResult;
-        var decoded = std.Io.Writer.fixed(&summary.description.bytes);
-        try mcp_document.writeDecoded(&decoded, text);
-        summary.description.len = decoded.end;
-    } else try summary.description.set(tool.name.slice());
+    const summary: ActionSummary = .{ .description = tool.description };
     try sink.feed("\n");
     try sink.feed(Style.attention.code(colour));
     try sink.feed("?");
@@ -962,7 +947,6 @@ fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, too
     try indented.feed("\nArguments:\n");
     var lines: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented, .prefix = content_mark, .marks_empty = true, .line_start = true };
     var escaped: Escaped(@TypeOf(&lines)) = .{ .sink = &lines, .text = .{ .mode = .multiline } };
-    try reader.seekTo(0);
     while (true) {
         const bytes = reader.interface.peekGreedy(1) catch |err| switch (err) {
             error.EndOfStream => break,
@@ -1699,7 +1683,7 @@ test "hosted calls draw as tool rows: successes pack together, a failure stands 
     );
 }
 
-test "MCP approval renders object arguments and adopts the same Allow once and Deny choices" {
+test "MCP approval uses the saved description and renders exact arguments with Allow once and Deny" {
     const Screen = @import("SessionScreen.zig");
     const Consent = @import("session_consent.zig");
     var environ = try std.testing.environ.createMap(std.testing.allocator);
@@ -1722,17 +1706,18 @@ test "MCP approval renders object arguments and adopts the same Allow once and D
             self.offset += bytes.len;
         }
     };
-    var tool: ActionTool = .{ .name = .{}, .server = .{} };
+    var tool: ActionTool = .{ .name = .{}, .description = .{}, .server = .{} };
     try tool.name.set("fetch_page");
     try tool.server.?.set("docs");
     const Case = struct { arguments: []const u8, description: []const u8 };
     for ([_]Case{
         .{ .arguments = "{}", .description = "fetch_page" },
-        .{ .arguments = " { \"q\" : [1, null] } ", .description = "fetch_page" },
-        .{ .arguments = "{\"rui_call_description\":\"Fetch \\u00e9\\npage\",\"url\":\"https://example.test\"}", .description = "Fetch é\npage" },
+        .{ .arguments = " { \"q\" : [1, null] } ", .description = "Fetch saved page" },
+        .{ .arguments = "{\"rui_call_description\":\"Fetch \\u00e9\\npage\",\"url\":\"https://example.test\"}", .description = "Fetch saved é page" },
         .{ .arguments = "{\"rui_call_description\":\"" ++ @as([200]u8, @splat('a')) ++ "\"}", .description = &@as([200]u8, @splat('a')) },
         .{ .arguments = "{\"rui_call_description\":\"" ++ @as([201]u8, @splat('a')) ++ "\"}", .description = "fetch_page" },
     }) |case| {
+        try tool.description.set(case.description);
         try scratch.setLength(std.testing.io, 0);
         try scratch.writePositionalAll(std.testing.io, case.arguments, 0);
         try action.setLength(std.testing.io, 0);
@@ -1741,6 +1726,8 @@ test "MCP approval renders object arguments and adopts the same Allow once and D
         try std.testing.expectEqualStrings(case.description, summary.description.slice());
         var rendered: [2048]u8 = undefined;
         const count = try action.readPositionalAll(std.testing.io, &rendered, 0);
+        var heading: [256]u8 = undefined;
+        try std.testing.expect(std.mem.startsWith(u8, rendered[0..count], try std.fmt.bufPrint(&heading, "\n? {s}\n", .{case.description})));
         try std.testing.expect(std.mem.indexOf(u8, rendered[0..count], "\n  Tool: fetch_page\n  Server: docs\n  Arguments:\n  │ ") != null);
         try std.testing.expect(std.mem.indexOf(u8, rendered[0..count], case.arguments) != null);
         try std.testing.expect(std.mem.indexOf(u8, rendered[0..count], "\n  $ ") == null);
@@ -1762,12 +1749,12 @@ test "only a Bash Action names a command for its row, whatever another tool's ar
     defer tmp.cleanup();
     const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });
     defer scratch.close(std.testing.io);
-    var bash: ActionTool = .{ .name = .{} };
+    var bash: ActionTool = .{ .name = .{}, .description = .{} };
     try bash.name.set("bash");
-    var mcp: ActionTool = .{ .name = .{}, .server = .{} };
+    var mcp: ActionTool = .{ .name = .{}, .description = .{}, .server = .{} };
     try mcp.name.set("run");
     try mcp.server.?.set("shell");
-    var other: ActionTool = .{ .name = .{} };
+    var other: ActionTool = .{ .name = .{}, .description = .{} };
     try other.name.set("web_search");
     // Arguments every one of the three would accept as Bash's.
     const arguments = "{\"cmd\":\"rm -rf build\\nzig build\",\"description\":\"Clean and build\"}";
@@ -1810,9 +1797,10 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
             self.offset += bytes.len;
         }
     };
-    var tool: ActionTool = .{ .name = .{}, .server = .{} };
+    var tool: ActionTool = .{ .name = .{}, .description = .{}, .server = .{} };
     try tool.name.set("fetch_page");
     try tool.server.?.set("docs");
+    try tool.description.set("Saved \x1b[2J");
     const prefix = "{\n\"rui_call_description\":\"Fetch \\u001b[2J\",\n\"body\":\"";
     try scratch.writePositionalAll(std.testing.io, prefix, 0);
     // Literal bidi content is valid JSON, but cannot direct the terminal.
@@ -1826,6 +1814,7 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     var beginning: [512]u8 = undefined;
     const count = try action.readPositionalAll(std.testing.io, &beginning, 0);
     const shown = beginning[0..count];
+    try std.testing.expect(std.mem.startsWith(u8, shown, "\n? Saved \\x1b[2J\n"));
     try std.testing.expect(std.mem.indexOf(u8, shown, "\x1b") == null);
     try std.testing.expect(std.mem.indexOf(u8, shown, "‮") == null);
     try std.testing.expect(std.mem.indexOf(u8, shown, "\n  │ \"rui_call_description\"") != null);

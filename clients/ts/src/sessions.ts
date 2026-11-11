@@ -23,7 +23,7 @@ export interface AgentSpec {
 	workspace?: string;
 	/** `openai` or `codex`. Fixed for the Session's life. */
 	provider?: NonNullable<Schemas["AgentSpec"]["provider"]>;
-	/** Fixed for the Session's life. */
+	/** May change within the Session's fixed provider. */
 	model: string;
 	instructions?: string;
 	/** JSON output schema, or its JSON text; `null` clears it. */
@@ -50,7 +50,7 @@ export type SessionSpec = AgentSpec;
 export type SessionCreate = (AgentSpec & { preset?: never }) | ({ preset: string } & Partial<AgentSpec>);
 
 /** The settings `update` may change: everything but the ones fixed at creation. */
-export type SessionUpdate = Partial<Pick<SessionSpec, "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label" | "loadedTools" | "outputReservation">>;
+export type SessionUpdate = Partial<Pick<SessionSpec, "model" | "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label" | "loadedTools" | "outputReservation">>;
 
 export interface WriteOptions {
 	/** Required on `create` and `send`, built as `kind:driftId`. Other writes get a fresh UUIDv4 when it is left out (D123). */

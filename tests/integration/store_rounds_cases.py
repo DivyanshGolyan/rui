@@ -45,15 +45,15 @@ IDLE_SECONDS = 5
 BUDGET = {
     # A Session's first operation, exact.
     "first_commits": 4,
-    "first_write_round_trips": 14,
+    "first_write_round_trips": 10,
     # Each later operation, exact.
     "commits": 3,
-    "write_round_trips": 10,
+    "write_round_trips": 7,
     # Any operation, upper bound: rescans and the observe loop below make
-    # the total vary (33 for a first operation and 26 for a later one
-    # over five runs once a request read its settings in one round and its
-    # history and tools in one more; earlier work varied by up to 6).
-    "round_trips": 39,
+    # the total vary (29 for a first operation and 23 for a later one
+    # over four runs once a lone write's COMMIT rode its last writes;
+    # earlier work varied by up to 6).
+    "round_trips": 35,
     # Over IDLE_SECONDS with no Session, exact: the Host asks again only
     # after a commit, a slot change or a scheduled retry falling due.
     "idle_round_trips": 0,

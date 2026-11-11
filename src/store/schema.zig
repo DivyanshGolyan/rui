@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 60;
+pub const schema_version: u32 = 61;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -47,6 +47,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 58, .digest = 0x4cd0a6b38d4904ed },
     .{ .schema_version = 59, .digest = 0xa3ebc37622ed945b },
     .{ .schema_version = 60, .digest = 0x6b696b3423202987 },
+    .{ .schema_version = 61, .digest = 0xec460e03aa080495 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -322,6 +323,33 @@ pub const migrations = [_]Migration{
             "UPDATE store_meta SET meta_value='11' WHERE meta_key='wire_version' AND meta_value='10'",
         },
     },
+    // Schema 61 (D227): call lines retain up to 200 decoded UTF-8 bytes.
+    // Existing lines already fit; rebuilding only changes their byte bounds.
+    .{
+        .from = 60,
+        .sqlite = &.{
+            "ALTER TABLE model_output_item RENAME TO model_output_item_60",
+            "CREATE TABLE model_output_item(\n operation_id INTEGER NOT NULL REFERENCES model_operation(operation_id),\n item_ordinal INTEGER NOT NULL CHECK(item_ordinal>=0),\n session_ref TEXT NOT NULL,\n session_position INTEGER NOT NULL CHECK(session_position>0),\n item_kind INTEGER NOT NULL CHECK(item_kind BETWEEN 1 AND 5),\n message_content_id INTEGER REFERENCES content(content_id) CHECK((message_content_id IS NOT NULL)=(item_kind=2)),\n attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal>0),\n item_id_digest BLOB NOT NULL CHECK(length(item_id_digest)=32),\n replay_omits_reasoning_text INTEGER NOT NULL CHECK(replay_omits_reasoning_text IN (0,1) AND (replay_omits_reasoning_text=0 OR item_kind=1)),\n phase INTEGER NOT NULL DEFAULT 0 CHECK(phase IN (0,1,2) AND (phase=0 OR item_kind=2)),\n extras_content_id INTEGER NOT NULL REFERENCES content(content_id),\n part_count INTEGER NOT NULL CHECK(part_count>=0 AND (part_count=0 OR item_kind IN (1,2))),\n description TEXT CHECK(description IS NULL OR (length(CAST(description AS BLOB)) BETWEEN 1 AND 200 AND (description IS NOT NULL)=(item_kind=5))),\n call_failed INTEGER NOT NULL DEFAULT 0 CHECK(call_failed IN (0,1) AND (call_failed=0 OR item_kind=5)),\n PRIMARY KEY(operation_id,item_ordinal),\n UNIQUE(session_ref,session_position),\n UNIQUE(operation_id,item_id_digest)\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed) SELECT operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed FROM model_output_item_60",
+            "DROP TABLE model_output_item_60",
+            "CREATE INDEX model_output_history ON model_output_item(session_ref,session_position)",
+            "CREATE INDEX model_output_call_history ON model_output_item(session_ref,session_position) WHERE item_kind=3",
+            "CREATE INDEX model_output_hosted_history ON model_output_item(session_ref,session_position) WHERE item_kind=5",
+            "CREATE INDEX model_output_compaction_history ON model_output_item(session_ref,session_position) WHERE item_kind=4",
+            "CREATE INDEX model_output_compaction_anchor ON model_output_item(operation_id,item_ordinal) WHERE item_kind=4",
+            "ALTER TABLE model_tool_call RENAME TO model_tool_call_60",
+            "CREATE TABLE model_tool_call(\n operation_id INTEGER NOT NULL REFERENCES model_operation(operation_id),\n session_ref TEXT NOT NULL,\n call_ordinal INTEGER NOT NULL CHECK(call_ordinal>=0),\n item_ordinal INTEGER NOT NULL CHECK(item_ordinal>=0),\n name_content_id INTEGER NOT NULL REFERENCES content(content_id),\n call_id_content_id INTEGER NOT NULL REFERENCES content(content_id),\n arguments_content_id INTEGER NOT NULL REFERENCES content(content_id),\n description TEXT CHECK(description IS NULL OR length(CAST(description AS BLOB)) BETWEEN 1 AND 200),\n field_metadata BLOB NOT NULL CHECK(length(field_metadata)=120),\n rejection_code TEXT CHECK(rejection_code IS NULL OR rejection_code IN ('unknown_tool','invalid_arguments')),\n rejection_content_id INTEGER REFERENCES content(content_id),\n acceptance_position INTEGER CHECK(acceptance_position IS NULL OR acceptance_position>0),\n action_kind INTEGER CHECK(action_kind IS NULL OR action_kind=1),\n PRIMARY KEY(operation_id,call_ordinal),\n UNIQUE(operation_id,item_ordinal),\n UNIQUE(operation_id,call_id_content_id),\n UNIQUE(operation_id,call_ordinal,action_kind),\n FOREIGN KEY(operation_id,session_ref) REFERENCES model_operation(operation_id,session_ref),\n CHECK((rejection_code IS NULL AND rejection_content_id IS NULL AND acceptance_position IS NULL AND (action_kind IS 1)) OR (rejection_code IS NOT NULL AND rejection_content_id IS NOT NULL AND acceptance_position IS NOT NULL AND action_kind IS NULL))\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,description,field_metadata,rejection_code,rejection_content_id,acceptance_position,action_kind) SELECT operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,description,field_metadata,rejection_code,rejection_content_id,acceptance_position,action_kind FROM model_tool_call_60",
+            "DROP TABLE model_tool_call_60",
+            "CREATE INDEX model_tool_call_session_order ON model_tool_call(session_ref,operation_id,call_ordinal)",
+            "CREATE INDEX model_tool_call_session_results ON model_tool_call(session_ref,operation_id,acceptance_position) WHERE acceptance_position IS NOT NULL",
+            "CREATE INDEX model_tool_call_acceptance ON model_tool_call(session_ref,acceptance_position) WHERE acceptance_position IS NOT NULL",
+        },
+        .mysql = &.{
+            "ALTER TABLE model_output_item DROP CHECK model_output_item_chk_10, ADD CHECK(description IS NULL OR (OCTET_LENGTH(description) BETWEEN 1 AND 200 AND (description IS NOT NULL)=(item_kind=5)))",
+            "ALTER TABLE model_tool_call DROP CHECK model_tool_call_chk_3, ADD CHECK(description IS NULL OR OCTET_LENGTH(description) BETWEEN 1 AND 200)",
+        },
+    },
 };
 
 comptime {
@@ -345,7 +373,7 @@ comptime {
 
 /// The statements of the step from `from`, as one text for the DB team to
 /// run on a MySQL Store at `from`; `ddl(.mysql)` is a new MySQL Store's.
-/// PR 8's `rui store schema --engine mysql [--from N]` prints them. Rui takes
+/// `rui store schema --engine mysql --from N` prints the remaining steps. Rui takes
 /// no backup of a MySQL Store: backing it up before applying the text is the
 /// DB team's job.
 pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
@@ -357,6 +385,49 @@ pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
         const terminated = text ++ "\x00";
         break :blk terminated[0..text.len :0];
     };
+}
+
+/// All forward steps from a runtime-selected format, oldest first, without
+/// allocation. After the steps, finalize format and wire metadata once, as
+/// opening the migrated Store requires both to match this build. The current
+/// format needs no SQL; unsupported formats have no text.
+pub fn mysqlMigrationFrom(from: u64) ?[:0]const u8 {
+    const texts = comptime blk: {
+        var result: [schema_version - migration_baseline + 1][:0]const u8 = undefined;
+        result[result.len - 1] = "";
+        const metadata = "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n" ++
+            "UPDATE store_meta SET meta_value='" ++ wire_version ++ "' WHERE meta_key='wire_version';\n";
+        var index = result.len - 1;
+        while (index > 0) {
+            index -= 1;
+            const text = mysqlMigration(migration_baseline + index) ++
+                (if (index + 1 == result.len - 1) metadata else result[index + 1]);
+            const terminated = text ++ "\x00";
+            result[index] = terminated[0..text.len :0];
+        }
+        break :blk result;
+    };
+    if (from < migration_baseline or from > schema_version) return null;
+    return texts[@intCast(from - migration_baseline)];
+}
+
+test "store schema --from prints every remaining MySQL migration then finalizes metadata once" {
+    for (migration_baseline..schema_version + 1) |from| {
+        var expected: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer expected.deinit();
+        inline for (migrations) |step| {
+            if (step.from >= from) try expected.writer.writeAll(mysqlMigration(step.from));
+        }
+        if (from < schema_version) try expected.writer.print(
+            "UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format';\nUPDATE store_meta SET meta_value='{s}' WHERE meta_key='wire_version';\n",
+            .{ schema_version, wire_version },
+        );
+        try std.testing.expectEqualStrings(expected.written(), mysqlMigrationFrom(@intCast(from)).?);
+    }
+    try std.testing.expectEqualStrings("", mysqlMigrationFrom(schema_version).?);
+    try std.testing.expect(mysqlMigrationFrom(migration_baseline - 1) == null);
+    try std.testing.expect(mysqlMigrationFrom(schema_version + 1) == null);
+    try std.testing.expect(mysqlMigrationFrom(std.math.maxInt(u64)) == null);
 }
 
 /// SQL membership of `column` in a closed set of enum tags or text literals:
@@ -1121,7 +1192,7 @@ pub const tables = [_]Table{
             .{ .name = "part_count", .type = .int, .check = "part_count>=0 AND (part_count=0 OR item_kind IN (1,2))" },
             // A hosted tool call's description and outcome: every tool
             // call is shown by its description.
-            .{ .name = "description", .type = .{ .text = .{ .min = 1, .max = 100 } }, .nullable = true, .check = "(description IS NOT NULL)=(item_kind=5)" },
+            .{ .name = "description", .type = .{ .text = .{ .min = 1, .max = 200 } }, .nullable = true, .check = "(description IS NOT NULL)=(item_kind=5)" },
             .{ .name = "call_failed", .type = .flag, .default = "0", .check = "(call_failed=0 OR item_kind=5)" },
         },
         .primary_key = &.{ "operation_id", "item_ordinal" },
@@ -1167,7 +1238,7 @@ pub const tables = [_]Table{
             .{ .name = "name_content_id", .type = .int },
             .{ .name = "call_id_content_id", .type = .int },
             .{ .name = "arguments_content_id", .type = .int },
-            .{ .name = "description", .type = .{ .text = .{ .min = 1, .max = 100 } }, .nullable = true },
+            .{ .name = "description", .type = .{ .text = .{ .min = 1, .max = 200 } }, .nullable = true },
             .{ .name = "field_metadata", .type = .{ .bytes = .{ .min = 120, .max = 120 } } },
             .{ .name = "rejection_code", .type = .{ .tag = &.{ "unknown_tool", "invalid_arguments" } }, .nullable = true },
             .{ .name = "rejection_content_id", .type = .int, .nullable = true },
@@ -1444,6 +1515,48 @@ pub fn hasIndex(comptime name: []const u8) bool {
     }
 }
 
+// Cache the DDL's names once; checking every forceable catalog name must
+// not regenerate every table's DDL for each index.
+const mysql_index_names: []const []const u8 = blk: {
+    @setEvalBranchQuota(objects_quota);
+    var names: []const []const u8 = &.{};
+    for (objects(.mysql)) |object| if (object.kind == .index) {
+        names = names ++ .{object.name};
+    };
+    break :blk names;
+};
+
+/// Whether MySQL's DDL has this named index on real columns. A lowered
+/// partial index cannot serve a query on its original prefix: forcing it
+/// would replace a lookup with a full index scan.
+pub fn mysqlCanForceIndex(comptime name: []const u8) bool {
+    comptime {
+        @setEvalBranchQuota(objects_quota);
+        return canForceMysqlIndex(&tables, &indexes, name) and contains(mysql_index_names, name);
+    }
+}
+
+fn canForceMysqlIndex(comptime every: []const Table, comptime all_indexes: []const Index, comptime name: []const u8) bool {
+    for (all_indexes) |index| {
+        if (!std.mem.eql(u8, index.name, name)) continue;
+        if (mysqlIndexForm(index)) |form| if (form != .plain_unique) return false;
+        for (every) |table| {
+            if (!std.mem.eql(u8, table.name, index.table)) continue;
+            if (!table.engines.on(.mysql)) return false;
+            for (index.columns) |part| {
+                const column_name = indexColumn(part).name;
+                const found = for (table.columns) |column| {
+                    if (std.mem.eql(u8, column.name, column_name)) break column.engines.on(.mysql);
+                } else false;
+                if (!found) return false;
+            }
+            return index.columns.len != 0;
+        }
+        return false;
+    }
+    return false;
+}
+
 /// The DDL that creates every table, then every index.
 pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     return comptime blk: {
@@ -1572,10 +1685,31 @@ fn mysqlObjects(comptime every: []const Table, comptime all_indexes: []const Ind
 /// SQL expression, such as `DATABASE()`). It holds what the schema value
 /// decides and leaves out what MySQL names or spells itself: CHECK and
 /// expression texts, which servers normalise differently, and the names
-/// of CHECKs, foreign keys and unique keys. Each value is cast to binary,
-/// so the lines compare as bytes whatever information_schema's collations.
+/// of CHECKs, foreign keys and server-generated keys. Forceable indexes
+/// include their canonical names: statements depend on those names, not
+/// just equivalent definitions. This admission digest is not stored or
+/// pinned by Store format; `digest()` covers bootstrap SQL separately.
+/// MySQL 8.4 STATISTICS plan domain: TABLE_NAME and forceable INDEX_NAME identify
+/// the key; NON_UNIQUE, ordered COLUMN_NAME (SEQ_IN_INDEX), COLLATION,
+/// SUB_PART, INDEX_TYPE, PACKED and IS_VISIBLE describe its usable shape.
+/// Visibility applies to every index: canonical DDL makes all visible, and
+/// hiding even an unhinted key weakens a Store plan. NULLABLE is derived
+/// from the checked COLUMNS; functional parts are nullable. EXPRESSION's
+/// presence is the `*` part; its server-normalized text is not a forced-plan
+/// dependency, since mysqlCanForceIndex excludes every functional key.
+/// TABLE_CATALOG is always def; TABLE_SCHEMA/INDEX_SCHEMA only locate the
+/// database. Only CARDINALITY (estimates), COMMENT (server status prose)
+/// and INDEX_COMMENT (DBA prose) are ignored mutable index metadata: none
+/// changes the key's definition or availability to a statement.
+/// Each value is cast to binary, so the lines compare as bytes whatever
+/// information_schema's collations.
 pub fn catalogSql(comptime database: []const u8) [:0]const u8 {
     return comptime blk: {
+        @setEvalBranchQuota(objects_quota);
+        var forced: []const u8 = "FALSE";
+        for (indexes) |index| if (mysqlCanForceIndex(index.name)) {
+            forced = forced ++ " OR (" ++ binary("TABLE_NAME") ++ "='" ++ index.table ++ "' AND " ++ binary("INDEX_NAME") ++ "='" ++ index.name ++ "')";
+        };
         const in = "information_schema.";
         const text = "SELECT CONCAT('t '," ++ binary("TABLE_NAME") ++ ",' '," ++ binary("ENGINE") ++ ",' '," ++ binary("TABLE_COLLATION") ++ ") FROM " ++ in ++
             "TABLES WHERE TABLE_SCHEMA=" ++ database ++ " AND TABLE_TYPE='BASE TABLE'" ++
@@ -1583,7 +1717,9 @@ pub fn catalogSql(comptime database: []const u8) [:0]const u8 {
             ",' '," ++ binary("COALESCE(COLLATION_NAME,'-')") ++ ",IF(EXTRA IN ('STORED GENERATED','VIRTUAL GENERATED'),' generated','')) FROM " ++ in ++
             "COLUMNS WHERE TABLE_SCHEMA=" ++ database ++
             " UNION ALL SELECT CONCAT('i '," ++ binary("TABLE_NAME") ++ ",IF(MAX(NON_UNIQUE)=0,' u ',' n '),GROUP_CONCAT(" ++ binary("COALESCE(COLUMN_NAME,'*')") ++
-            ",IF(COLLATION='D',' desc','') ORDER BY SEQ_IN_INDEX SEPARATOR ',')) FROM " ++ in ++ "STATISTICS WHERE TABLE_SCHEMA=" ++ database ++ " GROUP BY TABLE_NAME,INDEX_NAME" ++
+            ",IF(SUB_PART IS NULL,'',CONCAT('(',SUB_PART,')')),CASE COLLATION WHEN 'A' THEN '' WHEN 'D' THEN ' desc' ELSE ' unordered' END," ++
+            "IF(PACKED IS NULL,'',CONCAT(' packed='," ++ binary("PACKED") ++ ")) ORDER BY SEQ_IN_INDEX SEPARATOR ','),' '," ++ binary("MAX(INDEX_TYPE)") ++
+            ",' '," ++ binary("MAX(IS_VISIBLE)") ++ ",IF(" ++ forced ++ ",CONCAT(' '," ++ binary("INDEX_NAME") ++ "),'')) FROM " ++ in ++ "STATISTICS WHERE TABLE_SCHEMA=" ++ database ++ " GROUP BY TABLE_NAME,INDEX_NAME" ++
             " UNION ALL SELECT CONCAT('f '," ++ binary("TABLE_NAME") ++ ",' ',GROUP_CONCAT(" ++ binary("COLUMN_NAME") ++ " ORDER BY ORDINAL_POSITION SEPARATOR ','),' '," ++
             binary("MAX(REFERENCED_TABLE_NAME)") ++ ",' ',GROUP_CONCAT(" ++ binary("REFERENCED_COLUMN_NAME") ++ " ORDER BY ORDINAL_POSITION SEPARATOR ',')) FROM " ++ in ++
             "KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=" ++ database ++ " AND REFERENCED_TABLE_NAME IS NOT NULL GROUP BY TABLE_NAME,CONSTRAINT_NAME" ++
@@ -1639,7 +1775,11 @@ fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Ind
             var parts: []const []const []const u8 = &.{table.primary_key};
             for (table.uniques) |unique| parts = parts ++ .{unique};
             var flags: []const bool = &.{true};
-            for (table.uniques) |_| flags = flags ++ .{true};
+            var forced_names: []const []const u8 = &.{""};
+            for (table.uniques) |_| {
+                flags = flags ++ .{true};
+                forced_names = forced_names ++ .{""};
+            }
             for (all_indexes) |index| if (std.mem.eql(u8, index.table, table.name)) {
                 var names: []const []const u8 = &.{};
                 for (index.columns, 0..) |column, position| {
@@ -1657,6 +1797,7 @@ fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Ind
                 }
                 parts = parts ++ .{names};
                 flags = flags ++ .{index.unique};
+                forced_names = forced_names ++ .{if (canForceMysqlIndex(every, all_indexes, index.name)) " " ++ index.name else ""};
             };
             var added: usize = 0;
             for (table.foreign_keys) |key| {
@@ -1667,17 +1808,18 @@ fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Ind
                 if (!led) {
                     parts = parts ++ .{key.columns};
                     flags = flags ++ .{false};
+                    forced_names = forced_names ++ .{""};
                     added += 1;
                 }
             }
-            for (parts, flags, 0..) |index_parts, unique, position| {
+            for (parts, flags, forced_names, 0..) |index_parts, unique, forced_name, position| {
                 // InnoDB keeps no index it added for a foreign key when a
                 // longer one it added for another key leads with it.
                 const implicit = parts[parts.len - added ..];
                 const covered = position >= parts.len - added and for (implicit) |other| {
                     if (other.len > index_parts.len and eqlList(other[0..index_parts.len], index_parts)) break true;
                 } else false;
-                if (!covered) lines = lines ++ .{"i " ++ table.name ++ (if (unique) " u " else " n ") ++ list(index_parts)};
+                if (!covered) lines = lines ++ .{"i " ++ table.name ++ (if (unique) " u " else " n ") ++ list(index_parts) ++ " BTREE YES" ++ forced_name};
             }
         }
         return lines;
@@ -2328,6 +2470,8 @@ test "a catalog line names each table, column, index, foreign key and CHECK coun
     const lines = comptime catalogLines(&[_]Table{ mysql_test_order, mysql_test_label }, &.{
         .{ .name = "open", .table = "turn", .columns = &.{ "code", "turn_id DESC" }, .where = "live=1" },
         .{ .name = "one", .table = "turn", .columns = &.{"code"}, .unique = true, .where = "live=1" },
+        .{ .name = "by_live", .table = "turn", .columns = &.{"live"} },
+        .{ .name = "by_note", .table = "content", .columns = &.{"label"}, .unique = true },
     });
     const expected = [_][]const u8{
         "t turn InnoDB utf8mb4_0900_bin",
@@ -2337,10 +2481,11 @@ test "a catalog line names each table, column, index, foreign key and CHECK coun
         "k turn 1",
         "c turn open_lead varchar(8) YES utf8mb4_0900_bin generated",
         "f turn code content label",
-        "i turn u turn_id",
-        "i turn n open_lead,turn_id desc",
-        "i turn u *",
-        "i turn n code",
+        "i turn u turn_id BTREE YES",
+        "i turn n open_lead,turn_id desc BTREE YES",
+        "i turn u * BTREE YES",
+        "i turn n live BTREE YES by_live",
+        "i turn n code BTREE YES",
         "t content InnoDB utf8mb4_0900_bin",
         "c content label varchar(8) NO utf8mb4_0900_bin",
         "c content note text YES utf8mb4_0900_bin",
@@ -2348,8 +2493,9 @@ test "a catalog line names each table, column, index, foreign key and CHECK coun
         "c content first_turn bigint NO -",
         "k content 3",
         "f content first_turn turn turn_id",
-        "i content u label",
-        "i content n first_turn",
+        "i content u label BTREE YES",
+        "i content u label BTREE YES by_note",
+        "i content n first_turn BTREE YES",
     };
     try std.testing.expectEqual(expected.len, lines.len);
     for (expected, lines) |want, line| try std.testing.expectEqualStrings(want, line);
@@ -2528,4 +2674,162 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='restore-request'"));
     try openExisting(std.testing.io, database, root, null);
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT suppress_message FROM session_ending_owed WHERE turn_id=1"));
+}
+
+test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/store.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |step| {
+        if (step.from >= 60) break;
+        for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF;PRAGMA user_version=60");
+    try sqlite.exec(database, identity_sql);
+    {
+        const meta = try sqlite.prepare(database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','11'),('store_selector',?1),('format','60')");
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, root);
+        try sqlite.expectDone(meta);
+    }
+    // Preserve a hosted line at the old byte limit, a nullable call line,
+    // and the fixture's original accepted line and dependent rows.
+    try sqlite.exec(database, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed) VALUES(2,2,'brhkcj',6,5,NULL,1,zeroblob(32),0,0,7,0,'" ++ @as([100]u8, @splat('h')) ++ "',1)");
+    try sqlite.exec(database, "UPDATE model_tool_call SET description=NULL WHERE call_ordinal=1");
+    const ascii_line: [200]u8 = @splat('a');
+    const ascii_overlong = ascii_line ++ "a";
+    const utf8_line: [200]u8 = comptime line: {
+        var bytes: [200]u8 = undefined;
+        for (0..100) |index| bytes[index * 2 ..][0..2].* = "é".*;
+        break :line bytes;
+    };
+    const utf8_overlong = utf8_line ++ "a";
+    const updates = .{
+        "UPDATE model_tool_call SET description=?1 WHERE operation_id=2 AND call_ordinal=0",
+        "UPDATE model_output_item SET description=?1 WHERE operation_id=2 AND item_ordinal=2",
+    };
+    inline for (updates) |sql| {
+        const statement = try sqlite.prepare(database, sql);
+        defer _ = c.sqlite3_finalize(statement);
+        try sqlite.bindText(statement, 1, ascii_overlong[0..101]);
+        try std.testing.expectEqual(c.SQLITE_CONSTRAINT, c.sqlite3_step(statement));
+    }
+    inline for (.{ "model_output_item", "model_tool_call", "model_output_part", "action_operation", "conversation_entry" }) |name| {
+        try sqlite.exec(database, "CREATE TEMP TABLE original_" ++ name ++ " AS SELECT * FROM " ++ name);
+    }
+    try openExisting(std.testing.io, database, root, null);
+    try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
+    try std.testing.expect(try metaEquals(database, "format", format_text));
+    try std.testing.expect(try metaEquals(database, "wire_version", wire_version));
+    inline for (.{ "model_output_item", "model_tool_call", "model_output_part", "action_operation", "conversation_entry" }) |name| {
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_" ++ name ++ " EXCEPT SELECT * FROM " ++ name ++ ")"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM " ++ name ++ " EXCEPT SELECT * FROM original_" ++ name ++ ")"));
+    }
+    inline for (updates) |sql| {
+        // Both ASCII and multibyte UTF-8 use byte, not character, bounds.
+        for ([_][]const u8{ &ascii_line, &utf8_line }) |line| {
+            const statement = try sqlite.prepare(database, sql);
+            defer _ = c.sqlite3_finalize(statement);
+            try sqlite.bindText(statement, 1, line);
+            try sqlite.expectDone(statement);
+        }
+        for ([_][]const u8{ ascii_overlong, utf8_overlong, "" }) |line| {
+            const statement = try sqlite.prepare(database, sql);
+            defer _ = c.sqlite3_finalize(statement);
+            try sqlite.bindText(statement, 1, line);
+            try std.testing.expectEqual(c.SQLITE_CONSTRAINT, c.sqlite3_step(statement));
+        }
+    }
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_tool_call WHERE operation_id=2 AND call_ordinal=0 AND length(CAST(description AS BLOB))=200 AND description='" ++ utf8_line ++ "'"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_output_item WHERE operation_id=2 AND item_ordinal=2 AND length(CAST(description AS BLOB))=200 AND description='" ++ utf8_line ++ "'"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+    // The widened lines and canonical table/index shapes survive reopening.
+    try openExisting(std.testing.io, database, root, null);
+}
+
+test "MySQL index hints require a named real-column index on that engine" {
+    const table: Table = .{
+        .name = "fixture",
+        .columns = &.{ .{ .name = "id", .type = .int }, .{ .name = "value", .type = .int } },
+        .primary_key = &.{"id"},
+    };
+    const index: Index = .{ .name = "by_value", .table = "fixture", .columns = &.{"value DESC"} };
+    try std.testing.expect(comptime canForceMysqlIndex(&.{table}, &.{index}, "by_value"));
+    const unique = comptime blk: {
+        var copy = index;
+        copy.unique = true;
+        copy.columns = &.{"value"};
+        copy.where = "value IS NOT NULL";
+        break :blk copy;
+    };
+    try std.testing.expect(comptime canForceMysqlIndex(&.{table}, &.{unique}, "by_value"));
+    const plain_unique = comptime blk: {
+        var copy = unique;
+        copy.where = null;
+        break :blk copy;
+    };
+    try std.testing.expect(comptime canForceMysqlIndex(&.{table}, &.{plain_unique}, "by_value"));
+    const trailing_sqlite_column = comptime blk: {
+        var copy = index;
+        copy.columns = &.{ "id", "value DESC" };
+        break :blk copy;
+    };
+    const sqlite_table = comptime blk: {
+        var copy = table;
+        copy.engines = .sqlite;
+        break :blk copy;
+    };
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{sqlite_table}, &.{index}, "by_value"));
+    const sqlite_column = comptime blk: {
+        var copy = table;
+        var columns = table.columns[0..2].*;
+        columns[1].engines = .sqlite;
+        copy.columns = &columns;
+        break :blk copy;
+    };
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{sqlite_column}, &.{index}, "by_value"));
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{sqlite_column}, &.{trailing_sqlite_column}, "by_value"));
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{table}, &.{index}, "absent"));
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{}, &.{index}, "by_value"));
+    const missing_column = comptime blk: {
+        var copy = index;
+        copy.columns = &.{"absent"};
+        break :blk copy;
+    };
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{table}, &.{missing_column}, "by_value"));
+    const functional = comptime blk: {
+        var copy = unique;
+        copy.where = "value>0";
+        break :blk copy;
+    };
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{table}, &.{functional}, "by_value"));
+    const leading = comptime blk: {
+        var copy = index;
+        copy.where = "value IS NOT NULL";
+        break :blk copy;
+    };
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{table}, &.{leading}, "by_value"));
+    const empty = comptime blk: {
+        var copy = index;
+        copy.columns = &.{};
+        break :blk copy;
+    };
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{table}, &.{empty}, "by_value"));
+    try std.testing.expect(!comptime mysqlCanForceIndex("action_operation_executable"));
+    try std.testing.expect(!comptime mysqlCanForceIndex("turn_one_active_per_session"));
+    try std.testing.expect(!comptime mysqlCanForceIndex("absent"));
+    inline for (.{ "session_revision_instructions", "session_revision_output_schema" }) |name| {
+        try std.testing.expect(comptime hasIndex(name));
+        try std.testing.expect(comptime mysqlCanForceIndex(name));
+    }
 }

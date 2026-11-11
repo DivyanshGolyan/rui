@@ -3076,11 +3076,13 @@ test "Message observation work and recovery fit the unchanged resident response 
     const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
     var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
     try description.set(&@as([protocol.max_tool_description_bytes]u8, @splat(1)));
+    var bash_description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
+    try bash_description.set(&@as([protocol.session_work.max_description_bytes]u8, @splat(1)));
     var observation = store_module.CommandObservation{ .status = .accepted, .kind = .{ .message = .{
         .content = .{ .length = max, .digest = @splat(0xff) },
         .queue = .{ .admission_id = max, .state = .{ .processing = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max } } },
         .admitted_at = max,
-        .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = description, .running = max, .approvals = max } }, .first_action = max },
+        .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = bash_description, .running = max, .approvals = max } }, .first_action = max },
     } } };
     try observation.target.set(&escaped_session);
     observation.kind.message.?.recovery.count = protocol.message_recovery_limit;

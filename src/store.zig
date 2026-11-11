@@ -28,6 +28,7 @@ pub const MysqlStartError = @import("store/engine/mysql_refusal.zig").StartError
 
 /// The DB team applies this file; opening a MySQL Store never performs DDL.
 pub const mysql_schema = store_schema.ddl(.mysql);
+pub const mysqlMigrationFrom = store_schema.mysqlMigrationFrom;
 
 pub const ActivityTool = reads_domain.ActivityTool;
 pub const AcceptedMessageQueue = reads_domain.AcceptedMessageQueue;
@@ -43,11 +44,8 @@ pub const ActionResolutionCode = action_domain.ActionResolutionCode;
 pub const ActiveOperationFilter = action_domain.ActiveOperationFilter;
 pub const application_id = store_schema.application_id;
 pub const AttemptBinding = store_core.AttemptBinding;
-pub const mcp_stop_unknown_text = action_domain.mcp_stop_unknown_text;
-pub const mcp_stop_not_sent_text = action_domain.mcp_stop_not_sent_text;
-pub const McpExecutionInput = action_domain.McpExecutionInput;
-pub const McpAction = action_domain.McpAction;
-pub const BashExecutionInput = action_domain.BashExecutionInput;
+pub const ActionExecutionInput = action_domain.ActionExecutionInput;
+pub const ReadyAction = action_domain.ReadyAction;
 pub const CommandObservation = command_domain.CommandObservation;
 pub const Observed = store_core.Observed;
 pub const ConfigureReply = configuration_domain.ConfigureReply;

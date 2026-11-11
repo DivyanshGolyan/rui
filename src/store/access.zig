@@ -3,22 +3,15 @@
 //! plain Zig, then queues its writes and ends with `commit`. It never
 //! writes BEGIN, COMMIT, a row-count check or a position claim itself.
 //!
-//! The engine is the Store's (`engine.Engine`), today its SQLite
-//! connection. A statement is bound when queued: fixed values are copied
-//! then, and only texts and blobs are read in place when it steps
-//! (`sqlite.bindArgs`, `Borrowed`). A round may
-//! queue one statement any number of times: SQLite steps what is queued,
-//! in order (an engine pass), before it rebinds a statement already
-//! queued, when the queue's 16 slots are full, when `contentSink` opens a
-//! row on SQLite, before the commit round's compare-and-sets, and at
-//! `run`. On MySQL a pass also runs when a content chunk lacks room in the
-//! batch (`queueChunk`). A pass
-//! is in-process work inside the round, never a round trip, so a
-//! destination is defined only after `run`, as it will be on a network
-//! engine, where a repeated statement is one more Bind/Execute in the same
-//! pipeline. Until the pass that steps it, a `readInto`'s `Found` is
-//! `.pending` and panics when asked, and Debug and test builds poison a
-//! `read`'s destination (`Access.read` says what that catches).
+//! A statement is bound when queued. SQLite copies fixed arguments then
+//! and reads texts/blobs in place when stepping (`Borrowed`); a batching
+//! engine lowers binds into its outgoing batch. A pass runs on queue or
+//! packet pressure, before rebinding an in-process statement, when an
+//! in-process sink needs its row, before position compare-and-sets, and at
+//! `run`. The queue stays bounded (eight slots, sixteen for a survey).
+//! In-process passes cost no round trip; network passes send a batch.
+//! Until the pass that steps a read, `Found` is `.pending` and Debug/test
+//! builds poison its destination (`Access.read` says what that catches).
 
 const std = @import("std");
 const change_ring = @import("../change_ring.zig");
@@ -37,11 +30,9 @@ pub const Mode = enum {
     /// Opens the transaction before its first statement and ends it with
     /// `commit`, or with `abandon` when it finds no work or fails.
     write,
-    /// One write statement, which commits itself: no BEGIN or COMMIT.
-    /// Its reads run outside any transaction, under the Entry's lock,
-    /// which excludes every other writer, so what they read still holds
-    /// when the write runs. It takes no identities and claims no
-    /// positions, and `commit` runs exactly one queued write.
+    /// One domain write: SQLite autocommit under the Entry lock, or an
+    /// ownership-fenced transaction on a batching engine. It takes no
+    /// identities or positions; `commit` runs exactly one queued write.
     single,
 };
 
@@ -199,6 +190,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         failed_sql: ?[*:0]const u8 = null,
         queue: [max_queued]Queued = undefined,
         queued: u8 = 0,
+        /// The queued writes a guard's answer follows (`Engine.guard`), a
+        /// bit for each queue slot.
+        guarded: u16 = 0,
         /// Engine passes. Rounds, each one round trip on a network
         /// engine, count on the Store (`testing_content_work.rounds` for
         /// `run` and `commit`, `.content_rounds` for `readRaw`).
@@ -289,7 +283,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// must keep its bytes. Two reads need it: `saved_session`, whose
         /// 4.6 KB Row `configure` fills in the caller's Session, and
         /// `bash_input`, whose Row points into the caller's
-        /// `BashExecutionInput`, so neither is copied.
+        /// `ActionExecutionInput`, so neither is copied.
         pub fn readInto(a: *Self, comptime S: type, args: S.Args, row: *S.Row, found: *Found) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality == .optional);
             found.* = .pending;
@@ -337,19 +331,17 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// contains it reports it.
         fn pass(a: *Self) void {
             bump(&a.passes);
-            if (a.store.engine == .mysql and a.failure == null)
+            if (a.store.engine.batches() and a.failure == null)
                 for (a.queue[0..a.queued]) |*entry| entry.borrowed.check();
             if (a.queued != 0 and a.failure == null) {
-                if (@import("builtin").is_test) {
-                    if (a.store.engine == .mysql) a.store.engine.mysql.state.testing_shape.access_passes += 1;
-                }
+                a.store.engine.notePass(.access);
                 a.store.engine.startPass() catch |err| {
                     a.failure = err;
                 };
             }
             for (a.queue[0..a.queued]) |*entry| {
                 if (a.failure != null) break;
-                if (a.store.engine == .sqlite) entry.borrowed.check();
+                if (!a.store.engine.batches()) entry.borrowed.check();
                 entry.run(a, entry) catch |err| {
                     a.failure = err;
                 };
@@ -447,26 +439,30 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// outlive the round.
         pub fn writeContent(a: *Self, content_id: u64, bytes: []const u8) void {
             comptime std.debug.assert(!reads_only and mode != .single);
-            if (a.store.engine == .mysql) {
-                const Chunk = engine.Mysql.insert_chunk;
-                var offset: usize = 0;
-                while (offset < bytes.len) {
-                    const n = @min(bytes.len - offset, 128 * 1024);
-                    if (!a.queueStatement(Chunk, &.{
-                        .content_id = content_id,
-                        .chunk_index = @intCast(offset / (128 * 1024)),
-                        .bytes = .{ .bytes = bytes[offset..][0..n] },
-                    }, runWrite(Chunk), .{ .none = {} })) break;
-                    offset += n;
-                }
-                return;
-            }
-            if (a.reserve()) |slot| {
-                slot.* = .{ .statement = null, .run = runPayload, .target = .{ .payload = .{ .content_id = content_id, .bytes = bytes } } };
-                slot.borrowed = .ofBytes(bytes);
-                a.queued += 1;
-            }
+            a.ensureOpen();
+            if (a.failure != null) return;
+            a.store.engine.queuePayload(content_id, bytes, PayloadHost{ .access = a });
         }
+
+        /// The adapter lowers a buffered payload into ordinary queued
+        /// statements, or one in-process payload operation. It owns the
+        /// layout; Access owns queue pressure, guards and result order.
+        const PayloadHost = struct {
+            access: *Self,
+
+            pub fn statement(host: @This(), comptime S: type, args: S.Args) bool {
+                return host.access.queueStatement(S, &args, runWrite(S), .{ .none = {} });
+            }
+
+            pub fn payload(host: @This(), content_id: u64, bytes: []const u8) void {
+                const a = host.access;
+                if (a.reserve()) |slot| {
+                    slot.* = .{ .statement = null, .run = runPayload, .target = .{ .payload = .{ .content_id = content_id, .bytes = bytes } } };
+                    slot.borrowed = .ofBytes(bytes);
+                    a.queued += 1;
+                }
+            }
+        };
 
         /// Reads exactly `destination.len` bytes of the content row
         /// `content_id`'s payload at `offset`, as a round of its own; on
@@ -510,29 +506,29 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (content_id == 0) return error.ContentNotInserted;
             const index = std.mem.findScalar(u64, &a.taken, content_id) orelse return error.ContentNotInserted;
             if (!a.taken_rows[index]) return error.ContentWriteFailed;
-            if (a.store.engine == .sqlite) {
+            if (!a.store.engine.batches()) {
                 a.pass();
                 if (a.failure) |err| return err;
             }
             return a.store.engine.openSink(content_id, length, .{ .context = a, .chunk = queueChunk });
         }
 
-        /// `engine.Mysql.ContentHost.chunk`: queues one chunk INSERT of `n`
+        /// `engine.ContentHost.chunk`: queues one payload INSERT of `n`
         /// payload bytes, after a pass when the queue or the batch lacks
         /// room, and returns the batch's writer for its payload.
         fn queueChunk(context: *anyopaque, id: u64, index: u64, n: usize) error{ContentWriteFailed}!*std.Io.Writer {
             const a: *Self = @ptrCast(@alignCast(context));
             a.ensureOpen();
             if (a.failure != null) return error.ContentWriteFailed;
-            const mysql = &a.store.engine.mysql;
-            if (!mysql.chunkFits(id, index, n)) {
+            const e = &a.store.engine;
+            if (!e.chunkFits(id, index, n)) {
                 a.pass();
                 // A server whose packets cannot hold one chunk refuses the
                 // write before any of it is sent.
-                if (a.failure == null and !mysql.chunkFits(id, index, n)) return error.ContentWriteFailed;
+                if (a.failure == null and !e.chunkFits(id, index, n)) return error.ContentWriteFailed;
             }
             const slot = a.reserve() orelse return error.ContentWriteFailed;
-            const w = mysql.beginChunk(id, index) catch |err| {
+            const w = e.beginChunk(id, index) catch |err| {
                 a.failure = err;
                 return error.ContentWriteFailed;
             };
@@ -545,14 +541,14 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         /// Runs the queued writes and one compare-and-set per Session that
         /// claimed positions, then COMMIT. A failed guard stops before
-        /// COMMIT. A `.single` Access runs its one write, which commits
-        /// itself.
+        /// COMMIT. A SQLite `.single` uses its one write's autocommit;
+        /// a batching engine keeps its ownership fence in the transaction.
         pub fn commit(a: *Self) Error!void {
             comptime std.debug.assert(mode == .write or mode == .single);
             if (@import("builtin").is_test) a.store.testing_content_work.rounds += 1;
-            if (mode == .single) {
-                // A second statement would not commit with the first.
-                if (a.failure == null and a.queued != 1) @panic("a single Access commits exactly one write");
+            if (mode == .single and a.failure == null and a.queued != 1)
+                @panic("a single Access commits exactly one write");
+            if (!a.transactional()) {
                 a.pass();
                 if (a.failure) |err| return err;
                 a.phase = .ended;
@@ -579,7 +575,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             const discarded = a.resetQueued();
             a.claimed = 0;
             a.phase = .ended;
-            if (mode == .write and opened) try store_core.rollbackAfterError(a.store, faults);
+            if (a.transactional() and opened) try store_core.rollbackAfterError(a.store, faults);
             try discarded;
         }
 
@@ -604,23 +600,53 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 // latched so the Store cannot reuse the unresolved connection.
                 a.failure = err;
             };
-            if (mode == .write and a.phase == .opened) @panic("a write Access neither committed nor abandoned its transaction");
+            if (a.transactional() and a.phase == .opened) @panic("a write Access neither committed nor abandoned its transaction");
         }
 
         /// The queued writes, then one compare-and-set per claiming
         /// Session, in the round that commits. The compare-and-sets are
-        /// bound only once the writes stepped without a failure.
+        /// bound only once the writes stepped without a failure. A
+        /// network engine's COMMIT rides the same round when the write is
+        /// its batch's only one (`store_core.commitsWithWrites`): each
+        /// write's guard stops the round before it (`Engine.appendCommit`).
         fn finishWrites(a: *Self) Error!void {
             a.ensureOpen();
-            if (a.store.engine == .sqlite) a.pass();
+            if (!a.store.engine.batches()) a.pass();
             if (a.failure) |err| return err;
             for (a.claims[0..a.claimed]) |*claim| if (claim.taken != 0) {
                 const expected = claim.head.next_position.get();
                 _ = a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), .{ .none = {} });
             };
+            const commits = a.bindCommit();
             a.pass();
             a.claimed = 0;
+            if (commits) {
+                if (a.store.engine.settleCommit()) |_| {
+                    // Saved, though the connection was lost on the way.
+                    if (a.failure) |err| if (err == error.CommitOutcomeUnknown) {
+                        a.failure = null;
+                    };
+                } else |err| a.failure = err;
+            }
             if (a.failure) |err| return err;
+        }
+
+        /// A single domain write still needs the network ownership fence
+        /// and every transaction exit, including abandon and failed rollback.
+        fn transactional(a: *const Self) bool {
+            return mode == .write or (mode == .single and a.store.engine.batches());
+        }
+
+        /// Binds COMMIT after the round's writes and queues its step; false
+        /// when COMMIT takes a round of its own.
+        fn bindCommit(a: *Self) bool {
+            if (a.failure != null or !store_core.commitsWithWrites(a.store)) return false;
+            const slot = a.reserve() orelse return false;
+            if (!a.store.engine.appendCommit()) return false;
+            slot.* = .{ .statement = null, .run = runCommit, .target = .{ .none = {} } };
+            slot.borrowed = .of(struct {}, &.{});
+            a.queued += 1;
+            return true;
         }
 
         /// Opens the transaction of a write Access before its first
@@ -632,7 +658,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             std.debug.assert(a.phase != .ended);
             if (a.phase == .opened or a.failure != null) return;
             a.phase = .opened;
-            if (mode == .write) store_core.begin(a.store) catch |err| {
+            if (a.transactional()) store_core.begin(a.store) catch |err| {
                 a.failure = err;
             };
         }
@@ -677,6 +703,15 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 return false;
             };
             slot.borrowed = .of(S.Args, args);
+            if (comptime S.kind == .write and !reads_only and S.guarded) {
+                const e = &a.store.engine;
+                const bound = switch (S.expect) {
+                    .exact => |exact| e.guard(false, exact.rows),
+                    .at_most => |rows| e.guard(true, rows),
+                    .counted => e.guard(false, target.counted),
+                };
+                if (bound) a.guarded |= @as(u16, 1) << @intCast(a.queued);
+            }
             a.queued += 1;
             return true;
         }
@@ -704,6 +739,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         fn resetQueued(a: *Self) Failure!void {
             for (a.queue[0..a.queued]) |entry| a.store.engine.discard(entry.statement);
             a.queued = 0;
+            a.guarded = 0;
             try a.store.engine.discardBatch();
         }
 
@@ -807,8 +843,15 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                         .at_most => |rows| if (changed > rows) return error.CorruptStore,
                         .counted => |guard| if (changed != entry.target.counted) return comptime @as(Error, @errorCast(guard.otherwise)),
                     }
+                    const slot = entry - @as([*]const Queued, &a.queue);
+                    if (a.guarded >> @intCast(slot) & 1 != 0) _ = try a.store.engine.stepWrite(entry.statement);
                 }
             }.run);
+        }
+
+        /// The COMMIT `finishWrites` bound after the round's writes.
+        fn runCommit(a: *Self, _: *const Queued) Error!void {
+            try a.store.engine.stepCommit();
         }
 
         /// A sink's chunk INSERT (`queueChunk`): one row.
@@ -819,7 +862,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         fn runPayload(a: *Self, entry: *const Queued) Error!void {
             const payload = entry.target.payload;
             if (payload.bytes.len == 0) return;
-            try a.store.engine.writePayload(payload.content_id, payload.bytes);
+            try a.store.engine.stepPayload(payload.content_id, payload.bytes);
         }
     };
 }

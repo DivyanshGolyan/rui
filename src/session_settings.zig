@@ -26,7 +26,7 @@ pub const Entry = struct {
 pub const entries = [_]Entry{
     .{ .field = "workspace", .spec = "workspace", .kind = .{ .text = 4096 }, .changeable = false, .cli = .{ .name = "workspace" }, .column = "workspace" },
     .{ .field = "provider", .spec = "provider", .kind = .{ .choice = 16 }, .changeable = false, .cli = .{ .name = "provider", .group = .binding }, .column = "provider" },
-    .{ .field = "model", .spec = "model", .kind = .{ .text = 256 }, .create = .must_value, .changeable = false, .cli = .{ .name = "model", .group = .binding }, .column = "model" },
+    .{ .field = "model", .spec = "model", .kind = .{ .text = 256 }, .create = .must_value, .changeable = true, .cli = .{ .name = "model", .group = .binding }, .column = "model" },
     .{ .field = "instructions", .spec = "instructions", .kind = .content, .cli = .{ .name = "instructions", .on_start = false }, .column = "instructions_content_id" },
     .{ .field = "tools", .spec = "tools", .kind = .tools, .create = .must_value, .cli = .{ .name = "tools" }, .column = "tool_set_id" },
     .{ .field = "loaded_tools", .spec = "loadedTools", .kind = .tools, .cli = .{ .name = "loaded-tools" }, .digest = .unless_omitted, .column = "loaded_tool_set_id" },

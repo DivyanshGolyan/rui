@@ -368,6 +368,13 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(callers, [], "Store tests reach these Store callers; move the tests that "
                          "import them into the callers")
 
+    def test_store_tests_reach_no_client_reply_decoder(self):
+        # Store/decoder round trips belong to protocol_reply_store_tests.zig,
+        # not Store's root: the decoder can reach caller-only presentation.
+        graph = tree_graph()
+        self.assertNotIn("src/protocol_reply.zig", graph.reached["test-store"],
+                         "Move Store/client decoder contracts to protocol_reply_store_tests.zig")
+
     def test_store_code_imports_no_protocol(self):
         # The Store reads and writes plain values; the Host translates
         # between them and the wire, so a wire change does not reach it.

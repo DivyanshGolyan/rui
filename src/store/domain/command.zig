@@ -470,7 +470,7 @@ pub fn deliverAgentMessage(
     const key = agentMessageKey(&key_buffer, binding.action_id);
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &facts);
+    a.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     var receiver: target_session.Result = null;
@@ -526,7 +526,7 @@ pub fn deliverAgentMessage(
         try skills_domain.saveBound(a, admission_id, boundOf(captured), faults);
     }
     const outcome_id = try content_domain.importBytes(a, &outcome, result);
-    try action_domain.queueCoreResolution(a, binding, found.session, if (delivered) .succeeded else .failed, outcome_id);
+    try action_domain.queueResolution(a, binding, found.session, if (delivered) .succeeded else .failed, outcome_id);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
     return if (delivered) .delivered else .failed;
@@ -680,7 +680,7 @@ pub fn startAgent(
     const key = std.fmt.bufPrint(&key_buffer, "rui.core/start_agent/{d}", .{binding.action_id}) catch unreachable;
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &facts);
+    a.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     configuration.workspace = .{ .state = .value, .value = .{ .len = 0 } };
@@ -762,7 +762,7 @@ pub fn startAgent(
         try skills_domain.saveBound(a, admission_id, boundOf(captured), faults);
     }
     const outcome_id = try content_domain.importBytes(a, &outcome, result);
-    try action_domain.queueCoreResolution(a, binding, found.session, if (applied != null) .succeeded else .failed, outcome_id);
+    try action_domain.queueResolution(a, binding, found.session, if (applied != null) .succeeded else .failed, outcome_id);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
     const value = applied orelse return .failed;
@@ -775,7 +775,7 @@ pub fn startAgent(
 pub fn resolveCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, code: action_domain.ActionResolutionCode, result: []const u8, faults: Faults) !bool {
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &facts);
+    a.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
     var outcome: content_domain.Import = .ofBytes(result, false);
     content_domain.lookup(a, &outcome);
     try a.run();
@@ -786,7 +786,7 @@ pub fn resolveCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, 
     }
     if (faults.content_import) return error.InjectedContentImportFailure;
     const outcome_id = try content_domain.importBytes(a, &outcome, result);
-    try action_domain.queueCoreResolution(a, binding, found.session, code, outcome_id);
+    try action_domain.queueResolution(a, binding, found.session, code, outcome_id);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
     return true;
@@ -1068,7 +1068,7 @@ fn stopRounds(a: anytype, command: *const command_input.SessionStopCommand, owed
     var interrupted_operation_id: ?u64 = null;
     // The cancellation text's identity: its queued row reads the digest in
     // place until commit.
-    var cancellation = content_domain.stop_cancellation;
+    var cancellation = unattempted_stop_content;
     if (turn) |open| {
         if (open.running) {
             a.write(interrupt_operation, .{ .operation_id = open.operation_id.get(), .command_key = key, .session = head });
@@ -1091,6 +1091,24 @@ fn stopRounds(a: anytype, command: *const command_input.SessionStopCommand, owed
     } };
 }
 
+/// All unattempted runners use the same bytes today. Prove that before
+/// sharing one content import and one cancellation batch, without another
+/// read or a runner column. A runner that changes this must split the batch.
+const unattempted_stop_text = blk: {
+    const runners = @import("../../tool_record.zig").Runner;
+    const text = runners.bash.beforeAdmissionStopText();
+    for (.{ runners.bash, runners.mcp, runners.core }) |runner| {
+        if (!std.mem.eql(u8, text, runner.beforeAdmissionStopText()))
+            @compileError("unattempted cancellation batch requires one runner text");
+    }
+    break :blk text;
+};
+
+const unattempted_stop_content: content_domain.Import = blk: {
+    @setEvalBranchQuota(1_000_000);
+    break :blk .ofBytes(unattempted_stop_text, false);
+};
+
 /// Cancels the open Turn's `open.cancellable` Actions in call order, each
 /// at the Session's next position, with the stop's cancellation text.
 fn cancelActions(
@@ -1106,7 +1124,7 @@ fn cancelActions(
     a.readEach(cancellable_actions, .{ .operation_id = open.operation_id.get(), .after = 0 }, cancel_chunk, &chunk);
     try a.run();
     if (faults.content_import) return error.InjectedContentImportFailure;
-    const content_id = try content_domain.importBytes(a, cancellation, content_domain.stop_cancellation_text);
+    const content_id = try content_domain.importBytes(a, cancellation, unattempted_stop_text);
     var cancelled: u64 = 0;
     // The count says when the last page was read, so a multiple of
     // `cancel_chunk` costs no empty round.

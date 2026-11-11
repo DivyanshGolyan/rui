@@ -200,6 +200,8 @@ pub fn configurationBeforeWorkspace(
     if (requested.compaction_trigger.state == .explicit_null) return .invalid_compaction_trigger;
     const compact_at = if (requested.compaction_trigger.state == .value)
         tokenCount(requested.compaction_trigger.value.slice(), false) catch return .invalid_compaction_trigger
+    else if (current) |existing|
+        existing.compaction_trigger
     else
         null;
     _ = configurationTokens(requested.output_reservation, null, true) catch return .invalid_output_reservation;
@@ -221,11 +223,6 @@ pub fn configurationBeforeWorkspace(
         if (provider) |value| {
             if (value != existing.provider) return .provider_is_immutable;
         }
-        if (requested.model.state == .value and
-            !existing.model.eql(requested.model.value.slice()))
-        {
-            return .model_is_immutable;
-        }
     }
     if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
     if (requested.tools.state == .value) if (toolsRejection(catalog, provider orelse (if (current) |existing| existing.provider else default_provider.?), &requested.tools)) |rejection| return rejection;
@@ -235,18 +232,22 @@ pub fn configurationBeforeWorkspace(
         if (known.context_window) |window| if (tokens > window) return .compact_at_too_large;
     };
     if (compact_at) |tokens| if (tokens > std.math.maxInt(i64)) return .invalid_compaction_trigger;
-    // A listed model with effort levels requires one of them. Models with no
-    // listed efforts can omit reasoning, but v2 cannot clear an assigned effort.
-    if (requested.reasoning_effort.state == .explicit_null) {
-        if (model_catalog.find(model_catalog.shipped, model)) |known| {
-            if (known.efforts.count() != 0) return .unsupported_reasoning_effort;
-        }
-        if (current) |existing| if (effectiveReasoningEffort(existing) != null) return .unsupported_reasoning_effort;
-    }
-    if (requested.reasoning_effort.state == .value) {
-        const effort = std.meta.stringToEnum(model_capability.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
-            return .unsupported_reasoning_effort;
-        if (!model_capability.supportsReasoningEffort(model, effort)) return .unsupported_reasoning_effort;
+    // Resolve the settings once: omission retains the effective historical
+    // effort, while a supplied value (including null) overrides it. Validate
+    // that result even when only the model, or neither setting, was supplied.
+    const retained_effort = if (current) |existing| effectiveReasoningEffort(existing) else null;
+    const effort = switch (requested.reasoning_effort.state) {
+        .omitted => retained_effort,
+        .explicit_null => null,
+        .value => std.meta.stringToEnum(model_capability.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
+            return .unsupported_reasoning_effort,
+    };
+    // The codec cannot encode a boundary back to unspecified effort.
+    if (requested.reasoning_effort.state == .explicit_null and retained_effort != null) return .unsupported_reasoning_effort;
+    if (effort) |value| {
+        if (!model_capability.supportsReasoningEffort(model, value)) return .unsupported_reasoning_effort;
+    } else if (model_catalog.find(model_catalog.shipped, model)) |known| {
+        if (known.efforts.count() != 0) return .unsupported_reasoning_effort;
     }
     return null;
 }
@@ -1163,6 +1164,7 @@ test "Session settings changed detects each mutable value without comparing boun
     try current.label.?.set("label");
     const before = Settings.of(&current);
     inline for (.{
+        session_field.SessionField.model,
         session_field.SessionField.instructions,
         session_field.SessionField.tools,
         session_field.SessionField.loaded_tools,
@@ -1175,6 +1177,7 @@ test "Session settings changed detects each mutable value without comparing boun
     }) |field| {
         var next = current;
         switch (field) {
+            .model => try next.model.set("gpt-5.5"),
             .instructions => next.instructions_id = 1,
             .tools => next.tool_set_id = 2,
             .loaded_tools => next.loaded_tool_set_id = 1,
