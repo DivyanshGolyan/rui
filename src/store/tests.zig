@@ -5402,22 +5402,21 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try own_ref.set(sender);
             const sender_end = (try store_core.activityPageForTesting(&storage, .{ .session = own_ref })).end;
             const Send = struct {
-                fn make(dir: std.Io.Dir, key: []const u8, target: []const u8, from: ?[]const u8, text: []const u8) !wire_request.MessageCommand {
+                fn make(dir: std.Io.Dir, store_id: []const u8, key: []const u8, target: []const u8, from: ?[]const u8, text: []const u8) !wire_request.MessageCommand {
                     const file = try dir.createFile(std.testing.io, key, .{ .read = true });
                     try file.writeStreamingAll(std.testing.io, text);
                     try file.sync(std.testing.io);
                     var command = try completeMessage(key, target, file, text);
                     if (from) |ref| {
                         command.sender = .{};
-                        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-                        try command.sender.?.store.set(root_buffer[0..try dir.realPath(std.testing.io, &root_buffer)]);
+                        try command.sender.?.store.set(store_id);
                         try command.sender.?.session.set(ref);
                     }
                     return command;
                 }
             };
 
-            var sent = try Send.make(tmp.dir, "peer-send", allocated_session_1.slice(), sender, "look at this\nsecond line");
+            var sent = try Send.make(tmp.dir, storage.storeId(), "peer-send", allocated_session_1.slice(), sender, "look at this\nsecond line");
             sent.sender_handle = handle;
             defer sent.removeTemporaryContent(std.testing.io) catch unreachable;
             var commits: TestingCommits = .{};
@@ -5428,19 +5427,19 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try std.testing.expect(commits.calls[0].from_peer);
             try std.testing.expectEqual(accepted.accepted.admission_id, commits.calls[0].admission_id);
             // The sender is part of the request: the same key without it conflicts.
-            var anonymous = try Send.make(tmp.dir, "peer-send-anonymous", allocated_session_1.slice(), null, "look at this\nsecond line");
+            var anonymous = try Send.make(tmp.dir, storage.storeId(), "peer-send-anonymous", allocated_session_1.slice(), null, "look at this\nsecond line");
             defer anonymous.removeTemporaryContent(std.testing.io) catch unreachable;
             try anonymous.key.set("peer-send");
             try std.testing.expect(storage.submitMessageWithModel(&anonymous, null, .{}) == .conflict);
 
-            var refused = try Send.make(tmp.dir, "peer-refused", "absent", sender, "lost");
+            var refused = try Send.make(tmp.dir, storage.storeId(), "peer-refused", "absent", sender, "lost");
             refused.sender_handle = handle;
             defer refused.removeTemporaryContent(std.testing.io) catch unreachable;
             try std.testing.expectEqual(protocol.MessageRejection.unknown_session, storage.submitMessageWithModel(&refused, commits.callback(), .{}).rejected.code);
             // A rejected Message installs nothing.
             try std.testing.expectEqual(@as(usize, 1), commits.count);
 
-            var forged = try Send.make(tmp.dir, "peer-forged", allocated_session_1.slice(), "f0rged", "forged");
+            var forged = try Send.make(tmp.dir, storage.storeId(), "peer-forged", allocated_session_1.slice(), "f0rged", "forged");
             defer forged.removeTemporaryContent(std.testing.io) catch unreachable;
             try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&forged, null, .{}).rejected.code);
             const forged_replay = storage.submitMessageWithModel(&forged, null, .{});
@@ -5470,7 +5469,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
                 .{ .key = "peer-empty-forged", .from = "f0rged" },
                 .{ .key = "peer-empty-known", .from = sender },
             }) |case| {
-                var empty = try Send.make(tmp.dir, case.key, "", case.from, "nowhere");
+                var empty = try Send.make(tmp.dir, storage.storeId(), case.key, "", case.from, "nowhere");
                 if (std.mem.eql(u8, case.from, sender)) empty.sender_handle = handle;
                 defer empty.removeTemporaryContent(std.testing.io) catch unreachable;
                 try std.testing.expectEqual(protocol.MessageRejection.invalid_session_reference, storage.submitMessageWithModel(&empty, null, .{}).rejected.code);
@@ -5584,8 +5583,7 @@ test "refused peer creation activity keeps invalid targets absent" {
             try creation.configuration.reasoning_effort.value.set("none");
             message.configuration = creation.configuration;
             message.sender = .{};
-            var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-            try message.sender.?.store.set(root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)]);
+            try message.sender.?.store.set(storage.storeId());
             message.sender.?.session = sender;
             message.sender_handle = input.sender_handle;
             var commits: TestingCommits = .{};
