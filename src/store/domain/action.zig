@@ -642,9 +642,9 @@ const settle_facts = rsql.Read(.{
 });
 
 const resolve_action = rsql.Write(.{
-    .sql = "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,sender_handle=NULL,resolved_at=@now " ++
+    .sql = "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,sender_handle=NULL,resolved_at=@now,full_content_id=?7 " ++
         "WHERE action_id=?1 AND parent_operation_id=?5 AND session_ref=@session(?6) AND " ++ action_attempted_sql ++ " AND resolution_code IS NULL",
-    .Args = struct { action_id: u64, code: ActionResolutionCode, content_id: u64, position: u64, parent_operation_id: u64, session: rsql.SessionHead },
+    .Args = struct { action_id: u64, code: ActionResolutionCode, content_id: u64, position: u64, parent_operation_id: u64, session: rsql.SessionHead, full_content_id: ?u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleActionAttemptBinding } },
 });
 
@@ -662,24 +662,45 @@ pub fn settleActionAttempt(
     result: []const u8,
     faults: Faults,
 ) !ActionSettlement {
+    return settleActionAttemptWithFullContent(a, binding, code, result, null, faults);
+}
+
+/// The MCP full answer shares the excerpt's lookup round and settlement.
+/// A selected stop imports neither the excerpt nor its discarded full text.
+pub fn settleActionAttemptWithFullContent(
+    a: anytype,
+    binding: ActionAttemptBinding,
+    code: ActionResolutionCode,
+    result: []const u8,
+    full_result: ?[]const u8,
+    faults: Faults,
+) !ActionSettlement {
     var facts: settle_facts.Result = undefined;
     a.read(settle_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &facts);
     try a.run();
     const found = facts orelse return error.StaleActionAttemptBinding;
     if (found.turn_id.get() != binding.turn_id) return error.StaleActionAttemptBinding;
+    std.debug.assert(full_result == null or found.mcp);
 
     // A stop that selected the Turn cancels whatever the Action did.
     const settled: struct { code: ActionResolutionCode, text: []const u8 } =
         if (found.stopped) .{ .code = .cancelled, .text = if (found.mcp) (if (code == .cancelled) result else if (code == .spawn_failed) mcp_stop_not_sent_text else mcp_stop_unknown_text) else content_domain.stop_cancellation_text } else .{ .code = code, .text = result };
     var content: content_domain.Import = .ofBytes(settled.text, false);
+    const full_text = if (found.stopped) null else full_result;
+    var full_content: ?content_domain.Import = if (full_text) |text| .ofBytes(text, false) else null;
+    var pair: content_domain.Pair = undefined;
     var completion: turn_domain.stopped_turn.Result = null;
-    content_domain.lookup(a, &content);
+    if (full_content) |*full| {
+        content_domain.lookupPair(a, &content, full, &pair);
+    } else content_domain.lookup(a, &content);
     if (found.stopped) a.read(turn_domain.stopped_turn, .{ .turn_id = binding.turn_id, .resolving_action_id = binding.action_id }, &completion);
     try a.run();
 
+    if (full_content) |*full| content_domain.foundPair(&pair, &content, full);
     if (faults.content_import) return error.InjectedContentImportFailure;
     const positions = try a.positions(found.session);
     const content_id = try content_domain.importBytes(a, &content, settled.text);
+    const full_content_id = if (full_content) |*full| try content_domain.importBytes(a, full, full_text.?) else null;
     a.write(resolve_action, .{
         .action_id = binding.action_id,
         .code = settled.code,
@@ -687,6 +708,7 @@ pub fn settleActionAttempt(
         .position = try positions.take(1),
         .parent_operation_id = binding.parent_operation_id,
         .session = found.session,
+        .full_content_id = full_content_id,
     });
     try turn_domain.queueStopCompletion(a, completion, binding.turn_id);
     turn_domain.queueContinuation(a, binding.turn_id, found.session);

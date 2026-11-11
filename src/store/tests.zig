@@ -13802,6 +13802,80 @@ fn membershipCatalog(digests: *[membership_records.len][32]u8) tool_catalog.Cata
     return .{ .records = &membership_records, .digests = digests };
 }
 
+test "MCP full answer settlement is atomic and stop and stale results import neither text" {
+    try store_testing.forEachEngine(struct {
+        fn run(engine: *store_testing.Case) !void {
+            const Scenario = enum { saved, fitting, stopped, import_failure, commit_failure };
+            for ([_]Scenario{ .saved, .fitting, .stopped, .import_failure, .commit_failure }) |scenario| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var digests: [membership_records.len][32]u8 = undefined;
+                const catalog = membershipCatalog(&digests);
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                var opened = true;
+                defer if (opened) storage.close() catch unreachable;
+                var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+                var configure = try completeConfiguration("mcp-full-config", "", try canonicalCwd(std.testing.io, &workspace), "model-a");
+                configure.configuration.tools = try .of(&.{"fetch_page"});
+                configure.configuration.permission_mode.state = .value;
+                try configure.configuration.permission_mode.value.set("bypass");
+                const session = (try storage.configure(&configure, .{})).accepted.session;
+                try submitTestMessage(&storage, &tmp, "mcp-full-input", "mcp-full-message", session.slice(), "fetch");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleCallsForTesting(&storage, &tmp, model, "mcp-full-calls", &.{.{
+                    .item_id = "item-1",
+                    .name = "fetch_page",
+                    .encoded_call_id = "call-1",
+                    .decoded_call_id = "call-1",
+                    .encoded_arguments = "{}",
+                    .decoded_arguments = "{}",
+                }});
+                const action = (try storage.nextMcpAction()).?;
+                const binding = (try storage.admitMcpActionAttempt(action.action_id, 600_000, .{})).?;
+                const excerpt = "Saved MCP excerpt";
+                const full = "Complete MCP answer, including bytes omitted from the saved excerpt.";
+                const full_text: ?[]const u8 = if (scenario == .fitting) null else full;
+                const before = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
+                if (scenario == .import_failure or scenario == .commit_failure) {
+                    try std.testing.expectError(if (scenario == .import_failure) error.InjectedContentImportFailure else error.InjectedCommitFailure, storage.settleMcpActionAttempt(binding, .succeeded, excerpt, full_text, .{
+                        .content_import = scenario == .import_failure,
+                        .before_commit = scenario == .commit_failure,
+                    }));
+                    try std.testing.expect(storage.isFenced());
+                    try storage.close();
+                    opened = false;
+                    try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                    opened = true;
+                    try std.testing.expectEqual(before, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_content_id IS NULL AND full_content_id IS NULL", .{binding.action_id}));
+                }
+                if (scenario == .stopped) {
+                    var stop = try completeSessionStop("mcp-full-stop", session.slice());
+                    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                }
+                try std.testing.expectEqual(if (scenario == .stopped) ActionSettlement.session_stop else ActionSettlement.effect, try storage.settleMcpActionAttempt(binding, .succeeded, excerpt, full_text, .{}));
+                const resolution_id = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{binding.action_id});
+                try expectContent(&storage, try testingContentReference(&storage, resolution_id), if (scenario == .stopped) action_domain.mcp_stop_unknown_text else excerpt);
+                if (scenario == .stopped or scenario == .fitting) {
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE full_content_id IS NOT NULL", .{}));
+                    const digest = protocol.contentDigest(full);
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1", .{store_testing.Blob{ .bytes = &digest }}));
+                } else {
+                    const full_id = try store_testing.queryU64(&storage, "SELECT full_content_id FROM action_operation WHERE action_id=?1", .{binding.action_id});
+                    try std.testing.expect(resolution_id != full_id);
+                    try expectContent(&storage, try testingContentReference(&storage, full_id), full);
+                    try std.testing.expectEqual(before + 2, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                }
+                const settled_count = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
+                try std.testing.expectError(error.StaleActionAttemptBinding, storage.settleMcpActionAttempt(binding, .failed, "Late excerpt must not be imported", "Late full answer must not be imported", .{}));
+                try std.testing.expectEqual(settled_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}
+
 const MembershipOutcome = enum { accepted, removed, unknown };
 const MembershipCase = struct {
     name: []const u8,

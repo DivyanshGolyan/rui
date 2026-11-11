@@ -584,11 +584,12 @@ The Operation's admission position fixes its historical boundary.
 Accepted model output, call rejection and Action Resolution become available at their acceptance positions, not a producing Operation's earlier admission position.
 Historical visibility does not bypass pending-input applicability, expose an incomplete Tool Result group or change Conversation/tool-call order.
 
-The Store keeps the complete rendered MCP answer as its Action Resolution, within the MCP transport's 4 MiB answer limit.
-Model history derives an excerpt from every Action Resolution and rejected call, regardless of runner: at most Bash's 10,000 excerpt bytes, cut back to a UTF-8 boundary, then an omitted-byte count and `read_transcript full on this call's result` pointer when anything was cut.
-This deterministic rendering preserves fitting results byte for byte and keeps repeated history writes cache-prefix stable.
-The historical result handle has no public entry address, so the pointer does not name one; `read_transcript(full)` reads the complete saved result through the public activity feed.
-Bash's existing status, tail and retention-path rendering is unchanged before this shared history bound.
+Model history writes each saved Action Resolution and rejected call byte for byte; it never truncates or re-renders the saved result (D235, replacing D233).
+The MCP producer renders an answer once, within the transport's 4 MiB answer limit, and derives its model-facing Resolution: at most 10,000 prefix bytes, cut back to a UTF-8 boundary, followed by the existing omitted-byte suffix when anything was cut.
+When bytes were omitted, the same settlement transaction saves the complete rendered answer as a second public content on the Action, `full_content_id` (Store format 62); a fitting answer leaves that reference null.
+`read_transcript(full)` reads the full content when present and the Resolution otherwise, through its existing bounded windows and next-offset line; Activity and transcript result byte counts describe the full content.
+Previously saved Resolutions remain untouched, preserving sealed model-history prefixes on resume.
+Bash's status, tail, omission notices and retention paths, and core-tool result windows, remain exactly as their producers saved them.
 
 Replacement Attempts retain that historical view.
 With unchanged adapter rules, they reconstruct equivalent request semantics; meaningless JSON spelling need not match.
@@ -1423,6 +1424,7 @@ The step to 58 moves saved wire 9 metadata to wire 10 for nullable failed-send p
 The step to 59 adds immutable skill catalog metadata and its ordinary turnless instruction provenance, retaining unreleased wire 10 without rewriting earlier Conversation content.
 The step to 60 adds `message_skill` and the Conversation's skill entries (kind 4, naming their `message_skill` row), rebuilding `conversation_entry` on both engines, and moves Store wire metadata to 11; earlier rows are unchanged.
 The step to 61 widens saved call descriptions on `model_tool_call` and `model_output_item` to 200 UTF-8 bytes on both engines; existing rows need no rewrite.
+The step to 62 adds the nullable `action_operation.full_content_id` content reference on both engines; existing saved Resolutions stay unchanged and have no full answer reference.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.

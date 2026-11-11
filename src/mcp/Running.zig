@@ -129,7 +129,7 @@ pub fn service(self: *Running, now_ms: u64, out: *std.Io.Writer) !?result_text.C
 
 fn finish(self: *Running, out: *std.Io.Writer, ending: result_text.Ending) !result_text.Code {
     defer self.deinit();
-    return result_text.write(out, .{ .server_name = self.server_name, .ended = ending });
+    return result_text.render(out, .{ .server_name = self.server_name, .ended = ending });
 }
 
 const Script = @import("test_server.zig");

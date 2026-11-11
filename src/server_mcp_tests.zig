@@ -47,7 +47,7 @@ test "Host MCP forwards schema-only arguments and metadata into a historical con
     try run(.success);
 }
 
-test "Host MCP keeps full oversized results for transcript windows and bounds model history" {
+test "Host MCP saves its unchanged excerpt beside full transcript windows" {
     try run(.oversized);
 }
 
@@ -242,16 +242,38 @@ fn run(case: Case) !void {
         try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), &script.connection_closed, poll.isSet);
     }
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
-    const expected = switch (case) {
+    const expected: []const u8 = switch (case) {
         .success, .serial => "page payload",
         .oversized => &oversized_text,
         .timeout, .stop => "Outcome unknown",
         .shutdown, .concurrent => "Outcome unknown",
         .down => "Failed, not run",
     };
+    const excerpt: ?[]u8 = if (case == .oversized)
+        try std.fmt.allocPrint(allocator, "{s}\n[{d} more bytes not shown]", .{ oversized_text[0 .. @import("mcp/result_text.zig").excerpt_bytes - 1], oversized_text.len - (@import("mcp/result_text.zig").excerpt_bytes - 1) })
+    else
+        null;
+    defer if (excerpt) |bytes| allocator.free(bytes);
+    const model_expected = excerpt orelse expected;
+    const full_count = try store.testing.sqlite_only.queryU64(storage, "SELECT count(*) FROM action_operation WHERE full_content_id IS NOT NULL", .{});
+    try std.testing.expectEqual(@as(u64, if (case == .oversized) 1 else 0), full_count);
+    if (case == .oversized) {
+        const full_id = try store.testing.sqlite_only.queryU64(storage, "SELECT full_content_id FROM action_operation WHERE full_content_id IS NOT NULL", .{});
+        const reference = try store.testingContentReference(storage, full_id);
+        try std.testing.expectEqual(oversized_text.len, reference.length);
+        var reader: store.ContentReader = undefined;
+        reader.open(try storage.openContent(reference));
+        defer reader.close();
+        const full = try allocator.alloc(u8, @intCast(reference.length));
+        defer allocator.free(full);
+        try std.testing.expectEqual(full.len, try reader.read(0, full));
+        try std.testing.expectEqualStrings(&oversized_text, full);
+    }
     const report = try store.testingSessionReportWithProfile(storage, &tmp, session.slice(), 1024 * 1024, .full);
     defer allocator.free(report);
-    try expectHere(@src(), std.mem.indexOf(u8, report, expected) != null);
+    const report_expected = try std.json.Stringify.valueAlloc(allocator, model_expected, .{});
+    defer allocator.free(report_expected);
+    try expectHere(@src(), std.mem.indexOf(u8, report, if (case == .oversized) report_expected else expected) != null);
     if (case == .stop) return;
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
@@ -274,7 +296,7 @@ fn run(case: Case) !void {
             defer allocator.free(bytes);
             try std.testing.expectEqual(bytes.len, try reader.read(0, bytes));
             if (case == .oversized) {
-                try std.testing.expectEqualStrings(&oversized_text, bytes);
+                try std.testing.expectEqualStrings(model_expected, bytes);
             } else try expectHere(@src(), std.mem.indexOf(u8, bytes, expected) != null);
             found += 1;
         }
@@ -282,11 +304,8 @@ fn run(case: Case) !void {
     try std.testing.expectEqual(count, found);
     view.close();
     if (case == .oversized) {
-        const kept = @import("bash.zig").excerpt_bytes - 1;
-        const excerpt = try std.fmt.allocPrint(allocator, "{s}\n[{d} more bytes not shown; read_transcript full on this call's result]", .{ oversized_text[0..kept], oversized_text.len - kept });
-        defer allocator.free(excerpt);
-        try expectNextRequest(storage, &tmp, continuation, excerpt, count, true);
-        try expectNextRequest(storage, &tmp, continuation, excerpt, count, true);
+        try expectNextRequest(storage, &tmp, continuation, model_expected, count, true);
+        try expectNextRequest(storage, &tmp, continuation, model_expected, count, true);
         try expectFullWindows(storage, &tmp, continuation, session.slice(), result_position);
     } else try expectNextRequest(storage, &tmp, continuation, expected, count, false);
 }

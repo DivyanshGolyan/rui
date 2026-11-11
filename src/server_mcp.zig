@@ -145,7 +145,7 @@ pub const Calls = struct {
                 };
             }
             if (code) |result| {
-                settle(host, active.binding, switch (result) {
+                settleFull(host, active.binding, switch (result) {
                     .succeeded => .succeeded,
                     .failed => .failed,
                     .spawn_failed => .spawn_failed,
@@ -171,6 +171,22 @@ pub const Calls = struct {
 
 fn nowMs(host: *const Host) u64 {
     return @intCast(@divTrunc(std.Io.Clock.Timestamp.now(host.io, .awake).raw.nanoseconds, std.time.ns_per_ms));
+}
+
+// Only oversized MCP answers need a second content. Fitting answers retain
+// the original resolution path, without copying their rendered bytes.
+noinline fn settleFull(host: *Host, binding: store.ActionAttemptBinding, code: store.ActionResolutionCode, full: []const u8) void {
+    const result_text = @import("mcp/result_text.zig");
+    if (full.len <= result_text.excerpt_bytes) return settle(host, binding, code, full);
+    var excerpt: std.Io.Writer.Allocating = .init(host.allocator);
+    defer excerpt.deinit();
+    result_text.writeExcerpt(&excerpt.writer, full) catch |err| {
+        fenceDispatch(host, "MCP excerpt rendering", err);
+        return;
+    };
+    _ = host.store.settleMcpActionAttempt(binding, code, excerpt.written(), full, host.hooks.storeFaults(.action_result)) catch |err| {
+        fenceDispatch(host, "MCP settlement", err);
+    };
 }
 
 fn settle(host: *Host, binding: store.ActionAttemptBinding, code: store.ActionResolutionCode, text: []const u8) void {

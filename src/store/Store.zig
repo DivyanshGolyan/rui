@@ -1233,7 +1233,20 @@ pub const Store = struct {
         result: []const u8,
         faults: Faults,
     ) !ActionSettlement {
-        return self.queue().write(settleActionAttemptHeld, .{ self, binding, code, result, faults });
+        return self.queue().write(settleActionAttemptHeld, .{ self, binding, code, result, @as(?[]const u8, null), faults });
+    }
+
+    /// Settle an MCP excerpt and, only when it omitted bytes, its complete
+    /// rendered answer. Both public contents belong to the same transaction.
+    pub fn settleMcpActionAttempt(
+        self: *Store,
+        binding: ActionAttemptBinding,
+        code: ActionResolutionCode,
+        result: []const u8,
+        full_result: ?[]const u8,
+        faults: Faults,
+    ) !ActionSettlement {
+        return self.queue().write(settleActionAttemptHeld, .{ self, binding, code, result, full_result, faults });
     }
 
     fn settleActionAttemptHeld(
@@ -1241,14 +1254,16 @@ pub const Store = struct {
         binding: ActionAttemptBinding,
         code: ActionResolutionCode,
         result: []const u8,
+        full_result: ?[]const u8,
         faults: Faults,
     ) !ActionSettlement {
         if (result.len == 0) return error.InvalidActionResult;
+        if (full_result) |full| if (full.len == 0) return error.InvalidActionResult;
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, action_domain.settleActionAttempt(&access, binding, code, result, faults)));
+        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, action_domain.settleActionAttemptWithFullContent(&access, binding, code, result, full_result, faults)));
     }
 
     /// Delivers the owed child ending (D39) `nextCoreWork` names, or only

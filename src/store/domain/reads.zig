@@ -479,7 +479,7 @@ const public_page = rsql.Read(.{
     .sql = public_tool_groups_sql ++
         "public AS (SELECT e.session_position AS position,0 AS ordinal,e.entry_kind AS kind,e.content_id " ++
         "FROM conversation_entry e WHERE e.session_ref=?1 AND e.entry_kind IN (1,3) AND e.session_position<=?2 " ++
-        "UNION ALL SELECT tool_groups.position,tool_call.call_ordinal+1,4,coalesce(tool_call.rejection_content_id,action.resolution_content_id) " ++
+        "UNION ALL SELECT tool_groups.position,tool_call.call_ordinal+1,4,coalesce(tool_call.rejection_content_id,action.full_content_id,action.resolution_content_id) " ++
         "FROM tool_groups JOIN model_tool_call tool_call ON tool_call.operation_id=tool_groups.operation_id " ++
         "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
         "WHERE tool_groups.position<=?2 " ++
@@ -731,7 +731,7 @@ const public_tool_result = rsql.Read(.{
     // there. Each arm names its acceptance index, as `call_candidates_sql`.
     .sql = "WITH last AS (SELECT operation_id FROM model_tool_call @index(model_tool_call_acceptance) WHERE session_ref=?1 AND acceptance_position=?2 " ++
         "UNION ALL SELECT parent_operation_id FROM action_operation @index(action_operation_acceptance) WHERE session_ref=?1 AND acceptance_position=?2) " ++
-        "SELECT coalesce(tool_call.rejection_content_id,action.resolution_content_id) AS content_id,NOT EXISTS(SELECT 1 FROM model_tool_call linked " ++
+        "SELECT coalesce(tool_call.rejection_content_id,action.full_content_id,action.resolution_content_id) AS content_id,NOT EXISTS(SELECT 1 FROM model_tool_call linked " ++
         "LEFT JOIN model_output_item item ON item.operation_id=linked.operation_id AND item.item_ordinal=linked.item_ordinal LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
         "LEFT JOIN content rejection ON rejection.content_id=linked.rejection_content_id " ++
         "LEFT JOIN action_operation a ON a.parent_operation_id=linked.operation_id AND a.call_ordinal=linked.call_ordinal " ++
