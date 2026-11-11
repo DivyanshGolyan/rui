@@ -136,8 +136,9 @@ def editor(fixture, row):
         # The expired standalone Esc leaves the chat, saving its draft. The
         # fixture creates exactly one Session, so Enter must reopen that row.
         # If Esc merged with a later byte, this overview observation must fail.
-        tty.marker("new Session · ")
+        tty.marker("+ New Session")
         tty.marker(f"○ {fixture.session}")
+        tty.marker("enter open")
         tty.send(b"\r")
         tty.marker(f"‹ {fixture.session} · ")
         tty.draft(row["reopen_draft"], 2 + len(row["reopen_draft"]))
@@ -200,6 +201,45 @@ def recovery(fixture, row):
     tty.finish()
 
 
+def assert_navigation_history(screen, first, browsing):
+    # 24 terminal rows minus the composer between its two rules, the
+    # facts, status and permanently reserved chip row leave 18 feed rows.
+    # At end the answer's last line takes one; away from end all 18 show
+    # numbered lines. Moving the anchor never switches documents or
+    # borrows the chip row. These literal anchors are fixture-owned.
+    count = 18 if browsing else 17
+    expected = [f"History line {number:03d}" for number in range(first, min(first + count, 100))]
+    lines = screen.splitlines()
+    actual = [found.group(0) for found in (re.match(r"History line \d{3}", line.strip()) for line in lines) if found]
+    assert actual == expected, ("navigation history anchor/distance", actual, expected)
+    # Scrolled back, the `↓` marker sits alone at the right of the row
+    # under the last history line, and nothing new arrived below; at the
+    # latest it is gone.
+    marked = [number for number, line in enumerate(lines) if re.search(r"↓( \d+ new)?\s*$", line)]
+    assert len(marked) == (1 if browsing else 0), ("navigation marker", marked)
+    assert not browsing or (lines[marked[0]].strip() == "↓" and expected[-1] in lines[marked[0] - 1]), \
+        ("navigation marker row", lines[marked[0]], lines[marked[0] - 1], expected[-1])
+
+
+def status_work(tty, session, path_length):
+    tty.marker(" Status · ")
+    tty.marker(f" · {session}")
+    tty.marker("Permissions     ")
+    # Fourteen settings, two group headings, title and Work. Allow two
+    # wrapped rows per ordinary setting and both fixture paths at half-width
+    # (40 columns) to cover hanging indentation/word wrapping at 80 columns.
+    # PgDn moves half the 18-row inspection pane, so this is a document-row
+    # bound, not a retry timeout. Long HOME/Store paths need not fit at once.
+    max_rows = 14 * 2 + 2 + 1 + 1 + 2 * ((path_length + 39) // 40)
+    for _ in range((max_rows + 8) // 9):
+        if tty.screen.reached(" Work"):
+            break
+        generation = tty.screen.generation
+        tty.send(b"\x1b[6~")
+        tty.wait(lambda: True, label="status inspection page movement", after=generation)
+    assert tty.screen.reached(" Work"), ("status Work within bounded page", tty.screen.completed)
+
+
 def navigation(fixture, row):
     # A real completed answer supplies enough history for page and wheel input
     # to move the viewport; an empty Session cannot distinguish ignored keys.
@@ -222,34 +262,16 @@ def navigation(fixture, row):
         tty.send(b"~")
         tty.draft("~", 3)
         assert scrolled_back() == browsing, "navigation view changed before ordered marker"
-        # 24 terminal rows minus the composer between its two rules, the
-        # facts and the status line leave 19 transcript rows. At the latest
-        # the answer's last line takes the bottom one, so 18 history lines
-        # show; scrolled back, the `↓` marker takes it, so 18 do too. These
-        # literal fixture anchors are independent of Rui's viewport.
-        expected = [f"History line {number:03d}" for number in range(first, min(first + 18, 100))]
-        lines = tty.screen.completed.splitlines()
-        actual = [found.group(0) for found in (re.match(r"History line \d{3}", line.strip()) for line in lines) if found]
-        assert actual == expected, ("navigation history anchor/distance", actual, expected)
-        # Scrolled back, the `↓` marker sits alone at the right of the row
-        # under the last history line, and nothing new arrived below; at the
-        # latest it is gone.
-        marked = [number for number, line in enumerate(lines) if re.search(r"↓( \d+ new)?\s*$", line)]
-        assert len(marked) == (1 if browsing else 0), ("navigation marker", marked)
-        assert not browsing or (lines[marked[0]].strip() == "↓" and expected[-1] in lines[marked[0] - 1]), \
-            ("navigation marker row", lines[marked[0]], lines[marked[0] - 1], expected[-1])
+        assert_navigation_history(tty.screen.completed, first, browsing)
         tty.send(b"\x15")
         tty.draft("", 2)
-    history(82, False)
+    history(83, False)
     generation = tty.screen.generation
     chunks(tty, row["chunks"])
-    tty.wait(scrolled_back, label="navigation entered browsing", after=generation)
     if row.get("status"):
-        tty.marker(" Status · ")
-        tty.marker(f" · {fixture.session}")
-        tty.marker(" Work")
-        tty.marker("Permissions     ")
+        status_work(tty, fixture.session, max(len(str(fixture.root)), len(str(fixture.store))))
     else:
+        tty.wait(scrolled_back, label="navigation moved feed anchor", after=generation)
         history(row["first_history"], True)
         for step in row.get("middle", []):
             generation = tty.screen.generation
@@ -261,7 +283,7 @@ def navigation(fixture, row):
     chunks(tty, row["return_chunks"])
     tty.wait(lambda: not scrolled_back() and tty.screen.draft("", 2),
              label="navigation returned to live empty composer", after=generation)
-    history(82, False)
+    history(83, False)
     tty.marker("TD4 history end")
     assert_submitted(fixture.endpoint.requests, ["seed history"])
     assert set((fixture.home / ".config/rui/requests").glob("*.json")) == captures, "navigation captured intent"

@@ -9,7 +9,36 @@
       "note": "01-overview-empty",
       "open": "overview",
       "steps": [],
-      "expect": "Type a task"
+      "expect": [
+        "Type a task",
+        "Settings",
+        "enter start"
+      ]
+    },
+    {
+      "name": "settings",
+      "note": "App settings by selecting the list's Settings row (End) and pressing Enter",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "End",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Rui"
+        },
+        {
+          "wait": "Notifications"
+        }
+      ],
+      "expect": [
+        "Rui",
+        "Notifications",
+        "Sign-in",
+        "Version"
+      ]
     },
     {
       "name": "start",
@@ -17,7 +46,7 @@
       "open": "overview",
       "steps": [
         {
-          "wait": "Needs you"
+          "wait": "Schema migration"
         },
         {
           "wait": "Profile the Host under load"
@@ -92,13 +121,14 @@
         }
       ],
       "expect": [
-        "Needs you",
+        "Schema migration",
+        "Settings",
         "■"
       ]
     },
     {
       "name": "start-busy",
-      "note": "03-overview-busy: ⠹ counts active Sessions",
+      "note": "03-overview-busy: two-line working Sessions",
       "open": "overview",
       "steps": [
         {
@@ -116,7 +146,7 @@
           }
         },
         {
-          "wait": "Run the slow tests"
+          "wait": "Docs build"
         }
       ],
       "cast": [
@@ -141,12 +171,13 @@
       ],
       "expect": [
         "Docs build",
-        "Run the slow tests"
+        "Benchmark idle memory",
+        "Settings"
       ]
     },
     {
       "name": "chat",
-      "note": "10-conversation",
+      "note": "10-conversation: tool rows stay folded, with named failed exits",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -168,9 +199,241 @@
         }
       ],
       "expect": [
+        "✓ List project files",
+        "× Fail with exit 127 · exit 127",
+        "× Fail with an excerpt · exit 1",
         "The project has a README",
         "retry policy notes"
+      ],
+      "absent": [
+        "asks before Bash/MCP",
+        "Type a message",
+        "enter sends"
       ]
+    },
+    {
+      "name": "tool-open",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "wait": "The project has a README"
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "wait": "    stderr tail:"
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        },
+        {
+          "gone": "▸"
+        }
+      ],
+      "expect": [
+        "✓ List project files",
+        "× Fail with exit 127 · exit 127",
+        "× Fail with an excerpt · exit 1",
+        "    Bash failed. Exit code: 1.",
+        "    stderr tail:",
+        "    usage: example",
+        "    unknown option --help"
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour"
+    },
+    {
+      "name": "tool-open-two",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "wait": "The project has a README"
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        },
+        {
+          "keys": [
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up"
+          ]
+        },
+        {
+          "wait": "✓ List project files"
+        },
+        {
+          "gone": "× Fail with exit 127"
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "PgDn",
+            "PgDn",
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        },
+        {
+          "gone": "▸"
+        }
+      ],
+      "expect": [
+        "✓ List project files",
+        "    Bash succeeded. Exit code: 0.",
+        "    stdout tail:",
+        "    README.md",
+        "    src",
+        "× Fail with exit 127 · exit 127",
+        "× Fail with an excerpt · exit 1",
+        "    Bash failed. Exit code: 1.",
+        "    stderr tail:",
+        "    usage: example",
+        "    unknown option --help"
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "note": "10b-tool-open-two: open the literal excerpt, scroll twelve rows from the narrow tail to select List, then show both quiet stored results before and after the sidebar appears"
+    },
+    {
+      "name": "tool-open-long",
+      "open": "Long tool output",
+      "cast": [
+        {
+          "label": "Long tool output",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Show long tool output."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Printed thirty-two numbered lines."
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "wait": "more lines"
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "gone": "▸"
+        }
+      ],
+      "expect": [
+        "✓ Print thirty-two lines",
+        "    Bash succeeded. Exit code: 0.",
+        "    stdout tail:",
+        "    output line 18",
+        "    … 14 more lines"
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then fourteen remaining lines"
+    },
+    {
+      "name": "tool-open-nocolor",
+      "open": "Fix retry deadline",
+      "env": {
+        "NO_COLOR": "1"
+      },
+      "steps": [
+        {
+          "wait": "The project has a README"
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "wait": "    stderr tail:"
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        },
+        {
+          "gone": "▸"
+        }
+      ],
+      "expect": [
+        "✓ List project files",
+        "× Fail with exit 127 · exit 127",
+        "× Fail with an excerpt · exit 1",
+        "    Bash failed. Exit code: 1.",
+        "    stderr tail:",
+        "    usage: example",
+        "    unknown option --help"
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour"
     },
     {
       "name": "chat-draft-kept",
@@ -196,12 +459,11 @@
           ]
         },
         {
-          "wait": "What I changed"
+          "wait": "↓"
         }
       ],
       "expect": [
-        "What I changed",
-        "retry.zig"
+        "↓"
       ]
     },
     {
@@ -218,12 +480,45 @@
           ]
         },
         {
-          "wait": "Start of conversation"
+          "wait": "The retry loop waits"
         }
       ],
       "expect": [
-        "Start of conversation",
-        "What I changed"
+        "The retry loop waits",
+        "↓"
+      ]
+    },
+    {
+      "name": "chat-new-below",
+      "note": "12a-conversation-new-below: incoming answer preserves the scrolled anchor",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "keys": [
+            "PgUp",
+            "PgUp",
+            "PgUp",
+            "PgUp"
+          ]
+        },
+        {
+          "wait": "The retry loop waits"
+        },
+        {
+          "send": {
+            "to": "Fix retry deadline",
+            "text": "Summarise the deadline fix.",
+            "wait": true
+          }
+        },
+        {
+          "wait": "new"
+        }
+      ],
+      "expect": [
+        "The retry loop waits",
+        "↓",
+        "new"
       ]
     },
     {
@@ -256,18 +551,23 @@
     },
     {
       "name": "markdown-wrapped",
-      "note": "12c-markdown-wrapped: code continuation retains its own indent",
+      "note": "12c-markdown-wrapped: pin the four-space code continuation while narrow, then resize to the sidebar layout",
       "open": "Markdown retry",
       "sizes": [
-        "46x30"
+        "46x30",
+        "140x40"
       ],
       "steps": [
         {
           "wait": "retry policy notes"
+        },
+        {
+          "wait": "return null; //\n    expired"
         }
       ],
       "expect": [
-        "return null; //\n    expired",
+        "return null; //",
+        "expired",
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
       ]
@@ -448,11 +748,16 @@
         {
           "wait": "× Model reply unreadable"
         }
+      ],
+      "absent": [
+        "asks before Bash/MCP",
+        "Type a message",
+        "enter sends"
       ]
     },
     {
       "name": "approval",
-      "note": "17-approval",
+      "note": "17-approval: clipped requests retain a quiet remaining-row count; no key hint",
       "open": "Schema migration",
       "steps": [
         {
@@ -461,11 +766,17 @@
         {
           "wait": "Deny"
         }
+      ],
+      "absent": [
+        "asks before Bash/MCP",
+        "Type a message",
+        "enter sends",
+        "more lines · shift+↓"
       ]
     },
     {
       "name": "approval-typing",
-      "note": "17c-approval-typing",
+      "note": "17c-approval-typing: the retained draft does not hide request overflow",
       "open": "Schema migration",
       "steps": [
         {
@@ -475,8 +786,15 @@
           "text": "I am checking the migration before approving it."
         },
         {
-          "wait": "I am checking the migration before approving it."
+          "wait": "approving it."
         }
+      ],
+      "expect": [
+        "I am checking the migration before",
+        "approving it."
+      ],
+      "absent": [
+        "more lines · shift+↓"
       ]
     },
     {
@@ -502,7 +820,7 @@
     },
     {
       "name": "help",
-      "note": "00-help",
+      "note": "20-help: Ctrl-O opens a row; no separate tool-details command",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -515,12 +833,22 @@
         },
         {
           "wait": "Marks"
+        },
+        {
+          "gone": "/details"
         }
+      ],
+      "expect": [
+        "Marks",
+        "Keys",
+        "ctrl+o                 open",
+        "Commands",
+        "/copy [code|file]"
       ]
     },
     {
       "name": "slash",
-      "note": "00-slash",
+      "note": "21-slash: conversation commands without a tool-details page",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -528,7 +856,15 @@
         },
         {
           "wait": "/help"
+        },
+        {
+          "gone": "/details"
         }
+      ],
+      "expect": [
+        "/copy [code|file]",
+        "/effort LEVEL",
+        "/help"
       ]
     },
     {
@@ -681,6 +1017,10 @@
         {
           "wait": "enter start"
         }
+      ],
+      "expect": [
+        "Settings",
+        "enter start"
       ]
     },
     {
@@ -703,7 +1043,10 @@
           ]
         }
       ],
-      "expect": "Migrate"
+      "expect": [
+        "Migrate the billing",
+        "Settings"
+      ]
     },
     {
       "name": "many-sessions",
@@ -725,6 +1068,12 @@
           ],
           "count": 25
         }
+      ],
+      "expect": [
+        "Batch job",
+        "↓",
+        "more",
+        "Settings"
       ]
     },
     {
@@ -777,14 +1126,17 @@
           ]
         },
         {
-          "wait": "Flaky upload"
+          "wait": "Settings"
         }
       ],
       "sizes": [
         "46x30",
         "140x40"
       ],
-      "expect": "Batch job"
+      "expect": [
+        "Settings",
+        "enter open"
+      ]
     },
     {
       "name": "day-start",
@@ -792,7 +1144,10 @@
       "open": "overview",
       "steps": [],
       "theme": "day",
-      "expect": "Type a task"
+      "expect": [
+        "Type a task",
+        "Settings"
+      ]
     },
     {
       "name": "day-chat",
@@ -823,14 +1178,17 @@
           ]
         },
         {
-          "wait": "What I changed"
+          "wait": "↓"
         }
       ],
-      "theme": "mist"
+      "theme": "mist",
+      "expect": [
+        "↓"
+      ]
     },
     {
       "name": "no-color",
-      "note": "72-no-color",
+      "note": "72-no-color: quiet two-line sidebar alongside the chat",
       "open": "Markdown retry",
       "steps": [
         {
@@ -876,17 +1234,14 @@
           "host": "pause"
         },
         {
-          "wait": "The Host stopped."
-        },
-        {
-          "wait": "Pane is dead (status 6"
+          "wait": "Host stopped"
         }
       ],
       "sizes": [
         "46x30",
         "140x40"
       ],
-      "expect": "Pane is dead (status 6"
+      "expect": "Host stopped"
     },
     {
       "name": "host-back",

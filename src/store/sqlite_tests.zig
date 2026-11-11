@@ -8626,6 +8626,60 @@ test "an exhausted Attempt still retains its effort refusal for the next Operati
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), settings.reasoning_effort);
 }
 
+test "schema 66 migration freezes actual effort emission and prior admitted fallback" {
+    for (std.enums.values(store_testing.EffortMigrationChoice)) |choice| for ([_]bool{ false, true }) |legacy_codec| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "{s}/effort-65.sqlite3", .{root});
+        const previous = 65; // The format-66 effort snapshot migration starts here.
+        {
+            const raw = try openRaw(path);
+            defer _ = c.sqlite3_close(raw);
+            try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+            try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+            try sqlite.exec(raw, store_testing.baseline_rows);
+            inline for (store_schema.migrations) |step| if (step.from < previous) {
+                inline for (step.sqlite) |sql| try sqlite.exec(raw, sql);
+            };
+            try sqlite.exec(raw, store_testing.operation_effort_migration_seed);
+            try sqlite.exec(raw, choice.sql());
+            if (legacy_codec) try sqlite.exec(raw, "UPDATE session SET codec='openai-responses/1' WHERE session_ref='d8mv7p'");
+            try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version={d}", .{ store_schema.application_id, previous }));
+            const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','12'),('store_selector',?1),('format',?2)");
+            defer _ = c.sqlite3_finalize(meta);
+            try sqlite.bindText(meta, 1, root);
+            try sqlite.bindText(meta, 2, std.fmt.comptimePrint("{d}", .{previous}));
+            try sqlite.expectDone(meta);
+        }
+        // Actual current emission differs from the previous Operation's value
+        // comparison after a base. Both facts must survive migration/reopen.
+        for (0..2) |_| {
+            var storage: Store = undefined;
+            try storage.open(std.testing.io, path, root);
+            defer storage.close() catch unreachable;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=1 AND reasoning_effort='low' AND previous_reasoning_effort IS NULL AND effort_source_revision=1 AND effort_update=0 AND previous_effort_override IS NULL", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=99 AND previous_effort_override IS NULL AND previous_reasoning_effort='low' AND effort_source_revision=2 AND effort_update=?1", .{@intFromBool(!legacy_codec)}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=100 AND previous_reasoning_effort='high' AND effort_source_revision=2 AND effort_update=0", .{}));
+            const emitted = !legacy_codec and choice != .back_to_top;
+            const source: u64 = if (choice == .retained) 2 else 3;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=101 AND previous_reasoning_effort='high' AND effort_source_revision=?1 AND effort_update=?2 AND resolution_code IS NULL", .{ source, @intFromBool(emitted) }));
+            if (choice == .legacy_new_choice) {
+                if (try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE field='reasoning_effort_refused'", .{}) == 0) {
+                    // The newer legacy raw choice already existed when this
+                    // earlier source was refused. Source identity is immutable.
+                    try store_testing.exec(&storage, "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id) VALUES('d8mv7p',30,0,2,'reasoning_effort_refused',1793781802,'refused',99)", .{});
+                }
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s WHERE session_ref='d8mv7p' AND " ++ configuration_domain.reasoningEffortOverrideSql("s") ++ "='xhigh'", .{}));
+                try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT effort_source_revision FROM session_revision WHERE session_ref='d8mv7p' AND revision=3", .{}));
+            }
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+        }
+    };
+}
+
 test "the previous Store format preserves change rows and admits bounded effort refusal text after migration" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -8640,8 +8694,8 @@ test "the previous Store format preserves change rows and admits bounded effort 
         try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
         const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format',?3)");
         defer _ = c.sqlite3_finalize(meta);
-        // The base format shipped with wire 11; exercise its forward update too.
-        try sqlite.bindText(meta, 1, "11");
+        // The base format uses released wire 12; exercise its forward update too.
+        try sqlite.bindText(meta, 1, "12");
         try sqlite.bindText(meta, 2, root);
         try sqlite.bindText(meta, 3, std.fmt.comptimePrint("{d}", .{previous}));
         try sqlite.expectDone(meta);
@@ -8654,8 +8708,10 @@ test "the previous Store format preserves change rows and admits bounded effort 
         try sqlite.exec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('effort-migration',1,'d8mv7p',zeroblob(32),1,'',2,0,100)");
         try sqlite.exec(raw, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label) " ++
             "SELECT session_ref,2,'effort-migration',workspace,provider,model,instructions_content_id,0,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,'high',label FROM session_revision WHERE session_ref='d8mv7p' AND revision=1");
-        try sqlite.exec(raw, "UPDATE session SET revision=2,reasoning_effort='high',next_position=8 WHERE session_ref='d8mv7p'");
+        try sqlite.exec(raw, "UPDATE session SET codec='openai-responses/2',revision=2,reasoning_effort='high',next_position=9 WHERE session_ref='d8mv7p'");
         try sqlite.exec(raw, "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at) VALUES('d8mv7p',6,0,2,'reasoning_effort',1793781800)");
+        try sqlite.exec(raw, "UPDATE model_operation SET reasoning_effort='low' WHERE operation_id=1");
+        try sqlite.exec(raw, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id) VALUES(99,1,'d8mv7p',2,1,7,0,'high',1,0,1793781800,4)");
         try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version={d};UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{ store_schema.application_id, previous, previous }));
     }
     var storage: Store = undefined;
@@ -8667,7 +8723,7 @@ test "the previous Store format preserves change rows and admits bounded effort 
         try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(raw, "PRAGMA user_version"));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM session_change WHERE session_ref='d8mv7p' AND position=6 AND ordinal=0 AND revision=2 AND field='reasoning_effort' AND changed_at=1793781800 AND provider_text IS NULL", .{}));
-        const insert = try sqlite.prepare(raw, "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text) VALUES('d8mv7p',7,0,2,'reasoning_effort_refused',1793781801,?1)");
+        const insert = try sqlite.prepare(raw, "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id) VALUES('d8mv7p',8,0,2,'reasoning_effort_refused',1793781801,?1,99)");
         defer _ = c.sqlite3_finalize(insert);
         const maximum = @import("../outcome_code.zig").max_report_bytes;
         try sqlite.bindText(insert, 1, &@as([maximum + 1]u8, @splat('x')));

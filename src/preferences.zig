@@ -24,6 +24,7 @@ pub const Edit = struct {
     /// Null keeps the saved choice.
     notifications: ?bool = null,
     reasoning_effort: union(enum) { keep, set: model_capability.ReasoningEffort, clear } = .keep,
+    permission_mode: union(enum) { keep, set: PermissionMode, clear } = .keep,
 };
 
 /// Safe fields only: resource availability belongs to the selecting caller.
@@ -53,6 +54,8 @@ fn validateSaved(values: *const Values) !void {
 }
 
 const effort_key = "reasoning_effort=";
+const permission_key = "permission_mode=";
+const PermissionMode = @import("cli_value.zig").PermissionMode;
 
 fn read(dir: std.Io.Dir) !Values {
     const file = openPreferenceFile(dir, "preferences") catch |err| switch (err) {
@@ -68,9 +71,10 @@ fn read(dir: std.Io.Dir) !Values {
     if (count != stat.size) return error.InvalidPreferences;
     var lines = std.mem.splitScalar(u8, bytes[0..count], '\n');
     // Version 1 predates notifications: they keep their default, on.
-    // Version 3 adds the new-Session effort after them.
+    // Version 3 adds the new-Session effort; version 4 adds permissions
+    // and allows an empty effort when no effort is saved.
     const version = lines.next() orelse "";
-    const known = [_][]const u8{ "version=1", "version=2", "version=3" };
+    const known = [_][]const u8{ "version=1", "version=2", "version=3", "version=4" };
     const number = for (known, 1..) |name, at| {
         if (std.mem.eql(u8, version, name)) break at;
     } else return error.UnsupportedPreferencesVersion;
@@ -88,7 +92,13 @@ fn read(dir: std.Io.Dir) !Values {
     if (number >= 3) {
         const line = lines.next() orelse return error.InvalidPreferences;
         if (!std.mem.startsWith(u8, line, effort_key)) return error.InvalidPreferences;
-        result.reasoning_effort = std.meta.stringToEnum(model_capability.ReasoningEffort, line[effort_key.len..]) orelse return error.InvalidPreferences;
+        const text = line[effort_key.len..];
+        if (number < 4 or text.len != 0) result.reasoning_effort = std.meta.stringToEnum(model_capability.ReasoningEffort, text) orelse return error.InvalidPreferences;
+    }
+    if (number >= 4) {
+        const line = lines.next() orelse return error.InvalidPreferences;
+        if (!std.mem.startsWith(u8, line, permission_key)) return error.InvalidPreferences;
+        result.permission_mode = std.meta.stringToEnum(PermissionMode, line[permission_key.len..]) orelse return error.InvalidPreferences;
     }
     if (!std.mem.eql(u8, lines.next() orelse return error.InvalidPreferences, "") or lines.next() != null)
         return error.InvalidPreferences;
@@ -191,6 +201,11 @@ fn apply(saved: Values, edit: Edit, readiness: *const Readinesses) !Values {
         .keep => {},
         .set => |effort| values.reasoning_effort = effort,
         .clear => values.reasoning_effort = null,
+    }
+    switch (edit.permission_mode) {
+        .keep => {},
+        .set => |mode| values.permission_mode = mode,
+        .clear => values.permission_mode = null,
     }
     switch (edit.model) {
         .keep => {},
@@ -306,9 +321,11 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, onl
             // Each file is the lowest version that holds its values, so an older
             // Rui still reads it unless a choice it cannot hold was made: version 1
             // says notifications are on, version 2 turns them off, version 3 adds
-            // the new-Session effort.
+            // the new-Session effort, and version 4 adds permissions.
             const fields = .{ values.store.slice(), values.provider.slice(), values.model.slice() };
-            const encoded = (if (values.reasoning_effort) |effort|
+            const encoded = (if (values.permission_mode) |mode|
+                std.fmt.bufPrint(&bytes, "version=4\nstore={s}\nprovider={s}\nmodel={s}\nnotifications={s}\n" ++ effort_key ++ "{s}\n" ++ permission_key ++ "{s}\n", fields ++ .{ if (values.notifications) "on" else "off", if (values.reasoning_effort) |effort| @tagName(effort) else "", @tagName(mode) })
+            else if (values.reasoning_effort) |effort|
                 std.fmt.bufPrint(&bytes, "version=3\nstore={s}\nprovider={s}\nmodel={s}\nnotifications={s}\n" ++ effort_key ++ "{s}\n", fields ++ .{ if (values.notifications) "on" else "off", @tagName(effort) })
             else if (values.notifications)
                 std.fmt.bufPrint(&bytes, "version=1\nstore={s}\nprovider={s}\nmodel={s}\n", fields)
@@ -545,6 +562,91 @@ test "a saved effort is kept across other edits, read back, and written as versi
         try bad.writeStreamingAll(io, invalid);
         bad.close(io);
         try std.testing.expectError(error.InvalidPreferences, load(home));
+    }
+}
+
+test "saved permissions round trip in version 4 and clearing restores the lowest version" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    for (std.enums.values(PermissionMode)) |mode| {
+        for ([_]?model_capability.ReasoningEffort{ null, .high }) |effort| {
+            for ([_]bool{ false, true }) |notifications| {
+                _ = try update(home, .{ .permission_mode = .{ .set = mode }, .reasoning_effort = if (effort) |value| .{ .set = value } else .clear, .notifications = notifications }, &.initFill(.configured));
+                var config = try tmp.dir.openDir(io, ".config/rui", .{});
+                defer config.close(io);
+                var bytes: [256]u8 = undefined;
+                var expected: [256]u8 = undefined;
+                const encoded = try std.fmt.bufPrint(&expected, "version=4\nstore=\nprovider=\nmodel=\nnotifications={s}\nreasoning_effort={s}\npermission_mode={s}\n", .{ if (notifications) "on" else "off", if (effort) |value| @tagName(value) else "", @tagName(mode) });
+                try std.testing.expectEqualStrings(encoded, try savedFile(config, &bytes));
+                const loaded = try load(home);
+                try std.testing.expectEqual(mode, loaded.permission_mode.?);
+                try std.testing.expectEqual(effort, loaded.reasoning_effort);
+                try std.testing.expectEqual(notifications, loaded.notifications);
+                const kept = try update(home, .{ .notifications = !notifications }, &.initFill(.configured));
+                try std.testing.expectEqual(mode, kept.permission_mode.?);
+                try std.testing.expectEqual(mode, (try load(home)).permission_mode.?);
+                _ = try update(home, .{ .permission_mode = .clear }, &.initFill(.configured));
+                try std.testing.expectEqual(@as(?PermissionMode, null), (try load(home)).permission_mode);
+                const old_version = if (effort != null) "version=3\n" else if (!notifications) "version=1\n" else "version=2\n";
+                try std.testing.expect(std.mem.startsWith(u8, try savedFile(config, &bytes), old_version));
+            }
+        }
+    }
+}
+
+test "saved permissions are absent in old versions and malformed version 4 is rejected" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    _ = try update(home, .{}, &.initFill(.configured));
+    var config = try tmp.dir.openDir(io, ".config/rui", .{});
+    defer config.close(io);
+    const old_files = [_][]const u8{
+        "version=1\nstore=\nprovider=\nmodel=\n",
+        "version=2\nstore=\nprovider=\nmodel=\nnotifications=off\n",
+        "version=3\nstore=\nprovider=\nmodel=\nnotifications=on\nreasoning_effort=high\n",
+    };
+    for (old_files, 0..) |text, index| {
+        const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
+        try file.writeStreamingAll(io, text);
+        file.close(io);
+        const loaded = try load(home);
+        try std.testing.expectEqual(@as(?PermissionMode, null), loaded.permission_mode);
+        try std.testing.expectEqual(index != 1, loaded.notifications);
+        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, if (index == 2) .high else null), loaded.reasoning_effort);
+        _ = try update(home, .{}, &.initFill(.configured));
+        var bytes: [256]u8 = undefined;
+        try std.testing.expectEqualStrings(text, try savedFile(config, &bytes));
+    }
+    const prefix = "version=4\nstore=\nprovider=\nmodel=\nnotifications=on\nreasoning_effort=";
+    for ([_][]const u8{ prefix ++ "\n", prefix ++ "\npermission_mode=\n", prefix ++ "\npermission_mode=plan\n", prefix ++ "fast\npermission_mode=ask\n", prefix ++ "\npermissions=ask\n", prefix ++ "\npermission_mode=ask\nextra\n" }) |text| {
+        const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
+        try file.writeStreamingAll(io, text);
+        file.close(io);
+        try std.testing.expectError(error.InvalidPreferences, load(home));
+    }
+}
+
+test "new Session permissions use no file then saved ask or bypass with either flag winning" {
+    const configure_input = @import("configure_input.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    for ([_]?PermissionMode{ null, .ask, .bypass }) |saved| {
+        if (saved) |mode| _ = try update(home, .{ .permission_mode = .{ .set = mode } }, &.initFill(.configured));
+        const values = try load(home);
+        for ([_]?PermissionMode{ null, .ask, .bypass }) |flag| {
+            var input: configure_input.ConfigureInput = .{ .store = "", .session = .create, .permission_mode = if (flag) |mode| .{ .present = true, .value = @tagName(mode) } else .{} };
+            var compaction: [20]u8 = undefined;
+            input.completeCreation(.openai, "gpt-6.1-sol", values.reasoning_effort, values.permission_mode, &compaction);
+            const expected = if (flag orelse saved) |mode| @tagName(mode) else @import("product_defaults.zig").permission_mode;
+            try std.testing.expect(input.permission_mode.present);
+            try std.testing.expectEqualStrings(expected, input.permission_mode.value);
+        }
     }
 }
 

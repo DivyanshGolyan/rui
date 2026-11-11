@@ -65,6 +65,23 @@ pub const Cancellation = struct {
     }
 };
 
+/// Provenance of an escaping failure, not a guess from its OS error name.
+/// Only concrete socket effects (including premature EOF) stamp transport.
+pub const FailureOrigin = enum { local, host_transport };
+
+/// An in-app read adapter cannot omit its pinned result's provenance. Project
+/// this whole context into Requests; never rebuild a borrower from io alone.
+pub const ReadContext = struct {
+    io: std.Io,
+    origin: *FailureOrigin,
+    cancellation: ?*const Cancellation = null,
+    read_failure: ?*?protocol_reply.ReadFailure = null,
+
+    pub fn requests(self: ReadContext) Requests {
+        return .{ .io = self.io, .cancellation = self.cancellation, .read_failure = self.read_failure, .failure_origin = self.origin };
+    }
+};
+
 /// Borrows io, token, inputs, captures, sinks and reply storage through return.
 /// A worker owns each socket; no socket escapes or closes from another thread.
 pub const Requests = struct {
@@ -72,6 +89,9 @@ pub const Requests = struct {
     cancellation: ?*const Cancellation = null,
     /// One borrower writes; the caller reads/resets only after return or join.
     read_failure: ?*?protocol_reply.ReadFailure = null,
+    /// Optional reader-owned result, pinned through return/join. Successful
+    /// requests and local preparation, source and sink errors never stamp it.
+    failure_origin: ?*FailureOrigin = null,
     /// Test hook for mutation sends only: asks the Host to drop its reply at
     /// this point.
     drop_reply: ?[]const u8 = null,
@@ -91,6 +111,13 @@ pub const Requests = struct {
             slot.* = failure;
         };
         return failure;
+    }
+
+    fn transportFailure(self: Requests, err: anytype) @TypeOf(err) {
+        if (@as(anyerror, err) != error.Cancelled) if (self.failure_origin) |origin| {
+            origin.* = .host_transport;
+        };
+        return err;
     }
 
     fn check(self: Requests) error{Cancelled}!void {
@@ -380,7 +407,7 @@ fn readFirstLine(requests: Requests, fd: std.posix.fd_t, buffer: []u8) !protocol
     var filled: usize = 0;
     const line = while (filled != wanted) {
         const count = try readRequest(requests, fd, buffer[filled..wanted], ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, null, true));
-        if (count == 0) return error.TruncatedResponse;
+        if (count == 0) return requests.transportFailure(error.TruncatedResponse);
         if (std.mem.indexOfScalar(u8, buffer[filled..][0..count], '\n')) |index| break buffer[0 .. filled + index];
         filled += count;
     } else if (wanted < head.content_length) wholeScalars(buffer[0..wanted]) else buffer[0..wanted];
@@ -418,7 +445,7 @@ fn readPublicContentResponse(requests: Requests, fd: std.posix.fd_t, expected: ?
         var filled: usize = 0;
         while (filled != wanted) {
             const count = try readRequest(requests, fd, window[filled..wanted], ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, null, true));
-            if (count == 0) return error.TruncatedResponse;
+            if (count == 0) return requests.transportFailure(error.TruncatedResponse);
             filled += count;
         }
         hash.update(window[0..wanted]);
@@ -2098,6 +2125,10 @@ fn closeSocket(io: std.Io, fd: std.posix.fd_t) void {
 }
 
 fn connectRequest(requests: Requests, address: std.Io.net.UnixAddress, until: ?i128) !std.posix.fd_t {
+    return connectSocket(requests, address, until) catch |err| return requests.transportFailure(err);
+}
+
+fn connectSocket(requests: Requests, address: std.Io.net.UnixAddress, until: ?i128) !std.posix.fd_t {
     try requests.check();
     if (until != null or requests.cancellation != null) return connectUntil(requests, address.path, until);
     // Keep ordinary connection errors and std.Io acquisition semantics.
@@ -2214,13 +2245,13 @@ fn readResponseHeadForProfileUntil(requests: Requests, fd: std.posix.fd_t, timin
     var header_buffer: [protocol.max_header_bytes]u8 = undefined;
     const first_deadline = timing.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, until, false);
     const first_count = try readRequest(requests, fd, header_buffer[0..1], first_deadline);
-    if (first_count == 0) return error.TruncatedResponse;
+    if (first_count == 0) return requests.transportFailure(error.TruncatedResponse);
     var used: usize = first_count;
     while (used < header_buffer.len) {
         if (used >= 4 and std.mem.eql(u8, header_buffer[used - 4 .. used], "\r\n\r\n")) break;
         const deadline = timing.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, until, true);
         const count = try readRequest(requests, fd, header_buffer[used .. used + 1], deadline);
-        if (count == 0) return error.TruncatedResponse;
+        if (count == 0) return requests.transportFailure(error.TruncatedResponse);
         used += count;
     } else return error.ResponseHeaderTooLarge;
     return parseResponseHeadForProfile(header_buffer[0..used], profile);
@@ -2390,7 +2421,7 @@ fn readResponseBody(requests: Requests, fd: std.posix.fd_t, length: u64, sink: a
         var filled: usize = 0;
         while (filled != wanted) {
             const count = try readRequest(requests, fd, buffer[filled..wanted], ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds, null, true));
-            if (count == 0) return error.TruncatedResponse;
+            if (count == 0) return requests.transportFailure(error.TruncatedResponse);
             filled += count;
             if (delivery == .stream) break;
         }
@@ -2412,7 +2443,7 @@ fn readCommandBodyUntil(requests: Requests, fd: std.posix.fd_t, head: ResponseHe
     while (offset < body_length) {
         const deadline = timing.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, until, true);
         const count = try readRequest(requests, fd, reply_buffer.bytes[offset..body_length], deadline);
-        if (count == 0) return error.TruncatedResponse;
+        if (count == 0) return requests.transportFailure(error.TruncatedResponse);
         offset += count;
     }
     reply_buffer.len = body_length;
@@ -2445,6 +2476,10 @@ fn waitRequest(requests: Requests, fd: std.posix.fd_t, events: i16, deadline: ?i
 }
 
 fn readRequest(requests: Requests, fd: std.posix.fd_t, buffer: []u8, deadline: ?i128) !usize {
+    return readSocket(requests, fd, buffer, deadline) catch |err| return requests.transportFailure(err);
+}
+
+fn readSocket(requests: Requests, fd: std.posix.fd_t, buffer: []u8, deadline: ?i128) !usize {
     while (true) {
         if (!try waitRequest(requests, fd, std.posix.POLL.IN, deadline)) return error.ResponseInactive;
         const count = std.c.read(fd, buffer.ptr, buffer.len);
@@ -2470,6 +2505,10 @@ fn writeAll(fd: std.posix.fd_t, value: []const u8) !void {
 }
 
 fn writeAllRequest(requests: Requests, fd: std.posix.fd_t, value: []const u8, until: ?i128) !void {
+    return writeSocket(requests, fd, value, until) catch |err| return requests.transportFailure(err);
+}
+
+fn writeSocket(requests: Requests, fd: std.posix.fd_t, value: []const u8, until: ?i128) !void {
     const io = requests.io;
     var offset: usize = 0;
     var deadline = ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds, until, true).?;
@@ -2565,6 +2604,40 @@ fn socketPair() ![2]std.posix.fd_t {
         return error.SocketPairFailed;
     }
     return sockets;
+}
+
+test "transport failure provenance excludes local sinks, valid physical EOF and cancellation" {
+    const Sink = struct {
+        fail: bool,
+        bytes: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            if (self.fail) return error.FileNotFound;
+            self.bytes += bytes.len;
+        }
+    };
+    for (std.enums.values(enum { complete, truncated, local_sink, cancelled })) |mode| {
+        const sockets = try socketPair();
+        defer closeSocket(std.testing.io, sockets[0]);
+        {
+            defer closeSocket(std.testing.io, sockets[1]);
+            try writeAll(sockets[1], "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 3\r\nX-Rui-Content-Bytes: 3\r\nX-Rui-Next-Offset: 3\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n");
+            try writeAll(sockets[1], if (mode == .truncated) "a" else "abc");
+        }
+        var origin: FailureOrigin = .local;
+        var cancellation: Cancellation = .{};
+        if (mode == .cancelled) cancellation.requestStop();
+        const requests: Requests = .{ .io = std.testing.io, .cancellation = &cancellation, .failure_origin = &origin };
+        var sink: Sink = .{ .fail = mode == .local_sink };
+        const result = readPublicContentResponse(requests, sockets[0], .{ .bytes = 3, .digest = protocol.contentDigest("abc") }, &sink);
+        switch (mode) {
+            .complete => try std.testing.expect(try result == null),
+            .truncated => try std.testing.expectError(error.TruncatedResponse, result),
+            .local_sink => try std.testing.expectError(error.FileNotFound, result),
+            .cancelled => try std.testing.expectError(error.Cancelled, result),
+        }
+        try std.testing.expectEqual(if (mode == .truncated) FailureOrigin.host_transport else .local, origin);
+        try std.testing.expectEqual(@as(usize, if (mode == .complete) 3 else 0), sink.bytes);
+    }
 }
 
 test "observation transport owns a larger buffer without growing ordinary replies" {

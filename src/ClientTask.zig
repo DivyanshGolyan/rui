@@ -13,7 +13,12 @@ run: Run = undefined,
 thread: ?std.Thread = null,
 cancellation: client.Cancellation = .{},
 mutex: std.Io.Mutex = .init,
-result: ?anyerror!void = null,
+/// One joined outcome. Its origin is written only by this worker's borrower;
+/// reset before launch and read by the shell only after join.
+result: struct {
+    outcome: ?anyerror!void = null,
+    failure_origin: client.FailureOrigin = .local,
+} = .{},
 read_failure: ?protocol_reply.ReadFailure = null,
 
 /// All arguments and this owner stay in final storage through join.
@@ -23,7 +28,7 @@ pub fn start(self: *Self, io: std.Io, context: *anyopaque, run: Run) !void {
     self.context = context;
     self.run = run;
     self.cancellation = .{};
-    self.result = null;
+    self.result = .{};
     self.read_failure = null;
     self.thread = try signal_stack.spawn(.{}, execute, .{self});
 }
@@ -32,17 +37,21 @@ fn execute(self: *Self) void {
     const result = self.run(self.context, self);
     self.mutex.lockUncancelable(self.io);
     defer self.mutex.unlock(self.io);
-    self.result = result;
+    self.result.outcome = result;
 }
 
 pub fn requests(self: *Self) client.Requests {
-    return .{ .io = self.io, .cancellation = &self.cancellation, .read_failure = &self.read_failure };
+    return self.readContext().requests();
+}
+
+pub fn readContext(self: *Self) client.ReadContext {
+    return .{ .io = self.io, .cancellation = &self.cancellation, .read_failure = &self.read_failure, .origin = &self.result.failure_origin };
 }
 
 pub fn completed(self: *Self) bool {
     self.mutex.lockUncancelable(self.io);
     defer self.mutex.unlock(self.io);
-    return self.result != null;
+    return self.result.outcome != null;
 }
 
 pub fn cancel(self: *Self) void {
@@ -56,7 +65,7 @@ pub fn join(self: *Self) !void {
     const thread = self.thread orelse return;
     thread.join();
     self.thread = null;
-    try self.result.?;
+    try self.result.outcome.?;
 }
 
 test "ClientTask read diagnostic survives join with isolated borrowers and resets on reuse" {
@@ -94,4 +103,27 @@ test "ClientTask read diagnostic survives join with isolated borrowers and reset
     try first.join();
     try std.testing.expect(first.read_failure == null);
     try std.testing.expectEqualStrings(second_code, second.read_failure.?.diagnostic.code.slice());
+}
+
+test "ClientTask read context binds the joined result and resets origin for each launch" {
+    const Worker = struct {
+        fn failed(_: *anyopaque, task: *Self) !void {
+            const read = task.readContext();
+            const borrower = read.requests();
+            try std.testing.expect(borrower.failure_origin.? == &task.result.failure_origin);
+            read.origin.* = .host_transport;
+            return error.HostStopping;
+        }
+        fn done(_: *anyopaque, task: *Self) !void {
+            try std.testing.expectEqual(client.FailureOrigin.local, task.result.failure_origin);
+        }
+    };
+    var context: u8 = 0;
+    var task: Self = .{};
+    try task.start(std.testing.io, &context, Worker.failed);
+    try std.testing.expectError(error.HostStopping, task.join());
+    try std.testing.expectEqual(client.FailureOrigin.host_transport, task.result.failure_origin);
+    try task.start(std.testing.io, &context, Worker.done);
+    try task.join();
+    try std.testing.expectEqual(client.FailureOrigin.local, task.result.failure_origin);
 }

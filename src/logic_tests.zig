@@ -108,7 +108,6 @@ const cores = .{
     .{ "session_list.zig", @import("session_list.zig") },
     .{ "session_notice.zig", @import("session_notice.zig") },
     .{ "session_reading.zig", @import("session_reading.zig") },
-    .{ "session_transcript.zig", @import("session_transcript.zig") },
     .{ "session_upgrade.zig", @import("session_upgrade.zig") },
     .{ "upgrade_status.zig", @import("upgrade_status.zig") },
     .{ "session_work.zig", @import("session_work.zig") },
@@ -126,6 +125,7 @@ const cores = .{
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "theme.zig", @import("theme.zig") },
     .{ "tool_name.zig", @import("tool_name.zig") },
+    .{ "tool_fold.zig", @import("tool_fold.zig") },
     .{ "tool_presentation.zig", @import("tool_presentation.zig") },
     .{ "tool_proposal.zig", @import("tool_proposal.zig") },
     .{ "tool_record.zig", @import("tool_record.zig") },
@@ -400,21 +400,22 @@ test "overview benchmark: merging a 10,000-row listing, and building a 200x60 fr
         counting.count = 0;
         const render_start = nanosecondsNow();
         // What App's overview builds each frame: the header, the list's
-        // rows on screen through GroupedList, the facts and the status.
+        // two-line rows on screen through GroupedList, and one Footer.
         var frame: std.heap.ArenaAllocator = .init(counting.allocator());
         _ = try overview_view.headerSegments(frame.allocator(), &state, 200, .{});
         const Source = struct {
             fn row(userdata: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!GroupedList.Row {
                 const shown: *const overview_view.State = @ptrCast(@alignCast(userdata));
-                const built = try overview_view.listSegments(arena, shown, overview_view.listItem(shown, index).?, 200, .{}, 0);
-                return .{ .segments = built.segments, .heading = built.heading };
+                const item = overview_view.listItem(shown, index).?;
+                const built = try overview_view.listSegments(arena, shown, item, 200, .{}, 0);
+                return .{ .segments = built.segments, .heading = built.heading, .height = 2, .second = if (item == .row) try overview_view.rowSecondSegments(arena, shown, item.row, 200, .{}) else &.{} };
             }
         };
         list.rows = .{ .userdata = &state, .count = @intCast(overview_view.listLength(&state)), .rowFn = Source.row };
         list.selected = if (overview_view.selectedLine(&state)) |at| @intCast(at) else null;
         _ = try list.widget().draw(.{ .arena = frame.allocator(), .min = .{}, .max = .{ .width = 200, .height = 53 }, .cell_size = .{} });
-        _ = try overview_view.factsSegments(frame.allocator(), &state, 200, .{});
-        _ = try overview_view.statusSegments(frame.allocator(), &state, .{}, 200, .{});
+        const footer: @import("widgets/Footer.zig") = .{ .left = try overview_view.footerLeft(frame.allocator(), &state, 200, .{}), .right = overview_view.footerRight(&state, .{}) };
+        _ = try footer.widget().draw(.{ .arena = frame.allocator(), .min = .{}, .max = .{ .width = 200, .height = 1 }, .cell_size = .{} });
         render_ns[run] = nanosecondsNow() - render_start;
         render_allocations = @max(render_allocations, counting.count);
         frame.deinit();

@@ -1,8 +1,7 @@
-"""Overview counts cases; run by overview_integration.py, built on overview_fixture.py.
+"""Two-line overview rows, pinned Settings and one Footer through a real PTY.
 
-The counts line (the screen's top row) and the status row under the input,
-as a real terminal shows them. Rules: src/overview_view.zig countsLine,
-statusLine and unconfirmedLine.
+The historical counts group now checks the replacement presentation; archive
+views remain reachable through /sessions without a clickable counts row.
 """
 from contextlib import contextmanager
 import json
@@ -13,25 +12,6 @@ import threading
 
 import model_fixture as fixture
 from overview_fixture import world
-from terminal_process import ROWS
-
-# The test terminal is not one theme.wordmark trusts with Devanagari, so
-# the counts line names rui alone.
-WORDMARK = " rui"
-# Live memory on the right of the counts line: `rui 42 MB` or
-# `rui 42 MB · tools 1.8 GB` (sizeText: whole MB, or GB to a tenth).
-SIZE = r"\d+(?:\.\d)? [MG]B"
-MEMORY = re.compile(rf"rui {SIZE}(?: · tools {SIZE})?")
-
-
-def top(frame):
-    return frame.split("\n", 1)[0]
-
-
-def counts(frame):
-    """The counts line's left side: the wordmark and the counts, without the
-    memory a later build may draw on the right."""
-    return re.sub(rf"\s{{2,}}{MEMORY.pattern}\s*$", "", top(frame)).rstrip()
 
 
 def answer(name):
@@ -44,7 +24,6 @@ def send(w, session, text):
 
 @contextmanager
 def released(*holds):
-    """Releases every held reply on the way out, before the endpoint closes."""
     try:
         yield
     finally:
@@ -52,93 +31,78 @@ def released(*holds):
             held.set()
 
 
-def top_style(screen, frame, text):
-    assert text in top(frame), (text, frame)
-    return screen.style(text)
-
-
-def counts_by_mark():
-    """? needs you, ⠹ works, ◌ queues, × failed; zeros left out; slots only
-    while something queues; only ? and × coloured."""
+def rows_by_mark():
     holds = {name: threading.Event() for name in ("w1", "w2", "q1")}
     ask = fixture.sse_tool_calls("ask-calls", [("bash", "ask-call", json.dumps(
         {"cmd": "true", "timeout_ms": None, "description": "Run ask"}, separators=(",", ":")))])
     responses = {"ask": ask, "fail": b"data: {malformed\n\ndata: [DONE]\n\n",
                  **{name: (answer(name), held) for name, held in holds.items()}}
-    with world("counts-marks", responses, active_capacity=2) as w, released(*holds.values()):
-        with w.overview() as screen:
+    with world("drawing-marks", responses, active_capacity=2) as w, released(*holds.values()):
+        with w.overview(columns=99, rows=30) as screen:
             frame = screen.contains("+ New Session")
-            assert counts(frame) == WORDMARK, frame
-
+            assert frame.split("\n")[0] == "  + New Session", frame
             asking = w.session("--label", "Asking", "--tools", "bash", "--permission-mode", "ask")
             failing = w.session("--label", "Failing")
             send(w, asking, "ask")
             send(w, failing, "fail")
-            frame = screen.wait(lambda f: counts(f) == f"{WORDMARK}  ? 1  × 1", "? 1  × 1")
-            assert "? Asking" in frame and "× Failing" in frame, frame
-
+            screen.wait(lambda f: "? Asking" in f and "× Failing" in f, "approval and failure rows")
             for name in ("w1", "w2"):
                 send(w, w.session("--label", name), name)
-            # Both slots in use but nothing waits for one: no slots.
-            frame = screen.wait(lambda f: counts(f) == f"{WORDMARK}  ? 1  ⠹ 2  × 1", "? 1  ⠹ 2  × 1")
-            assert "slots" not in top(frame), frame
-
-            queued = w.session("--label", "q1")
-            send(w, queued, "q1")
-            frame = screen.wait(lambda f: counts(f) == f"{WORDMARK}  ? 1  ⠹ 2  ◌ 1 · slots 2/2  × 1",
-                                "? 1  ⠹ 2  ◌ 1 · slots 2/2  × 1")
-            assert "◌ q1" in frame, frame
-
-            # Only needs you and failures take a colour; working, queued
-            # and the slots draw in one ink, every count in its mark's.
-            needs, failed = (top_style(screen, frame, text) for text in ("? 1", "× 1"))
-            plain = [top_style(screen, frame, text) for text in ("⠹ 2", "◌ 1", "slots 2/2")]
-            assert len({cell.fg for cell in plain}) == 1, (plain, frame)
-            ink = plain[0].fg
-            assert needs.fg not in (None, ink) and failed.fg not in (None, ink), (needs, failed, ink, frame)
-            assert needs.fg != failed.fg, (needs, failed, frame)
-            for text in ("? 1", "⠹ 2", "◌ 1", "× 1"):
-                assert screen.style(text, 2).fg == screen.style(text).fg, (text, frame)
-
-            # A slot frees, the queued Session takes it: the slots go.
-            # (Your own working row's mark spins, so read q1's row as
-            # neither queued nor finished.)
+            screen.wait(lambda f: "w1" in f and "w2" in f, "working rows")
+            send(w, w.session("--label", "q1"), "q1")
+            frame = screen.contains("◌ q1")
+            lines = frame.split("\n")
+            queued = next(i for i, line in enumerate(lines) if "◌ q1" in line)
+            assert lines[queued].strip() == "◌ q1", frame
+            assert lines[queued + 1].startswith("   Queued"), frame
+            assert lines[queued + 1].rstrip().endswith("workspace"), frame
+            assert "slots " not in frame and not re.search(r"rui \d+ MB", frame), frame
+            assert screen.style("? Asking").fg != screen.style("× Failing").fg, frame
             holds["w1"].set()
-            frame = screen.wait(lambda f: counts(f) == f"{WORDMARK}  ? 1  ⠹ 2  × 1" and "✓ w1" in f
-                                and not re.search(r"[◌✓] q1", f), "q1 running, slots gone")
+            screen.wait(lambda f: "✓ w1" in f and "◌ q1" not in f, "queue admission")
             for held in holds.values():
                 held.set()
-            frame = screen.wait(lambda f: counts(f) == f"{WORDMARK}  ? 1  × 1" and "✓ q1" in f,
-                                "only ? and × left")
-    print("overview counts: the top row counts ? ⠹ ◌ × by mark, leaves zeros out, shows slots 2/2 only "
-          "while a Session queues, and colours only ? and ×", flush=True)
+            screen.contains("✓ q1")
+    print("overview drawing: two-line state rows replace counts and slots", flush=True)
 
 
 def view_name():
-    """`Archived` and `All` name the view on the right only off the default."""
-    with world("counts-view", {"talk": answer("talk")}) as w:
+    with world("drawing-view", {"talk": answer("talk")}) as w:
         session = w.session("--label", "Talk")
         send(w, session, "talk")
-        names = ("Unarchived", "Archived", "All")
-        with w.overview() as screen:
-            frame = screen.contains("✓ Talk")
-            assert not any(name in top(frame) for name in names), frame
-            for view, name in (("archived", "Archived"), ("all", "All")):
+        with w.overview(columns=99) as screen:
+            screen.contains("✓ Talk")
+            for view in ("archived", "all", "unarchived"):
                 screen.keys(f"/sessions {view}".encode())
                 screen.contains(f"/sessions {view}")
                 screen.keys(b"\r")
-                # The wordmark, no counts (nothing works, queues or failed),
-                # and the view's name on the right, after live memory.
-                frame = screen.wait(lambda f, name=name, view=view: re.fullmatch(rf"{WORDMARK}(?: {{2,}}{MEMORY.pattern})? {{2,}}{name}", top(f).rstrip())
-                                    and (view != "all" or "✓ Talk" in f), name)
-                assert ("Talk" in frame) == (view == "all"), frame
-            screen.keys(b"/sessions unarchived")
-            screen.contains("/sessions unarchived")
-            screen.keys(b"\r")
-            frame = screen.wait(lambda f: not top(f).rstrip().endswith("  All") and "✓ Talk" in f, "default view")
-            assert not any(name in top(frame) for name in names), frame
-            assert counts(frame) == WORDMARK, frame
-    print("overview counts: Archived and All show on the counts line only off the default view", flush=True)
+                frame = screen.wait(lambda f, view=view: "/sessions" not in f and ("✓ Talk" in f) == (view != "archived"), view)
+                assert frame.split("\n")[0] == "  + New Session", frame
+                assert "Settings" in frame, frame
+    print("overview drawing: /sessions reaches archive views without a view-name row", flush=True)
+
+
+def pinned_settings():
+    with world("drawing-settings") as w, w.overview(columns=46, rows=16) as screen:
+        frame = screen.contains("Settings")
+        rows = frame.split("\n")
+        settings = next(i for i, line in enumerate(rows) if "Settings" in line)
+        composer = next(i for i, line in enumerate(rows) if "› Type a task" in line)
+        assert settings == composer - 2, frame
+        assert re.fullmatch(r"─+", rows[settings - 1]), frame
+        assert rows[-1].rstrip().endswith("enter start"), frame
+        screen.keys(b"\x1b[F")
+        screen.wait(lambda f: f.split("\n")[-1].rstrip().endswith("enter open"), "Settings selected")
+        # Clicking the row opens app settings; Esc returns with the row pinned.
+        screen.click(4, settings + 1)
+        screen.contains("Notifications")
+        screen.keys(b"\x1b")
+        screen.contains("› Type a task")
+        screen.keys("draft")
+        frame = screen.contains("› draft")
+        assert frame.split("\n")[settings].lstrip().startswith("Settings"), frame
+        assert frame.split("\n")[-1].rstrip().endswith("enter start"), frame
+    print("overview drawing: Settings stays above the composer, opens app settings, and one Footer keeps the keys", flush=True)
 
 
 def requests(w):
@@ -164,7 +128,8 @@ def unconfirmed_status():
                 screen.keys(b"lost")
                 screen.contains("lost")
                 screen.keys(b"\r")
-                screen.contains("! Not confirmed · ctrl+r retries original", timeout=30)
+                screen.wait(lambda f: "! Not confirmed" in f and "ctrl+r retries original" in f,
+                            "unconfirmed state below footer and retry key in footer", timeout=30)
             finally:
                 os.kill(w.host.pid, signal.SIGCONT)
             saved = requests(w) - before
@@ -172,39 +137,21 @@ def unconfirmed_status():
             key = saved.pop()
             screen.keys(b"\x1b")
             line = f"! Not confirmed · rui request recover {key}"
-            frame = screen.wait(lambda f: line in f and "Type a task" in f, line)
+            frame = screen.wait(lambda f: line in f and "Type a task" in f and "enter open" in f, line)
             rows = screen.rows()
             status = next(at for at, row in enumerate(rows) if line in row)
             composer = next(at for at, row in enumerate(rows) if "› Type a task" in row)
             assert status > composer, frame
+            # The whole handle on its own row, the one Footer under it.
             assert rows[status].strip() == line, frame
-            assert "↑↓ select" not in frame, frame
+            assert rows[status + 1].rstrip().endswith("enter open"), frame
             assert screen.style("! Not confirmed").fg is not None, frame
-    print("overview counts: an unconfirmed send shows on the status row under the input with "
+    print("overview counts: an unconfirmed send shows on its own row above the Footer with "
           "rui request recover and its saved key", flush=True)
 
 
-def memory():
-    """Live memory on the right of the counts line, `rui N MB`; on a narrow
-    screen it drops before the counts do."""
-    hold = threading.Event()
-    with world("counts-memory", {"work": (answer("work"), hold)}) as w, released(hold):
-        send(w, w.session("--label", "Work"), "work")
-        with w.overview(columns=99) as screen:
-            screen.wait(lambda f: counts(f) == f"{WORDMARK}  ⠹ 1", "⠹ 1")
-            frame = screen.wait(lambda f: re.search(rf"  {MEMORY.pattern}$", top(f).rstrip()), "rui N MB on the right")
-            assert counts(frame) == f"{WORDMARK}  ⠹ 1", frame
-            # The same screen narrowed: 14 columns hold the counts (9
-            # cells) but not two spaces and memory too.
-            screen.resize(14, ROWS)
-            frame = screen.wait(lambda f: top(f).rstrip() == f"{WORDMARK}  ⠹ 1", "⠹ 1 alone")
-            assert not MEMORY.search(top(frame)), frame
-    print("overview counts: live memory shows as rui N MB on the right and drops before the counts "
-          "on a narrow screen", flush=True)
-
-
 def cases():
-    counts_by_mark()
+    rows_by_mark()
     view_name()
     unconfirmed_status()
-    memory()
+    pinned_settings()

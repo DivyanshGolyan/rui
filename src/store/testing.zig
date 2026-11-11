@@ -77,7 +77,7 @@ fn openSqlite(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: Te
         else => return err,
     };
     var mismatch: @import("schema.zig").IdentityMismatch = .{};
-    return storage.openWithOptions(io, database, selector, .{ .served = options.served, .host_tool_set = options.host_tool_set, .identity_mismatch = &mismatch }) catch |err| {
+    return storage.openTarget(io, .{ .sqlite = database }, selector, .{ .served = options.served, .host_tool_set = options.host_tool_set, .identity_mismatch = &mismatch }) catch |err| {
         std.debug.print("testing Store open failed: {s}, selector={s}, saved={s}\n", .{ @errorName(err), selector, mismatch.saved_selector.slice() });
         return err;
     };
@@ -386,6 +386,7 @@ pub fn setLoadedToolsForTesting(storage: *Store, session: []const u8, source: []
 pub fn setLegacyNullEffortForTesting(storage: *Store, session: []const u8) !void {
     try exec(storage, "UPDATE session SET reasoning_effort=NULL WHERE session_ref=?1", .{session});
     try exec(storage, "UPDATE session_revision SET reasoning_effort=NULL WHERE session_ref=?1", .{session});
+    try exec(storage, "UPDATE model_operation SET previous_effort_override=NULL WHERE session_ref=?1", .{session});
 }
 
 /// The first column of `sql`'s first row: `QueryFailed` with no row, and
@@ -776,3 +777,39 @@ pub const operation_offer_migration_seed: [:0]const u8 =
     "UPDATE session SET revision=2,loaded_tool_set_id=2,next_position=100 WHERE session_ref='d8mv7p';" ++
     "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
     "VALUES(99,1,'d8mv7p',2,1,99,0,1,'failed',1)";
+
+/// Format-65 request history: low, high, a high compaction, and its first
+/// successor. Tests vary the last choice/codec before applying pending 66.
+pub const operation_effort_migration_seed: [:0]const u8 =
+    "UPDATE session SET codec='openai-responses/2',revision=3,reasoning_effort='high',next_position=16,label='unrelated' WHERE session_ref='d8mv7p';" ++
+    "UPDATE model_operation SET reasoning_effort='low' WHERE operation_id=1;" ++
+    // Revision one remains a legacy null spec with a concrete frozen value.
+    "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) SELECT 'effort-migration-high',1,'d8mv7p',input_digest,1,'',2,0,100 FROM core_command WHERE command_key='fixture-answer-config';" ++
+    "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) SELECT 'effort-migration-last',1,'d8mv7p',input_digest,1,'',3,0,101 FROM core_command WHERE command_key='fixture-answer-config';" ++
+    "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label) " ++
+    "SELECT session_ref,2,'effort-migration-high',workspace,provider,model,instructions_content_id,0,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,'high',label FROM session_revision WHERE session_ref='d8mv7p' AND revision=1;" ++
+    "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label) " ++
+    "SELECT session_ref,3,'effort-migration-last',workspace,provider,model,instructions_content_id,0,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,'high','unrelated' FROM session_revision WHERE session_ref='d8mv7p' AND revision=1;" ++
+    "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at) VALUES('d8mv7p',6,0,2,'reasoning_effort',1793781800),('d8mv7p',14,0,3,'label',1793781801);" ++
+    "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,resolution_code,resolved_at,tool_set_id) " ++
+    "VALUES(99,1,'d8mv7p',2,1,7,0,0,'high',0,1,'answer',1793781800,4),(100,1,'d8mv7p',2,1,11,1,0,'high',1,1,'compacted',1793781800,4);" ++
+    "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count) " ++
+    "SELECT 100,0,'d8mv7p',12,4,1,item_id_digest,0,0,4,0 FROM model_output_item WHERE operation_id=1 AND item_ordinal=0;" ++
+    "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id) " ++
+    "VALUES(101,1,'d8mv7p',3,1,15,0,'high',1,0,1793781801,4)";
+
+pub const EffortMigrationChoice = enum {
+    retained,
+    back_to_top,
+    new_choice,
+    legacy_new_choice,
+
+    pub fn sql(choice: EffortMigrationChoice) [:0]const u8 {
+        return switch (choice) {
+            .retained => "UPDATE session SET label=label WHERE session_ref='d8mv7p'",
+            .back_to_top => "UPDATE session_revision SET reasoning_effort='low' WHERE session_ref='d8mv7p' AND revision=3;UPDATE session SET reasoning_effort='low' WHERE session_ref='d8mv7p';UPDATE model_operation SET reasoning_effort='low' WHERE operation_id=101;UPDATE session_change SET field='reasoning_effort' WHERE session_ref='d8mv7p' AND revision=3",
+            .new_choice => "UPDATE session_revision SET reasoning_effort='xhigh' WHERE session_ref='d8mv7p' AND revision=3;UPDATE session SET reasoning_effort='xhigh' WHERE session_ref='d8mv7p';UPDATE model_operation SET reasoning_effort='xhigh' WHERE operation_id=101;UPDATE session_change SET field='reasoning_effort' WHERE session_ref='d8mv7p' AND revision=3",
+            .legacy_new_choice => "UPDATE session_revision SET reasoning_effort='xhigh' WHERE session_ref='d8mv7p' AND revision=3;UPDATE session SET reasoning_effort='xhigh' WHERE session_ref='d8mv7p';UPDATE model_operation SET reasoning_effort='xhigh' WHERE operation_id=101",
+        };
+    }
+};
