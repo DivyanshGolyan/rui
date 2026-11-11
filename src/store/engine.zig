@@ -100,6 +100,46 @@ pub const Engine = union(Kind) {
         }
     }
 
+    /// A lone queued transaction can append its COMMIT only while armed
+    /// for the queue's first attempt, never during a whole-batch rerun.
+    pub inline fn commitArmed(e: *const Engine) bool {
+        return switch (e.*) {
+            .sqlite => false,
+            .mysql => |*s| s.commitArmed(),
+        };
+    }
+
+    /// A server-side row-count guard whose result follows the write's.
+    /// SQLite checks counts in process and queues no extra result.
+    pub inline fn guard(e: *Engine, comptime at_most: bool, rows: u64) bool {
+        return switch (e.*) {
+            .sqlite => false,
+            .mysql => |*s| s.guard(at_most, rows),
+        };
+    }
+
+    pub inline fn appendCommit(e: *Engine) bool {
+        return switch (e.*) {
+            .sqlite => false,
+            .mysql => |*s| s.appendCommit(),
+        };
+    }
+
+    /// Only an adapter that appended COMMIT queues its result/settlement.
+    pub inline fn stepCommit(e: *Engine) Failure!void {
+        return switch (e.*) {
+            .sqlite => unreachable,
+            .mysql => |*s| s.stepCommit(),
+        };
+    }
+
+    pub inline fn settleCommit(e: *Engine) Failure!void {
+        return switch (e.*) {
+            .sqlite => unreachable,
+            .mysql => |*s| s.settleCommit(),
+        };
+    }
+
     pub inline fn discardBatch(e: *Engine) Failure!void {
         switch (e.*) {
             .sqlite => {},

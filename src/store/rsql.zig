@@ -463,6 +463,10 @@ pub fn Write(comptime spec: WriteSpec) type {
         pub const made_from = spec;
         pub const Args = spec.Args;
         pub const expect = spec.expect;
+        /// Whether the rows it changes can differ from `expect` without
+        /// the statement failing: an INSERT ... VALUES inserts its one row
+        /// or fails, and every other write changes what its text finds.
+        pub const guarded = parsed.statement != .insert or parsed.statement.insert.values != .row;
         pub const sql = renderStatement(spec.sql, fieldCount(Args));
         /// The text in MySQL's spelling (`mysqlRendering`), rendered only
         /// where something reads it: `Store.cachedTyped` in test builds.
