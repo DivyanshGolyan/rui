@@ -555,6 +555,11 @@ fn appNotice(raw: *anyopaque, ctx: *vxfw.EventContext, text: []const u8) !void {
 /// else say what keeps this one open. The draft and Session stay as they are.
 fn appOpen(raw: *anyopaque, ctx: *vxfw.EventContext, id: []const u8) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    try self.openPeer(ctx, id);
+}
+
+/// A list row and an inline link share the same guarded, settled departure.
+pub fn openPeer(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
     try self.follow(ctx, id);
     try self.depart(ctx);
 }
@@ -862,7 +867,7 @@ test "App Session retains the draft across a permission card arriving during pas
             return error.UnexpectedOpen;
         }
     };
-    var root: Root = .{ .overview = empty_app_text.widget() };
+    var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
     const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
     self.reading.opening = false;
     self.poll_at = std.math.maxInt(i96);
@@ -964,7 +969,7 @@ test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps th
             }
         };
         Hooks.left = null;
-        var root: Root = .{ .overview = empty_app_text.widget() };
+        var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
         const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
         self.reading.opening = false;
         self.poll_at = std.math.maxInt(i96);
@@ -1024,7 +1029,7 @@ test "App Session drag copies the live rows it crosses once, says so and clears"
             return error.UnexpectedOpen;
         }
     };
-    var root: Root = .{ .overview = empty_app_text.widget() };
+    var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
     const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
     self.reading.opening = false;
     self.poll_at = std.math.maxInt(i96);
@@ -1133,7 +1138,7 @@ test "App Session link click leaves for the peer only where Esc would leave" {
     };
     Hooks.opened = null;
     Hooks.left = null;
-    var root: Root = .{ .overview = empty_app_text.widget() };
+    var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
     const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
     self.reading.opening = false;
     self.poll_at = std.math.maxInt(i96);
@@ -1203,7 +1208,7 @@ test "App Session Ctrl-O follows the lowest drawn peer name, or opens the lower 
     };
     Hooks.opened = null;
     Hooks.leaves = 0;
-    var root: Root = .{ .overview = empty_app_text.widget() };
+    var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
     const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
     self.reading.opening = false;
     self.poll_at = std.math.maxInt(i96);
@@ -3351,7 +3356,7 @@ const HeldFrontend = struct {
     tmp: std.testing.TmpDir,
     directory: [std.Io.Dir.max_path_bytes]u8 = undefined,
     interrupted: client.Cancellation = .{},
-    root: Root = .{ .overview = empty_app_text.widget() },
+    root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() },
     arena: std.heap.ArenaAllocator,
     /// What the frontend asked of its lender, in order.
     left: ?Outcome = null,
@@ -4999,7 +5004,7 @@ const ChromeFixture = struct {
             }
         }.line;
         fixture.self.begin(init_, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } }, undefined, undefined, undefined, fixture.screen, &fixture.interrupted, lender);
-        fixture.root = .{ .overview = empty_app_text.widget() };
+        fixture.root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
         fixture.widget = fixture.self.attach(.{ .root = &fixture.root, .context = fixture.self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
         fixture.self.reading.opening = false;
         fixture.self.poll_at = std.math.maxInt(i96);
@@ -5769,4 +5774,38 @@ test "open tool intent uses the complete Reference, with bounded allocation and 
     try std.testing.expect(!open.contains(first) and open.contains(changed[0]));
     open.remove(std.testing.allocator, changed[0]);
     try std.testing.expectEqual(@as(usize, 0), open.refs.capacity);
+}
+
+test "App Session keeps its real draft browsing anchor and focused composer across the split threshold" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.root.openSession(&fixture.ctx, fixture.widget);
+    const draw: vxfw.DrawContext = .{ .arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 26 }, .cell_size = .{} };
+    _ = try fixture.root.widget().draw(draw);
+    try fixture.press(.{ .codepoint = vaxis.Key.up, .mods = .{ .shift = true } });
+    for ("kept") |byte| try fixture.press(.{ .codepoint = byte, .text = &.{byte} });
+    _ = try fixture.root.widget().draw(draw);
+    const view_before = fixture.screen.view;
+    try std.testing.expect(view_before != .live);
+    const top = fixture.self.app_content.document.top;
+    try std.testing.expect(top != null);
+    const focused = fixture.self.app_input.composer.widget();
+    const commands = fixture.ctx.cmds.items.len;
+    try std.testing.expect(fixture.ctx.cmds.items[commands - 1].request_focus.eql(focused));
+    var caret_col: ?u16 = null;
+    for ([_]u16{ 140, 46, 99, 100, 46, 140 }) |width| {
+        const surface = try fixture.root.widget().draw(draw.withConstraints(.{}, .{ .width = width, .height = 26 }));
+        try std.testing.expect(fixture.root.session.?.eql(fixture.widget));
+        try std.testing.expectEqualStrings("kept", fixture.self.input.composition().bytes);
+        try std.testing.expectEqual(view_before, fixture.screen.view);
+        try std.testing.expectEqualDeep(top, fixture.self.app_content.document.top);
+        try std.testing.expectEqual(commands, fixture.ctx.cmds.items.len);
+        var screen: vaxis.Screen = try .init(fixture.arena.allocator(), .{ .cols = width, .rows = 26, .x_pixel = 0, .y_pixel = 0 });
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 26, .screen = &screen };
+        surface.render(window, focused);
+        try std.testing.expect(screen.cursor_vis);
+        const col = screen.cursor.col - @as(u16, if (width >= 100) 41 else 0);
+        if (caret_col) |expected| try std.testing.expectEqual(expected, col) else caret_col = col;
+    }
 }

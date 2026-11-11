@@ -265,8 +265,8 @@ def managed_descriptor_rejection(store, env, limit):
     fixed_host = os_semantics.HOST_FIXED_DESCRIPTORS
     authentication = os_semantics.AUTHENTICATION_DESCRIPTORS
     # Other occupied slots at five descriptors plus the serial ten-descriptor
-    # Bash spawn; ordinary exchanges at four, two controls and discovery.
-    execution, clients = (DEFAULT_ACTIVE_CAPACITY - 1) * 5 + 10, INTAKE * 4 + 3
+    # Bash spawn; ordinary exchanges at five, two controls and discovery.
+    execution, clients = (DEFAULT_ACTIVE_CAPACITY - 1) * 5 + 10, INTAKE * 5 + 3
     expected = dict(active_capacity=DEFAULT_ACTIVE_CAPACITY, soft_limit=limit, inherited=inherited,
                     fixed_host=fixed_host, clients=clients, execution=execution,
                     authentication=authentication, self_wake=2,
@@ -283,14 +283,14 @@ def startup_limits(root, env):
     # The default capacity cannot fit within macOS's default hard-capped 256
     # descriptors. Refuse with the existing diagnostic instead of clamping.
     required = managed_descriptor_rejection(root / "hard-256", env, 256)
-    minimum = required - 4 * (INTAKE - 10)
+    minimum = required - 5 * (INTAKE - 10)
     observed = managed_descriptor_rejection(root / "hard-below-minimum", env, minimum - 1)
     if observed != required:  # A different macOS inherited count moves the boundary.
-        required, minimum = observed, observed - 4 * (INTAKE - 10)
+        required, minimum = observed, observed - 5 * (INTAKE - 10)
         assert managed_descriptor_rejection(root / "hard-below-minimum-again", env, minimum - 1) == required
     print(f"default capacity refused below {minimum} descriptors (default intake needs {required})", flush=True)
     # macOS default soft 256 below a higher hard limit, a typical Linux
-    # 1024/1024 session, then exactly the minimum as both limits.
+    # 1024/1024 session (which may reduce intake), then exactly the minimum as both limits.
     for name, hard in (("soft-256", None), ("linux-1024", 1024), ("hard-minimum", minimum)):
         store = root / name
         def limits():
@@ -305,7 +305,8 @@ def startup_limits(root, env):
             assert json.loads(started.stdout) == reported, (started, reported)
             capacity = int(reported["intake_capacity"])
             if hard == 1024:
-                assert required <= 1024 and capacity == INTAKE and reported["descriptor_limit"] == "1024", reported
+                expected_capacity = INTAKE - max(0, (required - 1024 + 4) // 5)
+                assert capacity == expected_capacity and reported["descriptor_limit"] == "1024", reported
             elif hard:
                 # Exactly the minimum admits only the ten-client intake floor.
                 assert capacity == 10 and reported["descriptor_limit"] == str(hard), reported
