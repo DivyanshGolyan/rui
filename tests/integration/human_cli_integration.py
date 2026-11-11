@@ -996,8 +996,10 @@ def saved_capture_cases(state, store, workspace):
     # Recovery must ignore a newly selected, nonexistent preference Store.
     defaults(home, "--store", store)
     preferences = home / ".config/rui/preferences"
+    saved_preferences = preferences.read_bytes()
     preferences.write_text(f"version=1\nstore={state / 'missing-capture-store'}\n")
     assert json.loads(run(home, "request", "recover", handle))["answer"]["replayed"] is True
+    preferences.write_bytes(saved_preferences)
 
     # Rejected creation has no allocated Session. It remains inspectable and
     # recoverable, without hiding another Session's valid recovery handles.
