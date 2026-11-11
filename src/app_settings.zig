@@ -29,16 +29,20 @@ pub const Backend = struct {
     caps: *const fn (*anyopaque) view.Caps,
 };
 
+/// The page's rows, in drawn order: the Panel's field index of each.
+pub const Row = enum { model, effort, notifications, sign_in, version };
+const row_count = std.enums.values(Row).len;
+
 backend: ?Backend = null,
 narrow: bool = false,
 values: preferences.Values = .{},
 read_failed: bool = false,
 panel: Panel = .{ .title = "Rui" },
-fields: [5]Panel.Field = undefined,
+fields: [row_count]Panel.Field = undefined,
 /// The row awaiting the backend's answer. Displayed values always come from
 /// the saved file, including uncertain saves.
-saving_row: ?usize = null,
-failures: [5]?[]const u8 = @splat(null),
+saving_row: ?Row = null,
+failures: std.EnumArray(Row, ?[]const u8) = .initFill(null),
 effort_choices: [std.enums.values(catalog.ReasoningEffort).len + 1][]const u8 = undefined,
 effort_count: usize = 0,
 /// Supplied by the application owner, not a dependency of UI-only roots.
@@ -57,23 +61,27 @@ pub fn cancelChoice(self: *Self) void {
     self.panel.closeChoice();
 }
 
+pub fn select(self: *Self, row: Row) void {
+    self.panel.selected = @backingInt(row);
+}
+
 pub fn refresh(self: *Self) !void {
     // A choice is tied to the saved provider/model snapshot it opened on.
     // Refreshing (including failure) invalidates that choice, never its owner.
     self.cancelChoice();
     const backend = self.backend orelse {
         self.read_failed = true;
-        self.failures[0] = " · settings unavailable";
+        self.failures.set(.model, " · settings unavailable");
         return;
     };
     const was_failed = self.read_failed;
     self.values = backend.read(backend.context) catch {
         self.read_failed = true;
-        self.failures[0] = " · couldn't read settings";
+        self.failures.set(.model, " · couldn't read settings");
         return;
     };
     self.read_failed = false;
-    if (was_failed) self.failures[0] = null;
+    if (was_failed) self.failures.set(.model, null);
 }
 
 fn provider(self: *const Self) ?protocol.Provider {
@@ -84,18 +92,42 @@ fn model(self: *const Self) []const u8 {
     return if (self.values.model.len == 0) defaults.recommended_model else self.values.model.slice();
 }
 
+fn value(self: *const Self, row: Row) []const u8 {
+    if (row == .version) return self.version;
+    if (self.read_failed) return "unavailable";
+    return switch (row) {
+        .model => self.model(),
+        .effort => if (self.values.reasoning_effort) |effort| @tagName(effort) else "model default",
+        .notifications => if (self.values.notifications) "on" else "off",
+        .sign_in => if (self.provider()) |saved| saved.signIn() else "unavailable",
+        .version => unreachable,
+    };
+}
+
+fn tail(self: *Self, row: Row) ?[]const u8 {
+    if (self.saving_row == row) return " · saving";
+    if (self.failures.get(row)) |failure| return failure;
+    if (row != .version) return null;
+    const backend = self.backend orelse return null;
+    const run = backend.run(backend.context) orelse return null;
+    return upgrade_status.fieldTail(run, &self.upgrade_buffer);
+}
+
 fn bind(self: *Self) void {
     self.panel.userdata = self;
     self.panel.on_activate = activate;
     self.panel.on_pick = pick;
-    self.fields = .{
-        .{ .label = "Model", .value = if (self.read_failed) "unavailable" else self.model(), .tail = self.failures[0] },
-        .{ .label = "Effort", .value = if (self.read_failed) "unavailable" else if (self.values.reasoning_effort) |effort| @tagName(effort) else "model default", .tail = self.failures[1] },
-        .{ .label = "Notifications", .value = if (self.read_failed) "unavailable" else if (self.values.notifications) "on" else "off", .tail = self.failures[2] },
-        .{ .label = "Sign-in", .value = if (self.read_failed) "unavailable" else if (self.provider()) |saved| saved.signIn() else "unavailable", .tail = self.failures[3] },
-        .{ .label = "Version", .value = self.version, .tail = self.versionTail() },
+    for (std.enums.values(Row)) |row| self.fields[@backingInt(row)] = .{
+        .label = switch (row) {
+            .model => "Model",
+            .effort => "Effort",
+            .notifications => "Notifications",
+            .sign_in => "Sign-in",
+            .version => "Version",
+        },
+        .value = self.value(row),
+        .tail = self.tail(row),
     };
-    if (self.saving_row) |row| self.fields[row].tail = " · saving";
     self.panel.fields = &self.fields;
     const caps = if (self.backend) |b| b.caps(b.context) else view.Caps{};
     self.panel.ground = widget_style.of(caps, .{ .background = .bar });
@@ -105,32 +137,27 @@ fn bind(self: *Self) void {
     self.panel.rule_style = widget_style.of(caps, .{ .background = .bar, .colour = .rule });
 }
 
-fn versionTail(self: *Self) ?[]const u8 {
-    if (self.failures[4]) |failure| return failure;
-    const backend = self.backend orelse return null;
-    const run = backend.run(backend.context) orelse return null;
-    return upgrade_status.fieldTail(run, &self.upgrade_buffer);
-}
-
 fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const backend = self.backend orelse return;
     if (self.saving_row != null) return;
-    self.failures[index] = null;
-    if (index == 4) {
-        backend.upgrade(backend.context) catch {
-            self.failures[4] = " · couldn't start upgrade";
-        };
-        ctx.redraw = true;
-        return;
+    const row: Row = @fromBackingInt(@intCast(index));
+    self.failures.set(row, null);
+    switch (row) {
+        .version => backend.upgrade(backend.context) catch {
+            self.failures.set(.version, " · couldn't start upgrade");
+        },
+        // Sign-in stays selectable until its screen exists.
+        .sign_in => return,
+        .model, .effort, .notifications => {
+            try self.refresh();
+            if (self.read_failed) return;
+        },
     }
-    if (index == 3) return; // Sign-in stays selectable until its screen exists.
-    try self.refresh();
-    if (self.read_failed) return;
-    switch (index) {
-        0 => {
+    switch (row) {
+        .model => {
             if (self.provider() == null) {
-                self.failures[0] = " · sign-in unavailable";
+                self.failures.set(.model, " · sign-in unavailable");
                 return;
             }
             // Both supported sign-ins use the catalog's OpenAI chat models.
@@ -142,7 +169,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
             };
             self.panel.openChoice(&catalog.openai_ids, current);
         },
-        1 => {
+        .effort => {
             self.effort_choices[0] = "model default";
             self.effort_count = 1;
             var current: ?usize = if (self.values.reasoning_effort == null) 0 else null;
@@ -154,36 +181,34 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
             }
             self.panel.openChoice(self.effort_choices[0..self.effort_count], current);
         },
-        2 => {
-            const enabled = !self.values.notifications;
-            try self.save(ctx, index, .{ .notifications = enabled });
-        },
-        else => unreachable,
+        .notifications => try self.save(ctx, row, .{ .notifications = !self.values.notifications }),
+        .sign_in, .version => {},
     }
     ctx.redraw = true;
 }
 
 fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, field: usize, choice: usize) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const edit: preferences.Edit = switch (field) {
-        0 => .{
+    const row: Row = @fromBackingInt(@intCast(field));
+    try self.save(ctx, row, switch (row) {
+        .model => .{
             .provider = .{ .set = @tagName(self.provider().?) },
             .model = .{ .set = catalog.openai_ids[choice] },
         },
-        1 => .{
+        .effort => .{
             .reasoning_effort = if (choice == 0) .clear else .{
                 .set = std.meta.stringToEnum(catalog.ReasoningEffort, self.effort_choices[choice]).?,
             },
         },
-        else => unreachable,
-    };
-    try self.save(ctx, field, edit);
+        // Only Model and Effort open a choice.
+        .notifications, .sign_in, .version => unreachable,
+    });
 }
 
-fn save(self: *Self, ctx: *vxfw.EventContext, row: usize, edit: preferences.Edit) !void {
+fn save(self: *Self, ctx: *vxfw.EventContext, row: Row, edit: preferences.Edit) !void {
     const backend = self.backend.?;
     backend.save(backend.context, edit) catch {
-        self.failures[row] = " · couldn't save";
+        self.failures.set(row, " · couldn't save");
         ctx.redraw = true;
         return;
     };
@@ -201,7 +226,7 @@ fn poll(self: *Self) !void {
         .saved, .failed => {},
     }
     try self.refresh();
-    self.failures[row] = if (state == .failed) " · couldn't save" else if (self.read_failed) " · couldn't read settings" else null;
+    self.failures.set(row, if (state == .failed) " · couldn't save" else if (self.read_failed) " · couldn't read settings" else null);
     self.saving_row = null;
 }
 
@@ -298,21 +323,21 @@ test "App settings choices submit typed edits and show saved values after the ba
     try std.testing.expectEqual(.keep, model_edit.store);
     try std.testing.expectEqual(.keep, model_edit.reasoning_effort);
     try std.testing.expectEqual(@as(?bool, null), model_edit.notifications);
-    try std.testing.expectEqual(@as(?usize, 0), page.saving_row);
+    try std.testing.expectEqual(@as(?Row, .model), page.saving_row);
     page.bind();
-    try std.testing.expectEqualStrings(" · saving", page.fields[0].tail.?);
+    try std.testing.expectEqualStrings(" · saving", page.fields[@backingInt(Row.model)].tail.?);
     try fixture.values.model.set(catalog.openai_ids[next]);
     try fixture.values.provider.set("codex");
     try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expectEqual(@as(?usize, 0), page.saving_row);
+    try std.testing.expectEqual(@as(?Row, .model), page.saving_row);
     try std.testing.expectEqualStrings(defaults.recommended_model, page.model());
     fixture.save_status = .saved;
     try page.widget().handleEvent(&ctx, .tick);
     try std.testing.expectEqualStrings(catalog.openai_ids[next], page.model());
-    try std.testing.expectEqual(@as(?[]const u8, null), page.failures[0]);
+    try std.testing.expectEqual(@as(?[]const u8, null), page.failures.get(.model));
 
     // Effort choices are the selected model's supported efforts, plus clearing.
-    page.panel.selected = 1;
+    page.select(.effort);
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqualStrings("model default", page.effort_choices[0]);
     for (page.effort_choices[1..page.effort_count]) |text| try std.testing.expect(capability.supportsReasoningEffort(catalog.shipped, page.model(), std.meta.stringToEnum(catalog.ReasoningEffort, text).?));
@@ -336,7 +361,7 @@ test "App settings choices submit typed edits and show saved values after the ba
     fixture.save_status = .saved;
     try page.widget().handleEvent(&ctx, .tick);
 
-    page.panel.selected = 2;
+    page.select(.notifications);
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqual(@as(?bool, false), fixture.last_edit.?.notifications);
     try std.testing.expect(page.values.notifications);
@@ -346,14 +371,14 @@ test "App settings choices submit typed edits and show saved values after the ba
     try std.testing.expect(!page.values.notifications);
 
     // Read-only sign-in doesn't submit, while Version delegates to Upgrade.
-    page.panel.selected = 3;
+    page.select(.sign_in);
     fixture.last_edit = null;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqual(@as(?preferences.Edit, null), fixture.last_edit);
-    page.panel.selected = 4;
+    page.select(.version);
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqual(@as(usize, 1), fixture.upgrades);
-    try std.testing.expectEqualStrings(upgrade_status.fieldTail(.checking, &page.upgrade_buffer), page.versionTail().?);
+    try std.testing.expectEqualStrings(upgrade_status.fieldTail(.checking, &page.upgrade_buffer), page.tail(.version).?);
 }
 
 test "App settings failures stay on the field and can recover" {
@@ -363,10 +388,10 @@ test "App settings failures stay on the field and can recover" {
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try page.refresh();
-    page.panel.selected = 2;
+    page.select(.notifications);
     fixture.fail_save = true;
     try press(&page, &ctx, vaxis.Key.enter);
-    try std.testing.expectEqualStrings(" · couldn't save", page.failures[2].?);
+    try std.testing.expectEqualStrings(" · couldn't save", page.failures.get(.notifications).?);
     try std.testing.expect(page.values.notifications);
     fixture.fail_save = false;
     try press(&page, &ctx, vaxis.Key.enter);
@@ -374,19 +399,19 @@ test "App settings failures stay on the field and can recover" {
     fixture.values.notifications = false;
     fixture.save_status = .failed;
     try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expect(page.failures[2] != null);
-    try std.testing.expectEqualStrings(" · couldn't save", page.failures[2].?);
+    try std.testing.expect(page.failures.get(.notifications) != null);
+    try std.testing.expectEqualStrings(" · couldn't save", page.failures.get(.notifications).?);
     try std.testing.expect(!page.values.notifications);
-    try std.testing.expectEqual(@as(?usize, null), page.saving_row);
+    try std.testing.expectEqual(@as(?Row, null), page.saving_row);
     page.bind();
-    try std.testing.expectEqualStrings(" · couldn't save", page.fields[2].tail.?);
+    try std.testing.expectEqualStrings(" · couldn't save", page.fields[@backingInt(Row.notifications)].tail.?);
     try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expectEqualStrings(" · couldn't save", page.failures[2].?);
+    try std.testing.expectEqualStrings(" · couldn't save", page.failures.get(.notifications).?);
     try press(&page, &ctx, vaxis.Key.enter);
     fixture.values.notifications = true;
     fixture.save_status = .saved;
     try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expectEqual(@as(?[]const u8, null), page.failures[2]);
+    try std.testing.expectEqual(@as(?[]const u8, null), page.failures.get(.notifications));
     fixture.fail_read = true;
     try page.refresh();
     try std.testing.expect(page.read_failed);
@@ -404,24 +429,24 @@ test "App settings completion uses the backend outcome and reports read failures
             defer arena.deinit();
             var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
             try page.refresh();
-            page.panel.selected = 2;
+            page.select(.notifications);
             try press(&page, &ctx, vaxis.Key.enter);
-            try std.testing.expectEqual(@as(?usize, 2), page.saving_row);
+            try std.testing.expectEqual(@as(?Row, .notifications), page.saving_row);
             fixture.save_status = state;
             fixture.fail_read = fail_read;
             // The saved file is authoritative for displayed values; the
             // backend's outcome, not a value comparison, decides success.
             try page.widget().handleEvent(&ctx, .tick);
-            try std.testing.expectEqual(@as(?usize, null), page.saving_row);
+            try std.testing.expectEqual(@as(?Row, null), page.saving_row);
             try std.testing.expectEqual(fail_read, page.read_failed);
             try std.testing.expect(page.values.notifications);
             const failure: ?[]const u8 = if (state == .failed) " · couldn't save" else if (fail_read) " · couldn't read settings" else null;
             if (failure) |text| {
-                try std.testing.expectEqualStrings(text, page.failures[2].?);
+                try std.testing.expectEqualStrings(text, page.failures.get(.notifications).?);
                 page.bind();
-                try std.testing.expectEqualStrings(text, page.fields[2].tail.?);
+                try std.testing.expectEqualStrings(text, page.fields[@backingInt(Row.notifications)].tail.?);
             } else {
-                try std.testing.expectEqual(@as(?[]const u8, null), page.failures[2]);
+                try std.testing.expectEqual(@as(?[]const u8, null), page.failures.get(.notifications));
             }
         }
     }
@@ -458,7 +483,6 @@ test "App settings page text and ground at 99x20 and 46x20" {
         const ground = widget_style.of(.{}, .{ .background = .bar });
         try std.testing.expectEqual(ground.bg, screen.readCell(0, 15).?.style.bg);
         try std.testing.expectEqual(widget_style.of(.{}, .{ .background = .selection }).bg, screen.readCell(0, 2).?.style.bg);
-        std.debug.print("\nAPP SETTINGS {d}x20\n{s}END APP SETTINGS\n", .{ width, text });
     }
 }
 
@@ -468,12 +492,12 @@ test "App settings sign-in and effort choices reflect saved values without assum
     var page: Self = .{ .backend = fixture.backend() };
     try page.refresh();
     page.bind();
-    try std.testing.expectEqualStrings("API key", page.fields[3].value);
-    try std.testing.expectEqualStrings("model default", page.fields[1].value);
+    try std.testing.expectEqualStrings("API key", page.fields[@backingInt(Row.sign_in)].value);
+    try std.testing.expectEqualStrings("model default", page.fields[@backingInt(Row.effort)].value);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    page.panel.selected = 0;
+    page.select(.model);
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(page.hasChoice());
     page.cancelChoice();
@@ -482,10 +506,10 @@ test "App settings sign-in and effort choices reflect saved values without assum
     try fixture.values.provider.set("legacy");
     try page.refresh();
     page.bind();
-    try std.testing.expectEqualStrings("unavailable", page.fields[3].value);
+    try std.testing.expectEqualStrings("unavailable", page.fields[@backingInt(Row.sign_in)].value);
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(!page.hasChoice());
-    try std.testing.expectEqualStrings(" · sign-in unavailable", page.failures[0].?);
+    try std.testing.expectEqualStrings(" · sign-in unavailable", page.failures.get(.model).?);
     // A saved effort excluded by this model doesn't mark "model default" as
     // current: the page must not claim that an unsaved clearing already holds.
     for (catalog.shipped) |entry| if (entry.openai_listed and !entry.efforts.contains(.max)) {
@@ -493,7 +517,7 @@ test "App settings sign-in and effort choices reflect saved values without assum
         break;
     };
     fixture.values.reasoning_effort = .max;
-    page.panel.selected = 1;
+    page.select(.effort);
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqual(@as(?usize, null), page.panel.choice.?.current);
     page.cancelChoice();

@@ -367,6 +367,11 @@ pub const Event = union(enum) {
     models: ModelsRead,
     /// A save of the default ended.
     saved: SaveAnswer,
+    /// A write of the saved defaults that was no pick ended: the default a
+    /// fresh launch would now take from them, null when they decide none.
+    defaults_saved: ?Default,
+    /// The app settings page asked for the Upgrade /upgrade starts.
+    start_upgrade,
     /// A read the open conversation applied.
     observed: Observed,
     /// The command `step` asked the shell to run ended.
@@ -1742,6 +1747,13 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             }
             startSave(state, &effects);
         },
+        // A pick still on its way to the file was asked after the edit that
+        // wrote this snapshot, as `admitsDefaultsEdit` keeps it: the pick
+        // stands, and its own save writes over the snapshot.
+        .defaults_saved => |saved| if (state.save.running == null and state.save.wanted == null) {
+            if (saved) |binding| state.default = binding;
+        },
+        .start_upgrade => startUpgrade(state),
     }
     // Opening a Session shows the person its outcome.
     for (effects.slice()) |effect| if (effect == .open) if (state.entryOf(effect.open)) |entry| state.want(entry, attention.Status.opened(entry.status), false);
@@ -1855,6 +1867,14 @@ fn askModels(state: *State, effects: *Effects) void {
     if (state.asking_models) return;
     state.asking_models = true;
     effects.add(.list_models);
+}
+
+/// Whether the shell may queue a write of the saved defaults that is no
+/// pick. The shell writes in the order it queued, and a pick waiting here
+/// for the running save is not queued yet: an edit queued now would be
+/// written before that older pick and lost to it.
+pub fn admitsDefaultsEdit(state: *const State) bool {
+    return !state.left and !state.upgrade.held() and state.save.wanted == null;
 }
 
 /// Hands the waiting pick to the shell to save once no save runs. A
@@ -6815,6 +6835,43 @@ test "a failed save is not retried, but picking the same model again saves it" {
     try std.testing.expectEqualStrings("gpt-5.5", second.items[1].save_default.model.slice());
     try expectEffects(&.{}, try step(&state, .{ .saved = .{ .ended = .{ .binding = state.save.running.?, .outcome = .done } } }));
     try std.testing.expect(state.notice == null);
+}
+
+test "a defaults write that was no pick moves the default only when no pick is on its way, and is admitted in pick order" {
+    const written = Default.of("codex", "gpt-6.1-sol").?;
+    const Picks = enum { none, running, waiting };
+    for (std.enums.values(Picks)) |picks| {
+        for ([_]?Default{ null, written }) |saved| {
+            var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+            defer state.deinit();
+            if (picks != .none) {
+                try openPicker(&state, &.{chatgpt});
+                _ = try submit(&state, try typeText(&state, "/model gpt-5.5"));
+                try std.testing.expect(state.save.running != null);
+            }
+            if (picks == .waiting) {
+                try openPicker(&state, &.{chatgpt});
+                _ = try submit(&state, try typeText(&state, "/model gpt-6-luna"));
+                try std.testing.expect(state.save.wanted != null);
+            }
+            // Only a pick outside the shell's queue could be written after a
+            // newer edit.
+            try std.testing.expectEqual(picks != .waiting, admitsDefaultsEdit(&state));
+            const before = state.default.?;
+            try expectEffects(&.{}, try step(&state, .{ .defaults_saved = saved }));
+            const expected = if (picks == .none) saved orelse before else before;
+            try std.testing.expect(expected.eql(&state.default.?));
+        }
+    }
+    var held = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer held.deinit();
+    try expectEffects(&.{}, try step(&held, .start_upgrade));
+    try std.testing.expect(held.upgrade.run.? == .checking);
+    try std.testing.expect(!admitsDefaultsEdit(&held));
+    var left = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer left.deinit();
+    _ = try step(&left, .leave);
+    try std.testing.expect(!admitsDefaultsEdit(&left));
 }
 
 test "the lines that name the next Session's model name the saved effort its start applies" {

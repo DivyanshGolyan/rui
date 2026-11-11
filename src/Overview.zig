@@ -390,7 +390,7 @@ hooks: Hooks,
 ops: Operations,
 state: view.State,
 /// The typed save owns this outcome from acceptance through its worker answer.
-defaults_save: union(enum) { idle, pending, saved, failed: anyerror } = .idle,
+defaults_save: AppSettings.SaveState = .idle,
 caps: view.Caps,
 app: ?*TerminalApp = null,
 /// Program status records beside App's frames.
@@ -1033,7 +1033,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
 /// Accept one typed preference edit. Only this owner writes its worker queue;
 /// the page borrows the saved values and the answered status, never the job.
 pub fn saveDefaults(self: *Self, edit: preferences.Edit) !void {
-    if (self.state.left or self.state.upgrade.held() or self.defaults_save == .pending or self.job_count == max_jobs) return error.DefaultsUnavailable;
+    if (!view.admitsDefaultsEdit(&self.state) or self.defaults_save == .pending or self.job_count == max_jobs) return error.DefaultsUnavailable;
     const owned = try DefaultsEdit.init(self.init.gpa, edit);
     self.queue(.{ .defaults = owned });
     self.defaults_save = .pending;
@@ -1042,11 +1042,7 @@ pub fn saveDefaults(self: *Self, edit: preferences.Edit) !void {
 /// Use the same Upgrade transition and worker lifecycle as the other screens.
 pub fn startUpgrade(self: *Self) !void {
     if (self.state.left) return error.UpgradeUnavailable;
-    const next = try self.event(.{ .conversed = .{
-        .reference = self.state.conversing orelse @splat(0),
-        .work = .idle,
-        .input = .upgrade,
-    } });
+    const next = try self.event(.start_upgrade);
     std.debug.assert(next == null);
 }
 
@@ -1064,12 +1060,7 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
             return owner(raw).saveDefaults(edit);
         }
         fn saveState(raw: *anyopaque) AppSettings.SaveState {
-            return switch (owner(raw).defaults_save) {
-                .idle => .idle,
-                .pending => .pending,
-                .saved => .saved,
-                .failed => .failed,
-            };
+            return owner(raw).defaults_save;
         }
         fn upgrade(raw: *anyopaque) !void {
             return owner(raw).startUpgrade();
@@ -1214,13 +1205,7 @@ fn dispatch(self: *Self, jobs: enum { all, lent }) !void {
     const next = self.take(at);
     self.job.deinit(self.init.gpa);
     self.job = next;
-    self.worker.start(self.init.io, self, work) catch |err| {
-        if (self.job == .defaults) {
-            _ = try self.deliver(err);
-            return;
-        }
-        return err;
-    };
+    try self.worker.start(self.init.io, self, work);
 }
 
 /// The worker: runs one job and writes only that job's answer. Its
@@ -1391,16 +1376,16 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             },
         }),
         .defaults => {
-            const saved = if (outcome) |_| true else |err| preferences.failure(err).saved;
-            if (saved) if (self.savedDefault()) |binding| {
-                // As setup does, respect launch selectors and leave any local
-                // Configure override to nextBinding's existing precedence.
-                self.state.default = binding;
-            };
+            const written = if (outcome) |_| true else |err| preferences.failure(err).saved;
+            // As setup does, respect launch selectors and leave any local
+            // Configure override to nextBinding's existing precedence. The
+            // core decides whether a newer pick stands instead.
+            const next = if (written) try self.event(.{ .defaults_saved = self.savedDefault() }) else null;
+            std.debug.assert(next == null);
             if (outcome) |_| {
                 self.defaults_save = .saved;
             } else |err| {
-                self.defaults_save = .{ .failed = err };
+                self.defaults_save = .failed;
                 // With no page left to show the answer, the departure owns it.
                 if (self.state.left) return err;
             }
@@ -5758,14 +5743,14 @@ test "App settings typed saves own their strings and settle through the Overview
     defer ctx.cmds.deinit(std.testing.allocator);
     try overview.root.openSettings(&ctx);
     const page = &overview.root.settings_page;
-    page.panel.selected = 2;
+    page.select(.notifications);
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
     try std.testing.expectEqual(AppSettings.SaveState.pending, backend.save_state(backend.context));
     try std.testing.expect(!page.values.notifications);
     try std.testing.expect(try rig.settle() == null);
     try page.widget().handleEvent(&ctx, .tick);
     try std.testing.expect(page.values.notifications);
-    try std.testing.expect(page.failures[2] == null);
+    try std.testing.expect(page.failures.get(.notifications) == null);
     try std.testing.expect(overview.state.command == null and overview.state.panel == null);
     try std.testing.expectEqualStrings("kept draft", overview.composerDraft().bytes);
 }
@@ -5783,7 +5768,7 @@ test "App settings typed worker failure reaches its row and a later save recover
     defer ctx.cmds.deinit(std.testing.allocator);
     try overview.root.openSettings(&ctx);
     const page = &overview.root.settings_page;
-    page.panel.selected = 2;
+    page.select(.notifications);
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
     // Refuse the real preference writer only after the page's edit is accepted.
     const obstruction = try tmp.dir.createFile(std.testing.io, ".config", .{});
@@ -5791,7 +5776,7 @@ test "App settings typed worker failure reaches its row and a later save recover
     try std.testing.expect(try rig.settle() == null);
     try page.widget().handleEvent(&ctx, .tick);
     try std.testing.expect(overview.defaults_save == .failed);
-    try std.testing.expectEqualStrings(" · couldn't save", page.failures[2].?);
+    try std.testing.expectEqualStrings(" · couldn't save", page.failures.get(.notifications).?);
     try std.testing.expect(!overview.state.left);
     try tmp.dir.deleteFile(std.testing.io, ".config");
     try std.testing.expect((try preferences.load(home)).notifications);
@@ -5799,7 +5784,7 @@ test "App settings typed worker failure reaches its row and a later save recover
     try std.testing.expect(try rig.settle() == null);
     try page.widget().handleEvent(&ctx, .tick);
     try std.testing.expect(!page.values.notifications);
-    try std.testing.expect(page.failures[2] == null);
+    try std.testing.expect(page.failures.get(.notifications) == null);
     try std.testing.expect(overview.defaults_save == .saved);
 }
 
@@ -5820,6 +5805,10 @@ test "App settings typed admission and Upgrade stay within the Overview owner" {
     overview.job_count = overview.jobs.len;
     try std.testing.expectError(error.DefaultsUnavailable, overview.saveDefaults(.{ .notifications = false }));
     overview.job_count = 0;
+    // A pick waiting outside the queue would be written after this edit.
+    overview.state.save.wanted = view.Default.of("codex", "gpt-5.5");
+    try std.testing.expectError(error.DefaultsUnavailable, overview.saveDefaults(.{ .notifications = false }));
+    overview.state.save.wanted = null;
     try overview.startUpgrade();
     try std.testing.expectEqual(@as(?upgrade_status.Run, .checking), backend.run(backend.context));
     try std.testing.expect(!overview.upgrade_job.started);
@@ -5830,6 +5819,32 @@ test "App settings typed admission and Upgrade stay within the Overview owner" {
     _ = try overview.event(.leave);
     try std.testing.expectError(error.UpgradeUnavailable, overview.startUpgrade());
     try std.testing.expectError(error.DefaultsUnavailable, overview.saveDefaults(.{ .notifications = false }));
+}
+
+test "App settings saves and model picks leave the default asked for last in either order" {
+    for ([_]bool{ false, true }) |pick_first| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        try std.testing.expect(try rig.press("/model ") == null);
+        try std.testing.expect(try rig.settle() == null);
+        const edit: preferences.Edit = .{ .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-6.1-sol" } };
+        if (!pick_first) try overview.saveDefaults(edit);
+        try std.testing.expect(try rig.press("luna max\r") == null);
+        try std.testing.expect(overview.state.save.running != null);
+        if (pick_first) try overview.saveDefaults(edit);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expect(overview.defaults_save == .saved);
+        // The fake pick save writes no file, so the file holds the edit in
+        // both orders; the default in force is the one asked for last.
+        try std.testing.expectEqualStrings("gpt-6.1-sol", (try preferences.load(home)).model.slice());
+        try std.testing.expectEqualStrings(if (pick_first) "gpt-6.1-sol" else "gpt-6-luna", overview.state.default.?.model.slice());
+    }
 }
 
 test "App settings typed queued saves settle on departure and retain failures" {
