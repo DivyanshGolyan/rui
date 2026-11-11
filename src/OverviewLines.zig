@@ -1,4 +1,4 @@
-//! The overview's header: the counts line and any Host or provider band
+//! The overview's header: the counts line and any provider band
 //! under it, as `overview_view.header` decides them each frame. A left
 //! press on the counts line's view name, which shows only off the default
 //! view, is the core's `.view` click.
@@ -62,7 +62,7 @@ const Clicks = struct {
     }
 };
 
-test "the header draws the counts line over its bands, and only a press on the view name is the view click" {
+test "the header keeps Host words out and only a press on the view name is the view click" {
     var state: overview_view.State = undefined;
     try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
     defer state.deinit();
@@ -87,15 +87,15 @@ test "the header draws the counts line over its bands, and only a press on the v
     try header.widget().handleEvent(&events, press(45, 0));
     try std.testing.expectEqual(null, clicks.got);
 
-    // A stopped Host draws its band under the counts line.
+    // A failed listing adds no Host band to the header.
     state.archive = .archived;
-    state.unreachable_since_ms = state.now_ms;
+    state.list_stale = true;
     const banded = try header.widget().draw(ctx);
-    try std.testing.expectEqual(@as(u16, 2), banded.size.height);
+    try std.testing.expectEqual(@as(u16, 1), banded.size.height);
     const text = try cells(arena.allocator(), banded, 0);
     try std.testing.expectEqualStrings("Archived ", text[41..]);
-    try std.testing.expect(std.mem.indexOf(u8, try cells(arena.allocator(), banded, 1), "Host stopped") != null);
-    // Beside the name, after it, and on the band under it are not the name.
+    try std.testing.expect(std.mem.indexOf(u8, text, "Host stopped") == null);
+    // Beside the name, after it, and below the header are not the name.
     for ([_][2]i16{ .{ 40, 0 }, .{ 49, 0 }, .{ 44, 1 } }) |at| try header.widget().handleEvent(&events, press(at[0], at[1]));
     try std.testing.expectEqual(null, clicks.got);
     try std.testing.expect(!events.consume_event);

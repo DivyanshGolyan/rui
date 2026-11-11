@@ -12,6 +12,8 @@ pub const Values = struct {
     /// The effort new Sessions start at when their model offers it; null
     /// leaves each model at its own default.
     reasoning_effort: ?model_capability.ReasoningEffort = null,
+    /// Null leaves new Sessions at Rui's permission default.
+    permission_mode: ?@import("cli_value.zig").PermissionMode = null,
 };
 
 pub fn directoryPath(home: []const u8, buffer: []u8) ![]const u8 {

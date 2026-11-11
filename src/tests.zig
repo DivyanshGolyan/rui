@@ -111,6 +111,7 @@ test {
     _ = @import("read_transcript.zig");
     _ = @import("find_tools.zig");
     _ = @import("find_tools_tests.zig");
+    _ = @import("mcp_refresh_tests.zig");
     _ = @import("skills.zig");
     _ = @import("session_skills.zig");
     _ = @import("client.zig");
@@ -122,6 +123,7 @@ test {
     _ = @import("TerminalText.zig");
     _ = @import("SessionInput.zig");
     _ = @import("SessionSubmission.zig");
+    _ = @import("ToolFolds.zig");
     _ = @import("SessionFrontend.zig");
     _ = @import("Overview.zig");
     _ = @import("session_reads.zig");

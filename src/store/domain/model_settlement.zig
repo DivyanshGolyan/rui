@@ -561,19 +561,19 @@ const builtin_names_sql = blk: {
     break :blk names;
 };
 
-/// The Operation's frozen offered names and set id (null for a missing
-/// revision), owner validity, the Session's permission mode and revision,
+/// The Operation's frozen offered names and revision presence, owner validity,
+/// the Session's permission mode and revision,
 /// and the last Conversation ordinal. Earlier names are checked per batch.
 const success_facts = rsql.Read(.{
-    .sql = "SELECT r.tool_set_id,coalesce(" ++ tool_set.namesSql(tool_set.offeredSetSql("r")) ++ ",'') AS tool_names," ++
+    .sql = "SELECT r.revision AS frozen_revision,coalesce(" ++ tool_set.namesSql("o.tool_set_id") ++ ",'') AS tool_names," ++
         "EXISTS(SELECT 1 FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "WHERE member.tool_set_id=" ++ tool_set.offeredSetSql("r") ++ " AND tool.name NOT IN (" ++ builtin_names_sql ++ ") AND tool.owner<>'mcp') AS invalid_owner," ++
+        "WHERE member.tool_set_id=o.tool_set_id AND tool.name NOT IN (" ++ builtin_names_sql ++ ") AND tool.owner<>'mcp') AS invalid_owner," ++
         "s.permission_mode,s.revision," ++
         "coalesce((SELECT max(e.entry_ordinal) FROM conversation_entry e WHERE e.session_ref=o.session_ref),0) AS entry_base " ++
         "FROM model_operation o LEFT JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
         "JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
     .Args = struct { operation_id: u64 },
-    .Row = struct { tool_set_id: ?rsql.Positive = null, tool_names: *Bounded(tool_set.max_names_bytes), invalid_owner: bool = false, permission_mode: bool = false, revision: rsql.Positive = undefined, entry_base: u64 = 0 },
+    .Row = struct { frozen_revision: ?rsql.Positive = null, tool_names: *Bounded(tool_set.max_names_bytes), invalid_owner: bool = false, permission_mode: bool = false, revision: rsql.Positive = undefined, entry_base: u64 = 0 },
     .cardinality = .optional,
 });
 
@@ -904,9 +904,10 @@ const DuplicateVisitor = struct {
 };
 
 const historical_names = rsql.Read(.{
-    .sql = "SELECT DISTINCT tool.name FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision<o.settings_revision " ++
-        "JOIN tool_set_member member ON member.tool_set_id=" ++ tool_set.offeredSetSql("r") ++ " JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "WHERE o.operation_id=?1 AND tool.name IN (" ++ parameters(2, batch_items) ++ ")",
+    .sql = "SELECT DISTINCT tool.name FROM model_operation o JOIN tool_set_member member ON " ++
+        "(member.tool_set_id IN (SELECT earlier.tool_set_id FROM model_operation earlier WHERE earlier.session_ref=o.session_ref AND earlier.admission_position<o.admission_position) " ++
+        "OR member.tool_set_id IN (SELECT " ++ tool_set.offeredSetSql("r") ++ " FROM session_revision r WHERE r.session_ref=o.session_ref AND r.revision<o.settings_revision)) " ++
+        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE o.operation_id=?1 AND tool.name IN (" ++ parameters(2, batch_items) ++ ")",
     .Args = NameArgs(),
     .Row = struct { name: Bounded(tool_record.max_name_bytes) },
     .cardinality = .each,
@@ -1308,7 +1309,7 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
     // The Operation was found, so only its revision row can be missing.
     if (!success_found.get()) return error.CorruptStore;
     const settling = success;
-    if (settling.tool_set_id == null) return error.StaleAttemptBinding;
+    if (settling.frozen_revision == null) return error.StaleAttemptBinding;
     if (settling.invalid_owner) return error.CorruptStore;
     const purpose: ModelOperationKind = if (row.compaction) .compaction else .assistant_response;
     // Main checked the candidate before any output read.
