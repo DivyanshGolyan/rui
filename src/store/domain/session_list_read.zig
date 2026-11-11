@@ -235,25 +235,22 @@ const settings_columns = "session.session_ref,session.parent_ref,session.workspa
     "awaiting.approval_position AS last_approval_position,awaiting_call.description AS last_approval_text,";
 
 /// Only the newest Turn can be active: this seek visits at most two Turns.
-/// Pending approvals belong to the active Turn's current Operation, whose
-/// Actions are bounded by its calls, not by the Session's history. Both reads
-/// join the existing settings round; no page or content round is added.
+/// Work already selected the oldest pending approval: ?2 is its first_action,
+/// including beside running Actions. Join that Action directly, without a
+/// second owner of the selection or an additional page or content round.
 const last_line_joins = " LEFT JOIN turn last_turn ON last_turn.turn_id=(SELECT turn_id FROM turn @index(turn_session_latest) " ++
     "WHERE session_ref=session.session_ref AND outcome_code IS NOT NULL ORDER BY turn_id DESC LIMIT 1) " ++
-    "LEFT JOIN action_operation awaiting ON awaiting.action_id=(SELECT action.action_id FROM turn active @index(turn_one_active_per_session) " ++
-    "JOIN action_operation action ON action.parent_operation_id=active.operation_id " ++
-    "WHERE active.session_ref=session.session_ref AND active.outcome_code IS NULL " ++
-    "AND action.resolution_code IS NULL AND action.authorized=0 ORDER BY action.action_id LIMIT 1) " ++
+    "LEFT JOIN action_operation awaiting ON awaiting.action_id=?2 " ++
     "LEFT JOIN model_tool_call awaiting_call ON awaiting_call.operation_id=awaiting.parent_operation_id AND awaiting_call.call_ordinal=awaiting.call_ordinal ";
 
 /// One list row: the Session's settings, its latest Message from no
-/// Session, and its first Message, the admission ?2. A missing Message
+/// Session, and its first Message, the admission ?3. A missing Message
 /// or content finds no row. Its Row is over 1 KiB, so its visitor owns
 /// it (`RowsRead`).
 const list_row = rsql.Read(.{
     .sql = "SELECT " ++ settings_columns ++ report_domain.first_message_columns ++ " FROM session " ++
-        "JOIN message_admission m ON m.admission_id=?2 AND m.session_ref=session.session_ref " ++ report_domain.first_content_join ++ last_line_joins ++ " WHERE session.session_ref=?1",
-    .Args = struct { session: []const u8, first: u64 },
+        "JOIN message_admission m ON m.admission_id=?3 AND m.session_ref=session.session_ref " ++ report_domain.first_content_join ++ last_line_joins ++ " WHERE session.session_ref=?1",
+    .Args = struct { session: []const u8, first_action: ?u64, first: u64 },
     .Row = ListRow,
     .cardinality = .each,
 });
@@ -262,7 +259,7 @@ const list_row = rsql.Read(.{
 const list_row_bare = rsql.Read(.{
     .sql = "SELECT " ++ settings_columns ++ "NULL AS first_admission,NULL AS first_position,NULL AS first_admitted_at,NULL AS first_sender," ++
         "NULL AS first_length,NULL AS first_digest,NULL AS first_private FROM session" ++ last_line_joins ++ " WHERE session.session_ref=?1",
-    .Args = struct { session: []const u8 },
+    .Args = struct { session: []const u8, first_action: ?u64 },
     .Row = ListRow,
     .cardinality = .each,
 });
@@ -327,10 +324,13 @@ const ShownRow = struct { reference: *const change_ring.Id, first: u64, work: *c
 noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, now_ms: u64, visitor: anytype) !void {
     var read: RowsRead(@TypeOf(visitor)) = .{ .decoded = a.store.reportScratch(ListRow), .rows = rows, .now_ms = now_ms, .visitor = visitor };
     for (rows) |row| {
+        // Creation time only dates idle work, which has no Action. Its real
+        // value is read with the settings; the approval selection needs none.
+        const work = try row.work.work(0, now_ms);
         if (row.first == 0)
-            a.readEach(list_row_bare, .{ .session = row.reference }, 1, &read)
+            a.readEach(list_row_bare, .{ .session = row.reference, .first_action = work.first_action }, 1, &read)
         else
-            a.readEach(list_row, .{ .session = row.reference, .first = row.first }, 1, &read);
+            a.readEach(list_row, .{ .session = row.reference, .first_action = work.first_action, .first = row.first }, 1, &read);
     }
     const ran = runList(a);
     // A pass stops at a failed step, so a row that failed to be visited
