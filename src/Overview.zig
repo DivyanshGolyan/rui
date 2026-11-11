@@ -216,7 +216,7 @@ pub const Operations = struct {
     save_default: *const fn (*Self, view.Default) anyerror!void,
     /// Runs a command line for a Session, or for none when it is empty,
     /// keeping what it printed in `output`.
-    command: *const fn (*Self, client.Requests, []const u8, []u8) anyerror!void,
+    command: *const fn (*Self, client.ReadContext, []const u8, []u8) anyerror!void,
     /// Opens `opened` as a Session widget under Root.
     open: *const fn (*Self, *vxfw.EventContext) anyerror!void,
 };
@@ -1228,12 +1228,13 @@ fn dispatch(self: *Self, jobs: enum { all, lent }) !void {
 /// result is the job's outcome, which `complete` settles.
 fn work(raw: *anyopaque, task: *ClientTask) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    return self.runJob(task.requests());
+    return self.runJob(task.readContext());
 }
 
 /// Runs `job`, on the worker's thread or, for a save on the way out, the
 /// loop's, and leaves its answer.
-fn runJob(self: *Self, requests: client.Requests) !void {
+fn runJob(self: *Self, context: client.ReadContext) !void {
+    const requests = context.requests();
     std.debug.assert(self.answer == .none);
     switch (self.job) {
         .host => self.answer = .{ .host = self.ops.host(self) },
@@ -1296,7 +1297,7 @@ fn runJob(self: *Self, requests: client.Requests) !void {
         .save => |binding| try self.ops.save_default(self, binding),
         .command => |*command| {
             self.answer = .{ .output = .{} };
-            try self.ops.command(self, requests, if (command.session) |*session| session else "", command.line);
+            try self.ops.command(self, context, if (command.session) |*session| session else "", command.line);
         },
     }
 }
@@ -1306,7 +1307,8 @@ fn runJob(self: *Self, requests: client.Requests) !void {
 /// local file write that outlives the overview, and the departure says how
 /// it ended. No other queued job runs.
 fn flushSaves(self: *Self) !void {
-    const requests: client.Requests = .{ .io = self.init.io };
+    var origin: client.FailureOrigin = .local;
+    const requests: client.ReadContext = .{ .io = self.init.io, .origin = &origin };
     while (for (self.jobs[0..self.job_count], 0..) |job, index| {
         if (job == .save) break index;
     } else null) |index| {
@@ -1492,7 +1494,7 @@ fn savedAs(outcome: anyerror!void) view.Saved {
 
 /// Runs a command line through the CLI's hook, as a conversation runs it,
 /// and keeps what it printed.
-fn runCommand(self: *Self, requests: client.Requests, session: []const u8, line: []u8) !void {
+fn runCommand(self: *Self, requests: client.ReadContext, session: []const u8, line: []u8) !void {
     const page = self.command_page orelse page: {
         const file = try self.hooks.scratch(self.init);
         self.command_page = file;
@@ -3910,9 +3912,8 @@ const HostRecovery = struct {
         files += 1;
         return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
     }
-    fn lost(raw: *anyopaque, _: *ClientTask) !void {
-        const frontend: *SessionFrontend = @ptrCast(@alignCast(raw));
-        frontend.job.result.failure_origin = .host_transport;
+    fn lost(_: *anyopaque, task: *ClientTask) !void {
+        task.result.failure_origin = .host_transport;
         return error.ConnectionRefused;
     }
     fn completed(frontend: *SessionFrontend) !bool {
@@ -4873,7 +4874,7 @@ const Printing = struct {
         rig.overview.hooks.scratch = scratch;
     }
 
-    fn command(_: std.process.Init, _: client.Requests, to: []const u8, reference: []const u8, text: []u8) anyerror!void {
+    fn command(_: std.process.Init, _: client.ReadContext, to: []const u8, reference: []const u8, text: []u8) anyerror!void {
         runs += 1;
         line = Seen.bounded(text);
         session = Seen.bounded(reference);
@@ -4968,7 +4969,7 @@ test "a /setup that saves another model starts the next Session on it, unless th
         const Setup = struct {
             var at: []const u8 = "";
             var edit: preferences.Edit = .{};
-            fn command(_: std.process.Init, _: client.Requests, _: []const u8, _: []const u8, _: []u8) anyerror!void {
+            fn command(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, _: []u8) anyerror!void {
                 _ = try preferences.update(at, edit, &.initFill(.configured));
                 const said = "Rui: Saved.\n";
                 if (std.c.write(1, said.ptr, said.len) != said.len) return error.TestUnexpectedResult;
@@ -4999,7 +5000,7 @@ test "a model pick preserves the effort saved by setup" {
     Printing.use(rig, tmp.dir);
     const Setup = struct {
         var at: []const u8 = "";
-        fn command(_: std.process.Init, _: client.Requests, _: []const u8, _: []const u8, _: []u8) anyerror!void {
+        fn command(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, _: []u8) anyerror!void {
             _ = try preferences.update(at, .{ .reasoning_effort = .{ .set = .high } }, &.initFill(.configured));
             const said = "Rui: Saved.\n";
             if (std.c.write(1, said.ptr, said.len) != said.len) return error.TestUnexpectedResult;

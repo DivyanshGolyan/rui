@@ -322,10 +322,10 @@ test "reader freezes borrowed HOME independently of process initialization" {
     }
 }
 
-pub const SkillRead = *const fn (client.Requests, std.mem.Allocator, []const u8, []const u8, []const u8) anyerror!skill_suggestions.Page;
+pub const SkillRead = *const fn (client.ReadContext, std.mem.Allocator, []const u8, []const u8, []const u8) anyerror!skill_suggestions.Page;
 
-fn clientSkills(requests: client.Requests, gpa: std.mem.Allocator, store: []const u8, session: []const u8, prefix: []const u8) !skill_suggestions.Page {
-    return requests.skillSuggestions(gpa, store, .{ .session = session }, prefix);
+fn clientSkills(read: client.ReadContext, gpa: std.mem.Allocator, store: []const u8, session: []const u8, prefix: []const u8) !skill_suggestions.Page {
+    return read.requests().skillSuggestions(gpa, store, .{ .session = session }, prefix);
 }
 
 /// A skills read's inputs, copied when it starts, and its page.
@@ -340,7 +340,7 @@ const SkillJob = struct {
 
     fn work(raw: *anyopaque, task: *Task) !void {
         const job: *SkillJob = @ptrCast(@alignCast(raw));
-        job.page = try job.run(task.requests(), job.gpa, job.store, job.session, job.prefix.slice());
+        job.page = try job.run(task.readContext(), job.gpa, job.store, job.session, job.prefix.slice());
     }
 };
 
@@ -361,7 +361,9 @@ fn serviceSkills(self: *Self) !void {
             }
             job.page = null;
         } else |err| {
-            self.skills.fail(job.read);
+            if (err != error.Cancelled and self.skill_task.result.failure_origin == .host_transport and self.hostFailure()) {
+                self.skills.retry(job.read);
+            } else self.skills.fail(job.read);
             if (err == error.CanonicalStoreFailure) return err;
         }
         self.dirty = true;
@@ -639,9 +641,8 @@ fn hostHeld(self: *const Self) bool {
     return host.held(host.context);
 }
 
-fn hostFailure(self: *Self, err: anyerror) bool {
+fn hostFailure(self: *Self) bool {
     const host = self.app_hooks.host orelse return false;
-    if (!client.hostUnreachable(err)) return false;
     host.lost(host.context);
     self.dirty = true;
     return true;
@@ -1847,7 +1848,7 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     const Fake = struct {
         var calls: usize = 0;
         var session: [6]u8 = undefined;
-        fn read(_: client.Requests, gpa: std.mem.Allocator, _: []const u8, reference: []const u8, prefix: []const u8) !skill_suggestions.Page {
+        fn read(_: client.ReadContext, gpa: std.mem.Allocator, _: []const u8, reference: []const u8, prefix: []const u8) !skill_suggestions.Page {
             calls += 1;
             @memcpy(&session, reference);
             const entries = try gpa.alloc(skill_suggestions.Entry, 2);
@@ -1923,7 +1924,7 @@ test "a Session's /reload-skills drops the skills it listed, and the next read l
     const Fake = struct {
         var reloaded = false;
         var calls: usize = 0;
-        fn read(_: client.Requests, gpa: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !skill_suggestions.Page {
+        fn read(_: client.ReadContext, gpa: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !skill_suggestions.Page {
             calls += 1;
             const entries = try gpa.alloc(skill_suggestions.Entry, 1);
             entries[0] = .{ .name = try gpa.dupe(u8, if (reloaded) "release" else "recap"), .description = try gpa.dupe(u8, "") };
@@ -2816,7 +2817,7 @@ fn settleReader(self: *Self) !void {
         pending.failure.status == 503 and std.mem.eql(u8, pending.failure.diagnostic.code.slice(), "dispatch_fenced")
     else
         false;
-    const host_lost = if (end == .failed and self.job.result.failure_origin == .host_transport) self.hostFailure(end.failed.err) else false;
+    const host_lost = if (end == .failed and self.reader.result.failure_origin == .host_transport) self.hostFailure() else false;
     if (fenced and self.app_hooks.host != null) self.app_hooks.host.?.lost(self.app_hooks.host.?.context);
     if (host_lost or (fenced and self.app_hooks.host != null)) {
         // A joined failed read has published no staged output. Keep its
@@ -4224,7 +4225,7 @@ test "a pending decision, or a Message that carries one, has no /recover row, an
 
 test "Enter on a rejected draft clears it even while a skill list shows" {
     const Fake = struct {
-        fn read(_: client.Requests, gpa: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !skill_suggestions.Page {
+        fn read(_: client.ReadContext, gpa: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !skill_suggestions.Page {
             const entries = try gpa.alloc(skill_suggestions.Entry, 1);
             entries[0] = .{ .name = try gpa.dupe(u8, "recap"), .description = try gpa.dupe(u8, "") };
             return .{ .entries = entries, .total = 1 };
@@ -4965,7 +4966,7 @@ test "Alt-A and Ctrl-X during opening forward no intent and keep the draft" {
 const UnusedArchiveCommand = struct {
     var calls: usize = 0;
 
-    fn command(_: std.process.Init, _: client.Requests, _: []const u8, _: []const u8, _: []u8) !void {
+    fn command(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, _: []u8) !void {
         calls += 1;
         return error.TestUnexpectedCommand;
     }
@@ -5262,7 +5263,7 @@ test "a card taller than the screen says how many lines it hides and Shift-Down 
 
 test "reader failure provenance keeps transport loss separate from local copy failures, reachable or held" {
     const Probe = struct {
-        const Mode = enum { read_disconnect, copy_disconnect, command_disconnect, temporary, sink, rename };
+        const Mode = enum { read_disconnect, copy_disconnect, command_disconnect, inspect_disconnect, inspect_free, inspect_held, inspect_local, temporary, sink, rename };
         var mode: Mode = undefined;
         var local_effects: usize = 0;
         fn create(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
@@ -5283,7 +5284,8 @@ test "reader failure provenance keeps transport loss separate from local copy fa
             local_effects += 1;
             return error.FileNotFound;
         }
-        fn command(_: std.process.Init, requests: client.Requests, store: []const u8, session: []const u8, _: []u8) !void {
+        fn command(_: std.process.Init, read: client.ReadContext, store: []const u8, session: []const u8, _: []u8) !void {
+            const requests = read.requests();
             try std.testing.expect(requests.cancellation != null);
             _ = try requests.activityPage(store, session, .{});
             return error.TestUnexpectedResult;
@@ -5328,10 +5330,10 @@ test "reader failure provenance keeps transport loss separate from local copy fa
         }
         fn serve(self: *@This()) !void {
             {
-                const page = try self.request(if (self.mode == .read_disconnect or self.mode == .command_disconnect) "/v1/activity-page" else "/v1/conversation-page");
+                const page = try self.request(if (self.mode == .read_disconnect or self.mode == .command_disconnect) "/v1/activity-page" else if (self.mode == .inspect_disconnect) "/v1/inspect-session" else "/v1/conversation-page");
                 defer page.close(std.testing.io);
                 self.pages += 1;
-                if (self.mode == .read_disconnect or self.mode == .command_disconnect) return; // Physical EOF, no response.
+                if (self.mode == .read_disconnect or self.mode == .command_disconnect or self.mode == .inspect_disconnect) return; // Physical EOF, no response.
                 var bytes: [1024]u8 = undefined;
                 var body = std.Io.Writer.fixed(&bytes);
                 const shape = protocol.conversation_page_reply;
@@ -5379,21 +5381,27 @@ test "reader failure provenance keeps transport loss separate from local copy fa
         var tmp = try @import("socket_fixture.zig").Directory.init();
         defer tmp.cleanup();
         const root = tmp.root[0..tmp.root_len];
-        var lease = try @import("platform.zig").StoreLease.acquire(io, root);
-        defer lease.release();
-        try lease.prepareForServing(false);
-        var listener = try (try std.Io.net.UnixAddress.init(lease.paths.socket.slice())).listen(io, .{});
-        defer {
-            listener.deinit(io);
-            std.Io.Dir.cwd().deleteFile(io, lease.paths.socket.slice()) catch @panic("unable to remove fixture socket");
+        var lease: ?@import("platform.zig").StoreLease = try .acquire(io, root);
+        defer if (lease) |*held| held.release();
+        try lease.?.prepareForServing(false);
+        const paths = lease.?.paths;
+        const no_listener = mode == .inspect_free or mode == .inspect_held or mode == .inspect_local;
+        if (mode == .inspect_free) {
+            lease.?.release();
+            lease = null;
         }
-        var peer: Peer = .{ .mode = mode, .listener = &listener };
-        const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+        var listener: ?std.Io.net.Server = if (no_listener) null else try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+        defer if (listener) |*server| {
+            server.deinit(io);
+            std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+        };
+        var peer: Peer = .{ .mode = mode, .listener = if (listener) |*server| server else undefined };
+        const thread: ?std.Thread = if (listener != null) try std.Thread.spawn(.{}, Peer.run, .{&peer}) else null;
         var joined = false;
-        defer if (!joined) {
+        defer if (!joined and thread != null) {
             peer.stopping.store(true, .release);
-            if ((std.Io.net.UnixAddress.init(lease.paths.socket.slice()) catch unreachable).connect(io)) |wake| wake.close(io) else |_| {}
-            thread.join();
+            if ((std.Io.net.UnixAddress.init(paths.socket.slice()) catch unreachable).connect(io)) |wake| wake.close(io) else |_| {}
+            thread.?.join();
         };
         var vtable = io.vtable.*;
         vtable.dirCreateFile = Probe.create;
@@ -5401,35 +5409,49 @@ test "reader failure provenance keeps transport loss separate from local copy fa
         if (mode == .rename) vtable.dirRename = Probe.rename;
         self.init.io = .{ .userdata = io.userdata, .vtable = &vtable };
         self.store = root;
+        if (mode == .inspect_local) {
+            var missing: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            try fixture.environ.put("TMPDIR", try std.fmt.bufPrint(&missing, "{s}/missing-local-scratch", .{root}));
+        }
         self.live.cursor = .{ .position = 19 };
         self.reading.opening = mode == .read_disconnect;
         _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
         var discovery: Discovery = .{};
         self.app_hooks.host = .{ .context = &discovery, .held = Discovery.held, .lost = Discovery.lost, .start = Discovery.start, .notice = Discovery.notice };
-        self.command = Probe.command;
-        self.inspection.kind = if (mode == .command_disconnect) .command else .{ .copy = if (mode == .temporary or mode == .rename) .file else .answer };
+        const inspect = mode == .inspect_disconnect or mode == .inspect_free or mode == .inspect_held or mode == .inspect_local;
+        self.command = if (inspect) @import("cli.zig").sessionCommand else Probe.command;
+        self.inspection.kind = if (mode == .command_disconnect or inspect) .command else .{ .copy = if (mode == .temporary or mode == .rename) .file else .answer };
         const job = self.freeze(if (mode == .read_disconnect) .activity else .inspection);
-        try self.launch(job, if (mode == .read_disconnect) reads.scan else if (mode == .command_disconnect) reads.runCommand else reads.copyAnswer);
+        if (inspect) {
+            const command = "/inspect-action";
+            @memcpy(job.command_text[0..command.len], command);
+            job.command_text_length = command.len;
+        }
+        try self.launch(job, if (mode == .read_disconnect) reads.scan else if (mode == .command_disconnect or inspect) reads.runCommand else reads.copyAnswer);
         // An independent discovery change while this job is in flight must
         // not change where its own error came from or suppress a local notice.
         discovery.unavailable = already_unavailable;
-        try self.settleReader();
-        thread.join();
+        if (mode == .inspect_local) {
+            // The command already owns rendering, so its local scratch error
+            // keeps the original departure policy, not a Host recovery hold.
+            try std.testing.expectError(error.FileNotFound, self.settleReader());
+        } else try self.settleReader();
+        if (thread) |worker| worker.join();
         joined = true;
         try peer.result;
-        const transport = mode == .read_disconnect or mode == .copy_disconnect or mode == .command_disconnect;
-        try std.testing.expectEqual(if (transport) client.FailureOrigin.host_transport else .local, self.job.result.failure_origin);
-        try std.testing.expectError(if (transport) error.TruncatedResponse else if (mode == .sink) error.BrokenPipe else error.FileNotFound, self.reader.result.?);
+        const transport = mode == .read_disconnect or mode == .copy_disconnect or mode == .command_disconnect or (inspect and mode != .inspect_local);
+        try std.testing.expectEqual(if (transport) client.FailureOrigin.host_transport else .local, self.reader.result.failure_origin);
+        try std.testing.expectError(if (mode == .inspect_free) error.HostNotServing else if (mode == .inspect_held) error.HostStopping else if (transport) error.TruncatedResponse else if (mode == .sink) error.BrokenPipe else error.FileNotFound, self.reader.result.outcome.?);
         try std.testing.expectEqual(@as(usize, @intFromBool(transport)), discovery.losses);
         try std.testing.expectEqual(already_unavailable or transport, self.hostHeld());
-        try std.testing.expectEqual(@as(usize, @intFromBool(!transport)), Probe.local_effects);
-        try std.testing.expectEqual(@as(usize, 1), peer.pages);
-        try std.testing.expectEqual(@as(usize, @intFromBool(mode != .read_disconnect and mode != .command_disconnect and mode != .temporary)), peer.contents);
+        try std.testing.expectEqual(@as(usize, @intFromBool(!transport and !inspect)), Probe.local_effects);
+        try std.testing.expectEqual(@as(usize, @intFromBool(!no_listener)), peer.pages);
+        try std.testing.expectEqual(@as(usize, @intFromBool(mode != .read_disconnect and mode != .command_disconnect and !inspect and mode != .temporary)), peer.contents);
         try std.testing.expect(self.reader.thread == null and self.leaving == null);
         try std.testing.expectEqual(mode == .read_disconnect, self.reading.opening);
         try std.testing.expectEqual(@as(u64, 19), self.live.cursor.position);
         try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
-        if (transport) {
+        if (transport or mode == .inspect_local) {
             try std.testing.expect(self.notice == null);
         } else {
             try std.testing.expectEqualStrings("! Copy unavailable; draft retained.", self.notice.?);
@@ -5445,10 +5467,136 @@ test "reader failure provenance keeps transport loss separate from local copy fa
     };
 }
 
+test "required read adapter contexts cannot omit provenance" {
+    inline for (.{ Command, Requests, SkillRead }, .{ 1, 1, 0 }) |Callback, index| {
+        const signature = @typeInfo(@typeInfo(Callback).pointer.child).@"fn";
+        try std.testing.expect(signature.param_types[index].? == client.ReadContext);
+    }
+    const context = @typeInfo(client.ReadContext).@"struct";
+    inline for (context.field_names, context.field_types, context.field_attrs) |name, Type, attrs| {
+        if (comptime std.mem.eql(u8, name, "origin")) {
+            try std.testing.expect(Type == *client.FailureOrigin);
+            try std.testing.expect(attrs.default_value_ptr == null);
+        }
+    }
+}
+
+test "skills transport recovery retains the held page and retries the same prefix after reobservation" {
+    const Discovery = struct {
+        unavailable: bool = false,
+        losses: usize = 0,
+        fn held(raw: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.unavailable;
+        }
+        fn lost(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.losses += 1;
+            self.unavailable = true;
+        }
+        fn start(_: *anyopaque, _: *vxfw.EventContext) !bool {
+            return false;
+        }
+        fn notice(_: *anyopaque) ?vxfw.Widget {
+            return null;
+        }
+        fn completed(task: *Task) bool {
+            return task.completed();
+        }
+    };
+    const Peer = struct {
+        listener: *std.Io.net.Server,
+        stopping: std.atomic.Value(bool) = .init(false),
+        result: anyerror!void = {},
+        fn run(self: *@This()) void {
+            self.result = self.serve();
+        }
+        fn serve(self: *@This()) !void {
+            const stream = try self.listener.accept(std.testing.io);
+            defer stream.close(std.testing.io);
+            if (self.stopping.load(.acquire)) return error.Cancelled;
+            var bytes: [4096]u8 = undefined;
+            var used: usize = 0;
+            while (true) {
+                const count = try std.posix.read(stream.socket.handle, bytes[used..]);
+                if (count == 0) return error.UnexpectedEof;
+                used += count;
+                if (std.mem.indexOf(u8, bytes[0..used], "\r\n\r\n")) |end| {
+                    const start = std.mem.indexOf(u8, bytes[0..end], "Content-Length: ").? + "Content-Length: ".len;
+                    const finish = std.mem.indexOf(u8, bytes[start..end], "\r\n").? + start;
+                    if (used == end + 4 + try std.fmt.parseInt(usize, bytes[start..finish], 10)) break;
+                }
+            }
+            try std.testing.expectStringStartsWith(bytes[0..used], "POST /v1/skill-suggestions HTTP/1.1\r\n");
+            try std.testing.expect(std.mem.indexOf(u8, bytes[0..used], "\"prefix\":\"re\"") != null);
+            const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"skill_suggestions\",\"revision\":\"2\",\"total\":\"1\",\"entries\":[{\"name\":\"recap\",\"description\":\"Summarise\"}]}";
+            var header: [256]u8 = undefined;
+            var out = stream.writer(std.testing.io, &.{});
+            try out.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{body.len}));
+            try out.interface.writeAll(body);
+        }
+    };
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    defer if (self.dropSkills()) |err| std.debug.panic("skills cleanup failed: {}", .{err});
+    const io = std.testing.io;
+    var directory = try @import("socket_fixture.zig").Directory.init();
+    defer directory.cleanup();
+    const root = directory.root[0..directory.root_len];
+    var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    self.store = root;
+    var discovery: Discovery = .{};
+    self.app_hooks.host = .{ .context = &discovery, .held = Discovery.held, .lost = Discovery.lost, .start = Discovery.start, .notice = Discovery.notice };
+    const old = self.skills.ask("old").?;
+    try std.testing.expect(self.skills.answer(old.read, .{}, "old") == null);
+    _ = self.input.replace(.{ .start = 0, .end = 0, .text = "please /re" });
+    try self.serviceSkills();
+    const first = self.skill_job.read;
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &self.skill_task, Discovery.completed);
+    try self.serviceSkills();
+    try std.testing.expectError(error.FileNotFound, self.skill_task.result.outcome.?);
+    try std.testing.expectEqual(client.FailureOrigin.host_transport, self.skill_task.result.failure_origin);
+    try std.testing.expectEqual(@as(usize, 1), discovery.losses);
+    try std.testing.expect(self.skill_task.thread == null and self.skills.failed == null and self.skills.pending == null);
+    try std.testing.expectEqual(old.read, self.skills.held.?.read);
+    try self.serviceSkills();
+    try std.testing.expectEqual(first, self.skill_job.read); // No automatic attempt while held.
+    var listener = try (try std.Io.net.UnixAddress.init(lease.paths.socket.slice())).listen(io, .{});
+    defer {
+        listener.deinit(io);
+        std.Io.Dir.cwd().deleteFile(io, lease.paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    }
+    var peer: Peer = .{ .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    var joined = false;
+    defer if (!joined) {
+        peer.stopping.store(true, .release);
+        if ((std.Io.net.UnixAddress.init(lease.paths.socket.slice()) catch unreachable).connect(io)) |wake| wake.close(io) else |_| {}
+        thread.join();
+    };
+    defer self.stop();
+    discovery.unavailable = false; // A fresh shell observation permits reads again.
+    try self.serviceSkills();
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &self.skill_task, Discovery.completed);
+    try self.serviceSkills();
+    thread.join();
+    joined = true;
+    try peer.result;
+    try std.testing.expect(self.skill_job.read > first);
+    try std.testing.expectEqual(client.FailureOrigin.local, self.skill_task.result.failure_origin);
+    try std.testing.expectEqual(@as(usize, 1), discovery.losses);
+    try std.testing.expectEqualStrings("recap", self.skills.held.?.page.entries[0].name);
+    try std.testing.expectEqualStrings("please /re", self.input.composition().bytes);
+    try std.testing.expect(self.skill_task.thread == null and self.leaving == null);
+}
+
 test "Host recovery joins unavailable reads in every phase without losing the Session" {
     const Fault = struct {
         failure: anyerror,
-        job: *Job,
         origin: client.FailureOrigin = .local,
         lost: usize = 0,
         fenced: bool = false,
@@ -5460,7 +5608,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
                 try failure.diagnostic.code.set("dispatch_fenced");
                 return task.requests().failRead(failure);
             }
-            self.job.result.failure_origin = self.origin;
+            task.result.failure_origin = self.origin;
             return self.failure;
         }
         fn held(_: *anyopaque) bool {
@@ -5483,8 +5631,8 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
     const self = fixture.self;
     _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
     for (std.enums.values(ReadPhase)) |phase| {
-        for ([_]anyerror{ error.FileNotFound, error.ConnectionRefused, error.UnixConnectFailed, error.ConnectionResetByPeer, error.BrokenPipe, error.TruncatedResponse }) |failure| {
-            var fault: Fault = .{ .failure = failure, .job = &self.job, .origin = .host_transport };
+        for ([_]anyerror{ error.FileNotFound, error.ConnectionRefused, error.UnixConnectFailed, error.ConnectionResetByPeer, error.BrokenPipe, error.TruncatedResponse, error.ResponseInactive, error.HostNotServing, error.HostStopping }) |failure| {
+            var fault: Fault = .{ .failure = failure, .origin = .host_transport };
             self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
             self.reading.phase = phase;
             self.reading.opening = true;
@@ -5499,16 +5647,23 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
             try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
         }
     }
-    var fenced: Fault = .{ .failure = error.HostInvocationFailed, .job = &self.job, .fenced = true };
+    var fenced: Fault = .{ .failure = error.HostInvocationFailed, .fenced = true };
     self.app_hooks.host = .{ .context = &fenced, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
     self.reading.phase = .activity;
     try self.reader.start(std.testing.io, &fenced, Fault.run);
     try self.settleReader();
     try std.testing.expectEqual(@as(usize, 1), fenced.lost);
     try std.testing.expect(self.reading.pending_diagnostic == null);
+    // Cancellation wins even if earlier work on this invocation touched transport.
+    var cancelled: Fault = .{ .failure = error.Cancelled, .origin = .host_transport };
+    self.app_hooks.host = .{ .context = &cancelled, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+    self.reading.phase = .activity;
+    try self.reader.start(std.testing.io, &cancelled, Fault.run);
+    try std.testing.expectError(error.Cancelled, self.settleReader());
+    try std.testing.expectEqual(@as(usize, 0), cancelled.lost);
     // A canonical or unrelated failure still has its original fatal boundary.
     for ([_]anyerror{ error.CanonicalStoreFailure, error.AccessDenied }) |failure| {
-        var fault: Fault = .{ .failure = failure, .job = &self.job };
+        var fault: Fault = .{ .failure = failure };
         self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
         self.reading.phase = .activity;
         try self.reader.start(std.testing.io, &fault, Fault.run);
