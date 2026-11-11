@@ -2287,7 +2287,7 @@ Existing Stores use the private canonical validator, including supported aliases
 A missing or invalid saved Store fails rather than selecting another.
 Captured requests retain their recorded Store across preference edits.
 
-`rui defaults inspect` reads defaults without writing; `rui defaults configure` saves explicit Store/provider/model edits.
+`rui defaults inspect` reads defaults without writing; `rui defaults configure` saves explicit Store/provider/model, notification, effort and permission edits.
 A saved Store is the global default for commands without `--store` (captured requests keep their recorded Store), so `defaults configure --store` names it on stderr; stdout and exit status are unchanged.
 Interactive `/setup` keeps the same future-default capability.
 After a successful change in a conversation it prints one line, `Saved defaults for future Sessions. Active Session unchanged.`, and follows it with the Store, provider and sign-in report only when the next Session cannot start as saved; that conversation's `/status` shows the saved defaults themselves.
@@ -2295,7 +2295,12 @@ The overview's `/setup`, which has no such page, keeps the full report.
 `--notifications on|off` on either saves whether an open overview or conversation sends [desktop notifications](#desktop-notifications); it is on by default and changes no Session.
 `--reasoning-effort LEVEL` on either saves the effort new Sessions start at, and `default` clears it.
 A new Session that takes the saved defaults (its start leaves out `--provider` or `--model`) and whose model offers the saved effort starts with it as its override; one whose model does not, or a start that names its own effort, keeps the model's default or the named one.
-A start naming both `--provider` and `--model` reads no saved defaults, the effort included, so a script that spells them never depends on the preferences file; an overview opened with `--store`, `--provider` and `--model` starts its Sessions the same way.
+A start naming both `--provider` and `--model` ignores saved binding and effort; an overview opened with `--store`, `--provider` and `--model` starts its Sessions the same way.
+Permissions are independent: without an explicit `--permission-mode`, every fresh Session reads the saved permission mode, then Rui's product default (`bypass`) if none is saved.
+An explicit permission mode wins; naming both binding selectors and permissions lets a start bypass unused preferences.
+`--permission-mode ask|bypass` on `rui defaults configure` or `/setup` saves that new-Session default, never changing existing Sessions.
+The defaults report includes the saved `permission_mode` (null when absent); the app settings Permissions row between Effort and Notifications shows `run without asking` for bypass and `ask first` for ask.
+Enter opens those two choices, and picking publishes through the same preferences writer as the other settings rows.
 `rui session configure` creating a Session and each overview start read it at that moment, so a choice made since an overview opened applies.
 A `/setup` that runs in an overview also moves the provider and model its next Session starts on: the shell resolves them again from the launch's own `--provider` and `--model`, as given, and the saved defaults, through the same `new_session_selection` owner the launch used, so a selector the launch named still wins and `--clear-model` falls back to the provider's recommended model, as a fresh launch would.
 That resolution counts every sign-in as ready, as a caller that cannot ask does, since the Host answers readiness at the start; when no saved or named provider decides, the default in force stays.
@@ -2310,10 +2315,13 @@ HOME and the private preference path must still be valid.
 Interactive defaults output escapes dynamic fields without changing stored bytes.
 `/setup` and `/configure` accept double-quoted values and escaped quotes, backslashes or spaces without shell expansion; invalid quoting rejects before mutation.
 
-The versioned private file under `$HOME/.config/rui/preferences` contains only these three optional values, the notification choice and the new-Session effort, not credentials, Session lists or work status.
-A version 1 file reads as notifications on, and Rui writes version 1 while they are on.
+The versioned private file under `$HOME/.config/rui/preferences` contains only these three optional values, the notification choice, the new-Session effort and permission mode, not credentials, Session lists or work status.
+Versions 1–3 have no saved permission mode.
+A version 1 file reads as notifications on, and Rui writes version 1 while they are on and no effort or permission mode is saved.
 Turning them off writes version 2 with a `notifications=off` line, which an older Rui refuses to read; turning them on again, or removing the file, lets it read preferences again.
-A saved effort writes version 3, which adds a `notifications=on|off` line and a `reasoning_effort=LEVEL` line; clearing it writes version 1 or 2 again.
+Without saved permissions, a saved effort writes version 3, which adds a `notifications=on|off` line and a `reasoning_effort=LEVEL` line; clearing it writes version 1 or 2 again.
+A saved permission mode writes version 4 with those same lines (an empty `reasoning_effort=` means absent), followed by `permission_mode=ask|bypass`.
+Publication always chooses the lowest version that holds the saved values.
 Only `codex` is selectable as a provider in this slice.
 The CLI owns the bounded file of at most 1,024 bytes, validates private ownership/access and format on read, and serializes updates under a private lock.
 Publication writes/syncs a same-directory temporary file before atomic rename and directory sync, including HOME and `.config` parent entries on first creation.
@@ -2389,7 +2397,7 @@ The core chooses night unless the answer is light.
 Each frame clears every line to the skin's ground, draws its spans in 24-bit colour under `COLORTERM=truecolor` or `24bit` and in the nearest 256-colour entries otherwise, and ends in an SGR reset, so no exit path has colours to restore.
 `NO_COLOR` frames carry no colour at all: the band and the selection are reverse video.
 
-Typing in the overview's composer and pressing Enter starts a new Session with that text as its first Message, through one captured `session start` command: atomic configuration plus Message admission with the full Workspace, exact provider/model, Bash and `bypass` unless the composer's `/configure` start settings select otherwise.
+Typing in the overview's composer and pressing Enter starts a new Session with that text as its first Message, through one captured `session start` command: atomic configuration plus Message admission with the full Workspace, exact provider/model, Bash and the saved permission mode (or `bypass` when absent), unless the composer's `/configure` start settings select otherwise.
 The Store returns the allocated ID, and the overview opens that Session.
 The same enumerable handle recovers that ID after a lost reply; a second Enter is a new intent, so a start whose reply is lost clears the composer, says in the overview that the start is unconfirmed, and names its recovery command after the terminal is restored.
 Successful Host startup and request receipts stay out of normal output; `/status` and `/requests` in a conversation expose binding and recovery records.
@@ -2834,7 +2842,7 @@ The three-screen margin is a loading target, not an unbounded promise at arbitra
 Each oversized row retains a bounded head, not its tail; its complete saved source remains available through its exact Message target.
 Summary text and targets share one retention decision: each reader row admits at most 16 pairs, with omitted items represented by one final non-actionable aggregate.
 The window admits a complete row with all its targets or rejects it for normal trim-and-retry at its 512-target bound; it never silently drops a visible summary's target.
-Tool open state belongs to the window's bounded set of row keys and survives trim and reload while its key remains held.
+Tool open state belongs to the window's set of at most 64 row keys and survives trim and reload; with 64 open, another opening is refused, so no open row is forgotten.
 Inspection, Action and Message pages remain separate bounded documents.
 Ctrl-O opens the lowest collapsed Message the latest frame drew in the feed, as a Message page: it is read from the Store and shows only if its length and digest match.
 When a peer's name is drawn below that Message, Ctrl-O follows it instead, under the same rules and refusals as a click on the name, so every link has a keyboard path.

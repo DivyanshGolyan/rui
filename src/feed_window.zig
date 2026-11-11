@@ -55,8 +55,9 @@ pub const entry_capacity = 512;
 pub const byte_capacity = 65 * 1024;
 /// The tool rows the person opened, by key. A row renders with its output
 /// while its key is here, so it stays open across trimming and reloading.
-/// Holds the latest 64; the oldest-opened is forgotten when full. Lookup
-/// does not change the order. Closing releases a slot.
+/// Holds at most 64 and never forgets one: a full set refuses another
+/// opening, so the set and the rows' text cannot disagree. Closing releases
+/// a slot.
 pub const Opened = struct {
     pub const capacity = 64;
     keys: [capacity]Key = undefined,
@@ -67,6 +68,11 @@ pub const Opened = struct {
         return false;
     }
 
+    pub fn full(self: *const Opened) bool {
+        return self.count == capacity;
+    }
+
+    /// The caller asks `full` before opening another row.
     pub fn set(self: *Opened, key: Key, open: bool) void {
         for (self.keys[0..self.count], 0..) |item, i| {
             if (item.order(key) != .eq) continue;
@@ -77,10 +83,7 @@ pub const Opened = struct {
             return;
         }
         if (!open) return;
-        if (self.count == capacity) {
-            std.mem.copyForwards(Key, &self.keys, self.keys[1..]);
-            self.count -= 1;
-        }
+        std.debug.assert(!self.full());
         self.keys[self.count] = key;
         self.count += 1;
     }
@@ -576,10 +579,13 @@ test "feed_window open keys survive trimming either edge and reloading" {
     window.opened.set(.{ .position = 30, .ordinal = 1 }, true);
     window.opened.set(.{ .position = 30 }, false);
     try testing.expect(window.opened.has(.{ .position = 30, .ordinal = 1 }));
-    for (0..Opened.capacity) |i| window.opened.set(.{ .position = 100 + i }, true);
+    // A full set says so and keeps every key; closing one makes room.
+    var position: u64 = 100;
+    while (!window.opened.full()) : (position += 1) window.opened.set(.{ .position = position }, true);
     try testing.expectEqual(Opened.capacity, window.opened.count);
-    try testing.expect(!window.opened.has(.{ .position = 30, .ordinal = 1 }));
-    for (0..Opened.capacity) |i| try testing.expect(window.opened.has(.{ .position = 100 + i }));
+    try testing.expect(window.opened.has(.{ .position = 30, .ordinal = 1 }));
+    window.opened.set(.{ .position = 100 }, false);
+    try testing.expect(!window.opened.full());
 }
 
 fn totalRows(entries: []const Feed.Entry) u64 {

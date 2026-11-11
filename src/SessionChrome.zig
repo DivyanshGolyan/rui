@@ -58,6 +58,8 @@ pub const Identity = struct {
 
 /// What the screen read for this frame.
 pub const View = struct {
+    /// Shell fact, never inferred from this pane's width.
+    list_visible: bool = false,
     /// Anchor held away from the end: the reserved marker row shows its chip.
     browsing: bool = false,
     /// Transcript entries that arrived below while browsing.
@@ -69,7 +71,7 @@ pub const View = struct {
     /// Where a send stands (`chrome.Send.progress`).
     progress: ?[]const u8 = null,
     stoppable: bool = false,
-    /// The facts after `‹ `.
+    /// Identity after the narrow back control, or the wide input gutter.
     facts: Identity = .{},
     /// The reply to the last key that shows now (`Notice.current`), and
     /// what the overview says (`chrome.Facts.overview`), each borrowed
@@ -81,8 +83,6 @@ pub const View = struct {
     /// The overlay the screen would show (the palette), or null. The `?`
     /// shortcuts take its place while open.
     overlay: ?vxfw.Widget = null,
-    /// The shell owns whether the list is beside this chat.
-    list_visible: bool = false,
     width: u16,
 };
 
@@ -386,4 +386,35 @@ test "SessionChrome footer drops whole items with an ellipsis at narrow widths" 
     var text: std.Io.Writer.Allocating = .init(arena.allocator());
     for (stopped.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
     try std.testing.expectEqualStrings(" Fix retry deadline · …            ctrl+x stop", text.written());
+}
+
+test "Session chrome back control exists only while the shell hides the list" {
+    var recorder: Recorder = .{};
+    var self: Self = .init(recorder.actions());
+    var bytes: [1]u8 = undefined;
+    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    var input: @import("InputArea.zig") = .{ .composer = .{ .editor = &editor } };
+    var screen: AppScreen.Session = .{ .content = undefined, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} };
+    for ([_]bool{ true, false, true, false }) |list_visible| {
+        self.place(&screen, .{ .width = 80, .list_visible = list_visible, .facts = .{ .current = .{ .name = "demo", .model = "gpt-5.5", .effort = .low, .left = 100 } } });
+        const row = try input.facts.draw(draw);
+        if (list_visible) {
+            try std.testing.expectEqualStrings("d", row.readCell(1, 0).char.grapheme);
+            try std.testing.expectEqual(@as(usize, 0), row.children.len);
+        } else {
+            try std.testing.expectEqualStrings("d", row.readCell(3, 0).char.grapheme);
+            try std.testing.expectEqualStrings("‹", row.children[0].surface.readCell(0, 0).char.grapheme);
+        }
+        const before = recorder.clicked.get(.back);
+        const press: vaxis.Mouse = .{ .col = 1, .row = 0, .button = .left, .mods = .{}, .type = .press };
+        var release = press;
+        release.type = .release;
+        try @import("testing/app_events.zig").mouse(&ctx, row, press);
+        try @import("testing/app_events.zig").mouse(&ctx, row, release);
+        try std.testing.expectEqual(before + @intFromBool(!list_visible), recorder.clicked.get(.back));
+    }
 }

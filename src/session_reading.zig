@@ -71,8 +71,8 @@ pub const Unavailable = union(enum) { say: []const u8, copy };
 pub fn unavailable(phase: ReadPhase, inspection: Inspection) Unavailable {
     return switch (phase) {
         .activity, .fill, .permission => .{ .say = "! Messages unavailable; scroll to retry." },
-        .message => .{ .say = "! Message unavailable; Ctrl-O retries." },
-        .tool => .{ .say = "! Tool output unavailable; Ctrl-O retries." },
+        .message => .{ .say = "! Message unavailable." },
+        .tool => .{ .say = "! Tool output unavailable." },
         .recall => .{ .say = "! Sent message unavailable; draft retained." },
         .inspection => if (inspection == .copy) .copy else .{ .say = "! Inspection unavailable; draft retained." },
     };
@@ -159,8 +159,8 @@ test "only a command run over the shown /status page rereads its defaults" {
 }
 
 test "a read that failed while preparing says which page is unavailable" {
-    try std.testing.expectEqualStrings("! Message unavailable; Ctrl-O retries.", unavailable(.message, .other).say);
-    try std.testing.expectEqualStrings("! Tool output unavailable; Ctrl-O retries.", unavailable(.tool, .other).say);
+    try std.testing.expectEqualStrings("! Message unavailable.", unavailable(.message, .other).say);
+    try std.testing.expectEqualStrings("! Tool output unavailable.", unavailable(.tool, .other).say);
     try std.testing.expectEqualStrings("! Sent message unavailable; draft retained.", unavailable(.recall, .other).say);
     try std.testing.expectEqualStrings("! Inspection unavailable; draft retained.", unavailable(.inspection, .command).say);
     try std.testing.expect(unavailable(.inspection, .copy) == .copy);
