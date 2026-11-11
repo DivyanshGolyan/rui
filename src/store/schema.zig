@@ -19,7 +19,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 60;
+pub const schema_version: u32 = 61;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -46,6 +46,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 58, .digest = 0x4cd0a6b38d4904ed },
     .{ .schema_version = 59, .digest = 0xa3ebc37622ed945b },
     .{ .schema_version = 60, .digest = 0x6b696b3423202987 },
+    .{ .schema_version = 61, .digest = 0xec460e03aa080495 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -319,6 +320,33 @@ pub const migrations = [_]Migration{
             "CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position)",
             "ALTER TABLE conversation_entry ADD FOREIGN KEY(source_operation_id,source_item_ordinal) REFERENCES model_output_item(operation_id,item_ordinal)",
             "UPDATE store_meta SET meta_value='11' WHERE meta_key='wire_version' AND meta_value='10'",
+        },
+    },
+    // Schema 61 (D227): call lines retain up to 200 decoded UTF-8 bytes.
+    // Existing lines already fit; rebuilding only changes their byte bounds.
+    .{
+        .from = 60,
+        .sqlite = &.{
+            "ALTER TABLE model_output_item RENAME TO model_output_item_60",
+            "CREATE TABLE model_output_item(\n operation_id INTEGER NOT NULL REFERENCES model_operation(operation_id),\n item_ordinal INTEGER NOT NULL CHECK(item_ordinal>=0),\n session_ref TEXT NOT NULL,\n session_position INTEGER NOT NULL CHECK(session_position>0),\n item_kind INTEGER NOT NULL CHECK(item_kind BETWEEN 1 AND 5),\n message_content_id INTEGER REFERENCES content(content_id) CHECK((message_content_id IS NOT NULL)=(item_kind=2)),\n attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal>0),\n item_id_digest BLOB NOT NULL CHECK(length(item_id_digest)=32),\n replay_omits_reasoning_text INTEGER NOT NULL CHECK(replay_omits_reasoning_text IN (0,1) AND (replay_omits_reasoning_text=0 OR item_kind=1)),\n phase INTEGER NOT NULL DEFAULT 0 CHECK(phase IN (0,1,2) AND (phase=0 OR item_kind=2)),\n extras_content_id INTEGER NOT NULL REFERENCES content(content_id),\n part_count INTEGER NOT NULL CHECK(part_count>=0 AND (part_count=0 OR item_kind IN (1,2))),\n description TEXT CHECK(description IS NULL OR (length(CAST(description AS BLOB)) BETWEEN 1 AND 200 AND (description IS NOT NULL)=(item_kind=5))),\n call_failed INTEGER NOT NULL DEFAULT 0 CHECK(call_failed IN (0,1) AND (call_failed=0 OR item_kind=5)),\n PRIMARY KEY(operation_id,item_ordinal),\n UNIQUE(session_ref,session_position),\n UNIQUE(operation_id,item_id_digest)\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed) SELECT operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed FROM model_output_item_60",
+            "DROP TABLE model_output_item_60",
+            "CREATE INDEX model_output_history ON model_output_item(session_ref,session_position)",
+            "CREATE INDEX model_output_call_history ON model_output_item(session_ref,session_position) WHERE item_kind=3",
+            "CREATE INDEX model_output_hosted_history ON model_output_item(session_ref,session_position) WHERE item_kind=5",
+            "CREATE INDEX model_output_compaction_history ON model_output_item(session_ref,session_position) WHERE item_kind=4",
+            "CREATE INDEX model_output_compaction_anchor ON model_output_item(operation_id,item_ordinal) WHERE item_kind=4",
+            "ALTER TABLE model_tool_call RENAME TO model_tool_call_60",
+            "CREATE TABLE model_tool_call(\n operation_id INTEGER NOT NULL REFERENCES model_operation(operation_id),\n session_ref TEXT NOT NULL,\n call_ordinal INTEGER NOT NULL CHECK(call_ordinal>=0),\n item_ordinal INTEGER NOT NULL CHECK(item_ordinal>=0),\n name_content_id INTEGER NOT NULL REFERENCES content(content_id),\n call_id_content_id INTEGER NOT NULL REFERENCES content(content_id),\n arguments_content_id INTEGER NOT NULL REFERENCES content(content_id),\n description TEXT CHECK(description IS NULL OR length(CAST(description AS BLOB)) BETWEEN 1 AND 200),\n field_metadata BLOB NOT NULL CHECK(length(field_metadata)=120),\n rejection_code TEXT CHECK(rejection_code IS NULL OR rejection_code IN ('unknown_tool','invalid_arguments')),\n rejection_content_id INTEGER REFERENCES content(content_id),\n acceptance_position INTEGER CHECK(acceptance_position IS NULL OR acceptance_position>0),\n action_kind INTEGER CHECK(action_kind IS NULL OR action_kind=1),\n PRIMARY KEY(operation_id,call_ordinal),\n UNIQUE(operation_id,item_ordinal),\n UNIQUE(operation_id,call_id_content_id),\n UNIQUE(operation_id,call_ordinal,action_kind),\n FOREIGN KEY(operation_id,session_ref) REFERENCES model_operation(operation_id,session_ref),\n CHECK((rejection_code IS NULL AND rejection_content_id IS NULL AND acceptance_position IS NULL AND (action_kind IS 1)) OR (rejection_code IS NOT NULL AND rejection_content_id IS NOT NULL AND acceptance_position IS NOT NULL AND action_kind IS NULL))\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,description,field_metadata,rejection_code,rejection_content_id,acceptance_position,action_kind) SELECT operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,description,field_metadata,rejection_code,rejection_content_id,acceptance_position,action_kind FROM model_tool_call_60",
+            "DROP TABLE model_tool_call_60",
+            "CREATE INDEX model_tool_call_session_order ON model_tool_call(session_ref,operation_id,call_ordinal)",
+            "CREATE INDEX model_tool_call_session_results ON model_tool_call(session_ref,operation_id,acceptance_position) WHERE acceptance_position IS NOT NULL",
+            "CREATE INDEX model_tool_call_acceptance ON model_tool_call(session_ref,acceptance_position) WHERE acceptance_position IS NOT NULL",
+        },
+        .mysql = &.{
+            "ALTER TABLE model_output_item DROP CHECK model_output_item_chk_10, ADD CHECK(description IS NULL OR (OCTET_LENGTH(description) BETWEEN 1 AND 200 AND (description IS NOT NULL)=(item_kind=5)))",
+            "ALTER TABLE model_tool_call DROP CHECK model_tool_call_chk_3, ADD CHECK(description IS NULL OR OCTET_LENGTH(description) BETWEEN 1 AND 200)",
         },
     },
 };
@@ -1163,7 +1191,7 @@ pub const tables = [_]Table{
             .{ .name = "part_count", .type = .int, .check = "part_count>=0 AND (part_count=0 OR item_kind IN (1,2))" },
             // A hosted tool call's description and outcome: every tool
             // call is shown by its description.
-            .{ .name = "description", .type = .{ .text = .{ .min = 1, .max = 100 } }, .nullable = true, .check = "(description IS NOT NULL)=(item_kind=5)" },
+            .{ .name = "description", .type = .{ .text = .{ .min = 1, .max = 200 } }, .nullable = true, .check = "(description IS NOT NULL)=(item_kind=5)" },
             .{ .name = "call_failed", .type = .flag, .default = "0", .check = "(call_failed=0 OR item_kind=5)" },
         },
         .primary_key = &.{ "operation_id", "item_ordinal" },
@@ -1209,7 +1237,7 @@ pub const tables = [_]Table{
             .{ .name = "name_content_id", .type = .int },
             .{ .name = "call_id_content_id", .type = .int },
             .{ .name = "arguments_content_id", .type = .int },
-            .{ .name = "description", .type = .{ .text = .{ .min = 1, .max = 100 } }, .nullable = true },
+            .{ .name = "description", .type = .{ .text = .{ .min = 1, .max = 200 } }, .nullable = true },
             .{ .name = "field_metadata", .type = .{ .bytes = .{ .min = 120, .max = 120 } } },
             .{ .name = "rejection_code", .type = .{ .tag = &.{ "unknown_tool", "invalid_arguments" } }, .nullable = true },
             .{ .name = "rejection_content_id", .type = .int, .nullable = true },
@@ -2645,6 +2673,87 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='restore-request'"));
     try openExisting(std.testing.io, database, root, null);
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT suppress_message FROM session_ending_owed WHERE turn_id=1"));
+}
+
+test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/store.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |step| {
+        if (step.from >= 60) break;
+        for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF;PRAGMA user_version=60");
+    try sqlite.exec(database, identity_sql);
+    {
+        const meta = try sqlite.prepare(database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','11'),('store_selector',?1),('format','60')");
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, root);
+        try sqlite.expectDone(meta);
+    }
+    // Preserve a hosted line at the old byte limit, a nullable call line,
+    // and the fixture's original accepted line and dependent rows.
+    try sqlite.exec(database, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed) VALUES(2,2,'brhkcj',6,5,NULL,1,zeroblob(32),0,0,7,0,'" ++ @as([100]u8, @splat('h')) ++ "',1)");
+    try sqlite.exec(database, "UPDATE model_tool_call SET description=NULL WHERE call_ordinal=1");
+    const ascii_line: [200]u8 = @splat('a');
+    const ascii_overlong = ascii_line ++ "a";
+    const utf8_line: [200]u8 = comptime line: {
+        var bytes: [200]u8 = undefined;
+        for (0..100) |index| bytes[index * 2 ..][0..2].* = "é".*;
+        break :line bytes;
+    };
+    const utf8_overlong = utf8_line ++ "a";
+    const updates = .{
+        "UPDATE model_tool_call SET description=?1 WHERE operation_id=2 AND call_ordinal=0",
+        "UPDATE model_output_item SET description=?1 WHERE operation_id=2 AND item_ordinal=2",
+    };
+    inline for (updates) |sql| {
+        const statement = try sqlite.prepare(database, sql);
+        defer _ = c.sqlite3_finalize(statement);
+        try sqlite.bindText(statement, 1, ascii_overlong[0..101]);
+        try std.testing.expectEqual(c.SQLITE_CONSTRAINT, c.sqlite3_step(statement));
+    }
+    inline for (.{ "model_output_item", "model_tool_call", "model_output_part", "action_operation", "conversation_entry" }) |name| {
+        try sqlite.exec(database, "CREATE TEMP TABLE original_" ++ name ++ " AS SELECT * FROM " ++ name);
+    }
+    try openExisting(std.testing.io, database, root, null);
+    try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
+    try std.testing.expect(try metaEquals(database, "format", format_text));
+    try std.testing.expect(try metaEquals(database, "wire_version", wire_version));
+    inline for (.{ "model_output_item", "model_tool_call", "model_output_part", "action_operation", "conversation_entry" }) |name| {
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_" ++ name ++ " EXCEPT SELECT * FROM " ++ name ++ ")"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM " ++ name ++ " EXCEPT SELECT * FROM original_" ++ name ++ ")"));
+    }
+    inline for (updates) |sql| {
+        // Both ASCII and multibyte UTF-8 use byte, not character, bounds.
+        for ([_][]const u8{ &ascii_line, &utf8_line }) |line| {
+            const statement = try sqlite.prepare(database, sql);
+            defer _ = c.sqlite3_finalize(statement);
+            try sqlite.bindText(statement, 1, line);
+            try sqlite.expectDone(statement);
+        }
+        for ([_][]const u8{ ascii_overlong, utf8_overlong, "" }) |line| {
+            const statement = try sqlite.prepare(database, sql);
+            defer _ = c.sqlite3_finalize(statement);
+            try sqlite.bindText(statement, 1, line);
+            try std.testing.expectEqual(c.SQLITE_CONSTRAINT, c.sqlite3_step(statement));
+        }
+    }
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_tool_call WHERE operation_id=2 AND call_ordinal=0 AND length(CAST(description AS BLOB))=200 AND description='" ++ utf8_line ++ "'"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_output_item WHERE operation_id=2 AND item_ordinal=2 AND length(CAST(description AS BLOB))=200 AND description='" ++ utf8_line ++ "'"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+    // The widened lines and canonical table/index shapes survive reopening.
+    try openExisting(std.testing.io, database, root, null);
 }
 
 test "MySQL index hints require a named real-column index on that engine" {

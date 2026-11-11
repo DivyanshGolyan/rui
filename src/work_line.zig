@@ -312,11 +312,11 @@ test "a running span is seconds, then minutes and seconds, then hours and minute
 }
 
 test "a fitted line never takes more than its width and keeps the clock while words fit beside it" {
-    var long: [100]u8 = undefined;
-    for (0..50) |at| @memcpy(long[at * 2 ..][0..2], "é");
+    var long: [session_work.max_description_bytes]u8 = undefined;
+    for (0..long.len / 2) |at| @memcpy(long[at * 2 ..][0..2], "é");
     const descriptions = [_][]const u8{ "Run zig build test-store", &long, "a" };
     const clock = " · 42s";
-    for (descriptions) |description| for ([_]Method{ .unicode, .wcwidth }) |method| for (0..120) |width| {
+    for (descriptions) |description| for ([_]Method{ .unicode, .wcwidth }) |method| for (0..240) |width| {
         const state: WorkState = .{ .bash = .{ .since = test_now_s - 42, .call = 0, .description = bounded(session_work.max_description_bytes, description), .running = 1, .approvals = 0 } };
         var buffer: [max_clock_bytes]u8 = undefined;
         const fitted = fit(&buffer, of(&test_words, &state, null, test_now_ms).?, width, method);

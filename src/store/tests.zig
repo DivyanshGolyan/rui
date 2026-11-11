@@ -13642,6 +13642,160 @@ test "inline skills configuration validation borrows one Store-owned plan throug
     }
 }
 
+test "MCP settlement saves one decoded presentation line or the tool name" {
+    try store_testing.forEachEngine(struct {
+        fn run(engine: *store_testing.Case) !void {
+            const records = testingCatalogRecords(&.{.{
+                .name = "fetch_page",
+                .owner = .mcp,
+                .server = "docs",
+                .description = "Fetch a page.",
+                .input_schema = "{\"type\":\"object\",\"properties\":{}}",
+            }});
+            const digests = blk: {
+                var out: [records.len][32]u8 = undefined;
+                for (records, &out) |record, *digest| digest.* = tool_catalog.recordDigest(&record);
+                break :blk out;
+            };
+            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            const Case = struct { arguments: []const u8, expected: []const u8 = "fetch_page" };
+            const cases = [_]Case{
+                .{ .arguments = "{\"rui_call_description\":\"Fetch page\"}", .expected = "Fetch page" },
+                .{ .arguments = "{\"rui_call_description\":\"" ++ @as([200]u8, @splat('a')) ++ "\"}", .expected = &@as([200]u8, @splat('a')) },
+                .{ .arguments = "{\"rui_call_description\":\"" ++ @as([200]u8, @bitCast(@as([100][2]u8, @splat("é".*)))) ++ "\"}", .expected = &@as([200]u8, @bitCast(@as([100][2]u8, @splat("é".*)))) },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch \\u00e9 page\"}", .expected = "Fetch é page" },
+                .{ .arguments = "{\"padding\":\"" ++ @as([4100]u8, @splat('x')) ++ "\",\"rui_call_description\":\"Fetch after padding\"}", .expected = "Fetch after padding" },
+                .{ .arguments = "{\"rui_call_\\u0064escription\":\"" ++ @as([1200]u8, @bitCast(@as([200][6]u8, @splat("\\u0061".*)))) ++ "\"}", .expected = &@as([200]u8, @splat('a')) },
+                .{ .arguments = "{\"rui_call_description\":\"" ++ @as([201]u8, @splat('a')) ++ "\"}" },
+                .{ .arguments = "{\"rui_call_description\":\"" ++ @as([202]u8, @bitCast(@as([101][2]u8, @splat("é".*)))) ++ "\"}" },
+                .{ .arguments = "{}" },
+                .{ .arguments = "{\"rui_call_description\":7}" },
+                .{ .arguments = "{\"rui_call_description\":null}" },
+                .{ .arguments = "{\"rui_call_description\":\"\"}" },
+                .{ .arguments = "{\"rui_call_description\":\" \\t\\u00a0\"}" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch\\npage\"}" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch\\rpage\"}" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch\\u0085page\"}" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch\\u2028page\"}" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch\\u2029page\"}" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch page\",\"broken\":" },
+            };
+            for (cases) |line| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                defer storage.close() catch unreachable;
+                var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+                var configure = try completeConfiguration("mcp-line-config", "", try canonicalCwd(std.testing.io, &workspace), "model-a");
+                configure.configuration.tools = try .of(&.{"fetch_page"});
+                const configured = try storage.configure(&configure, .{});
+                const session = configured.accepted.session;
+                try submitTestMessage(&storage, &tmp, "mcp-line-input", "mcp-line-message", session.slice(), "fetch");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                var encoded: [8192]u8 = undefined;
+                var writer = std.Io.Writer.fixed(&encoded);
+                try std.json.Stringify.value(line.arguments, .{}, &writer);
+                const quoted = writer.buffered();
+                try settleCallsForTesting(&storage, &tmp, binding, "mcp-line-calls", &.{.{
+                    .item_id = "item-1",
+                    .name = "fetch_page",
+                    .encoded_call_id = "call-1",
+                    .decoded_call_id = "call-1",
+                    .encoded_arguments = quoted[1 .. quoted.len - 1],
+                    .decoded_arguments = line.arguments,
+                }});
+                errdefer std.debug.print("MCP arguments: {s}\n", .{line.arguments});
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{line.expected}));
+                if (line.expected.len == 200) {
+                    // These projections must read the frozen row, not parse
+                    // the original arguments or shorten it to the Bash bound.
+                    const page = try store_core.activityPageForTesting(&storage, .{ .session = session });
+                    try std.testing.expectEqual(@as(usize, 1), page.call_activity.count);
+                    try std.testing.expectEqualStrings(line.expected, page.call_activity.entries[0].presentation.description.?.slice());
+                    const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
+                    defer std.testing.allocator.free(report);
+                    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
+                    defer parsed.deinit();
+                    const unresolved = parsed.value.object.get("actions").?.object.get("unresolved").?.array.items;
+                    try std.testing.expectEqualStrings(line.expected, unresolved[0].object.get("presentation").?.object.get("description").?.string);
+                }
+            }
+        }
+    }.run);
+}
+
+test "saved MCP call lines survive all work reads pending, running and completed at every boundary" {
+    try store_testing.forEachEngine(struct {
+        fn run(engine: *store_testing.Case) !void {
+            var digests: [membership_records.len][32]u8 = undefined;
+            const catalog = membershipCatalog(&digests);
+            for ([_]usize{ 100, 101, 200 }) |length| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                defer storage.close() catch unreachable;
+                var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+                var configure = try completeConfiguration("mcp-work-config", "", try canonicalCwd(std.testing.io, &workspace), "model-a");
+                configure.configuration.tools = try .of(&.{"fetch_page"});
+                configure.configuration.permission_mode.state = .value;
+                try configure.configuration.permission_mode.value.set("bypass");
+                const configured = try storage.configure(&configure, .{});
+                const session = configured.accepted.session;
+                try submitTestMessage(&storage, &tmp, "mcp-work-input", "mcp-work-message", session.slice(), "fetch");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                var description: [protocol.max_tool_description_bytes]u8 = @splat('x');
+                for (0..length / 2) |i| @memcpy(description[i * 2 ..][0..2], "é");
+                const text = description[0..length];
+                var arguments: [1024]u8 = undefined;
+                const args = try std.fmt.bufPrint(&arguments, "{{\"rui_call_description\":\"{s}\"}}", .{text});
+                var encoded: [2048]u8 = undefined;
+                var writer = std.Io.Writer.fixed(&encoded);
+                try std.json.Stringify.value(args, .{}, &writer);
+                const quoted = writer.buffered();
+                try settleCallsForTesting(&storage, &tmp, model, "mcp-work-calls", &.{.{
+                    .item_id = "item-1",
+                    .name = "fetch_page",
+                    .encoded_call_id = "call-1",
+                    .decoded_call_id = "call-1",
+                    .encoded_arguments = quoted[1 .. quoted.len - 1],
+                    .decoded_arguments = args,
+                }});
+                try reads(&storage, &tmp, session.slice(), "pending", text);
+                const action = (try storage.nextMcpAction()).?;
+                const binding = (try storage.admitMcpActionAttempt(action.action_id, 600_000, .{})).?;
+                try reads(&storage, &tmp, session.slice(), "bash", text);
+                _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
+                try reads(&storage, &tmp, session.slice(), "pending", text);
+            }
+        }
+
+        fn reads(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, kind: []const u8, description: []const u8) !void {
+            // This compares the entire Current and Activity state, not just
+            // its kind. List and Message progress must project that same text.
+            _ = try expectOneWork(storage, tmp, session, kind);
+            var request: protocol.ActivityPage = .{};
+            try request.session.set(session);
+            const page = try store_core.activityPageForTesting(storage, request);
+            for (page.call_activity.entries[0..page.call_activity.count]) |*call|
+                try std.testing.expectEqualStrings(description, call.presentation.description.?.slice());
+            var listed = try testingListRow(storage, tmp, session);
+            defer listed.deinit();
+            try std.testing.expectEqualStrings(kind, listed.get(&.{ "work", "state", "kind" }).string);
+            const observed = (try store_testing.observeCommandForTesting(storage, "mcp-work-message")).kind.message.?;
+            const state = observed.work.?.state;
+            try std.testing.expectEqualStrings(kind, @tagName(state));
+            if (state == .bash) {
+                try std.testing.expectEqualStrings(description, page.work.work.state.bash.description.?.slice());
+                try std.testing.expectEqualStrings(description, listed.get(&.{ "work", "state", "description" }).string);
+                try std.testing.expectEqualStrings(description, state.bash.description.?.slice());
+            }
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
 const membership_records = store_testing.catalogRecordsWith(&.{.{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" }});
 fn membershipCatalog(digests: *[membership_records.len][32]u8) tool_catalog.Catalog {
     for (&membership_records, digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
