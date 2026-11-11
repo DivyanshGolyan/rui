@@ -1673,7 +1673,8 @@ test "an argument list the OS refuses reports the command and environment sizes"
     prepared.stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", 1, 1, .none);
     prepared.stderr_capture = try createOwnedFile(scratch, .@"bash-stderr", 1, 1, .none);
     var refused: ArgumentSizes = .{};
-    try std.testing.expectError(error.BashArgumentsTooLarge, prepared.launch(default_facts, null, "/runtime", &refused));
+    // This SQLite fixture has no MySQL routing hint, even with a separate runtime.
+    try std.testing.expectError(error.BashArgumentsTooLarge, prepared.launch(default_facts, null, null, &refused));
     // The fixed PATH, RUI_ADDRESS=k7m2qx, RUI_STORE=/s and the padding, each with its NUL.
     const environment_bytes = "PATH=".len + system_path.fixed.len + 1 + "RUI_ADDRESS=k7m2qx".len + 1 + "RUI_STORE=/s".len + 1 + "RUI_FAULT_PADDING=".len + fault_padding_bytes + 1;
     try std.testing.expectEqual(ArgumentSizes{ .command = 4, .environment = environment_bytes, .variables = 4 }, refused);
