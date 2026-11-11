@@ -146,10 +146,17 @@ const saved_identity = &[_]PositionalConflict{
     .{ .code = .handle_names_store_and_key, .option = "key" },
     .{ .code = .handle_names_store_and_key, .option = "key-hex" },
 };
+const tool_choices = blk: {
+    var text: []const u8 = "";
+    for (std.enums.values(@import("built_in_tool.zig").BuiltInTool), 0..) |tool, i| {
+        text = text ++ (if (i == 0) "" else ",") ++ @tagName(tool);
+    }
+    break :blk text ++ "|none";
+};
 /// Session settings shared by `session configure` and the live /configure.
 const settings = &[_]Option{
-    value("workspace", "PATH"),       value("instructions", "-"), value("tools", "bash,find_tools,message_agent,read_transcript,start_agent,web_search|none"), value("loaded-tools", "a,b|none"),             choice("permission-mode", cli_value.PermissionMode),
-    value("output-schema", "FILE|-"), flag("text-output"),        value("compaction-trigger", "TOKENS|default"),                                               value("output-reservation", "TOKENS|default"), choice("reasoning-effort", cli_value.ReasoningChoice),
+    value("workspace", "PATH"),       value("instructions", "-"), value("tools", tool_choices),                  value("loaded-tools", "a,b|none"),             choice("permission-mode", cli_value.PermissionMode),
+    value("output-schema", "FILE|-"), flag("text-output"),        value("compaction-trigger", "TOKENS|default"), value("output-reservation", "TOKENS|default"), choice("reasoning-effort", cli_value.ReasoningChoice),
     value("label", "TEXT"),
 };
 const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settings[4], settings[7], settings[8], settings[9], settings[10] };
@@ -717,4 +724,13 @@ test "archive list visibility is independent of all Workspaces" {
     try expectValidation(.session_list, &.{ "--all", "--archived" }, false);
     try expectValidation(.session_list, &.{ "--all", "--include-archived" }, false);
     _ = try expectRefusal(.session_list, &.{ "--archived", "--include-archived" }, .archive_visibility_conflict, "archived");
+}
+
+test "tool help lists every built-in including skill in name order" {
+    for ([_]Command{ .session_configure, .session_start }) |command| {
+        var help: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer help.deinit();
+        try command.definition().help(&help.writer);
+        try std.testing.expect(std.mem.indexOf(u8, help.written(), "--tools bash,find_tools,message_agent,read_transcript,skill,start_agent,web_search|none") != null);
+    }
 }

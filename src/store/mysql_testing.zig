@@ -406,6 +406,75 @@ test "store.mysql open preserves an unreachable socket" {
     }, "/mysql-refusal-probe", .{}));
 }
 
+test "store.mysql live admission checks the index plan domain without pinning generated key names" {
+    const Alter = struct {
+        fn index(name: []const u8, comptime table: []const u8, comptime alteration: []const u8) !void {
+            mutex.lockUncancelable(std.testing.io);
+            defer mutex.unlock(std.testing.io);
+            _ = try connection();
+            var buffer: [512]u8 = undefined;
+            try run(try std.fmt.bufPrint(&buffer, "ALTER TABLE {s}." ++ table ++ " " ++ alteration, .{name}));
+        }
+
+        fn refuses(name: []const u8, tmp: *std.testing.TmpDir, comptime table: []const u8, comptime alteration: []const u8, comptime restoration: []const u8, epoch: *u64) !void {
+            try index(name, table, alteration);
+            {
+                defer index(name, table, restoration) catch @panic("cannot restore index plan property");
+                var refused: Store = undefined;
+                // A mutation that admits the Store must still close its lock.
+                const admission = open(&refused, tmp, std.testing.io, .{});
+                if (admission) |_| try refused.close() else |_| {}
+                try std.testing.expectError(error.StoreSchemaBehind, admission);
+            }
+            // Restoring only the altered property repairs admission; no
+            // migration is needed, and the refused open released GET_LOCK.
+            var repaired: Store = undefined;
+            try openLive(&repaired, tmp);
+            defer repaired.close() catch unreachable;
+            try std.testing.expectEqual(epoch.* + 1, repaired.engine.mysql.state.epoch);
+            epoch.* = repaired.engine.mysql.state.epoch;
+            try std.testing.expectEqual(@as(u64, 1), try liveWrite(&repaired, live_noop, .{}));
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    const name_buffer = storage.engine.mysql.state.testing_database;
+    const name = std.mem.sliceTo(&name_buffer, 0);
+    var epoch = storage.engine.mysql.state.epoch;
+    try storage.close();
+
+    inline for (schema.indexes) |index| {
+        inline for (.{
+            .{ .alter = "RENAME INDEX " ++ index.name ++ " TO renamed_probe", .restore = "RENAME INDEX renamed_probe TO " ++ index.name, .forceable_only = true },
+            .{ .alter = "ALTER INDEX " ++ index.name ++ " INVISIBLE", .restore = "ALTER INDEX " ++ index.name ++ " VISIBLE", .forceable_only = false },
+        }) |change| {
+            if (comptime !change.forceable_only or schema.mysqlCanForceIndex(index.name))
+                try Alter.refuses(name, &tmp, index.table, change.alter, change.restore, &epoch);
+        }
+    }
+    // A prefix preserves the name, columns, order, uniqueness and type but
+    // loses covering bytes. It must not be mistaken for the full-column key.
+    try Alter.refuses(name, &tmp, "session", "DROP INDEX session_workspace_list, ADD INDEX session_workspace_list(workspace_digest(1),created_seq)", "DROP INDEX session_workspace_list, ADD INDEX session_workspace_list(workspace_digest,created_seq)", &epoch);
+
+    // MySQL names these keys itself: a unique constraint and an FK-backing
+    // index. Lowered partial indexes are likewise never forced by name.
+    inline for (.{
+        .{ "content", "digest" },
+        .{ "session_revision", "instructions_content_id" },
+        .{ "session_stop", "session_stop_unpositioned" },
+        .{ "turn", "turn_one_active_per_session" },
+    }) |key| {
+        try Alter.refuses(name, &tmp, key[0], "ALTER INDEX " ++ key[1] ++ " INVISIBLE", "ALTER INDEX " ++ key[1] ++ " VISIBLE", &epoch);
+        try Alter.index(name, key[0], "RENAME INDEX " ++ key[1] ++ " TO renamed_probe");
+        defer Alter.index(name, key[0], "RENAME INDEX renamed_probe TO " ++ key[1]) catch @panic("cannot restore unforced index name");
+        try openLive(&storage, &tmp);
+        epoch = storage.engine.mysql.state.epoch;
+        try storage.close();
+    }
+}
+
 test "store.mysql live admission refuses read_only" {
     try refusesGlobal("read_only", "1", error.MysqlReadOnly);
 }
