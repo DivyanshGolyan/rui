@@ -1762,7 +1762,7 @@ const message_observation = rsql.Read(.{
         admitted_at: rsql.Positive,
         has_recovery: bool,
     },
-    .cardinality = .one,
+    .cardinality = .optional,
 });
 
 /// The Action and decision a permission decision saved.
@@ -1781,6 +1781,10 @@ const permission_target = rsql.Read(.{
 pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservation) !void {
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
+    // Most observed commands are Messages, so the command's round also
+    // reads the Message it accepted: both are keyed by the command key.
+    var message: message_observation.Result = undefined;
+    a.read(message_observation, .{ .key = key }, &message);
     try a.run();
     const command = try savedAnswer(&saved) orelse {
         observation.* = .{ .status = .absent };
@@ -1796,9 +1800,7 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
         .message => {
             observation.kind = .{ .message = null };
             if (!command.accepted) return;
-            var row: message_observation.Row = undefined;
-            a.read(message_observation, .{ .key = key }, &row);
-            try a.run();
+            const row = message orelse return error.CorruptStore;
             const content_id = command.primary_content_id orelse return error.CorruptStore;
             if (!row.session_ref.eql(command.target.slice()) or row.content_id.get() != content_id) return error.CorruptStore;
             const queue = try messageQueue(&row);

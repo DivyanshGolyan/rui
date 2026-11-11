@@ -161,25 +161,37 @@ def command_frame(master, command, accept, timeout=15, *, end="\r"):
     return found[0]
 
 
+def conversation_text(frame):
+    """Transcript rows alone, without a wide shell's list and divider."""
+    return "\n".join(row.partition("│")[2] if "│" in row else row for row in frame.split("\n"))
+
+
+def composer_line(screen, y):
+    """The cursor row inside its pane, excluding a drawn list and divider."""
+    lines = screen.split("\n")
+    line = lines[y] if y < len(lines) else ""
+    if not line.startswith((" ›", " >")) and "│" in line:
+        line = line.partition("│")[2]
+    return line
+
+
 def composer_empty(screen, y):
     """The composer holds no draft: the cursor's row is its bare mark."""
-    lines = screen.split("\n")
-    return y < len(lines) and lines[y] in (" ›", " >")
+    return composer_line(screen, y) in (" ›", " >")
 
 
 def composer_ready(screen, x, y):
     """Input is accepted at the composer: the cursor sits on its prompt row."""
     if "Opening…" in screen:
         return False
-    line = screen.split("\n")[y] if y < len(screen.split("\n")) else ""
+    line = composer_line(screen, y)
     # The composer's mark follows the screen's one-column margin.
     return x >= 3 and any(line == " " + mark or line.startswith(" " + mark + " ") for mark in ("›", ">"))
 
 
 def overview_composer(screen, x, y):
     """Input is accepted at the overview's composer: the cursor is on its row."""
-    lines = screen.split("\n")
-    line = lines[y] if y < len(lines) else ""
+    line = composer_line(screen, y)
     return x >= 3 and any(line == " " + mark or line.startswith(" " + mark + " ") for mark in ("›", ">"))
 
 
