@@ -1868,7 +1868,7 @@ fn quiesceUpgrade(self: *Self) !void {
         if (!self.inspection.command_running) self.reader.cancel();
         if (self.reader.completed()) try self.settleReader();
     }
-    if (self.reading.pending_diagnostic != null and self.reader.thread == null) try self.presentReadDiagnostic(self.screen);
+    if (self.reading.pending_diagnostic != null and self.reader.thread == null) try self.presentReadDiagnostic();
     if (self.dropSkills()) |err| return err;
 }
 
@@ -1953,7 +1953,7 @@ fn update(self: *Self) !Updated {
         self.withdrawDecided();
     }
     if (self.reading.pending_diagnostic) |pending| {
-        if (pending.recoverable) try self.presentReadDiagnostic(self.screen);
+        if (pending.recoverable) try self.presentReadDiagnostic();
     }
     try self.startQueuedCommand();
     // Scans continue during consent, so an Action decided elsewhere leaves.
@@ -2728,36 +2728,25 @@ test "read diagnostic shows the Host's type and code as escaped line text" {
     }
 }
 
-fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
+/// A read's diagnostic is a notice, never a feed row: the summary, then the
+/// Host's own words.
+fn presentReadDiagnostic(self: *Self) !void {
     const pending = self.reading.pending_diagnostic.?;
-    var bytes: [1024]u8 = undefined;
-    var out = std.Io.Writer.fixed(&bytes);
-    const summary = switch (pending.phase) {
+    var out = std.Io.Writer.fixed(&self.notice_buffer);
+    try out.writeAll(switch (pending.phase) {
         .details => "! Details unavailable; draft retained.",
         .inspection => if (self.inspection.kind == .copy) "! Copy unavailable; draft retained." else "! Inspection unavailable; draft retained.",
         .recall => "! Sent message unavailable; draft retained.",
         else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
-    };
-    try out.writeAll(summary);
+    });
     try out.writeAll(" ");
     try self.writePendingDiagnostic(&out);
-    if (comptime @TypeOf(sink) == *Screen) {
-        // Read diagnostics are UI notices, not counterfeit Activity rows.
-        @memcpy(self.notice_buffer[0..out.buffered().len], out.buffered());
-        self.notice = self.notice_buffer[0..out.buffered().len];
-    } else {
-        try sink.append("\n");
-        try sink.append(View.Style.failure.code(self.colour));
-        try sink.append(out.buffered());
-        try sink.append(View.Style.normal.code(self.colour));
-        try sink.append("\n");
-        self.notice = summary;
-    }
+    self.notice = out.buffered();
     self.reading.pending_diagnostic = null;
     self.dirty = true;
 }
 
-test "frontend joined read diagnostic survives failed notice and worker reset" {
+test "frontend joined read diagnostic survives a worker reset and shows as the notice" {
     const Worker = struct {
         fn fail(_: *anyopaque, task: *Task) !void {
             var failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
@@ -2767,52 +2756,25 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
         }
         fn idle(_: *anyopaque, _: *Task) !void {}
     };
-    const Sink = struct {
-        bytes: [2048]u8 = undefined,
-        length: usize = 0,
-        calls: usize = 0,
-        fail_at: ?usize,
-
-        fn append(self: *@This(), bytes: []const u8) !void {
-            self.calls += 1;
-            if (self.fail_at == self.calls) return error.WriteFailed;
-            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
-            self.length += bytes.len;
-        }
-    };
-    for ([_]ReadPhase{.details}) |phase| {
-        for (1..6) |fail_at| {
-            var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .colour = false, .reading = .{ .phase = phase } };
-            self.init.io = std.testing.io;
-            self.input.init();
-            try self.reader.start(std.testing.io, &self, Worker.fail);
-            try self.settleReader(); // Preparation is recoverable, not fatal.
-            try std.testing.expect(self.reading.pending_diagnostic != null);
-            try std.testing.expect(self.reader.read_failure == null);
-            var sink: Sink = .{ .fail_at = fail_at };
-            try std.testing.expectError(error.WriteFailed, self.presentReadDiagnostic(&sink));
-            try std.testing.expect(self.reading.pending_diagnostic != null);
-            // Exercise the actual Task reset, also performed before spawn can fail.
-            try self.reader.start(std.testing.io, &self, Worker.idle);
-            try self.reader.join();
-            self.input.init();
-            self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
-            self.stop();
-            const settled = self.settle({});
-            for ([_]anyerror{ error.WriteFailed, error.SystemResources }) |cause|
-                try std.testing.expectEqual(cause, settled.failure(.final_exit, cause).?);
-            var bytes: [1024]u8 = undefined;
-            var out = std.Io.Writer.fixed(&bytes);
-            try self.writePendingDiagnostic(&out);
-            try std.testing.expectEqualStrings("HTTP 503; type: busy; code: host_busy\\x1b\\n", out.buffered());
-            sink = .{ .fail_at = null };
-            try self.presentReadDiagnostic(&sink);
-            try std.testing.expect(self.reading.pending_diagnostic == null);
-            try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], out.buffered()) != null);
-            try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], if (phase == .details) "Details unavailable" else "Earlier messages unavailable") != null);
-            try std.testing.expectEqualStrings(if (phase == .details) "! Details unavailable; draft retained." else "! Earlier messages unavailable; scroll up to retry. Draft retained.", self.notice.?);
-        }
-    }
+    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .colour = false, .reading = .{ .phase = .details } };
+    self.init.io = std.testing.io;
+    self.input.init();
+    try self.reader.start(std.testing.io, &self, Worker.fail);
+    try self.settleReader(); // Preparation is recoverable, not fatal.
+    try std.testing.expect(self.reading.pending_diagnostic != null);
+    try std.testing.expect(self.reader.read_failure == null);
+    // Exercise the actual Task reset, also performed before spawn can fail.
+    try self.reader.start(std.testing.io, &self, Worker.idle);
+    try self.reader.join();
+    self.input.init();
+    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+    self.stop();
+    const settled = self.settle({});
+    for ([_]anyerror{ error.WriteFailed, error.SystemResources }) |cause|
+        try std.testing.expectEqual(cause, settled.failure(.final_exit, cause).?);
+    try self.presentReadDiagnostic();
+    try std.testing.expect(self.reading.pending_diagnostic == null);
+    try std.testing.expectEqualStrings("! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy\\x1b\\n", self.notice.?);
 }
 
 fn applyReader(self: *Self, end: ReadEnd) !void {

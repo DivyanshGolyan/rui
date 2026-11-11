@@ -628,10 +628,9 @@ def permission_read_cases(state):
             os.write(master, b"/details\r")
             human.read_terminal(master, "host_busy", timeout=10)
             output = human.current_screen(master)
-            # The transcript keeps the whole diagnostic, wrapped at the width;
-            # the notice under the input names only what failed.
-            assert "! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy" in " ".join(output.split()), output
-            assert output.rstrip("\n").rsplit("\n", 1)[1] == "! Details unavailable; draft retained.", output
+            # The notice under the input names what failed, then the Host's
+            # own words. A diagnostic is never a feed row.
+            assert output.rstrip("\n").rsplit("\n", 1)[1] == "! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy", output
             assert caller.poll() is None, output
             os.write(master, b"\x03")
             _, errors = human.terminal_exit(caller, master, timeout=10)

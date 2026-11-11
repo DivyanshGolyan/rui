@@ -247,8 +247,11 @@ def scroll_marker_case():
         empty = chrome.session()
         master, caller, opened = chrome.open(empty, lambda screen: True)
         for keys in (b"\x1b[1;2A", b"\x1b[5~"):
-            unchanged = chrome.frame(master, keys, lambda screen: composing(screen, ""))
-            assert marker(unchanged) is None and "Start of conversation" not in unchanged, unchanged
+            # An empty feed draws nothing new for a scroll key, so the next
+            # frames come from typing after it and clearing that again.
+            typed = chrome.frame(master, keys + b"x", lambda screen: composing(screen, "x"))
+            assert marker(typed) is None and "Start of conversation" not in typed, typed
+            unchanged = chrome.frame(master, b"\x15", lambda screen: composing(screen, ""))
             assert rows(unchanged) == rows(opened), (opened, unchanged)
         chrome.leave(master, caller)
 
