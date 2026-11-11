@@ -64,6 +64,17 @@ pub const RpcError = struct {
     data: ?[]const u8,
 };
 
+/// Value outcome of one tools/call, independent of its transport owner.
+pub const CallOutcome = union(enum) {
+    waiting,
+    /// The server's result; `is_error` marks a tool that failed (D144).
+    result: CallResult,
+    /// The server's JSON-RPC error, which the model sees as text (D144).
+    server_error: RpcError,
+    /// An HTTP status with no JSON-RPC answer, with the start of its body.
+    refused: struct { status: u16, body: []const u8 },
+};
+
 pub const Message = union(enum) {
     /// A notification about the request, such as progress: skipped.
     notification,

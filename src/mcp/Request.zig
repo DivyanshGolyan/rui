@@ -37,7 +37,7 @@ pub const Outcome = union(enum) {
 
 const Reading = union(enum) {
     head,
-    body: reply.Body,
+    body: struct { kind: reply.Body, status: u16 },
     failed: u16,
 };
 
@@ -78,11 +78,28 @@ pub fn requestSent(self: *const Request) bool {
 }
 
 pub fn advance(self: *Request) Error!Outcome {
+    return self.advanceInner() catch |err| {
+        // The classifier must inspect the retained JSON prefix even when it
+        // came with an HTTP error: it may already establish a JSON-RPC error.
+        if (err == error.AnswerTooLarge) return err;
+        return switch (self.reading) {
+            // Even a malformed/truncated error body cannot undo the HTTP answer.
+            .failed => |status| .{ .failed = .{ .status = status, .body = self.answer.buffered() } },
+            .body => |body| if (body.status >= 400)
+                .{ .failed = .{ .status = body.status, .body = self.answer.buffered() } }
+            else
+                return err,
+            .head => return err,
+        };
+    };
+}
+
+fn advanceInner(self: *Request) Error!Outcome {
     while (true) {
         switch (try self.exchange.advance()) {
             .waiting => return .waiting,
             .head => |head| self.reading = switch (reply.reading(head.status, head.field("Content-Type"))) {
-                .body => |body| .{ .body = body },
+                .body => |body| .{ .body = .{ .kind = body, .status = head.status } },
                 .failed => |status| .{ .failed = status },
             },
             .body => |bytes| if (try self.take(bytes)) |outcome| {
@@ -104,9 +121,11 @@ fn take(self: *Request, bytes: []const u8) Error!?Outcome {
             self.answer.writeAll(bytes[0..@min(room, bytes.len)]) catch unreachable;
             return null;
         },
-        .body => |body| switch (body) {
+        .body => |body| switch (body.kind) {
             .json => {
-                self.answer.writeAll(bytes) catch return error.AnswerTooLarge;
+                const room = self.answer.unusedCapacityLen();
+                self.answer.writeAll(bytes[0..@min(room, bytes.len)]) catch unreachable;
+                if (bytes.len > room) return error.AnswerTooLarge;
                 return null;
             },
             .event_stream => {
@@ -129,7 +148,7 @@ fn ended(self: *Request) Error!Outcome {
     return switch (self.reading) {
         .head => unreachable,
         .failed => |status| .{ .failed = .{ .status = status, .body = self.answer.buffered() } },
-        .body => |body| switch (body) {
+        .body => |body| switch (body.kind) {
             .json => json: {
                 const message = try reply.readMessage(self.answer.buffered(), self.id);
                 // A body of only a notification answers nothing.

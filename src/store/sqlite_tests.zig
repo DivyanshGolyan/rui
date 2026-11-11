@@ -9951,13 +9951,15 @@ test "MCP attempts serialize Sessions and recover without replay" {
     const unsent = (try storage.admitActionAttempt(.{ .action_id = first + 1, .runner = .mcp }, 600_000, .{})).?.permit.binding;
     var stop = try completeSessionStop("mcp-unsent-stop", sessions[0].slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    // Store stop must not replace the adapter's definite not-run evidence.
     _ = try storage.settleActionAttempt(unsent, .spawn_failed, "not available", .{});
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='cancelled' AND CAST(c.payload AS TEXT) LIKE ?2", .{ unsent.action_id, "%not sent%" }));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='spawn_failed' AND CAST(c.payload AS TEXT) LIKE ?2", .{ unsent.action_id, "%not available%" }));
     const sent = (try storage.admitActionAttempt(.{ .action_id = other, .runner = .mcp }, 5_000, .{})).?.permit.binding;
     var sent_stop = try completeSessionStop("mcp-sent-stop", sessions[1].slice());
     try std.testing.expect(storage.stopSession(&sent_stop, .{}) == .accepted);
+    // A definite remote answer also remains definite when settlement races stop.
     _ = try storage.settleActionAttempt(sent, .succeeded, "terminal result raced stop", .{});
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='cancelled' AND CAST(c.payload AS TEXT) LIKE ?2", .{ sent.action_id, "%Outcome unknown%" }));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='succeeded' AND CAST(c.payload AS TEXT) LIKE ?2", .{ sent.action_id, "%terminal result raced stop%" }));
 }
 
 test "searchActivity streams window edges filters kinds and pages newest first" {
