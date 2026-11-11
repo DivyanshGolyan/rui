@@ -60,17 +60,19 @@ fn activate(self: *Self, ctx: *vxfw.EventContext) !void {
     }
 }
 
+/// The only keys a panel takes; every other key is its caller's.
+pub fn takesKey(key: vaxis.Key) bool {
+    return key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{}) or key.matches(vaxis.Key.enter, .{});
+}
+
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (input) {
         .key_press => |key| {
-            if (key.matches(vaxis.Key.up, .{})) {
-                self.move(false);
-            } else if (key.matches(vaxis.Key.down, .{})) {
-                self.move(true);
-            } else if (key.matches(vaxis.Key.enter, .{})) {
+            if (!takesKey(key)) return;
+            if (key.matches(vaxis.Key.enter, .{})) {
                 try self.activate(ctx);
-            } else return;
+            } else self.move(key.matches(vaxis.Key.down, .{}));
             ctx.consumeAndRedraw();
         },
         .mouse => |mouse| {

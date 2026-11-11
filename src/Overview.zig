@@ -591,6 +591,17 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             if (self.title.next(open, self.state.summary.counts.needs_you)) |text| try ctx.setTitle(text);
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
+            if (self.root.settings_open) {
+                // Under the settings page only the keys that are the whole
+                // app's stay live: leaving, and Esc for an Upgrade it can
+                // still cancel. Nothing edits the hidden draft or the list.
+                const selected = TerminalEditor.selectEvent(view.keys, input, self.root.pasting);
+                const live = selected == .action and (selected.action == .exit or (selected.action == .clear and self.state.upgrade.takesEscape()));
+                if (!live) {
+                    ctx.consumeEvent();
+                    return;
+                }
+            }
             if (self.state.picker != null and !self.root.pasting and input == .key_press) {
                 const key = input.key_press;
                 const action: ?model_picker_view.Action = if (key.matchExact(vaxis.Key.left, .{})) .lower_effort else if (key.matchExact(vaxis.Key.right, .{})) .higher_effort else if (key.matchExact(vaxis.Key.tab, .{})) .next_sign_in else null;
@@ -5824,6 +5835,17 @@ test "App settings typed admission and Upgrade stay within the Overview owner" {
     try overview.root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
     try std.testing.expect(overview.upgrade_job.cancelling);
     try std.testing.expect(overview.root.settings_open);
+    // Under the page nothing reaches the hidden draft or moves the list,
+    // and leaving works as on the overview.
+    const page = overview.root.settings_page.widget();
+    const selected = overview.state.selected;
+    try app_events.send(&ctx, "x\x1b[H\x18", overview.root.widget(), page);
+    try std.testing.expectEqual(@as(usize, 0), overview.composerDraft().bytes.len);
+    try std.testing.expectEqual(selected, overview.state.selected);
+    try std.testing.expect(!ctx.quit and overview.root.settings_open);
+    try app_events.send(&ctx, "\x03", overview.root.widget(), page);
+    try std.testing.expect(ctx.quit);
+    ctx.quit = false;
     _ = try overview.event(.leave);
     try std.testing.expectError(error.UpgradeUnavailable, overview.startUpgrade());
     try std.testing.expectError(error.DefaultsUnavailable, overview.saveDefaults(.{ .notifications = false }));

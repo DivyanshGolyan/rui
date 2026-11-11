@@ -90,19 +90,27 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             ctx.consumeEvent();
         },
         .key_release => ctx.consumeEvent(),
-        // Settings has nowhere to put pasted text, and a pasted line break
-        // must not change a setting: the page gets no key of a paste.
-        // Esc closes the topmost thing only: an open choice, then an Upgrade
-        // that can still be cancelled, which the overview owns, else the page.
-        .key_press => |key| if (self.settings_open and self.pasting) {
-            ctx.consumeEvent();
-        } else if (self.settings_open and key.matches(vaxis.Key.escape, .{})) {
-            if (self.settings_page.hasChoice()) {
+        // One router for every key while settings is open. A paste has
+        // nowhere to go and its line break must not change a setting. Esc
+        // (or Ctrl-G, as everywhere) closes the topmost thing only: an open
+        // choice, else the page, unless an Upgrade can still be cancelled.
+        // The page takes its own keys. Every other key is the app's, so
+        // leaving and an Upgrade's Esc work as on the overview, which owns
+        // them and takes nothing else under the page.
+        .key_press => |key| if (self.settings_open) {
+            const closes = key.matches(vaxis.Key.escape, .{}) or key.matches('g', .{ .ctrl = true });
+            if (self.pasting) {
+                ctx.consumeEvent();
+            } else if (closes and self.settings_page.hasChoice()) {
                 self.settings_page.cancelChoice();
-            } else if (self.settings_page.upgradeTakesEscape()) {
+                ctx.consumeAndRedraw();
+            } else if (closes and !self.settings_page.upgradeTakesEscape()) {
+                try self.showMain(ctx);
+                ctx.consumeAndRedraw();
+            } else if (!AppSettings.takesKey(key)) {
                 try self.overview.handleEvent(ctx, input);
-            } else try self.showMain(ctx);
-            ctx.consumeAndRedraw();
+                ctx.consumeAndRedraw();
+            }
         },
         else => {},
     }
@@ -414,6 +422,7 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
     const Fixture = struct {
         run: ?upgrade_status.Run = null,
         escapes: usize = 0,
+        others: usize = 0,
         fn read(_: *anyopaque) !@import("preferences.zig").Values {
             return .{};
         }
@@ -434,7 +443,8 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
         }
         fn event(raw: *anyopaque, _: *vxfw.EventContext, input: vxfw.Event) !void {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            if (input == .key_press and input.key_press.matches(vaxis.Key.escape, .{})) self.escapes += 1;
+            if (input != .key_press) return;
+            if (input.key_press.matches(vaxis.Key.escape, .{})) self.escapes += 1 else self.others += 1;
         }
         fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
             const self: *@This() = @ptrCast(@alignCast(raw));
@@ -484,6 +494,22 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
         try std.testing.expect(ctx.consume_event);
         try std.testing.expectEqual(@as(usize, @intFromBool(cancels)), fixture.escapes);
         try std.testing.expectEqual(cancels, root.settings_open);
+        if (!cancels) continue;
+        // The page's own keys stay with it; every other key is the app's,
+        // whose owner decides what it does under the page.
+        for ([_]vaxis.Key{ .{ .codepoint = vaxis.Key.up }, .{ .codepoint = vaxis.Key.down }, .{ .codepoint = vaxis.Key.enter } }) |key| {
+            ctx.consume_event = false;
+            try root.widget().captureEvent(&ctx, .{ .key_press = key });
+            try std.testing.expect(!ctx.consume_event);
+        }
+        try std.testing.expectEqual(@as(usize, 0), fixture.others);
+        for ([_]vaxis.Key{ .{ .codepoint = 'c', .mods = .{ .ctrl = true } }, .{ .codepoint = 'd', .mods = .{ .ctrl = true } }, .{ .codepoint = 'a' }, .{ .codepoint = vaxis.Key.end } }, 1..) |key, count| {
+            ctx.consume_event = false;
+            try root.widget().captureEvent(&ctx, .{ .key_press = key });
+            try std.testing.expect(ctx.consume_event);
+            try std.testing.expectEqual(count, fixture.others);
+            try std.testing.expect(root.settings_open);
+        }
     };
     // No key of a paste reaches the page or closes it; keys after it do.
     var pasted: Fixture = .{};
@@ -501,6 +527,11 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
     events.consume_event = false;
     try page.widget().captureEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
     try std.testing.expect(!events.consume_event);
+    try page.openSettings(&events);
+    // Ctrl-G closes as Escape does.
+    try page.widget().captureEvent(&events, .{ .key_press = .{ .codepoint = 'g', .mods = .{ .ctrl = true } } });
+    try std.testing.expect(!page.settings_open);
+    try page.openSettings(&events);
     try page.widget().captureEvent(&events, escape);
     try std.testing.expect(!page.settings_open);
     // With settings closed Root leaves Escape to the focused screen.

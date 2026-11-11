@@ -61,6 +61,9 @@ pub fn cancelChoice(self: *Self) void {
     self.panel.closeChoice();
 }
 
+/// The page takes its panel's keys; every other key is the app's.
+pub const takesKey = Panel.takesKey;
+
 /// Esc is the Upgrade's while it can still change nothing, as on the
 /// overview and in a conversation.
 pub fn upgradeTakesEscape(self: *const Self) bool {
