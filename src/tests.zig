@@ -24,7 +24,6 @@ test {
     _ = @import("host_identity.zig");
     _ = @import("upgrade.zig");
     _ = @import("installation_path.zig");
-    _ = @import("UpgradePanel.zig");
     _ = @import("UpgradeJob.zig");
     _ = @import("stderr.zig");
     // These were previously discovered only while compiling another test's
@@ -112,7 +111,6 @@ test {
     _ = @import("SessionFrontend.zig");
     _ = @import("Overview.zig");
     _ = @import("session_reads.zig");
-    _ = @import("SessionTerminal.zig");
     _ = @import("SessionScreen.zig");
     _ = @import("session_history.zig");
     _ = @import("session_view.zig");

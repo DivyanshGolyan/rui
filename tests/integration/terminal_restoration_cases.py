@@ -1166,15 +1166,17 @@ def fatal_reporting_cases(state):
 
 
 def decision_reporting_cases(state):
-    """Both accepted and interrupted choices retain the exact decision identity."""
+    """A decision still unconfirmed when the conversation ends keeps its exact
+    identity: Ctrl-C, SIGHUP and a closed terminal (EOF, the same hangup) each
+    exit naming its recovery, and the Host, still running, continues it."""
     root = state / "decision-reporting"
     root.mkdir()
     home, store = root / "home", root / "store"
     home.mkdir(mode=0o700)
-    cases = [(decision, True) for decision in ("allow_once", "deny")]
+    cases = [(decision, ending) for decision in ("allow_once", "deny") for ending in ("interrupt", "sighup", "closed")]
     responses = []
-    for decision, lost in cases:
-        name = f"{decision}-{lost}"
+    for decision, ending in cases:
+        name = f"{decision}-{ending}"
         responses.extend([
             fixture.sse_tool_calls(name, [("bash", name, json.dumps({"cmd": f"printf once >> effect-{name}", "timeout_ms": 1000, "description": f"Append effect-{name} marker"}))]),
             fixture.sse_answer(f"{name}-a", f"{name}-r", f"{name}-m", f"SETTLED-{name}")[0],
@@ -1185,8 +1187,8 @@ def decision_reporting_cases(state):
     host = caller = proxy = None
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        for decision, lost in cases:
-            name = f"{decision}-{lost}"
+        for decision, ending in cases:
+            name = f"{decision}-{ending}"
             session = human.admit(home, "session", "configure", "--store", store,
                 "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
@@ -1199,30 +1201,28 @@ def decision_reporting_cases(state):
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(write_ready)},
                     pass_fds=(write_ready,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 human.read_terminal(master, "› ")
-                if lost:
-                    def hold(response):
-                        received.set()
-                        assert reply_release.wait(15)
-                        return b""
-                    proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", hold)
-                else:
-                    proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
+
+                def hold(response):
+                    received.set()
+                    assert reply_release.wait(15)
+                    return b""
+                proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", hold)
                 os.write(master, b"propose exact decision\r")
                 proposal = human.read_terminal(master, human.CHOICE)
                 proposal += human.action_ready(read_ready, master)
                 if decision != "allow_once":
                     human.pick_deny(master)
                 os.write(master, human.ALLOW)
-                if lost:
-                    fixture.wait_for(human.draining(master, received.is_set), "permission decision route reached", timeout=10)
-                    caller.send_signal(signal.SIGINT)
+                fixture.wait_for(human.draining(master, received.is_set), "permission decision route reached", timeout=10)
+                if ending == "closed":
+                    # The terminal went away: no restoration is claimed.
+                    os.close(master)
+                    master = None
+                    _, errors = caller.communicate(timeout=6)
                 else:
-                    human.read_terminal(master, f"SETTLED-{name}", composer=True)
-                    status = human.terminal_step(master, "/status", " Status · ", composer=True)
-                    assert "Original reserved request:" not in status, status
-                    os.write(master, b"\x1b[")
-                output, errors = human.terminal_exit(caller, master, timeout=6)
-                assert caller.returncode == (0 if lost else 2), (output, errors)
+                    caller.send_signal(signal.SIGINT if ending == "interrupt" else signal.SIGHUP)
+                    output, errors = human.terminal_exit(caller, master, timeout=6)
+                assert caller.returncode == 0, (ending, errors)
                 records = [path for path in (home / ".config/rui/requests").glob("*.json")
                     if json.loads(path.read_bytes()).get("session") == session]
                 record, = [path for path in records if json.loads(path.read_bytes())["kind"] == "permission_decision"]
@@ -1238,14 +1238,11 @@ def decision_reporting_cases(state):
                 assert len(proxy.exchanges) == 1 and proxy.exchanges[0][0] == saved
                 assert request["key"].encode() in errors and message["key"].encode() not in errors, errors
                 assert request["decision"] == decision
-                assert (b"rui request recover " if lost else b"rui request inspect ") + request["key"].encode() in errors, errors
+                assert b"rui request recover " + request["key"].encode() in errors, errors
                 assert b"rui request read-result" not in errors, errors
-                assert (b"Decision not confirmed" if lost else b"Decision accepted; do not repeat it") in errors, errors
-                if not lost:
-                    assert b"[terminal_input_incomplete]" in errors and b"not confirmed" not in errors, errors
-                if lost:
-                    assert proxy.exchanges[0][0] == saved and not reply_release.is_set()
-                    reply_release.set()
+                assert b"Decision not confirmed" in errors, errors
+                assert proxy.exchanges[0][0] == saved and not reply_release.is_set()
+                reply_release.set()
                 proxy.close()
                 proxy = None
                 recovered = json.loads(human.run(home, "request", "recover", request["key"]))["answer"]
@@ -1254,8 +1251,9 @@ def decision_reporting_cases(state):
                 fixture.wait_for(lambda: fixture.completed_observation(store, message["key"]), "decision continuation")
                 effect = root / f"effect-{name}"
                 assert (effect.read_bytes() if effect.exists() else b"") == (b"once" if decision == "allow_once" else b"")
-                actual = termios.tcgetattr(slave)
-                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
+                if ending != "closed":
+                    actual = termios.tcgetattr(slave)
+                    assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
                 print(f"decision reporting: {name} passed", flush=True)
             finally:
                 if sys.exc_info()[0] is not None:
@@ -1263,7 +1261,7 @@ def decision_reporting_cases(state):
                         "case": name, "error": sys.exc_info()[0].__name__,
                         "caller_returncode": caller.poll() if caller is not None else None,
                         "ready_pending": bool(select.select([read_ready], [], [], 0)[0]),
-                        "terminal_pending": bool(select.select([master], [], [], 0)[0]),
+                        "terminal_pending": master is not None and bool(select.select([master], [], [], 0)[0]),
                         "reply_released": reply_release.is_set(),
                         "exchanges": len(proxy.exchanges) if proxy is not None else 0,
                     })
@@ -1271,7 +1269,7 @@ def decision_reporting_cases(state):
                     reply_release.set,
                     lambda: stop_process(caller, timeout=5) if caller is not None else None,
                     lambda: proxy.close() if proxy is not None else None,
-                    *(lambda fd=fd: os.close(fd) for fd in (master, slave, read_ready, write_ready)),
+                    *(lambda fd=fd: os.close(fd) for fd in (master, slave, read_ready, write_ready) if fd is not None),
                 )
                 proxy = None
     finally:
@@ -1864,56 +1862,6 @@ def host_diagnostic_cases(state, library):
                     pass  # Optional reporting cannot replace the original failure.
 
 
-def native_notice_cases(state):
-    """Exercise the public notice's libc adapter without a Host or interposer."""
-    binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
-    expected = b"\nDetached. Host work continues.\nResume: rui session resume --store $'/tmp/a\\' path' k7m2qx\n"
-    for transport, full in (("pipe", False), ("pipe", True), ("pty", False)):
-        # PTY EAGAIN is not persistent: internal delivery can make space without
-        # a reader. A full pipe with no reader owns the backpressure witness.
-        reader, writer = os.pipe() if transport == "pipe" else open_pty()
-        try:
-            if transport == "pty":
-                attrs = termios.tcgetattr(writer)
-                attrs[1] &= ~termios.OPOST
-                termios.tcsetattr(writer, termios.TCSANOW, attrs)
-            flags = fcntl.fcntl(writer, fcntl.F_GETFL)
-            filled = 0
-            if full:
-                fcntl.fcntl(writer, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-                while True:
-                    try:
-                        filled += os.write(writer, b"x" * 1024)
-                        assert filled < 1024 * 1024, "unbounded fixture output"
-                    except BlockingIOError:
-                        break
-                fcntl.fcntl(writer, fcntl.F_SETFL, flags)
-            result = subprocess.run([str(binary)], stdout=writer, stderr=subprocess.PIPE, timeout=5)
-            assert_file_flags(fcntl.fcntl(writer, fcntl.F_GETFL), flags)
-            assert result.returncode == (1 if full else 0), result.stderr
-            if full:
-                assert b"TerminalCleanupFailed" in result.stderr, result.stderr
-            else:
-                assert not result.stderr, result.stderr
-            # Read only after the actor exits. Bound reads even on a broken
-            # adapter, and reject extra/missing bytes, not just a prefix.
-            fcntl.fcntl(reader, fcntl.F_SETFL, fcntl.fcntl(reader, fcntl.F_GETFL) | os.O_NONBLOCK)
-            actual = bytearray()
-            while True:
-                try:
-                    chunk = os.read(reader, 4096)
-                    if not chunk:
-                        break
-                    actual.extend(chunk)
-                    assert len(actual) <= max(filled, len(expected)), "extra notice bytes"
-                except BlockingIOError:
-                    break
-            assert actual == (b"x" * filled if full else expected), actual
-            print(f"native notice: {transport} full={full}, exact bytes and restored flags passed", flush=True)
-        finally:
-            dispose_all(lambda: os.close(reader), lambda: os.close(writer))
-
-
 def app_terminal_cases():
     binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
     master, slave = open_pty()
@@ -2193,11 +2141,6 @@ def main(selected=None):
         if selected in (None, "app-ready-error"):
             app_ready_failure_case()
         if selected == "app-ready-error":
-            completed = True
-            return
-        if selected in (None, "notice", "detach"):
-            native_notice_cases(state)
-        if selected == "notice":
             completed = True
             return
         source, library = state / "probe.c", state / "probe.so"

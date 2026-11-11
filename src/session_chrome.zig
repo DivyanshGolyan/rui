@@ -64,17 +64,18 @@ pub const stop_key = session_line.stop_hint;
 
 /// What the status bar says of a send. `status` is the held original's
 /// line (`session_notice.status`); while it is opening or in flight it is
-/// progress, else it needs the person until resolved. With none held, `Sent`
-/// covers an accepted Message until live output or the waiting row shows it.
+/// progress, else it needs the person until resolved. With none held it
+/// says nothing: an accepted Message's own row, or its waiting row, is the
+/// feedback.
 pub const Send = struct { needs: ?[]const u8 = null, progress: ?[]const u8 = null };
 
-pub fn send(status: ?[]const u8, in_flight: bool, sent: bool) Send {
+pub fn send(status: ?[]const u8, in_flight: bool) Send {
     // An empty status is a waiting Action, which says how to decide it.
-    if (status) |text| return if (text.len == 0) .{} else if (in_flight) .{ .progress = text } else .{ .needs = text };
-    return .{ .progress = if (sent) "Sent" else null };
+    const text = status orelse return .{};
+    return if (text.len == 0) .{} else if (in_flight) .{ .progress = text } else .{ .needs = text };
 }
 
-test "a send is progress while in flight or just accepted, and needs the person once unresolved" {
+test "a send is progress while in flight, needs the person once unresolved, and says nothing once accepted" {
     const same = struct {
         fn text(want: ?[]const u8, got: ?[]const u8) !void {
             try std.testing.expectEqual(want == null, got == null);
@@ -85,18 +86,18 @@ test "a send is progress while in flight or just accepted, and needs the person 
             try text(want.progress, got.progress);
         }
     }.check;
-    try same(.{ .progress = "Sending…" }, send("Sending…", true, false));
-    try same(.{ .needs = "! Not confirmed · ctrl+r retries original" }, send("! Not confirmed · ctrl+r retries original", false, true));
-    try same(.{ .progress = "Sent" }, send(null, false, true));
-    try same(.{}, send("", false, true));
-    try same(.{}, send(null, false, false));
+    try same(.{ .progress = "Sending…" }, send("Sending…", true));
+    try same(.{ .needs = "! Not confirmed · ctrl+r retries original" }, send("! Not confirmed · ctrl+r retries original", false));
+    try same(.{}, send("", false));
+    // No original held: accepted or idle, the status bar says nothing.
+    for ([_]bool{ false, true }) |in_flight| try same(.{}, send(null, in_flight));
     // A reply to the last key outranks progress, which outranks the
     // overview's line, quietly; what needs the person outranks all three.
-    try std.testing.expectEqualStrings("! Unknown command /x", bar(.{ .progress = "Sent", .notice = "! Unknown command /x", .width = 80 }).left);
-    const sent = bar(.{ .progress = "Sent", .overview = "! Other Session failed", .width = 80 });
-    try std.testing.expectEqualStrings("Sent", sent.left);
-    try std.testing.expectEqual(Tone.quiet, sent.tone);
-    try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .notice = "Copied 3 lines", .progress = "Sent", .width = 80 }).left);
+    try std.testing.expectEqualStrings("! Unknown command /x", bar(.{ .progress = "Sending…", .notice = "! Unknown command /x", .width = 80 }).left);
+    const sending = bar(.{ .progress = "Sending…", .overview = "! Other Session failed", .width = 80 });
+    try std.testing.expectEqualStrings("Sending…", sending.left);
+    try std.testing.expectEqual(Tone.quiet, sending.tone);
+    try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .notice = "Copied 3 lines", .progress = "Sending…", .width = 80 }).left);
 }
 
 /// Bytes `factsRow` writes at most.
@@ -222,8 +223,8 @@ pub const Facts = struct {
     /// What needs the person, with its key (`! Not confirmed · ctrl+r
     /// retries`). Persists until resolved; outranks any notice.
     needs: ?[]const u8 = null,
-    /// Where a send stands while it is under way (`Opening…`, `Sending…`,
-    /// `Sent`): quiet, below what needs the person and a reply to the last
+    /// Where a send stands while it is under way (`Opening…`,
+    /// `Sending…`): quiet, below what needs the person and a reply to the last
     /// key, and above the overview's line. Enter's frame says it, since
     /// Enter dismissed any reply before it.
     progress: ?[]const u8 = null,

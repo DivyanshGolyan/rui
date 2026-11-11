@@ -132,21 +132,12 @@ pub fn build(b: *std.Build) void {
     // Nonblocking renderer contracts. No gate root imports these sources, and
     // check, check-full, test and test-logic never depend on these steps.
     // Each Python harness requires a fresh evidence directory: -- --output DIR.
-    const sequence_model = b.addSystemCommand(&.{"python3"});
-    sequence_model.addFileArg(b.path("tests/integration/session_sequence_model.py"));
-    sequence_model.addPassthruArgs();
-    sequence_model.has_side_effects = true;
-    b.step(
-        "sequence-model",
-        "Run TD1 sequence models through overlaid private frontend transitions (nonblocking)",
-    ).dependOn(&sequence_model.step);
     const renderer_selftests = b.step(
         "renderer-contracts-selftest",
-        "Run the direct-PTY, sequence-model and mutation harness self-tests (nonblocking)",
+        "Run the direct-PTY and mutation harness self-tests (nonblocking)",
     );
     for ([_][]const u8{
         "tests/qualification/direct-pty/test_driver.py",
-        "tests/integration/session_sequence_model_test.py",
         "tests/ci/renderer_mutation_test.py",
     }) |path| {
         const selftest = screen_module.screenCommand(b, screen, &.{ "python3", "-B" });

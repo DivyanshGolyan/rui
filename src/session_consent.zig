@@ -3,7 +3,6 @@
 //! that frame was delivered and offered and nothing changed since.
 const std = @import("std");
 
-pub const Service = enum { byte, empty, decoder_pending, decoder_expired, budget_exhausted };
 pub const Choice = enum { allow_once, deny };
 /// What Enter would do: decide this Action with this option.
 pub const Decision = struct { action: u64, choice: Choice };

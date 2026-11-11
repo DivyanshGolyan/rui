@@ -1,14 +1,10 @@
-//! What a Session's work asks of its person, and the desktop notification
-//! that tells them while the terminal is out of focus. The overview and the
-//! conversation decide with `observe`, against one record per Session, and
-//! write with `write`, so both notify alike and never twice.
+//! What a Session's work asks of its person, and the program status record
+//! (OSC 7501) that shows it in the terminal, focused or not.
 const std = @import("std");
-const Bounded = @import("bounded.zig").Bounded;
 const session_line = @import("session_line.zig");
 const session_work = @import("session_work.zig");
-const TerminalText = @import("TerminalText.zig");
 
-/// Most urgent first: a listing that brings several names the first.
+/// What a state wants of the person.
 pub const Kind = enum { approval, failed, finished };
 
 /// A state that wants the person, placed in the order its Session reached
@@ -56,75 +52,8 @@ pub fn observe(seen: *?Attention, work: session_work.Work) ?Kind {
     return now.kind;
 }
 
-/// How a terminal shows a notification. OSC 9 (iTerm2, kitty, WezTerm,
-/// Ghostty) and OSC 777 (foot) post a desktop notification; elsewhere a
-/// bell, which most terminals and multiplexers turn into an urgency hint.
-pub const Signal = enum { osc9, osc777, bell };
-
-/// Rui runs inside tmux or screen: `inside` when the environment names one
-/// (`TMUX`, `STY`), or when `term` does.
-pub fn multiplexed(term: []const u8, inside: bool) bool {
-    return inside or std.mem.startsWith(u8, term, "tmux") or std.mem.startsWith(u8, term, "screen");
-}
-
-/// The signal for the terminal the environment names. tmux and screen drop
-/// an OSC they do not know unless passthrough is configured, but pass a bell
-/// on, so inside one Rui rings.
-pub fn signal(term: []const u8, program: []const u8, inside: bool) Signal {
-    if (multiplexed(term, inside)) return .bell;
-    for ([_][]const u8{ "iTerm.app", "WezTerm", "ghostty" }) |name| if (std.mem.eql(u8, program, name)) return .osc9;
-    for ([_][]const u8{ "xterm-kitty", "xterm-ghostty", "wezterm" }) |name| if (std.mem.eql(u8, term, name)) return .osc9;
-    if (std.mem.startsWith(u8, term, "foot")) return .osc777;
-    return .bell;
-}
-
-/// Longest name a notification carries, before escaping.
+/// Longest name a record carries.
 pub const max_name_bytes = 80;
-/// Bytes `write` may need: an escaped name and the fixed words around it.
-pub const max_bytes = max_name_bytes * TerminalText.max_bytes_per_byte + 96;
-
-/// News waiting to be written: the most urgent Session's name and news, and
-/// how many other Sessions brought news with it.
-pub const Notice = struct {
-    name: Bounded(max_name_bytes),
-    kind: Kind,
-    more: usize,
-
-    pub fn of(name: []const u8, kind: Kind, more: usize) Notice {
-        return .{ .name = session_line.cut(max_name_bytes, name), .kind = kind, .more = more };
-    }
-
-    /// Counts `other`'s news with this one's. The more urgent is named, the
-    /// earlier among equals.
-    pub fn join(self: *Notice, other: Notice) void {
-        self.more +|= other.more +| 1;
-        if (@backingInt(other.kind) < @backingInt(self.kind)) {
-            self.name = other.name;
-            self.kind = other.kind;
-        }
-    }
-};
-
-/// Writes one complete notification: `name`'s news, and how many other
-/// Sessions brought news with it. The name's bytes pass through
-/// TerminalText, so none ends the sequence early or controls the terminal.
-pub fn write(out: *std.Io.Writer, how: Signal, name: []const u8, kind: Kind, more: usize) !void {
-    switch (how) {
-        .bell => return out.writeByte(0x07),
-        .osc9 => try out.writeAll("\x1b]9;Rui: "),
-        .osc777 => try out.writeAll("\x1b]777;notify;Rui;"),
-    }
-    var text: TerminalText = .{ .mode = .line };
-    try text.feed(out, session_line.cut(max_name_bytes, name).slice());
-    try text.finish(out);
-    try out.writeAll(switch (kind) {
-        .approval => " needs approval",
-        .failed => " failed",
-        .finished => " finished",
-    });
-    if (more != 0) try out.print(", and {d} more", .{more});
-    try out.writeByte(0x07);
-}
 
 /// What a Session is doing, as a terminal that takes program status reports
 /// (OSC 7501) shows it beside its other programs: one record per Session,
@@ -337,42 +266,6 @@ test "of every work state, only a finish, a failure and an Action awaiting appro
         try std.testing.expectEqual(@as(?Kind, null), news(seen, seen));
     }
     try std.testing.expectEqual(@as(?Kind, null), news(null, .{ .state = .{ .bash = .{ .since = 1, .call = 0, .description = null, .running = 1, .approvals = 0 } } }));
-}
-
-test "the signal follows what the terminal supports, and a multiplexer gets a bell" {
-    try std.testing.expectEqual(Signal.osc9, signal("xterm-256color", "iTerm.app", false));
-    try std.testing.expectEqual(Signal.osc9, signal("xterm-256color", "WezTerm", false));
-    try std.testing.expectEqual(Signal.osc9, signal("xterm-ghostty", "", false));
-    try std.testing.expectEqual(Signal.osc9, signal("xterm-kitty", "", false));
-    try std.testing.expectEqual(Signal.osc777, signal("foot-extra", "", false));
-    try std.testing.expectEqual(Signal.bell, signal("xterm-kitty", "iTerm.app", true));
-    try std.testing.expectEqual(Signal.bell, signal("tmux-256color", "", false));
-    try std.testing.expectEqual(Signal.bell, signal("screen-256color", "iTerm.app", false));
-    try std.testing.expectEqual(Signal.bell, signal("xterm-256color", "Apple_Terminal", false));
-    try std.testing.expectEqual(Signal.bell, signal("", "", false));
-}
-
-test "a notification is one sequence a hostile name cannot end or extend" {
-    var buffer: [max_bytes]u8 = undefined;
-    const cases = .{
-        .{ Signal.osc9, "Fix the build", Kind.finished, 0, "\x1b]9;Rui: Fix the build finished\x07" },
-        .{ Signal.osc777, "k7m2qx", Kind.approval, 2, "\x1b]777;notify;Rui;k7m2qx needs approval, and 2 more\x07" },
-        .{ Signal.osc9, "a\x07b\x1b\\c\u{9c}d", Kind.failed, 0, "\x1b]9;Rui: a\\x07b\\x1b\\\\c\\u009cd failed\x07" },
-        .{ Signal.osc9, "two\nlines\t\"x\"", Kind.finished, 0, "\x1b]9;Rui: two\\nlines\\t\\\"x\\\" finished\x07" },
-        .{ Signal.bell, "anything", Kind.finished, 3, "\x07" },
-    };
-    inline for (cases) |case| {
-        var out = std.Io.Writer.fixed(&buffer);
-        try write(&out, case[0], case[1], case[2], case[3]);
-        try std.testing.expectEqualStrings(case[4], out.buffered());
-    }
-    // The longest name, every byte escaped, still fits and ends the sequence.
-    const name: [256]u8 = @splat(0x1b);
-    var out = std.Io.Writer.fixed(&buffer);
-    try write(&out, .osc777, &name, .approval, std.math.maxInt(usize));
-    const written = out.buffered();
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, written, "\x07"));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, written, "\x1b"));
 }
 
 test "a Session's program status follows its work, and a record begins only with news" {

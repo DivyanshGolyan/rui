@@ -13,14 +13,12 @@ on:
       - 'src/session_consent.zig'
       - 'src/session_departure.zig'
       - 'src/SessionScreen.zig'
-      - 'src/SessionTerminal.zig'
       - 'src/session_view.zig'
       - 'src/session_history.zig'
       - 'src/session_reads.zig'
       - 'src/ClientTask.zig'
       - 'src/ConversationViewport.zig'
       - 'src/Terminal*'
-      - 'src/session_sequence_model_test.zig'
       - 'src/overview_view.zig'
       - 'src/Overview.zig'
       - 'src/keymap.zig'
@@ -32,7 +30,6 @@ on:
       - 'build/product.zig'
       - 'build/screen.zig'
       - 'tests/ci/renderer_mutation*'
-      - 'tests/integration/session_sequence_model*'
       - 'tests/integration/input_equivalence.py'
       - 'tests/integration/terminal_restoration_*'
       - 'tests/qualification/direct-pty/**'
@@ -70,7 +67,7 @@ jobs:
         with:
           targets: '["terminal-restoration-integration"]'
           check-part: renderer-contracts
-      - name: Self-tests, direct-PTY, Ghostty, controls, recovery encodings and sequence models
+      - name: Self-tests, direct-PTY, Ghostty, controls and recovery encodings
         # Each contract's only copy. Every one runs even after another fails;
         # steps.py records the failed ones for a promotion to replay.
         run: |
@@ -79,8 +76,7 @@ jobs:
             'pty=zig build direct-pty -j2 --summary all -- --output "$STEP_OUTPUT" --jobs 2' \
             'ghostty=zig build direct-pty -j2 --summary all -- --output "$STEP_OUTPUT" --jobs 2 --vectors "$PWD/tests/qualification/direct-pty/ghostty.json"' \
             'controls=zig build direct-pty-controls -j2 --summary all -- --output "$STEP_OUTPUT"' \
-            'recovery=zig build input-equivalence -j2 --summary all -- --output "$STEP_OUTPUT"' \
-            'sequence=ulimit -Sn 256; zig build sequence-model -j2 --summary all -- --output "$STEP_OUTPUT"'
+            'recovery=zig build input-equivalence -j2 --summary all -- --output "$STEP_OUTPUT"'
       - name: Bisect the promotion batch with each failed step
         if: ${{ failure() && inputs.batch-base }}
         timeout-minutes: 240
@@ -112,7 +108,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [test, test-logic, sequence-model]
+        target: [test, test-logic]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

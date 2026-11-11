@@ -118,10 +118,10 @@ FIXTURES = {
     "installer-integration": ((I + "installer_integration.py",), (),
                               ("src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig")),
     "upgrade-integration": ((I + "upgrade_integration.py",), (),
-                            ("src/upgrade.zig", "src/upgrade_process.zig", "src/UpgradePanel.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig",
+                            ("src/upgrade.zig", "src/upgrade_process.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig",
                              "src/HostLifecycle.zig", "src/Installation.zig")),
     "terminal-restoration-integration": ((I + "terminal_restoration_integration.py",), ("src/terminal_notice_test.zig",),
-                                         ("src/SessionFrontend.zig", "src/SessionTerminal.zig", "src/TerminalEditor.zig")),
+                                         ("src/SessionFrontend.zig", "src/TerminalApp.zig", "src/TerminalEditor.zig")),
     "canonical-failure-integration": ((I + "canonical_failure_integration.py",), (),
                                       (CALLER, "src/SessionFrontend.zig", "src/failure_class.zig", "src/model_adapter.zig")),
     "overview-integration": ((I + "overview_integration.py", I + "overview_fixture.py", I + "overview_groups_cases.py", I + "overview_counts_cases.py",
@@ -277,7 +277,7 @@ CLI_GRAMMAR = ("src/cli_grammar.zig", "src/cli_option_names.zig", "src/serve_gra
 # The upgrade fixture is standalone, including when a composed gate is selected.
 UPGRADE_PATHS = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
                  "src/upgrade_process.zig", "src/HostLifecycle.zig", "src/host_identity.zig",
-                 "src/host_identity.c", "src/UpgradePanel.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig", "src/stderr.zig", "src/host_launch.c",
+                 "src/host_identity.c", "src/UpgradeJob.zig", "src/upgrade_status.zig", "src/stderr.zig", "src/host_launch.c",
                  "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/client.zig", "src/slash_commands.zig",
                  "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
                  "tests/integration/upgrade_integration.py", "release/*", "install.sh", "build.zig")
@@ -378,7 +378,7 @@ CONTENT_RULES = {
 }
 
 # Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
-RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py")
+RENDERER_HARNESSES = ("tests/integration/input_equivalence.py",)
 
 # What the import graph cannot see: inputs no literal import names (C
 # sources, generators, non-Zig consumers) and owners whose checks a test
@@ -396,8 +396,6 @@ RULES = (
     (("src/model_list.zig",), ("codex-h2-integration",), ("codex-h2-integration",),
      "Provider model lists: the Host's fetch and the wire reply follow"),
     (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the nonblocking renderer contracts run them"),
-    (("src/session_sequence_model_test.zig",), ("test-logic",), ("test-logic",),
-     "Sequence-model oracle: no gate compiles it; nonblocking renderer contracts run it"),
     (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
      "The wire contract: openapi.json must equal what the wire types emit"),
     (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
