@@ -2642,13 +2642,13 @@ fn showTool(self: *Self, request: ToolFolds.Request) !bool {
 fn setToolOpen(self: *Self, reference: tool_fold.Reference, rows: anytype, open: bool) !bool {
     const screen = self.screen;
     const document = if (screen.view == .transcript) &screen.browsing else &screen.live;
-    const held = try document.checkToolOpen(reference, rows, open);
+    const held = try document.checkToolOpen(reference, rows, open, if (screen.view == .transcript) .newest else .oldest);
     if (open and !held) return false;
-    _ = try screen.live.checkToolOpen(reference, rows, open);
-    if (!open or screen.view == .transcript) _ = try screen.browsing.checkToolOpen(reference, rows, open);
+    _ = try screen.live.checkToolOpen(reference, rows, open, .oldest);
+    if (!open or screen.view == .transcript) _ = try screen.browsing.checkToolOpen(reference, rows, open, .newest);
     // The live copy and an existing transcript agree for each shared row.
     // Neither inspection pages nor hidden outputs have a separate cache.
-    if (try screen.live.setToolOpen(reference, rows, open)) |edit| {
+    if (try screen.live.setToolOpen(reference, rows, open, .oldest)) |edit| {
         for (self.live.marks.items[0..self.live.marks.count]) |*mark| mark.offset = edit.map(mark.offset);
         for (self.live.echoes.opening[0..self.live.echoes.opening_count]) |*echo| {
             echo.output = edit.map(echo.output);
@@ -2660,7 +2660,15 @@ fn setToolOpen(self: *Self, reference: tool_fold.Reference, rows: anytype, open:
         }
         if (self.live.echoes.dropped) |*span| span.end = edit.map(span.end);
     }
-    if (!open or screen.view == .transcript) _ = try screen.browsing.setToolOpen(reference, rows, open);
+    if (!open or screen.view == .transcript) {
+        const before = screen.browsing.collapsed(0, screen.browsing.text().len).count;
+        if (try screen.browsing.setToolOpen(reference, rows, open, .newest)) |edit| if (edit.trimmed) {
+            // As when an older page arrives: the transcript no longer ends
+            // where live output continues, and its newest blocks left.
+            screen.newer_trimmed = true;
+            self.transcript.blocks.dropNewest(before - screen.browsing.collapsed(0, screen.browsing.text().len).count);
+        };
+    }
     self.dirty = true;
     return held;
 }
@@ -6135,14 +6143,17 @@ test "fold read settlement covers success failure cancellation supersession inse
         screen.live.clear();
         try Helpers.append(&screen.live, reference);
         if (case == .refused) {
-            // The live copy could grow, the browsed copy cannot. Preflight
-            // must refuse before inserting output into either one.
-            screen.browsing = screen.live;
+            // The live copy could grow. The browsed copy is full up to this
+            // row, with nothing newer to drop. Preflight must refuse before
+            // inserting output into either one.
             screen.view = .transcript;
-            const filler = try std.testing.allocator.alloc(u8, viewport.capacity - screen.browsing.length);
+            const filler = try std.testing.allocator.alloc(u8, viewport.capacity - screen.live.length);
             defer std.testing.allocator.free(filler);
             @memset(filler, 'x');
+            filler[filler.len - 1] = '\n';
+            screen.browsing.clear();
             try screen.browsing.append(filler);
+            try Helpers.append(&screen.browsing, reference);
         }
         try std.testing.expectEqual(ToolFolds.State.closed, self.tools.state(reference));
         try std.testing.expect(!screen.live.toolIsOpen(screen.live.findTool(reference).?));
