@@ -22,6 +22,7 @@ const cli_args = @import("cli_args.zig");
 const configure_input = @import("configure_input.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
+const HostStartupWait = @import("HostStartupWait.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
@@ -858,6 +859,7 @@ const HostLaunchResult = struct {
     warning: ?Overview.HostLaunch.Warning = null,
     startup_bytes: [max_startup_bytes]u8 = undefined,
     startup_len: usize = 0,
+    wait: ?HostStartupWait = null,
 
     const max_startup_bytes = 8192;
     const Cause = Overview.HostLaunch.Failure;
@@ -887,6 +889,24 @@ const HostLaunchResult = struct {
     }
 };
 
+/// Progress synchronously borrows the owned startup transcript; it must not
+/// retain the bytes. The adapter alone chooses whether or where to show them.
+const HostLaunchProgress = struct {
+    context: *anyopaque,
+    report: *const fn (*anyopaque, []const u8) void,
+};
+
+const TerminalHostProgress = struct {
+    shown: usize = 0,
+
+    fn report(raw: *anyopaque, startup: []const u8) void {
+        const self: *TerminalHostProgress = @ptrCast(@alignCast(raw));
+        if (self.shown != 0) return;
+        self.shown = HostStartupWait.shownWhileStarting(startup);
+        if (self.shown != 0) _ = stderr.write(startup[0..self.shown]);
+    }
+};
+
 /// Only these native effects vary in owner-domain tests. No output channel
 /// belongs to the launch operation; every caller receives the same value.
 const HostLaunchOps = struct {
@@ -894,7 +914,7 @@ const HostLaunchOps = struct {
     observe: *const fn (?*anyopaque, std.Io, *const platform.Paths, ?i128) protocol_reply.HostStatus = nativeObserve,
     launch: *const fn (?*anyopaque, [*:0]const u8, [*:null]const ?[*:0]const u8, usize, *c_int) c_int = nativeLaunch,
     read: *const fn (?*anyopaque, c_int, []u8) isize = nativeRead,
-    now: *const fn (?*anyopaque, std.Io) i128 = nativeNow,
+    now: *const fn (?*anyopaque, std.Io) i96 = nativeNow,
     pause: *const fn (?*anyopaque, std.Io, u64) anyerror!void = nativePause,
 
     fn nativeObserve(_: ?*anyopaque, io: std.Io, paths: *const platform.Paths, until: ?i128) protocol_reply.HostStatus {
@@ -906,7 +926,7 @@ const HostLaunchOps = struct {
     fn nativeRead(_: ?*anyopaque, fd: c_int, bytes: []u8) isize {
         return std.c.read(fd, bytes.ptr, bytes.len);
     }
-    fn nativeNow(_: ?*anyopaque, io: std.Io) i128 {
+    fn nativeNow(_: ?*anyopaque, io: std.Io) i96 {
         return std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
     }
     fn nativePause(_: ?*anyopaque, io: std.Io, ns: u64) !void {
@@ -921,7 +941,7 @@ fn startOverviewHost(init: std.process.Init, selected: []const u8) Overview.Host
 }
 
 fn startOverviewHostUsing(init: std.process.Init, selected: []const u8, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps) Overview.HostLaunch {
-    const result = startHost(init, selected, null, readiness, ops);
+    const result = startHost(init, selected, null, readiness, ops, null);
     return result.summary();
 }
 
@@ -930,8 +950,9 @@ fn startHostForTerminal(init: std.process.Init, selected: []const u8, quiet: boo
 }
 
 fn startHostForTerminalUsing(init: std.process.Init, selected: []const u8, quiet: bool, capacity: ?usize, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps) !void {
-    const result = startHost(init, selected, capacity, readiness, ops);
-    try reportHostLaunch(init.io, &result, quiet, capacity);
+    var progress: TerminalHostProgress = .{};
+    const result = startHost(init, selected, capacity, readiness, ops, .{ .context = &progress, .report = TerminalHostProgress.report });
+    try reportHostLaunch(init.io, &result, quiet, capacity, progress.shown);
 }
 
 fn launchFailure(result: *HostLaunchResult, kind: HostLaunchResult.Cause.Kind, err: anyerror, store: ?[]const u8) HostLaunchResult {
@@ -947,7 +968,7 @@ fn launchReady(result: *HostLaunchResult, ready: protocol_reply.HostInfoFacts, p
     return result.*;
 }
 
-fn startHost(init: std.process.Init, selected: []const u8, capacity: ?usize, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps) HostLaunchResult {
+fn startHost(init: std.process.Init, selected: []const u8, capacity: ?usize, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps, progress: ?HostLaunchProgress) HostLaunchResult {
     var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
     const io = init.io;
     const selection = platform.resolveClientSelection(selected);
@@ -1003,10 +1024,14 @@ fn startHost(init: std.process.Init, selected: []const u8, capacity: ?usize, rea
         result.outcome.failed.os_error = launched;
         return result;
     }
-    const until = ops.now(ops.context, io) + 10 * std.time.ns_per_s;
-    while (ops.now(ops.context, io) < until) {
+    result.wait = .init(ops.now(ops.context, io));
+    while (!result.wait.?.expired(ops.now(ops.context, io))) {
         const count = ops.read(ops.context, startup_read, result.startup_bytes[result.startup_len..]);
         if (count > 0) result.startup_len += @intCast(count);
+        const now = ops.now(ops.context, io);
+        result.wait.?.observe(result.startup(), now);
+        const until: i128 = result.wait.?.until(now);
+        if (progress) |hook| hook.report(hook.context, result.startup());
         if ((count == 0 or result.startup_len == HostLaunchResult.max_startup_bytes) and
             std.mem.indexOf(u8, result.startup(), "[store_locked]\n") == null)
         {
@@ -1022,6 +1047,7 @@ fn startHost(init: std.process.Init, selected: []const u8, capacity: ?usize, rea
                 // Collect any write racing readiness, without waiting for it.
                 const final_count = ops.read(ops.context, startup_read, result.startup_bytes[result.startup_len..]);
                 if (final_count > 0) result.startup_len += @intCast(final_count);
+                result.wait.?.observe(result.startup(), ops.now(ops.context, io));
                 return launchReady(&result, ready, &paths);
             },
             .incompatible => return launchFailure(&result, .incompatible, error.IncompatibleHost, paths.store.slice()),
@@ -1034,13 +1060,14 @@ fn startHost(init: std.process.Init, selected: []const u8, capacity: ?usize, rea
     return launchFailure(&result, .readiness_timeout, error.HostReadinessUnconfirmed, paths.store.slice());
 }
 
-/// The terminal adapter renders the value only after the launch has settled.
-/// Screen callers receive that same value, with no terminal side channel.
-fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, capacity: ?usize) !void {
+/// The terminal adapter renders the settled value without repeating the
+/// migration announcement its progress hook already showed. Screen callers
+/// receive the same value without installing an output hook.
+fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, capacity: ?usize, shown: usize) !void {
     if (result.warning != null) stderr.diagnostic(invalid_base_url ++ "; this Host starts without OpenAI.\n", .{});
     switch (result.outcome) {
         .ready => |*ready| {
-            if (result.startup_len != 0 and std.mem.indexOf(u8, result.startup(), "[store_locked]\n") == null) _ = stderr.write(result.startup());
+            if (result.startup_len != 0 and std.mem.indexOf(u8, result.startup(), "[store_locked]\n") == null) _ = stderr.write(result.startup()[shown..]);
             try reportStartedHost(io, ready, quiet, capacity);
         },
         .failed => |*failure| {
@@ -1062,12 +1089,12 @@ fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, ca
                     try path_text.finish(&header);
                     try header.writeAll(":\n");
                     _ = stderr.write(header.buffered());
-                    _ = stderr.write(result.startup());
+                    _ = stderr.write(result.startup()[shown..]);
                     if (failure.cause.kind == .child_closed) stderr.diagnostic("Child closed its startup channel before readiness; exit status unavailable.\n", .{});
                     if (failure.cause.kind == .startup_full) stderr.diagnostic("Startup output reached 8 KiB; readiness and exit status remain unconfirmed.\n", .{});
                 },
                 .readiness_timeout => {
-                    if (result.startup_len != 0) _ = stderr.write(result.startup());
+                    if (result.startup_len != 0) _ = stderr.write(result.startup()[shown..]);
                     stderr.diagnostic("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
                 },
                 .incompatible => stderr.diagnostic("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host pause (rui host stop in older versions), then run this rui again; saved work is unchanged.\n", .{}),
@@ -4139,17 +4166,25 @@ test "fresh instruction validation renders both source and stdin conflict refusa
 }
 
 const LaunchFixture = struct {
-    const Scenario = enum { success, os_error, refusal, timeout, invalid_url, missing_key, already_ready, closed, full, identity, competitor, incompatible, access, interrupted };
+    const Scenario = enum { success, os_error, refusal, timeout, invalid_url, missing_key, already_ready, closed, full, identity, competitor, incompatible, access, interrupted, migration_success, migration_timeout, migration_both, migration_eof, migration_final };
     scenario: Scenario,
     launches: usize = 0,
     reads: usize = 0,
     pauses: usize = 0,
-    clock: i128 = 0,
+    clock: i96 = 0,
     startup_fd: c_int = -1,
     openai: bool = false,
     codex: bool = false,
     capacity: ?usize = null,
     deadline_valid: bool = true,
+    migrated_deadline: ?i96 = null,
+    migration_announced: bool = false,
+    output: ?std.Io.File = null,
+    terminal: bool = false,
+    live_checks: usize = 0,
+    live_output_valid: bool = true,
+    const migrating = "rui: backing up and migrating " ++ HostStartupWait.migrating_tag;
+    const migrated = "rui: migrated " ++ HostStartupWait.migrated_tag;
     const refusal = "Store needs a compatible Rui: observed schema 200, supported schema 199. [store_format_unsupported]\n";
     const identity = "Store identity differs. [store_identity_mismatch]\n";
     const competitor = "Another Host owns this Store. [store_locked]\n";
@@ -4163,11 +4198,16 @@ const LaunchFixture = struct {
     }
     fn observe(raw: ?*anyopaque, _: std.Io, paths: *const platform.Paths, until: ?i128) protocol_reply.HostStatus {
         const self = cast(raw);
-        if (until) |deadline| self.deadline_valid = self.deadline_valid and deadline == 10 * std.time.ns_per_s;
+        if (until) |deadline| {
+            const expected = self.migrated_deadline orelse if (self.migration_announced) self.clock - std.time.ns_per_s + HostStartupWait.readiness_ns else HostStartupWait.readiness_ns;
+            self.deadline_valid = self.deadline_valid and deadline == expected;
+        }
         if (self.scenario == .incompatible) return .incompatible;
         if (self.scenario == .access) return .access_failure;
         const ready = self.scenario == .already_ready or (self.launches != 0 and switch (self.scenario) {
-            .success, .invalid_url, .missing_key, .competitor => true,
+            .success, .invalid_url, .missing_key, .competitor, .migration_final => true,
+            .migration_success => self.reads >= 21,
+            .migration_both => self.reads >= 2,
             else => false,
         });
         if (!ready) return .unavailable;
@@ -4193,6 +4233,27 @@ const LaunchFixture = struct {
     fn read(raw: ?*anyopaque, _: c_int, bytes: []u8) isize {
         const self = cast(raw);
         self.reads += 1;
+        switch (self.scenario) {
+            .migration_success, .migration_timeout, .migration_both, .migration_eof, .migration_final => {
+                const text: []const u8 = switch (self.scenario) {
+                    .migration_success, .migration_timeout => switch (self.reads) {
+                        1 => "rui: backing up and migrating [store_",
+                        2 => "migrating]\n",
+                        20 => migrated,
+                        else => return -1,
+                    },
+                    .migration_both => if (self.reads == 1) migrating ++ migrated else return -1,
+                    .migration_eof => if (self.reads == 1) migrating else return 0,
+                    .migration_final => if (self.reads == 2) migrating else return -1,
+                    else => unreachable,
+                };
+                if (self.scenario != .migration_final) self.migration_announced = self.reads >= (if (self.scenario == .migration_success or self.scenario == .migration_timeout) @as(usize, 2) else 1);
+                if (std.mem.indexOf(u8, text, HostStartupWait.migrated_tag) != null) self.migrated_deadline = self.clock + HostStartupWait.readiness_ns;
+                @memcpy(bytes[0..text.len], text);
+                return @intCast(text.len);
+            },
+            else => {},
+        }
         if (self.scenario == .timeout or self.scenario == .interrupted) return -1; // EAGAIN, not EOF.
         if (self.scenario == .closed) return 0;
         if (self.scenario == .full and self.reads == 1) {
@@ -4213,7 +4274,7 @@ const LaunchFixture = struct {
         @memcpy(bytes[0..length], text[0..length]);
         return @intCast(length);
     }
-    fn now(raw: ?*anyopaque, _: std.Io) i128 {
+    fn now(raw: ?*anyopaque, _: std.Io) i96 {
         const self = cast(raw);
         const at = self.clock;
         self.clock += std.time.ns_per_s;
@@ -4222,6 +4283,12 @@ const LaunchFixture = struct {
     fn pause(raw: ?*anyopaque, _: std.Io, _: u64) !void {
         const self = cast(raw);
         self.pauses += 1;
+        if (self.migration_announced) if (self.output) |file| {
+            var bytes: [8192]u8 = undefined;
+            const length = try file.readPositionalAll(std.testing.io, &bytes, 0);
+            self.live_checks += 1;
+            self.live_output_valid = self.live_output_valid and std.mem.count(u8, bytes[0..length], HostStartupWait.migrating_tag) == @intFromBool(self.terminal);
+        };
         if (self.scenario == .interrupted) return error.Cancelled;
     }
 };
@@ -4230,6 +4297,11 @@ test "Host launch owner returns one result for terminal and screen across its wh
     const Case = struct { scenario: LaunchFixture.Scenario, kind: ?Overview.HostLaunch.Failure.Kind = null, err: ?anyerror = null, words: []const u8 = "", terminal: []const u8 = "", success: bool = false };
     const cases = [_]Case{
         .{ .scenario = .success, .success = true, .terminal = LaunchFixture.note },
+        .{ .scenario = .migration_success, .success = true, .terminal = LaunchFixture.migrating },
+        .{ .scenario = .migration_timeout, .kind = .readiness_timeout, .err = error.HostReadinessUnconfirmed, .words = "readiness timeout", .terminal = LaunchFixture.migrated },
+        .{ .scenario = .migration_both, .success = true, .terminal = LaunchFixture.migrated },
+        .{ .scenario = .migration_eof, .kind = .child_refused, .err = error.HostStartupFailed, .words = "startup refused", .terminal = LaunchFixture.migrating },
+        .{ .scenario = .migration_final, .success = true, .terminal = LaunchFixture.migrating },
         .{ .scenario = .os_error, .kind = .os_launch, .err = error.HostLaunchFailed, .words = "launch failed", .terminal = "OS error 13" },
         .{ .scenario = .refusal, .kind = .child_refused, .err = error.HostStartupFailed, .words = "startup refused", .terminal = LaunchFixture.refusal },
         .{ .scenario = .timeout, .kind = .readiness_timeout, .err = error.HostReadinessUnconfirmed, .words = "readiness timeout", .terminal = "readiness unconfirmed after 10 seconds" },
@@ -4270,6 +4342,8 @@ test "Host launch owner returns one result for terminal and screen across its wh
         defer stdout.close(io);
         const stderr_file = try tmp.dir.createFile(io, "stderr", .{ .read = true });
         defer stderr_file.close(io);
+        fixture.output = stderr_file;
+        fixture.terminal = surface == .terminal or surface == .quiet;
         var summary: ?Overview.HostLaunch = null;
         var terminal_error: ?anyerror = null;
         {
@@ -4285,8 +4359,15 @@ test "Host launch owner returns one result for terminal and screen across its wh
             defer std.debug.assert(std.c.dup2(saved_stderr, 2) == 2);
             switch (surface) {
                 .owner => {
-                    const result = startHost(init, store, 9, &readiness, fixture.ops());
+                    const result = startHost(init, store, 9, &readiness, fixture.ops(), null);
                     summary = result.summary();
+                    if (fixture.migrated_deadline != null) {
+                        try std.testing.expect(result.wait.?.phase == .migrated);
+                        try std.testing.expectEqual(fixture.migrated_deadline.?, result.wait.?.phase.migrated);
+                        try std.testing.expect(std.mem.indexOf(u8, result.startup(), HostStartupWait.migrating_tag) != null);
+                        try std.testing.expect(std.mem.indexOf(u8, result.startup(), HostStartupWait.migrated_tag) != null);
+                    }
+                    if (case.scenario == .migration_eof or case.scenario == .migration_final) try std.testing.expect(result.wait.?.phase == .migrating);
                     if (case.scenario == .full) try std.testing.expectEqual(@as(usize, 8192), result.startup_len);
                     if (case.scenario == .refusal) try std.testing.expectEqualStrings(LaunchFixture.refusal, result.startup());
                     if (case.scenario == .success) try std.testing.expectEqualStrings(LaunchFixture.note, result.startup());
@@ -4298,6 +4379,10 @@ test "Host launch owner returns one result for terminal and screen across its wh
             }
         }
         try std.testing.expect(fixture.deadline_valid);
+        try std.testing.expectEqual(true, fixture.live_output_valid);
+        if (case.scenario == .migration_success or case.scenario == .migration_timeout or case.scenario == .migration_both) try std.testing.expect(fixture.live_checks > 0);
+        if (case.scenario == .migration_success or case.scenario == .migration_timeout) try std.testing.expect(fixture.clock > HostStartupWait.readiness_ns);
+        if (case.scenario == .migration_timeout) try std.testing.expect(fixture.clock >= fixture.migrated_deadline.?);
         const launches: usize = switch (case.scenario) {
             .already_ready, .incompatible, .access => 0,
             else => 1,
@@ -4323,6 +4408,8 @@ test "Host launch owner returns one result for terminal and screen across its wh
                 try std.testing.expect(std.mem.indexOf(u8, text, "running Host keeps active capacity 4") != null);
             }
             if (case.terminal.len != 0) try std.testing.expect(std.mem.indexOf(u8, text, case.terminal) != null);
+            if (fixture.migration_announced or case.scenario == .migration_final) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, HostStartupWait.migrating_tag));
+            if (fixture.migrated_deadline != null) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, HostStartupWait.migrated_tag));
             if (case.scenario == .competitor) try std.testing.expect(std.mem.indexOf(u8, text, "store_locked") == null);
             if (case.scenario == .already_ready or case.scenario == .missing_key) try std.testing.expect(std.mem.indexOf(u8, text, invalid_base_url) == null);
         } else {

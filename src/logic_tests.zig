@@ -44,9 +44,11 @@ const cores = .{
     .{ "draft_layout.zig", @import("draft_layout.zig") },
     .{ "environment.zig", @import("environment.zig") },
     .{ "failure_class.zig", @import("failure_class.zig") },
+    .{ "feed_reads.zig", @import("feed_reads.zig") },
     .{ "find_tools_words.zig", @import("find_tools_words.zig") },
     .{ "home_path.zig", @import("home_path.zig") },
     .{ "host_reply.zig", @import("host_reply.zig") },
+    .{ "HostStartupWait.zig", @import("HostStartupWait.zig") },
     .{ "http1/Parser.zig", @import("http1/Parser.zig") },
     .{ "http1/request.zig", @import("http1/request.zig") },
     .{ "idempotency_key.zig", @import("idempotency_key.zig") },
@@ -131,6 +133,7 @@ const cores = .{
     .{ "turn_policy.zig", @import("turn_policy.zig") },
     .{ "utf8_validation.zig", @import("utf8_validation.zig") },
     .{ "ViewportPosition.zig", @import("ViewportPosition.zig") },
+    .{ "widgets/Feed.zig", @import("widgets/Feed.zig") },
     .{ "wire_field.zig", @import("wire_field.zig") },
     .{ "wire_version.zig", @import("wire_version.zig") },
     .{ "word_search.zig", @import("word_search.zig") },
@@ -154,6 +157,7 @@ test {
     _ = @import("ConversationViewport.zig");
     _ = @import("transcript_selection.zig");
     _ = @import("session_follow.zig");
+    _ = @import("session_drafts.zig");
     _ = @import("SessionInput.zig");
     _ = @import("TerminalEditor.zig");
     _ = @import("tools.zig");

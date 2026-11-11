@@ -1492,26 +1492,9 @@ noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInpu
             return .admitted;
         },
     }
-    var offer: SessionEnvironments.Offer = .{};
-    defer offer.deinit(host.allocator);
-    const Install = struct {
-        environments: *SessionEnvironments,
-        offer: *SessionEnvironments.Offer,
-
-        fn call(context: *anyopaque, admission: store_module.Store.MessageAdmission) void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.environments.offer(admission.session, .{ .origin = .peer, .admission = admission.admission_id }, self.offer);
-        }
-    };
-    var install: Install = undefined;
-    const committed: ?store_module.Store.MessageCommitted = if (host.environments) |environments| committed: {
-        const base = environments.copy(input.session.slice(), arena) catch return .retry_later;
-        const value = base orelse break :committed null;
-        offer = SessionEnvironments.Offer.init(host.allocator, value.len) catch return .retry_later;
-        @memcpy(offer.room()[0..value.len], value);
-        install = .{ .environments = environments, .offer = &offer };
-        break :committed .{ .context = &install, .call = Install.call };
-    } else null;
+    var inheritance = @import("child_environment.zig").Inheritance.init(host.environments, input.session.slice(), host.allocator, arena) catch return .retry_later;
+    defer inheritance.deinit(host.allocator);
+    const committed = inheritance.messageCallback();
     const parent_skills = host.store.readSkills(arena, input.session.slice()) catch return .retry_later;
     // The task binds against the catalog the new Session starts with.
     const prepared = @import("session_skills.zig").prepareCreation(arena, host.allocator, host.io, parent_skills.workspace.slice(), host.bash_facts.home, .{ .bytes = start.task }) catch return .retry_later;
@@ -1861,7 +1844,9 @@ fn admitNewAttempt(
     preparation: *model_adapter.Preparation,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
-    var admission = host.store.admitModelAttempt(kind, host.hooks.storeFaults(.attempt_admission)) catch |err| {
+    // The slot's preparation is free (`modelPreparationOpen`), so the
+    // admission starts the request in it: the settings ride its commit.
+    var admission = host.store.admitModelAttemptInto(kind, host.hooks.storeFaults(.attempt_admission), .{ .view = &preparation.view, .settings = &preparation.settings }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "Attempt admission", err);
         return .retry_later;
@@ -1869,7 +1854,7 @@ fn admitNewAttempt(
         host.custody.releaseUnused(token) catch unreachable;
         return .no_work;
     };
-    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation);
+    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation, admission.request_started);
 }
 
 fn admitRetryAttempt(
@@ -1892,7 +1877,7 @@ fn admitRetryAttempt(
         scanned.* = true;
         return .no_work;
     };
-    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation);
+    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation, false);
 }
 
 fn beginAdmittedAttempt(
@@ -1901,15 +1886,19 @@ fn beginAdmittedAttempt(
     token: execution.CustodyToken,
     permit: *store_module.DispatchPermit,
     preparation: *model_adapter.Preparation,
+    /// The admission already opened the preparation's view and read its
+    /// settings (`Store.admitModelAttemptInto`).
+    started: bool,
 ) AdmissionProgress {
     const binding = attachSlot(host, slot, token, permit) catch |err| {
+        if (started) preparation.view.close();
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "custody attachment", err);
         return .admitted;
     };
     // The view opens where it lives for the whole preparation; it never
     // moves.
-    host.store.openHistoricalView(binding, &preparation.view);
+    if (!started) host.store.openHistoricalView(binding, &preparation.view);
     var retained_scratch: ?named_scratch.Owner = null;
     preparation.init(
         host.io,

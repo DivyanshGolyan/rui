@@ -2725,6 +2725,11 @@
                 "type": "null"
               }
             ]
+          },
+          "parent": {
+            "type": "string",
+            "maxLength": 6,
+            "x-rui-max-bytes": 6
           }
         },
         "required": [],
@@ -2966,6 +2971,7 @@
                       "invalid_output_reservation",
                       "unsupported_reasoning_effort",
                       "unknown_tool",
+                      "mcp_server_unavailable",
                       "provider_tool_missing",
                       "loaded_tools_not_in_tools",
                       "loaded_tools_unreachable",
@@ -2973,6 +2979,11 @@
                       "incomplete_initial_configuration",
                       "unknown_preset",
                       "preset_on_update",
+                      "parent_on_update",
+                      "parent_provider_forbidden",
+                      "parent_workspace_forbidden",
+                      "tools_not_in_parent",
+                      "permission_mode_wider_than_parent",
                       "invalid_workspace",
                       "workspace_is_immutable",
                       "provider_is_immutable",
@@ -2980,13 +2991,26 @@
                       "revision_exhausted",
                       "skills_unavailable"
                     ]
+                  },
+                  "message": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 768,
+                        "x-rui-max-bytes": 768
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
                   "status",
                   "replayed",
                   "session",
-                  "code"
+                  "code",
+                  "message"
                 ],
                 "additionalProperties": false
               },
@@ -5073,6 +5097,7 @@
                       "invalid_output_reservation",
                       "unsupported_reasoning_effort",
                       "unknown_tool",
+                      "mcp_server_unavailable",
                       "provider_tool_missing",
                       "loaded_tools_not_in_tools",
                       "loaded_tools_unreachable",
@@ -5080,6 +5105,11 @@
                       "incomplete_initial_configuration",
                       "unknown_preset",
                       "preset_on_update",
+                      "parent_on_update",
+                      "parent_provider_forbidden",
+                      "parent_workspace_forbidden",
+                      "tools_not_in_parent",
+                      "permission_mode_wider_than_parent",
                       "invalid_workspace",
                       "workspace_is_immutable",
                       "provider_is_immutable",
@@ -5090,13 +5120,26 @@
                       "skill_file_too_large",
                       "skill_text_invalid"
                     ]
+                  },
+                  "message": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 768,
+                        "x-rui-max-bytes": 768
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
                   "status",
                   "replayed",
                   "session",
-                  "code"
+                  "code",
+                  "message"
                 ],
                 "additionalProperties": false
               },

@@ -414,10 +414,10 @@ fn configurationShape(comptime name: []const u8) type {
 }
 
 fn configurationMembers(comptime index: usize) type {
-    if (index == session_settings.entries.len) return struct {
+    if (index == session_settings.spec_entries.len) return struct {
         const shape = .{"}"};
     };
-    const entry = session_settings.entries[index];
+    const entry = session_settings.spec_entries[index];
     const value = switch (entry.kind) {
         .text, .choice => |capacity| Plain(Hole{ .string = capacity }, entry.nullable),
         .decimal_policy => Plain(TokenCount, entry.nullable),
@@ -1421,6 +1421,21 @@ test "replies the Host renders conform to their schemas" {
     };
     const a = arena.allocator();
     var out: std.Io.Writer.Allocating = .init(a);
+
+    // Render the real request refusal, including its advisory server names.
+    const reply = @import("command_reply.zig");
+    const host_reply = @import("host_reply.zig");
+    var configured: reply.ConfigureReply = .{ .rejected = .{ .replayed = false, .code = .mcp_server_unavailable } };
+    var catalog = @import("tools.zig").built_in;
+    catalog.configured_servers = &.{"notes"};
+    configured.rejected.message = catalog.missingTool("lookup");
+    try host_reply.renderConfigureReply(.{ .writer = &out.writer }, "", configured);
+    try Case.check(schemas, "ConfigureReply", out.written(), a);
+    out.clearRetainingCapacity();
+    const message: reply.MessageReply = .{ .rejected = .{ .replayed = false, .code = .mcp_server_unavailable, .message = configured.rejected.message, .content = .{ .length = 4, .digest = protocol.contentDigest("task") } } };
+    try host_reply.renderMessageReply(.{ .writer = &out.writer }, "", message);
+    try Case.check(schemas, "MessageReply", out.written(), a);
+    out.clearRetainingCapacity();
 
     // The model list is written in code, not as a shape.
     const ids = "gpt-6.1-sol\nmy\"model\n";
