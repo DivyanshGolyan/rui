@@ -15156,8 +15156,30 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
                 const unchanged = try storage.inspectSessionForTesting(parent.slice());
                 try expectToolSetNames(&storage, unchanged.tool_set_id, parent_names);
 
+                // Parent creation shares the catalog refusal before narrowing:
+                // never invent ownership for a name absent from every record.
+                var child: wire_request.ConfigureCommand = .{};
+                try child.key.set("mcp-missing-parent-create");
+                child.configuration = try testingAgentSpec(&.{"lookup"}, "ask");
+                child.configuration.parent.state = .value;
+                try child.configuration.parent.value.set(parent.slice());
+                try check(try storage.configure(&child, .{}), unavailable, detail, false);
+                try check(try storage.configure(&child, .{}), unavailable, detail, true);
+                var parent_message = message;
+                try parent_message.key.set("mcp-missing-parent-message");
+                parent_message.configuration = child.configuration;
+                try check(storage.submitMessageWithModel(&parent_message, null, .{}), unavailable, detail, false);
+                try check(storage.submitMessageWithModel(&parent_message, null, .{}), unavailable, detail, true);
+
                 // A known saved copy is admitted by every spec entry point.
                 if (mode == 3) {
+                    try child.key.set("mcp-kept-parent-create");
+                    child.configuration.tools = try .of(&.{"kept"});
+                    const created = try storage.configure(&child, .{});
+                    try std.testing.expect(created == .accepted);
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND parent_ref=?2", .{ created.accepted.session.slice(), parent.slice() }));
+                    try parent_message.key.set("mcp-kept-parent-message");
+                    parent_message.configuration = child.configuration;
                     try create.key.set("mcp-kept-create");
                     create.configuration.tools = try .of(&.{"kept"});
                     try std.testing.expect(try storage.configure(&create, .{}) == .accepted);
@@ -15175,6 +15197,7 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
                 const result = try storage.startAgent(action.binding, parent.slice(), "read", true, &spec, null, .{});
                 if (mode == 3) {
                     try std.testing.expectEqual(command_domain.AgentStart.started, result);
+                    try std.testing.expect(storage.submitMessageWithModel(&parent_message, null, .{}) == .accepted);
                     try message.key.set("mcp-kept-message");
                     message.configuration.?.tools = try .of(&.{"kept"});
                     try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
@@ -15188,6 +15211,132 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
                 }
                 try std.testing.expect(!storage.isFenced());
             }
+        }
+    }.run);
+}
+
+test "configure parent inherits binding without a task, uses the create round budget and delivers child endings" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var parent_spec = try completeConfiguration("parent-create-owner", "", workspace, "model-a");
+            parent_spec.configuration.tools = try .of(&.{ "bash", "start_agent" });
+            const parent = (try storage.configure(&parent_spec, .{})).accepted.session;
+            var child: wire_request.ConfigureCommand = .{};
+            try child.key.set("parent-create-child");
+            child.configuration = try testingAgentSpec(&.{"bash"}, "ask");
+            child.configuration.parent.state = .value;
+            try child.configuration.parent.value.set(parent.slice());
+            var meter: RoundMeter = .{ .storage = &storage };
+            meter.start();
+            const result = try storage.configure(&child, .{});
+            try std.testing.expect(result == .accepted);
+            meter.stop(.configure);
+            if (!case.rerun) {
+                const measured = meter.measured.get(.configure).?;
+                try std.testing.expectEqual(round_budgets.get(.configure), measured.rounds);
+                if (case.engine == .mysql) try std.testing.expectEqual(measured.shape.expected(), measured.shape.queries);
+            }
+            const session = result.accepted.session;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND parent_ref=?2 AND workspace=?3 AND provider='codex'", .{ session.slice(), parent.slice(), workspace }));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{session.slice()}));
+            const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 128 * 1024, .current);
+            defer std.testing.allocator.free(report);
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
+            defer parsed.deinit();
+            try std.testing.expectEqualStrings(parent.slice(), parsed.value.object.get("session").?.object.get("parent").?.string);
+            const replay = try storage.configure(&child, .{});
+            try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+            try std.testing.expectEqualStrings(session.slice(), replay.accepted.session.slice());
+            // The relation participates in idempotency without changing old digests.
+            try child.configuration.parent.value.set("zzzzzz");
+            try std.testing.expect(try storage.configure(&child, .{}) == .conflict);
+            try submitTestMessage(&storage, &tmp, "native-child-task", "native-child-task", session.slice(), "answer");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const item = "{\"type\":\"message\",\"id\":\"native-child-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}";
+            try settleItemsForTesting(&storage, &tmp, model, &.{item}, "hello");
+            const ending = (try storage.nextCoreWork()).?.ending;
+            try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND sender_session_ref=?2", .{ parent.slice(), session.slice() }));
+        }
+    }.run);
+}
+
+test "configure parent refuses every widening field, missing or ended parents and parent on update" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("parent-refuse-owner", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"start_agent"});
+            try create.configuration.permission_mode.value.set("ask");
+            const parent = (try storage.configure(&create, .{})).accepted.session;
+            const Case = enum { tools, permission, provider, workspace, missing, update, ended };
+            for (std.enums.values(Case), 0..) |variant, index| {
+                var child: wire_request.ConfigureCommand = .{};
+                var key_buffer: [64]u8 = undefined;
+                try child.key.set(try std.fmt.bufPrint(&key_buffer, "parent-refuse-{d}", .{index}));
+                child.configuration = try testingAgentSpec(&.{}, "ask");
+                child.configuration.parent.state = .value;
+                try child.configuration.parent.value.set(parent.slice());
+                const expected: protocol.ConfigurationRejection = switch (variant) {
+                    .tools => refusal: {
+                        child.configuration.tools = try .of(&.{"bash"});
+                        break :refusal .tools_not_in_parent;
+                    },
+                    .permission => refusal: {
+                        try child.configuration.permission_mode.value.set("bypass");
+                        break :refusal .permission_mode_wider_than_parent;
+                    },
+                    .provider => refusal: {
+                        child.configuration.provider.state = .value;
+                        try child.configuration.provider.value.set("codex");
+                        break :refusal .parent_provider_forbidden;
+                    },
+                    .workspace => refusal: {
+                        child.configuration.workspace.state = .value;
+                        try child.configuration.workspace.value.set(workspace);
+                        break :refusal .parent_workspace_forbidden;
+                    },
+                    .missing => refusal: {
+                        try child.configuration.parent.value.set("zzzzzz");
+                        break :refusal .unknown_session;
+                    },
+                    .update => refusal: {
+                        child.session = parent;
+                        break :refusal .parent_on_update;
+                    },
+                    .ended => refusal: {
+                        var archive: protocol.SessionArchiveCommand = .{ .archived = true };
+                        try archive.key.set("parent-ended");
+                        try archive.session.set(parent.slice());
+                        try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+                        break :refusal .unknown_session;
+                    },
+                };
+                const result = try storage.configure(&child, .{});
+                try std.testing.expect(result == .rejected);
+                try std.testing.expectEqual(expected, result.rejected.code);
+                const replay = try storage.configure(&child, .{});
+                try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+                try std.testing.expectEqual(expected, replay.rejected.code);
+                if (variant == .tools or variant == .permission or variant == .provider or variant == .workspace) {
+                    const outcome = try storage.commandResult(child.key.slice());
+                    try std.testing.expect(outcome.length > 0);
+                }
+            }
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{parent.slice()}));
         }
     }.run);
 }

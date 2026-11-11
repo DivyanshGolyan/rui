@@ -414,10 +414,10 @@ fn configurationShape(comptime name: []const u8) type {
 }
 
 fn configurationMembers(comptime index: usize) type {
-    if (index == session_settings.entries.len) return struct {
+    if (index == session_settings.spec_entries.len) return struct {
         const shape = .{"}"};
     };
-    const entry = session_settings.entries[index];
+    const entry = session_settings.spec_entries[index];
     const value = switch (entry.kind) {
         .text, .choice => |capacity| Plain(Hole{ .string = capacity }, entry.nullable),
         .decimal_policy => Plain(TokenCount, entry.nullable),

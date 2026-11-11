@@ -22,6 +22,12 @@ pub const Rejection = enum {
     incomplete_initial_configuration,
     unknown_preset,
     preset_on_update,
+    parent_on_update,
+    parent_provider_forbidden,
+    parent_workspace_forbidden,
+    tools_not_in_parent,
+    permission_mode_wider_than_parent,
+
     invalid_workspace,
     workspace_is_immutable,
     provider_is_immutable,

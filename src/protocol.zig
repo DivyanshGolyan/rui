@@ -909,7 +909,7 @@ fn ParserOf(comptime Custody: type) type {
                 const field = try specField(&key, &seen);
                 switch (field) {
                     inline else => |tag| {
-                        const entry = session_settings.entries[@backingInt(tag)];
+                        const entry = session_settings.spec_entries[@backingInt(tag)];
                         if (entry.kind == .content) {
                             // Suspend at the colon, before the first content
                             // byte. Ingress may resume with a quote or null.
@@ -1064,7 +1064,7 @@ fn ParserOf(comptime Custody: type) type {
         }
 
         fn specField(key: *const Bounded(32), seen: *std.enums.EnumSet(std.meta.FieldEnum(Configuration))) !std.meta.FieldEnum(Configuration) {
-            inline for (session_settings.entries, 0..) |entry, index| {
+            inline for (session_settings.spec_entries, 0..) |entry, index| {
                 if (key.eql(entry.spec)) {
                     const field: std.meta.FieldEnum(Configuration) = @fromBackingInt(@intCast(index));
                     if (seen.contains(field)) return error.UnexpectedField;
@@ -1085,7 +1085,7 @@ fn ParserOf(comptime Custody: type) type {
                 const field = try specField(&self.spec_field, &seen);
                 switch (field) {
                     inline else => |tag| {
-                        const entry = session_settings.entries[@backingInt(tag)];
+                        const entry = session_settings.spec_entries[@backingInt(tag)];
                         const name = entry.field;
                         const value = &@field(out, name);
                         if (try self.readNull()) {
@@ -1135,7 +1135,7 @@ fn ParserOf(comptime Custody: type) type {
         }
 
         fn validateCreatingConfiguration(configuration: *const Configuration) !void {
-            if (missingCreatingSetting(configuration, false) != null) return error.MissingField;
+            if (missingCreatingSetting(configuration, configuration.parent.state == .value) != null) return error.MissingField;
         }
 
         fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
@@ -3306,5 +3306,27 @@ test "Session settings preserve omitted and nullable wire states for every field
                 try std.testing.expectEqual(if (is_null) FieldState.explicit_null else FieldState.omitted, @field(request.configure.configuration, name).state);
             }
         }
+    }
+}
+
+test "parent spec relation parses creation without a workspace and rejects null or duplicate fields" {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"configuration\":{";
+    const required = "\"model\":\"model-a\",\"effort\":null,\"compactAt\":1000,\"tools\":[\"bash\"],\"permissionMode\":\"ask\"";
+    inline for (.{ "\"parent\":\"k7m2qx\"," ++ required, required ++ ",\"parent\":\"k7m2qx\"" }) |members| {
+        var source: MetadataSource = .{ .input = head ++ members ++ "}}" };
+        var parser: Tested.Parser = .{ .source = &source };
+        const request = try parseForTest(&parser);
+        try std.testing.expectEqualStrings("k7m2qx", request.configure.configuration.parent.value.slice());
+        try std.testing.expectEqual(FieldState.omitted, request.configure.configuration.workspace.state);
+        try std.testing.expectEqual(FieldState.omitted, request.configure.configuration.provider.state);
+    }
+    inline for (.{
+        .{ required, error.MissingField },
+        .{ required ++ ",\"parent\":null", error.InvalidFieldState },
+        .{ required ++ ",\"parent\":\"k7m2qx\",\"parent\":\"k7m2qx\"", error.UnexpectedField },
+    }) |case| {
+        var source: MetadataSource = .{ .input = head ++ case[0] ++ "}}" };
+        var parser: Tested.Parser = .{ .source = &source };
+        try std.testing.expectError(case[1], parseForTest(&parser));
     }
 }
