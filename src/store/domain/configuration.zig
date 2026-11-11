@@ -17,6 +17,7 @@ const provider_name = @import("../../provider_name.zig");
 const session_id = @import("../../session_id.zig");
 const content_custody = @import("../../content_custody.zig");
 const model_catalog = @import("../../model_catalog.zig");
+const model_facts = @import("model_facts.zig");
 const model_capability = @import("../../model_capability.zig");
 const product_defaults = @import("../../product_defaults.zig");
 const tool_catalog = @import("../../tool_record.zig");
@@ -192,6 +193,7 @@ fn tokenCount(text: []const u8, allow_zero: bool) !u64 {
 }
 
 pub fn configurationBeforeWorkspace(
+    selected_facts: []const model_catalog.Entry,
     catalog: *const tool_catalog.Catalog,
     current: ?*const CurrentConfiguration,
     requested: *const content_custody.Configuration,
@@ -228,7 +230,7 @@ pub fn configurationBeforeWorkspace(
     if (requested.tools.state == .value) if (toolsRejection(catalog, provider orelse (if (current) |existing| existing.provider else default_provider.?), &requested.tools)) |rejection| return rejection;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     // D166: an unlisted model has no known window to enforce.
-    if (compact_at) |tokens| if (model_catalog.find(model_catalog.shipped, model)) |known| {
+    if (compact_at) |tokens| if (model_catalog.find(selected_facts, model)) |known| {
         if (known.context_window) |window| if (tokens > window) return .compact_at_too_large;
     };
     if (compact_at) |tokens| if (tokens > std.math.maxInt(i64)) return .invalid_compaction_trigger;
@@ -245,8 +247,8 @@ pub fn configurationBeforeWorkspace(
     // The codec cannot encode a boundary back to unspecified effort.
     if (requested.reasoning_effort.state == .explicit_null and retained_effort != null) return .unsupported_reasoning_effort;
     if (effort) |value| {
-        if (!model_capability.supportsReasoningEffort(model, value)) return .unsupported_reasoning_effort;
-    } else if (model_catalog.find(model_catalog.shipped, model)) |known| {
+        if (!model_capability.supportsReasoningEffort(selected_facts, model, value)) return .unsupported_reasoning_effort;
+    } else if (model_catalog.find(selected_facts, model)) |known| {
         if (known.efforts.count() != 0) return .unsupported_reasoning_effort;
     }
     return null;
@@ -878,7 +880,10 @@ pub fn validateConfiguration(
     if (reads.found.get()) try checkSaved(next);
     const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
     const default_provider = defaultProvider(a.store.served);
-    if (configurationBeforeWorkspace(a.store.catalog().catalog, current_configuration, configuration, default_provider)) |rejection| {
+    var selected: model_facts.Model = .{};
+    selected.read(a, if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice());
+    try a.run();
+    if (configurationBeforeWorkspace(selected.facts(), a.store.catalog().catalog, current_configuration, configuration, default_provider)) |rejection| {
         return .{ .rejected = rejection };
     }
 

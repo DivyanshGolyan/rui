@@ -10,6 +10,7 @@
 //! asked for. An opened Session borrows the terminal through
 //! `SessionFrontend`, with ticks paused, and gives it back on Esc.
 const std = @import("std");
+const model_catalog = @import("model_catalog.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const TerminalApp = @import("TerminalApp.zig");
@@ -1801,7 +1802,7 @@ const fake_operations: Operations = .{
             errdefer reply.deinit();
             try reply.writer.writeAll(protocol.model_list_reply.head);
             // Navigation tests offer a small set, independent of catalog releases.
-            try model_list.writeProviders(&reply.writer, &.{
+            try model_list.writeProviders(&reply.writer, model_catalog.shipped, &.{
                 .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\n" } } },
                 .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nwhisper-1\n" } } },
             });

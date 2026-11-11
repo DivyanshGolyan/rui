@@ -1857,11 +1857,18 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             defer page.deinit(host.allocator);
             try fd.jsonGrowing(200, protocol.skill_suggestions_reply.max_bytes, host_reply.renderSkillSuggestions, .{&page});
         },
-        // Host memory only: never SQLite or the network.
-        // Sized as written: the bound is tens of KiB, a reply mostly far less.
+        // Refresh is asynchronous; the selected facts are an operation-scoped
+        // Store read, never retained beside the provider's live account list.
         .model_list => {
             host.listings_requested.store(true, .release);
-            try fd.jsonGrowing(200, protocol.model_list_reply.max_bytes, renderModelList, .{host});
+            var arena: std.heap.ArenaAllocator = .init(host.allocator);
+            defer arena.deinit();
+            const facts = host.store.readModelCatalog(arena.allocator()) catch |err| {
+                if (err == error.OutOfMemory) return error.OutOfMemory;
+                fenceDispatch(host, "model catalog", err);
+                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+            };
+            try fd.jsonGrowing(200, protocol.model_list_reply.maxBytes(facts), renderModelList, .{ host, facts });
         },
     }
 }
@@ -1877,9 +1884,9 @@ fn readSkillSuggestions(host: *Host, allocator: std.mem.Allocator, scope: @impor
     };
 }
 
-fn renderModelList(out: protocol.JsonOut, host: *Host) error{BufferTooLarge}!void {
+fn renderModelList(out: protocol.JsonOut, host: *Host, facts: []const @import("model_catalog.zig").Entry) error{BufferTooLarge}!void {
     out.writer.writeAll(protocol.model_list_reply.head) catch return error.BufferTooLarge;
-    host.model_lists.render(out.writer) catch return error.BufferTooLarge;
+    host.model_lists.render(out.writer, facts) catch return error.BufferTooLarge;
     out.writer.writeAll(protocol.model_list_reply.tail) catch return error.BufferTooLarge;
 }
 
@@ -2352,7 +2359,7 @@ const Reply = struct {
     }
 
     /// As `json`, growing from empty: for a bound far above most replies.
-    fn jsonGrowing(self: *Reply, status: u16, comptime max_bytes: usize, comptime render: anytype, args: anytype) !void {
+    fn jsonGrowing(self: *Reply, status: u16, max_bytes: usize, comptime render: anytype, args: anytype) !void {
         return self.jsonInto(.init(self.allocator), status, max_bytes, render, args);
     }
 
