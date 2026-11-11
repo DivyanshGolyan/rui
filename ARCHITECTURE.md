@@ -1404,9 +1404,14 @@ Before any write, open compares the format and then each table's and index's sto
 The Host opens schema 51 (41 let a failed, overflowed or retry-exhausted Turn outcome reference its report content; 42 saves each Model Output Item's replay rule, judged once at import, and replaces raw items with the neutral form: `model_output_item` keeps kind, phase, part count and an item bag; `model_output_part` keeps each part's array, kind, text and part bag; no answer or string projection tables remain; and content payloads are non-null with their recorded length; 43 certifies a Tool Call by its name, call ID and arguments only, since the provider item ID lives in the item bag, stores usage as four neutral counts beside the provider's report, pins each Session's codec (`openai-responses/1` for `codex`) and optional codec options of at most 512 bytes at creation, checks a provider label's syntax instead of a provider list, so adding a provider is no format change, and keeps each Session's [prefix seal](#prefix-seal); 44 stores a message's text once, as the item's message text row, with each text part keeping only its length into it, while a reasoning part keeps its own private row; 45 orders the index of Messages without a Session sender by Admission position; 46 names each Tool Call's Session on its row, and indexes every Activity row source by Session and position, so an Activity page is a range seek whatever the history's length; 47 makes the schema's tables expressible on SQLite, Postgres and MySQL and holds every statement to the reserved-name and `rowid` rules: no name any engine reserves outside its keyword place, no `rowid` (Sessions carry `created_seq` and Commands `command_seq`, each allocated max+1 in its creating transaction), a stored Workspace digest and key, foreign keys checked when each row is written rather than at commit, non-null key columns, byte-length checks, and the format marker in `store_meta`, while statements keep SQLite-only forms such as `unixepoch`, `GLOB`, `||`, `IS`, `INDEXED BY`, `ON CONFLICT`, `INSERT OR IGNORE` and `printf` until the typed statements bring their dialect rules; 48 and 49 record OpenAI web search; 50 drops the per-Session read-through position that 46 added; 51 makes a Command's `command_seq` its primary key and `command_key` unique, and indexes Commands by target, kind and `command_seq` in place of `command_seq`'s own index, so a Session's decisions, stops and interruptions are a range seek, and indexes Tool Calls by Session, Operation and call ordinal, and rejected Tool Calls and resolved Actions by Session, Operation and acceptance position, in place of the rejected calls' index by Operation, so a Session's calls and Tool Results are a range seek on their own tables, indexes revisions by Session and content so a Full report finds each content's first revision in SQL, and limits `store_meta`'s key to its three names, because MySQL keys only bounded text): a Store at any earlier version is rejected as unsupported and requires a compatible build or a separate fresh Store.
 Schema 51 is the migration baseline (Divyansh, D204): every later format change ships one forward step in `schema.migrations`, for SQLite and MySQL, and the build fails when `schema_version` and the steps disagree, and `tests/ci/test_store_schema_version.py` fails when a step whose `from` is below the released schema_version differs from its text at the release.
 A SQLite Store at a format from 51 up to the current one takes each pending step at open, in one transaction that also sets its format and commits only when every foreign key holds and every object's text equals a fresh bootstrap's; otherwise nothing changes and the Store is refused.
+The typed statement marker `@index(name)` renders as `INDEXED BY name` on SQLite.
+On MySQL it renders as `FORCE INDEX (name)` only when `schema.mysqlCanForceIndex` confirms that the named MySQL DDL index uses real columns; generated-leading and functional partial indexes remain unhinted, since forcing their lowered keys can turn a lookup into a full index scan.
+MySQL open includes every forceable index's canonical name in its catalog comparison and refuses a renamed index as `store_schema_behind` before any write; server-generated keys remain checked by definition.
+This admission digest is computed, not stored or pinned by Store format, so tightening its comparison changes no format or migration.
 Rui runs no DDL on MySQL (D203).
 `rui store schema --engine mysql` prints this build's canonical `schema.ddl(.mysql)` as one SQL file for the DB team to apply to an empty database.
-Forward steps for an existing database are `schema.mysqlMigration(from)`; this command does not apply them.
+With `--from N` it instead prints every forward MySQL migration from format N to this build's format, oldest first (D223); the current format prints empty stdout successfully, and formats outside the migration baseline through the current format are usage errors naming that range, with no stdout.
+The composed migration finishes with one update of the saved format and wire version to this build's values; individual steps remain `schema.mysqlMigration(from)`, and this command never applies the SQL.
 The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
 The step to 53 records a Session's parent (D27).
 The step to 54 records the stops and ending Messages an attached child owes (D38, D39), ancestor feed forwarding in `session_forward` (D135, D180), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
@@ -1483,13 +1488,14 @@ MySQL schema application and backup remain operator-owned.
 
 `rui upgrade` replaces an eligible managed released selection with the latest published stable release and conditionally activates it for the selected Store only when its Host was already running.
 `rui upgrade --check` is read-only and starts no Host.
-On the overview, `/upgrade` runs inline on the status bar, with no page, without sending `/upgrade` to the model or adding an updater service.
-In a conversation, `/upgrade` says `Run rui upgrade in the shell` and never reaches the model, until the conversation reuses the inline status row.
+On the overview and in a conversation, `/upgrade` runs inline on the status row, with no page, without sending `/upgrade` to the model or adding an updater service.
+It is one run whichever screen asked for it: a conversation hands `/upgrade` and Esc to the overview, which runs the worker once its own and the conversation's Client work has settled.
 It checks (`Checking for updates…`), then installs a found release at once, with no Enter step even while Sessions work, and its first line says what the restart will do: `Upgrading to 0.60.0 · restarts the Host (2 Sessions working) · esc cancels`.
 Esc cancels while it checks or prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting the Host…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
 A release the running client cannot use leaves `Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave` on the status bar until another `/upgrade`; longer text, such as PATH warnings, the full check and retained cleanup paths, prints with the departure message.
 Esc cancels the check as it cancels an install still preparing, and so does leaving rui.
-The Upgrade worker says where the whole run stands (checking, installing and its step, cancelling, ended) each time that changes, and the overview stores that one value: Host requests wait, Esc is the run's and another `/upgrade` is a no-op by it alone.
+The Upgrade worker says where the whole run stands (checking, installing and its step, cancelling, ended) each time that changes, and the overview stores that one value (`session_upgrade.Upgrade`), which both screens read: Host requests wait, Esc is the run's and another `/upgrade` is a no-op by it alone.
+A conversation keeps only that its own reading of the Session predates a run: after the run it says `Reading this Session again after the Upgrade…` and holds its Host requests until that read settles, then shows the run's ending.
 One pure core, `upgrade_status`, turns that value into the status bar's line for both screens.
 Divyansh chose this on 2026-11-09 (TUI rework plan, "/upgrade without a page"), replacing the `UpgradePanel` page and its Install step.
 It retains the draft, selected Session and unresolved capture handles through handoff and never replays indeterminate effects.
@@ -3346,7 +3352,7 @@ Each state carries `since`, the Host Unix second the Session entered it, read fr
 | The active Turn's model Operation has an Attempt in flight | `working` | Attempt admission |
 | The active Turn's model Operation waits for a retry due in the future | `retrying`, with due time, cause and the failed Attempt's ordinal, which is below the retry policy's maximum | retry scheduling |
 | That retry is already due | `pending` | its due second, never before scheduling |
-| A Bash Action the active Turn's Operation proposed is launched and unresolved | `bash`, with the oldest running call's ordinal (`call`; a running Host that predates it omits it, and a reader then gives the clock to the live line) and saved description, the running count and the count awaiting permission | the oldest launch |
+| A Bash or MCP Action the active Turn's Operation proposed is launched and unresolved | `bash`, with the oldest running call's ordinal (`call`; a running Host that predates it omits it, and a reader then gives the clock to the live line) and saved description (up to the shared 200-byte saved-call-line bound), the running count and the count awaiting permission | the oldest launch |
 | Every unresolved Action the active Turn's Operation proposed awaits a Permission Decision | `approval` | the group's latest change, else the proposing resolution |
 | Otherwise, with an active Turn | `pending` | the group's latest change, else the Operation's resolution |
 | No active Turn, and an eligible Message is queued | `pending` | the oldest queued admission, or the latest outcome when that Message was queued before it |
@@ -3594,7 +3600,7 @@ Clients never auto-start or access SQLite; disconnects/timeouts do not cancel wo
 A MySQL Host starts only from `rui host serve --launch-frame`.
 Its stdin
 frame's `store` is `mysql://USER:PASSWORD@HOST[:PORT]/DATABASE`; TCP verifies
-TLS with system trust.
+TLS with system trust unless its sole query option is `ssl-ca=<path>`, a nonempty absolute PEM CA-bundle path (percent escapes allowed, at most `PATH_MAX - 1` decoded bytes) trusted exclusively; unknown or repeated keys, fragments, relative or empty paths, `ssl-ca` on a Unix socket and any verification-disabling option are refused (D224).
 A Unix socket is an absolute path in place of HOST,
 usually percent-encoded (`%2Fvar%2Frun%2Fmysqld.sock`).
 User, password and
@@ -3607,6 +3613,7 @@ Parsing wipes all JSON allocations, including failed
 parses; the connection handshake wipes its authentication buffer as soon as
 login finishes or fails.
 The Store keeps its own copy of the login in Host memory for the Host's life, wiped when the Store closes, so it can reconnect.
+The connection loads TLS trust at open and retains it across reconnects without borrowing or reloading the CA path; an unloadable `ssl-ca` file refuses startup with `mysql_unreachable` and a static message that never names the path.
 
 On MySQL the `store_owner` row owns the Store: open raises its `epoch`, and every write transaction first advances `commit_seq` only where both match what this Host last saw, so a Host that lost the Store fails its next write.
 `GET_LOCK` only refuses early a second Host on the same database.
@@ -3640,7 +3647,7 @@ start refusal (D222):
 - `durability_innodb_flush_log_at_trx_commit`: `innodb_flush_log_at_trx_commit` is not 1.
 - `durability_sync_binlog`: binlogging is enabled and `sync_binlog` is not 1.
 - `binlog_statement`: `binlog_format` is STATEMENT.
-- `mysql_unreachable`: connection failed, including DNS, TCP or socket connection, TLS handshake or certificate verification, or a timeout before login.
+- `mysql_unreachable`: connection failed, including DNS, TCP or socket connection, TLS trust loading (including the `ssl-ca` file), handshake or certificate verification, or a timeout before login.
 - `mysql_login`: the server refused the credentials, authentication method or database access (including server errors 1045 and 1044).
 
 Exactly one admission cause is reported: version/MariaDB first (MariaDB wins

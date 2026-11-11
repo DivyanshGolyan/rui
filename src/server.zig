@@ -4427,7 +4427,8 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expectEqual(@as(?u64, 12000), observed.compaction_trigger_override);
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), observed.reasoning_effort_override);
     try std.testing.expectEqualStrings("bypass", observed.permission_mode.slice());
-    try std.testing.expectEqual(@as(u8, tools.toolBit(.start_agent)), observed.tools_mask);
+    try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member WHERE tool_set_id=?1", .{observed.tool_set_id}));
+    try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=?1 AND tool.name='start_agent'", .{observed.tool_set_id}));
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Overridden instructions"), &observed.instructions.digest);
     try std.testing.expect(observed.output_schema == null);
 

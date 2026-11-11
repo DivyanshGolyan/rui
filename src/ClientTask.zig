@@ -15,9 +15,6 @@ cancellation: client.Cancellation = .{},
 mutex: std.Io.Mutex = .init,
 result: ?anyerror!void = null,
 read_failure: ?protocol_reply.ReadFailure = null,
-/// Gets a byte once the result is stored, so a wake there always finds
-/// `completed`.
-notify: ?std.posix.fd_t = null,
 
 /// All arguments and this owner stay in final storage through join.
 pub fn start(self: *Self, io: std.Io, context: *anyopaque, run: Run) !void {
@@ -33,12 +30,9 @@ pub fn start(self: *Self, io: std.Io, context: *anyopaque, run: Run) !void {
 
 fn execute(self: *Self) void {
     const result = self.run(self.context, self);
-    {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        self.result = result;
-    }
-    if (self.notify) |fd| _ = std.c.write(fd, &[1]u8{0}, 1);
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
+    self.result = result;
 }
 
 pub fn requests(self: *Self) client.Requests {

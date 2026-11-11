@@ -4,7 +4,10 @@
 //! the run stands. Whether Host requests wait is `session_upgrade`'s decision.
 
 const std = @import("std");
-const session_upgrade = @import("session_upgrade.zig");
+
+/// What a run leaves Host requests: nothing installed, the selected Rui
+/// speaks this Host's protocol, or it does not.
+pub const Outcome = enum { unchanged, compatible, incompatible };
 
 /// A release's version, as `0.{schema}.{patch}`.
 pub const Version = struct {
@@ -53,7 +56,7 @@ pub const Run = union(enum) {
     cancelling,
     /// How it ended, as the status bar says it, and what it leaves Host
     /// requests: the run's own outcome, never read back from the words.
-    ended: struct { how: Ended, outcome: session_upgrade.Outcome },
+    ended: struct { how: Ended, outcome: Outcome },
 
     /// The run has not ended: Host requests wait and the worker is polled.
     pub fn going(self: Run) bool {

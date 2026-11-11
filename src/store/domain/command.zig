@@ -470,7 +470,7 @@ pub fn deliverAgentMessage(
     const key = agentMessageKey(&key_buffer, binding.action_id);
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &facts);
+    a.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     var receiver: target_session.Result = null;
@@ -650,9 +650,9 @@ pub const AgentStart = enum {
 /// The calling Session's settings a `start_agent` call inherits or may
 /// only narrow. Its Workspace fills the creating Configuration in place.
 const parent_settings = rsql.Read(.{
-    .sql = "SELECT workspace,provider," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,permission_mode FROM session WHERE session_ref=?1",
+    .sql = "SELECT workspace,provider,coalesce(" ++ tool_set.namesSql("session.tool_set_id") ++ ",'') AS tools,permission_mode FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { workspace: *Bounded(workspace_path.max_bytes), provider: provider_name.Provider, tools_mask: c_int, permission_mode: u8 },
+    .Row = struct { workspace: *Bounded(workspace_path.max_bytes), provider: provider_name.Provider, tools: *Bounded(tool_set.max_names_bytes), permission_mode: u8 },
     .cardinality = .optional,
 });
 
@@ -680,16 +680,16 @@ pub fn startAgent(
     const key = std.fmt.bufPrint(&key_buffer, "rui.core/start_agent/{d}", .{binding.action_id}) catch unreachable;
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &facts);
+    a.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     configuration.workspace = .{ .state = .value, .value = .{ .len = 0 } };
-    var parent: parent_settings.Row = .{ .workspace = &configuration.workspace.value, .provider = undefined, .tools_mask = undefined, .permission_mode = undefined };
-    var parent_found: store_access.Found = .missing;
-    a.readInto(parent_settings, .{ .session = caller }, &parent, &parent_found);
     // Over 4.6 KB, so held where the Store owns it, as a configure does.
     const creation = a.store.configurationReads();
     creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+    var parent: parent_settings.Row = .{ .workspace = &configuration.workspace.value, .provider = undefined, .tools = &creation.saved_tools.names, .permission_mode = undefined };
+    var parent_found: store_access.Found = .missing;
+    a.readInto(parent_settings, .{ .session = caller }, &parent, &parent_found);
     configuration_domain.prepareConfiguration(a, "", configuration, creation);
     try a.run();
     const found = facts orelse return error.StaleActionAttemptBinding;
@@ -701,11 +701,13 @@ pub fn startAgent(
     var result_buffer: [192]u8 = undefined;
     const refusal: ?[]const u8 = refusal: {
         if (saved != null) break :refusal "Rui could not start the agent: its command key is already taken. Nothing was started.";
-        const allowed = try configuration_domain.toolSet(parent.tools_mask);
-        const requested = configuration_domain.requestedTools(configuration) orelse
-            break :refusal "spec.tools: only Rui's own tools can be narrowed to. Nothing was started.";
-        var wider = requested.differenceWith(allowed).iterator();
-        if (wider.next()) |tool| break :refusal std.fmt.bufPrint(&result_buffer, "spec.tools: {s} is not one of your tools. Nothing was started.", .{@tagName(tool)}) catch unreachable;
+        var requested = configuration.tools.iterator();
+        while (requested.next()) |name| {
+            var allowed = std.mem.splitScalar(u8, parent.tools.slice(), ',');
+            while (allowed.next()) |member| {
+                if (std.mem.eql(u8, name, member)) break;
+            } else break :refusal std.fmt.bufPrint(&result_buffer, "spec.tools: {s} is not one of your tools. Nothing was started.", .{name}) catch unreachable;
+        }
         if (try configuration_domain.permissionMode(parent.permission_mode) == .ask and !configuration.permission_mode.value.eql("ask"))
             break :refusal "spec.permissionMode: you ask before running commands, so your agents ask too. Nothing was started.";
         // The Host bound the task's `/name` words to the new Session's skills.
@@ -773,7 +775,7 @@ pub fn startAgent(
 pub fn resolveCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, code: action_domain.ActionResolutionCode, result: []const u8, faults: Faults) !bool {
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &facts);
+    a.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
     var outcome: content_domain.Import = .ofBytes(result, false);
     content_domain.lookup(a, &outcome);
     try a.run();

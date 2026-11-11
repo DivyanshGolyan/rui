@@ -366,7 +366,7 @@ pub const SessionObservation = struct {
     provider: ?provider_name.Provider = null,
     model: Bounded(model_capability.max_model_bytes) = .{},
     revision: u64 = 0,
-    tools_mask: u8 = 0,
+    tool_set_id: u64 = 0,
     compaction_trigger: ?u64 = null,
     output_reservation: u64 = 0,
     compaction_trigger_override: ?u64 = null,
@@ -426,7 +426,7 @@ pub fn inspectSession(a: *ReadAccess, session_ref: []const u8, observation: *Ses
     observation.* = .{
         .found = true,
         .revision = current.revision,
-        .tools_mask = current.tools_mask,
+        .tool_set_id = current.tool_set_id,
         .compaction_trigger = policy.compaction_trigger,
         .output_reservation = policy.output_reservation,
         .compaction_trigger_override = current.compaction_trigger,

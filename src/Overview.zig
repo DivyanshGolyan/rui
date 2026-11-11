@@ -37,6 +37,8 @@ const app_events = @import("testing/app_events.zig");
 const view = @import("overview_view.zig");
 const ClientTask = @import("ClientTask.zig");
 const UpgradeJob = @import("UpgradeJob.zig");
+const session_upgrade = @import("session_upgrade.zig");
+const upgrade_status = @import("upgrade_status.zig");
 const session_chrome = @import("session_chrome.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const session_reads = @import("session_reads.zig");
@@ -288,6 +290,37 @@ const Job = union(enum) {
     }
 };
 
+/// What a job leaves, as one value in its job's shape. The job that runs
+/// is its only writer and `deliver`, for that job, its only reader, so no
+/// job reads what another left. A job that fails partway leaves the part
+/// it wrote.
+const Answer = union(enum) {
+    /// No job has run since the last answer was taken, or the job leaves
+    /// only its outcome.
+    none,
+    host: HostRead,
+    page: protocol_reply.SessionListPage,
+    lines: [view.max_first_line_reads]Line,
+    /// Each command read's leading bytes, null when it has none to show.
+    commands: [view.max_first_line_reads]Command,
+    /// A start's, stop's or archive's.
+    reply: Reply,
+    menu: model_picker.Menu,
+    skills: skill_suggestions.Page,
+    /// What a command printed, as far as the core takes it.
+    output: Output,
+
+    /// Frees an answer no one took.
+    fn deinit(self: *Answer, gpa: std.mem.Allocator) void {
+        switch (self.*) {
+            .menu => |*menu| menu.deinit(gpa),
+            .skills => |*page| page.deinit(gpa),
+            else => {},
+        }
+        self.* = .none;
+    }
+};
+
 /// One host read and list page, at most one first-line batch, one
 /// command-read batch, one model-list read, one skills read, one save, one
 /// command and the requests the core's ledger allows can wait at once.
@@ -349,9 +382,6 @@ draft: [view.draft_capacity]u8 = undefined,
 /// The byte the latest frame's first composer line starts at, kept first by
 /// the next frame so the composer scrolls only when its caret leaves view.
 draft_anchor: usize = 0,
-/// The worker's descriptors: it writes one byte as its job ends.
-done: [2]c_int = .{ -1, -1 },
-
 worker: ClientTask = .{},
 /// The /upgrade run's worker, for as long as the core says one runs, and
 /// the receipts runs left, which print on exit.
@@ -359,31 +389,22 @@ upgrade_job: UpgradeJob = .{},
 /// The serving Host's pid, read once per Host start.
 host_process: ?struct { started_at: u64, pid: i32 } = null,
 upgrade_report: ?std.Io.Writer.Allocating = null,
+/// What the overview last said under the open conversation.
+conversation_said: [upgrade_status.max_line_bytes]u8 = undefined,
 /// The terminal title as last set: the open Session's name, if any, and how
 /// many Sessions need the person.
 title: session_chrome.Title = .{},
 jobs: [max_jobs]Job = undefined,
 job_count: usize = 0,
-/// The job the worker runs or last ran, and its output.
+/// The job the worker runs or last ran, and what it left.
 job: Job = .list,
+answer: Answer = .none,
 traversal: protocol_reply.SessionTraversal = .init(null),
 traversal_archive: protocol.SessionArchiveFilter = .active,
-host: HostRead = .{},
-page: protocol_reply.SessionListPage = undefined,
-lines: [view.max_first_line_reads]Line = @splat(.{}),
-/// Each command read's leading bytes, null when it has none to show.
-commands: [view.max_first_line_reads]Command = @splat(.{}),
-reply: Reply = .{},
-/// The skills read's page, until the core takes it.
-skill_page: ?skill_suggestions.Page = null,
-/// The menu a model-list read built, until the core takes it.
-menu: model_picker.Menu = .{},
 /// Unlinked scratch for list pages.
 scratch: ?std.Io.File = null,
 /// Unlinked scratch a command's output goes to, made for the first command.
 command_page: ?std.Io.File = null,
-/// What the last command printed, as far as the core takes it.
-output: Output = .{},
 
 /// The Session a conversation borrows, in stable storage.
 opened: view.Reference = undefined,
@@ -480,11 +501,11 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             }
             if (self.root.session != null) {
                 // Under a Session the overview serves as it did when lending:
-                // a failure there is the overview's, not the Session's.
-                _ = try service(self);
+                // a failure there is the overview's, not the Session's. An
+                // Upgrade holds Host work here as it does on the overview.
+                if (self.state.upgrading()) try self.appUpgrade(ctx) else _ = try service(self);
             } else {
                 if (self.worker.thread != null and self.worker.completed()) {
-                    drain(self.done[0]);
                     try self.appNext(ctx, try self.complete());
                     ctx.redraw = true;
                 }
@@ -567,9 +588,9 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     }
     const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2], .status = opened[3], .actions = opened[4..6].* };
     const frontend = try self.init.gpa.create(SessionFrontend);
-    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeHandoff };
+    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
-    const child = frontend.attach(.{ .root = &self.root, .context = self, .leave = appSessionLeft, .upgrade = appSessionUpgrade, .copy = appCopy, .on_open = appSessionFollow }, self.caps);
+    const child = frontend.attach(.{ .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow }, self.caps);
     // Custody transfers before focus delivery: on failure the exit
     // path cancels and joins the same frontend before freeing it.
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
@@ -617,12 +638,6 @@ fn followNext(self: *Self, ctx: *vxfw.EventContext, from: view.Reference) !void 
     if (self.follow.next(from)) |target| try self.appNext(ctx, try self.event(.{ .open = target }));
 }
 
-fn appSessionUpgrade(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    self.app_session.?.frontend.?.notice = "Run rui upgrade in the shell";
-    ctx.redraw = true;
-}
-
 fn appCopy(raw: *anyopaque, file: std.Io.File, start: u64, length: u64) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const bytes = try self.init.gpa.alloc(u8, @intCast(length));
@@ -639,14 +654,21 @@ fn appCopy(raw: *anyopaque, file: std.Io.File, start: u64, length: u64) !void {
 fn appUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
     const job = &self.upgrade_job;
     // A failed start finishes the run, which the core is told below.
-    if (!job.started and try self.quiesceUpgrade()) job.begin(self.init, self.options.store) catch {};
+    if (!job.started and try self.quiesceUpgrade() and self.conversationSettled()) job.begin(self.init, self.options.store) catch {};
     const done = job.started and try job.advance();
     const stands = job.status(self.state.summary.counts.working);
-    if (!std.meta.eql(stands, self.state.upgrade.?)) {
+    if (!std.meta.eql(stands, self.state.upgrade.run.?)) {
         try self.appNext(ctx, try self.event(.{ .upgrade = stands }));
         ctx.redraw = true;
     }
     if (done) try self.keepUpgrade();
+}
+
+/// The open conversation, if any, has no Client work of its own in flight.
+fn conversationSettled(self: *const Self) bool {
+    const shown = self.app_session orelse return true;
+    const frontend = shown.frontend orelse return true;
+    return self.root.session == null or frontend.atRest();
 }
 
 /// Keeps a finished run's receipt for exit, the full report when it
@@ -888,29 +910,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     if (self.state.default) |*binding| binding.effort = self.savedEffort() catch null;
-    errdefer self.closePipes();
-    try openPipe(&self.done);
-    self.worker.notify = self.done[1];
     return self;
-}
-
-/// A signal handler and the worker write without blocking; no child
-/// inherits either end.
-fn openPipe(pipe: *[2]c_int) !void {
-    if (std.c.pipe(pipe) != 0) return error.SystemResources;
-    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
-    for (pipe) |fd| {
-        const flags = std.c.fcntl(fd, std.c.F.GETFL);
-        if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) < 0) return error.SystemResources;
-        if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return error.SystemResources;
-    }
-}
-
-fn closePipes(self: *Self) void {
-    for (&self.done) |*fd| if (fd.* >= 0) {
-        _ = std.c.close(fd.*);
-        fd.* = -1;
-    };
 }
 
 fn destroy(self: *Self) void {
@@ -921,10 +921,8 @@ fn destroy(self: *Self) void {
     for (self.jobs[0..self.job_count]) |job| job.deinit(self.init.gpa);
     if (self.scratch) |file| file.close(self.init.io);
     if (self.command_page) |file| file.close(self.init.io);
-    self.closePipes();
     self.state.deinit();
-    self.menu.deinit(self.init.gpa);
-    if (self.skill_page) |*page| page.deinit(self.init.gpa);
+    self.answer.deinit(self.init.gpa);
     self.init.gpa.destroy(self);
 }
 
@@ -933,11 +931,6 @@ const Ending = union(enum) { overview, conversation: Left };
 /// What the core asks of the loop: to leave, or to lend the terminal to a
 /// Session.
 const Next = union(enum) { leave, open: view.Reference };
-
-fn drain(fd: c_int) void {
-    var bytes: [64]u8 = undefined;
-    while (std.c.read(fd, &bytes, bytes.len) > 0) {}
-}
 
 /// Steps the core with one event and queues the jobs it asks for. Opening a
 /// Session and leaving are the loop's to do.
@@ -1052,7 +1045,7 @@ fn dispatch(self: *Self, jobs: enum { all, lent }) !void {
     try self.worker.start(self.init.io, self, work);
 }
 
-/// The worker: runs one job and writes only its own output fields. Its
+/// The worker: runs one job and writes only that job's answer. Its
 /// result is the job's outcome, which `complete` settles.
 fn work(raw: *anyopaque, task: *ClientTask) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
@@ -1060,15 +1053,18 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
 }
 
 /// Runs `job`, on the worker's thread or, for a save on the way out, the
-/// loop's.
+/// loop's, and leaves its answer.
 fn runJob(self: *Self, requests: client.Requests) !void {
+    std.debug.assert(self.answer == .none);
     switch (self.job) {
-        .host => self.host = self.ops.host(self),
-        .list => if (try self.ops.list(self, requests, self.traversal.cursor, &self.page)) |failure| return failure.err(),
+        .host => self.answer = .{ .host = self.ops.host(self) },
+        .list => {
+            self.answer = .{ .page = undefined };
+            if (try self.ops.list(self, requests, self.traversal.cursor, &self.answer.page)) |failure| return failure.err();
+        },
         .lines => |reads| {
-            const lines = self.lines[0..reads.len];
-            for (lines) |*line| line.result = .unanswered;
-            for (reads.slice(), lines) |read, *line| switch (try self.ops.first_line(self, requests, &read.reference, read.position, &line.bytes)) {
+            self.answer = .{ .lines = @splat(.{}) };
+            for (reads.slice(), self.answer.lines[0..reads.len]) |read, *line| switch (try self.ops.first_line(self, requests, &read.reference, read.position, &line.bytes)) {
                 .line => |text| {
                     line.result = .line;
                     line.len = text.len;
@@ -1082,9 +1078,8 @@ fn runJob(self: *Self, requests: client.Requests) !void {
             };
         },
         .commands => |reads| {
-            const commands = self.commands[0..reads.len];
-            for (commands) |*command| command.* = .{};
-            for (reads.slice(), commands) |read, *command| {
+            self.answer = .{ .commands = @splat(.{}) };
+            for (reads.slice(), self.answer.commands[0..reads.len]) |read, *command| {
                 command.text = try self.ops.action_command(self, requests, &read.reference, read.action, &command.bytes);
                 command.answered = true;
             }
@@ -1093,26 +1088,30 @@ fn runJob(self: *Self, requests: client.Requests) !void {
             // An unreadable saved effort sends nothing, as a failed capture does.
             var compaction_buffer: [20]u8 = undefined;
             const input = self.startInput(start, &compaction_buffer) catch |err| {
-                self.reply = .refused(@errorName(err));
+                self.answer = .{ .reply = .refused(@errorName(err)) };
                 return;
             };
-            try self.ops.start(self, requests, input, &self.reply);
+            self.answer = .{ .reply = .refused("start_request_failed") };
+            try self.ops.start(self, requests, input, &self.answer.reply);
         },
-        .stop => |*reference| try self.ops.stop(self, requests, .{ .store = self.options.store, .session = reference }, &self.reply),
+        .stop => |*reference| {
+            self.answer = .{ .reply = .refused("stop_request_failed") };
+            try self.ops.stop(self, requests, .{ .store = self.options.store, .session = reference }, &self.answer.reply);
+        },
         .archive => |*request| {
-            self.reply = .refused("archive_request_failed");
-            try self.ops.archive(self, requests, .{ .store = self.options.store, .session = &request.reference, .archived = request.archived }, &self.reply);
+            self.answer = .{ .reply = .refused("archive_request_failed") };
+            try self.ops.archive(self, requests, .{ .store = self.options.store, .session = &request.reference, .archived = request.archived }, &self.answer.reply);
         },
         .models => {
             const gpa = self.init.gpa;
             const body = try self.ops.models(self, requests, gpa);
             defer gpa.free(body);
-            self.menu = try model_picker.read(gpa, try protocol_reply.modelListProviders(body));
+            self.answer = .{ .menu = try model_picker.read(gpa, try protocol_reply.modelListProviders(body)) };
         },
-        .skills => |*read| self.skill_page = try self.ops.skills(self, requests, self.init.gpa, read.workspace.slice(), read.prefix.slice()),
+        .skills => |*read| self.answer = .{ .skills = try self.ops.skills(self, requests, self.init.gpa, read.workspace.slice(), read.prefix.slice()) },
         .save => |binding| try self.ops.save_default(self, binding),
         .command => |*command| {
-            self.output = .{};
+            self.answer = .{ .output = .{} };
             try self.ops.command(self, requests, if (command.session) |*session| session else "", command.line);
         },
     }
@@ -1145,45 +1144,52 @@ fn complete(self: *Self) !?Next {
     return next;
 }
 
+/// Steps the core with the job's answer, read where the job wrote it, since
+/// an answer may point into its own bytes, and then clears it: a job the
+/// core hears of leaves nothing behind for the next.
 fn deliver(self: *Self, outcome: anyerror!void) !?Next {
+    const answer = &self.answer;
+    defer answer.deinit(self.init.gpa);
     switch (self.job) {
         .host => {
-            if (self.host.memory) |memory| _ = try self.event(.{ .memory = memory });
-            return self.event(.{ .host = self.host.facts });
+            if (answer.host.memory) |memory| _ = try self.event(.{ .memory = memory });
+            return self.event(.{ .host = answer.host.facts });
         },
         .list => {
             outcome catch return self.event(.{ .list = .failed });
             var rows: [view.max_page_rows]view.Listed = undefined;
-            const page: view.Page = .of(&self.traversal, &self.page, &rows);
+            const page: view.Page = .of(&self.traversal, &answer.page, &rows);
             // The next page goes before anything this page's result queues.
             if (page.answer == null) self.queue(.list);
             return self.event(.{ .list = .{ .page = page } });
         },
-        .lines => |reads| for (reads.slice(), self.lines[0..reads.len]) |read, *line| {
+        .lines => |reads| for (reads.slice(), answer.lines[0..reads.len]) |read, *line| {
             const result: view.FirstLine = .{ .reference = read.reference, .admission = read.admission, .line = if (line.result == .line) line.bytes[0..line.len] else null, .unanswered = line.result == .unanswered };
             if (try self.event(.{ .first_line = result })) |next| return next;
         },
         // A batch that failed partway leaves the rest unanswered.
-        .commands => |reads| for (reads.slice(), self.commands[0..reads.len]) |read, *command| {
+        .commands => |reads| for (reads.slice(), answer.commands[0..reads.len]) |read, *command| {
             if (try self.event(.{ .command = .{ .reference = read.reference, .action = read.action, .text = command.text, .unanswered = !command.answered } })) |next| return next;
         },
         .start => {
-            if (self.reply.outcome == .accepted) self.started = self.reply.session;
-            return self.event(.{ .start = self.reply.start() });
+            if (answer.reply.outcome == .accepted) self.started = answer.reply.session;
+            return self.event(.{ .start = answer.reply.start() });
         },
-        .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }),
-        .archive => |request| return self.event(.{ .archive = self.reply.archive(request) }),
+        .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = answer.reply.stop() } }),
+        .archive => |request| return self.event(.{ .archive = answer.reply.archive(request) }),
         .skills => |read| {
-            const page = self.skill_page;
-            self.skill_page = null;
-            view.skillsRead(&self.state, read.read, if (outcome) |_| page else |_| null, self.composerDraft());
+            // The core owns the page it is given.
+            const page: ?skill_suggestions.Page = if (outcome) |_| answer.skills else |_| null;
+            answer.* = .none;
+            view.skillsRead(&self.state, read.read, page, self.composerDraft());
             self.askSkills();
             return null;
         },
         .models => {
             outcome catch |err| return self.event(.{ .models = .failed(err) });
-            const menu = self.menu;
-            self.menu = .{};
+            // The core owns the menu it is given.
+            const menu = answer.menu;
+            answer.* = .none;
             return self.event(.{ .models = .{ .menu = menu } });
         },
         .save => |binding| return self.event(.{
@@ -1196,7 +1202,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             },
         }),
         .command => |command| {
-            const output = &self.output;
+            const output = &answer.output;
             // As a conversation drops an inspection that could not start,
             // the overview says only that it did not run.
             var ran: view.Ran = .of(&output.bytes, output.len, if (outcome) |_| true else |_| false, output.kept);
@@ -1305,12 +1311,13 @@ fn runCommand(self: *Self, requests: client.Requests, session: []const u8, line:
     };
     const command: session_reads.CommandRun = .{ .command = self.hooks.command, .init = self.init, .requests = requests, .store = self.options.store, .session = session, .line = line };
     const ended = command.into(page);
-    self.output.kept = ended.rendering;
+    const output = &self.answer.output;
+    output.kept = ended.rendering;
     // Failed restoration may leave fd 2 on the page, so, as a conversation
     // does, keep nothing for the way out to write there.
     if (!ended.rendering or !ended.stderr_restored) return ended.outcome;
     // What it printed shows whether it ran to the end or not.
-    self.output.len = page.readPositionalAll(self.init.io, &self.output.bytes, 0) catch |err| {
+    output.len = page.readPositionalAll(self.init.io, &output.bytes, 0) catch |err| {
         try ended.outcome;
         return err;
     };
@@ -1379,14 +1386,13 @@ fn observed(raw: *anyopaque, read: protocol.session_work.Work, opening: bool) !v
 fn service(raw: *anyopaque) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
-    if (self.state.upgrade_after == .blocked) return false;
+    if (self.state.upgrade.after == .blocked) return false;
     const now_ms = self.realMs();
     if (self.state.wakeAt()) |at| if (now_ms >= at) {
         _ = try self.event(.{ .tick = now_ms });
     };
     const answered = self.worker.thread != null and self.worker.completed();
     if (answered) {
-        drain(self.done[0]);
         // Only a start's answer opens a Session, and none is in flight
         // while a conversation is open.
         const next = try self.complete();
@@ -1415,7 +1421,6 @@ fn quiesceUpgrade(self: *Self) !bool {
             .settle_effect => {},
         }
         if (self.worker.completed()) {
-            drain(self.done[0]);
             if (try self.complete()) |next| switch (next) {
                 .leave => return error.InteractiveInterrupted,
                 .open => |reference| self.started = reference,
@@ -1425,24 +1430,16 @@ fn quiesceUpgrade(self: *Self) !bool {
     return self.worker.thread == null and self.job_count == 0;
 }
 
-fn upgradeHandoff(raw: *anyopaque, handoff: SessionFrontend.UpgradeHandoff) !bool {
+/// The Upgrade, as the open conversation reads it.
+fn upgradeValue(raw: *anyopaque) session_upgrade.Upgrade {
     const self: *Self = @ptrCast(@alignCast(raw));
-    switch (handoff) {
-        .quiesce => {
-            self.state.holdForSessionUpgrade();
-            return self.quiesceUpgrade();
-        },
-        .ready, .incompatible => {
-            self.state.upgraded(if (handoff == .ready) .compatible else .incompatible);
-            return true;
-        },
-    }
+    return self.state.upgrade;
 }
 
 /// What the overview says under the opened Session's conversation.
 fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Said {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const said = view.conversation(&self.state, self.opened, kind);
+    const said = view.conversation(&self.state, self.opened, kind, self.caps, &self.conversation_said);
     return .{ .text = said.text, .stoppable = said.stoppable };
 }
 
@@ -1968,21 +1965,24 @@ const Rig = struct {
         while (true) {
             try overview.dispatch(.all);
             if (overview.worker.thread == null) return null;
-            var fds = [_]std.posix.pollfd{.{ .fd = overview.done[0], .events = std.posix.POLL.IN, .revents = 0 }};
-            if (try std.posix.poll(&fds, 10_000) == 0) return error.TestUnexpectedResult;
-            drain(overview.done[0]);
+            try rig.answered();
             if (try rig.next(try overview.complete())) |ending| return ending;
         }
     }
 
-    /// Services the overview as a conversation does, until no job it may
-    /// start is left.
-    fn lend(rig: *Rig) !void {
+    /// Waits for the running job's answer.
+    fn answered(rig: *Rig) !void {
         const Worker = struct {
             fn completed(overview: *Self) !bool {
                 return overview.worker.completed();
             }
         };
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), rig.overview, Worker.completed);
+    }
+
+    /// Services the overview as a conversation does, until no job it may
+    /// start is left.
+    fn lend(rig: *Rig) !void {
         const overview = rig.overview;
         for (0..100) |_| {
             _ = try service(overview);
@@ -1990,7 +1990,7 @@ const Rig = struct {
                 if (job != .start) break true;
             } else false;
             if (overview.worker.thread == null and !queued) return;
-            if (overview.worker.thread != null) try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), overview, Worker.completed);
+            if (overview.worker.thread != null) try rig.answered();
         }
         return error.TestUnexpectedResult;
     }
@@ -3109,7 +3109,10 @@ fn finishedGuidance(rig: *Rig, buffer: []u8) ![]const u8 {
 /// `failure`, and returns what it wrote to stderr.
 fn finishedWith(rig: *Rig, ended: anyerror!void, failure: ?anyerror, buffer: []u8) ![]const u8 {
     var pipe: [2]c_int = undefined;
-    try openPipe(&pipe);
+    if (std.c.pipe(&pipe) != 0) return error.SystemResources;
+    // A way out that writes nothing must read as nothing, not wait.
+    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    if (std.c.fcntl(pipe[0], std.c.F.SETFL, std.c.fcntl(pipe[0], std.c.F.GETFL) | nonblock) < 0) return error.SystemResources;
     defer for (pipe) |fd| {
         _ = std.c.close(fd);
     };
@@ -3483,8 +3486,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     try std.testing.expect(try finished.settle() == null);
     try std.testing.expect(try finished.press("\x1b[H\x18\x18") == null);
     try finished.overview.dispatch(.all);
-    var fds = [_]std.posix.pollfd{.{ .fd = finished.overview.done[0], .events = std.posix.POLL.IN, .revents = 0 }};
-    try std.testing.expectEqual(@as(usize, 1), try std.posix.poll(&fds, 10_000));
+    try finished.answered();
     try std.testing.expect(try finished.overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
     finished.overview.opened = "k7m2qx".*;
     try finished.lend();
@@ -3619,17 +3621,15 @@ test "a listing failure under a conversation ends the overview once the terminal
     rig.overview.hooks.scratch = Scratch.scratch;
     const overview = rig.overview;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
-    var fds = [_]std.posix.pollfd{.{ .fd = overview.done[0], .events = std.posix.POLL.IN, .revents = 0 }};
     try overview.dispatch(.all);
     try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.job));
-    if (try std.posix.poll(&fds, 10_000) == 0) return error.TestUnexpectedResult;
-    drain(overview.done[0]);
+    try rig.answered();
     try std.testing.expect(try overview.complete() == null);
     // The listing fails on the worker, and the conversation's first step
     // under it collects the failure.
     try overview.dispatch(.all);
     try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.job));
-    if (try std.posix.poll(&fds, 10_000) == 0) return error.TestUnexpectedResult;
+    try rig.answered();
     // The Session opens over the overview; the overview's next tick under
     // it collects the failure, which ends App.
     try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
@@ -4342,6 +4342,43 @@ test "Alt-A overview archives at once and preserves draft bytes caret and revisi
     };
 }
 
+test "a command read shows the bytes its operation returned" {
+    const rig = try openListed();
+    defer rig.close();
+    const overview = rig.overview;
+    const row = &overview.state.rows.items[0];
+    row.command = .requested;
+    row.first_action = 7;
+    var reads: view.Commands = .{};
+    reads.items[0] = .{ .reference = row.reference, .action = 7 };
+    reads.len = 1;
+    overview.queue(.{ .commands = reads });
+    try std.testing.expect(try rig.settle() == null);
+    const shown = &overview.state.rows.items[0];
+    try std.testing.expectEqualStrings("zig build test-store", overview.state.lines.items[shown.command.read].slice());
+}
+
+test "a stop that ends with no answer reads as failed, whatever the job before it left" {
+    const rig = try openListed();
+    defer rig.close();
+    const overview = rig.overview;
+    // The Host accepts an archive: the job before the stop left an accepted reply.
+    try std.testing.expect(try rig.press("\x1ba") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
+    overview.ops.stop = struct {
+        fn stop(_: *Self, _: client.Requests, _: client.SessionStopInput, _: *Reply) !void {
+            Seen.now.stops += 1;
+            return error.ConnectionRefused;
+        }
+    }.stop;
+    overview.state.notice = null;
+    try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
+    try std.testing.expectEqualStrings("! k7m2qx not stopped: stop_request_failed", overview.state.notice.?.text());
+}
+
 test "conversation archive and restore use the exact unlisted opened reference through the existing worker" {
     const rig = try openListed();
     defer rig.close();
@@ -4485,6 +4522,64 @@ test "memory counts this TUI alone while no Host runs, at open and after a Host 
     try std.testing.expect(overview.host_process == null);
     const after = second.memory orelse return error.TestUnexpectedResult;
     try std.testing.expect(after.rui > 0 and after.tools == null);
+}
+
+test "a conversation's /upgrade waits for the conversation's running read, though the overview ticks first" {
+    const Worker = struct {
+        fn read(_: *anyopaque, task: *ClientTask) !void {
+            while (!task.cancellation.stopped.load(.acquire)) std.Thread.yield() catch {};
+            return error.Cancelled;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    var ops = fake_operations;
+    ops.open = openSession;
+    const Scratch = struct {
+        var dir: std.Io.Dir = undefined;
+        var count: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            count += 1;
+            return dir.createFile(init.io, &.{'a' + count}, .{ .read = true });
+        }
+    };
+    Scratch.dir = tmp.dir;
+    Scratch.count = 0;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-6-luna" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    overview.hooks.scratch = Scratch.scratch;
+    try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+    defer {
+        for (overview.retired.items) |retired| overview.disposeSession(retired.left);
+        overview.retired.deinit(std.testing.allocator);
+    }
+    const frontend = overview.app_session.?.frontend.?;
+    try std.testing.expect(overview.root.session != null);
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    // A read the conversation still runs, then /upgrade before its tick.
+    try frontend.reader.start(std.testing.io, frontend, Worker.read);
+    try conversed(overview, .idle, .upgrade);
+    try std.testing.expect(overview.state.upgrading());
+    for (0..3) |_| try overview.appUpgrade(&ctx);
+    try std.testing.expect(overview.state.upgrading() and !overview.upgrade_job.started);
+    // Esc ends the run that never started, as on the overview.
+    try conversed(overview, .idle, .cancel_upgrade);
+    frontend.reader.cancel();
+    frontend.reader.join() catch {};
+    var turns: usize = 0;
+    while (overview.state.upgrading()) : (turns += 1) {
+        try std.testing.expect(turns < 100);
+        try overview.appUpgrade(&ctx);
+    }
+    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", overview.state.notice.?.text());
+    try std.testing.expect(overview.upgrade_report == null);
+    frontend.leaving = .returned;
+    try appSessionLeft(overview, &ctx, .returned);
 }
 
 test "upgrade quiescence cancels read jobs rather than granting them mutation custody" {

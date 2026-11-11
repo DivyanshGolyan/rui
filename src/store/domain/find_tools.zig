@@ -16,7 +16,7 @@ const tool_set = @import("tool_set.zig");
 const Faults = @import("../Store.zig").Faults;
 
 const settings = rsql.Read(.{
-    .sql = "SELECT revision,tool_set_id,coalesce(loaded_tool_set_id,tool_set_id) AS loaded_set FROM session WHERE session_ref=?1",
+    .sql = "SELECT revision,tool_set_id," ++ tool_set.offeredSetSql("session") ++ " AS loaded_set FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct { revision: rsql.Positive, tool_set_id: rsql.Positive, loaded_set: rsql.Positive },
     .cardinality = .one,
@@ -157,7 +157,7 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
     command.lookupCommand(a, key, &saved);
     var facts: action.core_facts.Result = undefined;
     const names: action.CoreNames = .of();
-    a.read(action.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &facts);
+    a.read(action.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
     try a.run();
     if (saved != null) {
         try a.abandon(.{});

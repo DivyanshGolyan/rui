@@ -270,24 +270,45 @@ pub const Runner = enum {
     pub fn of(tool: *const Record) Runner {
         if (tool.owner == .mcp) return .mcp;
         if (tool.owner == .provider) return .provider;
-        const core = std.mem.eql(u8, tool.name, find_tools_record.name) or std.mem.eql(u8, tool.name, message_agent_record.name) or std.mem.eql(u8, tool.name, read_transcript_record.name) or std.mem.eql(u8, tool.name, start_agent_record.name) or std.mem.eql(u8, tool.name, skill_record.name);
-        return if (core) .core else .bash;
+        for (built_in_rows.values) |row| {
+            if (std.mem.eql(u8, tool.name, row.record.name)) return row.runner;
+        }
+        return .bash;
     }
 };
 
-/// The record of each tool `Tool` names: the text a new tool set saves.
-/// Until the wire names tools by name, a Session's tools are a `ToolSet`
-/// and this maps it.
+/// One row per BuiltInTool, in its name order. This is the authority for
+/// each built-in's record and runner; EnumArray requires every tag once.
+pub const BuiltInRow = struct { record: *const Record, runner: Runner };
+pub const built_in_rows = std.enums.EnumArray(Tool, BuiltInRow).init(.{
+    .bash = .{ .record = &bash_record, .runner = .bash },
+    .find_tools = .{ .record = &find_tools_record, .runner = .core },
+    .message_agent = .{ .record = &message_agent_record, .runner = .core },
+    .read_transcript = .{ .record = &read_transcript_record, .runner = .core },
+    .skill = .{ .record = &skill_record, .runner = .core },
+    .start_agent = .{ .record = &start_agent_record, .runner = .core },
+    .web_search = .{ .record = &web_search_record, .runner = .provider },
+});
+
+/// Core tools in table order. The Host's exhaustive dispatch switch over
+/// this generated enum requires a runner arm for every core row.
+pub const CoreTool = blk: {
+    var names: []const []const u8 = &.{};
+    for (built_in_rows.values) |row| {
+        if (row.runner == .core) names = names ++ .{row.record.name};
+    }
+    var values: [names.len]u8 = undefined;
+    for (&values, 0..) |*value, i| value.* = @intCast(i);
+    break :blk @Enum(u8, .exhaustive, names, &values);
+};
+
+pub fn coreTool(name: []const u8) ?CoreTool {
+    return std.meta.stringToEnum(CoreTool, name);
+}
+
+/// The built-in record of each tool `Tool` names: the text a new set saves.
 pub fn record(tool: Tool) *const Record {
-    return switch (tool) {
-        .bash => &bash_record,
-        .find_tools => &find_tools_record,
-        .message_agent => &message_agent_record,
-        .read_transcript => &read_transcript_record,
-        .start_agent => &start_agent_record,
-        .skill => &skill_record,
-        .web_search => &web_search_record,
-    };
+    return built_in_rows.get(tool).record;
 }
 
 /// The built-ins, as the catalog of a Host with no other tools.
@@ -316,46 +337,33 @@ test "the built-in catalog is valid and finds each built-in by name" {
 comptime {
     for (std.enums.values(Tool)) |tool| {
         const r = record(tool);
+        if (built_in_rows.get(tool).runner == .mcp) @compileError("built-in MCP runner");
         if (!std.mem.eql(u8, r.name, @tagName(tool)) or r.name.len > max_name_bytes) @compileError("tool record name");
     }
 }
 
-/// The records a request offers, in a fixed order.
+/// The saved member names the request offers, for every owner.
 pub const Offered = struct {
-    /// Borrowed batch names and membership flags, filled by the Store lookup.
-    mcp_names: []const Bounded(max_name_bytes) = &.{},
-    mcp_offered: []const bool = &.{},
-    records: [std.enums.values(Tool).len]*const Record = undefined,
-    len: usize = 0,
-    /// The tools the Session offered at an earlier revision and this
-    /// request does not: a call to one gets "This tool was removed." (D54).
-    withdrawn: ToolSet = .empty,
+    /// Borrowed comma-separated names from the request's saved tool set.
+    names: []const u8 = "",
+    /// Borrowed name identities and flags for otherwise unknown names that
+    /// an earlier revision offered. Reusing the batch's content identities
+    /// avoids retaining another copy of every call name.
+    historical_digests: []const [32]u8 = &.{},
+    withdrawn: []const bool = &.{},
 
-    pub fn of(set: ToolSet) Offered {
-        var out: Offered = .{};
-        for (std.enums.values(Tool)) |tool| if (set.contains(tool)) {
-            out.records[out.len] = record(tool);
-            out.len += 1;
-        };
-        return out;
+    pub fn find(self: *const Offered, name: []const u8) ?[]const u8 {
+        var names = std.mem.splitScalar(u8, self.names, ',');
+        while (names.next()) |candidate| if (candidate.len != 0 and std.mem.eql(u8, candidate, name)) return candidate;
+        return null;
     }
 
-    /// From a tools_mask the Store already checked.
-    pub fn ofMask(mask: u8) Offered {
-        var set: ToolSet = .empty;
-        for (std.enums.values(Tool)) |tool| if (mask & toolBit(tool) != 0) set.insert(tool);
-        return of(set);
-    }
-
-    pub fn slice(self: *const Offered) []const *const Record {
-        return self.records[0..self.len];
-    }
-
-    /// `set`, with the tools of `ever` it lacks withdrawn.
-    pub fn since(set: ToolSet, ever: ToolSet) Offered {
-        var out = of(set);
-        out.withdrawn = ever.differenceWith(set);
-        return out;
+    pub fn wasWithdrawn(self: *const Offered, name: []const u8) bool {
+        const digest = content_string.digest(name);
+        for (self.historical_digests, self.withdrawn) |*candidate, withdrawn| {
+            if (withdrawn and std.mem.eql(u8, candidate, &digest)) return true;
+        }
+        return false;
     }
 };
 
@@ -367,24 +375,12 @@ pub fn builtIn(name: []const u8) ?Tool {
 
 pub const ToolSet = built_in_tool.Selection;
 
-/// Persisted tools_mask bit shared by Store encoding and model preparation.
-pub fn toolBit(tool: Tool) u8 {
-    return switch (tool) {
-        .bash => 1,
-        .web_search => 2,
-        .message_agent => 4,
-        .start_agent => 8,
-        .read_transcript => 16,
-        .find_tools => 32,
-        .skill => 64,
-    };
-}
-
-/// Every tool's bit: the largest valid tools_mask.
-pub const all_tools_mask: u8 = blk: {
-    var mask: u8 = 0;
-    for (std.enums.values(Tool)) |tool| mask |= toolBit(tool);
-    break :blk mask;
-};
-
 pub const Description = Bounded(tool_presentation.max_description_bytes);
+
+test "every built-in runner matches its table row" {
+    for (std.enums.values(Tool)) |tool| {
+        const row = built_in_rows.get(tool);
+        try std.testing.expectEqual(row.runner, Runner.of(record(tool)));
+        try std.testing.expectEqual(row.runner == .core, coreTool(row.record.name) != null);
+    }
+}
