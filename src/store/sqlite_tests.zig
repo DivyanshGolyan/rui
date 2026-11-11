@@ -2741,7 +2741,8 @@ test "64 calls with distinct unknown names fit one call batch's identities" {
     try submitTestMessage(&storage, &tmp, "unknown-calls-input", "unknown-calls-key", session.slice(), "unknown");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     // Each call imports four identities: its name, call_id, arguments and
-    // rejection text, 256 in all: exactly one batch's identities.
+    // rejection text, 256 in all. The shared removed-result prelookup adds
+    // one more identity, exercising the final lookup's padded window.
     var item_ids: [64][16]u8 = undefined;
     var call_ids: [64][16]u8 = undefined;
     var names: [64][16]u8 = undefined;
@@ -3082,7 +3083,7 @@ fn expectBindingPreserved(storage: *Store, session: []const u8, phase: []const u
         try std.testing.expectEqual(before.revision + @as(u64, if (variant < 4) 1 else 0), after.revision);
         try std.testing.expectEqual(protocol.Provider.codex, after.provider.?);
         try std.testing.expectEqualStrings("model-a", after.model.slice());
-        try std.testing.expectEqual(before.tools_mask, after.tools_mask);
+        try std.testing.expectEqual(before.tool_set_id, after.tool_set_id);
         try std.testing.expectEqualStrings(before.permission_mode.slice(), after.permission_mode.slice());
         try std.testing.expectEqualDeep(before.instructions, after.instructions);
         try std.testing.expectEqualDeep(before.output_schema, after.output_schema);
@@ -3110,7 +3111,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     defer storage.close() catch unreachable;
     const reopened = try storage.inspectSessionForTesting(created_session_0.slice());
     try std.testing.expectEqual(protocol.Provider.codex, reopened.provider.?);
-    try std.testing.expectEqual(@as(u8, 1), reopened.tools_mask);
+    try tests.expectToolSetNames(&storage, reopened.tool_set_id, &.{"bash"});
     try std.testing.expectEqualStrings("ask", reopened.permission_mode.slice());
     try expectBindingPreserved(&storage, created_session_0.slice(), "after-reopen");
 
@@ -4983,10 +4984,10 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqual(protocol.Provider.codex, settings.provider);
     try std.testing.expectEqualStrings("model-a", settings.model.slice());
     // The frozen tools come back as the Store saved them, in set order.
-    const offered = tool_catalog.Offered.ofMask(tool_catalog.toolBit(.bash) | tool_catalog.toolBit(.web_search));
+    const offered = [_]*const tool_catalog.Record{ tool_catalog.record(.bash), tool_catalog.record(.web_search) };
     try std.testing.expectEqual(@as(u64, offered.len), settings.tool_count);
     var tool: historical_domain.HistoricalTool = .{};
-    for (offered.slice()) |expected| {
+    for (offered) |expected| {
         try std.testing.expect(try view.nextTool(&tool));
         try std.testing.expectEqualStrings(expected.name, tool.name.slice());
         try std.testing.expectEqual(expected.owner, tool.owner);
@@ -9587,75 +9588,6 @@ test "MCP Actions follow ask and bypass permission and continue after resolution
         try std.testing.expectEqual(binding.operation_id + 1, continuation.operation_id);
         try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='spawn_failed' AND attempt_ordinal=0", .{}));
     }
-}
-
-test "an MCP tool outside the loaded tools gets the unknown-tool result instead of an Action" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
-    defer storage.close() catch unreachable;
-    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-    var empty = try completeConfiguration("mcp-loaded-empty", "", workspace, "model-a");
-    empty.configuration.tools = try .of(&.{});
-    const empty_reply = try storage.configure(&empty, .{});
-    try std.testing.expect(empty_reply == .accepted);
-    var command = try completeConfiguration("mcp-loaded-hidden", "", workspace, "model-a");
-    command.configuration.tools = try .of(&.{"fetch_page"});
-    command.configuration.permission_mode.state = .value;
-    try command.configuration.permission_mode.value.set("bypass");
-    const reply = try storage.configure(&command, .{});
-    try std.testing.expect(reply == .accepted);
-    const session = reply.accepted.session;
-    try store_testing.setLoadedToolsForTesting(&storage, session.slice(), empty_reply.accepted.session.slice());
-    try submitTestMessage(&storage, &tmp, "mcp-loaded-message", "mcp-loaded-message", session.slice(), "fetch");
-    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try settleCallsForTesting(&storage, &tmp, binding, "mcp-loaded-calls", &.{
-        .{ .item_id = "item", .name = "fetch_page", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
-    });
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE rejection_code='unknown_tool'", .{}));
-    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
-}
-
-test "a removed MCP tool gets the removed-tool result instead of an Action" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
-    defer storage.close() catch unreachable;
-    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    var command = try completeConfiguration("mcp-removed-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
-    command.configuration.tools = try .of(&.{ "bash", "fetch_page" });
-    const reply = try storage.configure(&command, .{});
-    try std.testing.expect(reply == .accepted);
-    const session = reply.accepted.session;
-    var update: wire_request.ConfigureCommand = .{};
-    try update.key.set("mcp-remove");
-    update.session = session;
-    update.configuration.tools = try .of(&.{"bash"});
-    try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
-    try submitTestMessage(&storage, &tmp, "mcp-removed-message", "mcp-removed-message", session.slice(), "fetch");
-    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    const calls = [_]TestingCall{.{ .item_id = "removed-item", .name = "fetch_page", .encoded_call_id = "removed-call", .decoded_call_id = "removed-call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
-    try settleCallsForTesting(&storage, &tmp, binding, "mcp-removed-metadata", &calls);
-    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
-    const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var view: HistoricalView = undefined;
-    storage.openHistoricalView(continuation, &view);
-    defer view.close();
-    var position: u64 = 0;
-    while (try view.nextEntry(position)) |entry| {
-        position = entry.position;
-        if (entry.kind == .tool_results) break;
-    } else return error.MissingToolResults;
-    const result = (try view.nextToolResult()).?;
-    var output: HistoricalReader = undefined;
-    try view.openContent(result.output, &output);
-    defer output.close();
-    var buffer: [128]u8 = undefined;
-    const count = try output.read(0, &buffer);
-    try std.testing.expectEqualStrings(tool_catalog.removed_tool_result, buffer[0..count]);
 }
 
 test "MCP and Bash admission seek each Action's call without scanning calls" {

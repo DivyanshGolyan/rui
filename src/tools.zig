@@ -110,8 +110,6 @@ test "a Bash call is described by the description its arguments carry" {
 pub const Tool = @import("tool_record.zig").Tool;
 pub const builtIn = @import("tool_record.zig").builtIn;
 pub const ToolSet = @import("tool_record.zig").ToolSet;
-pub const toolBit = @import("tool_record.zig").toolBit;
-pub const all_tools_mask = @import("tool_record.zig").all_tools_mask;
 
 test "read_transcript descriptions stream IDs and never reject runtime arguments at settlement" {
     const Name = struct {
@@ -137,7 +135,7 @@ test "read_transcript descriptions stream IDs and never reject runtime arguments
     }) |case| {
         var name: Name = .{};
         var arguments: TestSource = .{ .bytes = case.arguments };
-        const offered = Offered.of(ToolSet.initOne(.read_transcript));
+        const offered = Offered{ .names = "read_transcript" };
         const facts = try inspectCall(&name, "read_transcript".len, &arguments, &offered);
         try std.testing.expectEqual(@as(?protocol.ProposalRejection, null), classifyCall(&facts));
         const description = facts.description().?;
@@ -156,28 +154,29 @@ test "a call is checked against the offered records before its arguments" {
             return self.bytes[self.index];
         }
     };
-    const Case = struct { name: []const u8, arguments: []const u8, offered: ToolSet, expected: ?protocol.ProposalRejection, described: bool = false, ever: ToolSet = .empty, removed: bool = false };
+    const Case = struct { name: []const u8, arguments: []const u8, offered: []const u8, expected: ?protocol.ProposalRejection, described: bool = false, withdrawn: bool = false, removed: bool = false };
     const valid = "{\"cmd\":\"true\",\"description\":\"Run true\"}";
-    const bash_only = ToolSet.initOne(.bash);
+    const bash_only = "bash";
     for ([_]Case{
         .{ .name = "bash", .arguments = valid, .offered = bash_only, .expected = null, .described = true },
         .{ .name = "bash", .arguments = "{}", .offered = bash_only, .expected = .invalid_arguments },
         // A Bash call that was not offered keeps its description.
-        .{ .name = "bash", .arguments = valid, .offered = .empty, .expected = .unknown_tool, .described = true },
-        .{ .name = "bash", .arguments = "{}", .offered = ToolSet.initOne(.web_search), .expected = .unknown_tool },
+        .{ .name = "bash", .arguments = valid, .offered = "", .expected = .unknown_tool, .described = true },
+        .{ .name = "bash", .arguments = "{}", .offered = "web_search", .expected = .unknown_tool },
         // A provider-run tool never runs as a function call.
-        .{ .name = "web_search", .arguments = "{}", .offered = .full, .expected = .unknown_tool },
-        .{ .name = "bas", .arguments = valid, .offered = .full, .expected = .unknown_tool },
-        .{ .name = "bashx", .arguments = valid, .offered = .full, .expected = .unknown_tool },
-        .{ .name = &(@as([max_name_bytes + 1]u8, @splat('b'))), .arguments = valid, .offered = .full, .expected = .unknown_tool },
+        .{ .name = "web_search", .arguments = "{}", .offered = "bash,web_search,message_agent,start_agent,read_transcript,find_tools,skill", .expected = .unknown_tool },
+        .{ .name = "", .arguments = "{}", .offered = "", .expected = .unknown_tool },
+        .{ .name = "bas", .arguments = valid, .offered = "bash,web_search,message_agent,start_agent,read_transcript,find_tools,skill", .expected = .unknown_tool },
+        .{ .name = "bashx", .arguments = valid, .offered = "bash,web_search,message_agent,start_agent,read_transcript,find_tools,skill", .expected = .unknown_tool },
+        .{ .name = &(@as([max_name_bytes + 1]u8, @splat('b'))), .arguments = valid, .offered = "bash,web_search,message_agent,start_agent,read_transcript,find_tools,skill", .expected = .unknown_tool },
         // A tool the Session offered before and withdrew is removed, not
         // unknown; a provider-run one never runs as a call either way.
-        .{ .name = "bash", .arguments = valid, .offered = .empty, .ever = .full, .expected = .unknown_tool, .described = true, .removed = true },
-        .{ .name = "web_search", .arguments = "{}", .offered = .empty, .ever = .full, .expected = .unknown_tool },
+        .{ .name = "bash", .arguments = valid, .offered = "", .withdrawn = true, .expected = .unknown_tool, .described = true, .removed = true },
+        .{ .name = "web_search", .arguments = "{}", .offered = "", .withdrawn = true, .expected = .unknown_tool },
     }) |case| {
         var name: Source = .{ .bytes = case.name };
         var arguments: TestSource = .{ .bytes = case.arguments };
-        const offered = Offered.since(case.offered, case.ever);
+        const offered: Offered = .{ .names = case.offered, .historical_digests = &.{@import("content_string.zig").digest(case.name)}, .withdrawn = &.{case.withdrawn} };
         const facts = try inspectCall(&name, case.name.len, &arguments, &offered);
         try std.testing.expectEqual(case.expected, classifyCall(&facts));
         try std.testing.expectEqual(case.described, facts.bashArguments() != null);
@@ -401,26 +400,9 @@ test "MCP calls check only one JSON object and derive their runner" {
         }
     };
     const records = [_]Record{.{ .name = "fetch_page", .owner = .mcp, .server = "docs" }};
-    var offered: Offered = .of(.initOne(.bash));
-    var names: [1]protocol.Bounded(max_name_bytes) = .{.{ .len = 0 }};
-    try names[0].set("fetch_page");
-    offered.mcp_names = &names;
-    offered.mcp_offered = &.{true};
-    // Ownership, not a built-in spelling, chooses argument validation.
-    for ([_][]const u8{ "bash", "find_tools", "message_agent", "read_transcript", "start_agent" }) |spelling| {
-        var named: [1]protocol.Bounded(max_name_bytes) = .{.{ .len = 0 }};
-        try named[0].set(spelling);
-        var shadowed = offered;
-        shadowed.mcp_names = &named;
-        var name: Source = .{ .bytes = spelling };
-        var empty_arguments: TestSource = .{ .bytes = "{}" };
-        const owned = try inspectCall(&name, spelling.len, &empty_arguments, &shadowed);
-        try std.testing.expectEqual(@as(?protocol.ProposalRejection, null), classifyCall(&owned));
-        try std.testing.expect(owned.bash == null and owned.message_agent == null);
-        try std.testing.expect(!owned.find_tools and !owned.read_transcript);
-        try std.testing.expect(owned.description() == null);
-        try std.testing.expectEqual(Runner.mcp, owned.tool.?.runner());
-    }
+    const offered: Offered = .{ .names = "bash,fetch_page" };
+    // Native names resolve to their built-in records. The Store's catalog
+    // admission tests refuse MCP records that try to shadow those names.
     try std.testing.expectEqual(Runner.mcp, records[0].runner());
     try std.testing.expectEqual(Runner.bash, record(.bash).runner());
     const Case = struct { arguments: []const u8, valid: bool };
@@ -462,7 +444,7 @@ test "find_tools is a core tool and settlement defers its words check" {
     for ([_][]const u8{ "{}", "{", "[]", "{\"words\":false}", "{\"words\":\"bash\"}" }) |bytes| {
         var name: Name = .{};
         var arguments: core_tools.SliceSource = .{ .bytes = bytes };
-        const offered = Offered.of(ToolSet.initOne(.find_tools));
+        const offered = Offered{ .names = "find_tools" };
         const facts = try inspectCall(&name, "find_tools".len, &arguments, &offered);
         try std.testing.expectEqualStrings(find_tools_record.name, facts.tool.?.name);
         try std.testing.expectEqual(Runner.core, facts.tool.?.runner());
@@ -470,7 +452,7 @@ test "find_tools is a core tool and settlement defers its words check" {
         try std.testing.expect(protocol.ToolPresentation.validDescription(facts.description().?.slice()));
         name = .{};
         arguments = .{ .bytes = bytes };
-        const hidden = Offered.of(.empty);
+        const hidden = Offered{};
         const unknown = try inspectCall(&name, "find_tools".len, &arguments, &hidden);
         try std.testing.expect(unknown.tool == null and unknown.find_tools);
     }
