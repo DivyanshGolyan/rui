@@ -172,7 +172,6 @@ live: struct {
     view: View.Live = .{},
     work: protocol.SessionWork = .{},
     cursor: protocol_reply.ActivityCursor = .{},
-    provisional: ?feed_window.Key = null,
     queued: protocol.Queued = .{},
     queued_line: ?queued_line.Shown = null,
 } = .{},
@@ -257,7 +256,6 @@ fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
     self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread };
     const job = &self.job;
-    job.scan_provisional = self.live.provisional;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
         job.watch_status = self.statusShown();
@@ -2144,7 +2142,6 @@ fn feedState(self: *Self) FeedPolicy.State {
         .high = screen.feed.high,
         .scan_cursor = if (self.live.cursor.position != 0) .{ .position = self.live.cursor.position, .ordinal = self.live.cursor.ordinal orelse std.math.maxInt(u64) } else null,
         .window_provisional = screen.feed.firstProvisional(),
-        .scan_provisional = self.live.provisional,
         .scan_continuing = self.live.cursor.end != null,
         .window_continuing = screen.feed.forward_partial,
         .choice_open = screen.consent != null or self.app_consent.request != null,
@@ -2631,7 +2628,6 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             if (result.hint) |*hint| self.hint = hint.*;
             self.live.view = result.live;
             self.live.cursor = result.cursor;
-            self.live.provisional = result.scan_provisional;
             if (read == .opening) self.reading.opening = false;
             self.upgrade_stale = false;
             self.poll_at = feed_reads.scanDue(std.Io.Clock.awake.now(self.init.io).nanoseconds, self.inspection.status_requested);
@@ -5019,13 +5015,18 @@ const FeedFixture = struct {
     }
     fn page(self: FeedFixture, read: feed_reads.Read, rows: []const Row, start: bool, end: bool) !void {
         const frontend = &self.held.self;
+        // Freeze and settle exactly like the production read handoff. In
+        // particular, fills must not advance the independent live cursor.
+        if (read == .opening) frontend.reading.opening = true;
+        const job = frontend.freeze(.activity);
         frontend.reading.feed_read = read;
-        frontend.job = .{ .feed_page = FeedPolicy.request(read, frontend.feedState()) };
+        job.feed_page = FeedPolicy.request(read, frontend.feedState());
         frontend.job.result.row_count = rows.len;
         frontend.job.result.at_start = start;
         frontend.job.result.at_end = end;
         frontend.job.result.low = if (rows.len == 0) null else .{ .position = rows[0].key };
-        frontend.job.result.high = if (rows.len == 0) frontend.screen.feed.high else .{ .position = rows[rows.len - 1].key };
+        frontend.job.result.high = if (rows.len == 0) frontend.screen.feed.high else .{ .position = rows[rows.len - 1].key, .ordinal = if (end) std.math.maxInt(u64) else 0 };
+        if (frontend.job.result.high) |high| frontend.job.result.cursor = .{ .position = high.position, .ordinal = if (high.ordinal == std.math.maxInt(u64)) null else high.ordinal };
         var offset: u64 = 0;
         for (rows, 0..) |row, i| {
             try self.file.writePositionalAll(std.testing.io, row.text, offset);
@@ -5037,10 +5038,10 @@ const FeedFixture = struct {
             if (frontend.job.feed_page.?.started_from == null or row.key > frontend.job.feed_page.?.started_from.?.position) frontend.job.result.new_rows += 1;
             offset += row.text.len;
         }
-        try frontend.showStaged();
-        frontend.reading.opening = false;
-        frontend.live.cursor = .{ .position = if (frontend.screen.feed.high) |high| high.position else 0, .ordinal = if (frontend.screen.feed.high) |high| high.ordinal else null };
-        frontend.live.provisional = frontend.screen.feed.firstProvisional();
+        try frontend.launch(job, struct {
+            fn complete(_: *anyopaque, _: *Task) !void {}
+        }.complete);
+        try frontend.settleReader();
     }
     fn longPage(self: FeedFixture, read: feed_reads.Read, first: u64) !void {
         var rows: [16]Row = undefined;
@@ -5165,4 +5166,49 @@ test "SessionFrontend feed resize inside a long answer preserves the same logica
     held.size = .{ .width = 46, .height = 30 };
     try std.testing.expect(std.mem.indexOf(u8, firstRows(try held.shown(), 1), "logical 12") != null);
     try std.testing.expectEqualDeep(anchor, held.screen.anchor.anchor);
+}
+
+test "SessionFrontend backward fill supplies the scan replay boundary through the production handoff" {
+    // Queued Admissions can be hidden while work holds the queue or echoed
+    // while idle. Both are provisional rows, even outside the opening page.
+    for ([_][]const u8{ "", "› queued\n" }) |pending| {
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const held = fixture.held;
+        try fixture.page(.opening, &.{ .{ .key = 100, .text = "older answer\n" }, .{ .key = 110, .text = "settled turn\n" } }, false, true);
+        const scan_cursor = held.self.live.cursor;
+        try fixture.page(.fill_above, &.{.{ .key = 90, .text = pending, .provisional = true }}, true, false);
+        try std.testing.expectEqualDeep(scan_cursor, held.self.live.cursor);
+        const replay: feed_window.Key = .{ .position = 90 };
+        try std.testing.expectEqualDeep(@as(?feed_window.Key, replay), held.screen.feed.firstProvisional());
+        const planned = FeedPolicy.request(.scan, held.self.feedState()).?;
+        try std.testing.expectEqualDeep(@as(?feed_window.Key, replay), planned.from);
+        try std.testing.expectEqualDeep(@as(?feed_window.Key, replay), planned.replace_from);
+        try fixture.page(.scan, &.{ .{ .key = 100, .text = "older answer\n" }, .{ .key = 110, .text = "settled turn\n" }, .{ .key = 120, .text = "› applied\n" }, .{ .key = 130, .text = "new assistant answer\n" } }, true, true);
+        try std.testing.expect(held.screen.feed.firstProvisional() == null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, held.screen.feed.document.text(), "older answer"));
+        try std.testing.expectEqual(@as(usize, 4), held.screen.feed.count);
+        try std.testing.expect(held.screen.feed.at_end);
+        try std.testing.expectEqual(@as(usize, 0), held.self.new_below);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "new assistant answer") != null);
+    }
+}
+
+test "SessionFrontend scan after provisional eviction appends without an obsolete replay boundary" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const held = fixture.held;
+    try fixture.page(.opening, &.{ .{ .key = 100, .text = "older answer\n" }, .{ .key = 110, .text = "settled turn\n" } }, false, true);
+    try fixture.page(.fill_above, &.{.{ .key = 90, .text = "", .provisional = true }}, true, false);
+    const high = held.screen.feed.high;
+    held.screen.feed.trim(1, 0);
+    try std.testing.expect(held.screen.feed.firstProvisional() == null);
+    try std.testing.expectEqualDeep(high, held.screen.feed.high);
+    const planned = FeedPolicy.request(.scan, held.self.feedState()).?;
+    try std.testing.expect(planned.replace_from == null);
+    try std.testing.expectEqualDeep(high, planned.from);
+    try fixture.page(.scan, &.{.{ .key = 120, .text = "answer after eviction\n" }}, false, true);
+    try std.testing.expectEqual(@as(usize, 3), held.screen.feed.count);
+    try std.testing.expect(held.screen.feed.at_end);
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "answer after eviction") != null);
 }

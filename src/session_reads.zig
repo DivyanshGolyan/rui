@@ -224,8 +224,6 @@ pub const Job = struct {
     cursor: protocol_reply.ActivityCursor = .{},
     opening: bool = false,
     feed_page: ?FeedPolicy.Page = null,
-    /// The earliest provisional row in an unfinished forward sweep.
-    scan_provisional: ?Key = null,
     target: Target = undefined,
     recall: ?Input.Step = null,
     queued_line: u64 = 0,
@@ -268,7 +266,6 @@ pub const Job = struct {
         high: ?Key = null,
         at_start: bool = false,
         at_end: bool = false,
-        scan_provisional: ?Key = null,
         new_rows: usize = 0,
         // The Messages waiting at this read's cursor, and the newest one's
         // first line when the row shows it and does not hold it yet.
@@ -512,7 +509,6 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     }
     try job.files.inspection.setLength(task.io, 0);
     var offset: u64 = 0;
-    if (plan.continuing) job.result.scan_provisional = job.scan_provisional;
     for (0..page.facts.count) |index| {
         const item = page.facts.items[if (page.facts.direction == .backward) page.facts.count - index - 1 else index];
         const key: Key = .{ .position = item.position, .ordinal = item.ordinal };
@@ -531,9 +527,6 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         row.tight = compact;
         try output.finish();
         row.length = output.length;
-        if (row.provisional) {
-            if (job.result.scan_provisional == null or key.order(job.result.scan_provisional.?) == .lt) job.result.scan_provisional = key;
-        }
         if (row.length == 0 and !row.provisional) continue;
         job.result.rows[job.result.row_count] = row;
         job.result.row_count += 1;
@@ -1057,6 +1050,12 @@ test "session_reads plain text keeps whole code points within its bound, escapes
     };
 }
 
+/// Tests derive provisional ownership from the returned rows, as the feed does.
+fn firstProvisional(result: *const @FieldType(Job, "result")) ?Key {
+    for (result.rows[0..result.row_count]) |row| if (row.provisional) return row.key;
+    return null;
+}
+
 /// A Host for tests of what a Session read asks: it answers Activity pages
 /// and Message content from a history of `history` completed Turns'
 /// outcomes followed by `tail`, and counts the pages it served. The history
@@ -1455,7 +1454,7 @@ test "session_reads Messages waiting at an opening show in the queued row, unles
     var opening: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 22 } };
     try idle.read(&opening);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, idle.shown, "please wait"));
-    try std.testing.expectEqual(@as(?Key, .{ .position = 21 }), opening.result.scan_provisional);
+    try std.testing.expectEqual(@as(?Key, .{ .position = 21 }), firstProvisional(&opening.result));
 }
 
 // This golden exercises the public renderer, including reports that must never
@@ -1570,7 +1569,7 @@ test "session_reads opening exposes ordered rows and the normalized scan edge" {
     }
     try std.testing.expectEqual(job.result.rows[0].length, job.result.rows[1].offset);
     try std.testing.expectEqual(@as(usize, 2), job.result.new_rows);
-    try std.testing.expectEqualDeep(@as(?Key, .{ .position = 2 }), job.result.scan_provisional);
+    try std.testing.expectEqualDeep(@as(?Key, .{ .position = 2 }), firstProvisional(&job.result));
 
     var empty: FakeHost = .{ .history = 0, .tail = &.{}, .end = 0 };
     job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 0 } };
@@ -1597,7 +1596,7 @@ test "session_reads visible fills do not refresh line work queue live or scan cu
     try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
     try std.testing.expectEqual(@as(u64, 0), job.result.rows[0].length);
     try std.testing.expect(job.result.rows[0].provisional);
-    try std.testing.expectEqualDeep(@as(?Key, .{ .position = 1 }), job.result.scan_provisional);
+    try std.testing.expectEqualDeep(@as(?Key, .{ .position = 1 }), firstProvisional(&job.result));
 }
 
 test "session_reads replay replaces a provisional echo after intervening rows and counts only new rows" {
@@ -1620,7 +1619,7 @@ test "session_reads replay replaces a provisional echo after intervening rows an
         try host.read(&job);
         for ([_]u64{ 23, 24 }) |end| {
             const previous = job.result.high;
-            const replay = job.result.scan_provisional;
+            const replay = firstProvisional(&job.result);
             host.end = end;
             job.cursor = job.result.cursor;
             job.opening = false;
@@ -1632,7 +1631,7 @@ test "session_reads replay replaces a provisional echo after intervening rows an
             try std.testing.expectEqual(@as(usize, if (end == 23) 2 else 1), job.result.new_rows);
             try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Received message"));
             try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Messaged"));
-            try std.testing.expectEqualDeep(if (end == 23) @as(?Key, .{ .position = 21 }) else null, job.result.scan_provisional);
+            try std.testing.expectEqualDeep(if (end == 23) @as(?Key, .{ .position = 21 }) else null, firstProvisional(&job.result));
             if (end == 24) {
                 try std.testing.expect(std.mem.indexOf(u8, host.shown, "Received message").? < std.mem.indexOf(u8, host.shown, "please wait").?);
                 try std.testing.expectEqual(@as(usize, @intFromBool(excluded)), std.mem.count(u8, host.shown, "◌ not sent"));
@@ -1650,13 +1649,12 @@ test "session_reads first provisional survives every continuation page" {
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1 };
     var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
     try host.read(&job);
+    const provisional = firstProvisional(&job.result);
     host.end = tail.len;
     var counted: usize = 0;
     for ([_]u64{ 16, 32, 40 }, 0..) |expected, page_index| {
         const edge = job.result.high;
-        const provisional = job.result.scan_provisional;
         job.cursor = job.result.cursor;
-        job.scan_provisional = provisional;
         job.feed_page = .{ .direction = .forward, .kinds = .all, .started_from = edge, .from = if (page_index == 0) provisional else edge, .replace_from = provisional, .continuing = page_index != 0 };
         job.opening = false;
         job.result = .{};
@@ -1665,7 +1663,8 @@ test "session_reads first provisional survives every continuation page" {
         counted += job.result.new_rows;
         try std.testing.expectEqual(expected, job.result.cursor.position);
         try std.testing.expectEqual(page_index == 2, job.result.at_end);
-        try std.testing.expectEqualDeep(@as(?Key, .{ .position = 1 }), job.result.scan_provisional);
+        try std.testing.expectEqualDeep(@as(?Key, .{ .position = 1 }), job.feed_page.?.replace_from);
+        try std.testing.expectEqualDeep(if (page_index == 0) @as(?Key, .{ .position = 1 }) else null, firstProvisional(&job.result));
         try std.testing.expectEqual(@as(usize, if (page_index == 0) 1 else 0), std.mem.count(u8, host.shown, "please wait"));
     }
     try std.testing.expectEqual(@as(usize, 39), counted);
@@ -1680,7 +1679,7 @@ test "session_reads a hidden queued Admission replays when the queue becomes idl
     try std.testing.expectEqual(@as(u64, 0), job.result.rows[0].length);
     try std.testing.expectEqual(@as(usize, 0), job.result.new_rows);
     const edge = job.result.high;
-    const replay = job.result.scan_provisional;
+    const replay = firstProvisional(&job.result);
     job.cursor = job.result.cursor;
     job.feed_page = .{ .direction = .forward, .kinds = .all, .started_from = edge, .from = replay, .replace_from = replay };
     job.opening = false;
