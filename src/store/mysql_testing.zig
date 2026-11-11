@@ -406,6 +406,163 @@ test "store.mysql open preserves an unreachable socket" {
     }, "/mysql-refusal-probe", .{}));
 }
 
+/// Admission under the fixture's SELECT/INSERT/UPDATE-only runtime grant.
+fn admitMetadata(name: []const u8, selector: []const u8) !Mysql {
+    const config = (try dialect.rootConfig()).?;
+    return Mysql.open(std.testing.io, .{
+        .address = .{ .unix_socket = config.socket },
+        .user = "rui_conformance",
+        .password = "rui_conformance",
+        .database = name,
+    }, selector, .{});
+}
+
+fn refusesMetadata(name: []const u8, expected: anyerror) !void {
+    const admission = admitMetadata(name, name);
+    if (admission) |engine| {
+        var admitted = engine;
+        try admitted.close();
+    } else |_| {}
+    try std.testing.expectError(expected, admission);
+    // Refusal closes an undrained connection. COM_QUIT/socket close releases
+    // GET_LOCK when the server finishes that session, not at local return.
+    // Observe that boundary before the next probe, without a timing delay.
+    var buffer: [128]u8 = undefined;
+    try root.query(try std.fmt.bufPrint(&buffer, "SELECT GET_LOCK('{s}',10)", .{name}));
+    try std.testing.expectEqual(@as(u64, 1), try readU64());
+    try run("DO RELEASE_ALL_LOCKS()");
+}
+
+test "store.mysql live metadata identity ignores legacy selectors and survives a renamed restore" {
+    var original_tmp = std.testing.tmpDir(.{});
+    defer original_tmp.cleanup();
+    var restored_tmp = std.testing.tmpDir(.{});
+    defer restored_tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &original_tmp);
+    const original_name = storage.engine.mysql.state.testing_database;
+    const id = storage.engine.mysql.state.store_id;
+    try storage.close();
+    try openLive(&storage, &restored_tmp);
+    const restored_name = storage.engine.mysql.state.testing_database;
+    try storage.close();
+    const name = std.mem.sliceTo(&original_name, 0);
+    const restored = std.mem.sliceTo(&restored_name, 0);
+    try std.testing.expect(!std.mem.eql(u8, name, restored));
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
+    var buffer: [1024]u8 = undefined;
+    try run(try std.fmt.bufPrint(&buffer, "USE {s}", .{name}));
+    try root.query("SELECT count(*) FROM store_meta WHERE meta_key='store_selector'");
+    try std.testing.expectEqual(@as(u64, 0), try readU64());
+    for ([_][]const u8{
+        "DELETE FROM store_meta WHERE meta_key='store_selector'",
+        "INSERT INTO store_meta VALUES('store_selector','matching')",
+        "UPDATE store_meta SET meta_value='different-database' WHERE meta_key='store_selector'",
+        "UPDATE store_meta SET meta_value=REPEAT('x',600) WHERE meta_key='store_selector'",
+    }, 0..) |change, index| {
+        try run(change);
+        var admitted = admitMetadata(name, "matching") catch |err| {
+            std.debug.print("legacy selector case {d} refused admission: {s}\n", .{ index, @errorName(err) });
+            return error.TestUnexpectedResult;
+        };
+        try std.testing.expectEqualStrings(&id, &admitted.state.store_id);
+        try admitted.close();
+        try root.query("SELECT count(*) FROM store_meta WHERE meta_key='store_selector'");
+        try std.testing.expectEqual(@as(u64, if (index == 0) 0 else 1), try readU64());
+    }
+    // Restore this otherwise-empty Store's metadata and ownership snapshot
+    // into a fresh canonical catalog under a different database name.
+    try run(try std.fmt.bufPrint(
+        &buffer,
+        "UPDATE store_meta SET meta_value='{s}' WHERE meta_key='store_selector';DELETE FROM {s}.store_meta;INSERT INTO {s}.store_meta SELECT * FROM store_meta;DELETE FROM {s}.store_owner;INSERT INTO {s}.store_owner SELECT * FROM store_owner",
+        .{ name, restored, restored, restored, restored },
+    ));
+    var admitted = try admitMetadata(restored, restored);
+    defer admitted.close() catch unreachable;
+    try std.testing.expectEqualStrings(&id, &admitted.state.store_id);
+}
+
+test "store.mysql live metadata failures precede missing-key repair and ownership writes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    const name_buffer = storage.engine.mysql.state.testing_database;
+    const name = std.mem.sliceTo(&name_buffer, 0);
+    try storage.close();
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
+    var buffer: [512]u8 = undefined;
+    try run(try std.fmt.bufPrint(&buffer, "USE {s}", .{name}));
+    const cases = .{
+        .{ "UPDATE store_meta SET meta_value='0' WHERE meta_key='format'", error.StoreSchemaBehind },
+        .{ std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{schema.schema_version + 1}), error.StoreSchemaAhead },
+        .{ "UPDATE store_meta SET meta_value='not-a-number' WHERE meta_key='format'", error.MalformedStoreFormat },
+        .{ "UPDATE store_meta SET meta_value=REPEAT('9',600) WHERE meta_key='format'", error.MalformedStoreFormat },
+        .{ "UPDATE store_meta SET meta_value='wrong-wire' WHERE meta_key='wire_version'", error.WrongStoreVersion },
+        .{ "UPDATE store_meta SET meta_value=REPEAT('9',600) WHERE meta_key='wire_version'", error.WrongStoreVersion },
+        .{ "INSERT INTO store_meta VALUES('store_id','not-an-id')", error.WrongStoreIdentity },
+        .{ "INSERT INTO store_meta VALUES('store_id',REPEAT('a',600))", error.WrongStoreIdentity },
+        .{ "INSERT INTO store_meta VALUES('unexpected','private-value')", error.WrongStoreSchema },
+    };
+    inline for (cases) |case| {
+        try run("DELETE FROM store_meta WHERE meta_key='store_id' OR meta_key='unexpected';" ++
+            "UPDATE store_meta SET meta_value='" ++ std.fmt.comptimePrint("{d}", .{schema.schema_version}) ++ "' WHERE meta_key='format';" ++
+            "UPDATE store_meta SET meta_value='" ++ @import("../wire_version.zig").wire_version ++ "' WHERE meta_key='wire_version'");
+        const unexpected_key = case[1] == error.WrongStoreSchema;
+        if (unexpected_key) try run("ALTER TABLE store_meta ALTER CHECK store_meta_chk_1 NOT ENFORCED");
+        defer if (unexpected_key) {
+            run("DELETE FROM store_meta WHERE meta_key='unexpected';ALTER TABLE store_meta ALTER CHECK store_meta_chk_1 ENFORCED") catch @panic("cannot restore metadata CHECK enforcement");
+        };
+        try run(case[0]);
+        try root.query("SELECT epoch FROM store_owner WHERE owner_key=1");
+        const epoch = try readU64();
+        try root.query("SELECT BIT_XOR(CRC32(CONCAT(meta_key,'=',meta_value))) FROM store_meta");
+        const before = try readU64();
+        try refusesMetadata(name, case[1]);
+        try root.query("SELECT epoch FROM store_owner WHERE owner_key=1");
+        try std.testing.expectEqual(epoch, try readU64());
+        try root.query("SELECT BIT_XOR(CRC32(CONCAT(meta_key,'=',meta_value))) FROM store_meta");
+        try std.testing.expectEqual(before, try readU64());
+    }
+    try run("DELETE FROM store_meta WHERE meta_key='unexpected'");
+}
+
+test "store.mysql live metadata repair rolls back with a refused ownership update" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    const name_buffer = storage.engine.mysql.state.testing_database;
+    const name = std.mem.sliceTo(&name_buffer, 0);
+    const epoch = storage.engine.mysql.state.epoch;
+    try storage.close();
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
+    var buffer: [128]u8 = undefined;
+    try run(try std.fmt.bufPrint(&buffer, "USE {s}", .{name}));
+    try run("DELETE FROM store_meta;CREATE TRIGGER refuse_owner_update BEFORE UPDATE ON store_owner FOR EACH ROW SIGNAL SQLSTATE '45000'");
+    {
+        defer run("DROP TRIGGER refuse_owner_update") catch @panic("cannot restore ownership updates");
+        try refusesMetadata(name, error.StatementFailed);
+        try root.query("SELECT count(*) FROM store_meta");
+        try std.testing.expectEqual(@as(u64, 0), try readU64());
+        try root.query("SELECT epoch FROM store_owner WHERE owner_key=1");
+        try std.testing.expectEqual(epoch, try readU64());
+    }
+    var repaired = try admitMetadata(name, name);
+    const id = repaired.state.store_id;
+    try std.testing.expect(schema.isStoreId(&id));
+    try std.testing.expectEqual(epoch + 1, repaired.state.epoch);
+    try repaired.close();
+    try root.query("SELECT count(*) FROM store_meta");
+    try std.testing.expectEqual(@as(u64, 3), try readU64());
+    var reopened = try admitMetadata(name, name);
+    defer reopened.close() catch unreachable;
+    try std.testing.expectEqualStrings(&id, &reopened.state.store_id);
+}
+
 test "store.mysql live admission checks the index plan domain without pinning generated key names" {
     const Alter = struct {
         fn index(name: []const u8, comptime table: []const u8, comptime alteration: []const u8) !void {
@@ -424,7 +581,7 @@ test "store.mysql live admission checks the index plan domain without pinning ge
                 // A mutation that admits the Store must still close its lock.
                 const admission = open(&refused, tmp, std.testing.io, .{});
                 if (admission) |_| try refused.close() else |_| {}
-                try std.testing.expectError(error.StoreSchemaBehind, admission);
+                try std.testing.expectError(error.StoreCatalogMismatch, admission);
             }
             // Restoring only the altered property repairs admission; no
             // migration is needed, and the refused open released GET_LOCK.
