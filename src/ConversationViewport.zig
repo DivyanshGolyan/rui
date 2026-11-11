@@ -502,6 +502,8 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             at: u64,
             removed: usize,
             added: usize,
+            /// Newer lines left from the end to make room.
+            trimmed: bool = false,
 
             pub fn map(self: Edit, offset: u64) u64 {
                 if (offset < self.at) return offset;
@@ -509,9 +511,15 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             }
         };
 
-        const ToolEdit = struct { start: usize, end: usize, added: usize, discard: usize };
+        /// Which whole lines leave when opened output does not fit. Live output
+        /// drops its oldest, as any append does. A browsed transcript drops its
+        /// newest, as a prepended older page does: live output still holds them,
+        /// while lines dropped from its front would never load again.
+        pub const Room = enum { oldest, newest };
 
-        fn toolEdit(self: *const Self, reference: tool_fold.Reference, rows: anytype, open: bool) !?ToolEdit {
+        const ToolEdit = struct { start: usize, end: usize, added: usize, discard: usize, keep: usize };
+
+        fn toolEdit(self: *const Self, reference: tool_fold.Reference, rows: anytype, open: bool, room: Room) !?ToolEdit {
             const heading = self.findTool(reference) orelse return null;
             if (self.toolIsOpen(heading) == open) return null;
             const start = @min(self.lineEnd(heading) + 1, self.text().len);
@@ -520,32 +528,48 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             const added = if (open) rows.length else 0;
             const removed = end - start;
             var discard: usize = 0;
-            if (self.length - removed + added > limit) {
-                const wanted = self.length - removed + added - limit;
-                discard = self.lineEnd(wanted) + 1;
-                // Only older complete lines can leave, never this heading
-                // or newer canonical text. Check before mutating either copy.
-                if (discard > heading) return error.ToolFoldViewFull;
-            }
-            return .{ .start = start, .end = end, .added = added, .discard = discard };
+            var keep = self.length;
+            if (self.length - removed + added > limit) switch (room) {
+                .oldest => {
+                    const wanted = self.length - removed + added - limit;
+                    discard = self.lineEnd(wanted) + 1;
+                    // Only whole lines before this heading can leave. Check
+                    // before mutating either copy.
+                    if (discard > heading) return error.ToolFoldViewFull;
+                },
+                .newest => {
+                    if (added > limit) return error.ToolFoldViewFull;
+                    const fits = limit - added + removed;
+                    keep = if (std.mem.lastIndexOfScalar(u8, self.bytes[0..fits], '\n')) |line| line + 1 else 0;
+                    // Only whole lines after this row's output can leave.
+                    if (keep < end) return error.ToolFoldViewFull;
+                },
+            };
+            return .{ .start = start, .end = end, .added = added, .discard = discard, .keep = keep };
         }
 
         /// Validate all copies before editing any. True means this Reference
         /// exists, including when it already has the desired state.
-        pub fn checkToolOpen(self: *const Self, reference: tool_fold.Reference, rows: anytype, open: bool) !bool {
-            _ = try self.toolEdit(reference, rows, open);
+        pub fn checkToolOpen(self: *const Self, reference: tool_fold.Reference, rows: anytype, open: bool, room: Room) !bool {
+            _ = try self.toolEdit(reference, rows, open, room);
             return self.findTool(reference) != null;
         }
 
         /// Inserts/removes just this row's bounded output. Other folds and live
         /// text stay intact. A refused insertion changes neither text nor anchor.
         /// A held first row keeps its text; a view following its end still does.
-        pub fn setToolOpen(self: *Self, reference: tool_fold.Reference, rows: anytype, open: bool) !?Edit {
-            const plan = try self.toolEdit(reference, rows, open) orelse return null;
+        pub fn setToolOpen(self: *Self, reference: tool_fold.Reference, rows: anytype, open: bool, room: Room) !?Edit {
+            const plan = try self.toolEdit(reference, rows, open, room) orelse return null;
             var start = plan.start;
             var end = plan.end;
             const added = plan.added;
             const removed = end - start;
+            const trimmed = plan.keep != self.length;
+            if (trimmed) {
+                self.length = plan.keep;
+                self.control_length = 0;
+                self.link = .none;
+            }
             if (plan.discard != 0) {
                 const held = self.top;
                 self.discardFront(self.origin + plan.discard);
@@ -563,7 +587,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             }
             @memcpy(self.bytes[start..][0..added], rows.bytes[0..added]);
             if (styled) @memcpy(self.styles[start..][0..added], rows.styles[0..added]);
-            const edit: Edit = .{ .at = self.origin + start, .removed = removed, .added = added };
+            const edit: Edit = .{ .at = self.origin + start, .removed = removed, .added = added, .trimmed = trimmed };
             if (self.top) |*top| if (top.offset >= start) {
                 top.offset = @intCast(edit.map(self.origin + top.offset) - self.origin);
             };
@@ -1811,15 +1835,65 @@ test "a fold edit keeps a held first row on its text and leaves a following view
     const below = view.nextLine(heading).?;
     for ([_]?Position{ null, .{}, .{ .offset = heading }, .{ .offset = below } }) |held| {
         view.top = held;
-        try std.testing.expect((try view.setToolOpen(reference, &rows, true)) != null);
+        try std.testing.expect((try view.setToolOpen(reference, &rows, true, .oldest)) != null);
         try std.testing.expect(view.toolIsOpen(heading));
         const moved: ?Position = if (held) |top| .{ .offset = if (top.offset == below) below + rows.length else top.offset } else null;
         try std.testing.expectEqualDeep(moved, view.top);
         if (moved) |top| if (top.offset > heading) try std.testing.expect(std.mem.startsWith(u8, view.text()[top.offset..], "below\n"));
         // A first row inside the output lands on the line after it when it closes.
         if (held != null and held.?.offset == heading) view.top = .{ .offset = below + 3 };
-        try std.testing.expect((try view.setToolOpen(reference, &rows, false)) != null);
+        try std.testing.expect((try view.setToolOpen(reference, &rows, false, .oldest)) != null);
         try std.testing.expect(!view.toolIsOpen(heading));
         try std.testing.expectEqualDeep(if (held != null and held.?.offset == heading) @as(?Position, .{ .offset = below }) else held, view.top);
     }
+}
+
+test "output that does not fit drops a live view's oldest lines and a browsed view's newest, never the row" {
+    const Doc = Sized(256, true);
+    const Sink = struct {
+        view: *Doc,
+        pub fn feed(self: @This(), bytes: []const u8) !void {
+            try self.view.append(bytes);
+        }
+    };
+    const reference: tool_fold.Reference = .{ .position = 1, .ordinal = 0, .content = .{ .length = 0, .digest = @splat(0) } };
+    const old: [12 * 9]u8 = @bitCast(@as([12][9]u8, @splat("old line\n".*)));
+    var full: Doc = .{};
+    try full.append(&old);
+    try tool_fold.marker(reference, Sink{ .view = &full });
+    try full.append("✓ A\n");
+    while (full.length + "newer\n".len <= 256) try full.append("newer\n");
+    try full.prepare();
+    var rows: Sized(256, true) = .{};
+    try rows.append(tool_fold.output_marker ++ "    out\n" ++ tool_fold.output_marker ++ "    err\n");
+    try rows.prepare();
+    try std.testing.expect(full.length + rows.length > 256);
+    const newer = std.mem.count(u8, full.text(), "newer\n");
+
+    var live = full;
+    try std.testing.expect(try live.checkToolOpen(reference, &rows, true, .oldest));
+    const live_edit = (try live.setToolOpen(reference, &rows, true, .oldest)).?;
+    try std.testing.expect(!live_edit.trimmed and live.origin != 0);
+    try std.testing.expect(live.toolIsOpen(live.findTool(reference).?));
+    try std.testing.expect(std.mem.count(u8, live.text(), "old line\n") < 12);
+    try std.testing.expectEqual(newer, std.mem.count(u8, live.text(), "newer\n"));
+
+    var browsed = full;
+    browsed.top = .{};
+    const browsed_edit = (try browsed.setToolOpen(reference, &rows, true, .newest)).?;
+    try std.testing.expect(browsed_edit.trimmed and browsed.origin == 0);
+    try std.testing.expect(browsed.toolIsOpen(browsed.findTool(reference).?));
+    try std.testing.expect(std.mem.startsWith(u8, browsed.text(), &old));
+    try std.testing.expect(std.mem.count(u8, browsed.text(), "newer\n") < newer);
+    try std.testing.expect(std.mem.endsWith(u8, browsed.text(), "\n"));
+    try std.testing.expectEqualDeep(@as(?Position, .{}), browsed.top);
+
+    // Output larger than everything after the row is refused, changing nothing.
+    var large: Sized(256, true) = .{};
+    for (0..6) |_| try large.append(tool_fold.output_marker ++ "    a long output line\n");
+    try large.prepare();
+    var refused = full;
+    try std.testing.expectError(error.ToolFoldViewFull, refused.checkToolOpen(reference, &large, true, .newest));
+    try std.testing.expectError(error.ToolFoldViewFull, refused.setToolOpen(reference, &large, true, .newest));
+    try std.testing.expectEqualStrings(full.text(), refused.text());
 }

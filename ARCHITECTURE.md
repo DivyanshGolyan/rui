@@ -2832,6 +2832,8 @@ A click on a tool heading toggles its output directly below it; Ctrl-O toggles t
 Several tool rows may be open together, and new live output leaves them open.
 In the transcript the heading keeps its row and the output grows below it.
 Live output keeps following its latest rows, with or without an open tool row.
+When opened output does not fit the view, live output drops its oldest whole lines, as any append does; a browsed transcript drops its newest whole lines after the row, as a prepended older page does, because live output still holds them and the older-page cursor has already passed its front.
+Output larger than what may leave is refused and changes nothing.
 The frontend reads the selected immutable Store content on toggle, checking its length and digest, and retains only a bounded display prefix for the open row, never all closed outputs.
 At most 20 indented rows show, with long logical lines ending in `…` rather than wrapping past that bound, then a quiet `… N more lines` row; a byte-bound cut counts incomplete lines among those not shown.
 The printed prefix keeps at most 8,192 raw bytes and at most 8,192 bytes after terminal-control escaping, before the document escapes invisible clusters.
