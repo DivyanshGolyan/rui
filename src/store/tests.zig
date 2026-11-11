@@ -8753,6 +8753,117 @@ test "an admission's commit reads the request's settings where its message carri
     }.run);
 }
 
+test "an admission's commit reads the first history round from where its caller remembers the Session resuming, and a stale memory costs only that round" {
+    try store_testing.forEachEngine(struct {
+        const Variant = enum { right, no_memory, other_position, other_cursor, other_base, other_tools };
+
+        /// What a caller remembers of the one Session these cases drive.
+        const Memory = struct {
+            session: []const u8,
+            resume_from: ?historical_domain.Resume,
+
+            fn of(context: *anyopaque, session: []const u8) ?historical_domain.Resume {
+                const memory: *const Memory = @ptrCast(@alignCast(context));
+                return if (std.mem.eql(u8, memory.session, session)) memory.resume_from else null;
+            }
+        };
+
+        /// The entries after `after` and every tool of the set, as a
+        /// request that resumes its tool groups at `cursor` reads them.
+        fn walk(view: *HistoricalView, after: u64, cursor: u64, buffer: []u8) ![]const u8 {
+            while (!try view.validateOutputsStep()) {}
+            _ = try view.coverage();
+            view.expectTools(.all);
+            if (after != 0) view.resumeToolGroups(cursor);
+            var out = std.Io.Writer.fixed(buffer);
+            var rendered: [16 * 1024]u8 = undefined;
+            var position: TestingHistoryCursor = .{ .position = after };
+            while (try position.next(view)) |entry| try out.print("{d}:{s};", .{ entry.position, try renderTestingEntry(view, entry, &rendered) });
+            var tool: historical_domain.HistoricalTool = .{};
+            while (try view.nextTool(&tool)) try out.print("tool {s};", .{tool.name.slice()});
+            return out.buffered();
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "ahead-config");
+            try submitTestMessage(&storage, &tmp, "ahead-0", "ahead-0", session.slice(), "question");
+            var binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const items = [_][]const u8{"{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"};
+            var names: [std.enums.values(Variant).len][32]u8 = undefined;
+            for (std.enums.values(Variant), &names) |variant, *name| {
+                // What the last request's view ended with, as a caller keeps it.
+                var last: HistoricalView = undefined;
+                var last_settings: HistoricalSettings = undefined;
+                storage.openHistoricalView(binding, &last);
+                try last.settings(&last_settings);
+                var scratch: [8 * 1024]u8 = undefined;
+                _ = try walk(&last, 0, 0, &scratch);
+                var end: u64 = 0;
+                while (try last.nextEntry(end)) |entry| end = entry.position;
+                const right: historical_domain.Resume = .{
+                    .after_position = end,
+                    .group_cursor = last.toolGroupCursor(),
+                    .keys = last.resumeKeys(),
+                    .tool_set = last.currentDeclaration().tool_set_id,
+                    .tools = .all,
+                };
+                last.close();
+                try std.testing.expect(end != 0);
+
+                try settleItemsForTesting(&storage, &tmp, binding, &items, "answer");
+                const key = try std.fmt.bufPrint(name, "ahead-{t}", .{variant});
+                try submitTestMessage(&storage, &tmp, key, key, session.slice(), "follow-up");
+                var remembered = right;
+                switch (variant) {
+                    .right, .no_memory, .other_position => {},
+                    .other_cursor => remembered.group_cursor += 1,
+                    .other_base => remembered.keys.base += 1,
+                    .other_tools => remembered.tool_set += 1,
+                }
+                var memory: Memory = .{ .session = session.slice(), .resume_from = if (variant == .no_memory) null else remembered };
+                var view: HistoricalView = undefined;
+                var settings: HistoricalSettings = undefined;
+                const admitted = (try storage.admitModelAttemptInto(.message, .{}, .{
+                    .view = &view,
+                    .settings = &settings,
+                    .remembered = .{ .context = &memory, .of = Memory.of },
+                })).?;
+                binding = admitted.permit.binding;
+                if (!case.rerun) try std.testing.expectEqual(case.engine == .mysql, admitted.request_started);
+                if (!admitted.request_started) storage.openHistoricalView(binding, &view);
+                defer view.close();
+                // The request reads on from where its caller's memo ended,
+                // or, its memo lost, from the start.
+                const after = if (variant == .other_position) 0 else right.after_position;
+                const rounds = ViewRounds.start(&storage);
+                try view.settings(&settings);
+                var buffer: [8 * 1024]u8 = undefined;
+                const read = try walk(&view, after, right.group_cursor, &buffer);
+                // Only the round read from where the request does read, by
+                // the keys its own boundary gives, is its own.
+                const ahead: u16 = if (!admitted.request_started) 2 else if (variant == .right) 0 else 1;
+                try std.testing.expectEqual(ahead, rounds.taken().rounds);
+
+                var plain_view: HistoricalView = undefined;
+                var plain_settings: HistoricalSettings = undefined;
+                storage.openHistoricalView(binding, &plain_view);
+                defer plain_view.close();
+                try plain_view.settings(&plain_settings);
+                var plain_buffer: [8 * 1024]u8 = undefined;
+                try std.testing.expectEqualStrings(try walk(&plain_view, after, right.group_cursor, &plain_buffer), read);
+                try std.testing.expect(std.mem.indexOf(u8, read, "follow-up") != null);
+                try std.testing.expect(std.mem.indexOf(u8, read, "tool ") != null);
+                try std.testing.expectEqual(plain_view.toolGroupCursor(), view.toolGroupCursor());
+            }
+        }
+    }.run);
+}
+
 test "an admission weighs uncovered bytes in its write, and admits the compaction they call for" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

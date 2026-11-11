@@ -1846,7 +1846,7 @@ fn admitNewAttempt(
     const token = host.custody.reserve() orelse return .no_work;
     // The slot's preparation is free (`modelPreparationOpen`), so the
     // admission starts the request in it: the settings ride its commit.
-    var admission = host.store.admitModelAttemptInto(kind, host.hooks.storeFaults(.attempt_admission), .{ .view = &preparation.view, .settings = &preparation.settings }) catch |err| {
+    var admission = host.store.admitModelAttemptInto(kind, host.hooks.storeFaults(.attempt_admission), .{ .view = &preparation.view, .settings = &preparation.settings, .remembered = model_adapter.remembered(&host.history_memos) }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "Attempt admission", err);
         return .retry_later;

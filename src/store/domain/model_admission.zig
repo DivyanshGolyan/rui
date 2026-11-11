@@ -743,6 +743,49 @@ const IdleChecks = struct {
 /// and commits. The Entry mutex excludes every other writer; a moved head is
 /// `SelectionChanged`.
 pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, pressure: Pressure, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
+    const queued = try queueNextModelAttempt(reader, writer, kind, pressure, faults) orelse return null;
+    return commitAdmission(writer, &queued, start);
+}
+
+/// Commits the admission `writer` holds queued, starting the admitted
+/// Attempt's request in `start` where the commit's message carries reads.
+/// Never inlined: the request's reads live in this frame through the
+/// commit only, beside `queueNextModelAttempt`'s and not under it.
+noinline fn commitAdmission(writer: anytype, queued: *const QueuedAdmission, start: ?historical_domain.Start) !?AttemptAdmission {
+    const binding = queued.binding;
+    // The request's settings round reads only what this commit saves, so
+    // it follows COMMIT in the same message where that message has room.
+    var request: historical_domain.SettingsRead = undefined;
+    // Only a network engine's commit carries reads after it.
+    const opened = if (start) |into| writer.store.engine.batches() and into.open(writer.store, binding) else false;
+    if (opened) {
+        request = .init(start.?.view, start.?.settings);
+        request.readAhead(start.?, &queued.session, queued.position);
+        store_core.followCommit(writer.store, request.follow());
+    }
+    defer if (opened) store_core.followCommit(writer.store, null);
+    writer.commit() catch |err| {
+        if (opened) start.?.view.close();
+        return err;
+    };
+    const started = opened and start.?.view.settled != null;
+    if (opened and !started) start.?.view.close();
+    return .{ .permit = .{ .binding = binding }, .request_started = started };
+}
+
+/// What `queueNextModelAttempt` queued: the Attempt its writes admit.
+const QueuedAdmission = struct {
+    binding: AttemptBinding,
+    session: @FieldType(rsql.SessionHead, "ref"),
+    /// The Operation's admission position.
+    position: u64,
+};
+
+/// Selects the next Attempt and queues its admission's writes on `writer`,
+/// which the caller commits; null when nothing is runnable. Never inlined:
+/// the facts it reads are over 1 KiB, and its frame is gone before the
+/// commit, whose message is the deepest part of the engine thread's stack.
+noinline fn queueNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, pressure: Pressure, faults: Faults) !?QueuedAdmission {
     var found: runnable_selection.Result = undefined;
     var facts_row: SelectedRow = undefined;
     var facts_found: store_access.Found = undefined;
@@ -847,13 +890,14 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
             .revision = facts.revision.get(),
         }, instructions);
     }
+    const position = try positions.take(1);
     writer.write(insert_operation, .{
         .operation_id = operation_id,
         .turn_id = turn_id,
         .session = facts.session,
         .revision = facts.revision.get(),
         .cutoff = cutoff,
-        .position = try positions.take(1),
+        .position = position,
         .compaction = purpose == .compaction,
         .compaction_trigger = policy.compaction_trigger,
         .output_reservation = policy.output_reservation,
@@ -864,24 +908,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
     });
     // The writes are queued, not run, as in every converted entry point.
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    const binding: AttemptBinding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 };
-    // The request's settings round reads only what this commit saves, so
-    // it follows COMMIT in the same message where that message has room.
-    var request: historical_domain.SettingsRead = undefined;
-    // Only a network engine's commit carries reads after it.
-    const opened = if (start) |into| writer.store.engine.batches() and into.open(writer.store, binding) else false;
-    if (opened) {
-        request = .init(start.?.view, start.?.settings);
-        store_core.followCommit(writer.store, request.follow());
-    }
-    defer if (opened) store_core.followCommit(writer.store, null);
-    writer.commit() catch |err| {
-        if (opened) start.?.view.close();
-        return err;
-    };
-    const started = opened and start.?.view.settled != null;
-    if (opened and !started) start.?.view.close();
-    return .{ .permit = .{ .binding = binding }, .request_started = started };
+    return .{ .binding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 }, .session = facts.session.ref, .position = position };
 }
 
 /// Which of the dispatch loop's commit-driven scans would find work now.
