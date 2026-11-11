@@ -190,6 +190,26 @@ def recovery(fixture, row):
     tty.finish()
 
 
+def assert_navigation_history(screen, first, browsing):
+    # 24 terminal rows minus the composer between its two rules, the
+    # facts, status and permanently reserved chip row leave 19 feed rows.
+    # At end the answer's last line takes one; away from end all 19 show
+    # numbered lines. Moving the anchor never switches documents or
+    # borrows the chip row. These literal anchors are fixture-owned.
+    count = 19 if browsing else 18
+    expected = [f"History line {number:03d}" for number in range(first, min(first + count, 100))]
+    lines = screen.splitlines()
+    actual = [found.group(0) for found in (re.match(r"History line \d{3}", line.strip()) for line in lines) if found]
+    assert actual == expected, ("navigation history anchor/distance", actual, expected)
+    # Scrolled back, the `↓` marker sits alone at the right of the row
+    # under the last history line, and nothing new arrived below; at the
+    # latest it is gone.
+    marked = [number for number, line in enumerate(lines) if re.search(r"↓( \d+ new)?\s*$", line)]
+    assert len(marked) == (1 if browsing else 0), ("navigation marker", marked)
+    assert not browsing or (lines[marked[0]].strip() == "↓" and expected[-1] in lines[marked[0] - 1]), \
+        ("navigation marker row", lines[marked[0]], lines[marked[0] - 1], expected[-1])
+
+
 def navigation(fixture, row):
     # A real completed answer supplies enough history for page and wheel input
     # to move the viewport; an empty Session cannot distinguish ignored keys.
@@ -212,34 +232,19 @@ def navigation(fixture, row):
         tty.send(b"~")
         tty.draft("~", 3)
         assert scrolled_back() == browsing, "navigation view changed before ordered marker"
-        # 24 terminal rows minus the composer between its two rules, the
-        # facts and the status line leave 19 transcript rows. At the latest
-        # the answer's last line takes the bottom one, so 18 history lines
-        # show; scrolled back, the `↓` marker takes it, so 18 do too. These
-        # literal fixture anchors are independent of Rui's viewport.
-        expected = [f"History line {number:03d}" for number in range(first, min(first + 18, 100))]
-        lines = tty.screen.completed.splitlines()
-        actual = [found.group(0) for found in (re.match(r"History line \d{3}", line.strip()) for line in lines) if found]
-        assert actual == expected, ("navigation history anchor/distance", actual, expected)
-        # Scrolled back, the `↓` marker sits alone at the right of the row
-        # under the last history line, and nothing new arrived below; at the
-        # latest it is gone.
-        marked = [number for number, line in enumerate(lines) if re.search(r"↓( \d+ new)?\s*$", line)]
-        assert len(marked) == (1 if browsing else 0), ("navigation marker", marked)
-        assert not browsing or (lines[marked[0]].strip() == "↓" and expected[-1] in lines[marked[0] - 1]), \
-            ("navigation marker row", lines[marked[0]], lines[marked[0] - 1], expected[-1])
+        assert_navigation_history(tty.screen.completed, first, browsing)
         tty.send(b"\x15")
         tty.draft("", 2)
     history(82, False)
     generation = tty.screen.generation
     chunks(tty, row["chunks"])
-    tty.wait(scrolled_back, label="navigation entered browsing", after=generation)
     if row.get("status"):
         tty.marker(" Status · ")
         tty.marker(f" · {fixture.session}")
         tty.marker(" Work")
         tty.marker("Permissions     ")
     else:
+        tty.wait(scrolled_back, label="navigation moved feed anchor", after=generation)
         history(row["first_history"], True)
         for step in row.get("middle", []):
             generation = tty.screen.generation

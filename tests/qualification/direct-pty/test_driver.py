@@ -10,8 +10,51 @@ import unittest
 from unittest.mock import patch
 
 from driver import DirectPty, ScreenCapture
-from matrix import run_one
+from matrix import inventory, run_one
 import host_process
+
+
+class NavigationTests(unittest.TestCase):
+    @staticmethod
+    def check(screen, first, browsing):
+        # Model fixtures read the binary argument at import; these pure screen
+        # checks do not start a fixture or require a terminal emulator.
+        with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
+            from scenarios import assert_navigation_history
+        assert_navigation_history(screen, first, browsing)
+
+    @staticmethod
+    def screen(first, count, chip="↓"):
+        return "\n".join([f"History line {n:03d}" for n in range(first, first + count)] + [chip])
+
+    def test_continuous_feed_ranges_and_reserved_chip(self):
+        self.check(self.screen(82, 18, "TD4 history end\n"), 82, False)
+        for first in (64, 73, 79, 80, 81):
+            with self.subTest(first=first):
+                self.check(self.screen(first, 19), first, True)
+                # Reject the old separate-history screen and any one-row
+                # distance/direction error, not merely marker presence.
+                for actual, count in ((first, 18), (first - 1, 19), (first + 1, 19)):
+                    with self.assertRaisesRegex(AssertionError, "navigation history anchor/distance"):
+                        self.check(self.screen(actual, count), first, True)
+        for chip in ("", "↓ 1 new"):
+            with self.assertRaisesRegex(AssertionError, "navigation marker"):
+                self.check(self.screen(73, 19, chip), 73, True)
+
+    def test_all_navigation_vectors_keep_their_input_intent(self):
+        rows = inventory()
+        self.assertEqual(len(rows), 51)
+        navigation = {row["name"]: row for row in rows if row["scenario"] == "navigation"}
+        self.assertEqual(set(navigation), {
+            "key-pgup", "key-pgdn", "key-shift-pgup", "key-shift-up",
+            "key-up-csi", "key-up-ss3", "key-end-csi-f", "key-end-ss3-f",
+            "key-end-csi-4", "key-esc", "wheel-alt-scroll", "status"})
+        for name, encoded in (("key-end-csi-f", b"\x1b[F"),
+                              ("key-end-ss3-f", b"\x1bOF"),
+                              ("key-end-csi-4", b"\x1b[4~")):
+            self.assertEqual(navigation[name]["return_chunks"][0]["hex"], encoded.hex())
+        self.assertEqual([step["first_history"] for step in navigation["key-pgdn"]["middle"]], [73])
+        self.assertEqual([step["first_history"] for step in navigation["wheel-alt-scroll"]["middle"]], [80, 81])
 
 
 class DriverTests(unittest.TestCase):
