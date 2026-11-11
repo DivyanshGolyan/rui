@@ -190,7 +190,7 @@ def memory():
     hold = threading.Event()
     with world("counts-memory", {"work": (answer("work"), hold)}) as w, released(hold):
         send(w, w.session("--label", "Work"), "work")
-        with w.overview(columns=100) as screen:
+        with w.overview(columns=99) as screen:
             screen.wait(lambda f: counts(f) == f"{WORDMARK}  ⠹ 1", "⠹ 1")
             frame = screen.wait(lambda f: re.search(rf"  {MEMORY.pattern}$", top(f).rstrip()), "rui N MB on the right")
             assert counts(frame) == f"{WORDMARK}  ⠹ 1", frame
