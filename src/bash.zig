@@ -934,7 +934,7 @@ pub const Preparation = struct {
         scratch: Scratch,
         allocator: std.mem.Allocator,
         arguments: store.ContentLocation,
-        input: *const store.BashExecutionInput,
+        input: *const store.ActionExecutionInput,
         store_selector: []const u8,
         bash_path: []const u8,
         action_id: u64,
@@ -946,7 +946,7 @@ pub const Preparation = struct {
             .session = input.session,
             .sender_handle = input.sender_handle,
             .store_selector = store_selector,
-            .workspace = input.workspace,
+            .workspace = input.runner.bash.workspace,
             .bash_path = bash_path,
             .timeout_ms = input.timeout_ms,
             .action_id = action_id,
@@ -2007,7 +2007,7 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
     const testingStore = store.testing.testingSqliteStore;
     const configureTestSession = store.testing.configureTestSession;
     const testingPublicProjection = store.testingPublicProjection;
-    const BashExecutionInput = store.BashExecutionInput;
+    const ActionExecutionInput = store.ActionExecutionInput;
     const c = store.testingSqlite.c;
     const bash = @import("bash.zig");
     for ([_]usize{ 0, 1024 * 1024 }) |padding_length| {
@@ -2028,14 +2028,15 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
             .encoded = encoded[1 .. encoded.len - 1],
             .decoded = descriptor,
         }});
-        var input: BashExecutionInput = .{
+        var input: ActionExecutionInput = .{
+            .binding = .{ .action_id = 11, .parent_operation_id = 1, .turn_id = 1 },
             .session = request.session,
             .sender_handle = .{},
-            .workspace = .{},
+            .runner = .{ .bash = .{ .workspace = .{} } },
             .arguments = .{ .length = descriptor.len, .digest = undefined },
             .timeout_ms = 1000,
         };
-        try input.workspace.set(database.selector.slice());
+        try input.runner.bash.workspace.set(database.selector.slice());
         var used: std.atomic.Value(u64) = .init(0);
         const scratch: bash.Scratch = .{ .io = std.testing.io, .path = database.selector.slice(), .budget = .{ .used = &used, .limit = 4096 } };
         var preparation: bash.Preparation = undefined;
