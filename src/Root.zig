@@ -13,7 +13,7 @@ pub const split_at = 100;
 overview: vxfw.Widget,
 list: vxfw.Widget,
 compose: vxfw.Widget,
-divider_style: vaxis.Style = .{},
+divider: Split.Divider = .{},
 session: ?vxfw.Widget = null,
 pasting: bool = false,
 frames: u64 = 0,
@@ -97,7 +97,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             .left_width = list_width,
             .min_width = split_at,
             .narrow = .right,
-            .divider = .{ .style = self.divider_style },
+            .divider = self.divider,
         };
         break :wide try split.widget().draw(ctx);
     };

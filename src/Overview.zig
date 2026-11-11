@@ -471,8 +471,15 @@ fn composeWidget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = appEvent, .drawFn = appComposeDraw };
 }
 
+fn paintDivider(self: *Self) void {
+    self.root.divider = .{
+        .grapheme = if (self.caps.unicode) "│" else "|",
+        .style = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet }),
+    };
+}
+
 fn paintCursor(self: *Self) !void {
-    self.root.divider_style = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
+    self.paintDivider();
     if (self.caps.depth == .none) return;
     const theme = @import("theme.zig");
     const mode: theme.Mode = if (self.caps.skin() == .day) .light else .dark;
@@ -562,11 +569,6 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 /// A click the screen's widgets name steps the core as a key does.
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (click == .open and self.root.session != null) {
-        try self.app_session.?.frontend.?.openPeer(ctx, &click.open);
-        ctx.redraw = true;
-        return;
-    }
     try self.appNext(ctx, try self.event(.{ .clicked = click }));
     ctx.redraw = true;
 }
@@ -575,6 +577,10 @@ fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
     switch (next orelse return) {
         .leave => ctx.quit = true,
         .open => |reference| {
+            if (self.root.session != null) {
+                try self.app_session.?.frontend.?.openPeer(ctx, &reference);
+                return;
+            }
             _ = self.composer.blur();
             self.opened = reference;
             self.ops.open(self, ctx) catch |err| {
@@ -957,7 +963,8 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = self.emptyComposer(0);
-    self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .divider_style = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet }) };
+    self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget() };
+    self.paintDivider();
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" } };
     self.app_screen = .{ .content = &self.app_sessions, .input = &self.app_input, .userdata = self, .on_event = appEvent };
     self.app_header = .{ .state = &self.state, .userdata = self, .on_click = appClick };
@@ -5130,4 +5137,141 @@ test "App overview list press follows only after the open child settles and open
     try std.testing.expectEqualStrings("b4n8wd", &Seen.now.conversed);
     try std.testing.expect(overview.follow.pending == null);
     try std.testing.expect(!ctx.quit);
+}
+
+test "App shell divider follows overview locale across layouts and screen selection" {
+    const rig = try openComposer();
+    defer rig.close();
+    try rig.environ.put("NO_COLOR", "1");
+    const session: vxfw.Text = .{ .text = "Session" };
+    for ([_]struct { locale: []const u8, glyph: []const u8, unicode: bool }{
+        .{ .locale = "C", .glyph = "|", .unicode = false },
+        .{ .locale = "en_US.UTF-8", .glyph = "│", .unicode = true },
+    }) |case| {
+        try rig.environ.put("LC_ALL", case.locale);
+        var cancellation: client.Cancellation = .{};
+        const overview = try create(rig.init, rig.overview.options, undefined, fake_operations, &cancellation);
+        defer overview.destroy();
+        overview.attention = &rig.attention;
+        try std.testing.expectEqual(case.unicode, overview.caps.unicode);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        // Cover both construction and later theme/cursor repainting.
+        for (0..2) |paint| {
+            if (paint != 0) try overview.paintCursor();
+            for ([_]bool{ false, true }) |open| {
+                if (open) try overview.root.openSession(&events, session.widget()) else try overview.root.closeSession(&events);
+                for ([_]u16{ 46, 99, 100, 140 }) |width| {
+                    const surface = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
+                    const layout = surface.children[0].surface;
+                    if (width >= Root.split_at) {
+                        const divider = layout.children[1].surface;
+                        for (divider.buffer) |cell| try std.testing.expectEqualStrings(case.glyph, cell.char.grapheme);
+                        try std.testing.expectEqualDeep(@import("widget_style.zig").of(overview.caps, .{ .colour = .quiet }), divider.buffer[0].style);
+                    } else try std.testing.expect(layout.widget.eql(if (open) session.widget() else overview.widget()));
+                    var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = width, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+                    const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 24, .screen = &screen };
+                    surface.render(window, overview.app_input.composer.widget());
+                    if (!case.unicode) for (screen.buf) |cell| {
+                        for (cell.char.grapheme) |byte| try std.testing.expect(byte < 0x80);
+                    };
+                }
+            }
+        }
+    }
+}
+
+test "App list clicks validate present and removed targets with open and closed chats" {
+    const Click = struct {
+        var dir: std.Io.Dir = undefined;
+        var files: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            files += 1;
+            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
+        }
+        fn origin(surface: vxfw.Surface, target: vxfw.Widget, at: vxfw.RelativePoint) ?vxfw.RelativePoint {
+            if (surface.widget.eql(target)) return at;
+            for (surface.children) |child| {
+                if (origin(child.surface, target, .{ .row = at.row + child.origin.row, .col = at.col + child.origin.col })) |found| return found;
+            }
+            return null;
+        }
+        fn leave(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFrontend.Outcome) !void {
+            const overview: *Self = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqualStrings("b4n8wd", &overview.follow.pending.?);
+            const frontend = overview.app_session.?.frontend.?;
+            try std.testing.expect(frontend.reader.thread == null);
+            try std.testing.expect(frontend.skill_task.thread == null);
+            try appSessionLeft(raw, ctx, outcome);
+        }
+        fn open(overview: *Self, ctx: *vxfw.EventContext) !void {
+            try std.testing.expect(overview.root.session == null);
+            Seen.now.conversations += 1;
+            Seen.now.conversed = overview.opened;
+            try overview.root.openSession(ctx, overview.app_sessions.widget());
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    Click.dir = tmp.dir;
+    for ([_]bool{ false, true }) |open| {
+        for ([_]bool{ true, false }) |present| {
+            Click.files = 0;
+            var cancellation: client.Cancellation = .{};
+            const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+            defer rig.close();
+            const overview = rig.overview;
+            Seen.now.listed = 2;
+            try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+            try std.testing.expect(try rig.settle() == null);
+            defer {
+                if (overview.app_session) |left| {
+                    if (left.frontend) |frontend| frontend.stop();
+                    overview.disposeSession(left);
+                    overview.app_session = null;
+                }
+                for (overview.retired.items) |retired| overview.disposeSession(retired.left);
+                overview.retired.deinit(std.testing.allocator);
+            }
+            if (open) {
+                overview.hooks.scratch = Click.scratch;
+                overview.ops.open = openSession;
+                try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+                overview.app_session.?.frontend.?.app_hooks.leave = Click.leave;
+            }
+            overview.ops.open = Click.open;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+            const at = Click.origin(frame, overview.app_sessions.widget(), .{ .row = 0, .col = 0 }).?;
+            const row = for (overview.app_sessions.shown_at) |span| {
+                if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, "b4n8wd")) break span.row;
+            } else unreachable;
+            // Refresh the core without replacing the drawn hit targets.
+            if (!present) {
+                Seen.now.listed = 1;
+                overview.state.next_list_ms = 0;
+                try std.testing.expect(try overview.event(.{ .tick = (test_now_s + 1) * 1000 }) == null);
+                try std.testing.expect(try rig.settle() == null);
+                try std.testing.expect(overview.state.find("b4n8wd".*) == null);
+            }
+            const previous = overview.root.session;
+            const selected = overview.state.selected;
+            var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+            try app_events.mouse(&ctx, frame, .{ .col = 4, .row = @intCast(at.row + row), .button = .left, .type = .press, .mods = .{} });
+            try std.testing.expectEqual(@as(usize, @intFromBool(present)), Seen.now.conversations);
+            try std.testing.expect(overview.follow.pending == null);
+            try std.testing.expect(!ctx.quit);
+            if (present) {
+                try std.testing.expectEqualStrings("b4n8wd", &Seen.now.conversed);
+                try std.testing.expectEqualStrings("b4n8wd", &overview.state.selected.?);
+                try std.testing.expectEqual(@as(usize, @intFromBool(open)), overview.retired.items.len);
+            } else {
+                try std.testing.expectEqual(selected, overview.state.selected);
+                try std.testing.expectEqual(@as(usize, 0), overview.retired.items.len);
+                if (previous) |widget_| try std.testing.expect(overview.root.session.?.eql(widget_)) else try std.testing.expect(overview.root.session == null);
+            }
+        }
+    }
 }
