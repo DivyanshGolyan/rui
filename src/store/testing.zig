@@ -76,8 +76,9 @@ fn openSqlite(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: Te
         error.FileNotFound => try copyTemplate(tmp, io, database, selector),
         else => return err,
     };
-    return storage.openWithOptions(io, database, selector, .{ .served = options.served, .catalog = options.catalog }) catch |err| {
-        std.debug.print("testing Store open failed: {s}\n", .{@errorName(err)});
+    var mismatch: @import("schema.zig").IdentityMismatch = .{};
+    return storage.openWithOptions(io, database, selector, .{ .served = options.served, .catalog = options.catalog, .identity_mismatch = &mismatch }) catch |err| {
+        std.debug.print("testing Store open failed: {s}, selector={s}, saved={s}\n", .{ @errorName(err), selector, mismatch.saved_selector.slice() });
         return err;
     };
 }
