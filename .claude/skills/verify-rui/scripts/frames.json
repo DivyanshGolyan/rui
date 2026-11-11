@@ -492,7 +492,8 @@
             "PgDn"
           ]
         }
-      ]
+      ],
+      "expect": "New Sessions"
     },
     {
       "name": "model-picker",
@@ -525,6 +526,10 @@
             "Right"
           ]
         }
+      ],
+      "expect": [
+        "gpt-6.1-terra",
+        "‹ high ›"
       ]
     },
     {

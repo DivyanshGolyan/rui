@@ -1899,7 +1899,14 @@ def size_name(size):
 
 def frame_expectations(state):
     """One expectation policy for validation and the capture owner."""
-    value = state.get("expect", next((step["wait"] for step in reversed(state["steps"]) if "wait" in step), []))
+    if "expect" in state:
+        value = state["expect"]
+    else:
+        steps = state["steps"]
+        last_wait = next((index for index in range(len(steps) - 1, -1, -1) if "wait" in steps[index]), None)
+        if last_wait is not None and any(set(step) & {"text", "keys", "send", "host"} for step in steps[last_wait + 1:]):
+            raise ValueError(f"{state['name']}: an action follows the last wait; set expect explicitly")
+        value = steps[last_wait]["wait"] if last_wait is not None else []
     if isinstance(value, str):
         value = [value]
     if not isinstance(value, list) or not all(isinstance(text, str) and text and "\0" not in text for text in value):

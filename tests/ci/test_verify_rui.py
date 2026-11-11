@@ -372,6 +372,70 @@ class FramesTest(unittest.TestCase):
             self.run_frames_scenario(scenario, capture_ok=False)
         self.assertEqual(result.exception.code, 1)
 
+    def test_expectation_defaults_to_last_wait_without_a_later_action(self):
+        policy = self.helper["frame_expectations"]
+        for suffix in ([], [{"sleep": 0.1}], [{"gone": "Loading"}],
+                       [{"keys": ["PgDn"]}, {"wait": "After scrolling"}]):
+            state = {"name": "default-policy", "steps": [{"wait": "Earlier"}, {"wait": "Before"}, *suffix]}
+            expected = ["After scrolling"] if suffix and "wait" in suffix[-1] else ["Before"]
+            self.assertEqual(policy(state), expected)
+            data = self.scenario()
+            data["states"][1] = {**data["states"][1], **state}
+            self.assertEqual(self.helper["validate_scenario"](data)["states"][1]["expect"], expected)
+
+    def test_validation_rejects_all_actions_after_last_wait_before_allocating(self):
+        actions = [{"keys": ["PgDn"]}, {"text": "new draft"},
+                   {"send": {"to": "Fix it", "text": "new message"}}, {"host": "pause"}]
+        command = self.helper["cmd_frames"]
+        for action in actions:
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as temp:
+                data = self.scenario()
+                data["states"][1]["steps"] = [{"wait": "Before"}, action]
+                with self.assertRaisesRegex(ValueError, "chat.*expect"):
+                    self.helper["frame_expectations"](data["states"][1])
+                with self.assertRaisesRegex(ValueError, "chat.*expect"):
+                    self.helper["validate_scenario"](data)
+                path = Path(temp) / "scenario.json"
+                path.write_text(json.dumps(data))
+                args = types.SimpleNamespace(scenario=str(path), sizes=None)
+                err = io.StringIO()
+                with patch.dict(command.__globals__, {"cmd_new": unittest.mock.Mock()}), \
+                        contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as result:
+                    allocate = command.__globals__["cmd_new"]
+                    command(args)
+                self.assertEqual(result.exception.code, 2)
+                allocate.assert_not_called()
+                self.assertIn("chat", err.getvalue())
+                self.assertIn("expect", err.getvalue())
+
+    def test_explicit_expectation_after_an_action_overrides_the_old_wait(self):
+        for action in ({"keys": ["PgDn"]}, {"text": "new draft"},
+                       {"send": {"to": "Fix it", "text": "new message"}}, {"host": "pause"}):
+            for expect in ("After", ["After", "Other content"], []):
+                with self.subTest(action=action, expect=expect):
+                    data = self.scenario()
+                    state = data["states"][1]
+                    state.update(steps=[{"wait": "Before"}, action], expect=expect)
+                    expected = [expect] if isinstance(expect, str) else expect
+                    self.assertEqual(self.helper["frame_expectations"](state), expected)
+                    self.assertEqual(self.helper["validate_scenario"](data)["states"][1]["expect"], expected)
+
+    def test_capture_after_scrolling_can_pass_without_the_original_wait_heading(self):
+        data = self.scenario()
+        data["states"][1].update(steps=[{"wait": "This Session"}, {"keys": ["PgDn"]}], expect="New Sessions")
+        state = self.helper["validate_scenario"](data)["states"][1]
+        for screen, ok in (("New Sessions\n Model: example\n", True), ("This Session\n", False)):
+            with self.subTest(screen=screen), tempfile.TemporaryDirectory() as temp:
+                run = types.SimpleNamespace(meta={"sha": "a" * 40}, tmux=lambda *argv, **_kw:
+                    types.SimpleNamespace(returncode=0, stderr="", stdout=screen if argv[0] == "capture-pane" else "0 0 0\n"))
+                out = Path(temp)
+                record = self.helper["frame_capture"](run, "pane", out, state, (100, 20), None)
+                self.assertEqual(record["ok"], ok)
+                self.assertEqual(record["reason"], None if ok else "state left before capture: New Sessions")
+                if ok:
+                    self.assertNotIn("This Session", (out / record["files"]["txt"]).read_text())
+                    self.assertIn("New Sessions", (out / record["files"]["txt"]).read_text())
+
     def test_capture_expectations_over_sizes_and_state_transitions(self):
         capture = self.helper["frame_capture"]
         cases = [
