@@ -90,9 +90,13 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             ctx.consumeEvent();
         },
         .key_release => ctx.consumeEvent(),
+        // Settings has nowhere to put pasted text, and a pasted line break
+        // must not change a setting: the page gets no key of a paste.
         // Esc closes the topmost thing only: an open choice, then an Upgrade
         // that can still be cancelled, which the overview owns, else the page.
-        .key_press => |key| if (self.settings_open and key.matches(vaxis.Key.escape, .{})) {
+        .key_press => |key| if (self.settings_open and self.pasting) {
+            ctx.consumeEvent();
+        } else if (self.settings_open and key.matches(vaxis.Key.escape, .{})) {
             if (self.settings_page.hasChoice()) {
                 self.settings_page.cancelChoice();
             } else if (self.settings_page.upgradeTakesEscape()) {
@@ -405,7 +409,7 @@ test "App root opens settings in both layouts and Escape closes the choice, then
     }
 }
 
-test "App root gives Escape to a cancellable Upgrade after a choice and before closing settings" {
+test "App root gives Escape to a cancellable Upgrade after a choice and before closing settings, and no pasted key to settings" {
     const upgrade_status = @import("upgrade_status.zig");
     const Fixture = struct {
         run: ?upgrade_status.Run = null,
@@ -481,6 +485,24 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
         try std.testing.expectEqual(@as(usize, @intFromBool(cancels)), fixture.escapes);
         try std.testing.expectEqual(cancels, root.settings_open);
     };
+    // No key of a paste reaches the page or closes it; keys after it do.
+    var pasted: Fixture = .{};
+    var page: Self = .{ .overview = pasted.widget(), .list = pasted.widget(), .compose = pasted.widget() };
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
+    try page.openSettings(&events);
+    try page.widget().captureEvent(&events, .paste_start);
+    for ([_]u21{ vaxis.Key.enter, vaxis.Key.escape, vaxis.Key.down, 'a' }) |codepoint| {
+        events.consume_event = false;
+        try page.widget().captureEvent(&events, .{ .key_press = .{ .codepoint = codepoint } });
+        try std.testing.expect(events.consume_event);
+        try std.testing.expect(page.settings_open);
+    }
+    try page.widget().captureEvent(&events, .paste_end);
+    events.consume_event = false;
+    try page.widget().captureEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    try std.testing.expect(!events.consume_event);
+    try page.widget().captureEvent(&events, escape);
+    try std.testing.expect(!page.settings_open);
     // With settings closed Root leaves Escape to the focused screen.
     var fixture: Fixture = .{ .run = .checking };
     var root: Self = .{ .overview = fixture.widget(), .list = fixture.widget(), .compose = fixture.widget() };
