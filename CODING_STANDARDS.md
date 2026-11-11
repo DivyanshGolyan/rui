@@ -128,7 +128,8 @@ On Host threads:
 
 ## Review
 
-Codex on the PR is the code review: comment `@codex review for duplicated authority and braided concerns; group symptoms by owner` after every push, because it does not re-review on its own.
+Codex on the draft PR is the code review: comment `@codex review for duplicated authority and braided concerns; group symptoms by owner` after every draft push, because it reviews drafts only on request.
+Mark ready once Codex is clean; [Landing](docs/agents/landing.md#publish-and-merge) owns the test-only exception for fixes after readiness.
 The [Code Review Rules](AGENTS.md#code-review-rules) own how it groups and orders its findings; the rules it applies stay here.
 The author's own reviews are design reviews of the approved design, and a redesign when fixes keep producing new findings.
 Reviewers apply the rules below and the [product tenets](VERIFICATION.md#product-tenets).
@@ -179,7 +180,7 @@ Before every push, including review-fix rounds and after merging main, run only 
 - the touched owners' focused tests (`-Dtest-filter`)
 - a mutation that reverts each fix and shows its new test fails
 
-The PR's Selected run executes the review-phase set on the pushed head.
+A ready PR's Selected run executes the review-phase set on the pushed head; draft CI runs quick checks only.
 Never run a full local suite (`zig build test`, `check`, the review-phase selection or a local mirror of CI) except to diagnose a CI red.
 In Claude Code, `.claude/hooks/block_full_runs.py` refuses those commands unless prefixed with `RUI_CI_RED=<run or issue>`.
 Live provider checks remain opt-in.
@@ -198,7 +199,7 @@ A fixture module, one with a main block or one that `build.zig` or `check.sh` la
 Fixtures and qualification harnesses observe the Host only through its boundaries.
 Read native evidence from the lossless test observation channel; stderr phase traces drop records under contention and are never evidence (`tests/ci/test_harness_contracts.py` rejects them in qualification).
 Take Host-decided values such as the canonical Store, capacities and descriptor requirements from readiness rather than recomputing them; pass each Host option once through the shared launcher; and let synthesized durable populations pass a production read before measuring them.
-A value another file owns is pinned only by that owner's tests: other tests read the Store format, wire version, product defaults, catalog windows and efforts, and built-in tools from their owners (`host_process`, `product_defaults` and `tools.built_in`), and match a caller error by its exit status, the invocation's context and its `[code]`, not the catalog's prose.
+A value another file owns is pinned only by that owner's tests: other tests read the Store format, wire version, product defaults, catalog windows and efforts, and built-in tools from their owners (`host_process`, `product_defaults` and `tools.built_in_tool_set`), and match a caller error by its exit status, the invocation's context and its `[code]`, not the catalog's prose.
 `test_store_schema_fixtures.py`, `test_wire_version.py` and `test_fixture_literals.py` in `tests/ci` take the forbidden values from the owners and reject restated ones.
 Code that runs only on scheduled or one-platform jobs gets no other drift check.
 

@@ -15,7 +15,7 @@ const outcome_code = @import("../../outcome_code.zig");
 const session_report = @import("../../session_report.zig");
 const tool_name = @import("../../tool_name.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
-const tool_catalog = @import("../../tool_record.zig");
+const tool_defs = @import("../../tool_record.zig");
 const turn_policy = @import("../../turn_policy.zig");
 const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
@@ -153,7 +153,7 @@ const unresolved_actions = rsql.Read(.{
         permission_revision: rsql.Positive,
         authorized: bool,
         permission_mode: u1,
-        tool_name: Bounded(tool_catalog.max_name_bytes),
+        tool_name: Bounded(tool_defs.max_name_bytes),
         call_id_length: u64,
         call_id_digest: [32]u8,
         arguments_length: u64,
@@ -307,8 +307,8 @@ const CurrentFacts = struct {
 /// (`report.sortedToolNames`), which the Current values borrow.
 const ToolNames = struct {
     row: set_names.Row,
-    tools: [tool_catalog.max_tools][]const u8,
-    loaded: [tool_catalog.max_tools][]const u8,
+    tools: [tool_defs.max_tools][]const u8,
+    loaded: [tool_defs.max_tools][]const u8,
 };
 
 /// The names of the tool set ?1, joined (`tool_set.namesSql`).
@@ -501,7 +501,7 @@ fn unresolvedRow(row: *const unresolved_actions.Row) ValuesError!session_report.
     const mcp = server != null;
     const name = if (mcp) row.tool_name.slice() else @tagName(built_in orelse return error.CorruptStore);
     if (mcp and !tool_name.valid(name)) return error.CorruptStore;
-    const core = !mcp and tool_catalog.Runner.of(tool_catalog.record(built_in.?)) == .core;
+    const core = !mcp and tool_defs.Runner.of(tool_defs.record(built_in.?)) == .core;
     // Settlement authorizes a core call at once, with no decision.
     if (core and !row.authorized) return error.CorruptStore;
     return .{
@@ -525,7 +525,7 @@ fn unresolvedRow(row: *const unresolved_actions.Row) ValuesError!session_report.
 /// The built-in tool whose name has `digest`, among those an Action runs.
 fn actionTool(digest: *const [32]u8) ?built_in_tool.BuiltInTool {
     for (std.enums.values(built_in_tool.BuiltInTool)) |tool| {
-        const owned = tool_catalog.record(tool);
+        const owned = tool_defs.record(tool);
         if (owned.owner == .rui and std.mem.eql(u8, digest, &content_string.digest(owned.name))) return tool;
     }
     return null;
