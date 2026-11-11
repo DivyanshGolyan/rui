@@ -1611,6 +1611,111 @@ pub fn testingListRow(storage: *Store, tmp: *std.testing.TmpDir, session: []cons
     return error.TestUnexpectedResult;
 }
 
+test "last line follows ended Turns and pending approvals with bounded public text" {
+    try store_testing.forEachEngine(struct {
+        fn expect(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, position: ?u64, text: ?[]const u8) !void {
+            var listed = try testingListRow(storage, tmp, session);
+            defer listed.deinit();
+            if (position) |at| {
+                try std.testing.expectEqual(at, try listed.number(&.{ "last_line", "position" }));
+                const shown = listed.get(&.{ "last_line", "text" });
+                if (text) |line| {
+                    try std.testing.expectEqualStrings(line, shown.string);
+                    try std.testing.expect(shown.string.len <= 200);
+                    try std.testing.expect(std.unicode.utf8ValidateSlice(shown.string));
+                } else try std.testing.expect(shown == .null);
+            } else try std.testing.expect(listed.get(&.{"last_line"}) == .null);
+        }
+
+        fn ended(storage: *Store, session: []const u8) !u64 {
+            return store_testing.queryU64(storage, "SELECT max(outcome_position) FROM turn WHERE session_ref=?1", .{session});
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSessionAsk(&storage, "last-line-config");
+            try expect(&storage, &tmp, session.slice(), null, null);
+
+            const first = [_]TestingAnswerPart{.{ .encoded = "First answer\\nnot the preview", .decoded = "First answer\nnot the preview" }};
+            try answerTestTurn(&storage, &tmp, session.slice(), "last-line-first", &first);
+            const first_position = try ended(&storage, session.slice());
+            try expect(&storage, &tmp, session.slice(), first_position, "First answer");
+
+            const second = [_]TestingAnswerPart{.{ .encoded = "Later answer", .decoded = "Later answer" }};
+            try answerTestTurn(&storage, &tmp, session.slice(), "last-line-second", &second);
+            const second_position = try ended(&storage, session.slice());
+            try std.testing.expect(second_position > first_position);
+            try expect(&storage, &tmp, session.slice(), second_position, "Later answer");
+
+            // While another Turn runs, keep the ended Turn, not its partial output.
+            try submitTestMessage(&storage, &tmp, "last-line-call-input", "last-line-call-key", session.slice(), "propose");
+            const proposing = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try expect(&storage, &tmp, session.slice(), second_position, "Later answer");
+            const calls = [_]TestingCall{
+                .{ .item_id = "older", .name = "bash", .encoded_call_id = "older", .decoded_call_id = "older", .encoded_arguments = "{\\\"description\\\":\\\"Older approval\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Older approval\",\"cmd\":\"true\",\"timeout_ms\":null}" },
+                .{ .item_id = "newer", .name = "bash", .encoded_call_id = "newer", .decoded_call_id = "newer", .encoded_arguments = "{\\\"description\\\":\\\"Newer approval\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Newer approval\",\"cmd\":\"true\",\"timeout_ms\":null}" },
+            };
+            try settleCallsForTesting(&storage, &tmp, proposing, "last-line-calls", &calls);
+            const oldest_position = try store_testing.queryU64(&storage, "SELECT min(approval_position) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+            const newest_position = try store_testing.queryU64(&storage, "SELECT max(approval_position) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+            try std.testing.expect(oldest_position > second_position and newest_position > oldest_position);
+            try expect(&storage, &tmp, session.slice(), oldest_position, "Older approval");
+            const oldest_action = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+            const newest_action = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+            inline for (.{ .{ "last-line-allow-older", false }, .{ "last-line-allow-newer", true } }) |decision| {
+                var allow: protocol.PermissionDecisionCommand = .{ .action_id = if (decision[1]) newest_action else oldest_action, .decision = if (decision[1]) .deny else .allow_once };
+                try allow.key.set(decision[0]);
+                try allow.session.set(session.slice());
+                try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+                if (decision[1]) {
+                    try expect(&storage, &tmp, session.slice(), second_position, "Later answer");
+                } else try expect(&storage, &tmp, session.slice(), newest_position, "Newer approval");
+            }
+            var stop = try completeSessionStop("last-line-stop", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            try expect(&storage, &tmp, session.slice(), try ended(&storage, session.slice()), null);
+
+            try submitTestMessage(&storage, &tmp, "last-line-fail-input", "last-line-fail-key", session.slice(), "fail");
+            const failing = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try storage.settleModelAttemptFailure(failing, .{ .rejected = .{ .code = "provider_quota", .diagnostic = "", .request_id = .{}, .report = "Not an answer" } }, .ordinary, .{});
+            try expect(&storage, &tmp, session.slice(), try ended(&storage, session.slice()), null);
+
+            // Independent expected lines cover CR/LF, blank-led multiline,
+            // exact byte bounds, code-point cuts and the 1 KiB read boundary.
+            inline for (.{
+                .{ "blank", "\\r\\n \\t\\n  useful line \\r\\nignored", "\r\n \t\n  useful line \r\nignored", @as(?[]const u8, "useful line") },
+                .{ "long", "\\n" ++ @as([1200]u8, @bitCast(@as([600][2]u8, @splat("é".*)))) ++ "\\nignored", "\n" ++ @as([1200]u8, @bitCast(@as([600][2]u8, @splat("é".*)))) ++ "\nignored", @as(?[]const u8, @as([196]u8, @bitCast(@as([98][2]u8, @splat("é".*)))) ++ "…") },
+                .{ "exact", &@as([200]u8, @splat('x')), &@as([200]u8, @splat('x')), @as(?[]const u8, &@as([200]u8, @splat('x'))) },
+                .{ "empty", " \\t\\n\\r\\n", " \t\n\r\n", @as(?[]const u8, null) },
+                .{ "prefix", @as([1024]u8, @splat(' ')) ++ "not read", @as([1024]u8, @splat(' ')) ++ "not read", @as(?[]const u8, null) },
+                .{ "split", @as([1021]u8, @splat(' ')) ++ "x€", @as([1021]u8, @splat(' ')) ++ "x€", @as(?[]const u8, "x") },
+            }) |answer| {
+                const parts = [_]TestingAnswerPart{.{ .encoded = answer[1], .decoded = answer[2] }};
+                try answerTestTurn(&storage, &tmp, session.slice(), "last-line-" ++ answer[0], &parts);
+                try expect(&storage, &tmp, session.slice(), try ended(&storage, session.slice()), answer[3]);
+            }
+
+            const private = [_]TestingAnswerPart{.{ .encoded = "Do not disclose", .decoded = "Do not disclose" }};
+            try answerTestTurn(&storage, &tmp, session.slice(), "last-line-private", &private);
+            const private_position = try ended(&storage, session.slice());
+            // Public output cannot normally name private content; substitute
+            // it at the read boundary to prove the preview never discloses it.
+            try store_testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT outcome_content_id FROM turn WHERE session_ref=?1 AND outcome_position=?2)", .{ session.slice(), private_position });
+            try expect(&storage, &tmp, session.slice(), private_position, null);
+
+            const active = try configureTestSession(&storage, "last-line-active-config");
+            try submitTestMessage(&storage, &tmp, "last-line-active-input", "last-line-active-key", active.slice(), "first turn");
+            _ = (try storage.admitNextModelAttempt(.{})).?;
+            try expect(&storage, &tmp, active.slice(), null, null);
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
 test "a list row carries its Session's Label, times, first Message, work and peers" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
