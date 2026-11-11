@@ -461,6 +461,16 @@ Omission never clears a field.
 Settings are plain data captured at each configure invocation, before later caller mutation.
 Each Session evolves independently; sharing a settings object creates no shared configuration entity.
 
+Tool names remain exactly as supplied by MCP servers, without an inferred server namespace (D120).
+At Host startup, an unreachable server keeps its saved tool copies; a configured server with no records contributes no tools (D147).
+When a create or update spec names a tool absent from the catalog, admission refuses it as `mcp_server_unavailable` if any configured MCP server contributes no tools, otherwise `unknown_tool`.
+This is deliberately not an ownership claim: the refusal's advisory `message` says the name is unknown and lists every empty server that may provide it.
+The same catalog decision applies to a creating Message and `start_agent`; the latter returns a failed tool result naming `spec.tools`, without starting a Session.
+Known tools, including saved copies of an unreachable server's tools, remain admissible subject to the existing provider and child-narrowing rules.
+Only the rejection code is durable; direct replies derive the advisory message from the current Host's catalog and launch configuration, including on replay, with no extra Store read or format change.
+Other request refusals have a null advisory message.
+An admitted MCP call that cannot reach its server continues to return `mcp_server_unavailable` as a tool result (A-D116).
+
 The CLI spells a Label `--label TEXT` (the Session's name or title, shown in lists and `/status`) on `session start`, `session configure` and interactive `/configure`, and clears it with `--label ""`: the empty string is the one spelling that can never be a Label.
 A Session can label itself from Bash with `--store "$RUI_STORE" --session "$RUI_ADDRESS"`, and its collaboration context names that command so a model asked to rename its Session finds it.
 Every Label change is a revision like any other configuration change.
@@ -2474,6 +2484,9 @@ Exit, interruption or a disconnected caller never cancels Host work.
 
 **Bounded CLI editor (native terminal-display qualification pending):** The editor owns draft bytes, grapheme cursor and rendering within the frontend's terminal lifetime.
 App owns keyboard and paste decoding for the invocation; draft resets, bank switches and a permission card never replace its input runtime.
+Each chat keeps its own draft bytes, caret, recall anchor and rejection when switching through the list, returning to the overview or following a Session link; a newly opened chat starts empty unless it has a saved draft.
+Only inactive drafts with text or other draft state own storage in this invocation, with exact-length text keyed by the Session reference; taking one transfers it to the active editor, and sending clears that chat's draft.
+The overview's new-Session composer stays independent, and quitting forgets all drafts without writing them to the Store or disk.
 Terminal replies reach App rather than the editor, and an editor that did not see a paste begin rejects its remainder.
 Its caller supplies storage: up to 65,536 UTF-8 bytes for a Message.
 Validated submission borrows complete bytes; [staged persistent input](#staged-persistent-input) owns sealing, next-draft custody and Admission.
