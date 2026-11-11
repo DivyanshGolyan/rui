@@ -22,22 +22,12 @@ test("configuration preserves omitted, null and value states and normalizes tool
 	assert.ok(first && second && third);
 	assert.equal(first.version, WIRE_VERSION);
 	assert.deepEqual(first.configuration, {
-		workspace: { state: "omitted" },
-		provider: { state: "omitted" },
-		model: { state: "omitted" },
-		instructions: { state: "omitted" },
-		tools: { state: "value", value: ["bash", "write"] },
-		permission_mode: { state: "omitted" },
-		output_schema: { state: "omitted" },
-		compaction_trigger: { state: "value", value: "0" },
-		output_reservation: { state: "omitted" },
-		reasoning_effort: { state: "null" },
-		label: { state: "value", value: 'a"\nlabel' },
-	});
-	assert.deepEqual(second.configuration.compaction_trigger, { state: "value", value: "2000" });
-	assert.deepEqual(second.configuration.reasoning_effort, { state: "value", value: "none" });
-	assert.deepEqual(second.configuration.label, { state: "null" });
-	for (const field of Object.values(third.configuration)) assert.deepEqual(field, { state: "omitted" });
+        tools: ["bash", "write"], compactAt: 0, effort: null, label: 'a"\nlabel',
+    });
+    assert.equal(second.configuration.compactAt, 2000);
+    assert.equal(second.configuration.effort, "none");
+    assert.equal(second.configuration.label, null);
+    assert.deepEqual(third.configuration, {});
 });
 
 type CurrentReport = Extract<components["schemas"]["InspectSessionReply"], { profile: "current"; work: unknown }>;
@@ -123,13 +113,13 @@ test("creation sends explicit settings without Host client defaults", async () =
 		async exchange(_path, build) {
 			const request = JSON.parse(build("store"));
 			assert.equal(request.session, "");
-			assert.deepEqual(request.configuration.model, { state: "value", value: "custom-model" });
-			assert.deepEqual(request.configuration.compaction_trigger, { state: "value", value: "1234" });
-			assert.deepEqual(request.configuration.reasoning_effort, { state: "null" });
-			assert.deepEqual(request.configuration.tools, { state: "value", value: [] });
-			assert.deepEqual(request.configuration.permission_mode, { state: "value", value: "ask" });
-			assert.deepEqual(request.configuration.provider, { state: "omitted" });
-			assert.deepEqual(request.configuration.workspace, { state: "omitted" });
+			assert.deepEqual(request.configuration.model, "custom-model");
+			assert.deepEqual(request.configuration.compactAt, 1234);
+			assert.deepEqual(request.configuration.effort, null);
+			assert.deepEqual(request.configuration.tools, []);
+			assert.deepEqual(request.configuration.permissionMode, "ask");
+			assert.deepEqual(request.configuration.provider, undefined);
+			assert.deepEqual(request.configuration.workspace, undefined);
 			return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "abc123" } }));
 		},
 	};
@@ -147,10 +137,7 @@ test("model updates serialize without changing omitted settings", async () => {
 			const request = JSON.parse(build("store"));
 			assert.equal(request.session, "existing-session");
 			assert.equal(request.key, "change-model");
-			assert.deepEqual(request.configuration.model, { state: "value", value: "other-model" });
-			for (const [name, field] of Object.entries(request.configuration)) {
-				if (name !== "model") assert.deepEqual(field, { state: "omitted" });
-			}
+			assert.deepEqual(request.configuration, { model: "other-model" });
 			return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
 		},
 	};
@@ -175,10 +162,10 @@ test("creation can name a preset without inventing missing fields", async () => 
 		async exchange(_path, build) {
 			const request = JSON.parse(build("store"));
 			assert.equal(request.preset, "review");
-			assert.deepEqual(request.configuration.model, { state: "omitted" });
-			assert.deepEqual(request.configuration.tools, { state: "omitted" });
-			assert.deepEqual(request.configuration.reasoning_effort, { state: "null" });
-			assert.deepEqual(request.configuration.output_schema, { state: "null" });
+			assert.deepEqual(request.configuration.model, undefined);
+			assert.deepEqual(request.configuration.tools, undefined);
+			assert.deepEqual(request.configuration.effort, null);
+			assert.deepEqual(request.configuration.outputSchema, null);
 			return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "abc123" } }));
 		},
 	};
@@ -198,3 +185,35 @@ function presetTypeContract(sessions: Sessions): void {
 	void update;
 }
 void presetTypeContract;
+
+test("unknown tool refusals preserve MCP advisory detail through request errors", async () => {
+	const message = "spec.tools: lookup is not a known tool; MCP server notes is unavailable and may provide it";
+	for (const code of ["mcp_server_unavailable", "unknown_tool"] as const) {
+		const detail = code === "mcp_server_unavailable" ? message : null;
+		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status: "rejected", code, message: detail } })) };
+		const session = new Session(link, "abc123");
+		const spec: SessionSpec = { model: "model-a", effort: null, compactAt: 1000, tools: ["lookup"], permissionMode: "ask" };
+		for (const request of [
+			() => new Sessions(link).create(spec, { idempotencyKey: "create" }),
+			() => session.update({ tools: ["lookup"] }),
+			() => session.send("task", { idempotencyKey: "send" }),
+		]) {
+			await assert.rejects(request(), (error: unknown) => error instanceof RuiRequestError && error.code === code && error.message === (detail ?? `Rui rejected the request: ${code}`));
+		}
+	}
+});
+
+test("create parent is a create-only relation in the shared wire spec", async () => {
+    const requests: components["schemas"]["ConfigureRequest"][] = [];
+    const link: Link = { async exchange(path, build) {
+        assert.equal(path, "/v1/configure");
+        requests.push(JSON.parse(build("store")));
+        return Buffer.from(JSON.stringify({ context: { session: "child1" }, answer: { status: "accepted", session: "child1" } }));
+    } };
+    const sessions = new Sessions(link);
+    await sessions.create({ parent: "p4rent", model: "model-a", tools: ["bash"], permissionMode: "ask", effort: null, compactAt: 1000 }, { idempotencyKey: "child" });
+    assert.deepEqual(requests[0]?.configuration, { parent: "p4rent", model: "model-a", tools: ["bash"], permissionMode: "ask", effort: null, compactAt: 1000 });
+    // @ts-expect-error parent cannot change on an existing Session
+    const invalid: SessionUpdate = { parent: "p4rent" };
+    void invalid;
+});

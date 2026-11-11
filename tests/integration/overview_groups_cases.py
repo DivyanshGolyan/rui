@@ -70,15 +70,16 @@ def needs_you():
         asking = w.session("--permission-mode", "ask", "--label", "Asks before running")
         send(w, asking, "please run the command")
         wait_state(w, asking, "approval")
-        with w.overview(columns=100, rows=20) as screen:
+        # Detail/row contracts use the full-screen list below the split threshold.
+        with w.overview(columns=99, rows=20) as screen:
             frame = screen.contains("echo first line of the command")
             lines = frame.split("\n")
             headings = [line for line in lines if re.fullmatch(r" \S.* · \d+", line)]
-            assert headings == [" Needs you · 1", " Yours · 1"], frame
-            assert lines[1] == " Needs you · 1", frame
+            assert headings == [], frame
+            assert lines[1] == "  + New Session", frame
             asked = row(frame, "Asks before running")
             assert re.fullmatch(r"  \? Asks before running {2,}echo first line of the command {2,}\d+s", asked), asked
-            assert len(asked) == 99, asked
+            assert len(asked) == 98, asked
             assert "second line" not in frame, frame
             assert lines.index(asked) == 2, frame
             assert re.fullmatch(r"  ✓ Answered already {2,}\d+s", row(frame, "Answered already")), frame
@@ -94,12 +95,12 @@ def needs_you():
             # the view before its Message row shows.
             opened = screen.contains("Asks before running · gpt-6-luna")
             assert "Answered already" not in opened, opened
-    print("overview groups: an Action's wait leads in Needs you, `?` in the attention colour, selected, with its command's first line", flush=True)
+    print("overview groups: an Action's wait leads the flat list, `?` in the attention colour, selected, with its command's first line", flush=True)
 
 
 def queued_in_active():
-    """A peer's Message waiting for a model slot shows a dim `◌` in Active,
-    after the working row; no Queued group shows."""
+    """A peer's Message waiting for a model slot shows a dim `◌` last,
+    after working and done rows; no headings show."""
     hold = threading.Event()
     replies = Replies({"dispatch two Messages": [None, answer("dispatched")],
                        "peer": [(answer("worked"), hold)]})
@@ -117,19 +118,19 @@ def queued_in_active():
             wait_state(w, dispatcher, "finished")
             wait_state(w, first, "working")
             wait_state(w, second, "pending")
-            with w.overview(columns=100, rows=20) as screen:
+            with w.overview(columns=99, rows=20) as screen:
                 frame = screen.wait(lambda shown: "Second peer task" in shown and "First peer task" in shown,
                                     "both peer rows")
                 lines = frame.split("\n")
                 headings = [line for line in lines if re.fullmatch(r" \S.* · \d+", line)]
-                assert headings == [" Yours · 1", " Active · 2"], frame
+                assert headings == [], frame
                 assert "Queued" not in frame, frame
                 working = row(frame, "First peer task")
                 queued = row(frame, "Second peer task")
-                assert re.fullmatch(r"  ● First peer task {2,}\d+s", working), working
+                assert re.fullmatch(r"  ⠹ First peer task {2,}\d+s", working), working
                 assert re.fullmatch(r"  ◌ Second peer task {2,}\d+s", queued), queued
-                active = lines.index(" Active · 2")
-                assert lines[active + 1:active + 3] == [working, queued], frame
+                done = row(frame, "Dispatcher")
+                assert lines.index(working) < lines.index(done) < lines.index(queued), frame
                 drawn = cells(screen, "Second peer task")
                 queued_mark, age = drawn[2], [cell for cell in drawn if cell.data != " "][-1]
                 assert age.data == "s", drawn
@@ -140,7 +141,7 @@ def queued_in_active():
                 assert queued_mark.fg != working_mark.fg, (queued_mark, working_mark)
         finally:
             hold.set()
-    print("overview groups: a queued peer row shows a dim `◌` in Active after the working row, with no Queued group", flush=True)
+    print("overview groups: a queued peer row shows a dim `◌` after working and done rows, with no headings", flush=True)
 
 
 def detail_column():
@@ -156,11 +157,11 @@ def detail_column():
         retrying = w.session("--label", "Rate limited task")
         send(w, retrying, "rate limit me")
         wait_state(w, retrying, "retrying")
-        with w.overview(columns=100, rows=20) as screen:
+        with w.overview(columns=99, rows=20) as screen:
             frame = screen.wait(lambda shown: "retry in" in shown and "Fails every time" in shown,
                                 "the retry countdown and the failed row")
             shown = row(frame, "Rate limited task")
-            match = re.fullmatch(r"  ● Rate limited task {2,}Rate limited · retry in (\d+)s {2,}\d+s", shown)
+            match = re.fullmatch(r"  ⠹ Rate limited task {2,}Rate limited · retry in (\d+)s {2,}\d+s", shown)
             assert match and 0 < int(match[1]) <= 41, (shown, frame)
             failure = row(frame, "Fails every time")
             assert re.fullmatch(r"  × Fails every time {2,}Retries ran out {2,}\d+s", failure), (failure, code)

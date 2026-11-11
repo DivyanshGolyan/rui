@@ -96,8 +96,8 @@ pub noinline fn open(io: std.Io, database_path: []const u8, selector: []const u8
 
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LENGTH, @intCast(content_string.max_bytes + 4096));
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_SQL_LENGTH, 16 * 1024);
-    // model_operation has 34 columns, including the final attempt's timings.
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COLUMN, 34);
+    // Selection batches admission facts, intent and recipe identities: 35 columns.
+    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COLUMN, 35);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, @import("../../json_limits.zig").max_depth);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COMPOUND_SELECT, 4);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_FUNCTION_ARG, 16);
@@ -115,7 +115,7 @@ pub noinline fn open(io: std.Io, database_path: []const u8, selector: []const u8
     try sqlite.exec(database.?, "PRAGMA locking_mode=EXCLUSIVE");
     if (existing) {
         if (options.found_schema_version) |found| found.* = try sqlite.pragmaInt(database.?, "PRAGMA user_version");
-        try store_schema.openExisting(io, database.?, selector, options.identity_mismatch);
+        try store_schema.openExisting(io, database.?, selector, options.identity_mismatch, options.migration_notice);
     }
     try sqlite.exec(database.?, "PRAGMA busy_timeout=0");
     try sqlite.exec(database.?, "PRAGMA foreign_keys=ON");

@@ -52,8 +52,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 63, .digest = 0x7a09d94b6ba24eea },
     .{ .schema_version = 64, .digest = 0xba89834313d6181f },
     .{ .schema_version = 65, .digest = 0x78987c40a911dee5 },
-    .{ .schema_version = 66, .digest = 0x0 },
-    .{ .schema_version = 67, .digest = 0x0 },
+    .{ .schema_version = 66, .digest = 0x43cfcabd5b1addea },
+    .{ .schema_version = 67, .digest = 0x52bfd48af5b6aa51 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -468,7 +468,7 @@ pub const migrations = [_]Migration{
             "ALTER TABLE model_operation ADD COLUMN first_event_ms INTEGER CHECK(first_event_ms IS NULL OR first_event_ms>=0)",
         },
         .mysql = &.{
-            "ALTER TABLE model_operation ADD COLUMN latency_ms BIGINT CHECK(latency_ms IS NULL OR latency_ms>=0) AFTER history_dropped, ADD COLUMN first_event_ms BIGINT CHECK(first_event_ms IS NULL OR first_event_ms>=0) AFTER latency_ms",
+            "ALTER TABLE model_operation ADD COLUMN latency_ms BIGINT CHECK(latency_ms IS NULL OR latency_ms>=0) AFTER tool_set_id, ADD COLUMN first_event_ms BIGINT CHECK(first_event_ms IS NULL OR first_event_ms>=0) AFTER latency_ms",
         },
     },
 };
@@ -612,6 +612,10 @@ pub const Column = struct {
     /// of its columns, and leaves this `.recipient`.
     read_by: ReadBy = .recipient,
     engines: Engines = .all,
+    /// SQLite ADD COLUMN appends ", " rather than a new line. Keep its
+    /// exact stored CREATE text on bootstrap too, so admission still checks
+    /// byte-for-byte equality after an additive migration.
+    sqlite_added: bool = false,
 };
 
 /// The engines a table or column exists on. Each engine's DDL, catalog
@@ -1249,10 +1253,10 @@ pub const tables = [_]Table{
             // or the compaction before it; the feed's `compacted` row shows
             // it, and zero for a compaction without a floor.
             .{ .name = "history_dropped", .type = .int, .nullable = true, .check = "history_dropped IS NULL OR history_dropped>=0" },
-            .{ .name = "latency_ms", .type = .int, .nullable = true, .sqlite_added = true, .check = "latency_ms IS NULL OR latency_ms>=0" },
-            .{ .name = "first_event_ms", .type = .int, .nullable = true, .sqlite_added = true, .check = "first_event_ms IS NULL OR first_event_ms>=0" },
             // Effective offer frozen at admission; Session sets are intent.
             tool_set_column,
+            .{ .name = "latency_ms", .type = .int, .nullable = true, .sqlite_added = true, .check = "latency_ms IS NULL OR latency_ms>=0" },
+            .{ .name = "first_event_ms", .type = .int, .nullable = true, .sqlite_added = true, .check = "first_event_ms IS NULL OR first_event_ms>=0" },
         },
         .primary_key = &.{"operation_id"},
         .uniques = &.{&.{ "operation_id", "session_ref" }},
@@ -2255,7 +2259,12 @@ const bootstrap_sql = [_][:0]const u8{ ddl(.sqlite), identity_sql, version_sql, 
 fn createTable(comptime table: Table) []const u8 {
     if (!table.engines.on(.sqlite)) @compileError("schema: " ++ table.name ++ " is not on SQLite");
     var lines: []const []const u8 = &.{};
-    for (table.columns) |column| lines = lines ++ .{columnDefinition(table, column)};
+    for (table.columns) |column| {
+        if (column.sqlite_added) {
+            if (lines.len == 0) @compileError("schema: an added column must follow an existing column");
+            lines = lines[0 .. lines.len - 1] ++ .{lines[lines.len - 1] ++ "," ++ columnDefinition(table, column)};
+        } else lines = lines ++ .{columnDefinition(table, column)};
+    }
     if (table.primary_key.len > 1) lines = lines ++ .{" PRIMARY KEY(" ++ list(table.primary_key) ++ ")"};
     for (table.uniques) |unique| {
         if (unique.len > 1) lines = lines ++ .{" UNIQUE(" ++ list(unique) ++ ")"};
@@ -3079,7 +3088,7 @@ test "MySQL index hints require a named real-column index on that engine" {
     }
 }
 
-test "model call timing migration preserves old resolutions with null final attempt timings" {
+test "model call timing format 67 migration preserves format 66 resolutions with null final attempt timings" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [store_path.max_bytes]u8 = undefined;
@@ -3105,4 +3114,3 @@ test "model call timing migration preserves old resolutions with null final atte
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE model_operation SET latency_ms=-1"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE model_operation SET first_event_ms=-1"));
 }
-

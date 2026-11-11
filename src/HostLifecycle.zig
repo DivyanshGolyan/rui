@@ -1,5 +1,6 @@
 const std = @import("std");
 const client = @import("client.zig");
+const HostStartupWait = @import("HostStartupWait.zig");
 const protocol = @import("protocol.zig");
 const platform = @import("platform.zig");
 const identity = @import("host_identity.zig");
@@ -405,15 +406,18 @@ fn startPinned(init: std.process.Init, allocator: std.mem.Allocator, plan: *cons
     };
     if (launched != 0 or launched_pid <= 0 or launched_started == 0) return .{ .failed = .starting };
     Progress.send(progress, .verifying);
-    const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 10 * std.time.ns_per_s;
+    // A Host of a newer release may first back up and migrate the Store.
+    var wait = HostStartupWait.init(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
     var startup: [8192]u8 = undefined;
     var used: usize = 0;
-    while (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < until) {
+    while (!wait.expired(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds)) {
         if (used < startup.len) {
             const n = std.c.read(startup_read, startup[used..].ptr, startup.len - used);
             if (n > 0) used += @intCast(n);
             if (n == 0 and client.hostLockState(io, store) == .free) return .{ .failed = .starting };
         }
+        wait.observe(startup[0..used], std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
+        const until = wait.until(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
         if (client.observeHostProcess(io, store, until)) |observed| {
             if (observed.pid != launched_pid) return .replacement_observed;
             var snapshot = identity.snapshot(allocator, observed.pid) catch return .{ .unconfirmed = .verifying };

@@ -116,13 +116,18 @@ pub fn readFirst(a: anytype, comptime S: type, args: S.Args, visitor: anytype) v
 /// A per-row visitor's `visit`: counts the row, then keeps it. A second
 /// row, or one `keep` refuses, stops the read and is its failure.
 pub fn visitRow(visitor: anytype, row: anytype) bool {
-    visitor.count.rows += 1;
-    if (visitor.count.rows > 1) {
-        visitor.count.failure = error.CorruptStore;
+    return countRow(&visitor.count, visitor, row);
+}
+
+/// `visitRow` for a visitor that counts each of its reads apart.
+pub fn countRow(count: *RowCount, visitor: anytype, row: anytype) bool {
+    count.rows += 1;
+    if (count.rows > 1) {
+        count.failure = error.CorruptStore;
         return false;
     }
     visitor.keep(row) catch |err| {
-        visitor.count.failure = err;
+        count.failure = err;
         return false;
     };
     return true;

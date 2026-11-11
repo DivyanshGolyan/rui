@@ -77,16 +77,35 @@ jobs:
             ${{ runner.temp }}/previous-release/.zig-cache
             ${{ runner.temp }}/previous-release/zig-pkg
           key: rui-previous-release-${{ runner.os }}-${{ runner.arch }}-0.17.1-0e4b2225d106dd63fa9c38801188facb5e9c6335
+      # Setup's restat ran before this restore and only over the candidate's
+      # caches. Without it Zig 0.17.1 misses every restored input
+      # (tests/ci/zig_cache_restat.c) and rebuilds the pinned release whole.
+      - name: Reuse the restored previous-release compilation at new inodes
+        run: |
+          set -euo pipefail
+          previous="$RUNNER_TEMP/previous-release"
+          mkdir -p "$previous/.zig-cache/h"
+          "$RUNNER_TEMP/zig-cache-restat" "$previous/.zig-cache/h" -- \
+            "$previous" "$RUNNER_TEMP/rui-zig/lib" "$previous/.zig-cache" "$HOME/.cache/zig"
       - name: Start detached, then install, save real work, reinstall and restart the same Store
         # Each check's only copy; steps.py records the failed ones for a promotion to replay.
         timeout-minutes: 45
+        env:
+          # A PR's Selected suites already run host-launch-integration on the PR
+          # build whenever the change reaches it. Promotion and manual runs
+          # repeat it here on the shipped build, which costs a second LLVM compile.
+          HOST_LAUNCH: ${{ github.event_name != 'pull_request' }}
         run: |
           set -euo pipefail
           uname -sm
           git rev-parse HEAD
           zig version
+          startup=()
+          if [ "$HOST_LAUNCH" = true ]; then
+            startup=('startup=RUI_FAILURE_ARTIFACTS="$RUNNER_TEMP/rui-failure-artifacts" zig build host-launch-integration -j2 --summary all')
+          fi
           python3 -B tests/ci/steps.py --output-root "$RUNNER_TEMP/rui-upgrade-data" \
-            'startup=RUI_FAILURE_ARTIFACTS="$RUNNER_TEMP/rui-failure-artifacts" zig build host-launch-integration -j2 --summary all' \
+            ${startup[@]+"${startup[@]}"} \
             'current-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py . .' \
             'previous-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .'
       - name: Retain bounded failed-fixture diagnostics

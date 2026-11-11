@@ -1,4 +1,5 @@
 const std = @import("std");
+const model_catalog = @import("model_catalog.zig");
 const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalText = @import("TerminalText.zig");
 const stderr = @import("stderr.zig");
@@ -21,6 +22,7 @@ const cli_args = @import("cli_args.zig");
 const configure_input = @import("configure_input.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
+const HostStartupWait = @import("HostStartupWait.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
@@ -757,8 +759,16 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     const selected = try selectedStore(init, parsed.get("store"), &fallback);
     if (command == .host_start) return startHost(init, selected, false, try parsed.number(usize, "active-capacity"), null);
     if (command == .host_pause) return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
-    const status = client.hostStatus(init.io, selected);
-    try writeHostStatus(init.io, status);
+    const paths: ?platform.Paths = platform.resolveClientPaths(init.io, selected) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => {
+            try writeHostStatus(init.io, .access_failure, null);
+            try validateStoreSpelling(selected);
+            return error.StoreAccessFailed;
+        },
+    };
+    const status = if (paths) |*location| client.hostStatusAt(init.io, location, null) else .unavailable;
+    try writeHostStatus(init.io, status, if (paths) |*location| location else null);
     try validateStoreSpelling(selected);
     switch (status) {
         .incompatible => return error.IncompatibleHost,
@@ -767,7 +777,7 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     }
 }
 
-fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus) !void {
+fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus, paths: ?*const platform.Paths) !void {
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
     try writer.print("{{\"version\":\"{s}\",\"type\":\"host_status\",\"status\":\"{s}\"", .{ protocol.wire_version, @tagName(status) });
@@ -787,8 +797,8 @@ fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus) !void {
             try std.json.Stringify.value(ready.capabilities, .{}, writer);
             var location: [protocol.max_store_bytes + "/diagnostics".len]u8 = undefined;
             try writer.writeAll(",\"diagnostics\":");
-            // A ready opaque identity already resolved through this runtime hint.
-            const directory = if (platform.isOpaqueStoreId(ready.store.slice())) platform.mysqlRuntimeDirectory(ready.store.slice()).? else ready.store.slice();
+            // A ready reply supplies identity, never a new engine/routing hint.
+            const directory = paths.?.diagnosticsDirectory();
             try std.json.Stringify.value(try std.fmt.bufPrint(&location, "{s}/diagnostics", .{directory}), .{}, writer);
         },
         else => {},
@@ -846,8 +856,13 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
 /// `readiness` is the caller's fresh local credential state, when it has one.
 fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity: ?usize, readiness: ?*const provider_selection.Readinesses) !void {
     const io = init.io;
-    switch (client.hostStatus(io, selected)) {
-        .ready => |ready| return reportStartedHost(io, ready, quiet, capacity),
+    const selection = platform.resolveClientSelection(selected);
+    const resolved: ?platform.Paths = selection.paths(io) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return error.StoreAccessFailed,
+    };
+    switch (if (resolved) |*paths| client.hostStatusAt(io, paths, null) else @as(protocol_reply.HostStatus, .unavailable)) {
+        .ready => |ready| return reportStartedHost(io, &resolved.?, ready, quiet, capacity),
         .incompatible => {
             stderr.diagnostic("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host pause (rui host stop in older versions), then run this rui again; saved work is unchanged.\n", .{});
             return error.IncompatibleHost;
@@ -857,12 +872,12 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
     }
     // An opaque MySQL id has no login and can only attach. Never turn it
     // into a new SQLite directory when the launched Host is unavailable.
-    if (platform.mysqlRuntimeDirectory(selected) != null) return error.MysqlHostUnavailable;
+    if (selection == .mysql) return error.MysqlHostUnavailable;
     // Only the serving Host obtains the exclusive lease; this creates the
     // candidate Store path without claiming an owner or touching SQLite.
     var dir = try std.Io.Dir.cwd().createDirPathOpen(io, selected, .{ .permissions = .fromMode(0o700) });
     dir.close(io);
-    const paths = try platform.resolveClientPaths(io, selected);
+    const paths = resolved orelse try selection.paths(io);
     var executable_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
     const length = try std.process.executablePath(io, &executable_buffer);
     if (length == executable_buffer.len) return error.ExecutablePathTooLong;
@@ -908,18 +923,27 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
         }
         return error.HostLaunchFailed;
     }
-    const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 10 * std.time.ns_per_s;
+    var wait = HostStartupWait.init(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
     var startup_bytes: [8192]u8 = undefined;
     var startup_length: usize = 0;
-    while (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < until) {
+    // Startup output already written to the terminal: a migration's
+    // announcement, which explains a wait longer than ten seconds.
+    var shown: usize = 0;
+    while (!wait.expired(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds)) {
         const count = std.c.read(startup_read, startup_bytes[startup_length..].ptr, startup_bytes.len - startup_length);
         if (count > 0) startup_length += @intCast(count);
         const startup = startup_bytes[0..startup_length];
+        wait.observe(startup, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
+        const until = wait.until(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
+        if (shown == 0) {
+            shown = HostStartupWait.shownWhileStarting(startup);
+            if (shown != 0) _ = @import("stderr.zig").write(startup[0..shown]);
+        }
         if ((count == 0 or startup_length == startup_bytes.len) and
             std.mem.indexOf(u8, startup, "[store_locked]\n") == null)
         {
             // A competing candidate may have lost the lease to a ready Host.
-            if (client.hostStatusUntil(io, paths.store.slice(), until) != .ready) {
+            if (client.hostStatusAt(io, &paths, until) != .ready) {
                 var header_bytes: [4 * protocol.max_store_bytes + 256]u8 = undefined;
                 var header = std.Io.Writer.fixed(&header_bytes);
                 try header.writeAll("\nrui: detached Host startup failed for Store ");
@@ -928,7 +952,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
                 try path_text.finish(&header);
                 try header.writeAll(":\n");
                 _ = @import("stderr.zig").write(header.buffered());
-                _ = @import("stderr.zig").write(startup);
+                _ = @import("stderr.zig").write(startup[shown..]);
                 if (startup_length == 0) stderr.diagnostic("Child closed its startup channel before readiness; exit status unavailable.\n", .{});
                 if (startup_length == startup_bytes.len) {
                     stderr.diagnostic("Startup output exceeded 8 KiB; readiness and exit status remain unconfirmed.\n", .{});
@@ -938,7 +962,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
                 return error.HostStartupFailed;
             }
         }
-        switch (client.hostStatusUntil(io, paths.store.slice(), until)) {
+        switch (client.hostStatusAt(io, &paths, until)) {
             .ready => |ready| {
                 // Startup notices precede readiness. The first read may have
                 // raced their write; collect once more after readiness proves
@@ -949,8 +973,8 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
                 // A competing launcher lost to this ready owner; its expected
                 // lease refusal is not a warning about the running Host.
                 if (startup_length != 0 and std.mem.indexOf(u8, notices, "[store_locked]\n") == null)
-                    _ = @import("stderr.zig").write(notices);
-                return reportStartedHost(io, ready, quiet, capacity);
+                    _ = @import("stderr.zig").write(notices[shown..]);
+                return reportStartedHost(io, &paths, ready, quiet, capacity);
             },
             .incompatible => return error.IncompatibleHost,
             .access_failure => return error.StoreAccessFailed,
@@ -959,14 +983,14 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
         const remaining = until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
         if (remaining > 0) try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 100 * std.time.ns_per_ms))), .awake);
     }
-    if (startup_length != 0) _ = @import("stderr.zig").write(startup_bytes[0..startup_length]);
+    if (startup_length != shown) _ = @import("stderr.zig").write(startup_bytes[shown..startup_length]);
     stderr.diagnostic("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
     return error.HostReadinessUnconfirmed;
 }
 
 /// A ready Host keeps the capacity it started with, so a different request
 /// is reported rather than dropped; a competing launcher may have won.
-fn reportStartedHost(io: std.Io, ready: @FieldType(protocol_reply.HostStatus, "ready"), quiet: bool, capacity: ?usize) !void {
+fn reportStartedHost(io: std.Io, paths: *const platform.Paths, ready: @FieldType(protocol_reply.HostStatus, "ready"), quiet: bool, capacity: ?usize) !void {
     if (capacity) |requested| if (requested != ready.active_capacity) notice: {
         var bytes: [4 * protocol.max_store_bytes + 512]u8 = undefined;
         var notice = std.Io.Writer.fixed(&bytes);
@@ -975,7 +999,7 @@ fn reportStartedHost(io: std.Io, ready: @FieldType(protocol_reply.HostStatus, "r
         notice.writeByte('\n') catch break :notice;
         stderr.diagnostic("{s}", .{notice.buffered()});
     };
-    if (!quiet) try writeHostStatus(io, .{ .ready = ready });
+    if (!quiet) try writeHostStatus(io, .{ .ready = ready }, paths);
 }
 
 fn login(init: std.process.Init, args: []const []const u8, interactive: bool, comptime exchange: anytype) !void {
@@ -1567,7 +1591,7 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
         selected_store = destination.path;
         try preflightNewSession(init.io, selected_store, destination.saved);
         // Check the prospective pin's syntax before credential lookup or
-        // login. A model Rui does not list runs with default limits.
+        // login. Client defaults use the shipped catalog, not Host facts.
         const usable: provider_selection.Readinesses = .initFill(.configured);
         _ = snapshot.resolve(&usable) catch |err| {
             if (after_choice) {
@@ -1850,18 +1874,18 @@ test "a Label argument sets, clears or refuses before capture" {
     try std.testing.expectEqual(@as(usize, 100), (try labelArgument(&longest)).value.?.len);
 }
 
-/// Admits a typed model ID with valid syntax. One Rui does not list runs
-/// with default limits, and one line says so.
+/// Admits a typed model ID with valid syntax. Missing shipped facts only
+/// select estimated client defaults; the Host owns runtime fact admission.
 fn admitModel(model: []const u8) error{InvalidModel}!void {
-    if (model_capability.supportsModel(model)) return;
+    if (model_capability.supportsModel(model_catalog.shipped, model)) return;
     // Optional diagnostics stay bounded and cannot retain a restored terminal
     // on stderr credit. Spell arbitrary bytes safely, without changing input.
     var bytes: [4 * protocol.max_model_bytes + model_capability.model_help.len + 256]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
     if (model_capability.validModelSyntax(model)) {
-        out.writeAll("rui: Rui does not list ") catch unreachable;
+        out.writeAll("rui: this client's catalog does not list ") catch unreachable;
         writeSafeTextTo(&out, model) catch unreachable;
-        out.writeAll("; it uses default limits.\n") catch unreachable;
+        out.writeAll("; client defaults use estimated limits.\n") catch unreachable;
         _ = @import("stderr.zig").write(out.buffered());
         return;
     }
@@ -3316,7 +3340,7 @@ const StartConfiguration = struct {
             .reasoning_effort = input.reasoning_effort.value,
             // A client may materialize its product default into input. Only
             // the saved preference snapshot establishes saved provenance.
-            .effort_source = if (effort_flag) .flag else if (model_capability.startEffort(saved_effort, model) != null) .saved else .model_default,
+            .effort_source = if (effort_flag) .flag else if (model_capability.startEffort(model_catalog.shipped, saved_effort, model) != null) .saved else .model_default,
         };
     }
 };
@@ -3724,7 +3748,8 @@ fn showResult(init: std.process.Init, requester: client.Requests, saved: *const 
     var read_buffer: client.ReplyBuffer = .{};
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
-    var renderer: AnswerRenderer = .{ .out = &output.interface, .home = init.environ_map.get("HOME") orelse "" };
+    const no_colour: []const u8 = init.environ_map.get("NO_COLOR") orelse "";
+    var renderer: AnswerRenderer = .{ .out = &output.interface, .home = init.environ_map.get("HOME") orelse "", .colour = no_colour.len == 0 };
     const answer = blk: {
         // Abandon retained text and pending writer bytes on failure. A renderer
         // transition may be buffered, so tracked style cannot prove terminal state.

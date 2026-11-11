@@ -5,6 +5,7 @@ const os = @import("os/os.zig");
 const socket_os = @import("os/socket.zig");
 const pages = @import("os/pages.zig");
 const HostDiagnostics = @import("HostDiagnostics.zig");
+const HostStartupWait = @import("HostStartupWait.zig");
 const TerminalText = @import("TerminalText.zig");
 const TestObservation = @import("TestObservation.zig");
 const bash = @import("bash.zig");
@@ -884,14 +885,14 @@ pub const Launch = struct {
     presets: []const core_tools.Preset = &.{},
 };
 
-/// Lists each MCP server and saves the Host's catalog: the built-ins and
+/// Lists each MCP server and saves the Host tool set: the built-ins and
 /// the servers' tools, with an unreachable server's last saved tools kept
 /// (D147). A name two sources share refuses the start (D142).
 noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, storage: *store_module.Store, servers: []const launch_frame.Frame.McpServer, stop: ?std.posix.fd_t) !void {
-    var saved = try storage.readCatalog(arena);
-    const kept: ?tools.Catalog = if (saved) |*found| found.catalog() else null;
+    var saved = try storage.readHostToolSet(arena);
+    const kept: ?tools.HostToolSet = if (saved) |*found| found.toolSet() else null;
     var collision: mcp_offered.Collision = .{};
-    const catalog = mcp_offered.collect(io, arena, scratch, servers, if (kept) |*value| value else null, &collision, stop) catch |err| switch (err) {
+    const host_tool_set = mcp_offered.collect(io, arena, scratch, servers, if (kept) |*value| value else null, &collision, stop) catch |err| switch (err) {
         // The launcher closed stdin: stop as a closed stdin does later.
         error.Stopped => return error.EffectAwareShutdown,
         error.ToolNameCollision => {
@@ -908,9 +909,9 @@ noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem
         },
         else => |other| return other,
     };
-    const owned = try arena.create(tools.Catalog);
-    owned.* = catalog;
-    try storage.saveCatalog(owned);
+    const owned = try arena.create(tools.HostToolSet);
+    owned.* = host_tool_set;
+    try storage.saveHostToolSet(owned);
 }
 
 pub fn serve(
@@ -956,7 +957,7 @@ pub fn serve(
         if (err == error.DescriptorCapacityInsufficient) {
             stderr.print(
                 "rui: Host cannot start: descriptor soft limit {d} is below the minimum intake requirement {d} (10 ordinary clients). Rui already tried raising it. Inspect limits with ulimit -Sn and ulimit -Hn; raise the hard limit in your system/session settings (ask your administrator if needed), then retry rui host start.\n",
-                .{ descriptor_observation.soft_limit.?, descriptor_requirement.total - 4 * (product_defaults.intake_capacity - descriptor_capacity.minimum_intake) },
+                .{ descriptor_observation.soft_limit.?, descriptor_requirement.total - descriptor_capacity.ordinary_exchange_descriptors * (product_defaults.intake_capacity - descriptor_capacity.minimum_intake) },
             );
             stderr.print(
                 "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d} (required is for default intake; RLIMIT_NOFILE).\n",
@@ -1013,10 +1014,10 @@ pub fn serve(
     if (diagnostics) |*writer| try recordCapacity(writer, intake_capacity, descriptor_requirement.total, descriptor_limit_text);
     var startup_failure: []const u8 = "startup_error";
     errdefer if (diagnostics) |*writer| writer.record("failed", startup_failure);
-    // The catalog's records point into this arena, and the Store keeps the
-    // catalog for its life, so it outlives the Store.
-    var catalog_memory = std.heap.ArenaAllocator.init(allocator);
-    defer catalog_memory.deinit();
+    // The tool set's records point into this arena, and the Store keeps the
+    // tool set for its life, so it outlives the Store.
+    var tool_set_memory = std.heap.ArenaAllocator.init(allocator);
+    defer tool_set_memory.deinit();
     var storage: store_module.Store = undefined;
     openStoreForHost(io, &storage, &lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
         if (err == error.StoreIdentityMismatch) startup_failure = "store_identity_mismatch";
@@ -1036,7 +1037,7 @@ pub fn serve(
         bash_timeout_ms,
         home,
         launch,
-        &catalog_memory,
+        &tool_set_memory,
         mcp_servers,
         intake_capacity,
         descriptor_requirement.total,
@@ -1062,7 +1063,7 @@ fn serveOpened(
     bash_timeout_ms: u64,
     home: ?[]const u8,
     launch: ?Launch,
-    catalog_memory: *std.heap.ArenaAllocator,
+    tool_set_memory: *std.heap.ArenaAllocator,
     mcp_servers: []const launch_frame.Frame.McpServer,
     intake_capacity: usize,
     descriptor_requirement: usize,
@@ -1072,7 +1073,7 @@ fn serveOpened(
     diagnostic_open_error: ?anyerror,
     readiness_owned: *bool,
 ) !void {
-    if (mcp_servers.len != 0) try offerMcpTools(io, catalog_memory.allocator(), allocator, storage, mcp_servers, if (launch) |value| value.stdin else null);
+    if (mcp_servers.len != 0) try offerMcpTools(io, tool_set_memory.allocator(), allocator, storage, mcp_servers, if (launch) |value| value.stdin else null);
     try storage.validateRetryWaits(limits.retry_waits_ms);
     try lease.prepareForServing(hooks.fails(.startup_cleanup));
 
@@ -1201,7 +1202,7 @@ fn serveOpened(
 fn finishServing(io: std.Io, storage: *const store_module.Store, launched: bool, result: anyerror!void) !void {
     // This is the sole decision and publication site, after intake, workers
     // and execution have drained. A fence wins over every serving outcome.
-    if (launched and storage.engine == .mysql and storage.isFenced()) {
+    if (launched and storage.kind() == .mysql and storage.isFenced()) {
         launch_frame.writeRefusal(io, .{ .code = .store_fenced, .message = "the MySQL Store lost ownership or its connection; restart the Host" });
         return error.StoreFenced;
     }
@@ -1233,31 +1234,97 @@ noinline fn openStoreForHost(
 ) !void {
     var found_schema_version: u32 = store_module.schema_version;
     var identity_mismatch: store_module.IdentityMismatch = .{};
+    var migration: StartupMigration = .{ .diagnostics = diagnostics };
     const store_options: store_module.OpenOptions = .{
         .served = served.routes(),
         .cache_spill = limits.sqlite_cache_spill,
         .cache_kib = limits.sqlite_cache_kib,
         .found_schema_version = &found_schema_version,
         .identity_mismatch = &identity_mismatch,
-        // With MCP servers the catalog is saved below, once they are listed.
-        .catalog = if (!has_mcp) &tools.built_in else null,
+        .migration_notice = .{ .context = &migration, .notify = StartupMigration.notify },
+        // With MCP servers the tool set is saved below, once they are listed.
+        .host_tool_set = if (!has_mcp) &tools.built_in_tool_set else null,
     };
-    if (mysql_url) |url| {
-        // Only this call borrows the login. Neither metadata nor filesystem
-        // paths ever see the URL, and admission failure wipes it too.
-        defer url.wipe();
-        try storage.openMysql(io, url.options(), url.database.slice(), store_options);
-        lease.paths.store.set(storage.mysqlStoreId()) catch unreachable;
-        storage.selector.set(storage.mysqlStoreId()) catch unreachable;
-    } else storage.openWithOptions(io, lease.paths.database.slice(), lease.paths.store.slice(), store_options) catch |err| {
-        if (err == error.WrongStoreVersion) {
-            try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
-            if (diagnostics) |writer| writer.record("failed", "unsupported_store_version");
-        } else if (err == error.StoreIdentityMismatch) {
-            try reportStoreIdentityMismatch(identity_mismatch.saved_selector.slice(), lease.paths.store.slice());
+    // The login is borrowed only by admission and wiped on every exit.
+    defer if (mysql_url) |url| url.wipe();
+    const target: store_module.Target = if (mysql_url) |url|
+        .{ .mysql = url.options() }
+    else
+        .{ .sqlite = lease.paths.database.slice() };
+    const selector = if (mysql_url) |url| url.database.slice() else lease.paths.store.slice();
+    storage.openTarget(io, target, selector, store_options) catch |err| {
+        if (mysql_url == null) {
+            if (err == error.WrongStoreVersion) {
+                try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
+                if (diagnostics) |writer| writer.record("failed", "unsupported_store_version");
+            } else if (err == error.StoreIdentityMismatch) {
+                try reportStoreIdentityMismatch(identity_mismatch.saved_selector.slice(), lease.paths.store.slice());
+            }
         }
         return err;
     };
+    lease.paths.store.set(storage.storeId()) catch unreachable;
+}
+
+/// Announces a startup migration on the startup channel, where a launcher
+/// waits through it (`HostStartupWait`), and in the startup records.
+const StartupMigration = struct {
+    diagnostics: ?*HostDiagnostics,
+
+    fn notify(context: *anyopaque, event: store_module.MigrationNotice.Event) void {
+        const self: *StartupMigration = @ptrCast(@alignCast(context));
+        var message: [256]u8 = undefined;
+        var detail: [32]u8 = undefined;
+        const text, const phase, const format = switch (event) {
+            .begin => |from| .{
+                std.fmt.bufPrint(&message, "rui: backing up this Store and migrating it from format {d} to {d}; a large Store takes longer " ++ HostStartupWait.migrating_tag, .{ from, store_module.schema_version }) catch unreachable,
+                "migrating",
+                from,
+            },
+            .end => .{
+                std.fmt.bufPrint(&message, "rui: Store migrated to format {d} " ++ HostStartupWait.migrated_tag, .{store_module.schema_version}) catch unreachable,
+                "migrated",
+                store_module.schema_version,
+            },
+        };
+        // `serve` holds stderr custody from before the Store opens through
+        // readiness, so this writes under it. One nonblocking try, so a
+        // foreground Host whose stderr nobody drains never stalls holding the
+        // Store. A launcher drains the channel, so its notices arrive; a
+        // dropped one leaves it to the ordinary wait, and readiness or exit
+        // still ends the wait.
+        _ = stderr.writeHeld(text);
+        if (self.diagnostics) |writer| writer.record(phase, std.fmt.bufPrint(&detail, "format_{d}", .{format}) catch unreachable);
+    }
+};
+
+test "migration notices reach the launcher while serve holds stderr custody" {
+    var pipe: [2]c_int = undefined;
+    if (std.c.pipe(&pipe) != 0) return error.SystemResources;
+    defer for (pipe) |fd| {
+        _ = std.c.close(fd);
+    };
+    const saved = std.c.dup(2);
+    if (saved < 0 or std.c.dup2(pipe[1], 2) < 0) return error.TestUnexpectedResult;
+    // As `serve` holds it from before the Store opens through readiness.
+    try std.testing.expect(stderr.tryExclude());
+    var migration: StartupMigration = .{ .diagnostics = null };
+    StartupMigration.notify(&migration, .{ .begin = store_module.schema_version - 1 });
+    StartupMigration.notify(&migration, .end);
+    stderr.release();
+    _ = std.c.dup2(saved, 2);
+    _ = std.c.close(saved);
+    var buffer: [1024]u8 = undefined;
+    const count = std.c.read(pipe[0], &buffer, buffer.len);
+    try std.testing.expect(count > 0);
+    const output = buffer[0..@intCast(count)];
+    var wait = HostStartupWait.init(0);
+    const begin_end = std.mem.indexOf(u8, output, HostStartupWait.migrating_tag).? + HostStartupWait.migrating_tag.len;
+    wait.observe(output[0..begin_end], 1);
+    try std.testing.expect(!wait.expired(HostStartupWait.readiness_ns * 10));
+    wait.observe(output, HostStartupWait.readiness_ns * 10);
+    try std.testing.expect(!wait.expired(HostStartupWait.readiness_ns * 10 + 1));
+    try std.testing.expect(wait.expired(HostStartupWait.readiness_ns * 11));
 }
 
 noinline fn reportStoreIdentityMismatch(saved_selector: []const u8, actual_selector: []const u8) !void {
@@ -1521,6 +1588,16 @@ noinline fn submitMessage(host: *Host, command: *const wire_request.MessageComma
     const initial_skills = prepared.initial;
     const captured_skill = prepared.captured;
     const faults = host.hooks.storeFaults(.command);
+    if (command.configuration) |*configuration| if (configuration.parent.state == .value) {
+        // A creating child inherits, rather than treating the caller's task
+        // environment as a new person's environment for that child.
+        var inheritance = @import("child_environment.zig").Inheritance.init(host.environments, configuration.parent.value.slice(), host.allocator, memory.allocator()) catch |err| {
+            if (host.store.isFenced()) return .infrastructure_failure;
+            return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
+        };
+        defer inheritance.deinit(host.allocator);
+        return host.store.submitMessageCapturedSkills(command, inheritance.messageCallback(), initial_skills, if (captured_skill) |*value| value else null, faults);
+    };
     const environments = host.environments orelse return host.store.submitMessageCapturedSkills(command, null, initial_skills, if (captured_skill) |*value| value else null, faults);
     const Install = struct {
         environments: *SessionEnvironments,
@@ -1595,14 +1672,19 @@ noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.Co
         @import("session_skills.zig").initial(memory.allocator(), host.allocator, host.io, host.store, command.key.slice(), &command.configuration, host.bash_facts.home) catch |err| return configureFailure(host, err)
     else
         null;
-    return host.store.configureWithCapturedSkills(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, host.hooks.storeFaults(.command));
+    var inheritance = if (command.session.len == 0 and command.configuration.parent.state == .value)
+        @import("child_environment.zig").Inheritance.init(host.environments, command.configuration.parent.value.slice(), host.allocator, memory.allocator()) catch |err| return configureFailure(host, err)
+    else
+        @import("child_environment.zig").Inheritance{ .environments = null };
+    defer inheritance.deinit(host.allocator);
+    return host.store.configureWithCreationCommitted(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, inheritance.creationCallback(), host.hooks.storeFaults(.command));
 }
 
 /// `client_environment` holds a Message's checked environment.
 fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer) !void {
     // The first MySQL readiness probe learns the opaque id over the private
     // socket. All subsequent work must name that exact id, never the URL.
-    const discovering = request.* == .host_info and request.store().len == 0 and host.store.engine == .mysql;
+    const discovering = request.* == .host_info and request.store().len == 0 and host.store.kind() == .mysql;
     if (!discovering and !std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
     }
@@ -1633,7 +1715,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .custody_occupied = host.custody.held(),
                 .paused = host.turns_paused.load(.acquire),
                 .routes = host.providers.routes(),
-                .doublewrite = host.store.mysqlDoublewrite(),
+                .doublewrite = host.store.admissionDiagnostic().doublewrite,
             }});
         },
         .host_pause => |pause| {
@@ -1854,11 +1936,18 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             defer page.deinit(host.allocator);
             try fd.jsonGrowing(200, protocol.skill_suggestions_reply.max_bytes, host_reply.renderSkillSuggestions, .{&page});
         },
-        // Host memory only: never SQLite or the network.
-        // Sized as written: the bound is tens of KiB, a reply mostly far less.
+        // Refresh is asynchronous; the selected facts are an operation-scoped
+        // Store read, never retained beside the provider's live account list.
         .model_list => {
             host.listings_requested.store(true, .release);
-            try fd.jsonGrowing(200, protocol.model_list_reply.max_bytes, renderModelList, .{host});
+            var arena: std.heap.ArenaAllocator = .init(host.allocator);
+            defer arena.deinit();
+            const facts = host.store.readModelCatalog(arena.allocator()) catch |err| {
+                if (err == error.OutOfMemory) return error.OutOfMemory;
+                fenceDispatch(host, "model catalog", err);
+                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+            };
+            try fd.jsonGrowing(200, protocol.model_list_reply.maxBytes(facts), renderModelList, .{ host, facts });
         },
     }
 }
@@ -1874,9 +1963,9 @@ fn readSkillSuggestions(host: *Host, allocator: std.mem.Allocator, scope: @impor
     };
 }
 
-fn renderModelList(out: protocol.JsonOut, host: *Host) error{BufferTooLarge}!void {
+fn renderModelList(out: protocol.JsonOut, host: *Host, facts: []const @import("model_catalog.zig").Entry) error{BufferTooLarge}!void {
     out.writer.writeAll(protocol.model_list_reply.head) catch return error.BufferTooLarge;
-    host.model_lists.render(out.writer) catch return error.BufferTooLarge;
+    host.model_lists.render(out.writer, facts) catch return error.BufferTooLarge;
     out.writer.writeAll(protocol.model_list_reply.tail) catch return error.BufferTooLarge;
 }
 
@@ -2349,7 +2438,7 @@ const Reply = struct {
     }
 
     /// As `json`, growing from empty: for a bound far above most replies.
-    fn jsonGrowing(self: *Reply, status: u16, comptime max_bytes: usize, comptime render: anytype, args: anytype) !void {
+    fn jsonGrowing(self: *Reply, status: u16, max_bytes: usize, comptime render: anytype, args: anytype) !void {
         return self.jsonInto(.init(self.allocator), status, max_bytes, render, args);
     }
 
@@ -3070,7 +3159,7 @@ test "command observation full and both unchanged tiers render byte exactly with
     try std.testing.expectEqual(protocol.shapeBytes(protocol.command_observation_reply.absent), host_reply.commandObservationBytes(&observed));
 }
 
-test "Message observation work and recovery fit the unchanged resident response bound" {
+test "Message observation work and recovery fit their exchange-owned response bound" {
     const max = std.math.maxInt(u64);
     const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
     const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
@@ -3090,9 +3179,25 @@ test "Message observation work and recovery fit the unchanged resident response 
     var response: protocol.CommandObservationBuffer = .{};
     try response.render(host_reply.renderFullCommandObservation, .{ &escaped_key, &observation, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)) });
     try std.testing.expectEqual(protocol.command_observation_reply.maxBytes(.message) - protocol.shapeBytes(protocol.command_observation_reply.code), response.len);
-    // The existing response owner is sized by host-info's escaped Store path,
-    // not these added per-observation facts; no resident pool grows.
-    try std.testing.expectEqual(protocol.max_host_info_response_bytes, protocol.max_response_bytes);
+    // Observations use their exchange-owned writer, not ResponseBuffer.
+    // Neither host-info nor mutation diagnostics determine this bound.
+}
+
+test "MCP rejection diagnostics fit the protocol-owned response bound" {
+    // The resident owner must cover the complete string hole, not just the
+    // shorter semantic advisory emitted for valid tool/server names.
+    try std.testing.expect(protocol.configuration_reply.max_bytes <= protocol.max_response_bytes);
+    try std.testing.expect(protocol.message_reply.max_bytes <= protocol.max_response_bytes);
+    var host_tool_set = tools.built_in_tool_set;
+    host_tool_set.configured_servers = &.{"notes"};
+    var response: protocol.ResponseBuffer = .{};
+    try response.render(host_reply.renderMessageReply, .{ "", store_module.MessageReply{ .rejected = .{
+        .replayed = false,
+        .code = .mcp_server_unavailable,
+        .message = host_tool_set.missingTool("lookup"),
+        .content = .{ .length = 4, .digest = protocol.contentDigest("task") },
+    } } });
+    try std.testing.expect(std.mem.indexOf(u8, response.slice(), "MCP server notes is unavailable and may provide it") != null);
 }
 
 test "control response variants fit exact worst-case JSON bounds" {
@@ -4332,8 +4437,10 @@ test "MySQL Host readiness reports doublewrite OFF while SQLite stays unchanged"
     info.doublewrite = null;
     try response.render(host_reply.renderHostInfo, .{info});
     try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
-    // MySQL's bounded opaque id fits within SQLite's existing reply budget.
-    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_reply), protocol.max_host_info_response_bytes);
+    // The common public bound includes the optional diagnostic even beside
+    // a maximum-width selector; SQLite omits that entire fragment.
+    const shape = protocol.host_info_reply;
+    try std.testing.expectEqual(protocol.shapeBytes(shape.head) + protocol.shapeBytes(shape.doublewrite) + protocol.shapeBytes(shape.tail), protocol.max_host_info_response_bytes);
 }
 
 test "MCP socket capacity is reserved beside model and Bash descriptors" {
@@ -4664,4 +4771,108 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
         try std.testing.expect(std.mem.startsWith(u8, status, "HTTP/1.1 503 "));
     }
     try std.testing.expect(fail_index > 0);
+}
+
+test "Host startup projects MCP offers after a changed listing and restart" {
+    const Script = @import("mcp/test_server.zig");
+    const testing = store_module.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+    const replies = [_][]const u8{
+        Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"fetch_page\",\"description\":\"old page\",\"inputSchema\":{\"type\":\"object\"}}]}}"),
+        Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"fetch_page\",\"description\":\"new page\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"readOnlyHint\":true}}]}}"),
+    };
+    for (replies, 0..) |reply, round| {
+        var script: Script = .{ .reply = reply };
+        try script.start();
+        defer script.stop();
+        var tool_memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer tool_memory.deinit();
+        var storage: store_module.Store = undefined;
+        try testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+        defer storage.close() catch unreachable;
+        var server: launch_frame.Frame.McpServer = .{};
+        try server.name.set("docs");
+        @memcpy(server.bearer_token.bytes[0..6], "secret");
+        server.bearer_token.len = 6;
+        var url: [128]u8 = undefined;
+        try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
+        try offerMcpTools(std.testing.io, tool_memory.allocator(), std.testing.allocator, &storage, &.{server}, null);
+        if (round == 0) {
+            var cwd: [protocol.max_workspace_bytes]u8 = undefined;
+            var configure = try testing.completeConfiguration("restart-mcp-config", "", try testing.canonicalCwd(std.testing.io, &cwd), "model-a");
+            configure.configuration.tools = try .of(&.{"fetch_page"});
+            session = (try storage.configure(&configure, .{})).accepted.session;
+        }
+        const key = if (round == 0) "restart-mcp-first" else "restart-mcp-next";
+        try testing.submitTestMessage(&storage, &tmp, key, key, session.slice(), "read page");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT settings_revision FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
+        const description = protocol.contentDigest(if (round == 0) "old page" else "new page");
+        try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation m JOIN session_revision r ON r.session_ref=m.session_ref AND r.revision=m.settings_revision JOIN tool_set_member tm ON tm.tool_set_id=m.tool_set_id JOIN tool_record t ON t.tool_record_id=tm.tool_record_id JOIN content c ON c.content_id=t.description_content_id WHERE m.operation_id=?1 AND c.digest=?2 AND t.read_only=?3", .{ binding.operation_id, testing.Blob{ .bytes = &description }, @intFromBool(round == 1) }));
+        try testing.settleItemsForTesting(&storage, &tmp, binding, &.{"{\"type\":\"message\",\"id\":\"done\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
+        try std.testing.expect(script.request_received.load(.acquire));
+        try std.testing.expect(std.mem.indexOf(u8, script.seen[0..script.seen_len], "tools/list") != null);
+        try std.testing.expect(!storage.isFenced());
+    }
+}
+
+test "configure parent inherits the Host environment only after a fresh creation" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    try lease.paths.store.set("s");
+    var storage: store_module.Store = undefined;
+    try store_module.testing.testingSqliteStore(&storage, &tmp, io);
+    defer storage.close() catch unreachable;
+    var environments: SessionEnvironments = undefined;
+    try environments.init(io, allocator);
+    defer environments.deinit();
+    var host: Host = .{ .io = io, .allocator = allocator, .lease = &lease, .store = &storage, .environments = &environments };
+    var create = try store_module.testing.completeConfiguration("env-parent", "", root, "model-a");
+    create.configuration.tools = try .of(&.{"bash"});
+    const parent = (try storage.configure(&create, .{})).accepted.session;
+    var offer = try SessionEnvironments.Offer.init(allocator, 4);
+    defer offer.deinit(allocator);
+    @memcpy(offer.room(), "A=1\x00");
+    environments.offer(parent.slice(), .{ .origin = .person, .admission = 1 }, &offer);
+    var child: wire_request.ConfigureCommand = .{};
+    try child.key.set("env-child");
+    child.configuration = (try store_module.testingCompleteConfiguration("unused", "", root, "model-a")).configuration;
+    child.configuration.workspace.state = .omitted;
+    child.configuration.provider.state = .omitted;
+    child.configuration.tools = try .of(&.{"bash"});
+    try child.configuration.permission_mode.value.set("ask");
+    child.configuration.parent.state = .value;
+    try child.configuration.parent.value.set(parent.slice());
+    const result = try submitConfigure(&host, &child);
+    try std.testing.expect(result == .accepted);
+    const session = result.accepted.session;
+    const copied = (try environments.copy(session.slice(), allocator)).?;
+    defer allocator.free(copied);
+    try std.testing.expectEqualStrings("A=1\x00", copied);
+    const count = environments.len;
+    var newer = try SessionEnvironments.Offer.init(allocator, 4);
+    defer newer.deinit(allocator);
+    @memcpy(newer.room(), "B=2\x00");
+    environments.offer(parent.slice(), .{ .origin = .person, .admission = 2 }, &newer);
+    const replay = try submitConfigure(&host, &child);
+    try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+    const retained = (try environments.copy(session.slice(), allocator)).?;
+    defer allocator.free(retained);
+    try std.testing.expectEqualStrings("A=1\x00", retained);
+    try child.key.set("env-child-refused");
+    child.configuration.provider.state = .value;
+    try child.configuration.provider.value.set("codex");
+    const refusal = try submitConfigure(&host, &child);
+    try std.testing.expect(refusal == .rejected);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.parent_provider_forbidden, refusal.rejected.code);
+    try std.testing.expectEqual(count, environments.len);
 }

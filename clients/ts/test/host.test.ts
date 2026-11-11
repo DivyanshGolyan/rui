@@ -46,6 +46,8 @@ test("connect starts a ready Host and close stops it", { skip }, async () => {
 	assert.equal(info.active_capacity, "2");
 	assert.equal(info.capabilities.providers.openai, "key_file");
 	assert.equal(info.store, realpathSync(store));
+	assert.equal(rui.hostInfo?.innodb_doublewrite, undefined);
+	assert.equal(Object.hasOwn(info, "innodb_doublewrite"), false);
 	if (process.platform === "linux") {
 		const pid = rui.pid;
 		const environment = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").filter(Boolean);
@@ -252,8 +254,9 @@ process.stdin.on("end", () => server ? server.close(() => process.exit(0)) : pro
 		rui = await Rui.connect(options("mysql://user:private@localhost/db", { binary: executable }));
 		const id = "0123456789abcdef0123456789abcdef";
 		assert.equal(rui.hostInfo?.store, id);
-		assert.ok(rui.hostInfo && "innodb_doublewrite" in rui.hostInfo);
-		assert.equal(rui.hostInfo.innodb_doublewrite, "OFF");
+		// No property-presence/union narrowing is needed on the shared shape.
+		const doublewrite: string | undefined = rui.hostInfo?.innodb_doublewrite;
+		assert.equal(doublewrite, "OFF");
 		await rui.exchange("/v1/host-info", store => {
 			assert.equal(store, id);
 			return JSON.stringify({ version: WIRE_VERSION, kind: "host_info", store });

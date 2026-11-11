@@ -64,11 +64,11 @@ def mcp_entry(name, server):
     return {"name": name, "url": f"http://127.0.0.1:{server.server_port}/mcp", "bearerToken": "t", "callTimeoutMs": 1000}
 
 
-def sdk_catalog(root, good, network, ci):
-    """Prove every real SDK tool entered the Host catalog, with its owner.
+def sdk_tool_set(root, good, network, ci):
+    """Prove every real SDK tool entered the Host tool set, with its owner.
 
-    There is no public catalog-list route yet. A collision refusal is the
-    existing public boundary that reports a catalog name and both sources.
+    There is no public tool-set listing route yet. A collision refusal is the
+    existing public boundary that reports a tool name and both sources.
     """
     if not shutil.which("node") or not shutil.which("npm"):
         assert not ci, "CI requires Node and npm for the real MCP SDK fixture"
@@ -104,9 +104,9 @@ def sdk_catalog(root, good, network, ci):
                     with selectors.DefaultSelector() as selector:
                         selector.register(host.stdout, selectors.EVENT_READ)
                         host_process.wait_for(lambda: bool(selector.select(timeout=0)),
-                                              "the SDK catalog collision refusal", timeout=30)
+                                              "the SDK tool-set collision refusal", timeout=30)
                     line = host.stdout.readline()
-                    assert line.startswith(b"{"), (name, "expected a drift-sdk catalog collision refusal", line)
+                    assert line.startswith(b"{"), (name, "expected a drift-sdk tool-set collision refusal", line)
                     refused = json.loads(line)["rui_start_error"]
                     assert host.wait(timeout=20) != 0
                     assert refused["code"] == "tool_name_collision", refused
@@ -118,7 +118,7 @@ def sdk_catalog(root, good, network, ci):
                         host.wait(timeout=10)
                     collision.shutdown()
                     collision.server_close()
-            print("real MCP SDK: Host catalog contains drift-sdk echo, fail, slow, progress")
+            print("real MCP SDK: Host tool set contains drift-sdk echo, fail, slow, progress")
         finally:
             if host is not None and host.poll() is None:
                 host.kill()
@@ -215,7 +215,7 @@ def main(network, ci):
     host = launch(frame(dict(good, presets={"review": preset})))
     wait_for_host(sock, store, host)
     create = {"version": WIRE, "kind": "configure", "store": str(store), "key": "preset:create",
-              "session": "", "preset": "review", "configuration": {"label": {"state": "null"}}}
+              "session": "", "preset": "review", "configuration": {"label": None}}
     created = post(sock, "configure", create)
     assert created["answer"]["status"] == "accepted", created
     session = created["answer"]["session"]
@@ -235,7 +235,7 @@ def main(network, ci):
     for presets, field in [
         ({"Bad": preset}, "name"),
         ({"a" * 64: dict(preset, **{"\x01" * 64: None})}, "\x01"),
-        ({"review": {"model": "m"}}, "effort"),
+        ({"review": {name: value for name, value in preset.items() if name != "effort"}}, "effort"),
         ({"review": dict(preset, tools=["bash"])}, "workspace"),
     ]:
         refused = refusal(launch(frame(dict(good, presets=presets))))
@@ -299,7 +299,7 @@ def main(network, ci):
     assert time.monotonic() - started < 3
     held.close()
     silent.close()
-    sdk_catalog(root, good, network, ci)
+    sdk_tool_set(root, good, network, ci)
     print(f"launch frame: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, opened paused, preset creation and four preset refusals, four frame refusals, MCP tools listed, a collision refused, a server down tolerated")
 
 

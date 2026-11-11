@@ -2,7 +2,9 @@
 //! decoders that accept or reject its bytes. Requests are in protocol.zig;
 //! client.zig owns transport and request capture.
 const std = @import("std");
+const model_catalog = @import("model_catalog.zig");
 const protocol = @import("protocol.zig");
+const session_list = @import("session_list.zig");
 const activity_reply = @import("activity_reply.zig");
 pub const SessionToken = @import("change_ring.zig").SessionToken;
 const model_list = @import("model_list.zig");
@@ -407,7 +409,7 @@ pub fn validHostUnavailable(body: []const u8) bool {
 /// reads. The Host writes the reply's head and tail as they are.
 pub fn modelListProviders(body: []const u8) error{InvalidModelList}![]const u8 {
     const reply = protocol.model_list_reply;
-    if (body.len > reply.max_bytes or !std.mem.startsWith(u8, body, reply.head) or !std.mem.endsWith(u8, body, reply.tail) or body.len < reply.head.len + reply.tail.len)
+    if (!std.mem.startsWith(u8, body, reply.head) or !std.mem.endsWith(u8, body, reply.tail) or body.len < reply.head.len + reply.tail.len)
         return error.InvalidModelList;
     return body[reply.head.len .. body.len - reply.tail.len];
 }
@@ -416,7 +418,7 @@ test "a model list reply reads as what the Host writes" {
     var bytes: [protocol.model_list_reply.max_bytes]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
     try out.writeAll(protocol.model_list_reply.head);
-    try model_list.writeProviders(&out, &.{
+    try model_list.writeProviders(&out, model_catalog.shipped, &.{
         .{ .provider = .codex, .list = .catalog },
         .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-luna\nunlisted-model\n" } } },
     });
@@ -498,6 +500,44 @@ pub fn parseHostInfoForProfile(body: []const u8, store: []const u8, profile: Hos
         .innodb_doublewrite = doublewrite,
         .capabilities = info.capabilities,
     };
+}
+
+test "Host information parses omitted and bounded string diagnostics with one selector bound" {
+    const host_reply = @import("host_reply.zig");
+    for ([_][]const u8{ "/sqlite", "0123456789abcdef0123456789abcdef", &@as([protocol.max_store_bytes]u8, @splat('s')) }) |selector| {
+        var info: host_reply.HostInfo = .{
+            .store = selector,
+            .instance = @splat(1),
+            .active_capacity = 2,
+            .intake_capacity = 100,
+            .descriptor_soft_limit = 1024,
+            .started_at = 1792918800,
+            .custody_occupied = 0,
+            .paused = false,
+            .routes = protocol.routesAll(.unserved),
+            .doublewrite = null,
+        };
+        var response: protocol.ResponseBuffer = .{};
+        try response.render(host_reply.renderHostInfo, .{info});
+        const omitted = try parseHostInfo(response.slice(), selector);
+        try std.testing.expect(omitted.ready.innodb_doublewrite == null);
+        try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
+        // Exercise every admitted width, including JSON escaping at the bound.
+        const escaped = @as([32]u8, @splat(1));
+        for (0..escaped.len + 1) |len| {
+            response.len = 0;
+            info.doublewrite = escaped[0..len];
+            try response.render(host_reply.renderHostInfo, .{info});
+            const present = try parseHostInfo(response.slice(), selector);
+            try std.testing.expectEqualStrings(escaped[0..len], present.ready.innodb_doublewrite.?.slice());
+        }
+        response.len = 0;
+        info.doublewrite = "";
+        try response.render(host_reply.renderHostInfo, .{info});
+        const oversized = try std.mem.replaceOwned(u8, std.testing.allocator, response.slice(), "\"innodb_doublewrite\":\"\"", "\"innodb_doublewrite\":\"" ++ (&@as([33]u8, @splat('x'))) ++ "\"");
+        defer std.testing.allocator.free(oversized);
+        try std.testing.expectError(error.ValueTooLong, parseHostInfo(oversized, selector));
+    }
 }
 
 test "Host information is bounded and rejects ambiguous identities and capacity" {
@@ -1253,6 +1293,7 @@ pub const SessionListPage = struct {
                 revision: JsonString(20),
                 end: JsonString(20),
                 first_message: ?JsonFirstMessage,
+                last_line: ?struct { position: JsonString(20), text: ?JsonString(session_list.max_last_line_bytes) },
                 work: struct { state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20) },
                 peers: struct { from_person_at: ?JsonString(20) },
             };
@@ -1286,6 +1327,10 @@ pub const SessionListPage = struct {
                 .peers = .{ .from_person_at = if (wire.peers.from_person_at) |at| try ActivityPage.id(at, false) else null },
             };
             if (wire.first_message) |first| row.first_message = first.value;
+            if (wire.last_line) |last| {
+                row.last_line = .{ .position = try ActivityPage.id(last.position, false), .text = if (last.text) |text| text.value else null };
+                if (row.last_line.?.position > row.end) return error.InvalidCharacter;
+            }
             const work = row.work;
             if ((work.turn == null) != (work.operation == null) or (work.first_action != null and work.turn == null)) return error.InvalidCharacter;
             // A person's Message is a Message, and the first one is either a
@@ -2557,12 +2602,12 @@ test "canonical failure classifier bounds deep wide and escaped maximum replies"
 const testing_list_facts = "],\"delta\":\"full\",\"since\":\"abababababababababababababababab.42\",\"next\":";
 /// A list row's facts after its settings, for a Session no one has messaged.
 const testing_row_facts = ",\"archive_state\":\"active\"" ++ testing_row_details;
-const testing_row_details = ",\"parent\":null,\"label\":null,\"created_at\":\"1\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null," ++
+const testing_row_details = ",\"parent\":null,\"label\":null,\"created_at\":\"1\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null,\"last_line\":null," ++
     "\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null},\"peers\":{\"from_person_at\":null}";
 /// The same for a Session a person started, now working.
 const testing_started_row_facts = ",\"archive_state\":\"active\",\"parent\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"revision\":\"1\",\"end\":\"9\"," ++
     "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
-    "\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null},\"peers\":{\"from_person_at\":\"1792925001\"}";
+    "\"last_line\":null,\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null},\"peers\":{\"from_person_at\":\"1792925001\"}";
 
 test "Session list facts own complete rows and render semantic output after scratch reuse" {
     const io = std.testing.io;
@@ -2573,7 +2618,7 @@ test "Session list facts own complete rows and render semantic output after scra
     const digest = @as([64]u8, @splat('a'));
     const facts = "\"archive_state\":\"active\",\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
         "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
-        "\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null}," ++
+        "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
     const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
         facts ++ ",\"extra\":[null,{\"discard\":true}]}" ++ testing_list_facts ++ "null,\"extra\":1}";
@@ -2589,6 +2634,8 @@ test "Session list facts own complete rows and render semantic output after scra
     try std.testing.expectEqualStrings("Review PR", row.label.?.slice());
     try std.testing.expectEqual(@as(u64, 1792925000), row.created_at);
     try std.testing.expectEqual(@as(u64, 9), row.end);
+    try std.testing.expectEqual(@as(u64, 8), row.last_line.?.position);
+    try std.testing.expectEqualStrings("Saved preview", row.last_line.?.text.?.slice());
     try std.testing.expectEqualStrings("p33rs1", row.first_message.?.sender.?.session.slice());
     try std.testing.expectEqual(@as(u64, 1792925300), row.work.state.since());
     try std.testing.expectEqualStrings("Run the tests", row.work.state.bash.description.?.slice());
@@ -2746,6 +2793,12 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
         .{ "\"created_at\":\"1792925000\"", "\"created_at\":\"0\"" },
         .{ "\"revision\":\"1\"", "\"revision\":\"0\"" },
         .{ "\"end\":\"9\"", "\"end\":\"9\",\"end\":\"9\"" },
+        .{ ",\"last_line\":null", "" },
+        .{ "\"last_line\":null", "\"last_line\":{\"position\":\"0\",\"text\":null}" },
+        .{ "\"last_line\":null", "\"last_line\":{\"position\":\"10\",\"text\":null}" },
+        .{ "\"last_line\":null", "\"last_line\":{\"position\":\"8\"}" },
+        .{ "\"last_line\":null", "\"last_line\":{\"position\":\"8\",\"text\":false}" },
+        .{ "\"last_line\":null", "\"last_line\":{\"position\":\"8\",\"text\":\"" ++ @as([session_list.max_last_line_bytes + 1]u8, @splat('x')) ++ "\"}" },
         // The first Message lies beyond the activity end.
         .{ "\"end\":\"9\"", "\"end\":\"0\"" },
         .{ "\"sender\":null", "\"sender\":{\"session\":\"k7m2qX\"}" },
@@ -2950,6 +3003,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     var description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
     try description.set(&call_text);
     maximal.work = .{ .state = .{ .bash = .{ .since = largest, .call = largest, .description = description, .running = largest, .approvals = largest } }, .turn = largest, .operation = largest, .first_action = largest };
+    maximal.last_line = .{ .position = largest, .text = description };
     maximal.peers = .{ .from_person_at = largest };
     for (0..8) |index| {
         if (index != 0) try writer.writeAll(",");

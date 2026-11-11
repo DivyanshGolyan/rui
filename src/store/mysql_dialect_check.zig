@@ -570,7 +570,7 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     writeRecord();
 }
 
-test "model call timing MySQL migration preserves old resolutions with null final attempt timings" {
+test "model call timing MySQL format 67 migration preserves format 66 resolutions with null final attempt timings" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
@@ -614,9 +614,7 @@ test "schema 55 migrates recovery index and wire 8 together to the current schem
         if (step.from < 55) try load(migrated_database, schema.mysqlMigration(step.from), false);
     }
     try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','8'),('format','55')", false);
-    inline for (schema.migrations) |step| {
-        if (step.from >= 55) try load(migrated_database, schema.mysqlMigration(step.from), false);
-    }
+    try load(migrated_database, schema.mysqlMigrationFrom(55).?, false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
@@ -668,9 +666,7 @@ test "skills schema 56 wire 9 MySQL migration preserves ordinary rows and reache
     defer before.deinit();
     try writeResult(ordinary_rows, &before.writer);
     try std.testing.expect(before.written().len > 100);
-    inline for (schema.migrations) |step| {
-        if (step.from >= 56) try load(migrated_database, schema.mysqlMigration(step.from), false);
-    }
+    try load(migrated_database, schema.mysqlMigrationFrom(56).?, false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
@@ -738,9 +734,7 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     defer before.deinit();
     try writeResult(ordinary_rows, &before.writer);
     try std.testing.expect(before.written().len > 100);
-    inline for (schema.migrations) |step| {
-        if (step.from >= 58) try load(migrated_database, schema.mysqlMigration(step.from), false);
-    }
+    try load(migrated_database, schema.mysqlMigrationFrom(58).?, false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
@@ -812,4 +806,31 @@ test "metadata seed MySQL missing masks retain canonical selector and id" {
     try std.testing.expect(schema.isStoreId(&first));
     try std.testing.expect(schema.isStoreId(&second));
     try std.testing.expect(!std.mem.eql(u8, &first, &second));
+}
+
+test "schema 65 MySQL migration freezes each Operation offer and preserves Session intent" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    const name = "rui_offer_migration";
+    try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
+    defer restore("DROP DATABASE IF EXISTS " ++ name);
+    try load(name, store_testing.baseline_mysql_ddl, false);
+    try load(name, store_testing.baseline_rows, true);
+    inline for (schema.migrations) |step| {
+        if (comptime step.from < 64) try load(name, schema.mysqlMigration(step.from), false);
+    }
+    try load(name, store_testing.operation_offer_migration_seed, false);
+    try load(name, schema.mysqlMigration(64), false);
+    var rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer rows.deinit();
+    try writeResult("SELECT operation_id,tool_set_id FROM " ++ name ++ ".model_operation ORDER BY operation_id", &rows.writer);
+    try std.testing.expectEqualStrings("\n 1:1 1:4\n 1:2 1:2\n 2:99 1:2", rows.written());
+    rows.clearRetainingCapacity();
+    try writeResult("SELECT revision,tool_set_id,loaded_tool_set_id FROM " ++ name ++ ".session WHERE session_ref='d8mv7p'", &rows.writer);
+    try std.testing.expectEqualStrings("\n 1:2 1:4 1:2", rows.written());
+    done.migrations += 1;
+    writeRecord();
 }

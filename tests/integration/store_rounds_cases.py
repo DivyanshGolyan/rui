@@ -45,15 +45,16 @@ IDLE_SECONDS = 5
 BUDGET = {
     # A Session's first operation, exact.
     "first_commits": 4,
-    "first_write_round_trips": 10,
+    "first_write_round_trips": 8,
     # Each later operation, exact.
     "commits": 3,
-    "write_round_trips": 7,
+    "write_round_trips": 5,
     # Any operation, upper bound: rescans and the observe loop below make
-    # the total vary (24 for a first operation and 19 for a later one
-    # over four runs once the dispatch survey rode a lone write's COMMIT;
-    # earlier work varied by up to 6).
-    "round_trips": 30,
+    # the total vary (15 for a first operation and 10 for a later one
+    # over four runs once an observation read its command, its Message
+    # and the active Turn's work in one round; earlier work varied by
+    # up to 6).
+    "round_trips": 21,
     # Over IDLE_SECONDS with no Session, exact: the Host asks again only
     # after a commit, a slot change or a scheduled retry falling due.
     "idle_round_trips": 0,
@@ -209,7 +210,7 @@ def run(rui, admin):
         host_process.wait_for(window_closed, "the idle window", timeout=IDLE_AFTER + IDLE_SECONDS + 5)
         measured["idle_round_trips"] = counts["end"] - counts["start"]
 
-        configured = post("configure", key="config", session="", preset="rounds", configuration={"label": {"state": "null"}})
+        configured = post("configure", key="config", session="", preset="rounds", configuration={"label": None})
         assert configured["answer"]["status"] == "accepted", configured
         session = configured["answer"]["session"]
 

@@ -2,9 +2,11 @@
 """Select existing build targets for fresh execution.
 
 A changed file selects the unit roots and process fixtures that reach it
-through literal imports (`Graph`), plus the targets its path rules name.
+through literal imports (`Graph`), plus the targets its path rules name and
+fixtures that assert text found in the changed production source.
 """
 import argparse
+import ast
 import difflib
 from functools import cache
 import fnmatch
@@ -153,6 +155,42 @@ SOURCE_READ = re.compile(r"\b(src/[\w./-]+)")
 SOURCE_JOIN = re.compile(r'/\s*"src"\s*/\s*"([\w./-]+)"')
 
 
+def uses_live_mysql(source, *, entry):
+    """Find server inputs, not environment forwarding or server provisioning.
+
+    Imported helpers do not execute their main blocks: mysql_server's CLI
+    reads a provisioning password there, but its Docker fixture callers do not.
+    """
+    if "MYSQL_" not in source:
+        return False
+    tree = ast.parse(source)
+    if not entry:
+        tree.body = [node for node in tree.body if not (
+            isinstance(node, ast.If) and any(isinstance(part, ast.Constant) and part.value == "__main__"
+                                            for part in ast.walk(node.test)))]
+    nodes = list(ast.walk(tree))
+    modules = {alias.asname or alias.name for node in nodes if isinstance(node, ast.Import)
+               for alias in node.names if alias.name == "live_engines"}
+    names = {alias.asname or alias.name for node in nodes
+             if isinstance(node, ast.ImportFrom) and node.module == "live_engines"
+             for alias in node.names if alias.name.startswith("MYSQL_")}
+    pending = [(tree, False)]
+    while pending:
+        node, in_input = pending.pop()
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+            and node.value.id in modules and node.attr.startswith("MYSQL_")) or (
+                isinstance(node, ast.Name) and node.id in names):
+            return True
+        if (in_input and isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and node.value.startswith("RUI_TEST_MYSQL_")):
+            return True
+        # Walk each subtree once, rather than rewalking every nested call.
+        in_input = in_input or isinstance(node, (ast.Call, ast.Subscript))
+        pending.extend((child, in_input) for child in ast.iter_child_nodes(node))
+    return False
+
+
+
 class Graph:
     """Literal import edges of one source tree and the targets each file reaches.
 
@@ -164,11 +202,16 @@ class Graph:
     def __init__(self, names, read):
         names = set(names)
         self.production, self.every, self.python = {}, {}, {}
+        entries = {script for scripts, _, _ in FIXTURES.values() for script in scripts}
+        mysql_cases = set()
         for name in sorted(names):
             if name.endswith(".zig") and name.startswith(("src/", I)):
                 self.zig(name, read(name))
             elif name.startswith(I) and name.endswith((".py", ".sh")):
                 source = read(name)
+                if (uses_live_mysql(source, entry=name in entries) if name.endswith(".py")
+                    else "RUI_TEST_MYSQL_" in source):
+                    mysql_cases.add(name)
                 # Python names a file it reads in a string; shell, anywhere.
                 strings = (" ".join(token.string for token in tokenize.generate_tokens(io.StringIO(source).readline)
                                     if token.type == tokenize.STRING) if name.endswith(".py") else source)
@@ -207,8 +250,10 @@ class Graph:
                        and name.endswith(".zig") and name in names
                        and re.search(r'\b\w+\.forEachEngine\s*\(', read(name))]
         self.live_conformance = self.closure(self.every, conformance)
-        self.driven, self.owners = {}, {}
+        self.driven, self.owners, self.live_mysql = {}, {}, set()
         for target, (scripts, executables, owners) in FIXTURES.items():
+            if self.scripts(scripts) & mysql_cases:
+                self.live_mysql.add(target)
             self.owners[target] = {name for name in names if matches(name, owners)}
             owners = [*self.owners[target], *(host if HOST in owners else ())]
             self.reached[target] = self.reached.get(target, set()) | self.scripts(scripts)
@@ -268,6 +313,58 @@ class Graph:
 def tree_graph():
     tracked = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z"]).decode().split("\0")
     return Graph([name for name in tracked if name and (ROOT / name).is_file()], lambda name: (ROOT / name).read_text())
+
+
+def script_literals(source, suffix):
+    """Literal text, including f-string constant parts, without executing scripts."""
+    if suffix == ".py":
+        return {node.value for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+    return {single or double for single, double in re.findall(
+        r''''((?:\\.|[^'\\])*)'|"((?:\\.|[^"\\])*)"''', source)}
+
+
+def fixture_text(literal):
+    """Screen prose, rather than short fragments or identifier-like literals."""
+    text = literal.strip()
+    return text if len(text) >= 12 and " " in text else ""
+
+
+def source_strings(source):
+    """String bodies drawn by source: quoted strings and Zig multiline lines."""
+    tokens = re.finditer(r'//[^\n]*|"(?:\\.|[^"\\])*"|\\\\[^\n]*', source)
+    return "\n".join(token[1:-1] if token.startswith('"') else token[2:]
+                     for match in tokens if not (token := match.group()).startswith("//"))
+
+
+@cache
+def tree_fixture_literals():
+    return {target: {text for script in tree_graph().scripts(scripts)
+                     if Path(script).suffix in {".py", ".sh"} and (ROOT / script).is_file()
+                     for literal in script_literals((ROOT / script).read_text(), Path(script).suffix)
+                     if (text := fixture_text(literal))}
+            for target, (scripts, _, _) in FIXTURES.items()}
+
+
+@cache
+def tree_uncommon_texts(candidates):
+    """Count only prose found in changed source, once per production file.
+
+    Like the import graph, prevalence comes from the selector's working tree.
+    Stop searching for each candidate once three files contain it.
+    """
+    if not candidates:
+        return frozenset()
+    counts = dict.fromkeys(candidates, 0)
+    tracked = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z", "src/"]).decode().split("\0")
+    for name in tracked:
+        if not name or matches(name, TEST_CODE) or not (ROOT / name).is_file():
+            continue
+        source = source_strings((ROOT / name).read_text())
+        for text, count in counts.items():
+            if count < 3 and text in source:
+                counts[text] += 1
+    return frozenset(text for text, count in counts.items() if count < 3)
 
 
 # The option grammar cli_args.zig used to hold: rules that name cli_args.zig
@@ -467,10 +564,9 @@ RULES = (
      "Installer report reads the CLI's defaults and Host status JSON"),
 )
 
-# check.yml's LIVE_MYSQL: Linux shards for the unit dialect check
-# (src/store/mysql_dialect_check.zig) and the launch-frame Host fixture.
+# Targets that execute the Store dialect check; shard provisioning owns
+# whether their selected part runs that check (callers does not).
 LIVE_MYSQL_DIALECT_TARGETS = frozenset({"test", "test-store", "check", "check-full"})
-LIVE_MYSQL_TARGETS = LIVE_MYSQL_DIALECT_TARGETS | {"launch-frame-integration"}
 # check.yml's Postgres step condition: the Linux targets whose shards start
 # postgres:15 for test-pg's live rounds.
 LIVE_POSTGRES_TARGETS = frozenset({"test-pg", "check", "check-full"})
@@ -504,7 +600,7 @@ LIVE_RULES = (
 )
 RULES += tuple(rule[:4] for rule in LIVE_RULES)
 # The Store's MySQL round-trip budget runs against the live MySQL that
-# launch-frame-integration starts (LIVE_MYSQL_TARGETS); development skips it.
+# launch-frame-integration requires; development skips it.
 RULES += ((("src/store.zig", "src/store/*", "!src/store/wire/*", "src/server_execution.zig", "src/execution_turn.zig",
             "src/model_adapter.zig", "tests/integration/store_rounds_cases.py"),
            ("launch-frame-integration",), (),
@@ -654,9 +750,35 @@ def matches(path, patterns):
     return included and not any(fnmatch.fnmatchcase(path, pattern[1:]) for pattern in patterns if pattern.startswith("!"))
 
 
-def select(paths, phase, available, graph=None, contents=None):
-    """`contents` maps FIXTURE_TABLE, or a path a `CONTENT_RULES` entry matches,
-    to its (before, after) text; a path it leaves out counts as changed throughout."""
+def mysql_provisioning(targets, part, platform, mysql_suites):
+    """Provisioning and dialect evidence for one shard, from its requirements."""
+    targets = set(targets)
+    dialect = platform == "linux" and bool(
+        targets & (LIVE_MYSQL_DIALECT_TARGETS - {"check-full"})
+        or "check-full" in targets and part != "callers")
+    return {"live_mysql": platform == "linux" and (dialect or bool(targets & mysql_suites)),
+            "mysql_dialect": dialect}
+
+
+def live_mysql_suites(targets, mysql_suites):
+    """Standalone fixtures that must also run with CI's live MySQL server."""
+    targets = set(targets)
+    # check-full's callers shard has no MySQL. Keep each selected live
+    # fixture standalone too, even when that composed gate absorbed it.
+    # check runs every part together with MySQL, so needs no duplicate.
+    selected = targets | (CHECK_COVERS if "check-full" in targets else set())
+    suites = selected & set(mysql_suites)
+    return suites
+
+
+def select(paths, phase, available, graph=None, contents=None, fixture_literals=None):
+    """`contents` maps source and content-rule paths to (before, after) text.
+
+    Missing content counts as changed throughout for CONTENT_RULES, but cannot
+    establish asserted-text ownership. `fixture_literals` maps targets to script
+    literals already filtered for prevalence; when omitted, tree readers find
+    the scripts and count only prose present in the changed source texts.
+    """
     graph = graph or tree_graph()
     paths = [BUILD_HUB if BUILD_MODULES.get(path) == BUILD_HUB else path for path in paths]
     contents = contents or {}
@@ -739,6 +861,22 @@ def select(paths, phase, available, graph=None, contents=None):
         targets.update(rows)
         native_targets.update(rows - LINUX_ONLY)
         reasons.add("Fixture table: the fixtures whose rows changed")
+    source_changes = [contents[path] for path in paths
+                      if path.startswith("src/") and not matches(path, TEST_CODE) and path in contents]
+    if source_changes:
+        literals = tree_fixture_literals() if fixture_literals is None else fixture_literals
+        texts = {text for strings in literals.values() for literal in strings if (text := fixture_text(literal))}
+        sources = {source for change in source_changes for source in change if source}
+        drawn = "\n".join(source_strings(source) for source in sources)
+        present = {text for text in texts if text in drawn}
+        if fixture_literals is None:
+            present = tree_uncommon_texts(tuple(sorted(present)))
+        asserted = {target for target, strings in literals.items()
+                    if any(fixture_text(literal) in present for literal in strings)}
+        if asserted:
+            targets.update(asserted)
+            native_targets.update(asserted - LINUX_ONLY)
+            reasons.add("Asserted text: a fixture waits for text this file draws")
     # The unit roots review runs on Linux, before `check` absorbs them: drafts
     # run these too. Process fixtures among UNIT_ROOTS keep their own rules.
     unit_roots = targets & ({"test"} | UNIT_ROOTS.keys()) - FIXTURES.keys()
@@ -778,6 +916,10 @@ def select(paths, phase, available, graph=None, contents=None):
             targets.add("test")
     if "test" in targets:
         targets.difference_update({"test-native", "test-store"})
+    mysql_suites = live_mysql_suites(targets, graph.live_mysql)
+    targets.update(mysql_suites)
+    if mysql_suites:
+        reasons.add("Live MySQL fixtures also run in a MySQL-enabled Linux job")
     for reason, served_by in live_reasons:
         if not targets & served_by:
             raise ValueError(f"{reason!r} selected none of the targets that start its server: {sorted(served_by)}")
@@ -788,6 +930,7 @@ def select(paths, phase, available, graph=None, contents=None):
     if missing:
         raise ValueError(f"Selected targets absent from the build: {sorted(missing)}")
     return {"phase": phase, "targets": sorted(targets),
+            "mysql_suites": sorted(graph.live_mysql),
             # The selected targets that start a live server in CI (`LIVE_RULES`).
             "server_targets": sorted((targets & live_targets) | ({"test"} if "test" in targets and "test-store" in live_targets else set())),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
@@ -833,7 +976,8 @@ def main():
     result = select(paths, args.phase, available,
                     contents={path: (revision_text(base, path), revision_text(head, path))
                               for path in paths
-                              if path == FIXTURE_TABLE or any(matches(path, patterns) for patterns, _ in CONTENT_RULES.values())})
+                              if path.startswith("src/") or path == FIXTURE_TABLE
+                              or any(matches(path, patterns) for patterns, _ in CONTENT_RULES.values())})
     result["base"] = base
     result["head"] = head
     print(json.dumps(result, indent=2))

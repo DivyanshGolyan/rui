@@ -29,6 +29,25 @@ from model_fixture import (
 from model_fixture import dispose_dispatch, stop_endpoint
 
 
+def seed_future_retries(store, sessions):
+    """Stopped-Host retry populations use their real built-in Session offers."""
+    database = sqlite3.connect(store / "rui.sqlite3")
+    try:
+        # The selector-only population deliberately omits Turns, not offers.
+        database.execute("PRAGMA foreign_keys=OFF")
+        inserted = database.executemany(
+            "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
+            "admission_position,attempt_ordinal,retry_due_at_ms,retry_scheduled_at,output_reservation,tool_set_id) "
+            "SELECT ?,?,session_ref,revision,1,1,1,9223372036854775807,1,0,"
+            "coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?",
+            [(index, index, session) for index, session in enumerate(sessions, 1)],
+        )
+        assert inserted.rowcount == len(sessions), inserted.rowcount
+        database.commit()
+    finally:
+        database.close()
+
+
 def history(items):
     """A request's input without its tool declarations, which
     openai-responses/2 writes at each Operation that offers new tools; the
@@ -2026,7 +2045,7 @@ def main(mode="all", correlation_case="all"):
             ).fetchone()[0]
             assert "created_by" not in json.loads("{" + reasoning_bag + "}"), reasoning_bag
             observations = database.execute(
-                "SELECT response_id,model_evidence,request_id,resolution_code,usage_content_id IS NOT NULL FROM model_operation ORDER BY operation_id"
+                "SELECT response_id,model_evidence,request_id,resolution_code,usage_output_tokens IS NOT NULL FROM model_operation ORDER BY operation_id"
             ).fetchall()
             assert [(row[0], *decode_model_evidence(row[1]), *row[2:]) for row in observations] == [
                 (
@@ -2047,13 +2066,6 @@ def main(mode="all", correlation_case="all"):
                     "answer",
                     1,
                 ),
-            ]
-            saved_usage = database.execute(
-                "SELECT CAST(c.payload AS TEXT) FROM model_operation o JOIN content c ON c.content_id=o.usage_content_id ORDER BY o.operation_id"
-            ).fetchall()
-            assert [json.loads(row[0]) for row in saved_usage] == [
-                {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
-                {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
             ]
             neutral_usage = database.execute(
                 "SELECT usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens "
@@ -4216,18 +4228,7 @@ def main(mode="all", correlation_case="all"):
                            for index in range(1, 101)]
         stop_host(backlog_host)
         processes.remove(backlog_host)
-        database = sqlite3.connect(backlog_store / "rui.sqlite3")
-        try:
-            database.execute("PRAGMA foreign_keys=OFF")
-            database.executemany(
-                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
-                "admission_position,attempt_ordinal,retry_due_at_ms,retry_scheduled_at,output_reservation) "
-                "VALUES(?,?,?,1,1,1,1,9223372036854775807,1,0)",
-                [(index, index, session) for index, session in enumerate(backlog_history, 1)],
-            )
-            database.commit()
-        finally:
-            database.close()
+        seed_future_retries(backlog_store, backlog_history)
         backlog_host = start_host(
             backlog_store,
             f"http://127.0.0.1:{backlog_endpoint.server_port}/responses",
@@ -4305,18 +4306,7 @@ def main(mode="all", correlation_case="all"):
                             for index in range(1, 101)]
         stop_host(recovery_host)
         processes.remove(recovery_host)
-        database = sqlite3.connect(recovery_store / "rui.sqlite3")
-        try:
-            database.execute("PRAGMA foreign_keys=OFF")
-            database.executemany(
-                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
-                "admission_position,attempt_ordinal,retry_due_at_ms,retry_scheduled_at,output_reservation) "
-                "VALUES(?,?,?,1,1,1,1,9223372036854775807,1,0)",
-                [(index, index, session) for index, session in enumerate(recovery_history, 1)],
-            )
-            database.commit()
-        finally:
-            database.close()
+        seed_future_retries(recovery_store, recovery_history)
         recovery_host = start_host(
             recovery_store,
             f"http://127.0.0.1:{recovery_endpoint.server_port}/responses",

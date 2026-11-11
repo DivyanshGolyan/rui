@@ -146,7 +146,7 @@ pub const item_bytes_sql = "coalesce((SELECT bag.byte_length FROM content bag WH
     "coalesce((SELECT name.byte_length+call_id.byte_length+arguments.byte_length FROM model_tool_call tool_call " ++
     "JOIN content name ON name.content_id=tool_call.name_content_id JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
     "JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
-    "WHERE tool_call.operation_id=i.operation_id AND tool_call.item_ordinal=i.item_ordinal),0)";
+    "WHERE tool_call.operation_id=i.operation_id AND tool_call.item_ordinal=i.item_ordinal AND tool_call.session_ref=i.session_ref),0)";
 
 /// The drop units of Operation ?1's Session that begin below ?2 and above
 /// ?3, newest first: Messages but the first (?4), and the calls after the
@@ -211,7 +211,9 @@ pub fn deeperFloor(a: anytype, operation: u64) !?Room {
     const compatible = if (facts.base_model) |*model| output_item.Kind.compaction.replayableTo(model.slice(), facts.model.slice(), .selected_base) else true;
     const base_floor: u64 = if (compatible) (if (facts.base_floor) |floor| floor.get() else 0) else 0;
     const previous: u64 = if (facts.history_floor) |floor| floor.get() else base_floor;
-    var walk: Walk = .init(model_capability.contextWindow(facts.model.slice()), facts.output_reservation, facts.admission_position.get());
+    // Settlement and admission must agree about an already frozen Operation's
+    // escalation. A refresh between them must not change its historical walk.
+    var walk: Walk = .init(model_capability.contextWindow(@import("../../model_catalog.zig").shipped, facts.model.slice()), facts.output_reservation, facts.admission_position.get());
     while (!walk.done()) {
         walk.page_rows = 0;
         a.readEach(units, .{

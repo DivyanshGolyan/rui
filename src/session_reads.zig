@@ -220,6 +220,7 @@ pub const Job = struct {
     session: []const u8 = "",
     files: Files = undefined,
     colour: bool = false,
+    width_method: Viewport.Method = .wcwidth,
     command: Command = undefined,
     requests: Requests = undefined,
     status: Status = undefined,
@@ -235,8 +236,8 @@ pub const Job = struct {
     // Messages shown in live output before this read.
     messages: Messages = .{},
     // The Messages waiting at the live cursor, as the Host reported them;
-    // the newest live output showed while it waited (see View.Taking),
-    // which each read sets in place; and the Message whose first line the
+    // the newest one live output showed while it waited, which each read
+    // sets in place; and the Message whose first line the
     // queued row holds.
     queued: protocol.Queued = .{},
     drawn: queued_line.Drawn = .{},
@@ -507,9 +508,8 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
             if (conversationItem(item.value)) mark = .{ .end = page.facts.end, .before_position = item.position, .before_ordinal = item.ordinal };
         };
         // Nothing showed before the opening, so its start is a boundary even
-        // when it shows nothing. Every Message it shows is at or after its
-        // page's lowest item, a row included; one admitted before that page
-        // and not applied is listed there, unless it waits above the input.
+        // when it shows nothing. Start at the page's lowest item; a stop's
+        // search may render older Admissions and lower it below.
         const lowest = if (page.facts.count != 0) page.facts.items[page.facts.count - 1].position else page.facts.end + 1;
         job.result.boundaries.add(.{ .output = 0, .cursor = mark, .admitted = lowest });
     }
@@ -520,15 +520,29 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     // position, at the first transcript that reaches the seam and not here:
     // opening reads the same after any history (see `list`).
     if (job.opening) job.result.lowest = 1;
-    // A stop searches only from the oldest Message that waited at the last
-    // read: queued input joins the work at its next input boundary, so that
-    // is at most one model step back, never the history.
-    job.drawn = try View.render(requests, job.store, job.session, &page, if (job.result.line) |line| line.provider else job.provider, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued) }, job.home);
+    for (0..page.facts.count) |index| {
+        const item = page.facts.items[if (page.facts.direction == .backward) page.facts.count - index - 1 else index];
+        output.item(item);
+        // Unit 5's replaceable provisional suffix removes this append-only
+        // bridge. Until then an Admission echo cannot move to its user row.
+        const echoed = switch (item.value) {
+            .admission, .user => |value| value.admission == job.drawn.admission,
+            else => false,
+        };
+        if (echoed) continue;
+        if (try View.render(requests, job.store, job.session, item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &output, job.colour, &job.result.compact_tools, job.home, .{ .viewport = job.width_method })) {
+            job.drawn = .{ .admission = item.value.admission.admission, .position = item.position };
+            output.drew(job.drawn.admission);
+        }
+    }
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
     job.result.entries = output.entries;
-    if (output.lowest) |lowest| job.result.lowest = lowest;
+    if (output.lowest) |lowest| {
+        job.result.lowest = lowest;
+        if (job.opening) job.result.boundaries.items[0].admitted = @min(job.result.boundaries.items[0].admitted, lowest);
+    }
     const queued = page.facts.queued;
     job.result.queued = queued;
     if (queued_line.unshown(queued.count, queued.oldest_position, job.drawn) != 0 and queued.newest_admission != job.queued_line) {
@@ -569,13 +583,8 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     try job.files.inspection.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed };
     if (latest) try output.feed("\nRecent conversation — tool details\n");
-    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour, job.home);
+    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour, job.home, .{ .viewport = job.width_method });
     if (!latest) job.result.history_cursor = prepared.page.continuation();
-}
-
-/// A position before the Admission of every Message in `queued`.
-fn searchFrom(queued: protocol.Queued) ?u64 {
-    return if (queued.count != 0) queued.oldest_position - 1 else null;
 }
 
 /// Renders one listed Message, bound to its item's length and digest, and
@@ -670,7 +679,7 @@ test "a stop answers every Message up to its cutoff, and no boundary precedes qu
     try answered.feed("✓ done\n");
     try std.testing.expectEqual(@as(usize, 0), answered.boundaries.count);
     answered.item(stop);
-    try answered.feed("! Session stopped.\n");
+    try answered.feed("■ Stopped\n");
     try std.testing.expectEqualDeep(@as([]const Boundary, &.{.{ .output = 9, .cursor = .{ .end = 19 }, .admitted = 20 }}), answered.boundaries.slice());
     try std.testing.expect(answered.finish().settled());
     try std.testing.expectEqual(@as(u64, 2), answered.entries);
@@ -682,12 +691,12 @@ test "a stop answers every Message up to its cutoff, and no boundary precedes qu
     try shown.feed("✓ done\n");
     try std.testing.expectEqual(@as(usize, 1), shown.boundaries.count);
     shown.excluding(12);
-    try shown.feed("! Stopped before it ran · send it again to run it\n› later\n");
+    try shown.feed("◌ not sent\n› later\n");
     try std.testing.expectEqual(@as(usize, 0), shown.boundaries.count);
     try std.testing.expectEqual(@as(usize, 0), shown.echoes.count);
     try std.testing.expectEqual(@as(?u64, 12), shown.lowest);
     shown.item(stop);
-    try shown.feed("! Session stopped.\n");
+    try shown.feed("■ Stopped\n");
     try std.testing.expectEqual(@as(usize, 1), shown.boundaries.count);
     try std.testing.expectEqual(@as(u64, 20), shown.boundaries.items[0].admitted);
     // Entries are the items that showed bytes: an item that writes nothing
@@ -778,12 +787,9 @@ const DisplayCapture = struct {
         self.drawn = admission;
     }
 
-    /// A stop shows the queued Messages it excluded next, from the one
-    /// admitted at `position`. Their bytes, until the stop's own item, belong
-    /// to no item, and no transcript begins earlier in this read: once they
-    /// are excluded, it would list them at its seam too.
+    /// Excluded Messages belong to the current stop. A transcript cannot
+    /// begin before them in this read, or its seam would list them again.
     pub fn excluding(self: *@This(), position: u64) void {
-        _ = self.finish();
         self.boundaries.count = 0;
         self.lowest = @min(self.lowest orelse position, position);
     }
@@ -1253,6 +1259,7 @@ const FakeHost = struct {
     end: u64,
     held: bool = false,
     refuse_content: bool = false,
+    content_texts: ?[]const []const u8 = null,
     pages: usize = 0,
     contents: usize = 0,
     others: usize = 0,
@@ -1262,7 +1269,7 @@ const FakeHost = struct {
 
     /// A tail item; a Message a stop at `excluded_at` excludes reads as
     /// excluded at that end and later.
-    const Tail = struct { value: protocol.ActivityItem.Value, excluded_at: ?u64 = null };
+    const Tail = struct { value: protocol.ActivityItem.Value, excluded_at: ?u64 = null, applied_at: ?u64 = null };
     const text = "please wait\nfor the build";
 
     fn content() protocol.ActivityItem.Content {
@@ -1297,10 +1304,14 @@ const FakeHost = struct {
         if (tail.excluded_at) |at| if (end >= at) {
             value.admission.state = .excluded;
         };
+        if (tail.applied_at) |at| if (end >= at) {
+            value.admission.state = .applied;
+            value.admission.turn = 1;
+        };
         return .{ .position = position, .at = 1, .value = value };
     }
 
-    fn page(self: *const FakeHost, end: u64, position: u64, ordinal: ?u64, direction: @FieldType(protocol.ActivityFacts, "direction")) protocol.ActivityFacts {
+    fn page(self: *const FakeHost, end: u64, position: u64, ordinal: ?u64, direction: @FieldType(protocol.ActivityFacts, "direction"), kinds: protocol.ActivityPage.Kinds, limit: u8) protocol.ActivityFacts {
         var facts: protocol.ActivityFacts = .{ .end = end, .direction = direction };
         var next: ?Row = if (ordinal) |at|
             step(.{ .position = position, .ordinal = at }, end, direction)
@@ -1308,13 +1319,16 @@ const FakeHost = struct {
             .forward => step(.{ .position = position }, end, direction),
             .backward => if (position != 0) step(.{ .position = position }, end, direction) else if (end >= 1) .{ .position = end } else null,
         };
-        while (facts.count < facts.items.len) {
-            const row = next orelse break;
-            facts.items[facts.count] = self.item(row, end);
-            facts.count += 1;
+        while (next) |row| {
+            const value = self.item(row, end);
+            if (kinds.contains(std.meta.activeTag(value.value))) {
+                if (facts.count == limit) break;
+                facts.items[facts.count] = value;
+                facts.count += 1;
+            }
             next = step(row, end, direction);
         }
-        facts.more = facts.count == facts.items.len and next != null;
+        facts.more = next != null;
         const boundary = if (direction == .forward and facts.more) facts.items[facts.count - 1].position else end;
         for (self.tail, @as(usize, @intCast(self.history)) + 1..) |_, at| {
             if (at > boundary) break;
@@ -1360,14 +1374,16 @@ const FakeHost = struct {
         const body = request[body_start .. body_start + length];
         var storage: [4096]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
-        const Cursor = struct { end: ?[]const u8 = null, position: []const u8, ordinal: ?[]const u8 = null, direction: []const u8 = "forward" };
+        const Cursor = struct { end: ?[]const u8 = null, position: []const u8, ordinal: ?[]const u8 = null, direction: []const u8 = "forward", kinds: []const protocol.ActivityItem.Kind = &.{}, limit: []const u8 = "16" };
         const cursor = try std.json.parseFromSliceLeaky(Cursor, fixed.allocator(), body, .{ .ignore_unknown_fields = true });
         const position = try std.fmt.parseInt(u64, cursor.position, 10);
         if (std.mem.startsWith(u8, request[0..used], "POST /v1/activity-page ")) {
             self.pages += 1;
             const end = if (cursor.end) |value| try std.fmt.parseInt(u64, value, 10) else self.end;
             const ordinal = if (cursor.ordinal) |value| try std.fmt.parseInt(u64, value, 10) else null;
-            const facts = self.page(end, position, ordinal, if (std.mem.eql(u8, cursor.direction, "backward")) .backward else .forward);
+            var kinds: protocol.ActivityPage.Kinds = .{};
+            for (cursor.kinds) |kind| kinds.insert(kind);
+            const facts = self.page(end, position, ordinal, if (std.mem.eql(u8, cursor.direction, "backward")) .backward else .forward, kinds, try std.fmt.parseInt(u8, cursor.limit, 10));
             var out = std.Io.Writer.Allocating.init(std.testing.allocator);
             defer out.deinit();
             try activity_reply.writePage(&out.writer, &facts);
@@ -1380,8 +1396,9 @@ const FakeHost = struct {
                 try protocol.writeShape(&writer, protocol.error_reply, .{ protocol.ErrorType.activity_unavailable, "ContentNotFound" });
                 return respond(fd, "409 Conflict", "application/json", "", writer.buffered());
             }
+            const body_text = if (self.content_texts) |texts| texts[@intCast(position - 1)] else text;
             var extra: [128]u8 = undefined;
-            respond(fd, "200 OK", "application/octet-stream", try std.fmt.bufPrint(&extra, "X-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ text.len, text.len }), text);
+            respond(fd, "200 OK", "application/octet-stream", try std.fmt.bufPrint(&extra, "X-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ body_text.len, body_text.len }), body_text);
         } else self.others += 1;
     }
 
@@ -1395,9 +1412,7 @@ const FakeHost = struct {
         }
     }
 
-    /// Runs `job` as a read against this Host at a Store it serves; what it
-    /// showed is then in `shown`.
-    fn read(self: *FakeHost, job: *Job) !void {
+    fn withHost(self: *FakeHost, action: anytype) !void {
         const io = std.testing.io;
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
@@ -1420,15 +1435,252 @@ const FakeHost = struct {
             thread.join();
             self.stopping.store(false, .release);
         }
-        const inspection = try tmp.dir.createFile(io, "inspection", .{ .read = true });
-        defer inspection.close(io);
-        job.store = root;
-        job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
-        var task: Task = .{ .io = io };
-        try scan(job, &task);
-        self.shown = self.output[0..try inspection.readPositionalAll(io, &self.output, 0)];
+        try action.run(self, tmp.dir, root);
+    }
+
+    /// Runs `job` as a read against this Host; output is then in `shown`.
+    fn read(self: *FakeHost, job: *Job) !void {
+        const Read = struct {
+            job: *Job,
+            fn run(action: *@This(), host: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
+                const io = std.testing.io;
+                const inspection = try dir.createFile(io, "inspection", .{ .read = true });
+                defer inspection.close(io);
+                action.job.store = root;
+                action.job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
+                var task: Task = .{ .io = io };
+                try scan(action.job, &task);
+                host.shown = host.output[0..try inspection.readPositionalAll(io, &host.output, 0)];
+            }
+        };
+        var action: Read = .{ .job = job };
+        try self.withHost(&action);
     }
 };
+
+// One domain test drives the renderer itself, not scan's temporary echo bridge.
+test "session_view Message placement is identical in either direction at every page split" {
+    const Domain = struct {
+        const user = "\n› " ++ View.Mark.body ++ "please wait\n  for the build" ++ View.Mark.reset ++ "\n";
+        const link = TerminalText.link_open ++ TerminalText.session_link ++ "9f8e7d" ++ TerminalText.link_end ++ "\x1b[4mPeer" ++ TerminalText.link_close ++ View.Mark.reset ++ View.Mark.summary;
+        const received = "\n" ++ View.Mark.summary ++ "← Received message from " ++ link ++ View.Mark.reset ++ "\n";
+        const sent = "\n" ++ View.Mark.summary ++ "→ Messaged " ++ link ++ View.Mark.reset ++ "\n";
+        const Sink = struct {
+            out: *std.Io.Writer,
+            lowest: ?u64 = null,
+            pub fn feed(self: *@This(), bytes: []const u8) !void {
+                try self.out.writeAll(bytes);
+            }
+            pub fn excluding(self: *@This(), position: u64) void {
+                self.lowest = position;
+            }
+            pub fn collapsed(_: *@This(), _: View.Collapsed) !void {}
+        };
+        const Expected = struct { text: []const u8 = "", provisional: bool = false, lowest: ?u64 = null };
+
+        // Each possible boundary separates two reads; backward loads the newer
+        // part first. Each part may itself span multiple bounded Activity pages.
+        fn check(root: []const u8, rows: []const protocol.ActivityItem, expected: []const Expected, queued: protocol.Queued, held: bool) !void {
+            const requests: client.Requests = .{ .io = std.testing.io };
+            for ([_]bool{ false, true }) |backward| for (0..rows.len + 1) |split| {
+                for (0..2) |part| {
+                    const newer = (part == 1) != backward;
+                    const low = if (newer) split else 0;
+                    const high = if (newer) rows.len else split;
+                    var offset: usize = 0;
+                    while (offset < high - low) {
+                        const count = @min(protocol.ActivityPage.items, high - low - offset);
+                        for (0..count) |at| {
+                            const index = if (backward) high - offset - at - 1 else low + offset + at;
+                            var buffer: [8192]u8 = undefined;
+                            var out = std.Io.Writer.fixed(&buffer);
+                            var sink: Sink = .{ .out = &out };
+                            var compact = false;
+                            const provisional = try View.render(requests, root, "k7m2qx", rows[index], queued, held, &sink, false, &compact, "", .{ .viewport = .wcwidth });
+                            try std.testing.expectEqualStrings(expected[index].text, out.buffered());
+                            try std.testing.expectEqual(expected[index].provisional, provisional);
+                            try std.testing.expectEqual(expected[index].lowest, sink.lowest);
+                        }
+                        offset += count;
+                    }
+                }
+            };
+        }
+
+        fn run(_: *@This(), host: *FakeHost, _: std.Io.Dir, root: []const u8) !void {
+            var peer: protocol.NamedPeer = .{ .session = .{} };
+            try peer.session.set("9f8e7d");
+            try peer.label.set("Peer");
+            const outbound: protocol.ActivityItem.Value = .{ .sent = .{ .admission = 99, .target = peer, .content = FakeHost.content(), .admitted_at = std.math.maxInt(u64) } };
+            var incoming = FakeHost.message(90).admission;
+            incoming.sender = peer;
+            incoming.admitted_at = std.math.maxInt(u64);
+            // People and scripts both have no Session sender; distinct keys do
+            // not change placement. Peer Messages show at received in all states.
+            for ([_]enum { person, script, session }{ .person, .script, .session }) |source| {
+                for (std.enums.values(@FieldType(protocol.ActivityItem.Message, "state"))) |state| {
+                    for ([_]bool{ false, true }) |oldest| for ([_]bool{ false, true }) |held| {
+                        var value = FakeHost.message(1).admission;
+                        value.state = state;
+                        value.turn = if (state == .applied) 1 else null;
+                        value.admitted_at = std.math.maxInt(u64);
+                        if (source == .script) try value.key.set("script");
+                        if (source == .session) value.sender = peer;
+                        const rows = [_]protocol.ActivityItem{
+                            .{ .position = 2, .at = 1, .value = if (source == .session) .{ .received = value } else .{ .admission = value } },
+                            .{ .position = 3, .at = 1, .value = .{ .received = incoming } },
+                            .{ .position = 4, .at = 1, .value = outbound },
+                            .{ .position = 5, .at = 1, .value = if (state == .applied) .{ .user = value } else .{ .session_changed = .{ .revision = 2, .field = .label } } },
+                        };
+                        const echo = source != .session and state == .queued and oldest and !held;
+                        const expected = [_]Expected{
+                            .{ .text = if (source == .session) received else if (echo) user else "", .provisional = echo },
+                            .{ .text = received },
+                            .{ .text = sent },
+                            .{ .text = if (state == .applied and source != .session) user else "" },
+                        };
+                        const queued: protocol.Queued = if (state == .queued and source != .session) .{ .count = if (oldest) 1 else 2, .oldest_position = if (oldest) 2 else 1, .newest_admission = 1, .newest_position = 2 } else .{};
+                        try check(root, &rows, &expected, queued, held);
+                    };
+                }
+            }
+
+            // Two stops, a settled delimiter, and a newer Message beyond the
+            // cutoff. Exclusions cross at least three admission-only pages.
+            const max = protocol.ActivityPage.items * 2 + 7;
+            var tail: [max]FakeHost.Tail = undefined;
+            var rows: [max]protocol.ActivityItem = undefined;
+            var texts: [max][]const u8 = undefined;
+            var words: [max][32]u8 = undefined;
+            var shown: [max][128]u8 = undefined;
+            var expected: [max]Expected = undefined;
+            var clock_buffer: [5]u8 = undefined;
+            const time = View.clock(1, &clock_buffer).?;
+            var prefix_buffer: [64]u8 = undefined;
+            const prefix = try std.fmt.bufPrint(&prefix_buffer, "\n› " ++ View.Mark.sidenote ++ "{s}" ++ View.Mark.reset ++ View.Mark.body, .{time});
+            for ([_]usize{ 0, 1, protocol.ActivityPage.items * 2 + 1 }) |excluded| {
+                for ([_]bool{ false, true }) |applied_boundary| {
+                    const stop_at = excluded + 5;
+                    for (0..stop_at) |index| {
+                        texts[index] = try std.fmt.bufPrint(&words[index], "Message {d}", .{index + 1});
+                        var value = FakeHost.message(index + 1).admission;
+                        value.admitted_at = 1;
+                        value.content = .{ .length = texts[index].len, .digest = protocol.contentDigest(texts[index]) };
+                        tail[index] = .{ .value = .{ .admission = value } };
+                        expected[index] = .{};
+                    }
+                    tail[0].excluded_at = 2;
+                    tail[1].value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 1, .completion = .completed } };
+                    // A previous stop's exclusion OR an applied Admission ends
+                    // the search; neither may be attributed to the later stop.
+                    if (applied_boundary) {
+                        tail[2].value.admission.state = .applied;
+                        tail[2].value.admission.turn = 1;
+                    } else tail[2].value = .{ .session_changed = .{ .revision = 2, .field = .label } };
+                    for (3..excluded + 3) |index| tail[index].excluded_at = stop_at;
+                    tail[stop_at - 1].value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = excluded + 3, .completion = .completed } };
+                    host.tail = tail[0..stop_at];
+                    host.end = stop_at;
+                    host.content_texts = texts[0..stop_at];
+                    for (0..stop_at) |index| rows[index] = host.item(.{ .position = index + 1 }, stop_at);
+                    expected[1] = .{ .text = try std.fmt.bufPrint(&shown[1], "\n◌ not sent{s}{s}" ++ View.Mark.reset ++ "\n\n■ Stopped\n", .{ prefix, texts[0] }), .lowest = 1 };
+                    var stop_buffer: [8192]u8 = undefined;
+                    var stop_out = std.Io.Writer.fixed(&stop_buffer);
+                    for (3..excluded + 3) |index| try stop_out.print("\n◌ not sent{s}{s}" ++ View.Mark.reset ++ "\n", .{ prefix, texts[index] });
+                    try stop_out.writeAll("\n■ Stopped\n");
+                    expected[stop_at - 1] = .{ .text = stop_out.buffered(), .lowest = if (excluded == 0) null else 4 };
+                    try check(root, rows[0..stop_at], expected[0..stop_at], .{}, false);
+                }
+            }
+        }
+    };
+    var host: FakeHost = .{ .history = 0, .tail = &.{}, .end = 0 };
+    var domain: Domain = .{};
+    try host.withHost(&domain);
+}
+
+test "session_reads transcript lists stopped Messages once across opening and live seams" {
+    const Domain = struct {
+        const earlier = 20;
+        const bodies = [_][]const u8{ "first excluded Message", "second excluded Message" };
+
+        fn run(_: *@This(), host: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            const file = try dir.createFile(io, "inspection", .{ .read = true });
+            defer file.close(io);
+            const files: Files = .{ .scratch = file, .action = file, .inspection = file, .status = file, .actions = .{ file, file } };
+            var task: Task = .{ .io = io };
+            for ([_]bool{ false, true }) |opening| for ([_]bool{ false, true }) |before_page| {
+                // Both Admissions are either in the stop's page or just before
+                // it. Older history keeps the opening's transcript seam open.
+                var tail: [protocol.ActivityPage.items + 3]FakeHost.Tail = @splat(.{ .value = .{ .session_changed = .{ .revision = 1, .field = .label } } });
+                const count = 3 + @as(usize, if (before_page) protocol.ActivityPage.items else 0);
+                const end = host.history + count;
+                var texts: [earlier + tail.len][]const u8 = @splat("");
+                for (bodies, 0..) |body, index| {
+                    var value = FakeHost.message(index + 1).admission;
+                    value.content = .{ .length = body.len, .digest = protocol.contentDigest(body) };
+                    tail[index] = .{ .value = .{ .admission = value }, .excluded_at = end };
+                    texts[earlier + index] = body;
+                }
+                tail[count - 1] = .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 2, .completion = .completed } } };
+                host.tail = tail[0..count];
+                host.end = end;
+                host.content_texts = &texts;
+                var job: Job = .{ .store = root, .session = "k7m2qx", .files = files, .opening = opening, .cursor = .{ .position = if (opening) 0 else end - protocol.ActivityPage.items }, .line_read = .{ .revision = 1, .end = end } };
+                try scan(&job, &task);
+                var rendered: [4096]u8 = undefined;
+                const shown = rendered[0..try file.readPositionalAll(io, &rendered, 0)];
+                for (bodies) |body| {
+                    const occurrences = std.mem.count(u8, shown, body);
+                    if (occurrences != 1) std.debug.print("scan opening={} before_page={} body={s} shown={s}\n", .{ opening, before_page, body, shown });
+                    try std.testing.expectEqual(@as(usize, 1), occurrences);
+                }
+                var marks: Marks = .{};
+                for (job.result.boundaries.slice()) |boundary| marks.record(.{ .offset = boundary.output, .cursor = boundary.cursor, .admitted = boundary.admitted });
+                const lowest = job.result.lowest;
+
+                // A subsequent empty live read supplies a boundary after the
+                // stop, including when the stop was in the opening page.
+                job.opening = false;
+                job.cursor = job.result.cursor;
+                job.messages = job.result.messages;
+                job.result = .{};
+                try scan(&job, &task);
+                try std.testing.expectEqual(@as(u64, 0), job.result.output_length);
+                for (job.result.boundaries.slice()) |boundary| marks.record(.{ .offset = shown.len + boundary.output, .cursor = boundary.cursor, .admitted = boundary.admitted });
+
+                for ([_]bool{ false, true }) |after_stop| {
+                    const front = if (after_stop) shown.len else 0;
+                    var transcript = plan(&marks, &.{}, front, lowest);
+                    try std.testing.expect(!transcript.gap);
+                    try std.testing.expectEqual(front, transcript.start);
+                    var occurrences: [bodies.len]usize = @splat(0);
+                    for (bodies, 0..) |body, index| occurrences[index] = std.mem.count(u8, shown[@intCast(transcript.start)..], body);
+                    // Exercise the owner's actual seam listing, not a second
+                    // implementation of its Admission-range predicate.
+                    while (transcript.next()) |step| {
+                        job.result = .{};
+                        try list(&job, &task, step);
+                        var buffer: [4096]u8 = undefined;
+                        const listed_text = buffer[0..try file.readPositionalAll(io, &buffer, 0)];
+                        for (bodies, 0..) |body, index| occurrences[index] += std.mem.count(u8, listed_text, body);
+                        transcript.listed(step, job.result.listing);
+                    }
+                    // Before the stop the retained copy owns both Messages;
+                    // after it the seam owns both. Neither duplicates or loses.
+                    for (occurrences) |occurrence| {
+                        if (occurrence != 1) std.debug.print("seam opening={} before_page={} after_stop={} count={d}\n", .{ opening, before_page, after_stop, occurrence });
+                        try std.testing.expectEqual(@as(usize, 1), occurrence);
+                    }
+                }
+            };
+        }
+    };
+    var host: FakeHost = .{ .history = Domain.earlier, .tail = &.{}, .end = Domain.earlier };
+    var domain: Domain = .{};
+    try host.withHost(&domain);
+}
 
 test "opening reads one Activity page whatever the history before it" {
     // A Store with 10 or 10,000 earlier rows and the same newest page: the
@@ -1470,6 +1722,51 @@ test "Messages waiting at an opening show in the queued row, unless one is taken
     try std.testing.expectEqual(@as(u64, 1), opening.drawn.admission);
 }
 
+test "scan keeps a provisional echo once when received and sent intervene before application or exclusion" {
+    var peer: protocol.NamedPeer = .{ .session = .{} };
+    try peer.session.set("9f8e7d");
+    var incoming = FakeHost.message(90).admission;
+    incoming.sender = peer;
+    var applied = FakeHost.message(1).admission;
+    applied.state = .applied;
+    applied.turn = 1;
+    for ([_]bool{ false, true }) |excluded| {
+        const tail = [_]FakeHost.Tail{
+            .{ .value = FakeHost.message(1), .applied_at = if (excluded) null else 24, .excluded_at = if (excluded) 24 else null },
+            .{ .value = .{ .received = incoming } },
+            .{ .value = .{ .sent = .{ .admission = 91, .target = peer, .content = FakeHost.content(), .admitted_at = 1 } } },
+            .{ .value = if (excluded) .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 1, .completion = .completed } } else .{ .user = applied } },
+        };
+        var host: FakeHost = .{ .history = 20, .tail = &tail, .end = 21 };
+        var job: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 21 } };
+        try host.read(&job);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "please wait"));
+        for ([_]u64{ 23, 24 }) |end| {
+            host.end = end;
+            job.opening = false;
+            job.cursor = job.result.cursor;
+            job.messages = job.result.messages;
+            job.queued = job.result.queued;
+            job.result = .{};
+            job.line_read = .{ .revision = 1, .end = end };
+            try host.read(&job);
+            try std.testing.expectEqual(@as(u64, 1), job.drawn.admission);
+            try std.testing.expectEqual(@as(usize, if (end == 24 and excluded) 1 else 0), std.mem.count(u8, host.shown, "please wait"));
+            if (end == 23) {
+                try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Received message"));
+                try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Messaged"));
+            }
+        }
+        // A fresh opening places the settled Message after the intervening
+        // peer rows, at user or stop, with no carried echo history.
+        var opening: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 24 } };
+        try host.read(&opening);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "please wait"));
+        try std.testing.expect(std.mem.indexOf(u8, host.shown, "Received message").? < std.mem.indexOf(u8, host.shown, "please wait").?);
+        try std.testing.expectEqual(@as(usize, @intFromBool(excluded)), std.mem.count(u8, host.shown, "◌ not sent"));
+    }
+}
+
 test "a stop labels a Message that showed while it waited at the opening" {
     // Nothing holds the queue at the opening, so A, the oldest waiting,
     // shows unlabelled at its Admission. A stop then excludes it before it
@@ -1487,6 +1784,66 @@ test "a stop labels a Message that showed while it waited at the opening" {
     host.end = 22;
     var live: Job = .{ .session = "k7m2qx", .cursor = opening.result.cursor, .messages = opening.result.messages, .queued = opening.result.queued, .drawn = opening.drawn, .line_read = .{ .revision = 1, .end = 22 } };
     try host.read(&live);
-    try std.testing.expect(std.mem.indexOf(u8, host.shown, "! Stopped before it ran · send it again to run it") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host.shown, "! Session stopped.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "◌ not sent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "■ Stopped") != null);
+}
+
+// This golden exercises the public renderer, including reports that must never
+// be fetched, and stop/ending pairs split over live or historical pages.
+test "activity golden stop with interrupted ending draws one line across pages" {
+    const Sink = struct {
+        out: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
+        pub fn excluding(_: *@This(), _: u64) void {}
+        pub fn collapsed(_: *@This(), _: View.Collapsed) !void {}
+    };
+    var session: protocol.Bounded(6) = .{};
+    try session.set("a1b2c3");
+    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
+    try code.set("cancelled");
+    const stop: protocol.ActivityItem = .{ .position = 1, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = 2, .cutoff = 0, .completion = .completed } } };
+    // A non-null report also proves the renderer does not request its content:
+    // the Requests value is undefined and must remain unused.
+    const ended: protocol.ActivityItem = .{ .position = 2, .at = 2, .value = .{ .turn_ended = .{ .session = session, .turn = 2, .operation = 3, .ending = .stopped, .code = code, .content = .{ .length = 99, .digest = @splat(0) } } } };
+    const page = try std.testing.allocator.create(protocol_reply.ActivityPage);
+    defer std.testing.allocator.destroy(page);
+    for ([_]bool{ false, true }) |colour| {
+        for ([_]bool{ false, true }) |historical| {
+            for ([_]bool{ false, true }) |split| {
+                var buffer: [256]u8 = undefined;
+                var out = std.Io.Writer.fixed(&buffer);
+                var sink: Sink = .{ .out = &out };
+                var compact = true;
+                page.* = .{ .facts = .{ .end = 2, .count = if (split) 1 else 2, .direction = if (historical) .backward else .forward } };
+                page.facts.items[0] = if (historical and !split) ended else stop;
+                if (!split) page.facts.items[1] = if (historical) stop else ended;
+                for (0..page.facts.count) |index| {
+                    const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
+                    _ = try View.render(undefined, "unused", session.slice(), item, .{}, false, &sink, colour, &compact, "", .{ .viewport = .wcwidth });
+                }
+                if (split) {
+                    try std.testing.expectEqualStrings("", out.buffered());
+                    page.facts.items[0] = ended;
+                    for (0..page.facts.count) |index| {
+                        const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
+                        _ = try View.render(undefined, "unused", session.slice(), item, .{}, false, &sink, colour, &compact, "", .{ .viewport = .wcwidth });
+                    }
+                }
+                try std.testing.expectEqualStrings(if (colour) "\n\x1b[39m■\x1b[39m Stopped\n" else "\n■ Stopped\n", out.buffered());
+                try std.testing.expect(!compact);
+            }
+        }
+    }
+    // An idle stop has no terminal Turn to follow it and owns its own line.
+    page.* = .{ .facts = .{ .end = 1, .count = 1 } };
+    page.facts.items[0] = stop;
+    page.facts.items[0].value.stop.turn = null;
+    var buffer: [256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    var sink: Sink = .{ .out = &out };
+    var compact = false;
+    _ = try View.render(undefined, "unused", session.slice(), page.facts.items[0], .{}, false, &sink, true, &compact, "", .{ .viewport = .wcwidth });
+    try std.testing.expectEqualStrings("\n\x1b[39m■\x1b[39m Stopped\n", out.buffered());
 }

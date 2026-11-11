@@ -115,4 +115,16 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        env -u ZIG_LOCAL_PKG_DIR zig build --build-file screen-emulator/build.zig --fetch
+        packages="$PWD/screen-emulator/zig-pkg"
+        manifest=screen-emulator/build.zig.zon
+        env -u ZIG_LOCAL_PKG_DIR bash src/fetch_dependencies.sh "$manifest" "$packages"
+        ghostty=$(sed -n '/\.ghostty_vt = /,/},/s/.*\.hash = "\([^"]*\)".*/\1/p' "$manifest")
+        test -n "$ghostty"
+        env -u ZIG_LOCAL_PKG_DIR bash src/fetch_dependencies.sh "$packages/$ghostty/build.zig.zon" "$packages" uucode
+        env -u ZIG_LOCAL_PKG_DIR bash src/fetch_dependencies.sh "$packages/$ghostty/build.zig.zon" "$packages" aro
+        env -u ZIG_LOCAL_PKG_DIR bash src/fetch_dependencies.sh "$packages/$ghostty/pkg/translate-c/build.zig.zon" "$packages" translate_c
+        # Zig 0.17.1's build maker crashes downloading these lazy packages.
+        for dependency in wuffs highway; do
+          env -u ZIG_LOCAL_PKG_DIR bash src/fetch_dependencies.sh \
+            "$packages/$ghostty/pkg/$dependency/build.zig.zon" "$packages" "$dependency"
+        done
