@@ -3622,10 +3622,25 @@ MySQL readiness and `host_status` also report `innodb_doublewrite`, including
 `OFF` (D200).
 Admission refusals use a single stdout
 `{"rui_start_error":{"code":"...","message":"..."}}` line and exit 1:
-`store_locked`, `store_schema_missing`, `store_schema_behind`,
-`mysql_version_unsupported`, `mysql_read_only`, `mysql_durability_unsafe`,
-or `mysql_binlog_unsafe`.
-Messages are static, never server diagnostics.
+`store_locked`, `store_schema_missing`, `store_schema_behind`, or a MySQL
+start refusal (D222):
+
+- `mysql_version`: the server is older than MySQL 8.4, or its version cannot be parsed.
+- `mariadb`: the version or version comment identifies MariaDB, separately from an old MySQL version.
+- `read_only_replica`: `read_only` or `super_read_only` is ON.
+- `durability_innodb_flush_log_at_trx_commit`: `innodb_flush_log_at_trx_commit` is not 1.
+- `durability_sync_binlog`: binlogging is enabled and `sync_binlog` is not 1.
+- `binlog_statement`: `binlog_format` is STATEMENT.
+- `mysql_unreachable`: connection failed, including DNS, TCP or socket connection, TLS handshake or certificate verification, or a timeout before login.
+- `mysql_login`: the server refused the credentials, authentication method or database access (including server errors 1045 and 1044).
+
+Exactly one admission cause is reported: version/MariaDB first (MariaDB wins
+when either version field identifies it), then read-only, then
+`innodb_flush_log_at_trx_commit`, then `sync_binlog`, then binlog format.
+Thus when both durability variables are unsafe, the flush-log refusal comes first.
+Each durability message names only its variable and the required value 1.
+Messages are bounded static text, never server diagnostics, host names, users or URLs.
+Connection messages describe the failed driver step using Rui's own static text.
 A running MySQL Store that fences writes the same envelope with
 `store_fenced` before draining and exits 1 (D211).
 When the connection is lost around a COMMIT, the Store first reconnects, up to three times a second apart: it ends the old server session with `KILL`, takes `GET_LOCK` again once that session is gone, and reads `store_owner.commit_seq`.
