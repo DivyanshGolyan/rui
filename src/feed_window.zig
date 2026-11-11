@@ -2,7 +2,6 @@
 //! page-edge facts and the bounded set of opened tools.
 const std = @import("std");
 const vaxis = @import("vaxis");
-const unicode = @import("terminal_unicode");
 const viewport = @import("ConversationViewport.zig");
 const View = @import("session_view.zig");
 
@@ -39,20 +38,18 @@ pub const Entry = struct {
     text: Text,
     tight: bool = false,
     provisional: bool = false,
-    message: ?View.Collapsed = null,
     messages: []const MessageTarget = &.{},
 };
 
+/// The reader's bound on one row (session_reads.RowCapture cuts a longer row
+/// and says so). The window stores rows as given and has no cut of its own.
 pub const row_capacity = 32 * 1024;
 pub const entry_capacity = 512;
-// Account for styles AND worst-case one u32 per byte of newline-only text,
-// plus the entry and layout tables, within the old styled Document's footprint.
-// 65 KiB of text leaves room for bounded keyed Message metadata within the
-// existing styled Document footprint. At 80 columns this holds >800 typical
-// text rows, and 512 one-line entries hold
-// >three 140x40 screens even when every neighbour is tight. These independent
-// caps prevent a large row or many tiny entries from causing load/evict ping-pong.
-// No finite byte budget promises three screens at arbitrary terminal sizes.
+// Text, styles, one u32 per byte for newline-only text and the entry, layout
+// and target tables together fit the old styled Document's footprint. Two
+// full rows fit, and 512 one-line entries cover more than three 140x40
+// screens, so neither a large row nor many tiny ones makes loading and
+// eviction ping-pong.
 pub const byte_capacity = 65 * 1024;
 // Remember the latest 64 opened keys, including evicted entries; oldest-opened
 // is forgotten when full. Lookup does not mutate order. Closing releases a slot.
@@ -67,7 +64,6 @@ pub const Window = struct {
         length: usize,
         tight: bool,
         provisional: bool,
-        message: ?View.Collapsed,
     };
 
     document: Document = .{ .dirty = false, .sidenotes = true, .quotes = true },
@@ -137,7 +133,7 @@ pub const Window = struct {
     pub fn replace(self: *Window, key: Key, new_text: Text) Error!void {
         const index = self.indexOf(key) orelse unreachable;
         const old = self.entries[index];
-        try self.splice(index, 1, &.{.{ .key = key, .text = new_text, .tight = old.tight, .provisional = old.provisional, .message = old.message }});
+        try self.splice(index, 1, &.{.{ .key = key, .text = new_text, .tight = old.tight, .provisional = old.provisional }});
     }
 
     /// Forward reads restart at the first provisional row. The replacement may
@@ -252,10 +248,6 @@ pub const Window = struct {
             if (target.point.key.order(point.key) == .eq and entry.offset + target.point.offset == mark)
                 return target.target;
         }
-        // The singular compatibility field belongs only to the last summary.
-        if (entry.message) |message| {
-            if (self.document.collapsed(entry.offset, entry.offset + entry.length).last == mark) return message;
-        }
         return null;
     }
 
@@ -321,46 +313,14 @@ pub const Window = struct {
         return null;
     }
 
-    // Reserve a newline for every entry: logical line boundaries and hidden
-    // link-address runs cannot cross a seam. This is not the adjacency gap.
-    const Plan = struct {
-        head: usize,
-        marker: [64]u8 = undefined,
-        marker_length: usize = 0,
-        length: usize,
-    };
-
-    fn plan(text_: Text) Plan {
-        const bytes = text_.bytes;
-        std.debug.assert(text_.styles.len == 0 or text_.styles.len == bytes.len);
-        const newline = bytes.len == 0 or bytes[bytes.len - 1] != '\n';
-        if (bytes.len + @intFromBool(newline) <= row_capacity)
-            return .{ .head = bytes.len, .length = @max(1, bytes.len + @intFromBool(newline)) };
-        const limit = row_capacity - 64;
-        // Prefer complete logical lines. With a single enormous line retain
-        // whole graphemes from its head instead; never split a UTF-8 scalar.
-        const head = if (std.mem.lastIndexOfScalar(u8, bytes[0..limit], '\n')) |end| end + 1 else blk: {
-            var clusters = unicode.graphemeIterator(bytes);
-            var end: usize = 0;
-            while (clusters.next()) |cluster| {
-                if (cluster.start + cluster.len > limit) break;
-                end = cluster.start + cluster.len;
-            }
-            break :blk end;
-        };
-        // A cut at a line boundary must not count its preceding line as hidden.
-        const hidden_bytes = bytes[head..];
-        const hidden = std.mem.count(u8, hidden_bytes, "\n") + @intFromBool(hidden_bytes.len != 0 and hidden_bytes[hidden_bytes.len - 1] != '\n');
-        var result: Plan = .{ .head = head, .length = undefined };
-        const marker = std.fmt.bufPrint(&result.marker, "{s}┄ {d} more lines\n", .{ if (head != 0 and bytes[head - 1] == '\n') "" else "\n", hidden }) catch unreachable;
-        result.marker_length = marker.len;
-        result.length = head + marker.len;
-        return result;
-    }
-
-    fn entryPlan(entry: Entry) Plan {
-        if (entry.provisional and entry.text.bytes.len == 0) return .{ .head = 0, .length = 0 };
-        return plan(entry.text);
+    // Every stored entry ends in a newline: logical lines and hidden link
+    // addresses cannot cross a seam. This is not the adjacency gap. A hidden
+    // provisional key stores nothing.
+    fn storedLength(entry: Entry) usize {
+        const bytes = entry.text.bytes;
+        std.debug.assert(entry.text.styles.len == 0 or entry.text.styles.len == bytes.len);
+        if (bytes.len == 0) return @intFromBool(!entry.provisional);
+        return bytes.len + @intFromBool(bytes[bytes.len - 1] != '\n');
     }
 
     fn splice(self: *Window, first: usize, remove: usize, incoming: []const Entry) Error!void {
@@ -371,7 +331,7 @@ pub const Window = struct {
         var added: usize = 0;
         for (incoming, 0..) |entry, i| {
             if (i != 0) std.debug.assert(incoming[i - 1].key.order(entry.key) == .lt);
-            added += entryPlan(entry).length;
+            added += storedLength(entry);
         }
         if (incoming.len != 0) {
             if (first != 0) std.debug.assert(self.entries[first - 1].key.order(incoming[0].key) == .lt);
@@ -387,12 +347,7 @@ pub const Window = struct {
             const index = self.indexOf(target.point.key) orelse continue;
             if (index < first or index >= first + remove) targets_needed += 1;
         }
-        for (incoming) |entry| {
-            const p = entryPlan(entry);
-            for (entry.messages) |target| {
-                if (target.offset < p.head) targets_needed += 1;
-            }
-        }
+        for (incoming) |entry| targets_needed += entry.messages.len;
         if (targets_needed > self.targets.len) return error.WindowFull;
         var kept_targets: usize = 0;
         for (self.targets[0..self.target_count]) |target| {
@@ -420,39 +375,29 @@ pub const Window = struct {
         for (self.entries[first + incoming.len .. count]) |*entry| entry.offset = new_end + (entry.offset - old_end);
         var offset = old_start;
         for (incoming, 0..) |entry, i| {
-            const p = entryPlan(entry);
-            @memcpy(self.document.bytes[offset..][0..p.head], entry.text.bytes[0..p.head]);
-            if (entry.text.styles.len != 0) @memcpy(self.document.styles[offset..][0..p.head], entry.text.styles[0..p.head]) else @memset(self.document.styles[offset..][0..p.head], 0);
-            if (p.marker_length != 0) {
-                @memcpy(self.document.bytes[offset + p.head ..][0..p.marker_length], p.marker[0..p.marker_length]);
-                @memset(self.document.styles[offset + p.head ..][0..p.marker_length], 0);
-            } else if (p.length > p.head) {
-                self.document.bytes[offset + p.head] = '\n';
-                self.document.styles[offset + p.head] = 0;
+            const head = entry.text.bytes.len;
+            const stored = storedLength(entry);
+            @memcpy(self.document.bytes[offset..][0..head], entry.text.bytes);
+            if (entry.text.styles.len != 0) @memcpy(self.document.styles[offset..][0..head], entry.text.styles) else @memset(self.document.styles[offset..][0..head], 0);
+            if (stored > head) {
+                self.document.bytes[offset + head] = '\n';
+                self.document.styles[offset + head] = 0;
             }
             // End link runs at the seam, but preserve a code newline's band.
-            if (p.length > 0) {
-                const last = offset + p.length - 1;
+            if (stored > 0) {
+                const last = offset + stored - 1;
                 self.document.styles[last] = viewport.seamStyle(self.document.styles[last]);
             }
-            // The singular shorthand is valid only for one complete summary.
-            // A capped/multi-summary row must use explicit paired targets.
-            const message = if (entry.messages.len == 0 and p.marker_length == 0) entry.message else null;
-            self.entries[first + i] = .{ .key = entry.key, .offset = offset, .length = p.length, .tight = entry.tight, .provisional = entry.provisional, .message = message };
+            self.entries[first + i] = .{ .key = entry.key, .offset = offset, .length = stored, .tight = entry.tight, .provisional = entry.provisional };
             for (entry.messages) |target| {
-                // Oversized rows are capped; targets in omitted text disappear
-                // with their summaries. Capacity was checked before mutation.
-                if (target.offset >= p.head) continue;
+                std.debug.assert(target.offset < head);
                 self.targets[self.target_count] = .{ .point = .{ .key = entry.key, .offset = target.offset }, .target = target.target };
                 self.target_count += 1;
             }
-            offset += p.length;
+            offset += stored;
         }
         self.document.length = length;
         self.count = count;
-        for (self.entries[first .. first + incoming.len]) |*entry| {
-            if (entry.message != null and self.document.collapsed(entry.offset, entry.offset + entry.length).count != 1) entry.message = null;
-        }
     }
 };
 
@@ -530,24 +475,6 @@ test "feed_window replace clamps through Feed and suffix replacement can remove 
     try testing.expectEqual(@as(usize, 1), window.count);
     try testing.expectEqualSlices(u32, &.{1}, window.heights(test_layout)[0].lines);
     try testing.expectEqualStrings("x\n", window.text(.{ .position = 20 }).bytes);
-}
-
-test "feed_window caps oversized rows at their head and counts omitted lines" {
-    var window: Window = .{};
-    const many: [20000][2]u8 = @splat("a\n".*);
-    try window.append(&.{testEntry(10, std.mem.asBytes(&many))});
-    const capped = window.text(.{ .position = 10 });
-    try testing.expect(capped.bytes.len <= row_capacity);
-    try testing.expect(std.mem.startsWith(u8, capped.bytes, "a\na\n"));
-    try testing.expect(std.mem.endsWith(u8, capped.bytes, "┄ 3648 more lines\n"));
-    try testing.expectEqual(@as(usize, 16353), window.heights(test_layout)[0].lines.len);
-    const wide: [20000][3]u8 = @splat("界".*);
-    try window.replace(.{ .position = 10 }, .{ .bytes = std.mem.asBytes(&wide) });
-    const head = window.text(.{ .position = 10 });
-    try testing.expect(head.bytes.len <= row_capacity);
-    try testing.expect(std.unicode.utf8ValidateSlice(head.bytes));
-    try testing.expect(std.mem.startsWith(u8, head.bytes, "界界"));
-    try testing.expect(std.mem.endsWith(u8, head.bytes, "\n┄ 1 more lines\n"));
 }
 
 test "feed_window open keys survive trimming either edge and reloading" {

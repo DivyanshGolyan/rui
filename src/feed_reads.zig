@@ -179,8 +179,10 @@ pub fn Policy(comptime Cursor: type) type {
 
         /// Compare the low edge for fill_above; fill_below uses forward
         /// attachment against the high edge and first provisional key now.
-        /// Drop stale fills; need() will reissue. Scans are never dropped: live
-        /// facts always land, and applyScan decides what happens to their rows.
+        /// Drop stale fills; need() will reissue. Scans are never dropped: work,
+        /// call_activity, queued and the scan cursor always land, even from an
+        /// empty page or with the window scrolled away from the end, and
+        /// applyScan decides what happens to their rows.
         /// Opening/permission retain their own lifecycle, not an edge check.
         pub fn applies(read: Read, started_from: ?Cursor, replace_from: ?Cursor, edge_now: ?Cursor, window_provisional: ?Cursor) bool {
             return switch (read) {
@@ -191,9 +193,6 @@ pub fn Policy(comptime Cursor: type) type {
         }
 
         pub const Scan = struct {
-            /// Always refresh work, call_activity, queued and the scan cursor,
-            /// even for empty pages or a window scrolled away from the end.
-            live_facts: bool = true,
             rows: union(enum) { append, count_only: usize },
         };
 
@@ -307,9 +306,8 @@ test "feed_reads policy: opening, fair fills, stale edges, live scan, jump and p
     for ([_]Read{ .scan, .opening, .permission }) |read| try std.testing.expect(P.applies(read, high, null, low, null));
     for ([_]usize{ 0, 7 }) |rows| {
         const attached = P.applyScan(high, high, null, null, rows);
-        try std.testing.expect(attached.live_facts and attached.rows == .append);
+        try std.testing.expect(attached.rows == .append);
         const detached = P.applyScan(low, high, null, null, rows);
-        try std.testing.expect(detached.live_facts);
         try std.testing.expectEqual(rows, detached.rows.count_only);
         // Equal positions with different ordinals are disconnected too.
         const ordinal_changed = P.applyScan(.{ .position = 30, .ordinal = 1 }, high, null, null, rows);
@@ -400,7 +398,6 @@ test "feed_reads forward attachment domain for scan and fill_below" {
                     // Detached scans still deliver live facts and count rows.
                     try std.testing.expect(applies);
                     const result = P.applyScan(case.high, page.started_from, page.replace_from, case.current, 7);
-                    try std.testing.expect(result.live_facts);
                     try std.testing.expectEqual(case.attach, result.rows == .append);
                     if (!case.attach) try std.testing.expectEqual(@as(usize, 7), result.rows.count_only);
                 },

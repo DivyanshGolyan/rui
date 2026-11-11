@@ -2251,7 +2251,7 @@ fn scroll(self: *Self, down: bool, rows: usize) !void {
         self.app_content.scroll(if (down) amount else -amount);
         self.reading.fills = self.reading.fills.scrolled(self.feedState(), down);
         if (screen.anchor.following()) self.new_below = 0;
-    } else for (0..rows) |_| _ = screen.browse(down, false);
+    } else for (0..rows) |_| screen.browse(down, false);
     self.dirty = true;
 }
 
@@ -5434,7 +5434,7 @@ test "SessionFrontend failed historical fills retain the edge while scans approv
         try std.testing.expectEqual(ReadPhase.fill, self.reading.phase);
         try std.testing.expectEqualDeep(cycle, self.live.scan);
         try std.testing.expectEqualStrings(text, held.screen.feed.document.text());
-        try std.testing.expectEqualStrings("! Messages unavailable; scroll at this edge to retry. Draft retained.", self.notice.?);
+        try std.testing.expectEqualStrings("! Messages unavailable; scroll to retry. Draft retained.", self.notice.?);
         try std.testing.expect(self.reading.fills.blocked != null);
         for (0..3) |_| {
             _ = try held.draw();

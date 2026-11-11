@@ -38,7 +38,6 @@ pub const RenderedRow = struct {
     length: u64,
     tight: bool,
     provisional: bool,
-    collapsed: ?View.Collapsed = null,
     collapsed_targets: [16]View.Collapsed = undefined,
     collapsed_count: usize = 0,
 };
@@ -651,7 +650,6 @@ const RowCapture = struct {
         self.first = false;
         self.row.collapsed_targets[self.row.collapsed_count] = value;
         self.row.collapsed_count += 1;
-        self.row.collapsed = value;
         return true;
     }
 
@@ -1080,7 +1078,6 @@ fn firstProvisional(result: *const @FieldType(Job, "result")) ?Key {
 const FakeHost = struct {
     history: u64,
     history_users: bool = false,
-    last_read_ns: i96 = 0,
     tail: []const Tail,
     /// The Store's end, which a page asked for at no end reads.
     end: u64,
@@ -1283,9 +1280,7 @@ const FakeHost = struct {
                 if (action.job.session.len == 0) action.job.session = "k7m2qx";
                 action.job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
                 var task: Task = .{ .io = io };
-                const started = std.Io.Clock.awake.now(io).nanoseconds;
                 try scan(action.job, &task);
-                host.last_read_ns = std.Io.Clock.awake.now(io).nanoseconds - started;
                 host.shown = host.output[0..try inspection.readPositionalAll(io, &host.output, 0)];
             }
         };
@@ -1736,11 +1731,10 @@ test "session_reads row heads are bounded with ordered exact collapsed targets" 
     try std.testing.expectEqual(@as(usize, 16), row.collapsed_count);
 }
 
-test "session_reads long Session opening and visible fill measure their own bounded content reads" {
+test "session_reads long Session opening and visible fill each cost one page of content reads" {
     var host: FakeHost = .{ .history = 10_000, .history_users = true, .tail = &.{}, .end = 10_000 };
     var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 10_000 } };
     try host.read(&job);
-    const paint_ns = host.last_read_ns;
     try std.testing.expectEqual(@as(usize, 16), host.contents);
     try std.testing.expectEqual(@as(usize, 16), job.result.row_count);
     try std.testing.expect(!job.result.at_start and job.result.at_end);
@@ -1754,7 +1748,6 @@ test "session_reads long Session opening and visible fill measure their own boun
     try std.testing.expectEqual(@as(usize, 32), host.contents);
     try std.testing.expectEqual(@as(usize, 16), job.result.row_count);
     try std.testing.expectEqual(@as(usize, 2), host.pages);
-    std.debug.print("feed long Session: first paint {d} us / 16 content reads; fill {d} us / 16 content reads\n", .{ @divTrunc(paint_ns, 1000), @divTrunc(host.last_read_ns, 1000) });
 }
 
 test "session_reads row caps never split UTF-8 scalars or presentation controls" {

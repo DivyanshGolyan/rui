@@ -113,10 +113,9 @@ pub fn liveApproval(self: *const Self, command_blocked: bool) ConsentPolicy.Appr
 }
 
 /// Panels scroll their document; the feed always scrolls its keyed anchor.
-pub fn browse(self: *Self, down: bool, page: bool) bool {
+pub fn browse(self: *Self, down: bool, page: bool) void {
     std.debug.assert(self.view != .feed);
     self.viewed().browse(self.textLayout(), down, if (page) self.height else 1, self.height, null);
-    return false;
 }
 
 pub fn scrollFeed(self: *Self, rows: i32) void {
@@ -124,7 +123,7 @@ pub fn scrollFeed(self: *Self, rows: i32) void {
 }
 
 pub fn dragScroll(self: *Self, up: bool) void {
-    if (self.view == .feed) self.scrollFeed(if (up) -1 else 1) else _ = self.browse(!up, false);
+    if (self.view == .feed) self.scrollFeed(if (up) -1 else 1) else self.browse(!up, false);
 }
 
 /// Scrolls the inspection page so line `line` begins in view, as little as
@@ -319,7 +318,7 @@ test "SessionScreen feed scrolling includes tail and latest only changes the vie
     try screen.browsing.append("one\ntwo\nthree\nfour\n");
     screen.view = .inspection;
     screen.browsing.top = .{};
-    _ = screen.browse(true, false);
+    screen.browse(true, false);
     try std.testing.expectEqualDeep(held, screen.anchor.anchor);
     try std.testing.expectEqual(@as(usize, 4), screen.browsing.top.?.offset);
 }
