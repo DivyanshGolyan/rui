@@ -296,8 +296,10 @@ const EffortProvenanceSql = struct {
 
     fn previous(comptime self: EffortProvenanceSql, comptime revision: []const u8) []const u8 {
         const admitted = atAdmission("legacy");
+        // CASE keeps the source subquery out of the ordinary no-refusal path;
+        // an indexed equality alone lets SQLite evaluate it before finding no rows.
         return "CASE WHEN " ++ revision ++ ".reasoning_effort IS NULL OR " ++ self.hasRefusal() ++ " THEN (SELECT legacy.reasoning_effort FROM model_operation legacy @index(model_operation_admission) WHERE legacy.session_ref=" ++ self.session_ref ++ " AND legacy.settings_revision<=" ++ self.revision ++ " " ++
-            "AND NOT EXISTS(SELECT 1 FROM session_change invalidated WHERE invalidated.session_ref=legacy.session_ref AND invalidated.field='reasoning_effort_refused' AND invalidated.revision=" ++ admitted.source("revision") ++ ") " ++
+            "AND CASE WHEN " ++ self.hasRefusal() ++ " THEN NOT EXISTS(SELECT 1 FROM session_change invalidated WHERE invalidated.session_ref=legacy.session_ref AND invalidated.field='reasoning_effort_refused' AND invalidated.revision=" ++ admitted.source("revision") ++ ") ELSE 1 END " ++
             "ORDER BY legacy.admission_position DESC LIMIT 1) END";
     }
 
