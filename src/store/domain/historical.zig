@@ -68,7 +68,7 @@ pub const HistoricalSettings = struct {
     /// Effective effort frozen at admission; null when the binding has no
     /// inferred default and no override.
     reasoning_effort: ?model_capability.ReasoningEffort = null,
-    /// The effort the Session's first Operation froze.
+    /// The effort the Session's first Operation for this model froze.
     starting_effort: ?model_capability.ReasoningEffort = null,
     /// The codec the Session pinned at creation.
     codec: provider_name.Codec,
@@ -751,7 +751,8 @@ const historical_settings = rsql.Read(.{
         "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE member.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
         "o.reasoning_effort,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
-        "(SELECT first.reasoning_effort FROM model_operation first WHERE first.session_ref=o.session_ref ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
+        "(SELECT first.reasoning_effort FROM model_operation first JOIN session_revision first_revision ON first_revision.session_ref=first.session_ref AND first_revision.revision=first.settings_revision " ++
+        "WHERE first.session_ref=o.session_ref AND first_revision.model=r.model ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
         "instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest,instructions.private AS instructions_private," ++
         pageBytesSql("instructions", "instructions_bytes") ++ "," ++
         "output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest,output_schema.private AS output_schema_private " ++
@@ -1216,7 +1217,7 @@ const historical_entries = rsql.Read(.{
         // Every earlier Operation of the Session above the floor, whatever
         // its outcome: its request carried its own boundary, so later ones do too.
         // With each, its tool set and whether it declares any tool.
-        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,earlier.reasoning_effort,coalesce(revision.loaded_tool_set_id,revision.tool_set_id)," ++
+        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL,earlier.reasoning_effort,coalesce(revision.loaded_tool_set_id,revision.tool_set_id)," ++
         "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("coalesce(revision.loaded_tool_set_id,revision.tool_set_id)", "earlier.admission_position", "?6") ++ "),NULL " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++
@@ -1814,6 +1815,7 @@ fn historicalEntry(view: *HistoricalView, row: *const historical_entries.Row) er
     if (kind == .operation) return .{
         .position = row.session_position.get(),
         .kind = .operation,
+        .requested_model = row.model orelse return error.CorruptStore,
         .effort = row.effort,
         .tool_set_id = (row.tool_set_id orelse return error.CorruptStore).get(),
         .declares = row.declares orelse return error.CorruptStore,

@@ -906,7 +906,11 @@ pub const Preparation = struct {
                     // anchor with the output, so effort there is the top's.
                     .operation => if (!covered) {
                         if (entry.declares and codecs.declaresTools(self.settings.codec)) self.declare(.{ .tool_set_id = entry.tool_set_id, .position = entry.position }, .history);
-                        return self.loadItemHeader(.{ .operation = effortOf(entry.effort) }, 0);
+                        // Effort is model-specific configuration, not visible
+                        // conversation. Keep old tool declarations, but never
+                        // send another model's effort boundary to this one.
+                        if (entry.requested_model.?.eql(self.settings.model.slice()))
+                            return self.loadItemHeader(.{ .operation = effortOf(entry.effort) }, 0);
                     },
                     .provider_output => {
                         if (covered) return .pending;
@@ -3239,6 +3243,39 @@ test "model switch uses normal compaction pressure without the old base floor or
     defer std.testing.allocator.free(request.bytes);
     try expectInputTexts(request.bytes, &.{ "visible original", "additional_tools", "visible answer", "visible second", "compaction_trigger" });
     try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"type\":\"compaction\"") == null);
+}
+
+test "model switch rebuilds effort only from the requested model binding" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("switch-effort-create");
+    var revision: wire_request.ConfigureCommand = .{};
+    revision.session = session;
+    try revision.key.set("switch-effort-none");
+    revision.configuration.reasoning_effort.state = .value;
+    try revision.configuration.reasoning_effort.value.set("none");
+    try std.testing.expect(try setup.storage.configure(&revision, .{}) == .accepted);
+    try setup.submit("switch-effort-one", "switch-effort-one", session.slice(), "visible original");
+    const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store.settleAnswerItemsForTesting(&setup.storage, &setup.tmp, first, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"visible answer\"}]}"}, "visible answer");
+    try revision.key.set("switch-effort-model");
+    revision.configuration.model.state = .value;
+    try revision.configuration.model.value.set("gpt-6.1-sol");
+    try revision.configuration.reasoning_effort.value.set("low");
+    try std.testing.expect(try setup.storage.configure(&revision, .{}) == .accepted);
+    try setup.submit("switch-effort-two", "switch-effort-two", session.slice(), "visible second");
+    const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var entries: [1]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    const request = try prepareMemoForTesting(&setup, binding, &memos, .{});
+    defer std.testing.allocator.free(request.bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("low", parsed.value.object.get("reasoning").?.object.get("effort").?.string);
+    try expectInputTexts(request.bytes, &.{ "visible original", "additional_tools", "visible answer", "visible second" });
+    try std.testing.expect(try expectMemoRebuildEqual(&setup, binding, &memos, .{}) > 0);
 }
 
 test "switching back never replays an older unselected compaction" {

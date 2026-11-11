@@ -978,7 +978,9 @@ The seal covers the history span, not the request's settings and instructions be
 
 A Session pins its codec at creation, and new Sessions pin `openai-responses/2`; a Session on `openai-responses/1` keeps it and its exact bytes, since requests use the codec the Session pinned.
 Under `openai-responses/1` each request's top-level `reasoning.effort` is its Operation's frozen effort, so an effort change costs the provider cache.
-Under `openai-responses/2` the top-level effort is the effort the Session's first Operation froze, for the Session's life.
+Under `openai-responses/2` the top-level effort is the effort the Session's first Operation for the requested model froze.
+A rebuilt history preserves effort boundaries only from Operations requesting that model; other models' effort settings are not visible conversation and may not be supported by this model.
+Their tool declarations remain in place for the visible calls.
 The history view yields an Operation element at each earlier Operation's admission position, with the effort it froze, and the request being prepared gets its own Operation item after `history_end`, where a later request's span will place it.
 At an Operation whose effort differs from the one in force, the codec writes `{"type":"configuration_update","reasoning":{"effort":…}}` and its carry takes the new effort; an unchanged effort writes nothing.
 A compaction base covers the Operation elements before its anchor with the output it covers, so effort there is the top's again.
