@@ -8421,6 +8421,53 @@ test "a Store at the migration baseline with its rows takes every migration at o
     try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
 }
 
+test "schema 62 migration preserves saved resolutions and adds nullable full answer references" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite3", .{root});
+    {
+        const raw = try openRaw(path);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+        for (store_schema.migrations) |step| {
+            if (step.from >= 61) break;
+            for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+        }
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=61", .{store_schema.application_id}));
+        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','61')");
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, protocol.wire_version);
+        try sqlite.bindText(meta, 2, root);
+        try sqlite.expectDone(meta);
+        // A previously saved result and an unresolved sibling both survive
+        // the rebuild; migration must not re-render or replace either row.
+        try sqlite.exec(raw, "UPDATE action_operation SET attempt_ordinal=1,bash_timeout_ms=1000,attempt_at=1793781730,resolution_code='succeeded',resolution_content_id=5,acceptance_position=6,resolved_at=1793781740 WHERE action_id=1");
+        try sqlite.exec(raw, "UPDATE session SET next_position=7 WHERE session_ref='brhkcj'");
+    }
+    for (0..2) |opening| {
+        var storage: Store = undefined;
+        try storage.open(std.testing.io, path, root);
+        defer storage.close() catch unreachable;
+        try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u64, store_schema.schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=1 AND parent_operation_id=2 AND call_ordinal=0 AND resolution_code='succeeded' AND resolution_content_id=5 AND acceptance_position=6 AND resolved_at=1793781740", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=2 AND resolution_content_id IS NULL AND full_content_id IS NULL", .{}));
+        try std.testing.expectEqual(@as(u64, if (opening == 0) 2 else 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE full_content_id IS NULL", .{}));
+        const reference = try tests.testingContentReference(&storage, 5);
+        try tests.expectContent(&storage, reference, "hello\nworld");
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+        if (opening == 0) {
+            try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(storage.sqliteDatabase(), "UPDATE action_operation SET full_content_id=999999 WHERE action_id=1"));
+            try sqlite.exec(storage.sqliteDatabase(), "UPDATE action_operation SET full_content_id=5 WHERE action_id=1");
+        } else try std.testing.expectEqual(@as(u64, 5), try store_testing.sqlite_only.queryU64(&storage, "SELECT full_content_id FROM action_operation WHERE action_id=1", .{}));
+    }
+}
+
 test "schema 57 refusal rows migrate to wire 10 without changing command identity or sender positions" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

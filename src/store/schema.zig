@@ -19,7 +19,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 61;
+pub const schema_version: u32 = 62;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -47,6 +47,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 59, .digest = 0xa3ebc37622ed945b },
     .{ .schema_version = 60, .digest = 0x6b696b3423202987 },
     .{ .schema_version = 61, .digest = 0xec460e03aa080495 },
+    .{ .schema_version = 62, .digest = 0xa090e80d6bd39bd1 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -347,6 +348,27 @@ pub const migrations = [_]Migration{
         .mysql = &.{
             "ALTER TABLE model_output_item DROP CHECK model_output_item_chk_10, ADD CHECK(description IS NULL OR (OCTET_LENGTH(description) BETWEEN 1 AND 200 AND (description IS NOT NULL)=(item_kind=5)))",
             "ALTER TABLE model_tool_call DROP CHECK model_tool_call_chk_3, ADD CHECK(description IS NULL OR OCTET_LENGTH(description) BETWEEN 1 AND 200)",
+        },
+    },
+    // Schema 62 (D235): retain the full MCP answer beside its saved excerpt.
+    .{
+        .from = 61,
+        .sqlite = &.{
+            "ALTER TABLE action_operation RENAME TO action_operation_61",
+            "CREATE TABLE action_operation(\n action_id INTEGER PRIMARY KEY NOT NULL CHECK(action_id>0),\n parent_operation_id INTEGER NOT NULL REFERENCES model_operation(operation_id),\n call_ordinal INTEGER NOT NULL CHECK(call_ordinal>=0),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n tool_kind INTEGER NOT NULL CHECK(tool_kind=1),\n permission_revision INTEGER NOT NULL CHECK(permission_revision>0),\n authorized INTEGER NOT NULL CHECK(authorized IN (0,1)),\n attempt_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(attempt_ordinal IN (0,1)),\n bash_timeout_override_ms INTEGER CHECK(bash_timeout_override_ms IS NULL OR bash_timeout_override_ms>0),\n bash_timeout_ms INTEGER CHECK(bash_timeout_ms IS NULL OR bash_timeout_ms>0),\n sender_handle TEXT CHECK(sender_handle IS NULL OR (length(CAST(sender_handle AS BLOB))=32 AND (sender_handle NOT GLOB '*[^0-9a-f]*' AND length(sender_handle)=length(CAST(sender_handle AS BLOB))))),\n resolution_code TEXT CHECK(resolution_code IS NULL OR (resolution_code='denied' OR resolution_code='cancelled' OR resolution_code='succeeded' OR resolution_code='failed' OR resolution_code='timed_out' OR resolution_code='indeterminate' OR resolution_code='storage_failed' OR resolution_code='spawn_failed' OR resolution_code='infrastructure_shutdown')),\n resolution_content_id INTEGER REFERENCES content(content_id),\n acceptance_position INTEGER CHECK(acceptance_position IS NULL OR acceptance_position>0),\n attempt_at INTEGER CHECK(attempt_at IS NULL OR attempt_at>0),\n decided_at INTEGER CHECK(decided_at IS NULL OR decided_at>0),\n resolved_at INTEGER CHECK(resolved_at IS NULL OR resolved_at>0),\n approval_position INTEGER CHECK(approval_position IS NULL OR approval_position>0),\n full_content_id INTEGER REFERENCES content(content_id),\n UNIQUE(parent_operation_id,call_ordinal),\n FOREIGN KEY(parent_operation_id,session_ref) REFERENCES model_operation(operation_id,session_ref),\n FOREIGN KEY(parent_operation_id,call_ordinal,tool_kind) REFERENCES model_tool_call(operation_id,call_ordinal,action_kind),\n FOREIGN KEY(session_ref,permission_revision) REFERENCES session_revision(session_ref,revision),\n CHECK((resolution_code IS NOT 'denied') OR (authorized=0 AND attempt_ordinal=0)),\n CHECK((attempt_ordinal=0 AND bash_timeout_ms IS NULL) OR (attempt_ordinal=1 AND bash_timeout_ms IS NOT NULL)),\n CHECK((resolution_code IS NULL AND resolution_content_id IS NULL AND acceptance_position IS NULL) OR (resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL AND acceptance_position IS NOT NULL)),\n CHECK((attempt_ordinal=1)=(attempt_at IS NOT NULL)),\n CHECK((authorized=1)=(decided_at IS NOT NULL)),\n CHECK((resolution_code IS NULL)=(resolved_at IS NULL))\n) STRICT",
+            "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,attempt_ordinal,bash_timeout_override_ms,bash_timeout_ms,sender_handle,resolution_code,resolution_content_id,acceptance_position,attempt_at,decided_at,resolved_at,approval_position) SELECT action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,attempt_ordinal,bash_timeout_override_ms,bash_timeout_ms,sender_handle,resolution_code,resolution_content_id,acceptance_position,attempt_at,decided_at,resolved_at,approval_position FROM action_operation_61",
+            "DROP TABLE action_operation_61",
+            "CREATE INDEX action_operation_session_order ON action_operation(session_ref,action_id)",
+            "CREATE UNIQUE INDEX action_operation_sender_handle ON action_operation(sender_handle) WHERE sender_handle IS NOT NULL",
+            "CREATE INDEX action_operation_acceptance ON action_operation(session_ref,acceptance_position)",
+            "CREATE INDEX action_operation_session_results ON action_operation(session_ref,parent_operation_id,acceptance_position) WHERE acceptance_position IS NOT NULL",
+            "CREATE INDEX action_operation_approval ON action_operation(session_ref,approval_position) WHERE approval_position IS NOT NULL",
+            "CREATE INDEX action_operation_executable ON action_operation(action_id) WHERE authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0",
+            "CREATE INDEX action_operation_unresolved_attempt ON action_operation(action_id) WHERE resolution_code IS NULL AND attempt_ordinal=1",
+            "CREATE INDEX action_operation_indeterminate ON action_operation(session_ref,parent_operation_id,call_ordinal) WHERE resolution_code='indeterminate'",
+        },
+        .mysql = &.{
+            "ALTER TABLE action_operation ADD COLUMN full_content_id BIGINT NULL, ADD FOREIGN KEY(full_content_id) REFERENCES content(content_id)",
         },
     },
 };
@@ -1291,6 +1313,7 @@ pub const tables = [_]Table{
             // insert under an `ask` revision and never changed. Stored
             // because the feed seeks it and no index can see the revision.
             .{ .name = "approval_position", .type = .int, .nullable = true, .check = "approval_position IS NULL OR approval_position>0" },
+            .{ .name = "full_content_id", .type = .int, .nullable = true },
         },
         .primary_key = &.{"action_id"},
         .uniques = &.{&.{ "parent_operation_id", "call_ordinal" }},
@@ -1298,6 +1321,7 @@ pub const tables = [_]Table{
             references("parent_operation_id", "model_operation", &.{"operation_id"}),
             references("session_ref", "session", session_reference),
             references("resolution_content_id", "content", content_reference),
+            references("full_content_id", "content", content_reference),
             .{ .columns = &.{ "parent_operation_id", "session_ref" }, .references = "model_operation", .referenced = &.{ "operation_id", "session_ref" } },
             .{ .columns = &.{ "parent_operation_id", "call_ordinal", "tool_kind" }, .references = "model_tool_call", .referenced = &.{ "operation_id", "call_ordinal", "action_kind" } },
             .{ .columns = &.{ "session_ref", "permission_revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
@@ -2726,6 +2750,7 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
     inline for (.{ "model_output_item", "model_tool_call", "model_output_part", "action_operation", "conversation_entry" }) |name| {
         try sqlite.exec(database, "CREATE TEMP TABLE original_" ++ name ++ " AS SELECT * FROM " ++ name);
     }
+    try sqlite.exec(database, "ALTER TABLE original_action_operation ADD COLUMN full_content_id INTEGER");
     try openExisting(std.testing.io, database, root, null);
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
