@@ -18,7 +18,9 @@ pub fn widget(self: *const Self) vxfw.Widget {
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *const Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
-    if (size.width == 0 or size.height == 0) return .empty(self.widget());
+    if (size.width == 0) return .empty(self.widget());
+    // Drawing also updates child layout state. Forward zero remaining height
+    // through nested columns rather than leaving descendants at their old size.
     const children = try ctx.arena.alloc(vxfw.SubSurface, self.children.len);
     var remaining = size.height;
     var fill: ?usize = null;

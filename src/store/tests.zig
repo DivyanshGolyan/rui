@@ -3004,7 +3004,7 @@ test "production turn preserves skipped continuation preference through actual S
                         self.failure = err;
                         return error.Fence;
                     };
-                    return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation };
+                    return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry };
                 }
                 pub fn scheduledRetry(_: *const @This()) turn.ScheduledRetry {
                     return .unknown;
@@ -4609,7 +4609,7 @@ test "loaded tools select saved records even after the Host catalog changes or r
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             var records = comptime testingCatalogRecords(&.{
-                .{ .name = "fetch_page", .owner = .mcp, .server = "original", .description = "Original page", .input_schema = "{\"type\":\"object\"}" },
+                .{ .name = "fetch_page", .owner = .mcp, .server = "original", .read_only = true, .description = "Original page", .input_schema = "{\"type\":\"object\"}" },
                 .{ .name = "other_page", .owner = .mcp, .server = "original", .description = "Other page", .input_schema = "{\"type\":\"object\"}" },
             });
             var digests: [records.len][32]u8 = undefined;
@@ -4641,6 +4641,8 @@ test "loaded tools select saved records even after the Host catalog changes or r
             const loaded_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.loaded_tool_set_id " ++
                 "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
             try std.testing.expectEqual(saved_record, loaded_record);
+            const expected_loaded = tool_set_domain.Selection.of(&original, &update.configuration.loaded_tools).?;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set saved ON saved.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1 AND saved.digest=?2", .{ first.slice(), store_testing.Blob{ .bytes = &expected_loaded.digest } }));
 
             var removed_records: [records.len - 1]tool_catalog.Record = undefined;
             removed_records[0] = records[0];
@@ -5402,22 +5404,21 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try own_ref.set(sender);
             const sender_end = (try store_core.activityPageForTesting(&storage, .{ .session = own_ref })).end;
             const Send = struct {
-                fn make(dir: std.Io.Dir, key: []const u8, target: []const u8, from: ?[]const u8, text: []const u8) !wire_request.MessageCommand {
+                fn make(dir: std.Io.Dir, store_id: []const u8, key: []const u8, target: []const u8, from: ?[]const u8, text: []const u8) !wire_request.MessageCommand {
                     const file = try dir.createFile(std.testing.io, key, .{ .read = true });
                     try file.writeStreamingAll(std.testing.io, text);
                     try file.sync(std.testing.io);
                     var command = try completeMessage(key, target, file, text);
                     if (from) |ref| {
                         command.sender = .{};
-                        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-                        try command.sender.?.store.set(root_buffer[0..try dir.realPath(std.testing.io, &root_buffer)]);
+                        try command.sender.?.store.set(store_id);
                         try command.sender.?.session.set(ref);
                     }
                     return command;
                 }
             };
 
-            var sent = try Send.make(tmp.dir, "peer-send", allocated_session_1.slice(), sender, "look at this\nsecond line");
+            var sent = try Send.make(tmp.dir, storage.storeId(), "peer-send", allocated_session_1.slice(), sender, "look at this\nsecond line");
             sent.sender_handle = handle;
             defer sent.removeTemporaryContent(std.testing.io) catch unreachable;
             var commits: TestingCommits = .{};
@@ -5428,19 +5429,19 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try std.testing.expect(commits.calls[0].from_peer);
             try std.testing.expectEqual(accepted.accepted.admission_id, commits.calls[0].admission_id);
             // The sender is part of the request: the same key without it conflicts.
-            var anonymous = try Send.make(tmp.dir, "peer-send-anonymous", allocated_session_1.slice(), null, "look at this\nsecond line");
+            var anonymous = try Send.make(tmp.dir, storage.storeId(), "peer-send-anonymous", allocated_session_1.slice(), null, "look at this\nsecond line");
             defer anonymous.removeTemporaryContent(std.testing.io) catch unreachable;
             try anonymous.key.set("peer-send");
             try std.testing.expect(storage.submitMessageWithModel(&anonymous, null, .{}) == .conflict);
 
-            var refused = try Send.make(tmp.dir, "peer-refused", "absent", sender, "lost");
+            var refused = try Send.make(tmp.dir, storage.storeId(), "peer-refused", "absent", sender, "lost");
             refused.sender_handle = handle;
             defer refused.removeTemporaryContent(std.testing.io) catch unreachable;
             try std.testing.expectEqual(protocol.MessageRejection.unknown_session, storage.submitMessageWithModel(&refused, commits.callback(), .{}).rejected.code);
             // A rejected Message installs nothing.
             try std.testing.expectEqual(@as(usize, 1), commits.count);
 
-            var forged = try Send.make(tmp.dir, "peer-forged", allocated_session_1.slice(), "f0rged", "forged");
+            var forged = try Send.make(tmp.dir, storage.storeId(), "peer-forged", allocated_session_1.slice(), "f0rged", "forged");
             defer forged.removeTemporaryContent(std.testing.io) catch unreachable;
             try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&forged, null, .{}).rejected.code);
             const forged_replay = storage.submitMessageWithModel(&forged, null, .{});
@@ -5470,7 +5471,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
                 .{ .key = "peer-empty-forged", .from = "f0rged" },
                 .{ .key = "peer-empty-known", .from = sender },
             }) |case| {
-                var empty = try Send.make(tmp.dir, case.key, "", case.from, "nowhere");
+                var empty = try Send.make(tmp.dir, storage.storeId(), case.key, "", case.from, "nowhere");
                 if (std.mem.eql(u8, case.from, sender)) empty.sender_handle = handle;
                 defer empty.removeTemporaryContent(std.testing.io) catch unreachable;
                 try std.testing.expectEqual(protocol.MessageRejection.invalid_session_reference, storage.submitMessageWithModel(&empty, null, .{}).rejected.code);
@@ -5584,8 +5585,7 @@ test "refused peer creation activity keeps invalid targets absent" {
             try creation.configuration.reasoning_effort.value.set("none");
             message.configuration = creation.configuration;
             message.sender = .{};
-            var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-            try message.sender.?.store.set(root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)]);
+            try message.sender.?.store.set(storage.storeId());
             message.sender.?.session = sender;
             message.sender_handle = input.sender_handle;
             var commits: TestingCommits = .{};
@@ -6900,6 +6900,7 @@ test "the dispatch work read answers as each admission owner does, in every stat
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             try WorkParity.idle(&storage);
+            try std.testing.expect(!(try storage.dispatchWork(false)).retry);
 
             // Waiting input: a new Turn takes it unless new Turns are held.
             const session = try configureTestSessionAsk(&storage, "parity-config");
@@ -6908,10 +6909,18 @@ test "the dispatch work read answers as each admission owner does, in every stat
             try std.testing.expect((try WorkParity.model(&storage, .tool_continuation)) == null);
             const first = (try WorkParity.model(&storage, .message)).?;
             try WorkParity.idle(&storage);
+            // Its running Attempt is what a retry scan would read; once it
+            // resolves, neither scan has a row.
+            try std.testing.expect((try storage.dispatchWork(false)).retry);
 
             // Two Bash calls wait on a person: a blocked Operation, no work.
             try settleTwoActionsForTesting(&storage, &tmp, first, "parity-config");
             try WorkParity.idle(&storage);
+            try std.testing.expect(!(try storage.dispatchWork(false)).retry);
+            try std.testing.expect(!try storage.recoverOneExhaustedModelAttempt(ActiveOperationFilter.empty()));
+            var scheduled: ?u64 = 0;
+            try std.testing.expect((try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, &scheduled)) == null);
+            try std.testing.expectEqual(@as(?u64, null), scheduled);
             // Input that arrives now joins the open Turn, held or not, once it continues.
             try submitTestMessage(&storage, &tmp, "parity-more", "parity-more", session.slice(), "more");
             const last_action = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
@@ -14404,6 +14413,287 @@ test "runner action seam covers selection admission input settlement stop and re
                     try std.testing.expectEqual(@as(usize, 1), actions.len);
                     try std.testing.expectEqualStrings(expected_code, actions[0].object.get("resolution").?.string);
                     try std.testing.expectEqualStrings(expected_text, actions[0].object.get("result").?.object.get("text").?.string);
+                }
+            }
+        }
+    }.run);
+}
+
+test "MCP read-only ordering uses frozen offers and admits read waves between writes" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const records = comptime testingCatalogRecords(&.{
+                .{ .name = "read_page", .owner = .mcp, .server = "docs", .read_only = true, .description = "Read a page.", .input_schema = "{\"type\":\"object\"}" },
+                .{ .name = "write_page", .owner = .mcp, .server = "docs", .description = "Write a page.", .input_schema = "{\"type\":\"object\"}" },
+            });
+            const digests = comptime blk: {
+                @setEvalBranchQuota(1_000_000);
+                var out: [records.len][32]u8 = undefined;
+                for (&records, &out) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+                break :blk out;
+            };
+            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            const patterns = [_]struct { reads: []const bool, waves: []const usize }{
+                .{ .reads = &.{ false, true, true, false }, .waves = &.{ 1, 2, 1 } },
+                .{ .reads = &.{ true, true }, .waves = &.{2} },
+                .{ .reads = &.{ false, false }, .waves = &.{ 1, 1 } },
+            };
+            for (patterns) |pattern| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var configure = try completeConfiguration("read-only-order", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                configure.configuration.tools = try .of(&.{ "read_page", "write_page" });
+                configure.configuration.permission_mode.state = .value;
+                try configure.configuration.permission_mode.value.set("bypass");
+                const configured = try storage.configure(&configure, .{});
+                try std.testing.expect(configured == .accepted);
+                const session = configured.accepted.session;
+                try submitTestMessage(&storage, &tmp, "read-only-input", "read-only-message", session.slice(), "exercise read waves");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                var calls: [4]TestingCall = undefined;
+                const ids = [_][]const u8{ "call-a", "call-b", "call-c", "call-d" };
+                for (pattern.reads, 0..) |read, index| calls[index] = .{
+                    .item_id = ids[index],
+                    .name = if (read) "read_page" else "write_page",
+                    .encoded_call_id = ids[index],
+                    .decoded_call_id = ids[index],
+                    .encoded_arguments = "{}",
+                    .decoded_arguments = "{}",
+                };
+                try settleCallsForTesting(&storage, &tmp, model, "read-only-calls", calls[0..pattern.reads.len]);
+
+                // Today's catalog now says the opposite. Admission must still
+                // follow each call's frozen offer, and both record identities
+                // must coexist rather than overwrite one another.
+                var changed_records = records;
+                var changed_digests = digests;
+                for (&changed_records, &changed_digests) |*record, *digest| {
+                    if (record.owner == .mcp) record.read_only = !record.read_only;
+                    digest.* = tool_catalog.recordDigest(record);
+                }
+                const changed: tool_catalog.Catalog = .{ .records = &changed_records, .digests = &changed_digests };
+                try storage.saveCatalog(&changed);
+                try std.testing.expectEqual(@as(u64, 4), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE owner='mcp'", .{}));
+                for ([_][]const u8{ "read_page", "write_page" }) |name| {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE name=?1 AND read_only=0", .{name}));
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE name=?1 AND read_only=1", .{name}));
+                }
+                var saved = (try storage.readCatalog(std.testing.allocator)).?;
+                defer saved.deinit(std.testing.allocator);
+                const saved_catalog = saved.catalog();
+                for (changed.records, changed.digests) |record, digest| {
+                    const index = saved_catalog.find(record.name).?;
+                    try std.testing.expectEqual(record.read_only, saved_catalog.records[index].read_only);
+                    try std.testing.expectEqualSlices(u8, &digest, &saved_catalog.digests[index]);
+                }
+                // Re-saving the original catalog reuses its set and records.
+                const sets = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{});
+                try storage.saveCatalog(&catalog);
+                try std.testing.expectEqual(sets, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{}));
+                try storage.saveCatalog(&changed);
+
+                var ready: [4]action_domain.ReadyAction = undefined;
+                var bindings: [4]ActionAttemptBinding = undefined;
+                for (ready[0..pattern.reads.len], 0..) |*action, index| {
+                    action.* = .{ .action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1 AND call_ordinal=?2", .{ model.operation_id, index }), .runner = .mcp };
+                    try action.server.set("docs");
+                }
+                var start: usize = 0;
+                for (pattern.waves) |width| {
+                    const end = start + width;
+                    for (start..end) |index| {
+                        const next = try storage.nextAction(.mcp);
+                        try std.testing.expect(next != null);
+                        const selected = next.?;
+                        try std.testing.expectEqual(ready[index].action_id, selected.action_id);
+                        bindings[index] = (try storage.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
+                        // A caller cannot bypass selection's barrier by holding
+                        // a later Action id and asking for admission directly.
+                        for (ready[end..pattern.reads.len]) |blocked| {
+                            try std.testing.expect((try storage.admitActionAttempt(blocked, 1234, .{})) == null);
+                        }
+                    }
+                    try std.testing.expect((try storage.nextAction(.mcp)) == null);
+                    for (start..end) |index| {
+                        try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(bindings[index], .succeeded, "done", .{}));
+                        if (index + 1 < end) try std.testing.expect((try storage.nextAction(.mcp)) == null);
+                    }
+                    start = end;
+                }
+                try std.testing.expect((try storage.nextAction(.mcp)) == null);
+            }
+        }
+    }.run);
+}
+
+// One boundary test for every caller of the Session-message writer. A stop
+// does not close a Session: new input to it must still be admitted (D41).
+test "session message writer covers peer message_agent start_agent and ending with wake and refusal" {
+    // Ownership is part of this regression: correct rows alone did not catch
+    // four private copies of this transition. Pair the structural invariant
+    // with the durable behavior of every caller below.
+    const owner = @embedFile("domain/command.zig");
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, owner, "a.write(admit_sent_message,"));
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, owner, "try admitFromSession("));
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Source = enum { peer, message_agent, start_agent, ending };
+            inline for (std.enums.values(Source)) |source| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var path: [protocol.max_workspace_bytes]u8 = undefined;
+                var create = try completeConfiguration("writer-source", "", try canonicalCwd(std.testing.io, &path), "model-a");
+                create.configuration.tools = try .of(&.{ "bash", "message_agent", "start_agent" });
+                create.configuration.permission_mode.state = .value;
+                try create.configuration.permission_mode.value.set("bypass");
+                const sender = (try storage.configure(&create, .{})).accepted.session;
+                var receiver = try configureTestSession(&storage, "writer-target");
+                // Existing stopped receivers accept fresh input on both send paths.
+                if (source == .peer or source == .message_agent) {
+                    var stop = try completeSessionStop("writer-target-stop", receiver.slice());
+                    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                }
+                if (source == .ending) try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ receiver.slice(), sender.slice() });
+                try submitTestMessage(&storage, &tmp, "writer-task", "writer-task", sender.slice(), "send");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const text = "writer's saved content";
+                var key_buffer: [128]u8 = undefined;
+                var key: []const u8 = undefined;
+                var action: action_domain.CoreActionInput = undefined;
+                var peer: ActionExecutionInput = undefined;
+                if (source == .peer) {
+                    try settleTwoActionsForTesting(&storage, &tmp, model, "writer-peer-calls");
+                    const binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+                    try storage.readActionExecutionInput(.bash, binding, &peer);
+                    key = "writer-peer-send";
+                } else if (source == .ending) {
+                    try settleItemsForTesting(&storage, &tmp, model, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"writer's saved content\"}]}"}, text);
+                    key = try std.fmt.bufPrint(&key_buffer, "rui.core/ending/{d}", .{model.turn_id});
+                } else {
+                    const name = @tagName(source);
+                    var arguments_buffer: [128]u8 = undefined;
+                    const arguments = if (source == .message_agent) try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"hello\"}}", .{receiver.slice()}) else "{}";
+                    var encoded_buffer: [192]u8 = undefined;
+                    const encoded = if (source == .message_agent) try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hello\\\"}}", .{receiver.slice()}) else "{}";
+                    const calls = [_]TestingCall{
+                        .{ .item_id = "send", .name = name, .encoded_call_id = "send", .decoded_call_id = "send", .encoded_arguments = encoded, .decoded_arguments = arguments },
+                        .{ .item_id = "missing", .name = name, .encoded_call_id = "missing", .decoded_call_id = "missing", .encoded_arguments = encoded, .decoded_arguments = arguments },
+                    };
+                    try settleCallsForTesting(&storage, &tmp, model, "writer-core-calls", &calls);
+                    action = (try storage.nextCoreWork()).?.action;
+                    key = try std.fmt.bufPrint(&key_buffer, "rui.core/{s}/{d}", .{ name, action.binding.action_id });
+                }
+                const sender_position = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{sender.slice()});
+                var wake: std.Io.Event = .unset;
+                storage.commitWake().store(&wake, .release);
+                defer storage.commitWake().store(null, .release);
+                var commits: TestingCommits = .{};
+                switch (source) {
+                    .peer => {
+                        const file = try tmp.dir.createFile(std.testing.io, "peer-content", .{ .read = true });
+                        try file.writeStreamingAll(std.testing.io, text);
+                        try file.sync(std.testing.io);
+                        var command = try completeMessage(key, receiver.slice(), file, text);
+                        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+                        command.sender = .{ .store = storage.selector, .session = sender };
+                        command.sender_handle = peer.sender_handle;
+                        try std.testing.expect(storage.submitMessageWithModel(&command, commits.callback(), .{}) == .accepted);
+                    },
+                    .message_agent => try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(action.binding, receiver.slice(), text, .{})),
+                    .start_agent => {
+                        var spec = try testingAgentSpec(&.{"message_agent"}, "bypass");
+                        try std.testing.expectEqual(command_domain.AgentStart.started, try storage.startAgent(action.binding, sender.slice(), text, true, &spec, commits.callback(), .{}));
+                        const sent = try store_core.activityPageForTesting(&storage, .{ .session = sender, .kinds = .initOne(.sent) });
+                        receiver = sent.items[0].value.sent.target.session;
+                    },
+                    .ending => try std.testing.expect(try storage.deliverChildEnding(model.turn_id, .{})),
+                }
+                try std.testing.expect(wake.isSet());
+                if (source == .peer or source == .start_agent) {
+                    try std.testing.expectEqual(@as(usize, 1), commits.count);
+                    try std.testing.expect(commits.calls[0].from_peer);
+                    try std.testing.expectEqualStrings(receiver.slice(), commits.calls[0].session.slice());
+                }
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.command_key=?1 AND m.session_ref=?2 AND m.sender_session_ref=?3 AND m.sender_position=?4 AND c.digest=?5", .{ key, receiver.slice(), sender.slice(), sender_position, store_testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
+                const content_id = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key=?1", .{key});
+                try expectContent(&storage, try testingContentReference(&storage, content_id), text);
+                // Positions belong to the receiving Session, not the sender.
+                try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT next_position-1 FROM session WHERE session_ref=?1", .{receiver.slice()}), try store_testing.queryU64(&storage, "SELECT admission_position FROM message_admission WHERE command_key=?1", .{key}));
+                if (source == .peer) {
+                    const file = try tmp.dir.createFile(std.testing.io, "missing-content", .{ .read = true });
+                    try file.writeStreamingAll(std.testing.io, text);
+                    try file.sync(std.testing.io);
+                    var missing = try completeMessage("writer-missing", "zzzzzz", file, text);
+                    defer missing.removeTemporaryContent(std.testing.io) catch unreachable;
+                    missing.sender = .{ .store = storage.selector, .session = sender };
+                    missing.sender_handle = peer.sender_handle;
+                    try std.testing.expectEqual(protocol.MessageRejection.unknown_session, storage.submitMessageWithModel(&missing, null, .{}).rejected.code);
+                } else if (source == .message_agent) {
+                    const missing = (try storage.nextCoreWork()).?.action;
+                    try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(missing.binding, "zzzzzz", text, .{}));
+                }
+            }
+        }
+    }.run);
+}
+
+test "child ending Message includes bounded provider report done answer and quiet parent stop" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Ending = enum { failed, provider_refused, done, stopped, quiet };
+            inline for (std.enums.values(Ending)) |ending| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const parent = try configureTestSession(&storage, "report-parent");
+                const child = try configureTestSession(&storage, "report-child");
+                try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+                try submitTestMessage(&storage, &tmp, "report-task", "report-task", child.slice(), "answer");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const report: [protocol.max_report_bytes]u8 = @splat('r');
+                if (ending == .done) {
+                    try settleItemsForTesting(&storage, &tmp, model, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"saved answer\"}]}"}, "saved answer");
+                } else if (ending == .stopped) {
+                    var stop = try completeSessionStop("report-child-stop", child.slice());
+                    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                } else if (ending == .quiet) {
+                    var stop = try completeSessionStop("report-parent-stop", parent.slice());
+                    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                    const owed = (try storage.nextCoreWork()).?.stop;
+                    var child_stop: protocol.SessionStopCommand = .{ .key = owed.key, .session = child };
+                    try std.testing.expect(storage.stopOwedSession(&child_stop, .{}) == .accepted);
+                } else {
+                    try storage.settleModelAttemptFailure(model, .{ .correlated = .{ .code = if (ending == .failed) "malformed_provider_output" else "provider_http_400", .request_id = .{}, .report = &report } }, .ordinary, .{});
+                }
+                try std.testing.expect(try storage.deliverChildEnding(model.turn_id, .{}));
+                try std.testing.expect(!try storage.deliverChildEnding(model.turn_id, .{}));
+                const count = try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()});
+                try std.testing.expectEqual(@as(u64, if (ending == .quiet) 0 else 1), count);
+                if (ending != .quiet) {
+                    const content_id = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{parent.slice()});
+                    if (ending == .done) {
+                        try expectContent(&storage, try testingContentReference(&storage, content_id), "saved answer");
+                        try std.testing.expectEqual(content_id, try store_testing.queryU64(&storage, "SELECT outcome_content_id FROM turn WHERE turn_id=?1", .{model.turn_id}));
+                    } else {
+                        var expected: [96 + protocol.max_report_bytes]u8 = undefined;
+                        const text = try std.fmt.bufPrint(&expected, "[Rui: this agent's Turn ended without an answer: {s}.]{s}{s}", .{ @tagName(ending), if (ending == .stopped) "" else "\n", if (ending == .stopped) "" else &report });
+                        var reader: ContentReader = undefined;
+                        reader.open(try storage.openContent(try testingContentReference(&storage, content_id)));
+                        defer reader.close();
+                        var actual: [96 + protocol.max_report_bytes]u8 = undefined;
+                        const length = try reader.read(0, &actual);
+                        try std.testing.expectEqualStrings(text, actual[0..length]);
+                        try std.testing.expectEqual(@as(usize, 0), try reader.read(length, &actual));
+                    }
                 }
             }
         }

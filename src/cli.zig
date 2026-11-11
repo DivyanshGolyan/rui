@@ -757,8 +757,16 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     const selected = try selectedStore(init, parsed.get("store"), &fallback);
     if (command == .host_start) return startHost(init, selected, false, try parsed.number(usize, "active-capacity"), null);
     if (command == .host_pause) return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
-    const status = client.hostStatus(init.io, selected);
-    try writeHostStatus(init.io, status);
+    const paths: ?platform.Paths = platform.resolveClientPaths(init.io, selected) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => {
+            try writeHostStatus(init.io, .access_failure, null);
+            try validateStoreSpelling(selected);
+            return error.StoreAccessFailed;
+        },
+    };
+    const status = if (paths) |*location| client.hostStatusAt(init.io, location, null) else .unavailable;
+    try writeHostStatus(init.io, status, if (paths) |*location| location else null);
     try validateStoreSpelling(selected);
     switch (status) {
         .incompatible => return error.IncompatibleHost,
@@ -767,7 +775,7 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     }
 }
 
-fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus) !void {
+fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus, paths: ?*const platform.Paths) !void {
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
     try writer.print("{{\"version\":\"{s}\",\"type\":\"host_status\",\"status\":\"{s}\"", .{ protocol.wire_version, @tagName(status) });
@@ -787,8 +795,8 @@ fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus) !void {
             try std.json.Stringify.value(ready.capabilities, .{}, writer);
             var location: [protocol.max_store_bytes + "/diagnostics".len]u8 = undefined;
             try writer.writeAll(",\"diagnostics\":");
-            // A ready opaque identity already resolved through this runtime hint.
-            const directory = if (platform.isOpaqueStoreId(ready.store.slice())) platform.mysqlRuntimeDirectory(ready.store.slice()).? else ready.store.slice();
+            // A ready reply supplies identity, never a new engine/routing hint.
+            const directory = paths.?.diagnosticsDirectory();
             try std.json.Stringify.value(try std.fmt.bufPrint(&location, "{s}/diagnostics", .{directory}), .{}, writer);
         },
         else => {},
@@ -846,8 +854,13 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
 /// `readiness` is the caller's fresh local credential state, when it has one.
 fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity: ?usize, readiness: ?*const provider_selection.Readinesses) !void {
     const io = init.io;
-    switch (client.hostStatus(io, selected)) {
-        .ready => |ready| return reportStartedHost(io, ready, quiet, capacity),
+    const selection = platform.resolveClientSelection(selected);
+    const resolved: ?platform.Paths = selection.paths(io) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return error.StoreAccessFailed,
+    };
+    switch (if (resolved) |*paths| client.hostStatusAt(io, paths, null) else @as(protocol_reply.HostStatus, .unavailable)) {
+        .ready => |ready| return reportStartedHost(io, &resolved.?, ready, quiet, capacity),
         .incompatible => {
             stderr.diagnostic("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host pause (rui host stop in older versions), then run this rui again; saved work is unchanged.\n", .{});
             return error.IncompatibleHost;
@@ -857,12 +870,12 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
     }
     // An opaque MySQL id has no login and can only attach. Never turn it
     // into a new SQLite directory when the launched Host is unavailable.
-    if (platform.mysqlRuntimeDirectory(selected) != null) return error.MysqlHostUnavailable;
+    if (selection == .mysql) return error.MysqlHostUnavailable;
     // Only the serving Host obtains the exclusive lease; this creates the
     // candidate Store path without claiming an owner or touching SQLite.
     var dir = try std.Io.Dir.cwd().createDirPathOpen(io, selected, .{ .permissions = .fromMode(0o700) });
     dir.close(io);
-    const paths = try platform.resolveClientPaths(io, selected);
+    const paths = resolved orelse try selection.paths(io);
     var executable_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
     const length = try std.process.executablePath(io, &executable_buffer);
     if (length == executable_buffer.len) return error.ExecutablePathTooLong;
@@ -919,7 +932,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
             std.mem.indexOf(u8, startup, "[store_locked]\n") == null)
         {
             // A competing candidate may have lost the lease to a ready Host.
-            if (client.hostStatusUntil(io, paths.store.slice(), until) != .ready) {
+            if (client.hostStatusAt(io, &paths, until) != .ready) {
                 var header_bytes: [4 * protocol.max_store_bytes + 256]u8 = undefined;
                 var header = std.Io.Writer.fixed(&header_bytes);
                 try header.writeAll("\nrui: detached Host startup failed for Store ");
@@ -938,7 +951,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
                 return error.HostStartupFailed;
             }
         }
-        switch (client.hostStatusUntil(io, paths.store.slice(), until)) {
+        switch (client.hostStatusAt(io, &paths, until)) {
             .ready => |ready| {
                 // Startup notices precede readiness. The first read may have
                 // raced their write; collect once more after readiness proves
@@ -950,7 +963,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
                 // lease refusal is not a warning about the running Host.
                 if (startup_length != 0 and std.mem.indexOf(u8, notices, "[store_locked]\n") == null)
                     _ = @import("stderr.zig").write(notices);
-                return reportStartedHost(io, ready, quiet, capacity);
+                return reportStartedHost(io, &paths, ready, quiet, capacity);
             },
             .incompatible => return error.IncompatibleHost,
             .access_failure => return error.StoreAccessFailed,
@@ -966,7 +979,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
 
 /// A ready Host keeps the capacity it started with, so a different request
 /// is reported rather than dropped; a competing launcher may have won.
-fn reportStartedHost(io: std.Io, ready: @FieldType(protocol_reply.HostStatus, "ready"), quiet: bool, capacity: ?usize) !void {
+fn reportStartedHost(io: std.Io, paths: *const platform.Paths, ready: @FieldType(protocol_reply.HostStatus, "ready"), quiet: bool, capacity: ?usize) !void {
     if (capacity) |requested| if (requested != ready.active_capacity) notice: {
         var bytes: [4 * protocol.max_store_bytes + 512]u8 = undefined;
         var notice = std.Io.Writer.fixed(&bytes);
@@ -975,7 +988,7 @@ fn reportStartedHost(io: std.Io, ready: @FieldType(protocol_reply.HostStatus, "r
         notice.writeByte('\n') catch break :notice;
         stderr.diagnostic("{s}", .{notice.buffered()});
     };
-    if (!quiet) try writeHostStatus(io, .{ .ready = ready });
+    if (!quiet) try writeHostStatus(io, .{ .ready = ready }, paths);
 }
 
 fn login(init: std.process.Init, args: []const []const u8, interactive: bool, comptime exchange: anytype) !void {
