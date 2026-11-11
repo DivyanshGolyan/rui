@@ -604,7 +604,7 @@ def terminal_setup(c):
 
 
 def overview_args(binary, c):
-    """Inline /upgrade runs from the overview; a Session's /upgrade is PR 2's."""
+    """The overview, where every terminal case starts; a conversation opens from it."""
     return [str(binary), "--store", str(c.store), "--provider", "codex", "--model", "gpt-6-luna"]
 
 
@@ -662,6 +662,46 @@ def terminal_cases(root, binary, releases, artifacts):
         assert after["session"] == before["session"], "Upgrade submitted work or changed selected Session"
         assert (c.home / ".config/rui/codex.json").read_bytes() == credential
         assert {p.name: p.read_bytes() for p in request_directory.glob("*.json")} == captures, "local Upgrade captured a Host command"
+
+
+def conversation_case(root, binary, releases, artifacts):
+    """/upgrade in a conversation is the overview's run on the same status
+    row: Esc cancels while preparing, a second /upgrade installs and restarts
+    the Host, and the conversation reads again and stays usable."""
+    with case(root, binary, releases, "terminal-conversation") as c:
+        c.old_selection()
+        old_host, previous = c.start_host()
+        session, credential = terminal_setup(c)
+        before = c.json("session", "inspect", "--store", c.store, "--session", session)
+        gate = releases.gate_archive()
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+            screen = TerminalScreen(master, process)
+            screen.contains(session)
+            screen.send("\r")
+            screen.contains(f"‹ {session}")
+            screen.send("/upgrade\r")
+            screen.until(gate.entered.is_set, "conversation installation archive gate")
+            screen.contains(f"Upgrading to {releases.version}")
+            screen.contains("esc cancels")
+            screen.save(artifacts, "conversation-preparing")
+            assert c.link.resolve() == c.original and c.status()["instance"] == previous["instance"]
+            screen.send("\x1b")
+            screen.contains("Upgrade cancelled; nothing changed")
+            gate.release.set()
+            c.assert_unchanged()
+            assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
+            screen.send("/upgrade\r")
+            screen.contains(f"Upgraded to {releases.version}")
+            screen.save(artifacts, "conversation-installed")
+            proof_ready(c, previous, old_host)
+            # The run's ending shows once the conversation has read itself
+            # again under the new Host, so a command that asks the Host answers.
+            screen.send("/status\r")
+            screen.contains("Notifications")
+            screen.save(artifacts, "conversation-returned")
+        after = c.json("session", "inspect", "--store", c.store, "--session", session)
+        assert after["session"] == before["session"], "Upgrade submitted work or changed the open Session"
+        assert (c.home / ".config/rui/codex.json").read_bytes() == credential
 
 
 def escape_after_publication(root, binary, releases, artifacts):
@@ -884,6 +924,8 @@ def main():
         print("upgrade native: Esc cancelled the check and reaped the selected version probe before discovery", flush=True)
         terminal_cases(root, binary, releases, artifacts)
         print("upgrade native: overview /upgrade cancelled while preparing, then installed inline", flush=True)
+        conversation_case(root, binary, releases, artifacts)
+        print("upgrade native: a conversation's /upgrade cancelled while preparing, then installed inline and read again", flush=True)
         escape_after_publication(root, binary, releases, artifacts)
         print("upgrade native: Esc after publication changed nothing and the Upgrade finished", flush=True)
         terminal_cleanup_dual_failure(root, binary, releases, artifacts)
