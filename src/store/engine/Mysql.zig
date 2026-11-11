@@ -169,7 +169,6 @@ const Login = struct {
 /// stays final.
 const reconnect_attempts = 3;
 pub const ContentSink = content.ContentSink;
-pub const ContentHost = content.Host;
 pub const insert_chunk = rsql.Write(.{
     .sql = "INSERT INTO content_chunk(content_id,chunk_index,bytes) VALUES(?1,?2,?3)",
     .Args = struct { content_id: u64, chunk_index: u64, bytes: rsql.Bytes },
@@ -265,6 +264,13 @@ fn observeContentQuery(context: *anyopaque) void {
         const state: *State = @ptrCast(@alignCast(context));
         state.testing_shape.content_queries += 1;
     }
+}
+
+pub fn notePass(self: *Mysql, comptime kind: @import("../engine.zig").Pass) void {
+    if (is_test) switch (kind) {
+        .access => self.state.testing_shape.access_passes += 1,
+        .identity => self.state.testing_shape.identity_passes += 1,
+    };
 }
 
 pub fn fits(self: *Mysql, comptime S: type, args: *const S.Args, now: i64) Failure!bool {
@@ -606,6 +612,10 @@ pub fn queueCommit(self: *Mysql) Failure!void {
     if (is_test) self.state.testing_shape.controls += 1;
 }
 
+pub fn commitArmed(self: *const Mysql) bool {
+    return self.state.armed;
+}
+
 /// Binds COMMIT after the writes already in the open transaction's batch,
 /// so its last writes and its COMMIT are one message: each write's guard
 /// (`guard`) stops the message before COMMIT when its count is wrong, as
@@ -818,16 +828,13 @@ pub fn beginChunk(self: *Mysql, id: u64, index: u64) Failure!*std.Io.Writer {
     return w;
 }
 
-pub fn writePayload(self: *Mysql, id: u64, bytes: []const u8) Failure!void {
-    try self.check();
+/// Buffered payloads use the same typed statement path as other writes,
+/// preserving oversized-query streaming/drain as well as queue batching.
+pub fn queuePayload(_: *Mysql, id: u64, bytes: []const u8, host: anytype) void {
     var at: usize = 0;
     while (at < bytes.len) {
         const n = @min(content.chunk_bytes, bytes.len - at);
-        const args: insert_chunk.Args = .{ .content_id = id, .chunk_index = at / content.chunk_bytes, .bytes = .{ .bytes = bytes[at..][0..n] } };
-        try self.bind(insert_chunk, &args, 0);
-        try self.startPass();
-        if (try self.stepWrite() != 1) return error.CorruptStore;
-        try self.finishPass();
+        if (!host.statement(insert_chunk, .{ .content_id = id, .chunk_index = at / content.chunk_bytes, .bytes = .{ .bytes = bytes[at..][0..n] } })) break;
         at += n;
     }
 }

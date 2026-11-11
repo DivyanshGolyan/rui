@@ -1,6 +1,7 @@
 //! CLI causes and their repair contract. No wire or Store policy.
 //! Saved-code facts are replay-affecting: do not reinterpret them using live state.
 const std = @import("std");
+const session_settings = @import("session_settings.zig");
 const TerminalText = @import("TerminalText.zig");
 const provider_name = @import("provider_name.zig");
 const cli_value = @import("cli_value.zig");
@@ -97,6 +98,7 @@ pub const Code = enum {
     invalid_workspace,
     workspace_is_immutable,
     provider_is_immutable,
+    /// Historical saved rejection only; fresh model revisions are allowed.
     model_is_immutable,
     revision_exhausted,
     skills_unavailable,
@@ -350,22 +352,21 @@ pub const Input = enum {
     key,
 
     fn spelling(self: Input) ?[]const u8 {
+        inline for (session_settings.entries) |entry| {
+            // Instructions failures have always used their contextual witness,
+            // not an option spelling. Keep those diagnostics byte-identical.
+            if (comptime !std.mem.eql(u8, entry.field, "instructions")) {
+                if (comptime entry.cli) |cli| {
+                    const name = entry.field;
+                    if (self == @field(Input, name)) return "--" ++ cli.name;
+                }
+            }
+        }
         return switch (self) {
             .session => "--session / --to",
             .sender_handle => "RUI_SENDER_HANDLE",
-            .permission_mode => "--permission-mode",
-            .provider => "--provider",
-            .model => "--model",
-            .output_schema => "--output-schema",
-            .compaction_trigger => "--compaction-trigger",
-            .output_reservation => "--output-reservation",
-            .reasoning_effort => "--reasoning-effort",
-            .tools => "--tools",
-            .loaded_tools => "--loaded-tools",
-            .label => "--label",
             .preset => "preset",
             .initial_configuration => "--workspace, --provider, --model",
-            .workspace => "--workspace",
             .target => "--turn / --operation / --action",
             .operation => "--operation",
             .action => "--action",
@@ -481,7 +482,7 @@ pub fn facts(code: Code) Facts {
         .invalid_workspace => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "an absolute path to an existing directory" }, .says = "The workspace is not a usable absolute directory.", .next = "Set --workspace to an existing absolute directory accessible to the Host." },
         .workspace_is_immutable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "the workspace already saved for this Session" }, .says = "An existing Session cannot change its workspace.", .next = "Omit --workspace, or create a new Session for the other directory." },
         .provider_is_immutable => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "the provider already saved for this Session" }, .says = "An existing Session cannot change its provider.", .next = "Omit --provider, or create a new Session with the other provider." },
-        .model_is_immutable => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "the model already saved for this Session" }, .says = "An existing Session cannot change its model.", .next = "Omit --model, or create a new Session with the other model." },
+        .model_is_immutable => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "model changes within the Session's fixed provider" }, .says = "This saved command was rejected when a Session could not change its model.", .next = "Submit the model change with a new idempotency key." },
         .skill_file_unavailable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "a readable SKILL.md at its advertised absolute path" }, .says = "The selected skill file could not be read.", .next = "Restore the file and access to it, or reload skills before choosing another name." },
         .skill_file_too_large => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "complete SKILL.md files of at most 1 MiB each and in total" }, .says = "The selected skill files exceed the per-file or combined read limit.", .next = "Select fewer skills or reduce their files to fit both limits." },
         .skill_text_invalid => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "UTF-8 SKILL.md text" }, .says = "The selected skill file is not valid UTF-8 text.", .next = "Save the complete file as UTF-8, then invoke it again." },
@@ -737,6 +738,14 @@ test "saved rejection facts ignore current rendering overrides" {
     }
 }
 
+test "historical model immutability rejection explains its saved policy" {
+    const code = std.meta.stringToEnum(Code, "model_is_immutable") orelse return error.TestUnexpectedResult;
+    var bytes: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    try writeSavedLine(&out, code, .{ .resource = "session", .operation = "configure" });
+    try std.testing.expectEqualStrings("rui session configure: --model: This saved command was rejected when a Session could not change its model. Accepted: model changes within the Session's fixed provider. Next: Submit the model change with a new idempotency key. This rejection was saved and replays as saved; a resend needs a new key. [model_is_immutable]\n", out.buffered());
+}
+
 test "saved ambiguous causes do not invent missing flags or model restrictions" {
     const initial = facts(.incomplete_initial_configuration);
     try std.testing.expectEqualStrings("model, reasoning effort, compaction trigger, tools and permission mode, a workspace when tools include bash, and a provider when the Host serves several", initial.accepted.grammar);
@@ -775,4 +784,21 @@ test "inline skills size refusal explains per-file and combined limits" {
     try std.testing.expect(std.mem.indexOf(u8, line, "each and in total") != null);
     try std.testing.expect(std.mem.indexOf(u8, line, "Select fewer skills or reduce their files") != null);
     try std.testing.expect(std.mem.indexOf(u8, line, "a resend needs a new key") != null);
+}
+
+test "Session settings caller spellings retain every existing diagnostic" {
+    inline for (.{
+        .{ Input.workspace, "--workspace" },
+        .{ Input.provider, "--provider" },
+        .{ Input.model, "--model" },
+        .{ Input.tools, "--tools" },
+        .{ Input.loaded_tools, "--loaded-tools" },
+        .{ Input.permission_mode, "--permission-mode" },
+        .{ Input.output_schema, "--output-schema" },
+        .{ Input.compaction_trigger, "--compaction-trigger" },
+        .{ Input.output_reservation, "--output-reservation" },
+        .{ Input.reasoning_effort, "--reasoning-effort" },
+        .{ Input.label, "--label" },
+    }) |case| try std.testing.expectEqualStrings(case[1], case[0].spelling().?);
+    try std.testing.expect(Input.instructions.spelling() == null);
 }

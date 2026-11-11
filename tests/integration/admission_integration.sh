@@ -505,8 +505,8 @@ contains "$unknown_provider" '"code":"unsupported_provider"'
 require_test 'rejected providers create no Session' "$(session_refs)" = "$before_provider"
 require_test 'rejected provider releases all request scratch' -z "$(find "$store/scratch" -name 'request-*.tmp' -print)"
 
-# Equal and omitted binding fields preserve the initial binding. An unequal
-# model rejects the entire mixed update before work and across Host restart.
+# Equal and omitted values preserve settings; model changes are ordinary
+# atomic revisions, including mixed updates and updates after Host restart.
 binding=$($rui session configure --store "$store" --record "$records/binding.json" --key binding --workspace "$root" --provider codex --model gpt-6-sol)
 contains "$binding" '"revision":"1"'
 binding_session=$(printf '%s' "$binding" | session_id)
@@ -514,14 +514,14 @@ equal_binding=$($rui session configure --store "$store" --record "$records/equal
 contains "$equal_binding" '"revision":"2"'
 omitted_binding=$($rui session configure --store "$store" --record "$records/omitted-binding.json" --key omitted-binding --session "$binding_session" --permission-mode bypass)
 contains "$omitted_binding" '"revision":"3"'
-mixed_model=$(not_accepted "$rui" session configure --store "$store" --record "$records/mixed-model.json" --key mixed-model --session "$binding_session" --model gpt-6.1-sol --tools bash --permission-mode ask)
-contains "$mixed_model" '"code":"model_is_immutable"'
+mixed_model=$("$rui" session configure --store "$store" --record "$records/mixed-model.json" --key mixed-model --session "$binding_session" --model gpt-6.1-sol --tools bash --permission-mode ask)
+contains "$mixed_model" '"revision":"4"'
 binding_current=$($rui session inspect --store "$store" --session "$binding_session" --profile current)
 contains "$binding_current" '"provider":"codex"'
-contains "$binding_current" '"model":"gpt-6-sol"'
-contains "$binding_current" '"revision":"3"'
-contains "$binding_current" '"tools":[]'
-contains "$binding_current" '"permission_mode":"bypass"'
+contains "$binding_current" '"model":"gpt-6.1-sol"'
+contains "$binding_current" '"revision":"4"'
+contains "$binding_current" '"tools":["bash"]'
+contains "$binding_current" '"permission_mode":"ask"'
 stop_host
 start_host
 unknown_replay=$(not_accepted "$rui" request recover --store "$store" --record "$records/unknown-provider.json" --kind configure)
@@ -529,14 +529,14 @@ contains "$unknown_replay" '"code":"unsupported_provider"'
 contains "$unknown_replay" '"replayed":true'
 binding_full=$($rui session inspect --store "$store" --session "$binding_session" --profile full)
 contains "$binding_full" '"provider":"codex"'
-contains "$binding_full" '"model":"gpt-6-sol"'
-contains "$binding_full" '"revision":"3"'
-printf '%s' "$binding_full" | python3 -c 'import json,sys; rows=json.load(sys.stdin)["full"]["session_revisions"]; assert len(rows)==3; assert all(r["provider"]=="codex" and r["model"]=="gpt-6-sol" for r in rows)'
-restarted_model=$(not_accepted "$rui" session configure --store "$store" --record "$records/restarted-model.json" --key restarted-model --session "$binding_session" --model gpt-6.1-sol --tools bash)
-contains "$restarted_model" '"code":"model_is_immutable"'
+contains "$binding_full" '"model":"gpt-6.1-sol"'
+contains "$binding_full" '"revision":"4"'
+printf '%s' "$binding_full" | python3 -c 'import json,sys; rows=json.load(sys.stdin)["full"]["session_revisions"]; assert len(rows)==4; assert all(r["provider"]=="codex" for r in rows); assert [r["model"] for r in rows]==["gpt-6-sol"]*3+["gpt-6.1-sol"]'
+restarted_model=$("$rui" session configure --store "$store" --record "$records/restarted-model.json" --key restarted-model --session "$binding_session" --model gpt-6-sol --tools bash)
+contains "$restarted_model" '"revision":"5"'
 binding_rechecked=$($rui session inspect --store "$store" --session "$binding_session" --profile current)
-contains "$binding_rechecked" '"revision":"3"'
-contains "$binding_rechecked" '"tools":[]'
+contains "$binding_rechecked" '"revision":"5"'
+contains "$binding_rechecked" '"tools":["bash"]'
 
 # Lose an accepted reply, change current settings, and kill both processes.
 printf 'initial instructions\n' >"$state/instructions.txt"

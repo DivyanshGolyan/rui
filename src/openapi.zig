@@ -12,6 +12,7 @@
 //! hold a marker type (see `Optional`, `ListOf`, `State`, `Content`) for the parts the
 //! Host and client write in code rather than as one shape.
 const std = @import("std");
+const session_settings = @import("session_settings.zig");
 const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
 const model_list = @import("model_list.zig");
@@ -418,20 +419,25 @@ fn toolName(d: *Document) !Value {
 fn configurationShape(comptime name: []const u8, comptime instructions: anytype, comptime output_schema: anytype) type {
     return struct {
         pub const openapi_name = name;
-        pub const openapi_shape = .{
-            "{\"workspace\":",                                               State(Hole{ .string = protocol.max_workspace_bytes }, false),
-            ",\"provider\":",                                                State(Hole{ .string = protocol.max_provider_bytes }, false),
-            ",\"model\":",                                                   State(Hole{ .string = protocol.max_model_bytes }, false),
-            ",\"instructions\":",                                            instructions,
-            ",\"tools\":",                                                   State(ToolNameList, false),
-            Optional(.{ ",\"loaded_tools\":", State(ToolNameList, false) }), ",\"permission_mode\":",
-            State(Hole{ .string = 16 }, false),                              ",\"output_schema\":",
-            output_schema,                                                   ",\"compaction_trigger\":",
-            State(Hole{ .string = 20 }, true),                               ",\"output_reservation\":",
-            State(Hole{ .string = 20 }, true),                               ",\"reasoning_effort\":",
-            State(Hole{ .string = 16 }, true),                               ",\"label\":",
-            State(Hole{ .string = protocol.max_label_bytes }, true),         "}",
-        };
+        pub const openapi_shape = .{"{"} ++ configurationMembers(0, instructions, output_schema).shape;
+    };
+}
+
+fn configurationMembers(comptime index: usize, comptime instructions: anytype, comptime output_schema: anytype) type {
+    if (index == session_settings.entries.len) return struct {
+        const shape = .{"}"};
+    };
+    const entry = session_settings.entries[index];
+    const value = switch (entry.kind) {
+        .text, .choice => |capacity| State(Hole{ .string = capacity }, entry.nullable),
+        .decimal_policy => State(Hole{ .string = 20 }, entry.nullable),
+        .tools => State(ToolNameList, entry.nullable),
+        .content => if (std.mem.eql(u8, entry.field, "instructions")) instructions else output_schema,
+    };
+    const member = .{ (if (index == 0) "" else ",") ++ "\"" ++ entry.field ++ "\":", value };
+    return struct {
+        // loaded_tools was the only optional member in the original shape.
+        const shape = (if (std.mem.eql(u8, entry.field, "loaded_tools")) .{Optional(member)} else member) ++ configurationMembers(index + 1, instructions, output_schema).shape;
     };
 }
 

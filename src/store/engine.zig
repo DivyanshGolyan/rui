@@ -4,6 +4,7 @@
 //! `stepWrite`, `endStatement`). The guards, cardinalities and passes stay
 //! in Access, written once for every engine.
 
+const std = @import("std");
 const Sqlite = @import("engine/Sqlite.zig");
 pub const Mysql = @import("engine/Mysql.zig");
 
@@ -44,14 +45,18 @@ pub const Failure = error{
     ContentNotInserted,
 };
 
+/// Where a streaming adapter queues a payload statement. Access owns the
+/// queue and steps the result; the adapter owns its representation.
+pub const ContentHost = struct {
+    context: *anyopaque,
+    chunk: *const fn (context: *anyopaque, id: u64, index: u64, n: usize) error{ContentWriteFailed}!*std.Io.Writer,
+};
+
+pub const Pass = enum { access, identity };
+
 pub const Engine = union(Kind) {
     sqlite: Sqlite,
     mysql: Mysql,
-
-    /// Only network engines queue a pass before decoding its rows.
-    pub inline fn batches(e: *const Engine) bool {
-        return e.* == .mysql;
-    }
 
     pub fn publicSelector(e: *const Engine, sqlite_selector: []const u8) []const u8 {
         return switch (e.*) {
@@ -89,15 +94,25 @@ pub const Engine = union(Kind) {
         };
     }
 
-    pub inline fn noteIdentityPass(e: *Engine) void {
-        if (@import("builtin").is_test) switch (e.*) {
-            .sqlite => {},
-            .mysql => |*s| s.state.testing_shape.identity_passes += 1,
+    // Each method only picks the variant, so it is inline: one variant
+    // costs no call.
+
+    /// Whether binds construct an outgoing batch rather than statements
+    /// stepped in process. Also determines the effective `.single` mode.
+    pub inline fn batches(e: *const Engine) bool {
+        return switch (e.*) {
+            .sqlite => false,
+            .mysql => true,
         };
     }
 
-    // Each method only picks the variant, so it is inline: one variant
-    // costs no call.
+    /// Test-only physical pass accounting stays behind the adapter.
+    pub inline fn notePass(e: *Engine, comptime kind: Pass) void {
+        if (@import("builtin").is_test) switch (e.*) {
+            .sqlite => {},
+            .mysql => |*s| s.notePass(kind),
+        };
+    }
 
     /// Whether this statement fits the pending network batch. SQLite binds in place.
     pub inline fn fits(e: *Engine, comptime S: type, args: *const S.Args, now: i64) Failure!bool {
@@ -119,6 +134,46 @@ pub const Engine = union(Kind) {
             .sqlite => {},
             .mysql => |*s| try s.finishPass(),
         }
+    }
+
+    /// A lone queued transaction can append its COMMIT only while armed
+    /// for the queue's first attempt, never during a whole-batch rerun.
+    pub inline fn commitArmed(e: *const Engine) bool {
+        return switch (e.*) {
+            .sqlite => false,
+            .mysql => |*s| s.commitArmed(),
+        };
+    }
+
+    /// A server-side row-count guard whose result follows the write's.
+    /// SQLite checks counts in process and queues no extra result.
+    pub inline fn guard(e: *Engine, comptime at_most: bool, rows: u64) bool {
+        return switch (e.*) {
+            .sqlite => false,
+            .mysql => |*s| s.guard(at_most, rows),
+        };
+    }
+
+    pub inline fn appendCommit(e: *Engine) bool {
+        return switch (e.*) {
+            .sqlite => false,
+            .mysql => |*s| s.appendCommit(),
+        };
+    }
+
+    /// Only an adapter that appended COMMIT queues its result/settlement.
+    pub inline fn stepCommit(e: *Engine) Failure!void {
+        return switch (e.*) {
+            .sqlite => unreachable,
+            .mysql => |*s| s.stepCommit(),
+        };
+    }
+
+    pub inline fn settleCommit(e: *Engine) Failure!void {
+        return switch (e.*) {
+            .sqlite => unreachable,
+            .mysql => |*s| s.settleCommit(),
+        };
     }
 
     pub inline fn discardBatch(e: *Engine) Failure!void {
@@ -183,10 +238,34 @@ pub const Engine = union(Kind) {
         }
     }
 
-    pub inline fn writePayload(e: *Engine, content_id: u64, bytes: []const u8) Failure!void {
+    /// Lower while constructing the outgoing batch, never after startPass.
+    /// `host` accepts ordinary typed statements or an in-process payload.
+    pub inline fn queuePayload(e: *Engine, content_id: u64, bytes: []const u8, host: anytype) void {
+        switch (e.*) {
+            .sqlite => |*s| s.queuePayload(content_id, bytes, host),
+            .mysql => |*s| s.queuePayload(content_id, bytes, host),
+        }
+    }
+
+    pub inline fn stepPayload(e: *Engine, content_id: u64, bytes: []const u8) Failure!void {
         return switch (e.*) {
             .sqlite => |*s| s.writePayload(content_id, bytes),
-            .mysql => |*s| s.writePayload(content_id, bytes),
+            // Network payloads were lowered to statements at queue time.
+            .mysql => unreachable,
+        };
+    }
+
+    pub inline fn chunkFits(e: *Engine, id: u64, index: u64, n: usize) bool {
+        return switch (e.*) {
+            .sqlite => unreachable,
+            .mysql => |*s| s.chunkFits(id, index, n),
+        };
+    }
+
+    pub inline fn beginChunk(e: *Engine, id: u64, index: u64) Failure!*std.Io.Writer {
+        return switch (e.*) {
+            .sqlite => unreachable,
+            .mysql => |*s| s.beginChunk(id, index),
         };
     }
 
@@ -199,7 +278,7 @@ pub const Engine = union(Kind) {
 
     /// A sink on the payload of `content_id`, whose row holds `length`
     /// bytes. On MySQL its chunks ride `host`'s batches.
-    pub inline fn openSink(e: *Engine, content_id: u64, length: u64, host: Mysql.ContentHost) Failure!ContentSink {
+    pub inline fn openSink(e: *Engine, content_id: u64, length: u64, host: ContentHost) Failure!ContentSink {
         return switch (e.*) {
             .sqlite => |*s| .{ .sqlite = try s.openSink(content_id, length) },
             .mysql => |*s| .{ .mysql = try s.openSink(content_id, length, host) },

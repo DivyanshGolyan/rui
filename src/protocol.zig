@@ -1,4 +1,5 @@
 const std = @import("std");
+const session_settings = @import("session_settings.zig");
 const cli_value = @import("cli_value.zig");
 const built_in_tool = @import("built_in_tool.zig");
 const model_capability = @import("model_capability.zig");
@@ -1018,32 +1019,35 @@ fn ParserOf(comptime Custody: type) type {
 
         /// Fills `out`, which holds its defaults.
         fn parseConfiguration(self: *Parser, allow_content: bool, out: *Configuration) !void {
-            const Field = enum { workspace, provider, model, instructions, tools, loaded_tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
+            const Field = std.meta.FieldEnum(Configuration);
             try self.expectByte('{');
             var members: Members = .{};
             var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextField(Field, &members, &seen)) |field| switch (field) {
-                .workspace => try self.readOptionalSmall(max_workspace_bytes, &out.workspace),
-                .provider => try self.readOptionalSmall(max_provider_bytes, &out.provider),
-                .model => try self.readOptionalSmall(max_model_bytes, &out.model),
-                .instructions => try self.readContent(&out.instructions, false, allow_content),
-                .tools => try self.readTools(&out.tools),
-                .loaded_tools => try self.readTools(&out.loaded_tools),
-                .permission_mode => try self.readOptionalSmall(16, &out.permission_mode),
-                .output_schema => try self.readContent(&out.output_schema, true, allow_content),
-                .compaction_trigger => try self.readOptionalPolicy(&out.compaction_trigger),
-                .output_reservation => try self.readOptionalPolicy(&out.output_reservation),
-                .reasoning_effort => try self.readOptionalSmallNullable(16, &out.reasoning_effort, true),
-                .label => try self.readOptionalSmallNullable(max_label_bytes, &out.label, true),
+                inline else => |tag| {
+                    const entry = session_settings.entries[@backingInt(tag)];
+                    const name = entry.field;
+                    const value = &@field(out, name);
+                    switch (entry.kind) {
+                        .text, .choice => |capacity| try self.readOptionalSmallNullable(capacity, value, entry.nullable),
+                        .content => try self.readContent(value, entry.nullable, allow_content),
+                        .tools => try self.readTools(value, entry.nullable),
+                        .decimal_policy => try self.readOptionalSmallNullable(20, value, entry.nullable),
+                    }
+                },
             };
         }
 
         fn validateCreatingConfiguration(configuration: *const Configuration) !void {
-            if (configuration.model.state != .value or
-                configuration.compaction_trigger.state != .value or
-                configuration.tools.state != .value or
-                configuration.permission_mode.state != .value or
-                configuration.reasoning_effort.state == .omitted) return error.MissingField;
+            inline for (session_settings.entries) |entry| {
+                const name = entry.field;
+                const state = @field(configuration, name).state;
+                switch (entry.create) {
+                    .optional => {},
+                    .must_value => if (state != .value) return error.MissingField,
+                    .must_state => if (state == .omitted) return error.MissingField,
+                }
+            }
             var tools = configuration.tools.iterator();
             while (tools.next()) |tool| {
                 if (std.mem.eql(u8, tool, "bash") and configuration.workspace.state != .value)
@@ -1379,10 +1383,6 @@ fn ParserOf(comptime Custody: type) type {
             if (out.position == 0 or out.position > std.math.maxInt(i64) or out.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
         }
 
-        fn readOptionalPolicy(self: *Parser, field: *OptionalBounded(20)) !void {
-            try self.readOptionalSmallNullable(20, field, true);
-        }
-
         fn readOptionalSmall(self: *Parser, comptime capacity: usize, field: *OptionalBounded(capacity)) !void {
             try self.readOptionalSmallNullable(capacity, field, false);
         }
@@ -1433,7 +1433,7 @@ fn ParserOf(comptime Custody: type) type {
             field.state = try envelopeState(&state, seen, allow_null);
         }
 
-        fn readTools(self: *Parser, tools: *ToolsField) !void {
+        fn readTools(self: *Parser, tools: *ToolsField, allow_null: bool) !void {
             try self.expectByte('{');
             var members: Members = .{};
             var seen: std.enums.EnumSet(Envelope) = .empty;
@@ -1454,7 +1454,7 @@ fn ParserOf(comptime Custody: type) type {
                     };
                 },
             };
-            tools.state = try envelopeState(&state, seen, false);
+            tools.state = try envelopeState(&state, seen, allow_null);
         }
 
         /// Reads a literal null, or leaves the input where it was.
@@ -3121,5 +3121,66 @@ test "inline skills leave every existing canonical mutation digest unchanged" {
             else => unreachable,
         };
         try std.testing.expectEqualStrings(case.digest, &std.fmt.bytesToHex(digest, .lower));
+    }
+}
+
+// Captured from the hand-written configureDigest before table derivation.
+test "Session settings configure digest golden" {
+    var command: Tested.ConfigureCommand = .{};
+    try command.session.set("k7m2qx");
+    try std.testing.expectEqualStrings("db4015965f28197d8bfae4b13f61edb8b1047904643d764a7cc8ce10f9680e30", &std.fmt.bytesToHex(command.semanticDigest(), .lower));
+    command.require_model = true;
+    const c = &command.configuration;
+    c.workspace.state = .value;
+    try c.workspace.value.set("/tmp/workspace");
+    c.provider.state = .value;
+    try c.provider.value.set("openai");
+    c.model.state = .value;
+    try c.model.value.set("gpt-5");
+    c.instructions = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
+    c.tools = try command_input.ToolsField.of(&.{ "bash", "find_tools" });
+    c.loaded_tools = try command_input.ToolsField.of(&.{"bash"});
+    c.permission_mode.state = .value;
+    try c.permission_mode.value.set("ask");
+    c.output_schema = .{ .state = .value, .length = 2, .digest = contentDigest("{}") };
+    c.compaction_trigger.state = .value;
+    try c.compaction_trigger.value.set("12345");
+    c.output_reservation.state = .explicit_null;
+    c.reasoning_effort.state = .value;
+    try c.reasoning_effort.value.set("high");
+    c.label.state = .value;
+    try c.label.value.set("Golden Session");
+    try std.testing.expectEqualStrings("46c2a9eafbd26d33d6584f2758bad73383b642adf2b6d1655dea294136399522", &std.fmt.bytesToHex(command.semanticDigest(), .lower));
+}
+
+// Expectations are the pre-table wire grammar, not facts read from the table.
+test "Session settings preserve omitted and nullable wire states for every field" {
+    inline for (.{
+        .{ "workspace", false },
+        .{ "provider", false },
+        .{ "model", false },
+        .{ "instructions", false },
+        .{ "tools", false },
+        .{ "loaded_tools", false },
+        .{ "permission_mode", false },
+        .{ "output_schema", true },
+        .{ "compaction_trigger", true },
+        .{ "output_reservation", true },
+        .{ "reasoning_effort", true },
+        .{ "label", true },
+    }) |case| {
+        inline for (.{ "omitted", "null" }) |state| {
+            const json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"configuration\":{\"" ++ case[0] ++ "\":{\"state\":\"" ++ state ++ "\"}}}";
+            var source: MetadataSource = .{ .input = json };
+            var parser: Tested.Parser = .{ .source = &source };
+            if (comptime std.mem.eql(u8, state, "null") and !case[1]) {
+                try std.testing.expectError(error.InvalidFieldState, parseForTest(&parser));
+            } else {
+                const request = try parseForTest(&parser);
+                const expected: FieldState = if (comptime std.mem.eql(u8, state, "null")) .explicit_null else .omitted;
+                const name = case[0];
+                try std.testing.expectEqual(expected, @field(request.configure.configuration, name).state);
+            }
+        }
     }
 }

@@ -4861,3 +4861,68 @@ test "inline skills Message records keep /name words as exact text and refuse a 
     defer file.close(std.testing.io);
     try std.testing.expectError(error.InvalidRequestRecord, readCapturedBinding(std.testing.io, &file));
 }
+
+test "Session settings client writes every setting and the Host parser preserves its value" {
+    const session_settings = @import("session_settings.zig");
+    const host_request = @import("wire_request.zig");
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    inline for (.{ .{ "instructions.txt", "Follow the test instructions." }, .{ "schema.json", "{}" } }) |input| {
+        const file = try tmp.dir.createFile(io, input[0], .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, input[1]);
+    }
+    var instructions_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var schema_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var captured = try captureConfigure(io, .{
+        .store = root,
+        .session = .create,
+        .workspace = .{ .present = true, .value = root },
+        .provider = .{ .present = true, .value = "openai" },
+        .model = .{ .present = true, .value = "gpt-5" },
+        .instructions = .{ .state = .value, .path = try std.fmt.bufPrint(&instructions_path, "{s}/instructions.txt", .{root}) },
+        .tools = "bash,find_tools",
+        .loaded_tools = "bash",
+        .permission_mode = .{ .present = true, .value = "ask" },
+        .output_schema = .{ .state = .value, .path = try std.fmt.bufPrint(&schema_path, "{s}/schema.json", .{root}) },
+        .compaction_trigger = .{ .present = true, .value = "1000" },
+        .output_reservation = .{ .present = true, .value = "20" },
+        .reasoning_effort = .{ .present = true, .value = "high" },
+        .label = .{ .present = true, .value = "Every setting" },
+    }, .{ .generated = root }).get();
+    defer captured.close(io);
+    var bytes: [8192]u8 = undefined;
+    const length = try captured.file.readPositionalAll(io, &bytes, 0);
+    const ingress = try std.testing.allocator.create(host_request.Ingress);
+    defer std.testing.allocator.destroy(ingress);
+    var retained: ?@import("named_scratch.zig").Owner = null;
+    ingress.init(std.testing.allocator, .{ .io = io, .content_length = length, .scratch_path = root, .request_number = 1, .retained_scratch = &retained });
+    defer ingress.deinit();
+    try ingress.feed(bytes[0..length]);
+    const request = try ingress.finish();
+    defer request.removeTemporaryContent(io) catch unreachable;
+    const configuration = &request.configure.configuration;
+    var missing_buffer: [4096]u8 = undefined;
+    var missing: std.Io.Writer = .fixed(&missing_buffer);
+    inline for (session_settings.entries) |entry| {
+        if (@field(configuration, entry.field).state != .value)
+            try missing.print("{s}: ConfigureInput fixture / client.Capture.writeConfiguration / Host Parser\n", .{entry.field});
+    }
+    try std.testing.expectEqualStrings("", missing.buffered());
+    try std.testing.expectEqualStrings(root, configuration.workspace.value.slice());
+    try std.testing.expectEqualStrings("openai", configuration.provider.value.slice());
+    try std.testing.expectEqualStrings("gpt-5", configuration.model.value.slice());
+    try std.testing.expectEqualStrings("bash find_tools", configuration.tools.names.slice());
+    try std.testing.expectEqualStrings("bash", configuration.loaded_tools.names.slice());
+    try std.testing.expectEqualStrings("ask", configuration.permission_mode.value.slice());
+    try std.testing.expectEqualStrings("1000", configuration.compaction_trigger.value.slice());
+    try std.testing.expectEqualStrings("20", configuration.output_reservation.value.slice());
+    try std.testing.expectEqualStrings("high", configuration.reasoning_effort.value.slice());
+    try std.testing.expectEqualStrings("Every setting", configuration.label.value.slice());
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Follow the test instructions."), &configuration.instructions.digest);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest("{}"), &configuration.output_schema.digest);
+}

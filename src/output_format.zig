@@ -5,7 +5,7 @@ const conversation_read = @import("conversation_read.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const ModelOperationKind = @import("turn_policy.zig").Purpose;
-pub const OutputItemKind = enum(u8) { reasoning = 1, message = 2, function_call = 3, compaction = 4, web_search_call = 5 };
+pub const OutputItemKind = @import("output_item.zig").Kind;
 pub const OutputRecordTag = enum(u8) {
     item = 1,
     /// A message's text: its text parts' decoded text back to back, as one
