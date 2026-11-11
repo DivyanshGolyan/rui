@@ -4960,6 +4960,31 @@
           }
         ]
       },
+      "LastLineFields": {
+        "type": "object",
+        "properties": {
+          "position": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "x-rui-max-bytes": 200
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "position",
+          "text"
+        ],
+        "additionalProperties": false
+      },
       "LaunchFrame": {
         "type": "object",
         "properties": {
@@ -11691,6 +11716,16 @@
               }
             ]
           },
+          "last_line": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastLineFields"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "work": {
             "$ref": "#/components/schemas/SessionWork"
           },
@@ -11712,6 +11747,7 @@
           "revision",
           "end",
           "first_message",
+          "last_line",
           "work",
           "peers"
         ],

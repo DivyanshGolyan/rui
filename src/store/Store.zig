@@ -1271,7 +1271,7 @@ pub const Store = struct {
         self.identities().survey.asked = asked;
         // Nothing committed since the survey ran, right after its COMMIT.
         if (survey.kept == .ready and survey.asked == asked and !self.isFenced())
-            return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation };
+            return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation, .retry = survey.retry };
         const entry = try enter(self, .none);
         defer entry.release();
         var access: store_access.Access(.survey, error{}) = .open(&entry);
@@ -2071,6 +2071,7 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype) void {
     kept.bash = found.bash;
     kept.message = found.message;
     kept.tool_continuation = found.tool_continuation;
+    kept.retry = found.retry;
     kept.kept = .fresh;
 }
 
@@ -2336,7 +2337,8 @@ const Survey = packed struct(u16) {
     bash: bool = false,
     message: bool = false,
     tool_continuation: bool = false,
-    _: u7 = 0,
+    retry: bool = false,
+    _: u6 = 0,
 };
 
 const Admitted = struct {
