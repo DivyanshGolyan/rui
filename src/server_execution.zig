@@ -380,7 +380,7 @@ const Workspace = struct {
     /// `.bash_preparing` slot owns `bash_input` and `bash_preparation`,
     /// `bash_prepared` lives from the last advance to launch, and
     /// `bash_outcome` from completion to settlement.
-    bash_input: store_module.BashExecutionInput,
+    bash_input: store_module.ActionExecutionInput,
     bash_preparation: bash.Preparation,
     bash_prepared: bash.Prepared,
     bash_outcome: bash.Outcome,
@@ -1549,7 +1549,7 @@ fn admitBashAttempt(
     };
     testTransition(host, .action_attempt_admitted, action_binding);
     const input = &workspace.bash_input;
-    host.store.readBashExecutionInput(action_binding, input) catch |err| {
+    host.store.readActionExecutionInput(.bash, action_binding, input) catch |err| {
         settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be read.");
         finishCustodyNow(host, slot);
         if (host.store.isFenced()) fenceDispatch(host, "Bash canonical input", err);
@@ -3057,10 +3057,11 @@ test "cleanup publication follows complete execution retirement" {
     // calls this test drives directly read the plain test clock.
     var scratch = bashScratch(&host);
     scratch.io = std.testing.io;
-    var input: store_module.BashExecutionInput = .{
+    var input: store_module.ActionExecutionInput = .{
+        .binding = .{ .action_id = 11, .parent_operation_id = 1, .turn_id = 1 },
         .session = .{},
         .sender_handle = .{},
-        .workspace = workspace,
+        .runner = .{ .bash = .{ .workspace = workspace } },
         .arguments = .{ .length = arguments.len, .digest = undefined },
         .timeout_ms = 1000,
     };

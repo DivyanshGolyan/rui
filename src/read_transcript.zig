@@ -443,7 +443,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     const submitTestMessage = storage.testingSubmitMessage;
     const TestingCall = storage.TestingCall;
     const settleCallsForTesting = storage.settleCallsForTesting;
-    const BashExecutionInput = storage.BashExecutionInput;
+    const ActionExecutionInput = storage.ActionExecutionInput;
     const ActionSettlement = storage.ActionSettlement;
     const ContentReader = storage.ContentReader;
     const testingBytesContent = storage.testingBytesContent;
@@ -479,8 +479,8 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     const work = (try database.nextCoreWork()).?.action;
     try std.testing.expect(try database.deliverAgentMessage(work.binding, "zzzzzz", "hello", .{}) == .failed);
     const sender_action = (try database.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-    var sender_input: BashExecutionInput = undefined;
-    try database.readBashExecutionInput(sender_action, &sender_input);
+    var sender_input: ActionExecutionInput = undefined;
+    try database.readActionExecutionInput(.bash, sender_action, &sender_input);
     var rename: wire_request.ConfigureCommand = .{};
     try rename.key.set("transcript-source-label");
     rename.session = source;

@@ -45,7 +45,7 @@ const ActionSettlement = action_domain.ActionSettlement;
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
 const AttemptAdmission = model_admission_domain.AttemptAdmission;
 const AttemptBinding = store_core.AttemptBinding;
-const BashExecutionInput = action_domain.BashExecutionInput;
+const ActionExecutionInput = action_domain.ActionExecutionInput;
 const ConfigurationContentAction = configuration_domain.ConfigurationContentAction;
 const ConfigurationUpdatePlan = configuration_domain.ConfigurationUpdatePlan;
 const ConfigureReply = configuration_domain.ConfigureReply;
@@ -1059,8 +1059,8 @@ test "canonical report and Action read failures fence later commands" {
                 .arguments => if (storage.actionArguments(allocated_session_2.slice(), try store_testing.sqlite_only.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{}))) |_| {} else |err| err,
                 .execution => blk: {
                     const action = (try storage.admitNextActionAttempt(300_000, .{})).?;
-                    var input: BashExecutionInput = undefined;
-                    break :blk storage.readBashExecutionInput(action.permit.binding, &input);
+                    var input: ActionExecutionInput = undefined;
+                    break :blk storage.readActionExecutionInput(.bash, action.permit.binding, &input);
                 },
             };
             try std.testing.expectError(error.CorruptStore, result);
@@ -3605,25 +3605,25 @@ test "a Bash binding that is unknown, unattempted or without its revision is sta
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "stale-bash-config");
     const action = try attemptBashForTesting(&storage, &tmp, session.slice());
-    var input: BashExecutionInput = undefined;
-    try storage.readBashExecutionInput(action, &input);
+    var input: ActionExecutionInput = undefined;
+    try storage.readActionExecutionInput(.bash, action, &input);
     try std.testing.expectEqualStrings(session.slice(), input.session.slice());
     try std.testing.expectEqual(@as(u64, 300_000), input.timeout_ms);
 
     var unknown = action;
     unknown.action_id += 1000;
-    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(unknown, &input));
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.bash, unknown, &input));
     // The other Action of the call pair, never attempted: its timeout is NULL.
     var unattempted = action;
     unattempted.action_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT action_id FROM action_operation WHERE session_ref=?1 AND attempt_ordinal=0", .{session.slice()});
-    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(unattempted, &input));
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.bash, unattempted, &input));
     var rebound = action;
     rebound.turn_id += 1000;
-    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(rebound, &input));
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.bash, rebound, &input));
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET permission_revision=999 WHERE session_ref=?1 AND attempt_ordinal=1", .{session.slice()});
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
-    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(action, &input));
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.bash, action, &input));
     try std.testing.expect(!storage.isFenced());
 }
 
@@ -9623,7 +9623,7 @@ test "MCP Actions follow ask and bypass permission and continue after resolution
         try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
         try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
         if (std.mem.eql(u8, mode, "ask")) {
-            try std.testing.expect((try storage.nextMcpAction()) == null);
+            try std.testing.expect((try storage.nextAction(.mcp)) == null);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=0 AND approval_position IS NOT NULL", .{}));
             var allow: protocol.PermissionDecisionCommand = .{ .action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation", .{}), .decision = .allow_once };
             try allow.key.set("mcp-permission-allow");
@@ -9631,12 +9631,12 @@ test "MCP Actions follow ask and bypass permission and continue after resolution
             try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
         }
         try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1", .{}));
-        const action = (try storage.nextMcpAction()).?;
+        const action = (try storage.nextAction(.mcp)).?;
         try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
-        try storage.resolveMcpAction(action.action_id, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
-        try std.testing.expect((try storage.nextMcpAction()) == null);
+        try storage.resolveAction(action, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
+        try std.testing.expect((try storage.nextAction(.mcp)) == null);
         // A selected Action that was resolved before dispatch is a harmless no-op.
-        try storage.resolveMcpAction(action.action_id, .spawn_failed, "not used", .{});
+        try storage.resolveAction(action, .spawn_failed, "not used", .{});
         try std.testing.expect(!storage.isFenced());
         const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
@@ -9761,7 +9761,7 @@ test "MCP permission and core authorization coexist in one Turn" {
     try settleCallsForTesting(&storage, &tmp, model, "mixed-metadata", &calls);
     try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1", .{}));
     try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
-    try std.testing.expect((try storage.nextMcpAction()) == null);
+    try std.testing.expect((try storage.nextAction(.mcp)) == null);
     const report = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.indexOf(u8, report, "\"tool\":\"fetch_page\"") != null);
@@ -9780,10 +9780,10 @@ test "MCP permission and core authorization coexist in one Turn" {
     try allow.key.set("mixed-allow");
     allow.session = session;
     try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-    const mcp = (try storage.nextMcpAction()).?;
+    const mcp = (try storage.nextAction(.mcp)).?;
     try std.testing.expectEqual(action_id, mcp.action_id);
     try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
-    try storage.resolveMcpAction(mcp.action_id, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
+    try storage.resolveAction(mcp, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expectEqual(model.turn_id, continuation.turn_id);
 }
@@ -9813,9 +9813,9 @@ test "MCP work selected before its parent stops yields to the owed child stop" {
     var stop = try completeSessionStop("mcp-parent-stop", parent.slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
     // A selection is not authority: the parent's stop committed first.
-    try storage.resolveMcpAction(selected.action_id, .spawn_failed, "must not resolve", .{});
+    try storage.resolveAction(selected, .spawn_failed, "must not resolve", .{});
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code IS NOT NULL", .{}));
-    try std.testing.expect((try storage.nextMcpAction()) == null);
+    try std.testing.expect((try storage.nextAction(.mcp)) == null);
     const owed = (try storage.nextCoreWork()).?.stop;
     var owed_stop = try completeSessionStop(owed.key.slice(), owed.session.slice());
     try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
@@ -9835,7 +9835,7 @@ test "MCP work selected before its parent stops yields to the owed child stop" {
         .{ .item_id = "item-2", .name = "fetch_page", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{}", .decoded_arguments = "{}" },
     });
     const again = (try storage.nextCoreWork()).?.mcp;
-    try storage.resolveMcpAction(again.action_id, .spawn_failed, "interim", .{});
+    try storage.resolveAction(again, .spawn_failed, "interim", .{});
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NOT NULL", .{again.action_id}));
     try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
 }
@@ -9915,19 +9915,19 @@ test "MCP attempts serialize Sessions and recover without replay" {
     const first = (try storage.nextCoreWork()).?.mcp.action_id;
     // Selection repeats until admission: later calls cannot overtake it.
     try std.testing.expectEqual(first, (try storage.nextCoreWork()).?.mcp.action_id);
-    const binding = (try storage.admitMcpActionAttempt(first, 1234, .{})).?;
-    try std.testing.expect((try storage.admitMcpActionAttempt(first + 1, 600_000, .{})) == null);
-    var input: action_domain.McpExecutionInput = undefined;
-    try storage.readMcpExecutionInput(binding, &input);
+    const binding = (try storage.admitActionAttempt(.{ .action_id = first, .runner = .mcp }, 1234, .{})).?.permit.binding;
+    try std.testing.expect((try storage.admitActionAttempt(.{ .action_id = first + 1, .runner = .mcp }, 600_000, .{})) == null);
+    var input: action_domain.ActionExecutionInput = undefined;
+    try storage.readActionExecutionInput(.mcp, binding, &input);
     try std.testing.expectEqualStrings(sessions[0].slice(), input.session.slice());
-    try std.testing.expectEqualStrings(input.session.slice(), input.root.slice());
-    try std.testing.expect(input.parent == null);
-    try std.testing.expectEqualStrings("fetch_page", input.name.slice());
+    try std.testing.expectEqualStrings(input.session.slice(), input.runner.mcp.root.slice());
+    try std.testing.expect(input.runner.mcp.parent == null);
+    try std.testing.expectEqualStrings("fetch_page", input.runner.mcp.name.slice());
     try std.testing.expectEqual(@as(u64, 1234), input.timeout_ms);
     try std.testing.expectEqual(@as(usize, 32), input.sender_handle.slice().len);
-    try std.testing.expectEqualStrings("docs", input.server.slice());
-    try std.testing.expectEqual(@as(u64, mcp_record.input_schema.len), input.input_schema.length);
-    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(mcp_record.input_schema), &input.input_schema.digest);
+    try std.testing.expectEqualStrings("docs", input.runner.mcp.server.slice());
+    try std.testing.expectEqual(@as(u64, mcp_record.input_schema.len), input.runner.mcp.input_schema.length);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(mcp_record.input_schema), &input.runner.mcp.input_schema.digest);
     // Full MCP slots must not hide a later slot-free core call.
     const core = (try storage.nextCoreWorkForHost(false)).?.action;
     try std.testing.expectEqual(first + 2, core.binding.action_id);
@@ -9937,12 +9937,12 @@ test "MCP attempts serialize Sessions and recover without replay" {
     try std.testing.expect(try storage.recoverOneUncertainAction(action_domain.ActiveOperationFilter.empty()));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='indeterminate' AND CAST(c.payload AS TEXT) LIKE ?2", .{ first, "%Host stopped%" }));
     try std.testing.expectEqual(first + 1, (try storage.nextCoreWork()).?.mcp.action_id);
-    const unsent = (try storage.admitMcpActionAttempt(first + 1, 600_000, .{})).?;
+    const unsent = (try storage.admitActionAttempt(.{ .action_id = first + 1, .runner = .mcp }, 600_000, .{})).?.permit.binding;
     var stop = try completeSessionStop("mcp-unsent-stop", sessions[0].slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
     _ = try storage.settleActionAttempt(unsent, .spawn_failed, "not available", .{});
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='cancelled' AND CAST(c.payload AS TEXT) LIKE ?2", .{ unsent.action_id, "%not sent%" }));
-    const sent = (try storage.admitMcpActionAttempt(other, 5_000, .{})).?;
+    const sent = (try storage.admitActionAttempt(.{ .action_id = other, .runner = .mcp }, 5_000, .{})).?.permit.binding;
     var sent_stop = try completeSessionStop("mcp-sent-stop", sessions[1].slice());
     try std.testing.expect(storage.stopSession(&sent_stop, .{}) == .accepted);
     _ = try storage.settleActionAttempt(sent, .succeeded, "terminal result raced stop", .{});
@@ -10865,5 +10865,45 @@ test "an engine OutOfMemory under configure, a skills reload or a catalog read a
         }
         try std.testing.expect(!sqlite.testing_fail_next_insert);
         try std.testing.expect(!storage.isFenced());
+    }
+}
+
+test "Bash admission entry points agree on readiness" {
+    const Case = enum { ready, unauthorized, resolved, attempted, closed, stopped };
+    for (std.enums.values(Case)) |case| {
+        var results: [2]bool = undefined;
+        for (&results, 0..) |*result, entry| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var configuration = try completeConfiguration("bash-matrix", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            configuration.configuration.tools = try .of(&.{"bash"});
+            configuration.configuration.permission_mode.state = .value;
+            try configuration.configuration.permission_mode.value.set("bypass");
+            const configured = try storage.configure(&configuration, .{});
+            try std.testing.expect(configured == .accepted);
+            const session = configured.accepted.session;
+            try submitTestMessage(&storage, &tmp, "bash-matrix-input", "bash-matrix-input", session.slice(), "propose");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCallsForTesting(&storage, &tmp, model, "bash-matrix-calls", &.{.{ .item_id = "one", .name = "bash", .encoded_call_id = "one", .decoded_call_id = "one", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"true\\\"}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"true\"}" }});
+            const id = try store_testing.sqlite_only.queryU64(&storage, "SELECT action_id FROM action_operation", .{});
+            switch (case) {
+                .ready => {},
+                .unauthorized => try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET authorized=0,decided_at=NULL", .{}),
+                .resolved => try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET resolution_code='failed',resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1,resolved_at=1", .{}),
+                .attempted => try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,bash_timeout_ms=1", .{}),
+                .closed => try store_testing.sqlite_only.exec(&storage, "UPDATE turn SET outcome_code='cancelled',outcome_at=1", .{}),
+                .stopped => try store_testing.sqlite_only.exec(&storage, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) SELECT 'bash-matrix',session_ref,turn_id,0,1 FROM turn", .{}),
+            }
+            result.* = if (entry == 0)
+                (try storage.admitNextActionAttempt(300_000, .{})) != null
+            else
+                (try storage.admitActionAttempt(.{ .action_id = id, .runner = .bash }, 300_000, .{})) != null;
+        }
+        try std.testing.expectEqual(case == .ready, results[0]);
+        try std.testing.expectEqual(results[0], results[1]);
     }
 }
