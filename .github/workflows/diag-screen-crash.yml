@@ -1,0 +1,49 @@
+name: Diagnose screen child crash
+on:
+  push:
+    branches: [claude/project-thread-n0xurl-diag]
+permissions:
+  contents: read
+jobs:
+  diag:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          targets: '["test-logic", "test-native", "upgrade-integration"]'
+          check-part: compiled
+          publish-caches: 'false'
+      - name: Enable core dumps and record the CPU
+        run: |
+          grep -m1 'model name' /proc/cpuinfo
+          grep -m1 flags /proc/cpuinfo | tr ' ' '\n' | grep -cE 'avx512' || true
+          uname -a
+          sudo mkdir -p /tmp/cores && sudo chmod 1777 /tmp/cores
+          sudo sysctl -w kernel.core_pattern=/tmp/cores/core.%e.%p
+          (sudo apt-get install -yq gdb >/dev/null 2>&1 || true) &
+      - name: Build as linux_build does, with cores
+        id: build
+        continue-on-error: true
+        run: |
+          ulimit -c unlimited
+          zig build ci-build -Dpr-ci=true -j8 -Dci-targets=test-logic,test-native,upgrade-integration -Dci-part=rest --prefix "$RUNNER_TEMP/out" --summary failures
+      - name: Inspect cores
+        if: always()
+        run: |
+          ls -la /tmp/cores || true
+          command -v gdb || sudo apt-get install -yq gdb >/dev/null 2>&1 || true
+          for c in /tmp/cores/core.*; do
+            [ -e "$c" ] || continue
+            file "$c"
+            exe=$(file "$c" | sed -n "s/.*execfn: '\([^']*\)'.*/\1/p")
+            echo "exe=$exe"
+            [ -n "$exe" ] && file "$exe"
+            gdb -batch -ex 'info threads' -ex 'thread apply all bt 12' -ex 'info registers' -ex 'x/12i $pc-24' -ex 'info proc mappings' "$exe" "$c" 2>&1 | head -200
+          done
+          find .zig-cache "$HOME/.cache/zig" -name maker -type f -exec ls -la {} \; 2>/dev/null | head
