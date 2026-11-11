@@ -236,7 +236,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .height = screen.height,
         .screen = &screen,
     };
-    const below = if (!self.more or self.size.height == 0) 0 else self.document.measure(shape, self.first, std.math.maxInt(u16)).rows;
+    const below = if (!self.more or self.size.height < 2) 0 else self.document.measure(shape, self.first, std.math.maxInt(u16)).rows;
     var text = window;
     if (below > self.size.height) text.height -= 1;
     const drawn = self.document.draw(text, self.first, true, self.colour, self.style, self.colours);
@@ -606,6 +606,56 @@ test "a drag held at an edge scrolls one row a tick and selects the rows it brin
     try h.send(.release, 3, 5);
     try std.testing.expectEqual(@as(i32, -1), h.scrolls);
     try std.testing.expectEqualStrings("line 3\nline 4\nline 5", h.copies(&copied));
+}
+
+test "DocumentView active edge drag survives zero one and two row resizes with queued ticks" {
+    var text: [32 * 7]u8 = undefined;
+    for (0..32) |index| _ = try std.fmt.bufPrint(text[index * 7 ..][0..7], "line{d:0>2}\n", .{index});
+    for ([_]u16{ 10, 46 }) |width| for ([_]bool{ false, true }) |up| {
+        const h = try Harness.init(&text, .{ .width = width, .height = 3 });
+        defer h.deinit();
+        h.document.top = .{ .offset = 8 * 7 };
+        h.transcript.more = true;
+        _ = try h.frame();
+        try h.drag(.{ 0, 0 }, .{ 0, if (up) -1 else 4 });
+        try std.testing.expect(h.transcript.selection.?.dragging);
+        try std.testing.expect(h.transcript.selection.?.ticking);
+        const anchor = h.transcript.selection.?.anchor;
+
+        // Keep the same live drag while collapsing and restoring the view.
+        // A previously queued tick is delivered after every resized frame;
+        // its redraw must still have text cells for either selection edge.
+        for ([_]u16{ 0, 1, 2, 0, 2, 1 }) |height| {
+            h.size.height = height;
+            _ = try h.frame();
+            h.clearCommands();
+            const before = h.scrolls;
+            try h.transcript.widget().handleEvent(&h.ctx, .tick);
+            const surface = try h.frame();
+            try std.testing.expectEqual(before + @as(i32, if (up) -1 else 1), h.scrolls);
+            try std.testing.expectEqual(height, surface.size.height);
+            try std.testing.expectEqual(@as(u16, if (height == 2) 1 else height), h.transcript.drawn.height);
+            try std.testing.expect(h.transcript.selection.?.dragging);
+            try std.testing.expectEqualDeep(anchor, h.transcript.selection.?.anchor);
+            if (height < 2) {
+                try std.testing.expectEqual(null, h.transcript.continuation());
+                if (height == 1) try std.testing.expect(!std.mem.eql(u8, "…", surface.readCell(0, 0).char.grapheme));
+            } else {
+                try std.testing.expect(h.transcript.continuation() != null);
+                try std.testing.expectEqualStrings("…", surface.readCell(0, 1).char.grapheme);
+            }
+            var ticks: usize = 0;
+            for (h.ctx.cmds.items) |command| ticks += @intFromBool(command == .tick);
+            try std.testing.expectEqual(@as(usize, 1), ticks);
+        }
+        try h.send(.release, 0, 0);
+        try std.testing.expect(!h.transcript.dragging());
+        const after_release = h.scrolls;
+        h.clearCommands();
+        try h.transcript.widget().handleEvent(&h.ctx, .tick);
+        try std.testing.expectEqual(after_release, h.scrolls);
+        try std.testing.expectEqual(@as(usize, 0), h.ctx.cmds.items.len);
+    };
 }
 
 test "a drag on an edge row keeps the pointer's column until the view scrolls" {
