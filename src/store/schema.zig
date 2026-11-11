@@ -3,6 +3,7 @@
 //! stored DDL is compared with it when it opens.
 
 const std = @import("std");
+const session_settings = @import("../session_settings.zig");
 const store_path = @import("../store_path.zig");
 const tool_name = @import("../tool_name.zig");
 const Bounded = @import("../bounded.zig").Bounded;
@@ -846,7 +847,7 @@ pub const tables = [_]Table{
             .{ .name = "position", .type = .int, .check = "position>0" },
             .{ .name = "ordinal", .type = .int, .check = "ordinal>=0" },
             .{ .name = "revision", .type = .int, .check = "revision>1" },
-            .{ .name = "field", .type = .{ .tag = &.{ "provider", "model", "instructions", "tools", "loaded_tools", "permission_mode", "output_schema", "compaction_trigger", "output_reservation", "reasoning_effort", "label" } } },
+            .{ .name = "field", .type = .{ .tag = session_settings.revision_fields } },
             .{ .name = "changed_at", .type = .int, .check = "changed_at>0" },
         },
         .primary_key = &.{ "session_ref", "position", "ordinal" },
