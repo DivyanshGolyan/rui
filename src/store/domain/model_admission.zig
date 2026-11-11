@@ -95,14 +95,18 @@ const Selection = struct {
     turn_id: ?rsql.Positive,
 };
 
+/// The candidate Session is shared by selection and its batched facts read.
+fn runnableCandidateSql(comptime eligibility: []const u8) []const u8 {
+    return "SELECT m.session_ref FROM message_admission m @index(message_admission_pending) WHERE " ++
+        "@served((SELECT provider FROM session WHERE session_ref=m.session_ref))" ++ " AND " ++ eligibility ++
+        " ORDER BY m.admission_id LIMIT 1";
+}
+
 /// The Session whose oldest waiting Message is oldest, among those whose
 /// input `eligibility` admits, with the Messages it takes.
 fn RunnableSelection(comptime eligibility: []const u8) type {
     return rsql.Read(.{
-        .sql = "WITH candidate AS (" ++
-            "SELECT m.session_ref FROM message_admission m @index(message_admission_pending) WHERE " ++
-            "@served((SELECT provider FROM session WHERE session_ref=m.session_ref))" ++ " AND " ++ eligibility ++
-            " ORDER BY m.admission_id LIMIT 1) " ++
+        .sql = "WITH candidate AS (" ++ runnableCandidateSql(eligibility) ++ ") " ++
             "SELECT " ++ rsql.session_head_columns ++ ",min(m.admission_id) AS first_admission,max(m.admission_id) AS cutoff,count(*) AS selected," ++
             "coalesce(sum((SELECT count(*) FROM message_skill k WHERE k.admission_id=m.admission_id)),0) AS skills," ++
             "(SELECT active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
@@ -206,10 +210,9 @@ pub const compaction_failures = .{
 
 /// The facts the next model call's purpose rests on, read only as far as
 /// `turn_policy` needs them, in stages a caller's rounds share, for the
-/// Current report's `context_estimate`: the latest Turn; only where
-/// `asksNextInput`, the first runnable Message, which admission would
-/// select; and only when `turn_policy.forcedPurpose` leaves the purpose
-/// open, `admission_context`, the facts admission weighs in that case.
+/// Current report's `context_estimate`. Recipe identities ride the latest
+/// Turn's round; only where `asksNextInput`, read the first runnable Message.
+/// Only when purpose remains open does the next round count uncovered bytes.
 pub const CompactionRead = struct {
     session: []const u8,
     /// The Session's next position, provider and model.
@@ -217,7 +220,7 @@ pub const CompactionRead = struct {
     provider: provider_name.Provider,
     model: []const u8,
     facts: turn_policy.CompactionFacts,
-    stage: enum { latest, first, context, bytes, done } = .latest,
+    stage: enum { latest, first, bytes, done } = .latest,
     latest: latest_turn.Result = undefined,
     first: first_runnable.Result = undefined,
     context: admission_context.Result = undefined,
@@ -237,9 +240,11 @@ pub const CompactionRead = struct {
     /// Queues this stage's read; false once the facts are read.
     pub fn queue(read: *CompactionRead, a: anytype) bool {
         switch (read.stage) {
-            .latest => a.read(latest_turn, .{ .session = read.session }, &read.latest),
+            .latest => {
+                a.read(latest_turn, .{ .session = read.session }, &read.latest);
+                a.read(admission_context, .{ .session = read.session, .boundary = read.boundary, .provider = read.provider, .model = read.model }, &read.context);
+            },
             .first => a.read(first_runnable, .{ .session = read.session }, &read.first),
-            .context => a.read(admission_context, .{ .session = read.session, .boundary = read.boundary, .provider = read.provider, .model = read.model }, &read.context),
             .bytes => a.read(context_bytes, read.bytes_args, &read.bytes),
             .done => return false,
         }
@@ -253,13 +258,9 @@ pub const CompactionRead = struct {
             .latest => stage: {
                 const latest = read.latest orelse break :stage .done;
                 if (asksNextInput(latest.purpose == 1, latest.active)) break :stage .first;
-                break :stage read.weigh(null);
+                break :stage try read.weigh(null);
             },
-            .first => read.weigh(read.first.first),
-            .context => stage: {
-                read.bytes_args = try takeContext(&read.facts, &read.context, read.model, read.session) orelse break :stage .done;
-                break :stage .bytes;
-            },
+            .first => try read.weigh(read.first.first),
             .bytes => stage: {
                 read.facts.uncovered_bytes = read.bytes.uncovered_bytes;
                 break :stage .done;
@@ -270,11 +271,14 @@ pub const CompactionRead = struct {
 
     /// The latest Turn's `previousTurn`, given the next Turn's first
     /// Message where it asks; then whether the context is still to read.
-    fn weigh(read: *CompactionRead, next_first: ?u64) @TypeOf(read.stage) {
+    fn weigh(read: *CompactionRead, next_first: ?u64) !@TypeOf(read.stage) {
         const latest = read.latest.?;
         const resolution: []const u8 = if (latest.resolution_code) |*code| code.slice() else "";
         read.facts.previous = previousTurn(latest.purpose == 1, resolution, latest.active, latest.first_admission_id.get(), next_first, output_format.OutputItemKind.compaction.replayableTo(latest.model.slice(), read.model, .selected_base));
-        return if (turn_policy.forcedPurpose(read.facts.previous, read.facts.trigger) == null) .context else .done;
+        if (turn_policy.forcedPurpose(read.facts.previous, read.facts.trigger) != null) return .done;
+        const context = if (read.context) |*row| row else return error.CorruptStore;
+        read.bytes_args = try takeContext(&read.facts, context, read.model, read.session) orelse return .done;
+        return .bytes;
     }
 };
 
@@ -338,12 +342,12 @@ fn takeContext(compaction: *turn_policy.CompactionFacts, context: anytype, model
 
 /// The latest accepted output on this binding, even when its usage is absent.
 /// Its admission freezes the recipe it measured; its last item ends coverage.
-fn latestUsageSql(comptime provider: []const u8, comptime model: []const u8) []const u8 {
+fn latestUsageSql(comptime session: []const u8, comptime provider: []const u8, comptime model: []const u8) []const u8 {
     return "SELECT o.history_floor AS usage_floor,o.usage_uncached_tokens AS uncached,o.usage_cache_read_tokens AS cache_read,o.usage_cache_write_tokens AS cache_write," ++
         "o.usage_output_tokens AS output,coalesce((SELECT max(i.session_position) FROM model_output_item i WHERE i.operation_id=o.operation_id),o.admission_position) AS usage_position," ++
         "o.admission_position AS result_admission " ++
         "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
-        "WHERE o.session_ref=?1 AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ " " ++
+        "WHERE o.session_ref=" ++ session ++ " AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ " " ++
         "AND r.provider=" ++ provider ++ " AND r.model=" ++ model ++ " ORDER BY o.admission_position DESC LIMIT 1";
 }
 
@@ -376,18 +380,22 @@ fn uncoveredBytesSql(comptime usage_position: []const u8, comptime frontier: []c
 }
 
 /// The raw newest base, before model compatibility is decided by Recipe.select.
-const base_cte_sql = "base AS (SELECT candidate.operation_id,candidate.admission_position,candidate.history_floor,candidate.session_ref,candidate.settings_revision FROM model_operation candidate WHERE candidate.operation_id=" ++
-    historical_domain.newestBaseSql("?1", "?2") ++ ")";
+fn baseCteSql(comptime session: []const u8, comptime boundary: []const u8) []const u8 {
+    return "base AS (SELECT candidate.operation_id,candidate.admission_position,candidate.history_floor,candidate.session_ref,candidate.settings_revision FROM context_session context JOIN model_operation candidate ON candidate.operation_id=" ++
+        historical_domain.newestBaseSql(session, boundary) ++ ")";
+}
 
 /// Whether the raw base has a changed suffix. A discarded base instead means
 /// all visible history, hence a changed context, as `currentRecipe` decides.
-const changed_since_base_sql = "NOT EXISTS(SELECT 1 FROM base " ++
-    "WHERE NOT EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=?1 " ++
-    "AND e.entry_kind IN (1,2,4) AND e.session_position>base.admission_position AND e.session_position<?2) " ++
-    "AND NOT EXISTS(SELECT 1 FROM model_output_item item @index(model_output_history) " ++
-    "CROSS JOIN model_operation suffix ON suffix.operation_id=item.operation_id " ++
-    "WHERE item.session_ref=?1 AND suffix.session_ref=?1 AND suffix.purpose=0 " ++
-    "AND item.session_position>base.admission_position AND item.session_position<?2))";
+fn changedSinceBaseSql(comptime session: []const u8, comptime boundary: []const u8) []const u8 {
+    return "NOT EXISTS(SELECT 1 FROM base " ++
+        "WHERE NOT EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=" ++ session ++ " " ++
+        "AND e.entry_kind IN (1,2,4) AND e.session_position>base.admission_position AND e.session_position<" ++ boundary ++ ") " ++
+        "AND NOT EXISTS(SELECT 1 FROM model_output_item item @index(model_output_history) " ++
+        "CROSS JOIN model_operation suffix ON suffix.operation_id=item.operation_id " ++
+        "WHERE item.session_ref=" ++ session ++ " AND suffix.session_ref=" ++ session ++ " AND suffix.purpose=0 " ++
+        "AND item.session_position>base.admission_position AND item.session_position<" ++ boundary ++ "))";
+}
 
 const base_columns_sql = "base.admission_position AS base_position," ++
     "base.history_floor AS base_floor,base_revision.model AS base_model";
@@ -395,7 +403,7 @@ const base_revision_join_sql = " LEFT JOIN session_revision base_revision ON bas
 
 /// Overflow recovery uses the same selected recipe as request preparation and pressure.
 pub const context_changed = rsql.Read(.{
-    .sql = "WITH " ++ base_cte_sql ++ ",since AS (SELECT " ++ changed_since_base_sql ++ " AS changed) SELECT since.changed," ++ base_columns_sql ++
+    .sql = "WITH context_session AS (SELECT ?1 AS session_ref,?2 AS boundary)," ++ baseCteSql("context.session_ref", "context.boundary") ++ ",since AS (SELECT " ++ changedSinceBaseSql("context.session_ref", "context.boundary") ++ " AS changed FROM context_session context) SELECT since.changed," ++ base_columns_sql ++
         ",(SELECT r.model FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
         "WHERE o.session_ref=?1 AND o.admission_position=?2) AS model FROM since LEFT JOIN base ON 1" ++ base_revision_join_sql,
     .Args = struct { session: []const u8, boundary: u64 },
@@ -443,26 +451,21 @@ fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []con
     return "r.session_ref=" ++ session ++ " AND r.revision>" ++ appliedFrontierSql(session) ++ " AND r.revision<=" ++ revision ++ " AND r.instructions_updated=1";
 }
 
-/// What admission decides from, inside its transaction: the Session's head
-/// and settings, its latest Turn as `previousTurn` reads it, how many
-/// instruction updates `project_instructions` would project, and the
-/// raw context identities before the Session's next position ?2. They ride
-/// along to avoid another round trip; only a purpose left open by
-/// `turn_policy.forcedPurpose` selects coverage and counts uncovered bytes.
+/// The settings, previous Turn and instruction count frozen inside admission's
+/// transaction. The selected recipe was read under the same Entry lock; its
+/// uncovered bytes ride this read's batch, not a dependent round of their own.
 const admission_facts = rsql.Read(.{
-    .sql = "WITH " ++ contextCtesSql("(SELECT provider FROM session WHERE session_ref=?1)", "(SELECT model FROM session WHERE session_ref=?1)") ++
-        " SELECT " ++ rsql.session_head_columns ++ ",s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation,s.reasoning_effort," ++
+    .sql = "SELECT " ++ rsql.session_head_columns ++ ",s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation,s.reasoning_effort," ++
         configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
         "current.operation_id AS latest_operation,current.purpose AS latest_compaction,current.resolution_code AS latest_resolution,latest_revision.model AS latest_model," ++
-        "(SELECT count(*) FROM session_revision r WHERE " ++ pendingInstructionsSql("?1", "s.revision") ++ ") AS instructions," ++
-        context_columns_sql ++ " " ++
+        "(SELECT count(*) FROM session_revision r WHERE " ++ pendingInstructionsSql("?1", "s.revision") ++ ") AS instructions " ++
         "FROM session s LEFT JOIN turn latest ON latest.turn_id=(SELECT t.turn_id FROM turn t @index(turn_session_latest) " ++
         "WHERE t.session_ref=?1 ORDER BY t.turn_id DESC LIMIT 1) " ++
         "LEFT JOIN model_operation current ON current.operation_id=latest.operation_id " ++
         "LEFT JOIN session_revision latest_revision ON latest_revision.session_ref=current.session_ref AND latest_revision.revision=current.settings_revision " ++
-        "CROSS JOIN measured WHERE s.session_ref=?1",
-    .Args = struct { session: []const u8, boundary: u64 },
+        "WHERE s.session_ref=?1",
+    .Args = struct { session: []const u8 },
     .Row = struct {
         session: rsql.SessionHead,
         revision: rsql.Positive,
@@ -480,20 +483,6 @@ const admission_facts = rsql.Read(.{
         latest_resolution: ?Bounded(outcome_code.max_bytes),
         latest_model: ?Bounded(model_capability.max_model_bytes),
         instructions: u64,
-        changed: bool,
-        base_position: ?rsql.Positive,
-        base_floor: ?rsql.Positive,
-        base_model: ?Bounded(model_capability.max_model_bytes),
-        uncached: ?u64,
-        cache_read: ?u64,
-        cache_write: ?u64,
-        output: ?u64,
-        usage_position: ?rsql.Positive,
-        result_admission: ?rsql.Positive,
-        usage_floor: ?rsql.Positive,
-        usage_base_position: ?rsql.Positive,
-        usage_base_floor: ?rsql.Positive,
-        usage_base_model: ?Bounded(model_capability.max_model_bytes),
     },
     .cardinality = .one,
 });
@@ -503,15 +492,17 @@ pub const admission_facts_sql = admission_facts.sql;
 /// Read identities and counters, not an estimate against a SQL-selected recipe.
 /// Zig selects both the next request's recipe and the one the usage measured;
 /// only then does the byte read count the suffix (or restored full history).
-fn contextCtesSql(comptime provider: []const u8, comptime model: []const u8) []const u8 {
-    return base_cte_sql ++ ",since AS (SELECT " ++ changed_since_base_sql ++ " AS changed),latest_usage AS (" ++ latestUsageSql(provider, model) ++ ")," ++
+fn contextCtesSql(comptime scope: []const u8) []const u8 {
+    const session = "context.session_ref";
+    const boundary = "context.boundary";
+    return "context_session AS (" ++ scope ++ ")," ++ baseCteSql(session, boundary) ++ ",since AS (SELECT " ++ changedSinceBaseSql(session, boundary) ++ " AS changed FROM context_session context),latest_usage AS (" ++ latestUsageSql("(SELECT session_ref FROM context_session)", "(SELECT provider FROM context_session)", "(SELECT model FROM context_session)") ++ ")," ++
         "measured AS (SELECT since.changed," ++ base_columns_sql ++
         ",saved.uncached,saved.cache_read,saved.cache_write,saved.output,saved.usage_position,saved.result_admission,saved.usage_floor," ++
         "usage_base.admission_position AS usage_base_position," ++
         "usage_base.history_floor AS usage_base_floor,usage_revision.model AS usage_base_model " ++
-        "FROM since LEFT JOIN base ON 1" ++ base_revision_join_sql ++
+        "FROM context_session context CROSS JOIN since LEFT JOIN base ON 1" ++ base_revision_join_sql ++
         "LEFT JOIN latest_usage saved ON 1 LEFT JOIN model_operation usage_base ON usage_base.operation_id=" ++
-        historical_domain.newestBaseSql("?1", "saved.result_admission") ++
+        historical_domain.newestBaseSql(session, "saved.result_admission") ++
         " LEFT JOIN session_revision usage_revision ON usage_revision.session_ref=usage_base.session_ref AND usage_revision.revision=usage_base.settings_revision)";
 }
 
@@ -520,6 +511,7 @@ const context_columns_sql = "measured.changed,measured.base_position,measured.ba
     "measured.usage_floor,measured.usage_base_position,measured.usage_base_floor,measured.usage_base_model";
 
 const ContextRow = struct {
+    model: ?Bounded(model_capability.max_model_bytes),
     changed: bool,
     base_position: ?rsql.Positive,
     base_floor: ?rsql.Positive,
@@ -537,11 +529,27 @@ const ContextRow = struct {
 };
 
 const admission_context = rsql.Read(.{
-    .sql = "WITH " ++ contextCtesSql("?3", "?4") ++ " SELECT " ++ context_columns_sql ++ " FROM measured",
+    .sql = "WITH " ++ contextCtesSql("SELECT ?1 AS session_ref,?2 AS boundary,?3 AS provider,?4 AS model WHERE EXISTS(SELECT 1 FROM turn latest @index(turn_session_latest) WHERE latest.session_ref=?1)") ++ " SELECT ?4 AS model," ++ context_columns_sql ++ " FROM measured",
     .Args = struct { session: []const u8, boundary: u64, provider: provider_name.Provider, model: []const u8 },
     .Row = ContextRow,
-    .cardinality = .one,
+    .cardinality = .optional,
 });
+
+/// Read only recipe identities in the same batch as candidate selection.
+/// The candidate query comes from the selection owner, not a copied predicate.
+fn SelectedContext(comptime candidate_sql: []const u8) type {
+    return rsql.Read(.{
+        .sql = "WITH admission_selection AS (" ++ candidate_sql ++ ")," ++
+            contextCtesSql("SELECT s.session_ref,s.next_position AS boundary,s.provider,s.model FROM session s JOIN admission_selection chosen ON chosen.session_ref=s.session_ref") ++
+            " SELECT context.model," ++ context_columns_sql ++ " FROM context_session context CROSS JOIN measured",
+        .Args = struct {},
+        .Row = ContextRow,
+        .cardinality = .optional,
+    });
+}
+const selected_context = SelectedContext(runnableCandidateSql(runnable_eligibility_sql));
+const open_turn_context = SelectedContext(runnableCandidateSql(queued_input_sql ++ " AND " ++ open_turn_takes_input_sql));
+const tool_continuation_context = SelectedContext(tool_continuation_selection.made_from.sql);
 
 const context_bytes = rsql.Read(.{
     .sql = "SELECT " ++ uncoveredBytesSql("?2", "?3", "?4") ++ " AS uncovered_bytes",
@@ -648,6 +656,14 @@ fn queueSelection(reader: anytype, kind: ModelAdmissionKind, found: *runnable_se
     }
 }
 
+fn queueSelectedContext(reader: anytype, kind: ModelAdmissionKind, context: *selected_context.Result) void {
+    switch (kind) {
+        .message => reader.read(selected_context, .{}, context),
+        .open_turn_message => reader.read(open_turn_context, .{}, context),
+        .tool_continuation => reader.read(tool_continuation_context, .{}, context),
+    }
+}
+
 /// What a model admission that selected nothing checks before the Store
 /// counts as idle: no continuation disagrees with its calls, and every
 /// blocked Operation's calls have their outcomes. `queue` rides the
@@ -672,18 +688,22 @@ const IdleChecks = struct {
 /// selects, outside any transaction; with nothing selected it runs main's
 /// idle checks, the disagreeing continuations with whether any Operation
 /// is blocked, and only then the blocked calls' outcomes, and answers
-/// null. The write Access `writer` reads
-/// `admission_facts`, the context compaction weighs included, after its
-/// BEGIN. Then it writes the Turn, binds and projects the Messages and
-/// instructions, inserts the Operation, claims their positions and
-/// commits: three rounds, plus an uncovered-byte read when pressure is weighed.
-/// The held Store
-/// mutex excludes every other writer, so what the selection read still
-/// holds; a moved head is `SelectionChanged`.
+/// null. Recipe identities share selection's read batch, so Zig can choose
+/// coverage before the write Access reads the admission facts. The selected
+/// recipe's uncovered bytes share that first write batch. Then it writes the
+/// Turn, binds and projects input, inserts the Operation and commits: three
+/// rounds, with no extra round for pressure. The Entry mutex excludes every
+/// other writer; a moved head or requested model is `SelectionChanged`.
 pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
     var found: runnable_selection.Result = undefined;
+    var context_row: selected_context.Result = undefined;
     queueSelection(reader, kind, &found);
-    try store_access.runAs(reader, error.RunnableSelectionFailed);
+    queueSelectedContext(reader, kind, &context_row);
+    try store_access.runNamed(reader, .{
+        .{ selected_context, error.SessionReadFailed },
+        .{ open_turn_context, error.SessionReadFailed },
+        .{ tool_continuation_context, error.SessionReadFailed },
+    }, error.RunnableSelectionFailed);
     const selection = found orelse {
         var idle: IdleChecks = .{};
         idle.queue(reader);
@@ -694,33 +714,32 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
     if (selection.cutoff.get() < selection.first_admission.get()) return error.CorruptStore;
     const session_ref: []const u8 = &selection.session.ref;
     const first_admission = selection.first_admission.get();
-
-    var facts: admission_facts.Result = undefined;
-    writer.read(admission_facts, .{ .session = session_ref, .boundary = selection.session.next_position.get() }, &facts);
-    try store_access.runAs(writer, error.SessionReadFailed);
-    if (facts.session.next_position != selection.session.next_position) return error.SelectionChanged;
-
-    const policy = model_capability.compactionPolicy(facts.model.slice(), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);
+    const context = if (context_row) |*row| row else return error.CorruptStore;
+    const context_model = (context.model orelse return error.CorruptStore).slice();
     var compaction: turn_policy.CompactionFacts = .{
-        .trigger = policy.compaction_trigger,
+        .trigger = null,
         .context_changed = false,
         .usage_tokens = null,
         .uncovered_bytes = 0,
-        .output_reservation = policy.output_reservation,
+        .output_reservation = 0,
     };
+    const coverage = try takeContext(&compaction, context, context_model, session_ref);
+    var facts: admission_facts.Result = undefined;
+    var bytes: context_bytes.Result = undefined;
+    writer.read(admission_facts, .{ .session = session_ref }, &facts);
+    if (coverage) |args| writer.read(context_bytes, args, &bytes);
+    try store_access.runNamed(writer, .{.{ context_bytes, error.CorruptStore }}, error.SessionReadFailed);
+    if (facts.session.next_position != selection.session.next_position or !facts.model.eql(context_model)) return error.SelectionChanged;
+
+    const policy = model_capability.compactionPolicy(facts.model.slice(), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);
+    compaction.trigger = policy.compaction_trigger;
+    compaction.output_reservation = policy.output_reservation;
+    if (coverage != null) compaction.uncovered_bytes = bytes.uncovered_bytes;
     if (facts.latest_turn != null) {
         if (facts.latest_operation == null) return error.CorruptStore;
         const latest_first = facts.latest_first orelse return error.CorruptStore;
         const resolution: []const u8 = if (facts.latest_resolution) |*code| code.slice() else "";
         compaction.previous = previousTurn(facts.latest_compaction orelse return error.CorruptStore, resolution, facts.latest_active, latest_first.get(), first_admission, output_format.OutputItemKind.compaction.replayableTo((facts.latest_model orelse return error.CorruptStore).slice(), facts.model.slice(), .selected_base));
-    }
-    if (turn_policy.forcedPurpose(compaction.previous, compaction.trigger) == null) {
-        if (try takeContext(&compaction, &facts, facts.model.slice(), session_ref)) |args| {
-            var bytes: context_bytes.Result = undefined;
-            writer.read(context_bytes, args, &bytes);
-            try store_access.runAs(writer, error.CorruptStore);
-            compaction.uncovered_bytes = bytes.uncovered_bytes;
-        }
     }
     const purpose = turn_policy.nextPurpose(compaction);
     // A compaction after one that overflowed makes room: settlement let
