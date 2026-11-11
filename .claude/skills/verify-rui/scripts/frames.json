@@ -12,6 +12,31 @@
       "expect": "Type a task"
     },
     {
+      "name": "settings",
+      "note": "App settings via End/Enter; does not require S5's drawn Settings row",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "End",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Rui"
+        },
+        {
+          "wait": "Notifications"
+        }
+      ],
+      "expect": [
+        "Rui",
+        "Notifications",
+        "Sign-in",
+        "Version"
+      ]
+    },
+    {
       "name": "start",
       "note": "02-overview",
       "open": "overview",

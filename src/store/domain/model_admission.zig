@@ -22,6 +22,7 @@ const historical_domain = @import("historical.zig");
 const history_floor_domain = @import("history_floor.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const reads_domain = @import("reads.zig");
+const tool_offer = @import("tool_offer.zig");
 const store_schema = @import("../schema.zig");
 const turn_domain = @import("turn.zig");
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
@@ -460,6 +461,7 @@ fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []con
 fn factsColumnsSql(comptime session: []const u8) []const u8 {
     return "s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation,s.reasoning_effort," ++
         configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
+        "s.tool_set_id,s.loaded_tool_set_id," ++ tool_offer.stale_sql ++ " AS offer_stale," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
         "current.operation_id AS latest_operation,current.purpose AS latest_compaction,current.resolution_code AS latest_resolution,latest_revision.model AS latest_model," ++
         "(SELECT count(*) FROM session_revision r WHERE " ++ pendingInstructionsSql(session, "s.revision") ++ ") AS instructions";
@@ -529,6 +531,9 @@ const SelectedRow = struct {
     output_reservation: ?u64,
     reasoning_effort: ?model_capability.ReasoningEffort,
     previous_reasoning_effort: ?model_capability.ReasoningEffort,
+    tool_set_id: rsql.Positive,
+    loaded_tool_set_id: ?rsql.Positive,
+    offer_stale: bool,
     latest_turn: ?rsql.Positive,
     latest_active: bool,
     latest_first: ?rsql.Positive,
@@ -667,8 +672,8 @@ const project_instructions = rsql.Write(.{
 
 const insert_operation = rsql.Write(.{
     .sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,attempt_ordinal,retry_due_at_ms,attempt_at) " ++
-        "VALUES(?1,?2,@session(?3),?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,@now)",
+        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id) " ++
+        "VALUES(?1,?2,@session(?3),?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,@now,?14)",
     .Args = struct {
         operation_id: u64,
         turn_id: u64,
@@ -683,6 +688,7 @@ const insert_operation = rsql.Write(.{
         history_floor: ?u64,
         history_level: ?u8,
         history_dropped: ?u64,
+        tool_set_id: u64,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -818,6 +824,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
     const selected: u64 = if (purpose == .compaction) 0 else selection.selected;
     const instructions: u64 = if (purpose == .compaction) 0 else facts.instructions;
 
+    const offer = try tool_offer.freeze(writer, facts.tool_set_id.get(), if (facts.loaded_tool_set_id) |id| id.get() else null, facts.offer_stale);
     if (weighed) |args| writer.write(within_pressure, args);
     const turn_id = if (selection.turn_id) |existing| existing.get() else try writer.identity(.turn_id);
     const operation_id = try writer.identity(.operation_id);
@@ -861,6 +868,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         .history_floor = floor,
         .history_level = if (room) |choice| choice.level else null,
         .history_dropped = if (room != null) dropped else null,
+        .tool_set_id = offer,
     });
     // The writes are queued, not run, as in every converted entry point.
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;

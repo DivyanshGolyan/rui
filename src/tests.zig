@@ -1,4 +1,6 @@
 test {
+    _ = @import("widgets/Panel.zig");
+    _ = @import("app_settings.zig");
     _ = @import("widgets/Split.zig");
     _ = @import("widgets/Stack.zig");
     _ = @import("widgets/Layer.zig");
@@ -108,6 +110,7 @@ test {
     _ = @import("read_transcript.zig");
     _ = @import("find_tools.zig");
     _ = @import("find_tools_tests.zig");
+    _ = @import("mcp_refresh_tests.zig");
     _ = @import("skills.zig");
     _ = @import("session_skills.zig");
     _ = @import("client.zig");
