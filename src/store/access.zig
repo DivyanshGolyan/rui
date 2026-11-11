@@ -292,7 +292,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// must keep its bytes. Two reads need it: `saved_session`, whose
         /// 4.6 KB Row `configure` fills in the caller's Session, and
         /// `bash_input`, whose Row points into the caller's
-        /// `BashExecutionInput`, so neither is copied.
+        /// `ActionExecutionInput`, so neither is copied.
         pub fn readInto(a: *Self, comptime S: type, args: S.Args, row: *S.Row, found: *Found) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality == .optional);
             found.* = .pending;

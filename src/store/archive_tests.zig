@@ -121,8 +121,8 @@ test "Session archive pending blocks person and peer work and completes after Ac
             try std.testing.expect(blocked == .rejected);
             try std.testing.expectEqual(protocol.MessageRejection.session_archiving, blocked.rejected.code);
             const sender = try runningBash(&storage, &tmp, "archive-sender");
-            var input: action.BashExecutionInput = undefined;
-            try storage.readBashExecutionInput(sender.binding, &input);
+            var input: action.ActionExecutionInput = undefined;
+            try storage.readActionExecutionInput(.bash, sender.binding, &input);
             var peer = try message(&tmp, "archive-peer-blocked", receiver.session.slice());
             defer peer.removeTemporaryContent(std.testing.io) catch unreachable;
             peer.sender = .{};

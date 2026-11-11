@@ -178,9 +178,6 @@ const insert_content = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// The result of every Action and Turn a Session stop cancels.
-pub const stop_cancellation_text = "Cancelled by Session stop.";
-
 /// A content identity, and the row a lookup round found for it.
 pub const Import = struct {
     digest: [32]u8,
@@ -191,12 +188,6 @@ pub const Import = struct {
     pub fn ofBytes(bytes: []const u8, private: bool) Import {
         return .{ .digest = content_string.digest(bytes), .length = bytes.len, .private = private };
     }
-};
-
-/// `stop_cancellation_text`'s identity, hashed when the Host is built.
-pub const stop_cancellation: Import = blk: {
-    @setEvalBranchQuota(1_000_000);
-    break :blk .ofBytes(stop_cancellation_text, false);
 };
 
 /// The empty value's identity, hashed when the Host is built.

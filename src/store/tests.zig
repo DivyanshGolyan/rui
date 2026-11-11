@@ -57,7 +57,7 @@ const ActionSettlement = action_domain.ActionSettlement;
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
 const AttemptAdmission = model_admission_domain.AttemptAdmission;
 const AttemptBinding = store_core.AttemptBinding;
-const BashExecutionInput = action_domain.BashExecutionInput;
+const ActionExecutionInput = action_domain.ActionExecutionInput;
 const ConfigurationContentAction = configuration_domain.ConfigurationContentAction;
 const ConfigurationUpdatePlan = configuration_domain.ConfigurationUpdatePlan;
 const ConfigureReply = configuration_domain.ConfigureReply;
@@ -2434,8 +2434,8 @@ test "Full reports every closed Action resolution without fencing" {
             try allow.session.set(session.slice());
             try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
             const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-            var input: BashExecutionInput = undefined;
-            try storage.readBashExecutionInput(action_binding, &input);
+            var input: ActionExecutionInput = undefined;
+            try storage.readActionExecutionInput(.bash, action_binding, &input);
             try std.testing.expectEqual(@as(u64, 1234), input.timeout_ms);
             try std.testing.expectEqual(
                 ActionSettlement.effect,
@@ -5206,8 +5206,8 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, model, "sender-calls");
             const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-            var input: BashExecutionInput = undefined;
-            try storage.readBashExecutionInput(action, &input);
+            var input: ActionExecutionInput = undefined;
+            try storage.readActionExecutionInput(.bash, action, &input);
             const handle = input.sender_handle;
             var own_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
             try own_ref.set(sender);
@@ -5380,8 +5380,8 @@ test "refused peer creation activity keeps invalid targets absent" {
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, model, "creation-refusal-calls");
             const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-            var input: BashExecutionInput = undefined;
-            try storage.readBashExecutionInput(action, &input);
+            var input: ActionExecutionInput = undefined;
+            try storage.readActionExecutionInput(.bash, action, &input);
             const before = try store_core.activityPageForTesting(&storage, .{ .session = sender });
 
             const text = "work that must not be admitted";
@@ -9906,12 +9906,12 @@ const EntryPoint = enum {
     admitModelAttempt,
     admitNextActionAttempt,
     readBashExecutionInput,
-    admitMcpActionAttempt,
+    admitActionAttempt,
     readMcpExecutionInput,
     revokeActionSender,
     nextCoreWork,
-    nextMcpAction,
-    resolveMcpAction,
+    nextAction,
+    resolveAction,
     deliverAgentMessage,
     deliverChildEnding,
     deliverSessionForward,
@@ -9975,12 +9975,12 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .admitModelAttempt = 3,
     .admitNextActionAttempt = 2,
     .readBashExecutionInput = 2,
-    .admitMcpActionAttempt = 2,
+    .admitActionAttempt = 2,
     .readMcpExecutionInput = 3,
     .revokeActionSender = 2,
     .nextCoreWork = 3,
-    .nextMcpAction = 1,
-    .resolveMcpAction = 2,
+    .nextAction = 1,
+    .resolveAction = 2,
     .deliverAgentMessage = 3,
     .deliverChildEnding = 2,
     .deliverSessionForward = 2,
@@ -10444,21 +10444,21 @@ test "each Store entry point takes its round budget on its common path" {
                 .{ .item_id = "mcp-item-two", .name = "fetch_page", .encoded_call_id = "mcp-call-two", .decoded_call_id = "mcp-call-two", .encoded_arguments = "{}", .decoded_arguments = "{}" },
             });
             meter.start();
-            const action = (try storage.nextMcpAction()).?;
-            meter.stop(.nextMcpAction);
+            const action = (try storage.nextAction(.mcp)).?;
+            meter.stop(.nextAction);
             meter.start();
-            try storage.resolveMcpAction(action.action_id, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
-            meter.stop(.resolveMcpAction);
-            const second = (try storage.nextMcpAction()).?;
+            try storage.resolveAction(action, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
+            meter.stop(.resolveAction);
+            const second = (try storage.nextAction(.mcp)).?;
             meter.start();
-            const binding = (try storage.admitMcpActionAttempt(second.action_id, 600_000, .{})).?;
-            meter.stop(.admitMcpActionAttempt);
-            var input: action_domain.McpExecutionInput = undefined;
+            const binding = (try storage.admitActionAttempt(second, 600_000, .{})).?.permit.binding;
+            meter.stop(.admitActionAttempt);
+            var input: action_domain.ActionExecutionInput = undefined;
             meter.start();
-            try storage.readMcpExecutionInput(binding, &input);
+            try storage.readActionExecutionInput(.mcp, binding, &input);
             meter.stop(.readMcpExecutionInput);
             _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
-            try std.testing.expect((try storage.nextMcpAction()) == null);
+            try std.testing.expect((try storage.nextAction(.mcp)) == null);
             try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
         }
 
@@ -10625,9 +10625,9 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
             meter.stop(.admitNextActionAttempt);
-            var input: BashExecutionInput = undefined;
+            var input: ActionExecutionInput = undefined;
             meter.start();
-            try storage.readBashExecutionInput(action, &input);
+            try storage.readActionExecutionInput(.bash, action, &input);
             meter.stop(.readBashExecutionInput);
             meter.start();
             try storage.withActionDispatchHandoff(action, {}, Launch.run);
@@ -13160,8 +13160,8 @@ test "skills peer refusal persists authenticated activity diagnostic and keyed r
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, model, "skills-peer-call");
             const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-            var input: BashExecutionInput = undefined;
-            try storage.readBashExecutionInput(action, &input);
+            var input: ActionExecutionInput = undefined;
+            try storage.readActionExecutionInput(.bash, action, &input);
             var command: wire_request.MessageCommand = .{ .session = receiver, .text = .{ .state = .value, .digest = protocol.contentDigest("") }, .sender = .{}, .sender_handle = input.sender_handle };
             try command.key.set("skills-peer-refusal");
             try command.sender.?.store.set(storage.selector.slice());
@@ -13230,8 +13230,8 @@ test "inline skills a peer Session's Message may list the recipient's skills" {
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, model, "skills-peer-accept-call");
             const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-            var input: BashExecutionInput = undefined;
-            try storage.readBashExecutionInput(action, &input);
+            var input: ActionExecutionInput = undefined;
+            try storage.readActionExecutionInput(.bash, action, &input);
             const authored = "check the flaky tests";
             var command = try completeMessage("skills-peer-accept", receiver.slice(), try tmp.dir.createFile(std.testing.io, "peer-authored", .{ .read = true }), authored);
             try command.text.file.?.writeStreamingAll(std.testing.io, authored);
@@ -13813,6 +13813,124 @@ test "tool membership rejects MCP catalog shadows of every builtin name" {
                 try std.testing.expectError(error.InvalidToolCatalog, storage.saveCatalog(&shadow));
                 try std.testing.expect(!storage.isFenced());
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE name=?1 AND owner='mcp'", .{builtin.name}));
+            }
+        }
+    }.run);
+}
+
+test "runner action seam covers selection admission input settlement stop and recovery" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const records = comptime testingCatalogRecords(&.{
+                .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a docs page.", .input_schema = "{\"type\":\"object\"}" },
+            });
+            const digests = comptime blk: {
+                @setEvalBranchQuota(1_000_000);
+                var out: [records.len][32]u8 = undefined;
+                for (&records, &out) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+                break :blk out;
+            };
+            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            inline for (.{ .bash, .mcp }) |runner| {
+                for (0..4) |scenario| {
+                    var tmp = std.testing.tmpDir(.{});
+                    defer tmp.cleanup();
+                    var storage: Store = undefined;
+                    try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                    defer storage.close() catch unreachable;
+                    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                    var configure = try completeConfiguration("runner-seam", "", workspace, "model-a");
+                    const tool = if (runner == .bash) "bash" else "fetch_page";
+                    const arguments = if (runner == .bash) "{\"cmd\":\"printf seam\",\"description\":\"Print seam\",\"timeout_ms\":5678}" else "{}";
+                    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
+                    defer std.testing.allocator.free(encoded);
+                    configure.configuration.tools = try .of(&.{tool});
+                    configure.configuration.permission_mode.state = .value;
+                    try configure.configuration.permission_mode.value.set("bypass");
+                    const configured = try storage.configure(&configure, .{});
+                    try std.testing.expect(configured == .accepted);
+                    const session = configured.accepted.session;
+                    try submitTestMessage(&storage, &tmp, "seam-input", "seam-message", session.slice(), "exercise runner seam");
+                    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    try settleCallsForTesting(&storage, &tmp, model, "seam-calls", &.{
+                        .{ .item_id = "seam-item", .name = tool, .encoded_call_id = "seam-call", .decoded_call_id = "seam-call", .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments },
+                    });
+                    const selection_rounds = storage.testing_content_work.rounds;
+                    const selected = (try storage.nextAction(runner)).?;
+                    if (runner == .bash) try std.testing.expectEqual(selection_rounds + 1, storage.testing_content_work.rounds);
+                    var wrong = selected;
+                    wrong.runner = if (runner == .bash) .mcp else .bash;
+                    try std.testing.expect((try storage.admitActionAttempt(wrong, 1234, .{})) == null);
+                    try storage.resolveAction(wrong, .spawn_failed, "Wrong runner must not resolve.", .{});
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND attempt_ordinal=0 AND resolution_code IS NULL", .{selected.action_id}));
+                    try std.testing.expectEqual(runner, selected.runner);
+                    try std.testing.expectEqual(selected.action_id, (try storage.nextAction(runner)).?.action_id);
+                    if (runner == .mcp) try std.testing.expectEqualStrings("docs", selected.server.slice());
+                    const expected_code: []const u8 = switch (scenario) {
+                        0 => "succeeded",
+                        1 => "cancelled",
+                        2 => "indeterminate",
+                        else => "spawn_failed",
+                    };
+                    const expected_text: []const u8 = switch (scenario) {
+                        0 => "Runner seam succeeded.",
+                        1 => "Cancelled by Session stop.",
+                        2 => if (runner == .bash) "Bash outcome is indeterminate after Host recovery; the command was not replayed." else "Outcome unknown: the Host stopped while this MCP call was running; it was not retried.",
+                        else => "Runner seam rejected before execution.",
+                    };
+                    if (scenario == 1) {
+                        var stop = try completeSessionStop("seam-stop", session.slice());
+                        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                        try std.testing.expect((try storage.admitActionAttempt(selected, 1234, .{})) == null);
+                        try storage.resolveAction(selected, .spawn_failed, "Stale stop selection must not resolve.", .{});
+                    } else if (scenario == 3) {
+                        const resolve_rounds = storage.testing_content_work.rounds;
+                        try storage.resolveAction(selected, .spawn_failed, expected_text, .{});
+                        if (runner == .bash) try std.testing.expectEqual(resolve_rounds + 2, storage.testing_content_work.rounds);
+                    } else {
+                        const admission_rounds = storage.testing_content_work.rounds;
+                        const binding = (try storage.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
+                        if (runner == .bash) try std.testing.expectEqual(admission_rounds + 2, storage.testing_content_work.rounds);
+                        try std.testing.expectEqual(selected.action_id, binding.action_id);
+                        var input: action_domain.ActionExecutionInput = undefined;
+                        try storage.readActionExecutionInput(runner, binding, &input);
+                        try std.testing.expectEqualDeep(binding, input.binding);
+                        try std.testing.expectEqualStrings(session.slice(), input.session.slice());
+                        try std.testing.expectEqual(@as(usize, 32), input.sender_handle.slice().len);
+                        try std.testing.expectEqual(@as(u64, if (runner == .bash) 5678 else 1234), input.timeout_ms);
+                        try std.testing.expectEqual(@as(u64, arguments.len), input.arguments.length);
+                        try std.testing.expectEqualSlices(u8, &protocol.contentDigest(arguments), &input.arguments.digest);
+                        if (runner == .bash) {
+                            try std.testing.expectEqualStrings(workspace, input.runner.bash.workspace.slice());
+                        } else {
+                            try std.testing.expect(input.runner.mcp.parent == null);
+                            try std.testing.expectEqualStrings(session.slice(), input.runner.mcp.root.slice());
+                            try std.testing.expectEqualStrings("fetch_page", input.runner.mcp.name.slice());
+                            try std.testing.expectEqualStrings("docs", input.runner.mcp.server.slice());
+                            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("{\"type\":\"object\"}"), &input.runner.mcp.input_schema.digest);
+                        }
+                        if (scenario == 0) {
+                            try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(binding, .succeeded, expected_text, .{}));
+                        } else {
+                            try std.testing.expect(try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
+                        }
+                    }
+                    try storage.resolveAction(selected, .spawn_failed, "Repeated resolution must not replace the result.", .{});
+                    try std.testing.expect((try storage.nextAction(runner)) == null);
+                    try std.testing.expect((try storage.admitActionAttempt(selected, 1234, .{})) == null);
+                    try std.testing.expect(!try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
+                    try std.testing.expectEqual(@as(u64, if (scenario == 0 or scenario == 2) 1 else 0), try store_testing.queryU64(&storage, "SELECT attempt_ordinal FROM action_operation WHERE action_id=?1", .{selected.action_id}));
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code=?2 AND c.digest=?3", .{ selected.action_id, expected_code, store_testing.Blob{ .bytes = &protocol.contentDigest(expected_text) } }));
+                    const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full);
+                    defer std.testing.allocator.free(report);
+                    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
+                    defer parsed.deinit();
+                    const actions = parsed.value.object.get("full").?.object.get("actions").?.array.items;
+                    try std.testing.expectEqual(@as(usize, 1), actions.len);
+                    try std.testing.expectEqualStrings(expected_code, actions[0].object.get("resolution").?.string);
+                    try std.testing.expectEqualStrings(expected_text, actions[0].object.get("result").?.object.get("text").?.string);
+                }
             }
         }
     }.run);

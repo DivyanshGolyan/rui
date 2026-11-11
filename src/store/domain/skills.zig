@@ -273,7 +273,7 @@ pub fn runTool(a: anytype, allocator: std.mem.Allocator, binding: @import("actio
     try a.run();
     if (faults.content_import) return error.InjectedContentImportFailure;
     const outcome_id = try content.importBytes(a, &outcome, result.bytes);
-    try action.queueCoreResolution(a, binding, found.session, if (result.succeeded) .succeeded else .failed, outcome_id);
+    try action.queueResolution(a, binding, found.session, if (result.succeeded) .succeeded else .failed, outcome_id);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
     return true;
