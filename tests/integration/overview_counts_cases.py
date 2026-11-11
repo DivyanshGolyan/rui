@@ -133,16 +133,16 @@ def unconfirmed_status():
             key = saved.pop()
             screen.keys(b"\x1b")
             line = f"! Not confirmed · rui request recover {key}"
-            prefix = f"! Not confirmed · rui request recover {key[:8]}"
-            frame = screen.wait(lambda f: prefix in f and "Type a task" in f and "enter open" in f, line)
+            frame = screen.wait(lambda f: line in f and "Type a task" in f and "enter open" in f, line)
             rows = screen.rows()
-            status = next(at for at, row in enumerate(rows) if prefix in row)
+            status = next(at for at, row in enumerate(rows) if line in row)
             composer = next(at for at, row in enumerate(rows) if "› Type a task" in row)
             assert status > composer, frame
-            assert rows[status].strip().startswith(prefix), frame
-            assert rows[status].rstrip().endswith("enter open"), frame
+            # The whole handle on its own row, the one Footer under it.
+            assert rows[status].strip() == line, frame
+            assert rows[status + 1].rstrip().endswith("enter open"), frame
             assert screen.style("! Not confirmed").fg is not None, frame
-    print("overview counts: an unconfirmed send shows on the status row under the input with "
+    print("overview counts: an unconfirmed send shows on its own row above the Footer with "
           "rui request recover and its saved key", flush=True)
 
 

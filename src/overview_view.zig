@@ -423,16 +423,80 @@ pub const ListArea = enum { sessions, panel, picker };
 
 pub const StatusLine = struct { text: []const u8, colour: Colour };
 
-/// The overview's status bar: what `statusSaid` says, a notice by its first
-/// line; else the newest unconfirmed send; null when all is quiet.
+/// The overview's status: what `statusSaid` says, a notice with all its
+/// lines; else the newest unconfirmed send; null when all is quiet. It
+/// shows on rows of its own above the Footer, as `noticeRows` lays it out.
 /// Borrows `state` and `buffer`.
 pub fn statusLine(state: *const State, caps: Caps, buffer: *StatusBuffer) ?StatusLine {
-    if (statusSaid(state, caps, buffer[0..upgrade_status.max_line_bytes])) |line| {
-        const first = std.mem.indexOfScalar(u8, line.text, '\n') orelse line.text.len;
-        return .{ .text = line.text[0..first], .colour = line.colour };
-    }
+    if (statusSaid(state, caps, buffer[0..upgrade_status.max_line_bytes])) |line| return line;
     const unconfirmed = unconfirmedLine(state, buffer[0..max_unconfirmed_line_bytes]) orelse return null;
     return .{ .text = unconfirmed, .colour = .attention };
+}
+
+/// The most rows the status takes above the Footer: a command's short
+/// result.
+pub const max_notice_rows = slash_commands.short_result_lines;
+
+/// The rows `text` takes above the Footer at `width`, borrowed from it.
+/// Each of its lines gets a row first, as many as `max_notice_rows` hold,
+/// so a result's warning is never dropped for its success; rows left over
+/// wrap a line too long for one at its last space that fits, so a recover
+/// handle stays whole on a narrow screen.
+fn noticeRows(text: []const u8, width: u16, caps: Caps, rows: *[max_notice_rows][]const u8) []const []const u8 {
+    const glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs;
+    const room = width -| 2;
+    const lines = @min(1 + std.mem.count(u8, text, "\n"), rows.len);
+    var spare = rows.len - lines;
+    var count: usize = 0;
+    var texts = std.mem.splitScalar(u8, text, '\n');
+    for (0..lines) |_| {
+        var rest = texts.next().?;
+        while (spare > 0) : (spare -= 1) {
+            const cut = wrapAt(caps, glyphs, rest, room) orelse break;
+            rows[count] = rest[0..cut];
+            count += 1;
+            rest = std.mem.trimStart(u8, rest[cut..], " ");
+        }
+        rows[count] = rest;
+        count += 1;
+    }
+    return rows[0..count];
+}
+
+/// Where `line`, too long for `room` cells, breaks: at its last space
+/// before which it fits; null when it fits or has no such space.
+fn wrapAt(caps: Caps, glyphs: Glyphs, line: []const u8, room: usize) ?usize {
+    if (measured(caps, glyphs, line) <= room) return null;
+    var cut: ?usize = null;
+    var at: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, line, at, ' ')) |space| : (at = space + 1) {
+        if (measured(caps, glyphs, line[0..space]) > room) break;
+        if (space != 0) cut = space;
+    }
+    return cut;
+}
+
+/// The status's rows above the Footer, as `noticeRows` lays them out at
+/// `width`, joined by newline segments; null while all is quiet.
+pub fn noticeSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!?[]const Segment {
+    var buffer: StatusBuffer = undefined;
+    const line = statusLine(state, caps, &buffer) orelse return null;
+    var rows: [max_notice_rows][]const u8 = undefined;
+    var built: Spans = .of(arena, caps, width);
+    const newline: []const Segment = &.{.{ .text = "\n", .style = .{} }};
+    var parts: [2 * max_notice_rows][]const Segment = undefined;
+    var count: usize = 0;
+    for (noticeRows(line.text, width, caps, &rows), 0..) |row, at| {
+        if (at != 0) {
+            parts[count] = newline;
+            count += 1;
+        }
+        built.begin();
+        _ = try built.put(1, row, width -| 2, .{ .colour = line.colour });
+        parts[count] = try segmentsOf(arena, try built.finish(), width, .{});
+        count += 1;
+    }
+    return try std.mem.concat(arena, Segment, parts[0..count]);
 }
 
 /// The ledger can hold a conversation's unconfirmed original.
@@ -2979,12 +3043,15 @@ const Glyphs = struct { prompt: []const u8, dot: []const u8, rule: []const u8, e
 const unicode_glyphs: Glyphs = .{ .prompt = "›", .dot = work_line.glyphs.get(.unicode).dot, .rule = "─", .ellipsis = work_line.glyphs.get(.unicode).ellipsis, .arrows = "↑↓", .sides = "←→", .up = "↑", .down = "↓", .newline = "↵" };
 const ascii_glyphs: Glyphs = .{ .prompt = ">", .dot = work_line.glyphs.get(.ascii).dot, .rule = "-", .ellipsis = work_line.glyphs.get(.ascii).ellipsis, .arrows = "^v", .sides = "<>", .up = "^", .down = "v", .newline = "|" };
 
-/// Where App's rows go: the counts line and any bands from row 0, the
-/// list, the picker right above the input, then the input area. The core
-/// reads it to know what shows, and the overview's widgets draw by it.
+/// Where App's rows go: any provider band from row 0, the list (or the
+/// panel or picker in its place), the pinned Settings tail, then the input
+/// area. The core reads it to know what shows, and the overview's widgets
+/// draw by it.
 pub const Layout = struct {
     top: u16 = 0,
     list: Rows = .{},
+    /// The pinned tail under the list: its rule and the Settings row.
+    settings: Rows = .{},
     /// The input area's first row: the composer's top rule.
     input: u16 = 0,
 
@@ -2999,14 +3066,27 @@ pub const Layout = struct {
 };
 
 /// The rows of `state`'s screen. The input area is the composer's rules
-/// around its draft row, and one footer. The list occupies
-/// the rows above the input.
+/// around its draft row, the status's rows, and one Footer. The Settings
+/// tail takes its rows above the input before the list, which occupies the
+/// rest.
 pub fn layout(state: *const State) Layout {
     const height = state.size.height;
     if (height == 0 or state.size.width == 0) return .{};
     const top: u16 = @intCast(@min(topRows(state), height));
-    const input = @max(top, height -| 4);
-    return .{ .top = top, .list = .{ .start = top, .end = input }, .input = input };
+    const input = @max(top, height -| (3 + statusRows(state) + 1));
+    const settings = @max(top, input -| settings_rows);
+    return .{ .top = top, .list = .{ .start = top, .end = settings }, .settings = .{ .start = settings, .end = input }, .input = input };
+}
+
+/// The Settings tail's rows: its rule and the Settings row.
+const settings_rows = 2;
+
+/// Rows the status takes above the Footer: none while all is quiet.
+fn statusRows(state: *const State) u16 {
+    var buffer: StatusBuffer = undefined;
+    const line = statusLine(state, .{}, &buffer) orelse return 0;
+    var rows: [max_notice_rows][]const u8 = undefined;
+    return @intCast(noticeRows(line.text, state.size.width, .{}, &rows).len);
 }
 
 /// Provider bands, as `headerSegments` draws them.
@@ -3505,16 +3585,11 @@ pub fn footerRight(state: *const State, draft: Draft) []const u8 {
     return if (std.mem.trim(u8, draft.bytes, " \t\r\n").len != 0 or state.selected == .new_session) "enter start" else "enter open";
 }
 
-/// Sanitized and fitted before the generic Footer consumes these bytes.
+/// The Footer's facts, always: a notice takes rows of its own above it
+/// (`noticeSegments`). Sanitized and fitted before the generic Footer
+/// consumes these bytes.
 pub fn footerLeft(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const u8 {
-    var built: Spans = .of(arena, caps, width);
-    var buffer: StatusBuffer = undefined;
-    const segments = if (statusLine(state, caps, &buffer)) |line| notice: {
-        built.begin();
-        _ = try built.put(1, line.text, width -| 2, .{ .colour = line.colour });
-        break :notice try segmentsOf(arena, try built.finish(), width, .{});
-    } else try factsSegments(arena, state, width, caps);
-    return std.mem.trimEnd(u8, try segmentText(arena, segments), " ");
+    return std.mem.trimEnd(u8, try segmentText(arena, try factsSegments(arena, state, width, caps)), " ");
 }
 
 pub fn factsSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
@@ -3846,13 +3921,14 @@ fn expectNoticeAt(state: *State, expected: ?[]const u8, whole_at_40: bool) !void
         const notice = state.notice orelse return error.TestExpectedNotice;
         try std.testing.expectEqualStrings(text, notice.text());
         if (whole_at_40) {
-            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-            defer arena.deinit();
-            const left = try footerLeft(arena.allocator(), state, 40, .{});
-            try std.testing.expect(session_line.cells(left, .unicode) <= 40);
-            const first = std.mem.sliceTo(text, '\n');
-            const wide = try footerLeft(arena.allocator(), state, 200, .{});
-            try std.testing.expectEqualStrings(first, std.mem.trim(u8, wide, " "));
+            const screen = try screenText(state, 40, 24, .{});
+            defer std.testing.allocator.free(screen);
+            // The Footer ends the screen; above it, a row for each of the
+            // notice's lines.
+            var lines = std.mem.splitScalar(u8, screen, '\n');
+            for (0..std.mem.count(u8, screen, "\n") - std.mem.count(u8, text, "\n") - 1) |_| _ = lines.next();
+            var said = std.mem.splitScalar(u8, text, '\n');
+            while (said.next()) |line| try std.testing.expectEqualStrings(line, std.mem.trim(u8, lines.next().?, " "));
         }
     } else if (state.notice) |*notice| try std.testing.expectEqualStrings("", notice.text());
 }
@@ -3867,7 +3943,7 @@ fn screenText(state: *State, width: u16, height: u16, caps: Caps) ![]u8 {
 
 /// What the App overview's rows show at a size, from the segments each of
 /// its widgets draws: the provider header, two-line list or panel rows,
-/// and one Footer under `draft`. Settings has its own widget tests. This keeps
+/// the status's rows and one Footer under `draft`. Settings has its own widget tests. This keeps
 /// only their order, with the panel given the rows the core's layout gives
 /// it.
 const Frame = struct {
@@ -3895,7 +3971,7 @@ const Frame = struct {
         } else {
             while (listItem(state, list_count) != null) : (list_count += 1) {}
         }
-        const lines = try gpa.alloc([]const Segment, top.len + list_count * 2 + 4);
+        const lines = try gpa.alloc([]const Segment, top.len + list_count * 2 + max_notice_rows + 1);
         var count: usize = 0;
         var start: usize = 0;
         for (top, 0..) |segment, at| if (std.mem.eql(u8, segment.text, "\n")) {
@@ -3923,6 +3999,16 @@ const Frame = struct {
             }
         }
         const last = count;
+        if (try noticeSegments(gpa, state, width, caps)) |notice| {
+            var start_: usize = 0;
+            for (notice, 0..) |segment, at| if (std.mem.eql(u8, segment.text, "\n")) {
+                lines[count] = notice[start_..at];
+                count += 1;
+                start_ = at + 1;
+            };
+            lines[count] = notice[start_..];
+            count += 1;
+        }
         var footer: Spans = .of(gpa, caps, width);
         footer.begin();
         const keys_ = footerRight(state, draft);
@@ -4907,12 +4993,13 @@ fn expectStyle(state: *State, row: usize, column: usize, expected: Style) !void 
 
 /// The status row and the rows a longer notice takes above it read
 /// `expected`, as the bottom of the screen.
+/// The rows right above the Footer, which ends the screen, read `expected`.
 fn expectStatusLines(state: *State, expected: []const []const u8) !void {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const left = try footerLeft(arena.allocator(), state, 120, .{});
-    try std.testing.expectEqualStrings(std.mem.trim(u8, expected[0], " "), std.mem.trim(u8, left, " "));
-    try std.testing.expect(std.mem.indexOfScalar(u8, left, '\n') == null);
+    const text = try screenText(state, 80, 24, .{});
+    defer std.testing.allocator.free(text);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    for (0..std.mem.count(u8, text, "\n") - expected.len) |_| _ = lines.next();
+    for (expected) |line| try std.testing.expectEqualStrings(line, lines.next().?);
 }
 
 fn expectScreenLine(state: *State, line: usize, expected: []const u8) !void {
@@ -6551,18 +6638,18 @@ test "the status bar says the Upgrade at work, else the newest notice, else an U
     try std.testing.expectEqualStrings("Rui 0.61.0 installed - restart rui to continue - your draft is kept until you leave", statusLine(&state, .{ .unicode = false }, &ascii).?.text);
 }
 
-test "the status row under the input says the status bar's line" {
+test "the status rows above the Footer say the status bar's line" {
     var state = try opened(&.{session("k7m2qx", .{ .working = ago(10) }, .{})});
     defer state.deinit();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
     _ = try step(&state, .{ .unconfirmed = .{ .reference = "k7m2qx".*, .recovery = .{ .saved = .{ .original = .{ .kind = .message, .key = key }, .rejected = false } } } });
-    const unconfirmed = try footerLeft(arena.allocator(), &state, 120, .{});
+    const unconfirmed = try segmentText(arena.allocator(), (try noticeSegments(arena.allocator(), &state, 120, .{})).?);
     try std.testing.expect(std.mem.startsWith(u8, unconfirmed, " ! Not confirmed · rui request recover " ++ key));
     _ = try submit(&state, try typeText(&state, "/upgrade"));
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
-    const upgrading = try footerLeft(arena.allocator(), &state, 120, .{ .unicode = false });
+    const upgrading = try segmentText(arena.allocator(), (try noticeSegments(arena.allocator(), &state, 120, .{ .unicode = false })).?);
     try std.testing.expect(std.mem.startsWith(u8, upgrading, " Upgrading to 0.60.0 - no Host running - esc cancels"));
 }
 
@@ -7245,10 +7332,13 @@ test "overview single footer keeps the working Enter key for every selection and
         const before = try footerLeft(arena.allocator(), &state, width, .{});
         try std.testing.expect(std.mem.indexOf(u8, before, "new Session") == null);
         state.say(.failure, "Could not start", .{});
-        try std.testing.expectEqualStrings(" Could not start", try footerLeft(arena.allocator(), &state, width, .{}));
+        // The notice takes its own row above the Footer, which keeps its
+        // facts and key.
+        try std.testing.expectEqualStrings(" Could not start", std.mem.trimEnd(u8, try segmentText(arena.allocator(), (try noticeSegments(arena.allocator(), &state, width, .{})).?), " "));
+        try std.testing.expectEqualStrings(before, try footerLeft(arena.allocator(), &state, width, .{}));
         try std.testing.expectEqualStrings("enter open", footerRight(&state, .{}));
         _ = try press(&state, .{}, .first);
-        try std.testing.expect(std.mem.indexOf(u8, try footerLeft(arena.allocator(), &state, width, .{}), "Could not start") == null);
+        try std.testing.expectEqual(null, try noticeSegments(arena.allocator(), &state, width, .{}));
     }
 }
 

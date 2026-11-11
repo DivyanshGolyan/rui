@@ -916,7 +916,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         };
         const settings = try ctx.arena.create(OverviewLines.Settings);
         settings.* = .{ .selected = self.state.selected == .settings, .caps = self.caps, .userdata = self, .on_click = appClick };
-        prepared.tail = settings.widget();
+        prepared.tail = .{ .widget = settings.widget(), .rows = view.layout(&self.state).settings.len() };
         prepared.caps = self.caps;
         self.app_screen.content = prepared;
         list = prepared;
@@ -934,7 +934,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         const keys = view.footerRight(&self.state, self.composerDraft());
         footer.* = .{ .left = try view.footerLeft(ctx.arena, &self.state, size.width -| @as(u16, @intCast(keys.len)), self.caps), .right = keys, .style = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet, .background = .bar }) };
         self.app_input.facts = footer.widget();
-        self.app_input.status = .{ .userdata = self, .drawFn = emptyStatus };
+        self.app_input.status = if (try view.noticeSegments(ctx.arena, &self.state, size.width, self.caps)) |notice| try rich(ctx, self.caps, notice) else .{ .userdata = self, .drawFn = emptyStatus };
         self.app_screen.tail = null;
         self.app_screen.overlay = null;
         if (self.state.commands) |*shown| {
@@ -1006,7 +1006,8 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.composer = self.emptyComposer(0);
     self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget() };
     self.paintDivider();
-    self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" } };
+    // The status's rows sit above the one Footer row.
+    self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" }, .facts_at = .bottom };
     self.app_screen = .{ .content = &self.app_sessions, .input = &self.app_input, .userdata = self, .on_event = appEvent };
     self.app_header = .{ .state = &self.state };
     self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
@@ -4190,12 +4191,113 @@ test "both lines of a two-line command result show under the input" {
     try std.testing.expect(try rig.settle() == null);
     var shown = try rig.shown(80, 24);
     defer shown.deinit();
-    try shown.expectLines(21, &.{ " › Type a task", "────────────────────────────────────────────────────────────────────────────────" });
+    try shown.expectLines(19, &.{ " › Type a task", "────────────────────────────────────────────────────────────────────────────────", " Configured.", " ! label saved locally only" });
     const footer = try shown.line(23);
-    try std.testing.expect(std.mem.startsWith(u8, footer, " Configured."));
+    try std.testing.expect(std.mem.startsWith(u8, footer, " no model"));
     try std.testing.expect(std.mem.endsWith(u8, footer, "enter open"));
-    try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "label saved locally only") == null);
-    try std.testing.expectEqualStrings("Configured.\n! label saved locally only", rig.overview.state.notice.?.text());
+}
+
+/// The rows between the composer's bottom rule and the Footer, which ends
+/// a screen `height` rows tall, in the composer's pane: right of the list
+/// pane's divider on a wide screen.
+fn statusRowsShown(shown: *Shown, height: u16) ![]const []const u8 {
+    var draft: u16 = 0;
+    while (std.mem.indexOf(u8, try shown.line(draft), "› Type a task") == null) draft += 1;
+    const rows = try shown.arena.allocator().alloc([]const u8, height - 3 - draft);
+    for (rows, draft + 2..) |*row, at| {
+        const line = try shown.line(@intCast(at));
+        const pane = if (std.mem.lastIndexOf(u8, line, "│")) |divider| line[divider + "│".len ..] else line;
+        row.* = std.mem.trim(u8, pane, " ");
+    }
+    return rows;
+}
+
+test "a notice keeps its own rows above the one Footer: every result line and a whole recover handle, at any width" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cancellation: client.Cancellation = .{};
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const cases = [_]struct { printed: ?[]const u8, notice: []const u8 }{
+        .{ .printed = "Rui: Configured.\n", .notice = "Configured." },
+        .{ .printed = "Rui: Configured.\nrui: label saved locally only\n", .notice = "Configured.\n! label saved locally only" },
+        .{ .printed = null, .notice = "! Not confirmed · rui request recover " ++ key },
+    };
+    for (cases) |case| {
+        const rig = try commandRig(tmp.dir, &cancellation);
+        defer rig.close();
+        if (case.printed) |printed| {
+            Printing.stdout = printed;
+            try std.testing.expect(try rig.press("/rename lane four\r") == null);
+            try std.testing.expect(try rig.settle() == null);
+        } else {
+            const reference = rig.overview.state.selected.session;
+            _ = try view.step(&rig.overview.state, .{ .unconfirmed = .{ .reference = reference, .recovery = .{ .saved = .{ .original = .{ .kind = .message, .key = key }, .rejected = false } } } });
+        }
+        for ([_]u16{ 46, 80, 140 }) |width| {
+            var shown = try rig.shown(width, 24);
+            defer shown.deinit();
+            const rows = try statusRowsShown(&shown, 24);
+            // The rows hold the notice whole: its lines, a long one wrapped
+            // only at a space, with nothing cut.
+            const joined = try std.mem.join(shown.arena.allocator(), " ", rows);
+            const expected = try std.mem.replaceOwned(u8, shown.arena.allocator(), case.notice, "\n", " ");
+            try std.testing.expectEqualStrings(expected, joined);
+            try std.testing.expect(rows.len >= 1 + std.mem.count(u8, case.notice, "\n"));
+            const footer = try shown.line(23);
+            try std.testing.expect(std.mem.indexOf(u8, footer, " no model") != null);
+            try std.testing.expect(std.mem.endsWith(u8, footer, "enter open"));
+            try std.testing.expect(std.mem.indexOf(u8, footer, "!") == null);
+        }
+    }
+}
+
+test "/help opens only when every line it shows sits above the pinned Settings row, with or without a provider band" {
+    for ([_]bool{ false, true }) |banded| {
+        const rig = try openListed();
+        defer rig.close();
+        const state = &rig.overview.state;
+        if (banded) {
+            const row = &state.rows.items[state.order.items[0]];
+            row.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = null } };
+            try row.state.failed.code.set("provider_http_401");
+            try std.testing.expect(view.band(state.rows.items, state.now_ms, state.login_at) != null);
+        }
+        var opened = false;
+        var refused = false;
+        var height: u16 = 8;
+        while (height <= 40) : (height += 1) {
+            // Esc closes a panel or a notice the last height left.
+            _ = try rig.press("\x1b");
+            _ = try rig.press("\x1b");
+            var sized = try rig.shown(80, height);
+            sized.deinit();
+            _ = try rig.press("/help\r");
+            if (state.panel == null) {
+                refused = true;
+                try std.testing.expectEqualStrings("! Screen too small for /help", state.notice.?.text());
+                continue;
+            }
+            opened = true;
+            var shown = try rig.shown(80, height);
+            defer shown.deinit();
+            const at = view.layout(state);
+            try std.testing.expectEqual(@as(u16, @intFromBool(banded)), at.top);
+            try std.testing.expectEqual(@as(u16, 2), at.settings.len());
+            const items = (try view.panelItems(shown.arena.allocator(), state, 80, rig.overview.caps)).?;
+            try std.testing.expect(items.len <= at.list.len());
+            // Each line the panel built shows in its row, none under the
+            // Settings tail, and none is left uncounted.
+            for (items, at.top..) |item, row| {
+                var text: std.ArrayList(u8) = .empty;
+                for (item.segments) |segment| try text.appendSlice(shown.arena.allocator(), segment.text);
+                try std.testing.expectEqualStrings(std.mem.trimEnd(u8, text.items, " "), try shown.line(@intCast(row)));
+                try std.testing.expect(std.mem.indexOf(u8, text.items, "more lines") == null);
+            }
+            try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start), "─"));
+            try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start + 1), "  Settings"));
+        }
+        try std.testing.expect(opened and refused);
+    }
 }
 
 test "/rename and /setup run through the conversation's command hook on the worker, and what they print reaches the overview" {

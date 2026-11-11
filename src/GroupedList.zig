@@ -52,12 +52,16 @@ selected: ?u32 = null,
 on_press: ?Press = null,
 caps: overview_view.Caps = .{},
 inner: List = .{},
-tail: ?vxfw.Widget = null,
+/// What is pinned under the list, and the rows the screen's layout gives
+/// it (`overview_view.layout`'s `settings`), which the list never takes.
+tail: ?Tail = null,
 belowFn: ?*const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!List.Line = null,
 /// Borrowed alias to the widget's scrolling owner, established by widget().
 list: *vxfw.ListView = undefined,
 shown: List.Range = .{},
 shown_at: []const Span = &.{},
+
+pub const Tail = struct { widget: vxfw.Widget, rows: u16 };
 
 const Span = struct { row: i17, height: u16, target: ?Target };
 const Captured = struct { id: u32, target: Target };
@@ -127,8 +131,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.inner.base_style = widget_style.of(self.caps, .{});
     self.inner.selection_style = widget_style.of(self.caps, .{ .background = .selection });
     const size = ctx.max.size();
-    const tail = if (self.tail) |widget_| try widget_.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = @min(2, size.height) })) else null;
-    const room = size.height - if (tail) |drawn| drawn.size.height else 0;
+    const tail_rows = if (self.tail) |tail| @min(tail.rows, size.height) else 0;
+    const room = size.height - tail_rows;
+    const tail = if (self.tail) |pinned| try pinned.widget.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = tail_rows })) else null;
     var surface = try self.inner.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = room }));
     if (tail) |drawn| {
         const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
@@ -312,7 +317,7 @@ test "GroupedList two-line rows select and press both lines with a pinned tail" 
     const all: []const Row = &rows;
     var presses: Pressed = .{};
     const tail: vxfw.Text = .{ .text = "rule\nSettings" };
-    var list: Self = .{ .rows = .of(&all), .selected = 0, .on_press = presses.press(), .tail = tail.widget() };
+    var list: Self = .{ .rows = .of(&all), .selected = 0, .on_press = presses.press(), .tail = .{ .widget = tail.widget(), .rows = 2 } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 8 }, .cell_size = .{} };
