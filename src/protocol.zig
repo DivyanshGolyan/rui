@@ -364,7 +364,7 @@ pub const SinceToken = change_ring.Token;
 
 comptime {
     std.debug.assert(session_work.max_code_bytes == max_code_bytes);
-    std.debug.assert(session_work.max_description_bytes == @import("call_classification.zig").max_bash_description_bytes);
+    std.debug.assert(session_work.max_description_bytes == max_tool_description_bytes);
 }
 
 /// The wire form of a `WorkState`: `kind` and `since`, then the kind's own

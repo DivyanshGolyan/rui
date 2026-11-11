@@ -2182,7 +2182,7 @@ test "a work state reads back exactly the facts its kind owns" {
     var quota: protocol.Bounded(protocol.max_code_bytes) = .{};
     try quota.set("provider_quota");
     var description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
-    try description.set("Run \u{1}the resize tests");
+    try description.set(&@as([protocol.session_work.max_description_bytes]u8, @splat(1)));
     const states = [_]protocol.WorkState{
         .{ .idle = .{ .since = 1 } },
         .{ .pending = .{ .since = 2 } },
@@ -2927,8 +2927,9 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try maximal.label.?.set(&text);
     maximal.first_message = .{ .position = largest, .admission = largest, .admitted_at = largest, .sender = .{ .session = .{} }, .content = .{ .length = protocol.max_sqlite_content_bytes, .digest = @splat(0xff) } };
     try maximal.first_message.?.sender.?.session.set("zzzzzz");
+    const call_text = @as([protocol.max_tool_description_bytes]u8, @splat(1));
     var description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
-    try description.set(&text);
+    try description.set(&call_text);
     maximal.work = .{ .state = .{ .bash = .{ .since = largest, .call = largest, .description = description, .running = largest, .approvals = largest } }, .turn = largest, .operation = largest, .first_action = largest };
     maximal.peers = .{ .from_person_at = largest };
     for (0..8) |index| {
@@ -2956,7 +2957,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
         try std.testing.expectEqualStrings(&model, row.model.slice());
         try std.testing.expect(std.mem.eql(u8, row.tools.names.slice(), "bash") and row.permission_mode == .bypass);
         try std.testing.expectEqualStrings(&text, row.label.?.slice());
-        try std.testing.expectEqualStrings(&text, row.work.state.bash.description.?.slice());
+        try std.testing.expectEqualStrings(&call_text, row.work.state.bash.description.?.slice());
     }
     try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, length, "/wrong", .{}));
     try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, length, null, .{ .after = 19, .ceiling = 23 }));

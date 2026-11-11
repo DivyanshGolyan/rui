@@ -14,8 +14,8 @@ const retry_policy = @import("retry_policy.zig");
 
 /// The saved code bound (`turn.outcome_code`, `model_operation.last_failure_code`).
 pub const max_code_bytes = 96;
-/// The running Bash line bound; other saved call lines may be longer.
-pub const max_description_bytes = 100;
+/// The saved call line bound, shared by Bash and MCP running Actions.
+pub const max_description_bytes = @import("tool_presentation.zig").max_description_bytes;
 
 /// The greatest ordinal a retrying state's failed Attempt has: the last
 /// Attempt is never retried.
@@ -45,7 +45,7 @@ pub const WorkState = union(Kind) {
     /// The model Operation waits for a future retry time. `attempt` is the
     /// ordinal of the Attempt that failed; `cause` its failure code.
     retrying: Retrying,
-    /// At least one Bash Action is running. `call` is the oldest running
+    /// At least one Action (Bash or MCP) is running. `call` is the oldest running
     /// call's ordinal among the calls of the Work's Operation, null only as
     /// read from a Host that predates it, and `description` its saved
     /// description; `approvals` counts sibling Actions awaiting a
@@ -569,5 +569,45 @@ test "progress follows the work table" {
         // Only a due retry changes with time.
         try std.testing.expectEqual(kind == .retrying, std.meta.activeTag(state.asOf(5_000)) != kind);
         try std.testing.expectEqual(kind, std.meta.activeTag(state.asOf(4_999)));
+    }
+}
+
+test "saved MCP call lines survive pending, running and completed Actions at every boundary" {
+    // Action ownership does not change the work-state projection. Exercise
+    // both single-byte and multi-byte saved lines at the old and new bounds.
+    for ([_]usize{ 100, 101, 200 }) |length| {
+        for ([_]bool{ false, true }) |multibyte| {
+            var description: [@import("tool_presentation.zig").max_description_bytes]u8 = @splat('x');
+            if (multibyte) {
+                for (0..length / 2) |i| @memcpy(description[i * 2 ..][0..2], "é");
+            }
+            const text = description[0..length];
+            const pending: Inputs.Actions = .{ .total = 1, .unresolved = 1 };
+            try expectState(.{ .pending = .{ .since = 340 } }, .{
+                .now_ms = 0,
+                .created_at = 1,
+                .latest = activeTurn(proposals(340), pending),
+            });
+            var running = pending;
+            running.running = 1;
+            running.oldest_running = .{ .at = 350, .call = 0, .description = text };
+            const work = try derive(.{
+                .now_ms = 0,
+                .created_at = 1,
+                .latest = activeTurn(proposals(340), running),
+            });
+            try std.testing.expect(work.state == .bash);
+            try std.testing.expectEqualStrings(text, work.state.bash.description.?.slice());
+            try std.testing.expectEqual(@as(u64, 350), work.state.bash.since);
+            try std.testing.expectEqual(@as(?u64, 0), work.state.bash.call);
+            try std.testing.expectEqual(@as(u64, 1), work.state.bash.running);
+            try std.testing.expectEqual(@as(u64, 0), work.state.bash.approvals);
+            const completed: Inputs.Actions = .{ .total = 1, .latest_resolution_at = 360 };
+            try expectState(.{ .pending = .{ .since = 360 } }, .{
+                .now_ms = 0,
+                .created_at = 1,
+                .latest = activeTurn(proposals(340), completed),
+            });
+        }
     }
 }

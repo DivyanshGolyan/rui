@@ -61,7 +61,7 @@ fn archiveViewName(filter: ArchiveFilter) []const u8 {
 pub const Reference = change_ring.Id;
 
 /// A Label obeys the saved Bash description rule.
-pub const max_label_bytes = session_work.max_description_bytes;
+pub const max_label_bytes = @import("tool_presentation.zig").max_label_bytes;
 /// Rows on one `session list` page.
 pub const max_page_rows = 8;
 /// First lines one refresh asks for.
@@ -4339,7 +4339,7 @@ const mixed = [_]Listed{
     session("k7m2qx", .{ .working = ago(40) }, .{ .label = "Fix the flaky resize test", .yours = true }),
     session("h8q2mz", .{ .finished = ago(12 * 60) }, .{ .yours = true }),
     session("r4t9vw", .{ .approval = ago(3 * 60) }, .{ .label = "Review PR 412", .yours = true }),
-    session("a1b2c3", .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .{ .label = "Find why store tests fail" }),
+    session("a1b2c3", .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .{ .label = "Find why store tests fail" }),
     session("b2c3d4", .{ .working = ago(2 * 60) }, .{ .label = "Profile the curl send queue" }),
     session("c3d4e5", .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 12) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .{ .label = "Audit permission paths" }),
     session("d4e5f6", .{ .pending = ago(5) }, .{ .label = "Trace Host shutdown order" }),
@@ -4364,7 +4364,7 @@ const kind_cases = [_]struct { state: WorkState, heading: []const u8, unicode: [
     .{ .state = .{ .pending = ago(5) }, .heading = " Active", .unicode = "  ◌ Write the notes                                                          5s", .ascii = "  : Write the notes                                                          5s", .colour = .quiet, .stoppable = true },
     .{ .state = .{ .working = ago(40) }, .heading = " Active", .unicode = "  ● Write the notes                                                         40s", .ascii = "  * Write the notes                                                         40s", .colour = .ink, .stoppable = true },
     .{ .state = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 + 11_500, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .heading = " Active", .unicode = "  ● Write the notes                          Provider error · retry in 12s  30s", .ascii = "  * Write the notes                          Provider error - retry in 12s  30s", .colour = .attention, .stoppable = true },
-    .{ .state = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .heading = " Active", .unicode = "  ● Write the notes                                  Run the logic tests     1m", .ascii = "  * Write the notes                                  Run the logic tests     1m", .colour = .ink, .stoppable = true },
+    .{ .state = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .heading = " Active", .unicode = "  ● Write the notes                                  Run the logic tests     1m", .ascii = "  * Write the notes                                  Run the logic tests     1m", .colour = .ink, .stoppable = true },
     .{ .state = .{ .approval = ago(3 * 60) }, .heading = " Needs you", .unicode = "  ? Write the notes                                                          3m", .ascii = "  ? Write the notes                                                          3m", .colour = .attention, .stoppable = true },
     .{ .state = .{ .stopping = ago(8) }, .heading = " Active", .unicode = "  ● Write the notes                                  Stopping…               8s", .ascii = "  * Write the notes                                  Stopping.               8s", .colour = .quiet, .stoppable = false },
     .{ .state = .{ .finished = ago(12 * 60) }, .heading = " Finished", .unicode = "  ✓ Write the notes                                                         12m", .ascii = "  + Write the notes                                                         12m", .colour = .mark, .stoppable = false },
@@ -4411,7 +4411,7 @@ test "every work state follows the rules table, in Unicode and ASCII" {
 }
 
 test "a description's controls read escaped in its row's words, as its call row shows them" {
-    const bash: WorkState = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(max_label_bytes, "Run\t\x1b[2J\u{202e}tests"), .running = 1, .approvals = 0 } };
+    const bash: WorkState = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(session_work.max_description_bytes, "Run\t\x1b[2J\u{202e}tests"), .running = 1, .approvals = 0 } };
     var state = try opened(&.{session("k7m2qx", bash, .{ .label = "Write the notes" })});
     defer state.deinit();
     const text = try screenText(&state, 80, 24, .{});
@@ -4473,8 +4473,8 @@ fn expectGroups(state: *const State, expected: []const struct { Group, []const [
 }
 
 test "a Session waiting on an Action leads in Needs you, yours or not, and Yours keeps the rest" {
-    const beside_bash: WorkState = .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 1 } };
-    const running_bash: WorkState = .{ .bash = .{ .since = test_now_s - 20, .call = 0, .description = bounded(max_label_bytes, "Run the store tests"), .running = 1, .approvals = 0 } };
+    const beside_bash: WorkState = .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 1 } };
+    const running_bash: WorkState = .{ .bash = .{ .since = test_now_s - 20, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the store tests"), .running = 1, .approvals = 0 } };
     var state = try opened(&.{
         session("y0urs1", .{ .working = ago(40) }, .{ .label = "Mine, thinking", .yours = true }),
         session("y0urs2", .{ .approval = ago(9) }, .{ .label = "Mine, asking", .yours = true }),
@@ -4574,7 +4574,7 @@ test "row segments say each state with its mark, and words only for a cause or a
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const later: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 18) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
-    const beside_bash: WorkState = .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 1 } };
+    const beside_bash: WorkState = .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 1 } };
     const started = First{ .position = 1, .admission = 4, .sender = "a5k1ng".* };
     var state = try opened(&.{
         session("a5k1ng", .{ .approval = ago(120) }, .{ .label = "Fix flaky store test" }),
@@ -4790,7 +4790,7 @@ const picker_rows = [_]Listed{
 /// Your Sessions at work and waiting, beside others' work and ends.
 const spinning = [_]Listed{
     session("y0urs1", .{ .working = ago(40) }, .{ .label = "Mine, thinking", .yours = true }),
-    session("y0urs2", .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .{ .label = "Mine, running", .yours = true }),
+    session("y0urs2", .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .{ .label = "Mine, running", .yours = true }),
     session("y0urs3", .{ .approval = ago(2) }, .{ .label = "Mine, asking", .yours = true }),
     session("y0urs4", .{ .pending = ago(3) }, .{ .label = "Mine, queued", .yours = true }),
     session("y0urs5", .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 60) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .{ .label = "Mine, retrying", .yours = true }),
@@ -7968,4 +7968,25 @@ test "a command's output is cut at what the overview keeps, and its failure ends
     try std.testing.expect(!whole.readsDefault(.rename));
     try std.testing.expect(!Ran.of(&kept, 0, false, true).readsDefault(.setup));
     try std.testing.expect(!Ran.of(&kept, 0, false, false).readsDefault(.setup));
+}
+
+test "a saved MCP running line fits overview rows without narrowing its saved bound" {
+    const description = "a" ++ comptime repeated("é", 99) ++ "z";
+    const running: WorkState = .{ .bash = .{
+        .since = test_now_s - 75,
+        .call = 0,
+        .description = bounded(session_work.max_description_bytes, description),
+        .running = 1,
+        .approvals = 0,
+    } };
+    var state = try opened(&.{session("k7m2qx", running, .{ .label = "Fetch the page" })});
+    defer state.deinit();
+    for (20..241) |width| {
+        const text = try screenText(&state, @intCast(width), 24, .{});
+        defer std.testing.allocator.free(text);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(text));
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |line| try std.testing.expect(session_line.cells(line, .unicode) <= width);
+    }
+    try std.testing.expectEqualStrings(description, state.rows.items[0].state.bash.description.?.slice());
 }
