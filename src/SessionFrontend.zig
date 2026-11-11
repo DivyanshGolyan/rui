@@ -660,9 +660,6 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
             const pasting = self.app_hooks.root.pasting;
-            var ignored = false;
-            const prior_notice = self.notice;
-            const prior_shown_notice = self.shown_notice;
             self.shown_notice.dismiss();
             const question = self.app_consent.request == null and event == .key_press and !pasting and typesQuestion(event.key_press);
             const shortcut = session_chrome.shortcut(self.shortcuts_open, self.input.composition().bytes.len == 0, question);
@@ -699,9 +696,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                         .busy => self.notice = "Not sent: this Action needs a decision",
                         .editor => |outcome| switch (outcome) {
                             .action => |action| try self.perform(action),
-                            .refused => |why| if (why == .unbound) {
-                                ignored = true;
-                            } else {
+                            .refused => |why| if (why != .unbound) {
                                 self.notice = refusedNotice(why);
                             },
                             .none, .append, .redraw, .submit => {},
@@ -724,9 +719,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                         .busy => self.sayBusy(null, false),
                         .editor => |outcome| switch (outcome) {
                             .action => |action| try self.perform(action),
-                            .refused => |why| if (why == .unbound) {
-                                ignored = true;
-                            } else {
+                            .refused => |why| if (why != .unbound) {
                                 self.notice = refusedNotice(why);
                             },
                             .submit => if (self.shownCommands() != null) try self.commandLine(),
@@ -734,13 +727,6 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                         },
                     }
                 }
-            }
-            if (ignored) {
-                self.notice = prior_notice;
-                self.shown_notice = prior_shown_notice;
-                ctx.redraw = ctx.redraw or shortcut == .close_and_act;
-                ctx.consumeEvent();
-                return;
             }
             ctx.consumeEvent();
             ctx.redraw = true;
@@ -3582,7 +3568,7 @@ fn sendKeys(frontend: *Self, bytes: []const u8) !void {
     try held.keys(bytes);
 }
 
-test "unbound chat input preserves draft and notice while closing shortcuts redraws" {
+test "unbound chat input posts no notice and closing shortcuts redraws" {
     for ([_]bool{ false, true }) |shortcuts_open| {
         for ([_]bool{ false, true }) |notice_present| {
             const held = try HeldFrontend.create();
@@ -3599,15 +3585,10 @@ test "unbound chat input preserves draft and notice while closing shortcuts redr
             var ctx = held.context();
             ctx.redraw = false;
             try held.deliver(&ctx, .{ .key_press = parsed.event.?.key_press });
-            try std.testing.expectEqual(shortcuts_open, ctx.redraw);
+            try std.testing.expect(ctx.redraw);
             try std.testing.expect(!held.self.shortcuts_open);
             try std.testing.expectEqualStrings(if (shortcuts_open) "" else "abc", held.self.input.composition().bytes);
-            const notice = held.self.shown_notice.current(held.self.nowMs());
-            if (notice_present) {
-                try std.testing.expectEqualStrings("existing", notice.?);
-            } else {
-                try std.testing.expect(notice == null);
-            }
+            try std.testing.expect(held.self.shown_notice.current(held.self.nowMs()) == null);
         }
     }
 }
