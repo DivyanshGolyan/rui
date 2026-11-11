@@ -39,6 +39,99 @@ pub const openai_ids = rsql.Read(.{
     .cardinality = .each,
 });
 
+// One statement selects the authority and its facts together. The LEFT JOIN
+// deliberately emits a source-only row for an empty generation or absent ID:
+// neither may resurrect a shipped entry. No source emits no rows.
+const selection_sql = "SELECT fact.model_id,fact.context_window,fact.efforts,fact.openai_listed FROM model_catalog_source source LEFT JOIN model_fact fact ON fact.generation=source.generation AND (?1 IS NULL OR fact.model_id=?1) WHERE source.slot=1 ORDER BY fact.model_id";
+const SelectionRow = struct {
+    model_id: ?Bounded(256),
+    context_window: ?u32,
+    efforts: ?u8,
+    openai_listed: ?bool,
+
+    fn entry(self: *const SelectionRow, id: []const u8) catalog.Entry {
+        return .{
+            .id = id,
+            .context_window = self.context_window,
+            .efforts = .{ .bits = .{ .mask = @intCast(self.efforts.?) } },
+            .openai_listed = self.openai_listed.?,
+        };
+    }
+};
+const selected = rsql.Read(.{
+    .sql = selection_sql,
+    .Args = struct { id: ?[]const u8 },
+    .Row = SelectionRow,
+    .cardinality = .each,
+});
+const selected_model = rsql.Read(.{
+    .sql = selection_sql,
+    .Args = struct { id: ?[]const u8 },
+    .Row = SelectionRow,
+    .cardinality = .optional,
+});
+
+/// Operation-scoped single-model selection, including the source-only row.
+/// Queue alongside other reads, then call facts after the round completes.
+pub const Model = struct {
+    row: ?SelectionRow = null,
+    entry: [1]catalog.Entry = undefined,
+
+    pub fn read(self: *Model, a: anytype, id: []const u8) void {
+        a.read(selected_model, .{ .id = id }, &self.row);
+    }
+
+    /// Borrowed until this Model is released or read again. When there is no
+    /// source, the shipped snapshot is borrowed instead (the same selection
+    /// rule as the full-catalog read).
+    pub fn facts(self: *Model) []const catalog.Entry {
+        const row = if (self.row) |*row| row else return catalog.shipped;
+        const id = if (row.model_id) |*id| id.slice() else return &.{};
+        self.entry[0] = row.entry(id);
+        return &self.entry;
+    }
+};
+
+const Selection = struct {
+    allocator: std.mem.Allocator,
+    entries: std.ArrayList(catalog.Entry) = .empty,
+    saved: bool = false,
+    failed: bool = false,
+
+    pub fn visit(self: *Selection, row: *const SelectionRow) bool {
+        self.saved = true;
+        const id = if (row.model_id) |*id| id.slice() else return true;
+        const owned = self.allocator.dupe(u8, id) catch {
+            self.failed = true;
+            return false;
+        };
+        self.entries.append(self.allocator, row.entry(owned)) catch {
+            self.allocator.free(owned);
+            self.failed = true;
+            return false;
+        };
+        return true;
+    }
+
+    fn deinit(self: *Selection) void {
+        for (self.entries.items) |entry| self.allocator.free(entry.id);
+        self.entries.deinit(self.allocator);
+    }
+};
+
+/// Full selected generation for a single consumer operation. The caller's
+/// arena owns all saved entries and IDs; no source borrows shipped instead.
+/// One SELECT/Store round, with no separately observed source/fact state.
+pub fn readSelected(a: anytype, arena: std.mem.Allocator) ![]const catalog.Entry {
+    var selection: Selection = .{ .allocator = arena };
+    errdefer selection.deinit();
+    a.readEach(selected, .{ .id = null }, std.math.maxInt(u64), &selection);
+    try a.run();
+    if (selection.failed) return error.OutOfMemory;
+    if (!selection.saved) return catalog.shipped;
+    return selection.entries.toOwnedSlice(arena);
+}
+
 const existing = rsql.Read(.{
     .sql = "SELECT model_id FROM model_fact",
     .Args = struct {},

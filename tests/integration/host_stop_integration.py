@@ -266,11 +266,9 @@ def main():
             # work that an explicit restart would later execute.
             for kind in ("message", "configure"):
                 for phase in ("header", "body"):
-                    # Configure keys follow the parser's wire order; any other
-                    # order is rejected before capture, not held.
+                    # Hold a streamed plain-spec content value before admission.
                     fields = {"sender": None, "sender_handle": None, "text": {"state": "value", "value": "x" * 8192}} if kind == "message" else {
-                        "configuration": {name: {"state": "value", "value": "x" * 8192} if name == "instructions" else {"state": "omitted"}
-                            for name in ("workspace", "provider", "model", "instructions", "tools", "permission_mode", "output_schema")}}
+                        "configuration": {"instructions": "x" * 8192}}
                     body = json.dumps({"version": host_process.WIRE_VERSION, "kind": kind, "store": str(store),
                         "key": f"late-{kind}-{phase}", "session": session, **fields}).encode()
                     header = (f"POST /v1/{kind} HTTP/1.1\r\nHost: local\r\n".encode()

@@ -116,15 +116,21 @@ const max_provider_name_bytes = blk: {
     for (std.meta.fieldNames(provider_name.Provider)) |name| bytes = @max(bytes, name.len);
     break :blk bytes;
 };
-const max_catalog_bytes = blk: {
-    var bytes = 0;
-    for (catalog.openai_ids) |id| bytes += model_overhead + 2 * id.len;
-    break :blk bytes;
-};
 const provider_count = std.meta.fieldNames(provider_name.Provider).len;
 
-/// The most bytes `writeProviders` writes.
-pub const max_providers_bytes = "[]".len + provider_count * (provider_overhead + @max(max_catalog_bytes, max_live_models * model_overhead + 2 * max_live_id_bytes));
+/// The most bytes `writeProviders` writes for these facts, at most one list
+/// per built-in provider. Live account lists retain their independent bounds.
+pub fn providersBytes(facts: []const catalog.Entry) usize {
+    @setEvalBranchQuota(20000);
+    var catalog_bytes: usize = 0;
+    for (facts) |row| if (row.openai_listed) {
+        catalog_bytes += model_overhead + 2 * row.id.len;
+    };
+    return "[]".len + provider_count * (provider_overhead + @max(catalog_bytes, max_live_models * model_overhead + 2 * max_live_id_bytes));
+}
+
+/// Offline callers only; Host replies size against their selected facts.
+pub const max_providers_bytes = providersBytes(catalog.shipped);
 
 /// A provider's list: catalog OpenAI IDs, or the provider's own IDs.
 pub const List = union(Source) {
@@ -142,7 +148,7 @@ pub const Entry = struct {
 
 /// `[{"provider":...,"source":...,"models":[{"id":...,"known":...},...]},...]`,
 /// where `known` says Rui's catalog holds the model's facts.
-pub fn writeProviders(out: *std.Io.Writer, entries: []const Entry) !void {
+pub fn writeProviders(out: *std.Io.Writer, facts: []const catalog.Entry, entries: []const Entry) !void {
     try out.writeByte('[');
     for (entries, 0..) |entry, index| {
         if (index != 0) try out.writeByte(',');
@@ -151,21 +157,23 @@ pub fn writeProviders(out: *std.Io.Writer, entries: []const Entry) !void {
         switch (entry.list) {
             .live => |live| {
                 var ids = live.iterator();
-                while (ids.next()) |id| try writeModel(out, id, &first);
+                while (ids.next()) |id| try writeModel(out, facts, id, &first);
             },
-            .catalog, .pending, .catalog_fallback => for (catalog.openai_ids) |id| try writeModel(out, id, &first),
+            .catalog, .pending, .catalog_fallback => for (facts) |row| {
+                if (row.openai_listed) try writeModel(out, facts, row.id, &first);
+            },
         }
         try out.writeAll("]}");
     }
     try out.writeByte(']');
 }
 
-fn writeModel(out: *std.Io.Writer, id: []const u8, first: *bool) !void {
+fn writeModel(out: *std.Io.Writer, facts: []const catalog.Entry, id: []const u8, first: *bool) !void {
     if (!first.*) try out.writeByte(',');
     first.* = false;
     try out.writeAll("{\"id\":");
     try std.json.Stringify.encodeJsonString(id, .{}, out);
-    try out.print(",\"known\":{}}}", .{model_capability.supportsModel(id)});
+    try out.print(",\"known\":{}}}", .{model_capability.supportsModel(facts, id)});
 }
 
 test "an OpenAI list keeps the provider's order and skips IDs Rui cannot select" {
@@ -212,7 +220,7 @@ test "a list past either bound is refused, not cut" {
 test "a reply lists each provider's models and whether the catalog knows them" {
     var bytes: [max_providers_bytes]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
-    try writeProviders(&out, &.{
+    try writeProviders(&out, catalog.shipped, &.{
         .{ .provider = .codex, .list = .catalog },
         .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-luna\nmy\"model\n" } } },
     });
@@ -242,8 +250,65 @@ test "the reply bound holds the largest lists" {
     var entries: [provider_count]Entry = undefined;
     for (&entries, std.enums.values(provider_name.Provider)) |*entry, provider|
         entry.* = .{ .provider = provider, .list = .{ .live = .{ .bytes = ids[0..len] } } };
-    try writeProviders(&out, &entries);
+    try writeProviders(&out, catalog.shipped, &entries);
     entries[0] = .{ .provider = .codex, .list = .catalog_fallback };
     out = std.Io.Writer.fixed(&bytes);
-    try writeProviders(&out, &entries);
+    try writeProviders(&out, catalog.shipped, &entries);
+}
+
+test "provider lists use selected facts without merging shipped rows or sorting live IDs" {
+    const facts: []const catalog.Entry = &.{
+        .{ .id = "a-saved", .context_window = null, .efforts = .{}, .openai_listed = true },
+        .{ .id = "b-hidden", .context_window = null, .efforts = .{}, .openai_listed = false },
+        .{ .id = "z-saved", .context_window = null, .efforts = .{}, .openai_listed = true },
+    };
+    var bytes: [providersBytes(facts)]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    for ([_]Source{ .catalog, .pending, .catalog_fallback }) |source| {
+        out = std.Io.Writer.fixed(&bytes);
+        const list: List = switch (source) {
+            .catalog => .catalog,
+            .pending => .pending,
+            .catalog_fallback => .catalog_fallback,
+            .live => unreachable,
+        };
+        try writeProviders(&out, facts, &.{.{ .provider = .codex, .list = list }});
+        var expected: [256]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "[{{\"provider\":\"codex\",\"source\":\"{s}\",\"models\":[{{\"id\":\"a-saved\",\"known\":true}},{{\"id\":\"z-saved\",\"known\":true}}]}}]", .{@tagName(source)}), out.buffered());
+        out = std.Io.Writer.fixed(&bytes);
+        try writeProviders(&out, &.{}, &.{.{ .provider = .codex, .list = list }});
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "[{{\"provider\":\"codex\",\"source\":\"{s}\",\"models\":[]}}]", .{@tagName(source)}), out.buffered());
+    }
+    const entries: []const Entry = &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "z-saved\nb-hidden\ngpt-6-luna\na-saved\n" } } }};
+    out = std.Io.Writer.fixed(&bytes);
+    try writeProviders(&out, facts, entries);
+    try std.testing.expectEqualStrings(
+        "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"z-saved\",\"known\":true},{\"id\":\"b-hidden\",\"known\":true},{\"id\":\"gpt-6-luna\",\"known\":false},{\"id\":\"a-saved\",\"known\":true}]}]",
+        out.buffered(),
+    );
+}
+
+test "the dynamic reply bound holds saved catalogs beyond the shipped bound" {
+    const count = 1024;
+    const allocator = std.testing.allocator;
+    const ids = try allocator.alloc([catalog.max_model_bytes]u8, count);
+    defer allocator.free(ids);
+    const facts = try allocator.alloc(catalog.Entry, count);
+    defer allocator.free(facts);
+    for (facts, ids, 0..) |*row, *id, index| {
+        @memset(id, '"');
+        _ = try std.fmt.bufPrint(id[0..4], "{d:0>4}", .{index});
+        row.* = .{ .id = id, .context_window = null, .efforts = .{}, .openai_listed = true };
+    }
+    const bound = providersBytes(facts);
+    try std.testing.expect(bound > max_providers_bytes);
+    const bytes = try allocator.alloc(u8, bound);
+    defer allocator.free(bytes);
+    var out = std.Io.Writer.fixed(bytes);
+    var entries: [provider_count]Entry = undefined;
+    for (&entries, std.enums.values(provider_name.Provider)) |*entry, provider|
+        entry.* = .{ .provider = provider, .list = .catalog_fallback };
+    try writeProviders(&out, facts, &entries);
+    try std.testing.expect(out.buffered().len > max_providers_bytes);
+    try std.testing.expect(out.buffered().len <= bound);
 }

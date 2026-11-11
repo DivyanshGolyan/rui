@@ -82,7 +82,7 @@ fn Screen(comptime Content: type) type {
             lower_children[0] = .{ .widget = if (part == .compose) empty.widget() else self.content.widget(), .sizing = .fill };
             if (part == .whole) if (self.marker) |marker| {
                 const row = try ctx.arena.create(Marker);
-                row.* = .{ .child = marker };
+                row.* = .{ .child = marker, .style = self.style };
                 lower_children[count] = .{ .widget = row.widget() };
                 count += 1;
             };
@@ -140,6 +140,7 @@ fn Screen(comptime Content: type) type {
 
 const Marker = struct {
     child: vxfw.Widget,
+    style: @import("vaxis").Style,
 
     fn widget(self: *Marker) vxfw.Widget {
         return .{ .userdata = self, .drawFn = draw };
@@ -150,6 +151,7 @@ const Marker = struct {
         const width = ctx.max.width.?;
         if (width == 0 or ctx.max.height.? == 0) return .empty(self.widget());
         var row = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = 1 });
+        @memset(row.buffer, .{ .style = self.style });
         const drawn = try self.child.draw(ctx.withConstraints(.{}, .{ .width = width, .height = 1 }));
         const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
         children[0] = .{ .origin = .{ .row = 0, .col = width - drawn.size.width }, .surface = drawn, .z_index = 1 };
@@ -234,7 +236,7 @@ test "App screens compose content input facts status and an overlay without owni
     }
 }
 
-test "App screens render the same cells as the original composition" {
+test "App screens render the original composition with painted marker rows" {
     const vaxis = @import("vaxis");
     const Content = struct {
         fn widget(self: *@This()) vxfw.Widget {
@@ -274,15 +276,27 @@ test "App screens render the same cells as the original composition" {
         @memset(terminal.buf, .{});
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &terminal };
         surface.render(window, input.composer.widget());
+        if (screen.marker != null and screen.overlay == null and width > 0 and height > 0) {
+            const upper = surface.children[0].surface.children[0].surface;
+            const lower = upper.children[upper.children.len - 1];
+            const row = lower.surface.children[1];
+            if (row.surface.size.height > 0) {
+                const y: u16 = @intCast(lower.origin.row + row.origin.row);
+                const chip = row.surface.children[0];
+                for (0..@intCast(chip.origin.col)) |x| {
+                    try std.testing.expectEqual(screen.style.bg, terminal.readCell(@intCast(x), y).?.style.bg);
+                }
+            }
+        }
         for (terminal.buf) |cell| {
             hash.update(cell.char.grapheme);
             std.hash.autoHash(&hash, cell.char.width);
             std.hash.autoHash(&hash, cell.style);
         }
     };
-    // Captured from c347313's composition, across all optional rows and tiny,
-    // narrow and wide terminals. Hash visible graphemes, widths and styles.
-    try std.testing.expectEqual(@as(u64, 13927979314281808809), hash.final());
+    // Based on c347313's composition, with marker rows filled to the ground,
+    // across all optional rows and tiny, narrow and wide terminals.
+    try std.testing.expectEqual(@as(u64, 15741834227597727779), hash.final());
 }
 
 test "App screens update layout state through exhausted resizes for every optional row combination" {

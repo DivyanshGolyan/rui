@@ -13,15 +13,28 @@ pub const split_at = 100;
 overview: vxfw.Widget,
 list: vxfw.Widget,
 compose: vxfw.Widget,
-divider_style: vaxis.Style = .{},
+divider: Split.Divider = .{},
 session: ?vxfw.Widget = null,
 pasting: bool = false,
 frames: u64 = 0,
-/// This frame's shell layout, published before drawing its Session.
-list_visible: bool = false,
+size: vxfw.Size = .{},
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .captureHandler = capture, .eventHandler = event, .drawFn = draw };
+}
+
+/// Visibility follows the current viewport and screen selection, not the last
+/// time the list happened to draw. Opening a Session can hide it before drawing.
+pub fn listVisible(self: *const Self) bool {
+    return self.size.width > 0 and self.size.height > 0 and self.chooseLayout() != .session;
+}
+
+const Layout = enum { overview, session, split };
+
+/// One layout decision drives both drawing and off-frame visibility queries.
+fn chooseLayout(self: *const Self) Layout {
+    if (self.size.width >= split_at) return .split;
+    return if (self.session != null) .session else .overview;
 }
 
 pub fn openSession(self: *Self, ctx: *vxfw.EventContext, session: vxfw.Widget) !void {
@@ -79,22 +92,24 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
-    self.list_visible = size.width >= split_at and size.height != 0;
+    self.size = size;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
-    const child = if (!self.list_visible)
-        try (self.session orelse self.overview).draw(ctx)
-    else wide: {
-        const split = try ctx.arena.create(Split);
-        split.* = .{
-            .left = self.list,
-            .right = self.session orelse self.compose,
-            .left_width = list_width,
-            // Root has already selected this frame's wide layout.
-            .min_width = 0,
-            .narrow = .right,
-            .divider = .{ .style = self.divider_style },
-        };
-        break :wide try split.widget().draw(ctx);
+    const child = switch (self.chooseLayout()) {
+        .overview => try self.overview.draw(ctx),
+        .session => try self.session.?.draw(ctx),
+        .split => wide: {
+            const split = try ctx.arena.create(Split);
+            split.* = .{
+                .left = self.list,
+                .right = self.session orelse self.compose,
+                .left_width = list_width,
+                // Root already chose the layout; Split only places the panes.
+                .min_width = 0,
+                .narrow = .right,
+                .divider = self.divider,
+            };
+            break :wide try split.widget().draw(ctx);
+        },
     };
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = child };
     self.frames += 1;
@@ -153,7 +168,6 @@ test "App root places list and compose or the open child at desktop and phone wi
             const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
             const surface = try root.widget().draw(ctx);
             try std.testing.expectEqual(size, surface.size);
-            try std.testing.expectEqual(size.width >= split_at and size.height != 0, root.list_visible);
             const layout = surface.children[0].surface;
             if (size.width >= 100 and size.height > 0) {
                 try std.testing.expectEqual(@as(usize, 3), layout.children.len);

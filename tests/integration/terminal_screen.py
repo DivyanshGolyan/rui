@@ -370,12 +370,19 @@ class ScreenCapture:
 
     def draft(self, text, caret, *, prompt="› "):
         """Check the actual caret row, not an identical earlier User row."""
+        if self.synchronized or self.generation == 0:
+            return False
         cursor = self.screen.cursor
-        line = self.screen.display[cursor.y].rstrip()
-        # The composer keeps the screen's one-column margin before its mark;
-        # `caret` counts from the mark, as `prompt` starts there.
+        cells = self.completed_cells[cursor.y]
+        # A wide shell draws the composer after the list's divider. Locate
+        # that boundary in cells, not string offsets (the list may be Unicode).
+        origin = 0
+        if "".join(cell.data for cell in cells[:2]) not in (" ›", " >"):
+            origin = next((at + 1 for at, cell in enumerate(cells[:cursor.x]) if cell.data == "│"), 0)
+        line = "".join(cell.data for cell in cells[origin:]).rstrip()
+        # `caret` counts from the mark, after the pane's one-column margin.
         margin = 1 if line.startswith(" ") and not prompt.startswith(" ") else 0
         return (not self.synchronized and self.generation > 0
                 and "Opening…" not in self.completed
-                and cursor.x == caret + margin
+                and cursor.x - origin == caret + margin
                 and line[margin:] == (prompt + unicodedata.normalize("NFC", text)).rstrip())

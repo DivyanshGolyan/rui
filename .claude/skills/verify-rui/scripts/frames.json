@@ -1,0 +1,853 @@
+{
+  "sizes": [
+    "140x40",
+    "46x30"
+  ],
+  "states": [
+    {
+      "name": "start-empty",
+      "note": "01-overview-empty",
+      "open": "overview",
+      "steps": [],
+      "expect": "Type a task"
+    },
+    {
+      "name": "start",
+      "note": "02-overview",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Needs you"
+        },
+        {
+          "wait": "Profile the Host under load"
+        }
+      ],
+      "cast": [
+        {
+          "label": "Fix retry deadline",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "The retry loop waits a full backoff even when the request is already late. Fix it with a rich answer in markdown.",
+            "Give me a tool demonstration: list the project, then run the two checks."
+          ]
+        },
+        {
+          "label": "Schema migration",
+          "workspace": "code/drift",
+          "mode": "ask",
+          "effort": "high",
+          "messages": [
+            "Review the schema migration. First, run a consent check."
+          ],
+          "settle": "pending"
+        },
+        {
+          "label": "Flaky upload test",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "The upload test fails one run in ten. Find out why. (invalid output)"
+          ]
+        },
+        {
+          "label": "Profile the Host under load",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Profile the Host under load with a long bash call."
+          ],
+          "settle": "stop"
+        },
+        {
+          "label": "Release notes for 0.60",
+          "workspace": "code/blog",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Draft the release notes for 0.60 from the merged PRs."
+          ]
+        },
+        {
+          "label": "Split the Store module",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Split the Store module into smaller files."
+          ]
+        },
+        {
+          "label": "Explain the Host",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Explain the Host in a long answer."
+          ]
+        }
+      ],
+      "expect": [
+        "Needs you",
+        "■"
+      ]
+    },
+    {
+      "name": "start-busy",
+      "note": "03-overview-busy: ⠹ counts active Sessions",
+      "open": "overview",
+      "steps": [
+        {
+          "send": {
+            "to": "Benchmark idle memory",
+            "text": "Benchmark idle memory with a slow explanation.",
+            "wait": false
+          }
+        },
+        {
+          "send": {
+            "to": "Docs build",
+            "text": "Build the docs and run the tests with parallel bash.",
+            "wait": false
+          }
+        },
+        {
+          "wait": "Run the slow tests"
+        }
+      ],
+      "cast": [
+        {
+          "label": "Benchmark idle memory",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        },
+        {
+          "label": "Docs build",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        }
+      ],
+      "expect": [
+        "Docs build",
+        "Run the slow tests"
+      ]
+    },
+    {
+      "name": "chat",
+      "note": "10-conversation",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "send": {
+            "to": "Docs build",
+            "text": "Summarise the build results.",
+            "wait": true
+          }
+        },
+        {
+          "send": {
+            "to": "Benchmark idle memory",
+            "text": "Summarise the benchmark.",
+            "wait": true
+          }
+        },
+        {
+          "wait": "The project has a README"
+        }
+      ],
+      "expect": [
+        "The project has a README",
+        "retry policy notes"
+      ]
+    },
+    {
+      "name": "chat-scrolled",
+      "note": "11-conversation-scrolled",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "keys": [
+            "PgUp"
+          ]
+        },
+        {
+          "wait": "What I changed"
+        }
+      ],
+      "expect": [
+        "What I changed",
+        "retry.zig"
+      ]
+    },
+    {
+      "name": "chat-top",
+      "note": "12-conversation-top",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "keys": [
+            "PgUp",
+            "PgUp",
+            "PgUp",
+            "PgUp"
+          ]
+        },
+        {
+          "wait": "Start of conversation"
+        }
+      ],
+      "expect": [
+        "Start of conversation",
+        "What I changed"
+      ]
+    },
+    {
+      "name": "markdown",
+      "note": "12b-markdown-code-table-link",
+      "open": "Markdown retry",
+      "cast": [
+        {
+          "label": "Markdown retry",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "A compact rich answer."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "retry policy notes"
+        }
+      ],
+      "expect": [
+        "What I changed",
+        "retry.zig",
+        "pub fn next",
+        "Late request  waits 30 s  fails at once",
+        "retry policy notes"
+      ]
+    },
+    {
+      "name": "markdown-wrapped",
+      "note": "12c-markdown-wrapped: code continuation retains its own indent",
+      "open": "Markdown retry",
+      "sizes": [
+        "46x30"
+      ],
+      "steps": [
+        {
+          "wait": "retry policy notes"
+        }
+      ],
+      "expect": [
+        "return null; //\n    expired",
+        "Late request  waits 30 s  fails at once",
+        "retry policy notes"
+      ]
+    },
+    {
+      "name": "chat-working",
+      "note": "13b-working",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "Explain the change again, a slow walk through is fine."
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Waiting"
+        },
+        {
+          "wait": "ctrl+x stop"
+        }
+      ],
+      "expect": [
+        "Waiting",
+        "ctrl+x stop"
+      ]
+    },
+    {
+      "name": "chat-queued",
+      "note": "13d-queued-message",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "wait": "ctrl+x stop"
+        },
+        {
+          "text": "and one more thing"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "◌ and one more thing"
+        }
+      ]
+    },
+    {
+      "name": "tools-running",
+      "note": "14-tools-running: ⠹ marks active tool calls",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "send": {
+            "to": "Fix retry deadline",
+            "text": "Now build the docs and run the slow tests as parallel bash jobs.",
+            "wait": false
+          }
+        },
+        {
+          "wait": "Build the docs"
+        },
+        {
+          "wait": "Run the slow tests"
+        },
+        {
+          "wait": "ctrl+x stop"
+        }
+      ],
+      "expect": [
+        "⠹ Build the docs",
+        "Run the slow tests",
+        "ctrl+x stop"
+      ]
+    },
+    {
+      "name": "stopping",
+      "note": "14c-stop-asked: transient; capture immediately at one size before it settles",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "wait": "Build the docs"
+        },
+        {
+          "keys": [
+            "C-x"
+          ]
+        },
+        {
+          "wait": "Stopping"
+        }
+      ],
+      "sizes": [
+        "140x40"
+      ]
+    },
+    {
+      "name": "stopped",
+      "note": "14d-stopped: one ■ Stopped line, without continuation advice",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "wait": "■ Stopped"
+        }
+      ]
+    },
+    {
+      "name": "chat-failed",
+      "note": "16-conversation-failed: × Model reply unreadable, without a saved code or provider report",
+      "open": "Flaky upload test",
+      "steps": [
+        {
+          "wait": "× Model reply unreadable"
+        }
+      ]
+    },
+    {
+      "name": "approval",
+      "note": "17-approval",
+      "open": "Schema migration",
+      "steps": [
+        {
+          "wait": "Allow once"
+        },
+        {
+          "wait": "Deny"
+        }
+      ]
+    },
+    {
+      "name": "approval-typing",
+      "note": "17c-approval-typing",
+      "open": "Schema migration",
+      "steps": [
+        {
+          "wait": "Allow once"
+        },
+        {
+          "text": "I am checking the migration before approving it."
+        },
+        {
+          "wait": "Allow once"
+        }
+      ]
+    },
+    {
+      "name": "approval-after-esc",
+      "note": "17d-approval-after-esc",
+      "open": "Schema migration",
+      "steps": [
+        {
+          "wait": "Allow once"
+        },
+        {
+          "text": "I am checking the migration before approving it."
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "Allow once"
+        }
+      ]
+    },
+    {
+      "name": "help",
+      "note": "00-help",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "/help"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Marks"
+        }
+      ]
+    },
+    {
+      "name": "slash",
+      "note": "00-slash",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "/"
+        },
+        {
+          "wait": "/help"
+        }
+      ]
+    },
+    {
+      "name": "slash-filter",
+      "note": "22-slash-filter",
+      "open": "Release notes for 0.60",
+      "steps": [
+        {
+          "text": "/stat"
+        },
+        {
+          "wait": "/status"
+        }
+      ]
+    },
+    {
+      "name": "unknown-command",
+      "note": "25-unknown-command",
+      "open": "Release notes for 0.60",
+      "steps": [
+        {
+          "text": "/nope"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Unknown command /nope"
+        }
+      ]
+    },
+    {
+      "name": "misused-command",
+      "note": "23-misused",
+      "open": "Release notes for 0.60",
+      "steps": [
+        {
+          "text": "/configure --reasoning-effort \"\""
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Usage: /configure"
+        },
+        {
+          "text": "/status extra"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Usage: /status"
+        }
+      ]
+    },
+    {
+      "name": "status",
+      "note": "20-status",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "/status"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "This Session"
+        }
+      ]
+    },
+    {
+      "name": "status-page2",
+      "note": "20b-status-page2",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "/status"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "This Session"
+        },
+        {
+          "keys": [
+            "PgDn"
+          ]
+        }
+      ],
+      "expect": "New Sessions"
+    },
+    {
+      "name": "model-picker",
+      "note": "41-model-picker",
+      "open": "overview",
+      "steps": [
+        {
+          "text": "/model"
+        },
+        {
+          "wait": "tab sign-in"
+        }
+      ]
+    },
+    {
+      "name": "model-filter",
+      "note": "41d-model-filter",
+      "open": "overview",
+      "steps": [
+        {
+          "text": "/model ter"
+        },
+        {
+          "wait": "gpt-6.1-terra"
+        },
+        {
+          "keys": [
+            "Down",
+            "Right",
+            "Right"
+          ]
+        }
+      ],
+      "expect": [
+        "gpt-6.1-terra",
+        "‹ high ›"
+      ]
+    },
+    {
+      "name": "start-draft",
+      "note": "48-overview-draft",
+      "open": "overview",
+      "steps": [
+        {
+          "text": "Add a --json flag to rui session list"
+        },
+        {
+          "wait": "enter start"
+        }
+      ]
+    },
+    {
+      "name": "long-labels",
+      "note": "50c-long-label",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Migrate the billing"
+        }
+      ],
+      "cast": [
+        {
+          "label": "Migrate the billing reconciliation worker from the legacy queue to the new reconciliation pipeline",
+          "workspace": "code/customer-platform/production/billing-reconciliation-worker",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Plan the billing reconciliation migration."
+          ]
+        }
+      ],
+      "expect": "Migrate"
+    },
+    {
+      "name": "many-sessions",
+      "note": "51-many-sessions",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Batch job"
+        }
+      ],
+      "cast": [
+        {
+          "label": "Batch job {n}",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Complete this batch job."
+          ],
+          "count": 25
+        }
+      ]
+    },
+    {
+      "name": "many-sessions-end",
+      "note": "51b-many-sessions-end",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down"
+          ]
+        },
+        {
+          "wait": "Flaky upload"
+        }
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "expect": "Batch job"
+    },
+    {
+      "name": "day-start",
+      "note": "70-light-overview",
+      "open": "overview",
+      "steps": [],
+      "theme": "day",
+      "expect": "Type a task"
+    },
+    {
+      "name": "day-chat",
+      "note": "71-light-conversation",
+      "open": "Markdown retry",
+      "steps": [
+        {
+          "wait": "retry policy notes"
+        }
+      ],
+      "theme": "day",
+      "expect": [
+        "What I changed",
+        "retry.zig",
+        "pub fn next",
+        "Late request  waits 30 s  fails at once",
+        "retry policy notes"
+      ]
+    },
+    {
+      "name": "mist-chat-scrolled",
+      "note": "light terminal with its own background, scrolled back",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "keys": [
+            "PgUp"
+          ]
+        },
+        {
+          "wait": "What I changed"
+        }
+      ],
+      "theme": "mist"
+    },
+    {
+      "name": "no-color",
+      "note": "72-no-color",
+      "open": "Markdown retry",
+      "steps": [
+        {
+          "wait": "retry policy notes"
+        }
+      ],
+      "env": {
+        "NO_COLOR": "1"
+      },
+      "expect": [
+        "What I changed",
+        "retry.zig",
+        "pub fn next",
+        "Late request  waits 30 s  fails at once",
+        "retry policy notes"
+      ]
+    },
+    {
+      "name": "host-stopped",
+      "note": "60-host-down-overview",
+      "open": "overview",
+      "steps": [
+        {
+          "host": "pause"
+        },
+        {
+          "wait": "Host stopped"
+        }
+      ]
+    },
+    {
+      "name": "host-stopped-chat",
+      "note": "60b-host-down-conversation",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "host": "start"
+        },
+        {
+          "sleep": 1
+        },
+        {
+          "host": "pause"
+        },
+        {
+          "wait": "Host stopped"
+        }
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "expect": "Host stopped"
+    },
+    {
+      "name": "host-back",
+      "note": "61-host-back",
+      "open": "overview",
+      "steps": [
+        {
+          "host": "start"
+        },
+        {
+          "gone": "Host stopped"
+        }
+      ],
+      "expect": "Batch job"
+    },
+    {
+      "name": "exit",
+      "note": "81-exit",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "/exit"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Detached. Host work continues."
+        },
+        {
+          "wait": "Pane is dead (status 0"
+        }
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "expect": "Pane is dead (status 0"
+    }
+  ]
+}

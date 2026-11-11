@@ -266,10 +266,27 @@ const notice_capacity = @max(
     protocol.max_model_bytes + " · ".len + unknown_sign_in.len + model_tail.len,
 );
 
+test "a read freezes its viewport width method for live and historical answers" {
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    var environment = try std.testing.environ.createMap(std.testing.allocator);
+    defer environment.deinit();
+    try screen.init(std.testing.io, &environment, false);
+    defer screen.deinit();
+    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .screen = screen, .colour = false };
+    for (std.enums.values(@import("ConversationViewport.zig").Method)) |method| {
+        screen.setWidth(method);
+        for ([_]ReadPhase{ .activity, .history }) |phase| {
+            const job = self.freeze(phase);
+            try std.testing.expectEqual(method, job.width_method);
+        }
+    }
+}
+
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .target = if (phase == .history) if (self.transcript.plan.next()) |listing| .{ .listing = listing } else .older else .older, .messages = self.live.messages, .queued = self.live.queued, .drawn = self.live.drawn, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread };
+    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .target = if (phase == .history) if (self.transcript.plan.next()) |listing| .{ .listing = listing } else .older else .older, .messages = self.live.messages, .queued = self.live.queued, .drawn = self.live.drawn, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread };
     const job = &self.job;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
@@ -285,11 +302,17 @@ fn freeze(self: *Self, phase: ReadPhase) *Job {
 }
 
 test "reader freezes borrowed HOME independently of process initialization" {
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    var environment = try std.testing.environ.createMap(std.testing.allocator);
+    defer environment.deinit();
+    try screen.init(std.testing.io, &environment, false);
+    defer screen.deinit();
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
     for ([_][]const u8{ "", "/home/a b" }) |home| {
         for (std.enums.values(ReadPhase)) |phase| {
-            self.* = .{ .init = undefined, .home = home, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .colour = false };
+            self.* = .{ .init = undefined, .home = home, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .screen = screen, .colour = false };
             const job = self.freeze(phase);
             self.home = "/changed-after-freeze";
             try std.testing.expectEqualStrings(home, job.home);
@@ -752,6 +775,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .user = style.of(self.app_caps, .{ .colour = .ink }).fg,
         .attention = attention.fg,
         .failure = failure.fg,
+        .band = style.of(self.app_caps, .{ .background = .bar }).bg,
     };
     const facts_style = style.of(self.app_caps, .{ .colour = .quiet, .background = .bar });
     self.app_screen.style = normal;
@@ -808,7 +832,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const held = self.heldOriginal();
     const send = session_chrome.send(session_notice.status(self.reading.opening, self.app_consent.request != null, held), self.reading.opening or (held != null and held.?.state == .submitting));
     const facts_buffer = try ctx.arena.create([session_chrome.facts_bytes]u8);
-    const list_visible = self.app_hooks.root.list_visible;
+    const list_visible = self.app_hooks.root.listVisible();
     chrome.place(&self.app_screen, .{
         .list_visible = list_visible,
         .browsing = browsing,
@@ -5079,7 +5103,7 @@ test "App Session shell gutter and back control follow list visibility through r
         frame.render(window, self.app_input.composer.widget());
         const wide = width >= 100;
         const start: u16 = if (wide) 41 else 0;
-        try std.testing.expectEqual(wide, fixture.root.list_visible);
+        try std.testing.expectEqual(wide, fixture.root.listVisible());
         if (wide) try std.testing.expectEqualStrings("│", screen.readCell(40, 0).?.char.grapheme);
         // Exactly one shell-owned feed gutter, both beside the divider and alone.
         try std.testing.expectEqualStrings(" ", screen.readCell(start, 0).?.char.grapheme);
