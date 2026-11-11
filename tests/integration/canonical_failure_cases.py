@@ -343,10 +343,13 @@ def interactive_cases(state, binding=False, null_code=False):
                         os.write(master, b"\x04")
                 else:
                     if route == "/v1/control/permission-decision":
-                        proposal = human.read_terminal(master, human.CHOICE)
-                        # The borderless request has one title and the exact command.
+                        title = "? Check successful shell exit"
+                        # read_terminal joins earlier activity frames too. Count
+                        # titles only in one committed request-and-choice frame.
+                        proposal = human.keyed_frame(master, b"",
+                            lambda frame, x, y: human.CHOICE in frame and title in frame)
                         rows = [row.strip() for row in proposal.splitlines()]
-                        assert rows.count("? Check successful shell exit") == 1 and "$ true" in rows, proposal
+                        assert rows.count(title) == 1 and "$ true" in rows, proposal
                         proposal += human.action_ready(ready_read, master)
                         # Deny is picked and shown before Enter counts.
                         proposal += human.pick_deny(master)
