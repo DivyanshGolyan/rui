@@ -1186,17 +1186,14 @@
           "host": "pause"
         },
         {
-          "wait": "The Host stopped."
-        },
-        {
-          "wait": "Pane is dead (status 6"
+          "wait": "Host stopped"
         }
       ],
       "sizes": [
         "46x30",
         "140x40"
       ],
-      "expect": "Pane is dead (status 6"
+      "expect": "Host stopped"
     },
     {
       "name": "host-back",

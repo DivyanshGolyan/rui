@@ -1067,8 +1067,9 @@ pub const State = struct {
     pending: Vec(Row) = .{},
     next_list_ms: u64 = 0,
     listed_at_ms: ?u64 = null,
-    /// The Host has not answered a list request since this time.
-    unreachable_since_ms: ?u64 = null,
+    /// The latest listing failed. Rows remain visible but faded and still;
+    /// this is list freshness, not a Host availability observation.
+    list_stale: bool = false,
     /// Sort scratch reused across refreshes.
     sort_keys: Vec(SortKey) = .{},
 
@@ -1581,7 +1582,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 std.debug.assert(state.listing);
                 state.listing = false;
                 state.pending.items.len = 0;
-                if (state.unreachable_since_ms == null) state.unreachable_since_ms = state.now_ms;
+                state.list_stale = true;
             },
         },
         .first_line => |result| try firstLine(state, result),
@@ -1999,7 +2000,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     state.pending.items.len = 0;
     state.token = answer.since;
     state.listed_at_ms = state.now_ms;
-    state.unreachable_since_ms = null;
+    state.list_stale = false;
     try arrange(state);
     if (completed_archive) |ref| state.say(.quiet, "Archived {s}.", .{&ref});
     if (state.selected == .session and state.selectedRow() == null) {
@@ -3013,7 +3014,7 @@ fn hintRows(state: *const State) u16 {
 
 /// The counts line and its bands, as `headerSegments` draws them.
 fn topRows(state: *const State) usize {
-    return 1 + @as(usize, @intFromBool(state.unreachable_since_ms != null)) + @intFromBool(band(state.rows.items, state.now_ms, state.login_at) != null);
+    return 1 + @as(usize, @intFromBool(band(state.rows.items, state.now_ms, state.login_at) != null));
 }
 
 /// The list between the rule and the draft as it is now, while the person
@@ -3499,7 +3500,7 @@ fn rowLine(built: *Spans, state: *const State, at: usize, columns: Columns, fram
     const rule = rules.get(kind);
     var words: [work_line.max_words_bytes]u8 = undefined;
     const line = workLine(&words, state, row);
-    const faded = state.unreachable_since_ms != null;
+    const faded = state.list_stale;
     const mark = marks.get(rule.mark);
     const spins = markSpins(state, .{ .row = at }, built.caps);
     const glyph = if (spins) spinner[frame % spinner.len] else if (built.caps.unicode) mark.unicode else mark.ascii;
@@ -3559,12 +3560,13 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
 /// Unicode in colour spins, and a faded row's state is stale, so it holds
 /// still.
 pub fn markSpins(state: *const State, item: Item, caps: Caps) bool {
-    if (item != .row or state.unreachable_since_ms != null or !caps.unicode or caps.depth == .none) return false;
+    if (item != .row or state.list_stale or !caps.unicode or caps.depth == .none) return false;
     const row = &state.rows.items[state.order.items[item.row]];
     return row.from_person_at != null and rules.get(shownKind(state, row)).spins;
 }
 
-/// Counts and any actionable Host/provider warnings, above the list.
+/// Counts and actionable provider warnings, above the list. Host words belong
+/// to the shell's single Host line, independent of whether a listing failed.
 pub fn headerSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
     return (try header(arena, state, width, caps)).segments;
 }
@@ -3573,16 +3575,10 @@ pub fn headerSegments(arena: Allocator, state: *const State, width: u16, caps: C
 /// the view name a click takes back to the default view.
 pub fn header(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!CountsLine {
     const top = try countsLine(arena, state, width, caps);
-    var lines: [3][]const Segment = undefined;
+    var lines: [2][]const Segment = undefined;
     lines[0] = top.segments;
     var count: usize = 1;
     var built: Spans = .of(arena, caps, width);
-    if (state.unreachable_since_ms) |since| {
-        var buffer: [16]u8 = undefined;
-        const text = try std.fmt.allocPrint(arena, "Host stopped {s} ago. Run rui host start.", .{spanText(&buffer, (state.now_ms -| since) / 1000)});
-        lines[count] = try segmentsOf(arena, try bandLine(&built, text), width, .{});
-        count += 1;
-    }
     if (band(state.rows.items, state.now_ms, state.login_at)) |trouble| {
         lines[count] = try segmentsOf(arena, try providerBand(&built, trouble, state.now_ms), width, .{});
         count += 1;
@@ -4510,19 +4506,22 @@ fn expectLine(segments: []const Segment, width: u16, expected: []const []const u
     try std.testing.expectEqual(@as(usize, width), cells);
 }
 
-test "App header preserves simultaneous Host and sign-in recovery instructions" {
+test "App header keeps provider recovery without restating the shell Host line" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var state = try opened(&.{failedRow("aaaaaa", 60, "provider_http_401", null)});
     defer state.deinit();
-    state.unreachable_since_ms = state.now_ms - 5000;
+    state.list_stale = true;
     const segments = try headerSegments(arena.allocator(), &state, 100, .{});
     try std.testing.expectEqual(Background.bar, (try styleOf(segments, "rui")).background);
-    try std.testing.expectEqual(Background.band, (try styleOf(segments, "Host stopped 5s ago. Run rui host start.")).background);
     try std.testing.expectEqual(Background.band, (try styleOf(segments, "Sign-in expired. Run ")).background);
     var breaks: usize = 0;
-    for (segments) |segment| breaks += std.mem.count(u8, segment.text, "\n");
-    try std.testing.expectEqual(@as(usize, 2), breaks);
+    for (segments) |segment| {
+        breaks += std.mem.count(u8, segment.text, "\n");
+        try std.testing.expect(std.mem.indexOf(u8, segment.text, "Host stopped") == null);
+        try std.testing.expect(std.mem.indexOf(u8, segment.text, "rui host") == null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), breaks);
 }
 
 test "the counts line counts by mark, leaves zeros out, and colours only needs you and failures" {
@@ -4707,7 +4706,7 @@ test "your Sessions at work turn the spinner in step, and every other mark holds
     try std.testing.expectEqualStrings("⠹", markOf(asked, "Mine, thinking"));
     // ASCII, NO_COLOR and a faded screen hold still on every frame.
     for ([_]Caps{ .{ .unicode = false }, .{ .depth = .none }, .{ .unicode = false, .depth = .none }, .{} }, 0..) |caps, at| {
-        if (at == 3) state.unreachable_since_ms = state.now_ms;
+        if (at == 3) state.list_stale = true;
         const first = try screenText(&state, 80, 24, caps);
         defer std.testing.allocator.free(first);
         for (1..spinner.len + 1) |frame| {
@@ -5842,15 +5841,16 @@ test "the overview lists once a second, one listing at a time" {
     _ = try respond(&state, .full, testToken(1), &mixed);
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = start + 2 * list_interval_ms }));
     try expectEffects(&.{}, try step(&state, .{ .tick = start + 2 * list_interval_ms + 500 }));
-    // A Host that stops answering fades the rows and says since when.
+    // A failed listing fades the held rows; Host words stay with the shell.
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = start + 3 * list_interval_ms }));
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
-    try expectScreenLine(&state, 1, " Host stopped 0s ago. Run rui host start.");
+    try std.testing.expect(state.list_stale);
+    try expectScreenLine(&state, 1, "  + New Session");
     var screen = try Frame.of(&state, 80, 24, .{}, 0);
     defer screen.deinit();
-    try expectScreenLine(&state, 3, "  ? Review PR 412                                                            3m");
-    try std.testing.expectEqual(Style{ .colour = .quiet }, screen.styleAt(3, 2).?);
+    try expectScreenLine(&state, 2, "  ? Review PR 412                                                            3m");
+    try std.testing.expectEqual(Style{ .colour = .quiet }, screen.styleAt(2, 2).?);
     _ = try refresh(&state, .not_modified, testToken(1), &.{});
     try expectScreenLine(&state, 1, "  + New Session");
 }
@@ -6451,7 +6451,7 @@ test "overview compact top leaves a failed row visible in a narrow viewport" {
     try std.testing.expect(std.mem.indexOf(u8, text, "Host restarted") == null);
 }
 
-test "overview compact top preserves both alarm bands before the list" {
+test "overview compact top preserves the provider band before a stale list" {
     var state = try opened(&.{session("a1b2c3", .{ .working = ago(40) }, .{ .label = "Fail later" })});
     defer state.deinit();
     _ = try step(&state, .{ .tick = (test_now_s + 60) * 1000 });
@@ -6464,7 +6464,6 @@ test "overview compact top preserves both alarm bands before the list" {
     var lines = std.mem.splitScalar(u8, text, '\n');
     for ([_][]const u8{
         " rui  × 1",
-        " Host stopped 1m ago. Run rui host start.",
         " Sign-in expired. Run rui auth login codex.",
         "  + New Session",
         "  × Fail later                                       Sign-in expired         1m",
@@ -6473,20 +6472,19 @@ test "overview compact top preserves both alarm bands before the list" {
     try std.testing.expect(std.mem.indexOf(u8, text, "Host restarted") == null);
 }
 
-test "the Host-stopped band comes first, over the provider bands and the faded rows" {
+test "a failed listing keeps the provider band and faded rows without a Host band" {
     var state = try opened(&.{ failedRow("aaaaaa", 60, "provider_sign_in_refresh_token_expired", null), session("a1b2c3", .{ .working = ago(40) }, .{ .label = "Profile it" }) });
     defer state.deinit();
     try expectScreenLine(&state, 1, " Sign-in expired. Run rui auth login codex.");
     _ = try step(&state, .{ .tick = (test_now_s + 1) * 1000 });
     _ = try step(&state, .{ .list = .failed });
-    try std.testing.expectEqual(@as(?u64, (test_now_s + 1) * 1000), state.unreachable_since_ms);
+    try std.testing.expect(state.list_stale);
     _ = try step(&state, .{ .tick = (test_now_s + 181) * 1000 });
-    try expectScreenLine(&state, 1, " Host stopped 3m ago. Run rui host start.");
-    try expectScreenLine(&state, 2, " Sign-in expired. Run rui auth login codex.");
+    try expectScreenLine(&state, 1, " Sign-in expired. Run rui auth login codex.");
     try expectStyle(&state, 1, 0, .{ .colour = .on_band, .background = .band, .bold = true });
-    // The rows fade under it.
-    try expectScreenLine(&state, 4, "  ⠹ Profile it                                                               3m");
-    try expectStyle(&state, 4, 4, .{ .colour = .quiet });
+    // The rows still fade under the provider band.
+    try expectScreenLine(&state, 3, "  ⠹ Profile it                                                               3m");
+    try expectStyle(&state, 3, 4, .{ .colour = .quiet });
 }
 
 /// Answers the picker's model-list read with the menu of `lists`.
