@@ -720,7 +720,15 @@ class ReleaseFlowTest(unittest.TestCase):
 
     def test_promotion_step_lists_name_each_check_once_with_a_fresh_output(self):
         upgrade = self.step_list(job(UPGRADE.read_text(), 'upgrade'))
-        self.assertEqual([name for name, _ in upgrade], ['startup', 'current-upgrade', 'previous-upgrade'])
+        self.assertEqual([name for name, _ in upgrade], ['current-upgrade', 'previous-upgrade'])
+        # The shipped-build Host launch repeat runs first, and only outside PRs.
+        body = job(UPGRADE.read_text(), 'upgrade')
+        self.assertIn("HOST_LAUNCH: ${{ github.event_name != 'pull_request' }}", body)
+        startup = steps.parse(shlex.split(body.split("startup=(", 2)[2].split(")\n", 1)[0])[0])
+        self.assertEqual(startup[0], 'startup')
+        self.assertIn('zig build host-launch-integration', startup[1])
+        upgrade.append(startup)
+        self.assertLess(body.index('${startup[@]+"${startup[@]}"}'), body.index("'current-upgrade="))
         contracts = self.step_list(job(RENDERER.read_text(), 'contracts'))
         self.assertEqual([name for name, _ in contracts],
                          ['selftest', 'pty', 'ghostty', 'controls', 'recovery'])
@@ -739,6 +747,11 @@ class ReleaseFlowTest(unittest.TestCase):
                       'mv .amp/previous-release "$RUNNER_TEMP/previous-release"',
                       'uses: actions/cache/restore@'):
             self.assertLess(body.index(setup), checks, setup)
+        # Zig 0.17.1 misses a restored cache until its inputs are restatted, and
+        # setup's restat ran before the restore, over the candidate's caches only.
+        restat = '"$RUNNER_TEMP/zig-cache-restat" "$previous/.zig-cache/h"'
+        self.assertLess(body.index('uses: actions/cache/restore@'), body.index(restat))
+        self.assertLess(body.index(restat), checks)
 
 
     def test_candidate_jobs_are_read_only_and_cache_proof_adds_macos_in_promotion(self):

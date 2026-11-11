@@ -180,6 +180,7 @@ Both must pass.
 The execution partition overlaps native tests with its serial process fixtures; the unsplit gate remains serial.
 Their disjoint fixtures cover the full gate once; callers run Host-process, allocator, launch and Debug smoke cases serially after the parallel batch.
 [qualification.py](tests/ci/qualification.py) packs other Linux targets so a Selected run never exceeds ten shards.
+A long gate (`check`, `check-full`, `test`, `stack-frames`) runs alone, and beside one the short targets share three shards: they end inside the gate's run, so more shards would only repeat setup.
 Only draft and manually dispatched runs whose diff touches no strict path rerun a failed batch once and report both results; a pass after the rerun is a flake to fix.
 Ready PRs, promotions and the documentation lane never rerun, except a batch that failed only on [listed flakes](#listed-flakes).
 Qualification keeps one job per target. macOS packs native work into at most three workers: execution plus portable logic, callers, and remaining native targets.

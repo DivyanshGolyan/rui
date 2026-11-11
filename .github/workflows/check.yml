@@ -155,7 +155,8 @@ jobs:
     needs: plan
     if: ${{ !github.event.repository.private && needs.plan.outputs.change_kind == 'normal' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    # A tests/ci edit runs every self-check, about 4.5 minutes of the job.
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -414,7 +415,7 @@ jobs:
     timeout-minutes: ${{ inputs.promotion && 300 || 35 }}
     strategy:
       # qualification.py packs Selected suites into at most ten shards, so
-      # every shard starts at once.
+      # every shard starts at once; beside a long gate the short suites share three.
       fail-fast: false
       max-parallel: 10
       matrix: ${{ fromJSON(needs.plan.outputs.linux_matrix) }}

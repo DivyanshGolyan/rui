@@ -2026,7 +2026,7 @@ def main(mode="all", correlation_case="all"):
             ).fetchone()[0]
             assert "created_by" not in json.loads("{" + reasoning_bag + "}"), reasoning_bag
             observations = database.execute(
-                "SELECT response_id,model_evidence,request_id,resolution_code,usage_content_id IS NOT NULL FROM model_operation ORDER BY operation_id"
+                "SELECT response_id,model_evidence,request_id,resolution_code,usage_output_tokens IS NOT NULL FROM model_operation ORDER BY operation_id"
             ).fetchall()
             assert [(row[0], *decode_model_evidence(row[1]), *row[2:]) for row in observations] == [
                 (
@@ -2047,13 +2047,6 @@ def main(mode="all", correlation_case="all"):
                     "answer",
                     1,
                 ),
-            ]
-            saved_usage = database.execute(
-                "SELECT CAST(c.payload AS TEXT) FROM model_operation o JOIN content c ON c.content_id=o.usage_content_id ORDER BY o.operation_id"
-            ).fetchall()
-            assert [json.loads(row[0]) for row in saved_usage] == [
-                {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
-                {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
             ]
             neutral_usage = database.execute(
                 "SELECT usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens "

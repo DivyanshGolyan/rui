@@ -799,9 +799,9 @@ const insert_action = rsql.Write(.{
 
 /// Resolves the settling Attempt with its output.
 const resolve_success = rsql.Write(.{
-    .sql = "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?6,usage_content_id=?7,output_item_count=?8," ++
-        "usage_uncached_tokens=?9,usage_cache_read_tokens=?10,usage_cache_write_tokens=?11,usage_output_tokens=?12," ++ operation_resolved_now_sql ++ " " ++
-        "WHERE operation_id=?1 AND session_ref=@session(?14) AND resolution_code IS NULL AND attempt_ordinal=?13",
+    .sql = "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?6,output_item_count=?7," ++
+        "usage_uncached_tokens=?8,usage_cache_read_tokens=?9,usage_cache_write_tokens=?10,usage_output_tokens=?11," ++ operation_resolved_now_sql ++ " " ++
+        "WHERE operation_id=?1 AND session_ref=@session(?13) AND resolution_code IS NULL AND attempt_ordinal=?12",
     .Args = struct {
         operation_id: u64,
         resolution: []const u8,
@@ -809,7 +809,6 @@ const resolve_success = rsql.Write(.{
         response_id: ?[]const u8,
         model_evidence: rsql.Bytes,
         request_id: ?[]const u8,
-        usage_content_id: ?u64,
         item_count: u64,
         uncached: ?u64,
         cache_read: ?u64,
@@ -1121,8 +1120,9 @@ pub const Batch = struct {
 };
 
 /// The identity a metadata record imports, if any, as main imports it:
-/// a decoded part text, a bag, a message text, the usage record, and a
-/// call's name, call_id and arguments.
+/// a decoded part text, a bag, a message text, and a call's name,
+/// call_id and arguments. The usage record imports nothing: only its
+/// counts are kept.
 fn recordImport(record: *const OutputMetadataRecord) ?content_domain.Import {
     const length: u64, const private = switch (record.tag) {
         .part => switch (record.part_kind) {
@@ -1131,16 +1131,14 @@ fn recordImport(record: *const OutputMetadataRecord) ?content_domain.Import {
         },
         .extras => .{ record.decoded_length, true },
         .text => .{ record.decoded_length, false },
-        .usage => .{ record.length, true },
         .name, .call_id, .arguments => .{ record.decoded_length, false },
-        .item, .action, .pattern, .member => return null,
+        .item, .action, .pattern, .member, .usage => return null,
     };
     return .{ .digest = record.content_digest, .length = length, .private = private };
 }
 
 /// Collects the next items from `start`: whole items, at most
-/// `batch_items`, while their identities fit, the usage record's and an
-/// empty answer's included. A first item whose identities do not all fit
+/// `batch_items`, while their identities fit, an empty answer's included. A first item whose identities do not all fit
 /// is taken alone; the rest are looked up when written
 /// (`Settlement.content`). Never fails: a metadata read failure stops the
 /// batch there, for the write walk to return. Keep scan scratch off the
@@ -1159,8 +1157,8 @@ noinline fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.
             batch.last = true;
             return;
         };
+        // The usage record imports nothing but still closes the last item.
         if (record.tag == .item or record.tag == .usage) {
-            if (record.tag == .usage and !unfit and !batch.add(recordImport(&record).?)) unfit = true;
             if (record.tag == .item and !unfit and output.answer_length == 0 and output.answer_item_ordinal == record.ordinal and
                 !batch.add(content_domain.empty_content)) unfit = true;
             if (unfit and batch.digest_count != 0) {
@@ -1344,7 +1342,6 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
         .response_id = optionalText(output.response_id.slice()),
         .model_evidence = .{ .bytes = output.model_evidence.slice() },
         .request_id = optionalText(output.request_id.slice()),
-        .usage_content_id = settlement.usage_id,
         .item_count = output.item_count,
         // The provider parser admits only counts that fit an SQLite integer.
         .uncached = if (usage) |counts| counts.uncached else null,
@@ -1387,7 +1384,7 @@ fn Settlement(comptime A: type) type {
         imported_calls: u64 = 0,
         entries: u64 = 0,
         answer_id: ?u64 = null,
-        usage_id: ?u64 = null,
+        usage_seen: bool = false,
         usage: ?output_format.Usage = null,
         /// The function_call items, walked beside the calls' records.
         call_items: OutputMetadataReader,
@@ -1465,8 +1462,9 @@ fn Settlement(comptime A: type) type {
             while (reader.offset < batch.end) {
                 const record = try reader.next() orelse break;
                 if (record.tag == .usage) {
-                    if (s.usage_id != null) return error.CorruptOutputMetadata;
-                    s.usage_id = try s.importUsage(batch, record);
+                    // Only the four counts are kept; the provider's report is not.
+                    if (s.usage_seen) return error.CorruptOutputMetadata;
+                    s.usage_seen = true;
                     s.usage = record.usage;
                     continue;
                 }
@@ -1522,17 +1520,6 @@ fn Settlement(comptime A: type) type {
                 });
             }
             if (batch.stopped) |err| return err;
-        }
-
-        /// Copies the usage record's bytes into a private row.
-        fn importUsage(s: *Self, batch: *Batch, record: OutputMetadataRecord) !u64 {
-            const end = try std.math.add(u64, record.start, record.length);
-            if (end > s.output.source_length) return error.CorruptOutputMetadata;
-            const row = try s.content(batch, recordImport(&record).?);
-            const sink = try s.sinkFor(row, record.length);
-            defer if (sink) |value| value.close();
-            try streamSourceRange(s.io, s.output.source, record.start, record.length, &record.content_digest, sink, s.faults);
-            return row.id;
         }
 
         /// Saves one accepted item in Rui's own form from its metadata

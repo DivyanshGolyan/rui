@@ -316,11 +316,12 @@ pub fn build(b: *std.Build) void {
     });
     host_status_actor.root_module.link_libc = true;
     host_status_actor.root_module.addImport("client", read_client);
-    const host_status_integration = b.addSystemCommand(&.{"python3"});
+    const host_status_integration = b.addSystemCommand(&.{"env"});
+    host_status_integration.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
+    host_status_integration.addArg("python3");
     host_status_integration.addFileArg(b.path("tests/integration/host_status_integration.py"));
     host_status_integration.addFileArg(ci.path(release_safe));
     host_status_integration.addFileArg(ci.path(host_status_actor));
-    host_status_integration.addFileArg(ci.path(mysql_launch_admin));
     const host_status_step = b.step("host-status-integration", "Run native Host information and lease observation cases");
     host_status_step.dependOn(&host_status_integration.step);
 
@@ -417,7 +418,9 @@ pub fn build(b: *std.Build) void {
     format.addDirectoryArg(b.path("build"));
     format.addDirectoryArg(b.path("src"));
     const release_small = product.addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
-    const fast_integrations = screen_module.screenCommand(b, screen, &.{"sh"});
+    const fast_integrations = screen_module.screenCommand(b, screen, &.{"env"});
+    fast_integrations.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
+    fast_integrations.addArg("sh");
     fast_integrations.addFileArg(b.path("tests/integration/check.sh"));
     fast_integrations.addFileArg(ci.path(release_safe));
     fast_integrations.addFileArg(ci.path(debug));
@@ -458,7 +461,9 @@ pub fn build(b: *std.Build) void {
         "Run routine native tests and process integrations serially (long witnesses are separate)",
     );
     const check_part = b.option(enum { all, execution, callers }, "check-part", "Isolated full-check part (default all)") orelse .all;
-    const process_integrations = screen_module.screenCommand(b, screen, &.{"sh"});
+    const process_integrations = screen_module.screenCommand(b, screen, &.{"env"});
+    process_integrations.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
+    process_integrations.addArg("sh");
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
     process_integrations.addFileArg(ci.path(release_safe));
     process_integrations.addFileArg(ci.path(debug));

@@ -115,6 +115,11 @@ const code_index: u8 = 5;
 const linked_index: u8 = 6;
 const address_index: u8 = 7;
 
+/// End link runs at a document seam while retaining the blank code-line role.
+pub fn seamStyle(value: u8) u8 {
+    return if (foregroundIndex(value) == code_index) code_index << 3 else 0;
+}
+
 fn foregroundIndex(value: u8) u8 {
     return (value & foreground_mask) >> 3;
 }

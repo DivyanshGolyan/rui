@@ -5,6 +5,7 @@ const os = @import("os/os.zig");
 const socket_os = @import("os/socket.zig");
 const pages = @import("os/pages.zig");
 const HostDiagnostics = @import("HostDiagnostics.zig");
+const HostStartupWait = @import("HostStartupWait.zig");
 const TerminalText = @import("TerminalText.zig");
 const TestObservation = @import("TestObservation.zig");
 const bash = @import("bash.zig");
@@ -1233,12 +1234,14 @@ noinline fn openStoreForHost(
 ) !void {
     var found_schema_version: u32 = store_module.schema_version;
     var identity_mismatch: store_module.IdentityMismatch = .{};
+    var migration: StartupMigration = .{ .diagnostics = diagnostics };
     const store_options: store_module.OpenOptions = .{
         .served = served.routes(),
         .cache_spill = limits.sqlite_cache_spill,
         .cache_kib = limits.sqlite_cache_kib,
         .found_schema_version = &found_schema_version,
         .identity_mismatch = &identity_mismatch,
+        .migration_notice = .{ .context = &migration, .notify = StartupMigration.notify },
         // With MCP servers the tool set is saved below, once they are listed.
         .host_tool_set = if (!has_mcp) &tools.built_in_tool_set else null,
     };
@@ -1261,6 +1264,67 @@ noinline fn openStoreForHost(
         return err;
     };
     lease.paths.store.set(storage.storeId()) catch unreachable;
+}
+
+/// Announces a startup migration on the startup channel, where a launcher
+/// waits through it (`HostStartupWait`), and in the startup records.
+const StartupMigration = struct {
+    diagnostics: ?*HostDiagnostics,
+
+    fn notify(context: *anyopaque, event: store_module.MigrationNotice.Event) void {
+        const self: *StartupMigration = @ptrCast(@alignCast(context));
+        var message: [256]u8 = undefined;
+        var detail: [32]u8 = undefined;
+        const text, const phase, const format = switch (event) {
+            .begin => |from| .{
+                std.fmt.bufPrint(&message, "rui: backing up this Store and migrating it from format {d} to {d}; a large Store takes longer " ++ HostStartupWait.migrating_tag, .{ from, store_module.schema_version }) catch unreachable,
+                "migrating",
+                from,
+            },
+            .end => .{
+                std.fmt.bufPrint(&message, "rui: Store migrated to format {d} " ++ HostStartupWait.migrated_tag, .{store_module.schema_version}) catch unreachable,
+                "migrated",
+                store_module.schema_version,
+            },
+        };
+        // `serve` holds stderr custody from before the Store opens through
+        // readiness, so this writes under it. One nonblocking try, so a
+        // foreground Host whose stderr nobody drains never stalls holding the
+        // Store. A launcher drains the channel, so its notices arrive; a
+        // dropped one leaves it to the ordinary wait, and readiness or exit
+        // still ends the wait.
+        _ = stderr.writeHeld(text);
+        if (self.diagnostics) |writer| writer.record(phase, std.fmt.bufPrint(&detail, "format_{d}", .{format}) catch unreachable);
+    }
+};
+
+test "migration notices reach the launcher while serve holds stderr custody" {
+    var pipe: [2]c_int = undefined;
+    if (std.c.pipe(&pipe) != 0) return error.SystemResources;
+    defer for (pipe) |fd| {
+        _ = std.c.close(fd);
+    };
+    const saved = std.c.dup(2);
+    if (saved < 0 or std.c.dup2(pipe[1], 2) < 0) return error.TestUnexpectedResult;
+    // As `serve` holds it from before the Store opens through readiness.
+    try std.testing.expect(stderr.tryExclude());
+    var migration: StartupMigration = .{ .diagnostics = null };
+    StartupMigration.notify(&migration, .{ .begin = store_module.schema_version - 1 });
+    StartupMigration.notify(&migration, .end);
+    stderr.release();
+    _ = std.c.dup2(saved, 2);
+    _ = std.c.close(saved);
+    var buffer: [1024]u8 = undefined;
+    const count = std.c.read(pipe[0], &buffer, buffer.len);
+    try std.testing.expect(count > 0);
+    const output = buffer[0..@intCast(count)];
+    var wait = HostStartupWait.init(0);
+    const begin_end = std.mem.indexOf(u8, output, HostStartupWait.migrating_tag).? + HostStartupWait.migrating_tag.len;
+    wait.observe(output[0..begin_end], 1);
+    try std.testing.expect(!wait.expired(HostStartupWait.readiness_ns * 10));
+    wait.observe(output, HostStartupWait.readiness_ns * 10);
+    try std.testing.expect(!wait.expired(HostStartupWait.readiness_ns * 10 + 1));
+    try std.testing.expect(wait.expired(HostStartupWait.readiness_ns * 11));
 }
 
 noinline fn reportStoreIdentityMismatch(saved_selector: []const u8, actual_selector: []const u8) !void {

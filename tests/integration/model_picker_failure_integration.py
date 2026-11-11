@@ -55,7 +55,8 @@ def main():
         close_pty(slave)
         master = slave = None
 
-        master, slave = open_pty(columns=120, rows=24)
+        # Keep 120 columns for the compose pane and its full save-failure notice.
+        master, slave = open_pty(columns=161, rows=24)
         caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
                        env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, overview_title)
