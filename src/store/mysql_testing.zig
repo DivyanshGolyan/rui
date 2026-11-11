@@ -1322,6 +1322,133 @@ test "store.mysql live a lone write saved with every answer lost still counts as
     try std.testing.expectEqual(generation + 2, storage.commitGeneration());
 }
 
+test "store.mysql live a lone write's message carries the dispatch survey the Host asks for next" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const queries = &storage.engine.mysql.state.connection.queries;
+    // Until the Host asks, a commit carries nothing.
+    var before = queries.*;
+    try storage.queue().write(insertHeld, .{ &storage, 9000800 });
+    try std.testing.expectEqual(before + 1, queries.*);
+    const asked = try storage.dispatchWork(false);
+    try std.testing.expectEqual(before + 2, queries.*);
+    // Then a commit's one message carries the survey, and the next ask
+    // sends nothing and answers as a survey of its own does.
+    before = queries.*;
+    try storage.queue().write(insertHeld, .{ &storage, 9000801 });
+    try std.testing.expectEqual(before + 1, queries.*);
+    const carried = try storage.dispatchWork(false);
+    try std.testing.expectEqual(before + 1, queries.*);
+    try std.testing.expectEqual(asked, carried);
+    // It answers one ask.
+    try std.testing.expectEqual(carried, try storage.dispatchWork(false));
+    try std.testing.expectEqual(before + 2, queries.*);
+    // An ask with Turns held is another survey.
+    before = queries.*;
+    try storage.queue().write(insertHeld, .{ &storage, 9000802 });
+    _ = try storage.dispatchWork(true);
+    try std.testing.expectEqual(before + 2, queries.*);
+    // A write that saved nothing leaves no survey: the message, ROLLBACK,
+    // then the Host's own.
+    before = queries.*;
+    try std.testing.expectError(error.LiveGuard, storage.queue().write(insertTouching, .{ &storage, 9000803, 9000899 }));
+    _ = try storage.dispatchWork(true);
+    try std.testing.expectEqual(before + 3, queries.*);
+    try std.testing.expect(!storage.isFenced());
+    // A carried survey is dropped by a later commit that carries none:
+    // two writes sharing a batch.
+    _ = try storage.dispatchWork(false);
+    try storage.queue().write(insertHeld, .{ &storage, 9000804 });
+    const Writer = struct {
+        result: anyerror!void = {},
+        fn hold() error{}!void {}
+        fn write(self: *@This(), s: *Store, id: u64) void {
+            self.result = s.queue().write(insertHeld, .{ s, id });
+        }
+    };
+    try storage.queue().callHeld(Writer.hold, .{});
+    var writers: [2]Writer = .{ .{}, .{} };
+    var threads: [2]std.Thread = undefined;
+    for (&threads, &writers, 0..) |*thread, *writer, index| {
+        thread.* = try std.Thread.spawn(.{}, Writer.write, .{ writer, &storage, 9000805 + index });
+        @import("queue.zig").waitQueued(storage.queue(), index + 1);
+    }
+    storage.queue().release();
+    for (threads) |thread| thread.join();
+    for (writers) |writer| try writer.result;
+    before = queries.*;
+    _ = try storage.dispatchWork(false);
+    try std.testing.expectEqual(before + 1, queries.*);
+}
+
+/// `insertHeld`, committing into a batch with `room` bytes left after the
+/// insert.
+fn insertWithRoom(storage: *Store, id: u64, room: usize) !void {
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+    defer access.deinit();
+    access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest(std.mem.asBytes(&id)), .length = 0 });
+    const wire_connection = &storage.engine.mysql.state.connection;
+    const limit = wire_connection.batch_limit;
+    defer wire_connection.batch_limit = limit;
+    wire_connection.batch_limit = limit - (wire_connection.batchRoom() - room);
+    return entry.finishTransaction(store_core.Ordinary.none, .{}, access.end(.{}, access.commit()));
+}
+
+test "store.mysql live a write saves in its one message whether or not the batch has room for the survey" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const queries = &storage.engine.mysql.state.connection.queries;
+    _ = try storage.dispatchWork(false);
+    // From room for COMMIT and none of the survey, through part of it, to
+    // all of it: the write is one message and saves, and the Host's ask
+    // is free only when the whole survey rode.
+    var id: u64 = 9000900;
+    var carried: [2]bool = .{ false, false };
+    var room: usize = 32;
+    while (room <= 32768) : (room *= 2) {
+        const before = queries.*;
+        try storage.queue().write(insertWithRoom, .{ &storage, id, room });
+        try std.testing.expectEqual(before + 1, queries.*);
+        try std.testing.expect(!storage.isFenced());
+        _ = try storage.dispatchWork(false);
+        const asked = queries.* - before - 1;
+        try std.testing.expect(asked <= 1);
+        carried[@intFromBool(asked == 0)] = true;
+        // Once the whole survey fits, more room changes nothing.
+        if (asked == 1) try std.testing.expect(!carried[1]);
+        try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{id}));
+        id += 1;
+    }
+    try std.testing.expect(carried[0] and carried[1]);
+}
+
+test "store.mysql live a carried survey whose read fails fences as the Host's own does, and the write stands" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch |err| {
+        std.testing.expectEqual(error.StoreCloseFailed, err) catch unreachable;
+    };
+    _ = try storage.dispatchWork(false);
+    const generation = storage.commitGeneration();
+    // A table the survey reads is gone: its SELECT fails after COMMIT ran.
+    try rawExec(&storage, "RENAME TABLE session_stop_owed TO session_stop_owed_gone");
+    try storage.queue().write(insertHeld, .{ &storage, 9000950 });
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectEqual(generation + 1, storage.commitGeneration());
+    try rawExec(&storage, "RENAME TABLE session_stop_owed_gone TO session_stop_owed");
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000950", .{}));
+}
+
 test "store.mysql live a lone write whose fence fails saves nothing, though COMMIT shares its message" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
