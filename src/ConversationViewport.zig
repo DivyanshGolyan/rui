@@ -8,6 +8,7 @@ const unicode = @import("terminal_unicode");
 const state_marks = @import("marks.zig");
 const draft_layout = @import("draft_layout.zig");
 const TerminalText = @import("TerminalText.zig");
+const tool_fold = @import("tool_fold.zig");
 const display_text = @import("display_text.zig");
 pub const Document = Sized(capacity, true);
 pub const Method = gwidth.Method;
@@ -100,7 +101,9 @@ pub const Colours = struct {
     user: vaxis.Color = .default,
     attention: vaxis.Color = .default,
     failure: vaxis.Color = .default,
+    /// One line-level selvedge band for code and tool output.
     band: vaxis.Color = .default,
+    selection: vaxis.Color = .default,
 };
 
 /// Retained style byte, display-only: bits 0-2 bold, italic and underline,
@@ -449,6 +452,151 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             }
         }
 
+        /// Tool identity uses the same retained, hidden address representation as
+        /// internal Session links, with no new style bytes or closed output cache.
+        fn lineMarker(self: *const Self, offset: usize) ?struct { uri: []const u8, end: usize } {
+            if (!styled or offset >= self.text().len or foregroundIndex(self.styles[offset]) != address_index) return null;
+            var end = offset;
+            while (end < self.text().len and foregroundIndex(self.styles[end]) == address_index) : (end += 1) {}
+            const uri = self.bytes[offset..end];
+            if (!std.mem.startsWith(u8, uri, tool_fold.prefix) and !std.mem.eql(u8, uri, tool_fold.output_uri) and !std.mem.eql(u8, uri, tool_fold.more_uri)) return null;
+            return .{ .uri = uri, .end = end };
+        }
+
+        pub fn toolAt(self: *const Self, offset: usize) ?tool_fold.Reference {
+            const mark = self.lineMarker(offset) orelse return null;
+            return tool_fold.parse(mark.uri);
+        }
+
+        pub fn lastTool(self: *const Self, from: usize, to: usize) ?usize {
+            var offset = from;
+            var last: ?usize = null;
+            while (offset < @min(to, self.text().len)) {
+                if (self.toolAt(offset) != null) last = offset;
+                offset = self.nextLine(offset) orelse break;
+            }
+            return last;
+        }
+
+        pub fn findTool(self: *const Self, reference: tool_fold.Reference) ?usize {
+            var offset: usize = 0;
+            while (offset < self.text().len) {
+                if (self.toolAt(offset)) |found| if (std.meta.eql(found, reference)) return offset;
+                offset = self.nextLine(offset) orelse break;
+            }
+            return null;
+        }
+
+        fn toolOutput(self: *const Self, offset: usize) bool {
+            const mark = self.lineMarker(offset) orelse return false;
+            return std.mem.eql(u8, mark.uri, tool_fold.output_uri) or std.mem.eql(u8, mark.uri, tool_fold.more_uri);
+        }
+
+        pub fn toolIsOpen(self: *const Self, offset: usize) bool {
+            if (self.toolAt(offset) == null) return false;
+            return self.toolOutput(self.nextLine(offset) orelse return false);
+        }
+
+        /// A display edit relocates the frontend's absolute live anchors too.
+        pub const Edit = struct {
+            at: u64,
+            removed: usize,
+            added: usize,
+            /// Newer lines left from the end to make room.
+            trimmed: bool = false,
+
+            pub fn map(self: Edit, offset: u64) u64 {
+                if (offset < self.at) return offset;
+                return self.at + self.added + (offset - self.at -| self.removed);
+            }
+        };
+
+        /// Which whole lines leave when opened output does not fit. Live output
+        /// drops its oldest, as any append does. A browsed transcript drops its
+        /// newest, as a prepended older page does: live output still holds them,
+        /// while lines dropped from its front would never load again.
+        pub const Room = enum { oldest, newest };
+
+        const ToolEdit = struct { start: usize, end: usize, added: usize, discard: usize, keep: usize };
+
+        fn toolEdit(self: *const Self, reference: tool_fold.Reference, rows: anytype, open: bool, room: Room) !?ToolEdit {
+            const heading = self.findTool(reference) orelse return null;
+            if (self.toolIsOpen(heading) == open) return null;
+            const start = @min(self.lineEnd(heading) + 1, self.text().len);
+            var end = start;
+            while (self.toolOutput(end)) end = self.nextLine(end) orelse self.text().len;
+            const added = if (open) rows.length else 0;
+            const removed = end - start;
+            var discard: usize = 0;
+            var keep = self.length;
+            if (self.length - removed + added > limit) switch (room) {
+                .oldest => {
+                    const wanted = self.length - removed + added - limit;
+                    discard = self.lineEnd(wanted) + 1;
+                    // Only whole lines before this heading can leave. Check
+                    // before mutating either copy.
+                    if (discard > heading) return error.ToolFoldViewFull;
+                },
+                .newest => {
+                    if (added > limit) return error.ToolFoldViewFull;
+                    const fits = limit - added + removed;
+                    keep = if (std.mem.lastIndexOfScalar(u8, self.bytes[0..fits], '\n')) |line| line + 1 else 0;
+                    // Only whole lines after this row's output can leave.
+                    if (keep < end) return error.ToolFoldViewFull;
+                },
+            };
+            return .{ .start = start, .end = end, .added = added, .discard = discard, .keep = keep };
+        }
+
+        /// Validate all copies before editing any. True means this Reference
+        /// exists, including when it already has the desired state.
+        pub fn checkToolOpen(self: *const Self, reference: tool_fold.Reference, rows: anytype, open: bool, room: Room) !bool {
+            _ = try self.toolEdit(reference, rows, open, room);
+            return self.findTool(reference) != null;
+        }
+
+        /// Inserts/removes just this row's bounded output. Other folds and live
+        /// text stay intact. A refused insertion changes neither text nor anchor.
+        /// A held first row keeps its text; a view following its end still does.
+        pub fn setToolOpen(self: *Self, reference: tool_fold.Reference, rows: anytype, open: bool, room: Room) !?Edit {
+            const plan = try self.toolEdit(reference, rows, open, room) orelse return null;
+            var start = plan.start;
+            var end = plan.end;
+            const added = plan.added;
+            const removed = end - start;
+            const trimmed = plan.keep != self.length;
+            if (trimmed) {
+                self.length = plan.keep;
+                self.control_length = 0;
+                self.link = .none;
+            }
+            if (plan.discard != 0) {
+                const held = self.top;
+                self.discardFront(self.origin + plan.discard);
+                // A first row that left with the older lines becomes the new first line.
+                if (held) |top| self.top = if (top.offset >= plan.discard) .{ .offset = top.offset - plan.discard, .row = top.row } else .{};
+                start -= plan.discard;
+                end -= plan.discard;
+            }
+            if (added > removed) {
+                std.mem.copyBackwards(u8, self.bytes[start + added .. self.length - removed + added], self.bytes[end..self.length]);
+                if (styled) std.mem.copyBackwards(u8, self.styles[start + added .. self.length - removed + added], self.styles[end..self.length]);
+            } else {
+                std.mem.copyForwards(u8, self.bytes[start + added .. self.length - removed + added], self.bytes[end..self.length]);
+                if (styled) std.mem.copyForwards(u8, self.styles[start + added .. self.length - removed + added], self.styles[end..self.length]);
+            }
+            @memcpy(self.bytes[start..][0..added], rows.bytes[0..added]);
+            if (styled) @memcpy(self.styles[start..][0..added], rows.styles[0..added]);
+            const edit: Edit = .{ .at = self.origin + start, .removed = removed, .added = added, .trimmed = trimmed };
+            if (self.top) |*top| if (top.offset >= start) {
+                top.offset = @intCast(edit.map(self.origin + top.offset) - self.origin);
+            };
+            self.length = self.length - removed + added;
+            self.replacements +%= 1; // A drag must never retain pre-edit byte offsets.
+            self.dirty = true;
+            return edit;
+        }
+
         /// Where the line starting at `offset` ends (its newline or the text end).
         pub fn lineEnd(self: *const Self, offset: usize) usize {
             const bytes = self.text();
@@ -465,30 +613,63 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return if (std.mem.lastIndexOfScalar(u8, self.bytes[0 .. offset - 1], '\n')) |line| line + 1 else 0;
         }
 
+        const Line = enum {
+            plain,
+            code,
+            output,
+            selected,
+
+            fn style(kind: Line, colour: bool, base: vaxis.Style, colours: Colours) vaxis.Style {
+                var result = base;
+                if (!colour) return result;
+                result.bg = switch (kind) {
+                    .plain => base.bg,
+                    .code, .output => colours.band,
+                    .selected => colours.selection,
+                };
+                if (kind == .output) result.fg = colours.quiet;
+                return result;
+            }
+        };
+
+        /// A line's trusted marker owns its band, never an independent code
+        /// painter or a retained list of byte offsets to repair after edits.
+        fn lineKind(self: *const Self, offset: usize) Line {
+            if (self.lineMarker(offset)) |mark| {
+                if (std.mem.eql(u8, mark.uri, tool_fold.output_uri) or std.mem.eql(u8, mark.uri, tool_fold.more_uri)) return .output;
+                if (self.toolIsOpen(offset)) return .selected;
+            }
+            if (styled and offset < self.length and foregroundIndex(self.styles[offset]) == code_index) return .code;
+            return .plain;
+        }
+
         /// Prints one logical line with its first row at window row `row`
         /// (negative rows are clipped), or only measures it. Returns its rows.
         /// Measuring and drawing segment identically, so they wrap identically.
-        pub fn printLine(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, plain: vaxis.Style, colours: Colours) u16 {
+        pub fn printLine(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, base: vaxis.Style, colours: Colours) u16 {
             const end = self.lineEnd(offset);
-            if (styled and offset < self.length and foregroundIndex(self.styles[offset]) == code_index) {
-                // Measure before painting: the band includes blank lines, the
-                // unused cells after text and every wrapped continuation row.
-                // No retained line metadata or marker bytes are needed.
+            const mark = self.lineMarker(offset);
+            const content_start = if (mark) |value| value.end else offset;
+            const kind = self.lineKind(offset);
+            const output = kind == .output;
+            const plain = kind.style(colour, base, colours);
+            // Every band (including selection) is painted here, over the
+            // measured logical line's blank cells and wrapped rows alike.
+            if (commit and colour and kind != .plain) {
+                const used = self.printLine(window, row, offset, false, colour, base, colours);
+                const first_row: i32 = @max(row, 0);
+                const last_row: i32 = @min(@as(i32, row) + used, window.height);
+                if (last_row > first_row) window.child(.{ .y_off = @intCast(first_row), .height = @intCast(last_row - first_row) }).fill(.{ .style = plain });
+            }
+            if (kind == .code) {
                 const line = window.child(.{ .y_off = row });
                 var leading: usize = offset;
                 while (leading < end and (self.bytes[leading] == ' ' or self.bytes[leading] == '\t')) leading += 1;
-                // Leave one cell for progress on very narrow windows. This
-                // is the code's own indent, never a prose/list marker.
+                // Code's own indent, not prose/list hanging. Keep one cell
+                // for progress even at the narrowest widths.
                 const indent = @min(display_text.width(self.bytes[offset..leading], .{ .viewport = self.width_method }), line.width -| 1);
-                const body = line.child(.{ .x_off = indent });
-                const rows = rowsUsed(self.printRange(body, leading, end, .word, false, false, colour, plain, colours));
-                if (!commit) return rows;
-                const first_row: i32 = @max(row, 0);
-                const last_row: i32 = @min(@as(i32, row) + rows, window.height);
-                if (colour and last_row > first_row) window.child(.{ .y_off = @intCast(first_row), .height = @intCast(last_row - first_row) }).fill(.{ .style = .{ .fg = plain.fg, .bg = colours.band } });
-                _ = self.printRange(line.child(.{ .width = indent, .height = 1 }), offset, leading, .word, false, true, colour, plain, colours);
-                _ = self.printRange(body, leading, end, .word, false, true, colour, plain, colours);
-                return rows;
+                if (commit) _ = self.printRange(line.child(.{ .width = indent, .height = 1 }), offset, leading, .word, false, true, colour, plain, colours);
+                return rowsUsed(self.printRange(line.child(.{ .x_off = indent }), leading, end, .word, false, commit, colour, plain, colours));
             }
             var user = false;
             // A line of summary text alone (a peer Message's line) keeps one
@@ -503,6 +684,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 if (note == null) note = .{ .start = index, .end = index + 1 } else if (note.?.end == index) note.?.end += 1;
             };
+            // Tool output is bounded in screen rows too: long logical lines
+            // keep their prefix and a visible ellipsis rather than wrapping
+            // past the twenty-row fold budget.
+            if (output) single = true;
             // A single row's text ends where its trailing sidenote begins.
             const shown = if (note) |range| (if (range.end == end) range.start else end) else end;
             const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) sidenote_margin else 0;
@@ -540,12 +725,12 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 return 1;
             }
-            const split = hanging(self.bytes[offset..end], body.width, user);
-            if (commit) _ = self.printRange(body.child(.{ .y_off = row, .height = 1 }), offset, offset + split.bytes, .none, false, true, colour, plain, colours);
-            const rows = rowsUsed(self.printRange(body.child(.{ .x_off = split.cells, .y_off = row }), offset + split.bytes, end, .word, false, commit, colour, plain, colours));
+            const split = hanging(self.bytes[content_start..end], body.width, user);
+            if (commit) _ = self.printRange(body.child(.{ .y_off = row, .height = 1 }), content_start, content_start + split.bytes, .none, false, true, colour, plain, colours);
+            const rows = rowsUsed(self.printRange(body.child(.{ .x_off = split.cells, .y_off = row }), content_start + split.bytes, end, .word, false, commit, colour, plain, colours));
             if (commit and self.quotes and split.quoted) for (1..rows) |index| {
-                const mark = body.child(.{ .x_off = split.cells - 2, .y_off = row + @as(i17, @intCast(index)), .width = 1, .height = 1 });
-                _ = mark.printSegment(.{ .text = "┆", .style = self.segmentStyle(offset + split.bytes - 2, colour, plain, colours) }, .{ .wrap = .none });
+                const quote_mark = body.child(.{ .x_off = split.cells - 2, .y_off = row + @as(i17, @intCast(index)), .width = 1, .height = 1 });
+                _ = quote_mark.printSegment(.{ .text = "┆", .style = self.segmentStyle(content_start + split.bytes - 2, colour, plain, colours) }, .{ .wrap = .none });
             };
             return rows;
         }
@@ -591,7 +776,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     .failure => colours.failure,
                     .user => colours.user,
                 } else if (value.quiet) colours.quiet else plain.fg,
-                .bg = if (colour and foregroundIndex(self.styles[position]) == code_index) colours.band else plain.bg,
+                .bg = plain.bg,
             };
         }
 
@@ -1575,4 +1760,140 @@ test "wrapped code keeps its own indent across widths clipping and scripts witho
             }
         }
     }
+}
+
+test "one line band owner covers adjacent code, selected tool, output and plain rows" {
+    const Sink = struct {
+        bytes: [1024]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    var input: Sink = .{};
+    const first: tool_fold.Reference = .{ .position = 1, .ordinal = 0, .content = .{ .length = 0, .digest = @splat(0) } };
+    var second = first;
+    second.position = 2;
+    try input.feed("before\n\x1b[40m  abcdefghijkl\n\x1b[0m\x1b[40m\n\x1b[0m");
+    try tool_fold.marker(first, &input);
+    try input.feed("✓ A\n" ++ tool_fold.output_marker ++ "    out\n" ++ tool_fold.output_marker ++ "    err\n" ++ tool_fold.more_marker ++ "    … 2 more lines\n");
+    try tool_fold.marker(second, &input);
+    try input.feed("✓ B\nafter\n");
+    const plain: vaxis.Style = .{ .fg = .{ .index = 255 }, .bg = .{ .index = 19 } };
+    const colours: Colours = .{ .band = .{ .index = 61 }, .selection = .{ .index = 62 }, .quiet = .{ .index = 63 } };
+    for (0..input.length + 1) |split| {
+        var view: Sized(1024, true) = .{};
+        try view.append(input.bytes[0..split]);
+        try view.append(input.bytes[split..input.length]);
+        try view.prepare();
+        for (8..18) |width_value| {
+            const width: u16 = @intCast(width_value);
+            const code_rows = (12 + width_value - 3) / (width_value - 2);
+            const selected = 2 + code_rows;
+            const plain_start = selected + 4;
+            for ([_]bool{ false, true }) |colour| {
+                var screen: TestScreen = undefined;
+                const window = screen.window(width, 14);
+                window.fill(.{ .style = plain });
+                _ = view.draw(window, .{}, true, colour, plain, colours);
+                for (0..14) |row| for (0..width) |column| {
+                    const cell = screen.screen.readCell(@intCast(column), @intCast(row)).?;
+                    const band = row > 0 and row < plain_start;
+                    const expected = if (!colour or !band) plain.bg else if (row == selected) colours.selection else colours.band;
+                    try std.testing.expectEqual(expected, cell.style.bg);
+                    if (view.cellOffset(cell) != null) {
+                        const quiet = colour and (row > selected and row <= selected + 3);
+                        try std.testing.expectEqual(if (quiet) colours.quiet else plain.fg, cell.style.fg);
+                    }
+                };
+                // Neither open nor closed headings gain a second mark or indent.
+                try std.testing.expectEqualStrings("✓", screen.screen.readCell(0, @intCast(selected)).?.char.grapheme);
+                try std.testing.expectEqualStrings("✓", screen.screen.readCell(0, @intCast(plain_start)).?.char.grapheme);
+            }
+        }
+    }
+}
+
+test "a fold edit keeps a held first row on its text and leaves a following view following" {
+    const Sink = struct {
+        view: *Sized(1024, true),
+        pub fn feed(self: @This(), bytes: []const u8) !void {
+            try self.view.append(bytes);
+        }
+    };
+    const reference: tool_fold.Reference = .{ .position = 1, .ordinal = 0, .content = .{ .length = 0, .digest = @splat(0) } };
+    var view: Sized(1024, true) = .{};
+    try view.append("above\n");
+    try tool_fold.marker(reference, Sink{ .view = &view });
+    try view.append("✓ A\nbelow\n");
+    try view.prepare();
+    var rows: Sized(256, true) = .{};
+    try rows.append(tool_fold.output_marker ++ "    out\n" ++ tool_fold.output_marker ++ "    err\n");
+    try rows.prepare();
+    const heading = view.findTool(reference).?;
+    const below = view.nextLine(heading).?;
+    for ([_]?Position{ null, .{}, .{ .offset = heading }, .{ .offset = below } }) |held| {
+        view.top = held;
+        try std.testing.expect((try view.setToolOpen(reference, &rows, true, .oldest)) != null);
+        try std.testing.expect(view.toolIsOpen(heading));
+        const moved: ?Position = if (held) |top| .{ .offset = if (top.offset == below) below + rows.length else top.offset } else null;
+        try std.testing.expectEqualDeep(moved, view.top);
+        if (moved) |top| if (top.offset > heading) try std.testing.expect(std.mem.startsWith(u8, view.text()[top.offset..], "below\n"));
+        // A first row inside the output lands on the line after it when it closes.
+        if (held != null and held.?.offset == heading) view.top = .{ .offset = below + 3 };
+        try std.testing.expect((try view.setToolOpen(reference, &rows, false, .oldest)) != null);
+        try std.testing.expect(!view.toolIsOpen(heading));
+        try std.testing.expectEqualDeep(if (held != null and held.?.offset == heading) @as(?Position, .{ .offset = below }) else held, view.top);
+    }
+}
+
+test "output that does not fit drops a live view's oldest lines and a browsed view's newest, never the row" {
+    const Doc = Sized(256, true);
+    const Sink = struct {
+        view: *Doc,
+        pub fn feed(self: @This(), bytes: []const u8) !void {
+            try self.view.append(bytes);
+        }
+    };
+    const reference: tool_fold.Reference = .{ .position = 1, .ordinal = 0, .content = .{ .length = 0, .digest = @splat(0) } };
+    const old: [12 * 9]u8 = @bitCast(@as([12][9]u8, @splat("old line\n".*)));
+    var full: Doc = .{};
+    try full.append(&old);
+    try tool_fold.marker(reference, Sink{ .view = &full });
+    try full.append("✓ A\n");
+    while (full.length + "newer\n".len <= 256) try full.append("newer\n");
+    try full.prepare();
+    var rows: Sized(256, true) = .{};
+    try rows.append(tool_fold.output_marker ++ "    out\n" ++ tool_fold.output_marker ++ "    err\n");
+    try rows.prepare();
+    try std.testing.expect(full.length + rows.length > 256);
+    const newer = std.mem.count(u8, full.text(), "newer\n");
+
+    var live = full;
+    try std.testing.expect(try live.checkToolOpen(reference, &rows, true, .oldest));
+    const live_edit = (try live.setToolOpen(reference, &rows, true, .oldest)).?;
+    try std.testing.expect(!live_edit.trimmed and live.origin != 0);
+    try std.testing.expect(live.toolIsOpen(live.findTool(reference).?));
+    try std.testing.expect(std.mem.count(u8, live.text(), "old line\n") < 12);
+    try std.testing.expectEqual(newer, std.mem.count(u8, live.text(), "newer\n"));
+
+    var browsed = full;
+    browsed.top = .{};
+    const browsed_edit = (try browsed.setToolOpen(reference, &rows, true, .newest)).?;
+    try std.testing.expect(browsed_edit.trimmed and browsed.origin == 0);
+    try std.testing.expect(browsed.toolIsOpen(browsed.findTool(reference).?));
+    try std.testing.expect(std.mem.startsWith(u8, browsed.text(), &old));
+    try std.testing.expect(std.mem.count(u8, browsed.text(), "newer\n") < newer);
+    try std.testing.expect(std.mem.endsWith(u8, browsed.text(), "\n"));
+    try std.testing.expectEqualDeep(@as(?Position, .{}), browsed.top);
+
+    // Output larger than everything after the row is refused, changing nothing.
+    var large: Sized(256, true) = .{};
+    for (0..6) |_| try large.append(tool_fold.output_marker ++ "    a long output line\n");
+    try large.prepare();
+    var refused = full;
+    try std.testing.expectError(error.ToolFoldViewFull, refused.checkToolOpen(reference, &large, true, .newest));
+    try std.testing.expectError(error.ToolFoldViewFull, refused.setToolOpen(reference, &large, true, .newest));
+    try std.testing.expectEqualStrings(full.text(), refused.text());
 }

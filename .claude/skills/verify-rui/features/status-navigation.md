@@ -6,14 +6,14 @@
 
 - `status-page`: `/status` shows ` Status · NAME · ID`, the `Permissions` row (bypass is described only here), the `Work` section and the compaction rows, under `Browsing · Esc returns`.
 - `status-refresh`: a second `/status` during or after work shows the current `Work` state, not stale text.
-- `details`: `/details` shows each saved tool result's last 8,192 raw bytes, marks shortened results with `Earlier output omitted`, and retains full canonical raw export.
+- `tool-output`: Ctrl-O or a click on a tool heading opens its saved output under it, at most 20 rows then `… N more lines`; the same key or click closes it.
 - `scroll-page`: PgUp/PgDn move by pages, and repeated PgUp reaches `Start of conversation`.
 - `scroll-wheel`: the physical wheel scrolls. Rui enables alternate scroll (`?1007h`) when the terminal reports it reset, so the terminal sends arrow keys. Rui does not enable mouse tracking.
 - `return-live`: Esc, End (empty draft) and Ctrl-G return to the latest messages with the draft unchanged.
 
 ## How to get to it (user POV)
 
-- Type `/status` or `/details` and Enter. Press PgUp/PgDn/Up/Down or use the wheel. Press Esc, End or Ctrl-G.
+- Type `/status` and Enter, or press Ctrl-O on a tool heading. Press PgUp/PgDn/Up/Down or use the wheel. Press Esc, End or Ctrl-G.
 
 ## Driving it with verify-rui
 

@@ -13,6 +13,8 @@ const Palette = @import("Palette.zig");
 const SessionChrome = @import("SessionChrome.zig");
 const FactsRow = @import("FactsRow.zig");
 const viewport = @import("ConversationViewport.zig");
+const tool_fold = @import("tool_fold.zig");
+const ToolFolds = @import("ToolFolds.zig");
 const style = @import("widget_style.zig");
 const session_chrome = @import("session_chrome.zig");
 const client = @import("client.zig");
@@ -158,9 +160,8 @@ inspection: struct {
 } = .{},
 // Messages sent.
 admission: struct {
-    /// Messages begun; a /details read begun before the latest one never covers it.
+    /// Messages begun; earlier expansion reads never cover a later send.
     sent: u64 = 0,
-    details_sent: u64 = 0,
 } = .{},
 // Live output and the page that last extended it.
 live: struct {
@@ -211,6 +212,9 @@ transcript: struct {
     // The Messages of collapsed blocks in the transcript.
     blocks: View.Blocks = .{},
 } = .{},
+/// Open intent belongs to this frontend, not the current text window. Only
+/// bounded References survive a rebuild; display rows are read again on demand.
+tools: ToolFolds.Sized(viewport.capacity / tool_fold.minimum_reference_bytes) = .{},
 // One collapsed Message shown in full.
 expansion: struct {
     // Ctrl-O waits for the frame it names a block in; the read then waits for
@@ -589,13 +593,15 @@ fn follow(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, at: viewport.Position) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.leaving != null or self.pagePlace() == .elsewhere) return;
-    const index = self.app_content.document.summaryAt(at.offset) orelse return;
+    const tool = self.app_content.document.toolAt(at.offset);
+    const index = self.app_content.document.summaryAt(at.offset);
+    if (tool == null and index == null) return;
     self.shown_notice.dismiss();
     if (self.upgradeHeld()) {
         self.notice = session_upgrade.refusal(self.upgradePhase());
     } else {
-        self.dropMessageRequest();
-        self.openCollapsed(index);
+        try self.dropMessageRequest();
+        if (tool) |reference| try self.toggleTool(reference) else self.openCollapsed(index.?);
     }
     try self.afterInput(ctx);
 }
@@ -696,7 +702,9 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                         .busy => self.notice = "Not sent: this Action needs a decision",
                         .editor => |outcome| switch (outcome) {
                             .action => |action| try self.perform(action),
-                            .refused => |why| self.notice = refusedNotice(why),
+                            .refused => |why| if (why != .unbound) {
+                                self.notice = refusedNotice(why);
+                            },
                             .none, .append, .redraw, .submit => {},
                         },
                         .message, .command => unreachable, // Sending is disabled while consent waits.
@@ -717,7 +725,9 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                         .busy => self.sayBusy(null, false),
                         .editor => |outcome| switch (outcome) {
                             .action => |action| try self.perform(action),
-                            .refused => |why| self.notice = refusedNotice(why),
+                            .refused => |why| if (why != .unbound) {
+                                self.notice = refusedNotice(why);
+                            },
                             .submit => if (self.shownCommands() != null) try self.commandLine(),
                             .none, .append, .redraw => {},
                         },
@@ -785,6 +795,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .attention = attention.fg,
         .failure = failure.fg,
         .band = style.of(self.app_caps, .{ .background = .bar }).bg,
+        .selection = style.of(self.app_caps, .{ .background = .selection }).bg,
     };
     const facts_style = style.of(self.app_caps, .{ .colour = .quiet, .background = .bar });
     self.app_screen.style = normal;
@@ -1405,7 +1416,7 @@ test "App Session Ctrl-O follows the lowest drawn peer name, or opens the lower 
     try std.testing.expectEqual(@as(?u64, 9), self.app_consent.drawn);
     try widget_.handleEvent(&ctx, ctrl_o);
     try widget_.handleEvent(&ctx, .tick);
-    try std.testing.expectEqualStrings("! Ctrl-O opens a message or Session name from the conversation.", self.shown_notice.current(self.nowMs()).?);
+    try std.testing.expectEqualStrings("! Ctrl-O opens a tool, message or Session name from the conversation.", self.shown_notice.current(self.nowMs()).?);
     try std.testing.expectEqual(@as(?[session_id.bytes]u8, null), Hooks.opened);
     try std.testing.expectEqual(@as(?Outcome, null), self.leaving);
     self.live.work.first_action = null;
@@ -1422,7 +1433,7 @@ test "App Session Ctrl-O follows the lowest drawn peer name, or opens the lower 
     // With the peer row lowest again, Ctrl-O follows the peer, unless the
     // row is too narrow to show any of its name: then the Message above is
     // the lowest thing drawn that Ctrl-O can open.
-    self.dropMessageRequest();
+    try self.dropMessageRequest();
     try screen.live.append(peer);
     var narrow = draw_context;
     narrow.max.width = 20;
@@ -1432,7 +1443,7 @@ test "App Session Ctrl-O follows the lowest drawn peer name, or opens the lower 
     try std.testing.expectEqual(@as(?[session_id.bytes]u8, null), Hooks.opened);
     try std.testing.expectEqualStrings("Opening message…", self.shown_notice.current(self.nowMs()).?);
     try std.testing.expectEqual(@as(u64, 2), self.expansion.queued.ready.target.ordinal);
-    self.dropMessageRequest();
+    try self.dropMessageRequest();
     _ = try widget_.draw(draw_context);
     try widget_.handleEvent(&ctx, ctrl_o);
     try widget_.handleEvent(&ctx, .tick);
@@ -1538,6 +1549,7 @@ pub fn stop(self: *Self) void {
 }
 
 fn settle(self: *Self, restored: anyerror!void) Settled {
+    self.tools.deinit(self.init.gpa);
     const skills_error = self.dropSkills();
     const reader = self.joinReader();
     var admission = self.submission.join();
@@ -1619,7 +1631,7 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
     }
 }
 
-const History = enum { older, latest };
+const History = enum { older };
 
 /// What each slash command does here.
 const Slash = union(enum) {
@@ -1651,7 +1663,6 @@ fn parse(text: []const u8) Slash {
         .archive => .archive,
         .unarchive => .unarchive,
         .history => .{ .history = .older },
-        .details => .{ .history = .latest },
         .status => .{ .inspection = .status },
         .requests => .{ .inspection = .requests },
         .help => .{ .inspection = .help },
@@ -1668,7 +1679,7 @@ fn parse(text: []const u8) Slash {
 }
 
 /// The page asked for last is the one shown: a /status not yet rendered
-/// yields to a later /history or /details.
+/// yields to a later /history.
 fn requestHistory(self: *Self, history: History) void {
     self.transcript.history_requested = history;
     self.inspection.status_requested = false;
@@ -2183,23 +2194,16 @@ fn update(self: *Self) !Updated {
     // Scans continue during consent, so an Action decided elsewhere leaves.
     if (self.reader.thread == null and self.reading.prepared_action == null) {
         if (self.transcript.history_requested != null and !self.reading.opening) {
-            const requested = self.transcript.history_requested.?;
             self.transcript.history_requested = null;
-            if (requested == .latest) {
-                try self.screen.latest();
-                self.admission.details_sent = self.admission.sent;
-                try self.launch(self.freeze(.details), reads.history);
-            } else {
-                // /history scrolls the transcript to its top; older pages
-                // then load there as for any scroll.
-                const screen = self.screen;
-                if (screen.view != .transcript) {
-                    try screen.latest();
-                    if (screen.view == .live) try self.beginTranscript();
-                }
-                if (screen.view == .transcript) screen.browsing.top = .{} else self.notice = "/history opens once the Action is decided.";
-                self.dirty = true;
+            // /history scrolls the transcript to its top; older pages
+            // then load there as for any scroll.
+            const screen = self.screen;
+            if (screen.view != .transcript) {
+                try screen.latest();
+                if (screen.view == .live) try self.beginTranscript();
             }
+            if (screen.view == .transcript) screen.browsing.top = .{} else self.notice = "/history opens once the Action is decided.";
+            self.dirty = true;
         }
         if (self.reader.thread == null and self.expansion.queued == .ready) {
             const request = self.expansion.queued.ready;
@@ -2209,6 +2213,15 @@ fn update(self: *Self) !Updated {
             job.target = .{ .message = request.target };
             try self.launch(job, reads.fullMessage);
         }
+        if (self.reader.thread == null) if (self.tools.start(self.pageAsked())) |request| {
+            self.notice = "Opening tool output…";
+            const job = self.freeze(.tool);
+            job.target = .{ .tool = request.target };
+            self.launch(job, reads.fullTool) catch |err| {
+                try self.finishTool(request, .failed);
+                return err;
+            };
+        };
         if (self.reader.thread == null and !self.reading.opening) if (self.input.nextStep()) |recall| {
             const job = self.freeze(.recall);
             job.recall = recall;
@@ -2374,7 +2387,7 @@ fn beginMessage(self: *Self, intent: Submission.Intent) !void {
     self.admission.sent += 1;
     self.inspection.status_requested = false;
     self.transcript.history_requested = null;
-    self.dropMessageRequest();
+    try self.dropMessageRequest();
     try self.screen.latest();
 }
 
@@ -2424,7 +2437,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
             };
             // Leaving also abandons a Message page not yet shown, and returns
             // the input row to a waiting Action's choice.
-            self.dropMessageRequest();
+            try self.dropMessageRequest();
             screen.moveRow(.selector);
             if (action == .close and self.settledView()) {
                 const original: ?Submission.State = if (self.submission.view()) |submission| submission.state else null;
@@ -2441,7 +2454,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
         .expand => if (screen.view == .message) try screen.leaveMessage() else {
             // A newer Ctrl-O replaces any page asked for before it, even
             // before its own target is found, or if none is.
-            self.dropMessageRequest();
+            try self.dropMessageRequest();
             self.expansion.queued = .after_frame;
         },
         .detach => self.leaving = .detached,
@@ -2530,9 +2543,13 @@ fn pageAsked(self: *const Self) reader_policy.Asked {
 }
 
 /// No Message page asked for so far opens.
-fn dropMessageRequest(self: *Self) void {
+fn dropMessageRequest(self: *Self) !void {
     self.expansion.generation += 1;
     self.expansion.queued = .none;
+    while (self.tools.cancelNext(self.init.gpa)) |reference| {
+        var empty: viewport.Sized(0, true) = .{};
+        _ = try self.setToolOpen(reference, &empty, false);
+    }
 }
 
 /// Ctrl-O: opens the lowest collapsed Message the latest frame drew, or
@@ -2542,7 +2559,7 @@ fn expand(self: *Self) !?[session_id.bytes]u8 {
     self.dirty = true;
     const screen = self.screen;
     if (self.pagePlace() == .elsewhere) {
-        self.notice = "! Ctrl-O opens a message or Session name from the conversation.";
+        self.notice = "! Ctrl-O opens a tool, message or Session name from the conversation.";
         return null;
     }
     const index = switch (try screen.openableInView(self.init.gpa) orelse {
@@ -2551,9 +2568,113 @@ fn expand(self: *Self) !?[session_id.bytes]u8 {
     }) {
         .message => |index| index,
         .session => |id| return id,
+        .tool => |reference| {
+            try self.toggleTool(reference);
+            return null;
+        },
     };
     self.openCollapsed(index);
     return null;
+}
+
+// Preparing invisible clusters may grow an escaped prefix by up to four.
+const ToolText = viewport.Sized(64 * 1024, true);
+
+fn toggleTool(self: *Self, reference: tool_fold.Reference) !void {
+    const screen = self.screen;
+    const document = if (screen.view == .live) &screen.live else &screen.browsing;
+    _ = document.findTool(reference) orelse return;
+    if (self.tools.contains(reference)) {
+        var empty: viewport.Sized(0, true) = .{};
+        _ = try self.setToolOpen(reference, &empty, false);
+        self.tools.close(self.init.gpa, reference);
+    } else {
+        try self.tools.request(self.init.gpa, reference);
+        // A browsed row stays where it is while its output opens under it.
+        // Live output keeps following its latest rows.
+        if (screen.view == .transcript) document.top = screen.drawn.first;
+        self.notice = "Opening tool output…";
+    }
+    self.dirty = true;
+}
+
+/// Actual text-window rebuilds reapply only previously shown identities.
+/// The fold owner queues them through the same reader as a person's toggle.
+fn reconcileTools(self: *Self) void {
+    const document = switch (self.screen.view) {
+        .live => &self.screen.live,
+        .transcript => &self.screen.browsing,
+        else => return,
+    };
+    self.tools.rebuild(document);
+}
+
+/// The only completion boundary for a fold read. Failure/cancellation cannot
+/// leave output in another retained copy after releasing its intent.
+fn finishTool(self: *Self, request: ToolFolds.Request, outcome: ToolFolds.State) !void {
+    const accepted = self.tools.accepts(request);
+    self.tools.finish(self.init.gpa, request, outcome);
+    if (accepted and outcome != .shown) {
+        var empty: viewport.Sized(0, true) = .{};
+        _ = try self.setToolOpen(request.target, &empty, false);
+    }
+}
+
+/// Reads only the bounded, escaped rows prepared by the existing reader.
+fn showTool(self: *Self, request: ToolFolds.Request) !bool {
+    if (!self.tools.accepts(request)) return false;
+    const reference = request.target;
+    const rows = try self.init.gpa.create(ToolText);
+    defer self.init.gpa.destroy(rows);
+    rows.* = .{ .width_method = self.screen.live.width_method };
+    var window: [1024]u8 = undefined;
+    var offset: u64 = 0;
+    const length = (try self.files.inspection.stat(self.init.io)).size;
+    while (offset < length) {
+        const count = try self.files.inspection.readPositionalAll(self.init.io, window[0..@intCast(@min(window.len, length - offset))], offset);
+        if (count == 0) return error.TruncatedDisplayScratch;
+        try rows.append(window[0..count]);
+        offset += count;
+    }
+    try rows.prepare();
+    return self.setToolOpen(reference, rows, true) catch {
+        self.shown_notice.show("! Tool output does not fit this view; scroll down and try again.", self.nowMs());
+        return false;
+    };
+}
+
+fn setToolOpen(self: *Self, reference: tool_fold.Reference, rows: anytype, open: bool) !bool {
+    const screen = self.screen;
+    const document = if (screen.view == .transcript) &screen.browsing else &screen.live;
+    const held = try document.checkToolOpen(reference, rows, open, if (screen.view == .transcript) .newest else .oldest);
+    if (open and !held) return false;
+    _ = try screen.live.checkToolOpen(reference, rows, open, .oldest);
+    if (!open or screen.view == .transcript) _ = try screen.browsing.checkToolOpen(reference, rows, open, .newest);
+    // The live copy and an existing transcript agree for each shared row.
+    // Neither inspection pages nor hidden outputs have a separate cache.
+    if (try screen.live.setToolOpen(reference, rows, open, .oldest)) |edit| {
+        for (self.live.marks.items[0..self.live.marks.count]) |*mark| mark.offset = edit.map(mark.offset);
+        for (self.live.echoes.opening[0..self.live.echoes.opening_count]) |*echo| {
+            echo.output = edit.map(echo.output);
+            echo.end = edit.map(echo.end);
+        }
+        for (self.live.echoes.live[0..self.live.echoes.live_count]) |*echo| {
+            echo.output = edit.map(echo.output);
+            echo.end = edit.map(echo.end);
+        }
+        if (self.live.echoes.dropped) |*span| span.end = edit.map(span.end);
+    }
+    if (!open or screen.view == .transcript) {
+        const before = screen.browsing.collapsed(0, screen.browsing.text().len).count;
+        if (try screen.browsing.setToolOpen(reference, rows, open, .newest)) |edit| if (edit.trimmed) {
+            // As when an older page arrives: the transcript no longer ends
+            // where live output continues, and its newest blocks left.
+            screen.newer_trimmed = true;
+            self.transcript.blocks.dropNewest(before - screen.browsing.collapsed(0, screen.browsing.text().len).count);
+        };
+    }
+    self.dirty = true;
+    return held;
 }
 
 /// Asks for the collapsed Message `index` from the shown document's end.
@@ -2584,6 +2705,7 @@ fn beginTranscript(self: *Self) !void {
     // Without any boundary, where the conversation starts is unknown.
     self.transcript.beginning = self.transcript.older == null and !(self.transcript.plan.gap and self.live.marks.count == 0);
     try self.showOlderLabels();
+    self.reconcileTools();
 }
 
 /// Shows the gap's label once its Messages are listed, and the
@@ -2682,7 +2804,7 @@ fn takeRow(self: *Self, shown: *slash_commands_shared.Shown) void {
 fn refusedNotice(why: keymap.Refusal) []const u8 {
     return switch (why) {
         .invalid, .edit_rejected => "! Input rejected; nothing sent. Enter plain text or paste again.",
-        .unbound => "! Key combination not recognized; ignored. Draft unchanged.",
+        .unbound => unreachable,
         .overflow => "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
         .paste_overflow => "! Paste too long; draft unchanged.",
     };
@@ -2771,12 +2893,24 @@ fn heldFailure(self: *const Self) ?@TypeOf(self.failure.?) {
 fn settleReader(self: *Self) !void {
     const end = self.joinReader();
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
+    const phase = self.reading.phase;
+    if (phase == .tool) {
+        if (self.tools.in_flight) |request| {
+            const outcome: ToolFolds.State = if (end == .complete and self.tools.accepts(request) and reader_policy.messageShows(request.asked, self.pageAsked()))
+                if (self.showTool(request) catch |err| {
+                    try self.finishTool(request, .failed);
+                    return err;
+                }) .shown else .failed
+            else if (end == .failed) .failed else .cancelled;
+            try self.finishTool(request, outcome);
+        }
+    } else if (end != .complete and phase == .message) self.expansion.reading = null;
     // A fatal failure leaves command output for exit to print.
     if (end.failure(reader_policy.settleMode(self.upgradePhase() == .quiescing, self.input.queuedCommand() != null))) |err| return err;
-    const phase = self.reading.phase;
     const inspection = self.readInspection();
     if (end == .complete) switch (reader_policy.shows(phase, inspection)) {
         .older => try self.showOlder(),
+        .tool => {}, // Settled above, whatever its end.
         .message => {
             const request = self.expansion.reading.?;
             self.expansion.reading = null;
@@ -2785,7 +2919,7 @@ fn settleReader(self: *Self) !void {
         .recalled => try self.showRecalled(),
         .staged => try self.showStaged(),
         .copy => try self.showCopy(),
-        .page => if (phase != .details or reader_policy.detailsShows(self.admission.details_sent, self.admission.sent)) try self.showInspection(),
+        .page => try self.showInspection(),
     };
     // Shown, or never written: exit no longer prints it.
     if (reader_policy.commandSettled(end == .complete, phase)) self.inspection.command_running = false;
@@ -2836,6 +2970,7 @@ fn showOlder(self: *Self) !void {
             self.transcript.beginning = self.transcript.older == null;
         }
         try self.showOlderLabels();
+        self.reconcileTools();
     }
 }
 
@@ -2975,11 +3110,9 @@ fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
     self.live.compact_tools = false;
     var bytes: [1024]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
-    const summary = switch (pending.phase) {
-        .details => "! Details unavailable; draft retained.",
-        .inspection => if (self.inspection.kind == .copy) "! Copy unavailable; draft retained." else "! Inspection unavailable; draft retained.",
-        .recall => "! Sent message unavailable; draft retained.",
-        else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
+    const summary = switch (reader_policy.unavailable(pending.phase, self.readInspection())) {
+        .say => |text| text,
+        .copy => "! Copy unavailable; draft retained.",
     };
     try out.writeAll(summary);
     try out.writeAll(" ");
@@ -3018,7 +3151,7 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
             self.length += bytes.len;
         }
     };
-    for ([_]ReadPhase{ .history, .details }) |phase| {
+    for ([_]ReadPhase{ .history, .message }) |phase| {
         for (1..6) |fail_at| {
             var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .colour = false, .reading = .{ .phase = phase } };
             self.init.io = std.testing.io;
@@ -3047,8 +3180,8 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
             try self.presentReadDiagnostic(&sink);
             try std.testing.expect(self.reading.pending_diagnostic == null);
             try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], out.buffered()) != null);
-            try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], if (phase == .details) "Details unavailable" else "Earlier messages unavailable") != null);
-            try std.testing.expectEqualStrings(if (phase == .details) "! Details unavailable; draft retained." else "! Earlier messages unavailable; scroll up to retry. Draft retained.", self.notice.?);
+            try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], if (phase == .message) "Message unavailable" else "Earlier messages unavailable") != null);
+            try std.testing.expectEqualStrings(if (phase == .message) "! Message unavailable; Ctrl-O to retry. Draft retained." else "! Earlier messages unavailable; scroll up to retry. Draft retained.", self.notice.?);
         }
     }
 }
@@ -3068,11 +3201,11 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
     var observed: ?struct { work: protocol.session_work.Work, opening: bool } = null;
     if (self.reading.output_started)
         self.live.compact_tools = if (self.reading.phase == .activity or self.reading.phase == .permission) self.job.result.compact_tools else false;
-    if (self.reading.phase == .history or self.reading.phase == .message) {
+    if (self.reading.phase == .history or self.reading.phase == .message or self.reading.phase == .tool) {
         self.notice = null; // Clears "Loading earlier messages…" or "Opening message…".
     } else if (self.reading.phase == .recall) {
         // showRecalled selected the notice.
-    } else if (self.reading.phase == .details or self.reading.phase == .inspection) {
+    } else if (self.reading.phase == .inspection) {
         // showInspection selected the notice.
     } else {
         // History, footer, status and /status change together, in one frame.
@@ -3562,6 +3695,31 @@ fn barShows(held: *HeldFrontend) ![]const u8 {
 fn sendKeys(frontend: *Self, bytes: []const u8) !void {
     const held: *HeldFrontend = @fieldParentPtr("self", frontend);
     try held.keys(bytes);
+}
+
+test "unbound chat input posts no notice and closing shortcuts redraws" {
+    for ([_]bool{ false, true }) |shortcuts_open| {
+        for ([_]bool{ false, true }) |notice_present| {
+            const held = try HeldFrontend.create();
+            defer held.destroy();
+            if (shortcuts_open) {
+                try held.keys("?");
+                try std.testing.expect(held.self.shortcuts_open);
+            } else {
+                try held.keys("abc");
+            }
+            if (notice_present) held.self.shown_notice.show("existing", held.self.nowMs());
+            var parser: vaxis.Parser = .{};
+            const parsed = try parser.parse("\x1bx", null);
+            var ctx = held.context();
+            ctx.redraw = false;
+            try held.deliver(&ctx, .{ .key_press = parsed.event.?.key_press });
+            try std.testing.expect(ctx.redraw);
+            try std.testing.expect(!held.self.shortcuts_open);
+            try std.testing.expectEqualStrings(if (shortcuts_open) "" else "abc", held.self.input.composition().bytes);
+            try std.testing.expect(held.self.shown_notice.current(held.self.nowMs()) == null);
+        }
+    }
 }
 
 test "App Session draft storage still guards pending originals Actions and commands" {
@@ -4312,43 +4470,6 @@ test "permission resolved between the activity scan and Current keeps the fronte
     try std.testing.expect(held.self.app_consent.request == null);
     try sendKeys(self, "!");
     try std.testing.expectEqualStrings("draft retained!", self.input.composition().bytes);
-}
-
-test "a details page read before a Message was sent never covers it" {
-    const Worker = struct {
-        var release: std.atomic.Value(bool) = .init(false);
-        fn read(_: *anyopaque, _: *Task) !void {
-            while (!release.load(.acquire)) std.Thread.yield() catch {};
-        }
-    };
-    const held = try HeldFrontend.create();
-    defer held.destroy();
-    const self = &held.self;
-    const page = try held.tmp.dir.createFile(std.testing.io, "details", .{ .read = true });
-    defer page.close(std.testing.io);
-    try page.writePositionalAll(std.testing.io, "Saved tool output\n", 0);
-    self.files.inspection = page;
-    for ([_]bool{ true, false }) |send| {
-        Worker.release.store(false, .release);
-        try held.screen.latest();
-        // /details begins its read, as its command does.
-        self.admission.details_sent = self.admission.sent;
-        self.reading.phase = .details;
-        try self.reader.start(std.testing.io, self, Worker.read);
-        if (send) {
-            try self.beginMessage(.{ .message = self.input.submitText("sent while the page loaded") });
-            self.submission.cancel();
-            _ = self.submission.join();
-            self.submission.close();
-            self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = self.directory, .input = &self.input, .environment = .empty };
-            self.input.init();
-        }
-        Worker.release.store(true, .release);
-        while (!self.reader.completed()) std.Thread.yield() catch {};
-        try self.settleReader();
-        // The sent Message keeps the latest view; an unrelated page still opens.
-        try std.testing.expectEqual(if (send) Screen.ViewKind.live else .inspection, held.screen.view);
-    }
 }
 
 test "Ctrl-R recovers only as Ctrl-R, never with Shift hidden by its reported text" {
@@ -5259,6 +5380,7 @@ const ChromeFixture = struct {
     }
 
     fn deinit(fixture: *ChromeFixture) void {
+        fixture.self.tools.deinit(std.testing.allocator);
         fixture.arena.deinit();
         std.testing.allocator.destroy(fixture.self);
         fixture.page.close(std.testing.io);
@@ -5768,6 +5890,208 @@ test "App Session opens the collapsed Message whose ┄ row was clicked, as Ctrl
     try std.testing.expectEqual(@as(u64, 40), self.expansion.queued.ready.target.position);
 }
 
+test "tool folds share key and click ownership across live output, bounds, failures and NO_COLOR" {
+    const Harness = struct {
+        const Sink = struct {
+            document: *viewport.Document,
+            pub fn feed(sink: *@This(), bytes: []const u8) !void {
+                try sink.document.append(bytes);
+            }
+            pub fn tool(sink: *@This(), reference: tool_fold.Reference) !void {
+                try tool_fold.marker(reference, sink);
+            }
+        };
+        const File = struct {
+            file: std.Io.File,
+            offset: u64 = 0,
+            pub fn feed(file: *@This(), bytes: []const u8) !void {
+                try file.file.writePositionalAll(std.testing.io, bytes, file.offset);
+                file.offset += bytes.len;
+            }
+        };
+        fn append(fixture: *ChromeFixture, reference: tool_fold.Reference, failed: bool) !void {
+            var sink: Sink = .{ .document = &fixture.screen.live };
+            var compact = true;
+            var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+            try description.set(if (failed) "Fail with an excerpt" else "List project files");
+            try View.toolResultRow(.{ .description = description, .code = if (failed) .failed else .succeeded, .publication_position = null }, .{ .exit = if (failed) 1 else null }, reference, &sink, fixture.self.colour, &compact);
+        }
+        fn complete(fixture: *ChromeFixture, raw: []const u8) !void {
+            const request = fixture.self.tools.start(fixture.self.pageAsked()).?;
+            const output = try std.testing.allocator.create(tool_fold.Output);
+            defer std.testing.allocator.destroy(output);
+            output.* = .{};
+            // The formatter sees arbitrary read-window boundaries too.
+            for (raw) |byte| try output.feed(&.{byte});
+            try fixture.page.setLength(std.testing.io, 0);
+            var file: File = .{ .file = fixture.page };
+            try output.finish(&file);
+            try finish(fixture, request);
+        }
+        fn finish(fixture: *ChromeFixture, request: ToolFolds.Request) !void {
+            const outcome: ToolFolds.State = if (reader_policy.messageShows(request.asked, fixture.self.pageAsked()))
+                if (try fixture.self.showTool(request)) .shown else .failed
+            else
+                .cancelled;
+            try fixture.self.finishTool(request, outcome);
+        }
+        fn click(fixture: *ChromeFixture, reference: tool_fold.Reference) !void {
+            const handler = fixture.self.app_content.handler.?;
+            try handler.on_click.?(handler.userdata, &fixture.ctx, .{ .offset = fixture.screen.live.findTool(reference).? });
+        }
+        fn key(fixture: *ChromeFixture) !void {
+            _ = try fixture.draw();
+            try fixture.press(.{ .codepoint = 'o', .mods = .{ .ctrl = true } });
+            try fixture.widget.handleEvent(&fixture.ctx, .tick);
+        }
+    };
+    for ([_]bool{ false, true }) |colour| {
+        var fixture: ChromeFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const self = fixture.self;
+        const document = &fixture.screen.live;
+        self.colour = colour;
+        self.app_caps.depth = if (colour) .direct else .none;
+        self.app_content.colour = colour;
+        document.clear();
+        try document.append("› Request\n");
+        for (0..10) |_| try document.append("Before the tools\n");
+        const first: tool_fold.Reference = .{ .position = 41, .ordinal = 1, .content = .{ .length = 4, .digest = protocol.contentDigest("src\n") } };
+        const second: tool_fold.Reference = .{ .position = 45, .ordinal = 2, .content = .{ .length = 8, .digest = protocol.contentDigest("failure\n") } };
+        try Harness.append(&fixture, first, false);
+        try Harness.append(&fixture, second, true);
+        for (0..9) |_| try document.append("After the tools\n");
+        _ = try fixture.draw();
+        const before = self.app_content.first;
+        const end_before = try fixture.screen.liveEnd();
+        self.live.marks.record(.{ .offset = end_before, .cursor = .{ .end = 45 }, .admitted = 46 });
+        // Key selection is the lowest openable heading, including failed calls.
+        try Harness.key(&fixture);
+        try std.testing.expectEqual(ToolFolds.State.requested, self.tools.state(second));
+        // A live delivery before the output read completes does not stale it.
+        try document.append("Live delivery\n");
+        try Harness.complete(&fixture, "failure\n");
+        try std.testing.expect(document.toolIsOpen(document.findTool(second).?));
+        // Live output keeps following its latest rows with a tool open.
+        _ = try fixture.draw();
+        try std.testing.expect(document.top == null);
+        try std.testing.expect(self.app_content.first.order(before) == .gt);
+        try std.testing.expect(std.mem.indexOf(u8, document.text(), "    failure\n") != null);
+        try std.testing.expect(self.live.marks.items[0].offset > end_before);
+        // Ctrl-O on the same open row closes it and removes only its output.
+        try Harness.key(&fixture);
+        try std.testing.expect(!document.toolIsOpen(document.findTool(second).?));
+        try std.testing.expectEqual(end_before, self.live.marks.items[0].offset);
+        try std.testing.expect(std.mem.indexOf(u8, document.text(), "failure\n") == null);
+        // Mouse and key use the same owner, and more than one fold stays open.
+        try Harness.click(&fixture, first);
+        try Harness.complete(&fixture, "README.md\nsrc\n");
+        try Harness.click(&fixture, second);
+        try Harness.complete(&fixture, "bad \x1b[2J\nerror line\n");
+        try std.testing.expect(document.toolIsOpen(document.findTool(first).?));
+        try std.testing.expect(document.toolIsOpen(document.findTool(second).?));
+        try std.testing.expect(std.mem.indexOf(u8, document.text(), "    bad \\x1b[2J") != null);
+        try document.append("More live output\n");
+        try std.testing.expect(document.toolIsOpen(document.findTool(first).?));
+        try std.testing.expect(document.toolIsOpen(document.findTool(second).?));
+        // Rendered cells, not style bytes: selected header and separate output
+        // band with colour; no band or selection background with NO_COLOR.
+        const surface = try fixture.draw();
+        const arena = fixture.arena.allocator();
+        var screen = try vaxis.Screen.init(arena, .{ .rows = 24, .cols = 80, .x_pixel = 0, .y_pixel = 0 });
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 24, .screen = &screen };
+        surface.render(window, self.app_input.composer.widget());
+        var saw_output = false;
+        var saw_heading = false;
+        var saw_second_line = false;
+        for (0..24) |row| for (0..80) |col| {
+            const cell = screen.readCell(@intCast(col), @intCast(row)).?;
+            if (std.mem.eql(u8, cell.char.grapheme, "R") and col + 1 < 80 and std.mem.eql(u8, screen.readCell(@intCast(col + 1), @intCast(row)).?.char.grapheme, "E")) {
+                saw_output = true;
+                try std.testing.expectEqual(@as(usize, 4), col);
+                try std.testing.expectEqual(if (colour) self.app_content.colours.band else self.app_content.style.bg, cell.style.bg);
+                try std.testing.expectEqual(if (colour) self.app_content.colours.quiet else self.app_content.style.fg, cell.style.fg);
+            }
+            try std.testing.expect(!std.mem.eql(u8, cell.char.grapheme, "▸"));
+            if (std.mem.eql(u8, cell.char.grapheme, @import("marks.zig").marks.get(.finished).unicode)) {
+                saw_heading = true;
+                try std.testing.expectEqual(@as(usize, 0), col);
+                try std.testing.expectEqualStrings("L", screen.readCell(2, @intCast(row)).?.char.grapheme);
+                try std.testing.expectEqual(if (colour) self.app_content.colours.selection else self.app_content.style.bg, cell.style.bg);
+            }
+            if (col == 4 and std.mem.eql(u8, cell.char.grapheme, "e") and std.mem.eql(u8, screen.readCell(5, @intCast(row)).?.char.grapheme, "r")) {
+                saw_second_line = true;
+                try std.testing.expectEqual(if (colour) self.app_content.colours.quiet else self.app_content.style.fg, cell.style.fg);
+                try std.testing.expectEqual(if (colour) self.app_content.colours.band else self.app_content.style.bg, cell.style.bg);
+            }
+        };
+        try std.testing.expect(saw_output and saw_heading and saw_second_line);
+        // Close by click, then the twenty-row bound and exact omitted count.
+        try Harness.click(&fixture, second);
+        try Harness.click(&fixture, second);
+        var many: [5 * 23]u8 = undefined;
+        for (0..23) |index| @memcpy(many[index * 5 ..][0..5], "line\n");
+        try Harness.complete(&fixture, &many);
+        try std.testing.expectEqual(@as(usize, 20), std.mem.count(u8, document.text(), "    line\n"));
+        try std.testing.expect(std.mem.indexOf(u8, document.text(), "… 3 more lines") != null);
+        // Empty output is still openable/closable, and never reveals old bytes.
+        try Harness.click(&fixture, second);
+        try Harness.click(&fixture, second);
+        try Harness.complete(&fixture, "");
+        try std.testing.expect(document.toolIsOpen(document.findTool(second).?));
+        try std.testing.expect(std.mem.indexOf(u8, document.text(), "line\n") == null);
+        try Harness.click(&fixture, second);
+        try std.testing.expect(!document.toolIsOpen(document.findTool(second).?));
+        try Harness.click(&fixture, first);
+        try Harness.click(&fixture, first);
+        const wide: [200]u8 = @splat('W');
+        try Harness.complete(&fixture, &wide);
+        const output_row = document.nextLine(document.findTool(first).?).?;
+        try std.testing.expectEqual(@as(u16, 1), document.lineRows(.{ .width = 12, .method = .unicode }, output_row));
+        // Rows arriving below an open tool are followed like any others.
+        for (0..40) |_| try document.append("Later live rows\n");
+        _ = try fixture.draw();
+        try std.testing.expectEqual(.live, fixture.screen.view);
+        try std.testing.expect(document.top == null);
+        try std.testing.expect(document.toolIsOpen(document.findTool(first).?));
+        // A lower collapsed Message still joins the same openable set.
+        try document.append("› Later message\n  " ++ View.Mark.summary ++ "┄ 4 more lines" ++ View.Mark.reset ++ "\n");
+        self.live.blocks.append(.{ .source = .activity, .position = 99, .ordinal = 0, .content = first.content, .row = false });
+        document.top = null;
+        try Harness.key(&fixture);
+        try std.testing.expectEqual(@as(u64, 99), self.expansion.queued.ready.target.position);
+        try self.dropMessageRequest();
+        const copied = (try document.shownText(std.testing.allocator, 0, document.text().len, viewport.capacity)).?;
+        defer std.testing.allocator.free(copied);
+        try std.testing.expect(std.mem.indexOf(u8, copied, "rui-tool") == null);
+        // Rebuilding a row at another byte position cannot reset intent.
+        // The later feed window can reapply exactly these References.
+        const old_heading = document.findTool(first).?;
+        try std.testing.expectEqual(ToolFolds.State.shown, self.tools.state(first));
+        document.clear();
+        try document.append("Rebuilt prefix\n");
+        try Harness.append(&fixture, first, false);
+        try std.testing.expect(document.findTool(first).? != old_heading);
+        try std.testing.expect(!document.toolIsOpen(document.findTool(first).?));
+        self.reconcileTools();
+        try std.testing.expect(self.tools.pending());
+        try Harness.complete(&fixture, "Restored output\n");
+        try std.testing.expect(document.toolIsOpen(document.findTool(first).?));
+        try std.testing.expect(std.mem.indexOf(u8, document.text(), "    Restored output\n") != null);
+        // Same location and same text, but a different identity is not open.
+        var other = first;
+        other.content.digest[0] ^= 1;
+        document.clear();
+        try document.append("Rebuilt prefix\n");
+        try Harness.append(&fixture, other, false);
+        self.reconcileTools();
+        try std.testing.expect(!self.tools.pending());
+        try std.testing.expect(self.tools.contains(first));
+        try std.testing.expect(!document.toolIsOpen(document.findTool(other).?));
+    }
+}
+
 test "App Session drag-copy notices follow the notice rule" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
@@ -5814,4 +6138,152 @@ test "App Session keeps its real draft browsing anchor and focused composer acro
         const col = screen.cursor.col - @as(u16, if (width >= 100) 41 else 0);
         if (caret_col) |expected| try std.testing.expectEqual(expected, col) else caret_col = col;
     }
+}
+
+test "fold read settlement covers success failure cancellation supersession insertion refusal and closed receipts" {
+    const Helpers = struct {
+        fn append(document: *viewport.Document, reference: tool_fold.Reference) !void {
+            const Sink = struct {
+                document: *viewport.Document,
+                pub fn feed(sink: @This(), bytes: []const u8) !void {
+                    try sink.document.append(bytes);
+                }
+            };
+            try tool_fold.marker(reference, Sink{ .document = document });
+            try document.append("✓ Held call\n");
+        }
+        fn ok(_: *anyopaque, _: *Task) !void {}
+        fn failed(_: *anyopaque, _: *Task) !void {
+            return error.ContentBindingMismatch;
+        }
+        fn cancelled(_: *anyopaque, _: *Task) !void {
+            return error.Cancelled;
+        }
+    };
+    const Case = enum { success, failure, cancelled, superseded, dismissed, missing, refused, closed, reopened };
+    for (std.enums.values(Case)) |case| {
+        errdefer std.debug.print("fold settlement case={s}\n", .{@tagName(case)});
+        var fixture: ChromeFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const self = fixture.self;
+        const screen = fixture.screen;
+        const reference: tool_fold.Reference = .{ .position = 5, .ordinal = 1, .content = .{ .length = 5, .digest = protocol.contentDigest("done\n") } };
+        screen.live.clear();
+        try Helpers.append(&screen.live, reference);
+        if (case == .refused) {
+            // The live copy could grow. The browsed copy is full up to this
+            // row, with nothing newer to drop. Preflight must refuse before
+            // inserting output into either one.
+            screen.view = .transcript;
+            const filler = try std.testing.allocator.alloc(u8, viewport.capacity - screen.live.length);
+            defer std.testing.allocator.free(filler);
+            @memset(filler, 'x');
+            filler[filler.len - 1] = '\n';
+            screen.browsing.clear();
+            try screen.browsing.append(filler);
+            try Helpers.append(&screen.browsing, reference);
+        }
+        try std.testing.expectEqual(ToolFolds.State.closed, self.tools.state(reference));
+        try std.testing.expect(!screen.live.toolIsOpen(screen.live.findTool(reference).?));
+        try self.toggleTool(reference);
+        const request = self.tools.start(self.pageAsked()).?;
+        try std.testing.expectEqual(ToolFolds.State.requested, self.tools.state(reference));
+        try fixture.page.setLength(std.testing.io, 0);
+        try fixture.page.writePositionalAll(std.testing.io, tool_fold.output_marker ++ "    done\n", 0);
+        const job = self.freeze(.tool);
+        job.target = .{ .tool = reference };
+        try self.launch(job, switch (case) {
+            .failure => Helpers.failed,
+            .cancelled => Helpers.cancelled,
+            else => Helpers.ok,
+        });
+        switch (case) {
+            .superseded => self.admission.sent += 1, // messageShows rejects it even without explicit cancellation.
+            .dismissed => try self.dropMessageRequest(),
+            .missing => screen.live.clear(),
+            .closed => try self.toggleTool(reference),
+            .reopened => {
+                try self.toggleTool(reference);
+                try self.toggleTool(reference);
+            },
+            else => {},
+        }
+        if (case == .cancelled) try std.testing.expectError(error.Cancelled, self.settleReader()) else try self.settleReader();
+        try std.testing.expect(self.tools.in_flight == null);
+        if (case == .success) {
+            try std.testing.expectEqual(ToolFolds.State.shown, self.tools.state(reference));
+            try std.testing.expect(screen.live.toolIsOpen(screen.live.findTool(reference).?));
+        } else {
+            try std.testing.expectEqual(if (case == .reopened) ToolFolds.State.requested else ToolFolds.State.closed, self.tools.state(reference));
+            try std.testing.expect(std.mem.indexOf(u8, screen.live.text(), "    done\n") == null);
+            try std.testing.expect(std.mem.indexOf(u8, screen.browsing.text(), "    done\n") == null);
+            if (case == .missing) try Helpers.append(&screen.live, reference);
+            if (case != .reopened) try self.toggleTool(reference);
+            const retry = self.tools.start(self.pageAsked()).?;
+            try std.testing.expect(retry.ticket != request.ticket);
+            try std.testing.expectEqualDeep(reference, retry.target);
+            self.tools.finish(std.testing.allocator, retry, .cancelled);
+        }
+    }
+}
+
+test "history rebuild reapplies shown canonical References through the production reader queue" {
+    const Sink = struct {
+        document: *viewport.Document,
+        pub fn feed(sink: @This(), bytes: []const u8) !void {
+            try sink.document.append(bytes);
+        }
+    };
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    const screen = fixture.screen;
+    const reference: tool_fold.Reference = .{ .position = 5, .ordinal = 1, .content = .{ .length = 5, .digest = protocol.contentDigest("done\n") } };
+    screen.live.clear();
+    try tool_fold.marker(reference, Sink{ .document = &screen.live });
+    try screen.live.append("✓ Held call\n");
+    try self.toggleTool(reference);
+    const opening = self.tools.start(self.pageAsked()).?;
+    try fixture.page.setLength(std.testing.io, 0);
+    try fixture.page.writePositionalAll(std.testing.io, tool_fold.output_marker ++ "    done\n", 0);
+    try self.finishTool(opening, if (try self.showTool(opening)) .shown else .failed);
+    try self.beginTranscript();
+    try std.testing.expect(!self.tools.pending());
+    // Eviction discards display rows, not the shown identity. A canonical
+    // history page rebuilds the header at another position with no output.
+    screen.browsing.clear();
+    try screen.browsing.append("Newer retained rows\n");
+    // Use the actual encoded page (including its hidden Reference marker).
+    try fixture.page.setLength(std.testing.io, 0);
+    var marker: [256]u8 = undefined;
+    const Writer = struct {
+        writer: *std.Io.Writer,
+        pub fn feed(sink: @This(), bytes: []const u8) !void {
+            try sink.writer.writeAll(bytes);
+        }
+    };
+    var writer = std.Io.Writer.fixed(&marker);
+    try tool_fold.marker(reference, Writer{ .writer = &writer });
+    try writer.writeAll("✓ Held call\n");
+    try fixture.page.writePositionalAll(std.testing.io, writer.buffered(), 0);
+    _ = self.freeze(.history);
+    self.job.target = .older;
+    self.job.result.history_cursor = null;
+    try self.showOlder();
+    try std.testing.expectEqual(ToolFolds.State.requested, self.tools.state(reference));
+    const restored = self.tools.start(self.pageAsked()).?;
+    try std.testing.expectEqualDeep(reference, restored.target);
+    try std.testing.expect(restored.ticket != opening.ticket);
+    try fixture.page.setLength(std.testing.io, 0);
+    try fixture.page.writePositionalAll(std.testing.io, tool_fold.output_marker ++ "    done\n", 0);
+    try self.finishTool(restored, if (try self.showTool(restored)) .shown else .failed);
+    try std.testing.expect(screen.browsing.toolIsOpen(screen.browsing.findTool(reference).?));
+    // A close from live also releases the hidden transcript's bounded output.
+    try screen.latest();
+    try self.toggleTool(reference);
+    try std.testing.expectEqual(ToolFolds.State.closed, self.tools.state(reference));
+    try std.testing.expect(std.mem.indexOf(u8, screen.live.text(), "    done\n") == null);
+    try std.testing.expect(std.mem.indexOf(u8, screen.browsing.text(), "    done\n") == null);
 }
