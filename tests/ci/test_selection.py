@@ -19,7 +19,7 @@ import build_files
 from select_tests import (BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_POSTGRES_TARGETS, LIVE_RULES,
                           POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, Graph, execution_batches, matches, select,
                           setup_requirements, tree_graph, uses_live_mysql, live_mysql_suites, mysql_provisioning)
-from qualification import NATIVE, RESOURCES, qualification, shards
+from qualification import LONG_GATES, NATIVE, RESOURCES, SHARDS_BESIDE_LONG_GATE, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
 from host_process import dispose_all, wait_for
@@ -1272,6 +1272,26 @@ fi
                          [["check-full", "-Dcheck-part=execution"], ["check-full", "-Dcheck-part=callers"],
                           ["codex-credential-integration"], ["test-full"], ["measurement-check"]])
         self.assertEqual(shards([]), {"include": []})
+
+    def test_long_gate_runs_alone_and_short_suites_share_three_shards(self):
+        short = [f"suite-{index}-integration" for index in range(14)]
+        for gates in (["check"], ["test"], ["check-full"], ["check-full", "stack-frames"]):
+            with self.subTest(gates=gates):
+                rows = shards(sorted(gates + short))["include"]
+                packed = [row for row in rows if not LONG_GATES.intersection(row["targets"])]
+                # Each long gate keeps its own shard: a passenger lengthens the longest one.
+                alone = [name for gate in gates
+                         for name in (("full-execution", "full-callers") if gate == "check-full" else (gate,))]
+                self.assertCountEqual([row["name"] for row in rows if row not in packed], alone)
+                self.assertEqual(len(packed), SHARDS_BESIDE_LONG_GATE)
+                self.assertCountEqual([target for row in packed for target in row["targets"]], short)
+        # Without a long gate the short suites set the run's length: every slot.
+        rows = shards(short)["include"]
+        self.assertEqual(len(rows), 10)
+        self.assertCountEqual([target for row in rows for target in row["targets"]], short)
+        self.assertEqual([row["targets"] for row in shards(["test", "test-logic"])["include"]], [["test"], ["test-logic"]])
+        # Qualification still isolates every suite.
+        self.assertTrue(all(len(row["targets"]) == 1 for row in shards(["check", *short], limit=None)["include"]))
 
     def test_macos_native_work_fits_three_workers_without_losing_selected_checks(self):
         rows = qualification("native", "macos")["include"]
