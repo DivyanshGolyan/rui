@@ -15,7 +15,6 @@ const output_decode = @import("output_decode.zig");
 const request_encoding = @import("request_encoding.zig");
 const store = @import("store.zig");
 const tools = @import("tools.zig");
-const excerpt_bytes = @import("bash.zig").excerpt_bytes;
 
 const ScratchBudget = provider.ScratchBudget;
 const PreparedRequest = provider.PreparedRequest;
@@ -533,8 +532,6 @@ const peer_parts = blk: {
 const Handle = union(enum) {
     text: []const u8,
     content: store.HistoricalContent,
-    /// Every Action resolution and rejected call, independent of its runner.
-    result: store.HistoricalContent,
     /// Rui's runtime context, the Workspace, the Session's own address and
     /// the saved baseline instructions.
     instructions,
@@ -546,7 +543,7 @@ const Handle = union(enum) {
 /// JSON string literal within that text, so it takes one more escape than
 /// the text around it.
 const Segment = struct {
-    source: union(enum) { bytes: []const u8, content: store.HistoricalContent, result: store.HistoricalContent },
+    source: union(enum) { bytes: []const u8, content: store.HistoricalContent },
     quoted: bool = false,
 };
 
@@ -564,17 +561,6 @@ fn effortOf(effort: ?protocol.ReasoningEffort) ?codec_abi.Effort {
 
 comptime {
     std.debug.assert(codec_abi.max_model_bytes == protocol.max_model_bytes);
-    std.debug.assert(history_memo.chunk_bytes >= excerpt_bytes + 1);
-}
-
-/// The complete prefix, with one byte of lookahead when truncated. Exact
-/// fits are unchanged, including opaque bytes; valid UTF-8 is never split.
-fn resultPrefixLength(prefix: []const u8, total: u64) usize {
-    std.debug.assert(prefix.len == @min(total, excerpt_bytes + 1));
-    if (total <= excerpt_bytes) return prefix.len;
-    var kept: usize = excerpt_bytes;
-    while (kept > 0 and prefix[kept] & 0xc0 == 0x80) kept -= 1;
-    return kept;
 }
 
 pub const Preparation = struct {
@@ -589,11 +575,8 @@ pub const Preparation = struct {
     /// The content the emission reads; open exactly while
     /// `state.emission.readsContent()`.
     reader: store.HistoricalReader = undefined,
-    /// Shared read scratch: result prefixes during history encoding, memo
-    /// chunks during copying, and sealed-request chunks during verification.
-    /// These stages never overlap; no extra payload window per preparation.
-    read_window: [history_memo.chunk_bytes]u8 = undefined,
-    result_notice: protocol.Bounded(128) = undefined,
+    /// The window each memo chunk is copied through.
+    memo_window: [history_memo.chunk_bytes]u8 = undefined,
     /// The Session's codec state, begun at the settings stage.
     encoder: codecs.Encoder = undefined,
     /// The codec's state at the last history-element boundary: the initial
@@ -751,14 +734,13 @@ pub const Preparation = struct {
         json: JsonEmission,
         raw: request_encoding.RawCursor,
         history_memo,
-        result_prefix: struct { length: u64, loaded: usize = 0, escape: codec_abi.Escape },
 
         /// Whether the emission reads the preparation's content reader.
         fn readsContent(self: *const Emission) bool {
             return switch (self.*) {
                 .none, .fixed, .history_memo => false,
                 .json => |*json| json.bytes == null,
-                .raw, .result_prefix => true,
+                .raw => true,
             };
         }
     };
@@ -842,7 +824,7 @@ pub const Preparation = struct {
                 }
                 const write = &(self.state.memo_write orelse return self.finish());
                 const memos = self.state.memos.?;
-                bytes_left -= memos.writeChunk(self.writer.io, write, self.readonly, bytes_left, &self.read_window) catch {
+                bytes_left -= memos.writeChunk(self.writer.io, write, self.readonly, bytes_left, &self.memo_window) catch {
                     self.abandonMemoWrite();
                     return self.finish();
                 };
@@ -991,7 +973,7 @@ pub const Preparation = struct {
                     return .pending;
                 };
                 self.handles[0] = .{ .content = result.call_id };
-                self.handles[1] = .{ .result = result.output };
+                self.handles[1] = .{ .content = result.output };
                 return self.loadItemHeader(.tool_result, 0b11);
             },
             .covered_tool_results => {
@@ -1285,11 +1267,6 @@ pub const Preparation = struct {
         return switch (self.handles[handle]) {
             .text => |bytes| if (index == 0) .{ .source = .{ .bytes = bytes } } else null,
             .content => |content| if (index == 0) .{ .source = .{ .content = content } } else null,
-            .result => |content| switch (index) {
-                0 => .{ .source = .{ .result = content } },
-                1 => .{ .source = .{ .bytes = self.result_notice.slice() } },
-                else => null,
-            },
             .instructions => switch (index) {
                 0 => .{ .source = .{ .bytes = context_parts[0] } },
                 1 => .{ .source = .{ .bytes = self.settings.workspace.slice() }, .quoted = true },
@@ -1320,17 +1297,6 @@ pub const Preparation = struct {
                     else => .{ .json = .{ .bytes = bytes, .cursor = .{ .nested_string = true } } },
                 };
             },
-            .result => |content| {
-                std.debug.assert(!segment.quoted);
-                self.result_notice.len = 0;
-                if (content.length <= excerpt_bytes) {
-                    // Fitting results (including Bash's usual results) keep
-                    // the original streaming path and exact bytes.
-                    return self.startSegment(.{ .source = .{ .content = content } }, escape);
-                }
-                try self.view.openContentPrefix(content, excerpt_bytes + 1, &self.reader);
-                self.state.emission = .{ .result_prefix = .{ .length = content.length, .escape = escape } };
-            },
             .content => |content| {
                 std.debug.assert(!segment.quoted);
                 try self.view.openContent(content, &self.reader);
@@ -1355,26 +1321,6 @@ pub const Preparation = struct {
                 self.reader.close();
             },
             .history_memo => if (!try self.advanceMemoCopy(bytes_left, items_left)) return false,
-            .result_prefix => |*prefix| {
-                // One lookahead byte identifies a cut inside a UTF-8 unit.
-                // Reuse the existing content reader, never fetch the rest or
-                // query metadata again. Small allowances still yield.
-                const end = excerpt_bytes + 1;
-                const count = @min(end - prefix.loaded, bytes_left.*);
-                if (count == 0) return false;
-                if (try self.reader.read(prefix.loaded, self.read_window[prefix.loaded..][0..count]) != count)
-                    return error.ShortCanonicalRead;
-                prefix.loaded += count;
-                bytes_left.* -= count;
-                if (prefix.loaded != end) return false;
-                const kept = resultPrefixLength(self.read_window[0..end], prefix.length);
-                const notice = try std.fmt.bufPrint(&self.result_notice.bytes, "\n[{d} more bytes not shown; read_transcript full on this call's result]", .{prefix.length - kept});
-                self.result_notice.len = notice.len;
-                const escape = prefix.escape;
-                self.reader.close();
-                try self.startSegment(.{ .source = .{ .bytes = self.read_window[0..kept] } }, escape);
-                return self.advanceEmission(bytes_left, items_left);
-            },
         }
         // Naming the void field stores only the tag; `.none` lowers to a
         // memset of the whole union, replay validation window included.
@@ -1456,8 +1402,8 @@ pub const Preparation = struct {
             if (check.hashed == check.length) break;
             if (bytes_left.* == 0) return false;
             const limit = if (check.bound) |bound| bound.span_length else check.length;
-            const count: usize = @intCast(@min(bytes_left.*, self.read_window.len, limit - check.hashed));
-            const window = self.read_window[0..count];
+            const count: usize = @intCast(@min(bytes_left.*, self.memo_window.len, limit - check.hashed));
+            const window = self.memo_window[0..count];
             if (try self.readonly.readPositionalAll(self.writer.io, window, check.start + check.hashed) != count)
                 return error.RequestSealFailed;
             check.hasher.update(window);
@@ -3196,141 +3142,6 @@ test "request preparation replays a large private reasoning item within each adv
         if (preparation.state.active) preparation.cancel();
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
-}
-
-test "model result prefixes cut at every UTF-8 offset and preserve exact fits" {
-    const content = try std.testing.allocator.alloc(u8, excerpt_bytes + 32);
-    defer std.testing.allocator.free(content);
-    for ([_][]const u8{ "é", "€", "😀" }) |character| {
-        for (excerpt_bytes - 4..excerpt_bytes + 2) |at| {
-            @memset(content, 'x');
-            @memcpy(content[at..][0..character.len], character);
-            const expected = if (at < excerpt_bytes and at + character.len > excerpt_bytes) at else excerpt_bytes;
-            const kept = resultPrefixLength(content[0 .. excerpt_bytes + 1], content.len);
-            try std.testing.expectEqual(expected, kept);
-            try std.testing.expect(std.unicode.utf8ValidateSlice(content[0..kept]));
-        }
-        for ([_]usize{ character.len, excerpt_bytes - 4, excerpt_bytes - 1, excerpt_bytes }) |length| {
-            @memset(content, 'x');
-            @memcpy(content[length - character.len ..][0..character.len], character);
-            try std.testing.expectEqual(length, resultPrefixLength(content[0..length], length));
-        }
-    }
-    try std.testing.expectEqual(@as(usize, 0), resultPrefixLength("", 0));
-    try std.testing.expectEqual(@as(usize, 1), resultPrefixLength("\xff", 1));
-}
-
-test "model result history bounds every runner preserves fitting Bash and rejects deterministically" {
-    var setup: PreparationTestSetup = undefined;
-    try setup.init();
-    defer setup.close();
-    const session = try setup.configure("result-config");
-    var update: wire_request.ConfigureCommand = .{ .session = session };
-    try update.key.set("result-tools");
-    update.configuration.tools = try .of(&.{ "bash", "read_transcript" });
-    try std.testing.expect(try setup.storage.configure(&update, .{}) == .accepted);
-    try setup.submit("result-input", "result-input", session.slice(), "run tools");
-    const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
-    const arguments = "{\"cmd\":\"true\",\"description\":\"Run no-op command\",\"timeout_ms\":null}";
-    const quoted = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
-    defer std.testing.allocator.free(quoted);
-    var calls: [6]store.TestingCall = undefined;
-    const names = [_][]const u8{ "bash", "bash", "bash", "read_transcript", "unknown", "bash" };
-    const ids = [_][]const u8{ "short", "exact", "large", "core", "unknown", "invalid" };
-    for (&calls, names, ids, 0..) |*call, name, id, index| {
-        call.* = .{ .item_id = id, .name = name, .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = if (index < 3) quoted[1 .. quoted.len - 1] else "{}", .decoded_arguments = if (index < 3) arguments else "{}" };
-    }
-    try store.settleCallsForTesting(&setup.storage, &setup.tmp, first, "result-calls", &calls);
-    const short = "Bash succeeded. Exit code: 0.\nstdout tail:\né \"ok\"\n";
-    const long = try std.testing.allocator.alloc(u8, excerpt_bytes + 64);
-    defer std.testing.allocator.free(long);
-    @memset(long, 'x');
-    long[0] = '"';
-    long[1] = '\n';
-    @memcpy(long[excerpt_bytes - 1 ..][0..2], "é");
-    const exact = try std.testing.allocator.alloc(u8, excerpt_bytes);
-    defer std.testing.allocator.free(exact);
-    @memset(exact, 'y');
-    @memcpy(exact[exact.len - 4 ..], "😀");
-    for ([_][]const u8{ short, exact, long }) |text| {
-        const action = (try setup.storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-        _ = try setup.storage.settleActionAttempt(action, .succeeded, text, .{});
-    }
-    const work = (try setup.storage.nextCoreWork()).?.action;
-    try std.testing.expect(work.tool == .read_transcript);
-    try std.testing.expect(try setup.storage.succeedCoreCall(work.binding, long, .{}));
-    const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var previous: ?[]u8 = null;
-    defer if (previous) |bytes| std.testing.allocator.free(bytes);
-    for ([_][2]usize{ .{ 7, 3 }, .{ 4096, 16 } }) |schedule| {
-        var used: std.atomic.Value(u64) = .init(0);
-        var retained: ?named_scratch.Owner = null;
-        var prep: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &prep.view);
-        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
-        defer if (prep.state.active) prep.cancel();
-        const result = try drainPreparation(&prep, schedule[0], schedule[1], 1 << 20);
-        errdefer std.testing.allocator.free(result.bytes);
-        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
-        defer parsed.deinit();
-        var count: usize = 0;
-        for (parsed.value.object.get("input").?.array.items) |item| {
-            const kind = item.object.get("type") orelse continue;
-            if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
-            try std.testing.expectEqualStrings(ids[count], item.object.get("call_id").?.string);
-            const text = item.object.get("output").?.string;
-            switch (count) {
-                0 => try std.testing.expectEqualStrings(short, text),
-                1 => try std.testing.expectEqualStrings(exact, text),
-                2, 3 => {
-                    try std.testing.expectEqualStrings(long[0 .. excerpt_bytes - 1], text[0 .. excerpt_bytes - 1]);
-                    try std.testing.expectEqualStrings("\n[65 more bytes not shown; read_transcript full on this call's result]", text[excerpt_bytes - 1 ..]);
-                    try std.testing.expect(std.unicode.utf8ValidateSlice(text));
-                },
-                4 => try std.testing.expectEqualStrings("Unknown tool: unknown.", text),
-                5 => try std.testing.expect(std.mem.startsWith(u8, text, "Invalid arguments for tool 'bash': ")),
-                else => return error.UnexpectedToolResult,
-            }
-            count += 1;
-        }
-        try std.testing.expectEqual(calls.len, count);
-        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-        if (previous) |bytes| {
-            try std.testing.expectEqualStrings(bytes, result.bytes);
-            std.testing.allocator.free(bytes);
-        }
-        previous = result.bytes;
-    }
-    var entries: [1]history_memo.Table.Entry = @splat(.{});
-    var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
-    defer memos.deinit(std.testing.io);
-    const memo = try prepareMemoForTesting(&setup, binding, &memos, .{});
-    defer std.testing.allocator.free(memo.bytes);
-    try std.testing.expectEqualStrings(previous.?, memo.bytes);
-    try std.testing.expect((try expectMemoRebuildEqual(&setup, binding, &memos, .{})) > 0);
-    // Cancellation while the prefix is partially loaded releases the same
-    // reader as ordinary streaming; no extra reader survives the yield.
-    var used: std.atomic.Value(u64) = .init(0);
-    var retained: ?named_scratch.Owner = null;
-    var prep: Preparation = undefined;
-    setup.storage.openHistoricalView(binding, &prep.view);
-    try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
-    defer if (prep.state.active) prep.cancel();
-    for (0..1 << 20) |_| {
-        if (prep.state.emission == .result_prefix and prep.state.emission.result_prefix.loaded > 0) break;
-        switch (prep.advance(7, 3)) {
-            .pending => {},
-            .prepared => |request| {
-                request.deinit(std.testing.io, prep.writer.budget);
-                return error.ExpectedPartialPrefix;
-            },
-            .failed => |err| return err,
-        }
-    } else return error.ExpectedPartialPrefix;
-    try std.testing.expectEqual(@as(usize, 1), prep.view.outstandingReaders());
-    prep.cancel();
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-    try std.testing.expect(retained == null);
 }
 
 test "request preparation composes replay tool results and schema" {
