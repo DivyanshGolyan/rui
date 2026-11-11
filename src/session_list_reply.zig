@@ -39,6 +39,7 @@ pub fn Reply(comptime Capture: type) type {
                 .revision = values.revision,
                 .end = values.end,
                 .first_message = if (values.first_message) |first| .fromCore(first) else null,
+                .last_line = if (values.last_line) |last| .{ .position = last.position, .text = last.text } else null,
                 .work = &work,
                 .peers = &peers,
             };

@@ -10,6 +10,7 @@ const provider_name = @import("../../provider_name.zig");
 const session_archive = @import("../../session_archive.zig");
 const session_id = @import("../../session_id.zig");
 const session_list = @import("../../session_list.zig");
+const session_line = @import("../../session_line.zig");
 const tool_name = @import("../../tool_name.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const workspace_path = @import("../../workspace_path.zig");
@@ -227,16 +228,29 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
 
 const settings_columns = "session.session_ref,session.parent_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
     command_domain.archive_state_sql ++ " AS archive_state," ++
-    "(" ++ report_domain.person_message_sql ++ ") AS from_person_at,";
+    "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
+    "last_turn.outcome_position AS last_turn_position," ++
+    "(SELECT substr(@payload(content),1,1024) FROM content WHERE content_id=last_turn.outcome_content_id " ++
+    "AND private=0 AND last_turn.outcome_code='completed') AS last_answer," ++
+    "awaiting.approval_position AS last_approval_position,awaiting_call.description AS last_approval_text,";
+
+/// Only the newest Turn can be active: this seek visits at most two Turns.
+/// Work already selected the oldest pending approval: ?2 is its first_action,
+/// including beside running Actions. Join that Action directly, without a
+/// second owner of the selection or an additional page or content round.
+const last_line_joins = " LEFT JOIN turn last_turn ON last_turn.turn_id=(SELECT turn_id FROM turn @index(turn_session_latest) " ++
+    "WHERE session_ref=session.session_ref AND outcome_code IS NOT NULL ORDER BY turn_id DESC LIMIT 1) " ++
+    "LEFT JOIN action_operation awaiting ON awaiting.action_id=?2 " ++
+    "LEFT JOIN model_tool_call awaiting_call ON awaiting_call.operation_id=awaiting.parent_operation_id AND awaiting_call.call_ordinal=awaiting.call_ordinal ";
 
 /// One list row: the Session's settings, its latest Message from no
-/// Session, and its first Message, the admission ?2. A missing Message
+/// Session, and its first Message, the admission ?3. A missing Message
 /// or content finds no row. Its Row is over 1 KiB, so its visitor owns
 /// it (`RowsRead`).
 const list_row = rsql.Read(.{
     .sql = "SELECT " ++ settings_columns ++ report_domain.first_message_columns ++ " FROM session " ++
-        "JOIN message_admission m ON m.admission_id=?2 AND m.session_ref=session.session_ref " ++ report_domain.first_content_join ++ " WHERE session.session_ref=?1",
-    .Args = struct { session: []const u8, first: u64 },
+        "JOIN message_admission m ON m.admission_id=?3 AND m.session_ref=session.session_ref " ++ report_domain.first_content_join ++ last_line_joins ++ " WHERE session.session_ref=?1",
+    .Args = struct { session: []const u8, first_action: ?u64, first: u64 },
     .Row = ListRow,
     .cardinality = .each,
 });
@@ -244,8 +258,8 @@ const list_row = rsql.Read(.{
 /// `list_row` of a Session with no first Message.
 const list_row_bare = rsql.Read(.{
     .sql = "SELECT " ++ settings_columns ++ "NULL AS first_admission,NULL AS first_position,NULL AS first_admitted_at,NULL AS first_sender," ++
-        "NULL AS first_length,NULL AS first_digest,NULL AS first_private FROM session WHERE session.session_ref=?1",
-    .Args = struct { session: []const u8 },
+        "NULL AS first_length,NULL AS first_digest,NULL AS first_private FROM session" ++ last_line_joins ++ " WHERE session.session_ref=?1",
+    .Args = struct { session: []const u8, first_action: ?u64 },
     .Row = ListRow,
     .cardinality = .each,
 });
@@ -264,6 +278,10 @@ const ListRow = struct {
     next_position: rsql.Positive,
     archive_state: session_archive.State,
     from_person_at: ?rsql.Positive,
+    last_turn_position: ?rsql.Positive,
+    last_answer: ?rsql.Blob(1024),
+    last_approval_position: ?rsql.Positive,
+    last_approval_text: ?Bounded(tool_presentation.max_description_bytes),
     first_admission: ?rsql.Positive,
     first_position: ?rsql.Positive,
     first_admitted_at: ?rsql.Positive,
@@ -306,10 +324,13 @@ const ShownRow = struct { reference: *const change_ring.Id, first: u64, work: *c
 noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, now_ms: u64, visitor: anytype) !void {
     var read: RowsRead(@TypeOf(visitor)) = .{ .decoded = a.store.reportScratch(ListRow), .rows = rows, .now_ms = now_ms, .visitor = visitor };
     for (rows) |row| {
+        // Creation time only dates idle work, which has no Action. Its real
+        // value is read with the settings; the approval selection needs none.
+        const work = try row.work.work(0, now_ms);
         if (row.first == 0)
-            a.readEach(list_row_bare, .{ .session = row.reference }, 1, &read)
+            a.readEach(list_row_bare, .{ .session = row.reference, .first_action = work.first_action }, 1, &read)
         else
-            a.readEach(list_row, .{ .session = row.reference, .first = row.first }, 1, &read);
+            a.readEach(list_row, .{ .session = row.reference, .first_action = work.first_action, .first = row.first }, 1, &read);
     }
     const ran = runList(a);
     // A pass stops at a failed step, so a row that failed to be visited
@@ -334,7 +355,8 @@ fn RowsRead(comptime Visitor: type) type {
         pub fn visit(read: *@This(), row: *const ListRow) bool {
             if (read.failure != null) return false;
             var sorted: [tool_name.max_tools][]const u8 = undefined;
-            const values = rowValues(read.rows, read.shown, read.now_ms, row, &sorted) catch |err| {
+            var last_text: Bounded(session_list.max_last_line_bytes) = undefined;
+            const values = rowValues(read.rows, read.shown, read.now_ms, row, &sorted, &last_text) catch |err| {
                 read.failure = err;
                 return false;
             };
@@ -353,8 +375,8 @@ fn ErrorOf(comptime function: anytype) type {
 }
 
 /// The plain values of the shown row `index`, checked in main's order.
-/// They borrow `row` and `sorted`.
-fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const ListRow, sorted: *[tool_name.max_tools][]const u8) !session_list.Row {
+/// They borrow `row`, `sorted` and `last_text`.
+fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const ListRow, sorted: *[tool_name.max_tools][]const u8, last_text: *Bounded(session_list.max_last_line_bytes)) !session_list.Row {
     if (index == rows.len or !std.mem.eql(u8, row.session_ref.slice(), rows[index].reference)) return error.CorruptStore;
     const names = try report_domain.sortedToolNames(if (row.tools) |*tools| tools.slice() else null, sorted);
     if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
@@ -375,7 +397,41 @@ fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const List
         .revision = row.revision.get(),
         .end = row.next_position.get() - 1,
         .first_message = first_message,
+        .last_line = lastLine(row, last_text),
         .work = work,
         .peers = .{ .from_person_at = if (row.from_person_at) |at| at.get() else null },
     };
+}
+
+/// The newest thing the Session said to its person. A decision removes an
+/// approval from the candidates, leaving the newest ended Turn again. Text
+/// borrows the decoded row or `text`, only until this row's visitor returns.
+fn lastLine(row: *const ListRow, text: *Bounded(session_list.max_last_line_bytes)) ?session_list.LastLine {
+    const ended = if (row.last_turn_position) |position| position.get() else 0;
+    if (row.last_approval_position) |position| if (position.get() > ended) return .{
+        .position = position.get(),
+        .text = if (row.last_approval_text) |*line| line.slice() else null,
+    };
+    if (ended == 0) return null;
+    var answer: ?[]const u8 = null;
+    if (row.last_answer) |*prefix| {
+        // The bounded byte prefix can end inside a UTF-8 code point. Drop
+        // only that incomplete suffix before choosing a non-blank line.
+        var bytes = prefix.slice();
+        if (bytes.len != 0) {
+            var start = bytes.len - 1;
+            while (start > 0 and bytes[start] & 0xc0 == 0x80) start -= 1;
+            const width = std.unicode.utf8ByteSequenceLength(bytes[start]) catch 1;
+            if (start + width > bytes.len) bytes = bytes[0..start];
+        }
+        var lines = std.mem.splitAny(u8, bytes, "\r\n");
+        while (lines.next()) |line| {
+            const trimmed = session_line.firstLine(line);
+            if (trimmed.len == 0) continue;
+            text.* = session_line.cut(session_list.max_last_line_bytes, trimmed);
+            answer = text.slice();
+            break;
+        }
+    }
+    return .{ .position = ended, .text = answer };
 }

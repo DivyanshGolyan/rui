@@ -817,8 +817,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
 
 /// Which of the dispatch loop's commit-driven scans would find work now.
 /// A hint: each admission still selects for itself, so a stale one costs
-/// an empty scan or a pass's delay, never a wrong write. The retry scans
-/// are not here; they also skip what execution slots hold.
+/// an empty scan or a pass's delay, never a wrong write.
 pub const DispatchWork = struct {
     /// An owed stop, an owed ending, a feed hop or a core tool call.
     core: bool,
@@ -828,9 +827,13 @@ pub const DispatchWork = struct {
     /// are held (`paused`) only an open Turn's.
     message: bool,
     tool_continuation: bool,
+    /// An open Turn's Attempt is unresolved with a retry state: running,
+    /// waiting for its retry or out of retries. The retry scans find
+    /// nothing without one; they also skip what execution slots hold.
+    retry: bool,
 
     /// Before the first read, and what a loop with no Store assumes.
-    pub const unknown: DispatchWork = .{ .core = true, .mcp = true, .bash = true, .message = true, .tool_continuation = true };
+    pub const unknown: DispatchWork = .{ .core = true, .mcp = true, .bash = true, .message = true, .tool_continuation = true, .retry = true };
 };
 
 /// The reads `DispatchWork` takes, as one round's statements: the
@@ -842,6 +845,7 @@ pub const DispatchSurvey = struct {
     message: runnable_selection.Result = undefined,
     continuation: runnable_selection.Result = undefined,
     idle: IdleChecks = .{},
+    retry: retrying_attempt.Result = undefined,
 
     /// The statement whose failed step names the read's failure.
     pub const named = .{.{ blocked_operation, error.CallReadFailed }};
@@ -851,6 +855,7 @@ pub const DispatchSurvey = struct {
         queueSelection(reader, if (paused) .open_turn_message else .message, &survey.message);
         queueSelection(reader, .tool_continuation, &survey.continuation);
         survey.idle.queue(reader);
+        reader.read(retrying_attempt, .{}, &survey.retry);
     }
 
     /// Whether the idle checks, which run when either selection found
@@ -874,6 +879,7 @@ pub const DispatchSurvey = struct {
             .bash = survey.actions.bash(),
             .message = survey.message != null,
             .tool_continuation = survey.continuation != null,
+            .retry = survey.retry != null,
         };
     }
 };
@@ -887,6 +893,16 @@ pub fn dispatchWork(reader: anytype, paused: bool) !DispatchWork {
     if (try survey.unsettled()) try validateBlockedToolCalls(reader);
     return survey.found();
 }
+
+/// Whether any Attempt the retry scans read exists: each sets
+/// `retry_due_at_ms` while unresolved, and every resolution clears it.
+const retrying_attempt = rsql.Read(.{
+    .sql = "SELECT 1 AS retrying FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
+        "WHERE active.outcome_code IS NULL AND current.resolution_code IS NULL AND current.retry_due_at_ms IS NOT NULL LIMIT 1",
+    .Args = struct {},
+    .Row = struct { retrying: u64 },
+    .cardinality = .optional,
+});
 
 /// Due retries in id order after `after`, with their Session: one page.
 const due_retries = rsql.Read(.{
