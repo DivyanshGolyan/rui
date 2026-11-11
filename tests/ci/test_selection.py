@@ -175,9 +175,7 @@ class SelectionTest(unittest.TestCase):
                 self.assertTrue(set(result["targets"]) & LIVE_MYSQL_TARGETS)
 
     def test_unit_roots_follow_store_imports(self):
-        # Consent is also reached by the all-engine Store/decoder contracts;
-        # use the standalone native probe to test the native-only partition.
-        native = select(["src/signal_stack_probe.zig"], "review", AVAILABLE)["targets"]
+        native = select(["src/session_consent.zig"], "review", AVAILABLE)["targets"]
         self.assertIn("test-native", native)
         self.assertNotIn("test-store", native)
         self.assertNotIn("test", native)

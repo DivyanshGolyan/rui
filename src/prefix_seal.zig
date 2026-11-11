@@ -2,7 +2,7 @@
 //!
 //! A request's history span is a pure function of the Session's history
 //! below its Operation's admission position and the selected compaction
-//! anchor, and it only grows: the span for a later view begins with the span
+//! anchor and requested model, and it only grows within that binding: the span for a later view begins with the span
 //! for an earlier one. The provider caches requests by that prefix, so a
 //! Host that encodes the same history differently, after an upgrade or a
 //! bug, silently loses the cache. The seal records the length and SHA-256 of

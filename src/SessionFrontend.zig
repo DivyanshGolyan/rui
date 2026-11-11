@@ -4127,20 +4127,30 @@ test "the /status page marks one changeable row, which Up and Down move and Ente
     try sendKeys(&held.self, "\x1b[1;2B");
     try held.settle();
     try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, " › Effort"));
-    // Down moves the mark, past the Session's fixed Model, Store and
-    // Instructions to the defaults' Model; PageUp and PageDown still scroll.
+    // Down reaches the Session's changeable Model before the defaults;
+    // PageUp and PageDown still scroll.
     try sendKeys(&held.self, "\x1b[B");
     try held.settle();
     try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, "   Effort"));
     try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Permissions")).?, " › Permissions"));
     for (0..6) |_| try sendKeys(&held.self, "\x1b[B");
     try held.settle();
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Model           gpt-5.5")).?, " › Model"));
+    try sendKeys(&held.self, "\r");
+    try std.testing.expectEqualStrings("/configure --model gpt-5.5", held.self.input.composition().bytes);
+    held.self.input.clear();
+    // Down skips only Store and Instructions, which remain fixed.
+    try sendKeys(&held.self, "\x1b[B");
+    try held.settle();
     try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Rui default")).?, " › Model"));
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "fixed for this Session")).?, "   Model"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "fixed for this Session")).?, "   Store"));
     try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "set from a shell")).?, "   Instructions"));
     // A refresh, as the open page's next read, keeps the mark.
     try showStatus(held, false, "fix-safari-export");
     try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Rui default")).?, " › Model"));
+    try sendKeys(&held.self, "\x1b[A");
+    try held.settle();
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Model           gpt-5.5")).?, " › Model"));
     try sendKeys(&held.self, "\x1b[A");
     try held.settle();
     try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Headroom")).?, " › Headroom"));

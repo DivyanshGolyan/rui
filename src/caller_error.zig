@@ -98,6 +98,7 @@ pub const Code = enum {
     invalid_workspace,
     workspace_is_immutable,
     provider_is_immutable,
+    /// Historical saved rejection only; fresh model revisions are allowed.
     model_is_immutable,
     revision_exhausted,
     skills_unavailable,
@@ -481,7 +482,7 @@ pub fn facts(code: Code) Facts {
         .invalid_workspace => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "an absolute path to an existing directory" }, .says = "The workspace is not a usable absolute directory.", .next = "Set --workspace to an existing absolute directory accessible to the Host." },
         .workspace_is_immutable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "the workspace already saved for this Session" }, .says = "An existing Session cannot change its workspace.", .next = "Omit --workspace, or create a new Session for the other directory." },
         .provider_is_immutable => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "the provider already saved for this Session" }, .says = "An existing Session cannot change its provider.", .next = "Omit --provider, or create a new Session with the other provider." },
-        .model_is_immutable => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "the model already saved for this Session" }, .says = "An existing Session cannot change its model.", .next = "Omit --model, or create a new Session with the other model." },
+        .model_is_immutable => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "model changes within the Session's fixed provider" }, .says = "This saved command was rejected when a Session could not change its model.", .next = "Submit the model change with a new idempotency key." },
         .skill_file_unavailable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "a readable SKILL.md at its advertised absolute path" }, .says = "The selected skill file could not be read.", .next = "Restore the file and access to it, or reload skills before choosing another name." },
         .skill_file_too_large => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "complete SKILL.md files of at most 1 MiB each and in total" }, .says = "The selected skill files exceed the per-file or combined read limit.", .next = "Select fewer skills or reduce their files to fit both limits." },
         .skill_text_invalid => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "UTF-8 SKILL.md text" }, .says = "The selected skill file is not valid UTF-8 text.", .next = "Save the complete file as UTF-8, then invoke it again." },
@@ -735,6 +736,14 @@ test "saved rejection facts ignore current rendering overrides" {
         try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "Nothing was captured or sent") == null);
         try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "replays as saved; a resend needs a new key.") != null);
     }
+}
+
+test "historical model immutability rejection explains its saved policy" {
+    const code = std.meta.stringToEnum(Code, "model_is_immutable") orelse return error.TestUnexpectedResult;
+    var bytes: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    try writeSavedLine(&out, code, .{ .resource = "session", .operation = "configure" });
+    try std.testing.expectEqualStrings("rui session configure: --model: This saved command was rejected when a Session could not change its model. Accepted: model changes within the Session's fixed provider. Next: Submit the model change with a new idempotency key. This rejection was saved and replays as saved; a resend needs a new key. [model_is_immutable]\n", out.buffered());
 }
 
 test "saved ambiguous causes do not invent missing flags or model restrictions" {
