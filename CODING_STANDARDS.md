@@ -128,7 +128,8 @@ On Host threads:
 
 ## Review
 
-Codex on the PR is the code review: comment `@codex review for duplicated authority and braided concerns; group symptoms by owner` after every push, because it does not re-review on its own.
+Codex on the draft PR is the code review: comment `@codex review for duplicated authority and braided concerns; group symptoms by owner` after every draft push, because it reviews drafts only on request.
+Mark ready once Codex is clean; [Landing](docs/agents/landing.md#publish-and-merge) owns the test-only exception for fixes after readiness.
 The [Code Review Rules](AGENTS.md#code-review-rules) own how it groups and orders its findings; the rules it applies stay here.
 The author's own reviews are design reviews of the approved design, and a redesign when fixes keep producing new findings.
 Reviewers apply the rules below and the [product tenets](VERIFICATION.md#product-tenets).
@@ -179,7 +180,7 @@ Before every push, including review-fix rounds and after merging main, run only 
 - the touched owners' focused tests (`-Dtest-filter`)
 - a mutation that reverts each fix and shows its new test fails
 
-The PR's Selected run executes the review-phase set on the pushed head.
+A ready PR's Selected run executes the review-phase set on the pushed head; draft CI runs quick checks only.
 Never run a full local suite (`zig build test`, `check`, the review-phase selection or a local mirror of CI) except to diagnose a CI red.
 In Claude Code, `.claude/hooks/block_full_runs.py` refuses those commands unless prefixed with `RUI_CI_RED=<run or issue>`.
 Live provider checks remain opt-in.

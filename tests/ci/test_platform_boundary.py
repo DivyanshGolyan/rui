@@ -268,7 +268,7 @@ class PlatformBoundaryTest(unittest.TestCase):
                     (root / "selection.json").write_text(json.dumps(selection))
                     (root / "output").write_text("")
                     subprocess.run([sys.executable, "-B", "-c", script], cwd=root, check=True,
-                                   env=dict(os.environ, PROMOTION="false", EVENT_NAME=event, GITHUB_REF_NAME="branch",
+                                   env=dict(os.environ, DRAFT_RUN="false", PROMOTION="false", EVENT_NAME=event, GITHUB_REF_NAME="branch",
                                             CANDIDATE_REF=selection["head"],
                                             GITHUB_OUTPUT=str(root / "output"), GITHUB_STEP_SUMMARY=str(root / "summary")))
                     outputs = dict(line.split("=", 1) for line in (root / "output").read_text().splitlines())
@@ -299,7 +299,7 @@ class PlatformBoundaryTest(unittest.TestCase):
                     (root / "selection.json").write_text(json.dumps(selection))
                     (root / "output").write_text("")
                     subprocess.run([sys.executable, "-B", "-c", script], cwd=root, check=True,
-                                   env=dict(os.environ, EVENT_NAME="pull_request", PROMOTION="false",
+                                   env=dict(os.environ, DRAFT_RUN="false", EVENT_NAME="pull_request", PROMOTION="false",
                                             GITHUB_REF_NAME="main", CANDIDATE_REF=selection["head"],
                                             GITHUB_OUTPUT=str(root / "output"),
                                             GITHUB_STEP_SUMMARY=str(root / "summary")))

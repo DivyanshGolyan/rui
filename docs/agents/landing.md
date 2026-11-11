@@ -9,9 +9,12 @@ Before publishing, run the focused checks in [Evidence](../../CODING_STANDARDS.m
 For PR descriptions, use the `pr` skill.
 Every PR commit states its actual test commands and results.
 Open every PR with `python3 tests/ci/open_pr.py open --title TITLE --body-file FILE`, which lists open PRs sharing its files and opens it as a draft.
-A draft runs only the cheap development selection, so push freely while work continues.
-After the last planned push, run `python3 tests/ci/open_pr.py ready`; it refuses while the PR's head on GitHub differs from the committed checkout or changes are uncommitted.
-Review and CI fixes after that are ordinary pushes to the ready PR.
+Draft CI runs only the plan (candidate, whitespace and selection checks) and cheap aggregates; local `prepush.py` owns development feedback.
+The opener comments `@codex review`; Codex reviews drafts only on request.
+Push fixes to the draft and comment `@codex review` after every push.
+Once Codex is clean on the current head, run `python3 tests/ci/open_pr.py ready` to start the full selected suite; it refuses while the PR's head on GitHub differs from the committed checkout or changes are uncommitted.
+After readiness, a fix whose diff since Codex's clean review changes only test code (files under `tests/`, test-only Zig files, or only `test "..."` blocks in a source file) merges once `admission` is green, without another Codex review.
+Any non-test change needs Codex clean on the new head again.
 Performance changes include A/B numbers, and TUI changes include a plain-PTY capture using [verify-rui](../../.claude/skills/verify-rui/SKILL.md).
 Keep published commits unchanged so their CI evidence retains its SHA.
 

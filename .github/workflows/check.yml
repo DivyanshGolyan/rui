@@ -41,6 +41,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       change_kind: ${{ steps.select.outputs.change_kind }}
+      draft_run: ${{ steps.select.outputs.draft_run }}
       candidate_ref: ${{ steps.select.outputs.candidate_ref }}
       targets: ${{ steps.select.outputs.targets }}
       native_targets: ${{ steps.select.outputs.native_targets }}
@@ -68,13 +69,13 @@ jobs:
           CANDIDATE_REF: ${{ github.sha }}
           # A PR's base.sha can trail the main its merge commit was built on.
           BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || inputs.base }}
-          PHASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'development' || 'review' }}
+          DRAFT_RUN: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft || false }}
           EVENT_NAME: ${{ github.event_name }}
           PROMOTION: ${{ inputs.promotion || false }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_REF"
-          python3 tests/ci/select_tests.py --base "$BASE" --phase "$PHASE" > selection.json
+          python3 tests/ci/select_tests.py --base "$BASE" --phase review > selection.json
           cat selection.json
           BASE=$(python3 -c 'import json; print(json.load(open("selection.json"))["base"])')
           git diff --check "$BASE" HEAD
@@ -93,18 +94,22 @@ jobs:
                                     'manual_checks')):
               kind = ChangeKind.NORMAL
           p['change_kind'] = kind.value
-          ready_pr = os.environ['EVENT_NAME'] == 'pull_request' and p['phase'] == 'review'
+          draft_run = os.environ['DRAFT_RUN'] == 'true'
+          p['draft_run'] = draft_run
+          ready_pr = os.environ['EVENT_NAME'] == 'pull_request' and not draft_run
           # Listed flakes (quarantine.json) never excuse a strict change; promotion
           # still blocks on a listed flake's second consecutive failure.
           quarantine = ('promotion' if os.environ['PROMOTION'] == 'true'
                         else 'admission' if p['retry'] else 'off')
-          if kind == ChangeKind.DOCUMENTATION:
+          if draft_run or kind == ChangeKind.DOCUMENTATION:
               p['targets'] = []
               p['native_targets'] = []
+              p['server_targets'] = []
               p['cache_execution_checks'] = False
               p['typecheck_macos'] = False
               p['linux_memory_checks'] = False
               p['retry'] = False
+              quarantine = 'off' if draft_run else quarantine
           elif os.environ['PROMOTION'] == 'true':
               # The batch's full suite on both systems, plus the selected
               # standalone targets. check-full omits the portable logic root,
@@ -121,7 +126,7 @@ jobs:
               p['native_targets'] = (p['native_targets'] or ['check']) if p['mac_required'] else []
               p['retry'] = False
           else:
-              # Reduced draft feedback cannot qualify a merge candidate.
+              # Manual non-promotion runs retain Linux-only feedback.
               p['native_targets'] = []
           # PR integration codegen is fast; the LLVM stack oracle remains a
           # required, independent job rather than a dependency of every shard.
@@ -133,6 +138,7 @@ jobs:
           p['upgrade_required'] = ready_pr and kind == ChangeKind.NORMAL and p['upgrade_required']
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               print('change_kind=' + kind.value, file=f)
+              print('draft_run=' + str(draft_run).lower(), file=f)
               print('candidate_ref=' + os.environ['CANDIDATE_REF'], file=f)
               print('targets=' + json.dumps(p['targets']), file=f)
               print('native_targets=' + json.dumps(p['native_targets']), file=f)
@@ -154,7 +160,7 @@ jobs:
           PY
   policy:
     needs: plan
-    if: ${{ !github.event.repository.private && needs.plan.outputs.change_kind == 'normal' }}
+    if: ${{ !github.event.repository.private && needs.plan.outputs.change_kind == 'normal' && needs.plan.outputs.draft_run == 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -548,6 +554,7 @@ jobs:
     steps:
       - name: Require every selected Linux part
         env:
+          DRAFT_RUN: ${{ needs.plan.outputs.draft_run }}
           CHANGE_KIND: ${{ needs.plan.outputs.change_kind }}
           TARGETS: ${{ needs.plan.outputs.targets }}
           PLAN_RESULT: ${{ needs.plan.result }}
@@ -562,8 +569,8 @@ jobs:
           TYPECHECK_RESULT: ${{ needs.macos_typecheck.result }}
         run: |
           test "$PLAN_RESULT" = success
-          case "${CHANGE_KIND-normal}" in
-            documentation)
+          case "$DRAFT_RUN:${CHANGE_KIND-normal}" in
+            true:normal|true:documentation|false:documentation)
               test "$POLICY_RESULT" = skipped
               test "$TARGETS" = '[]'
               test "$SPLIT" = false
@@ -573,8 +580,8 @@ jobs:
                 test "$result" = skipped
               done
               exit 0 ;;
-            normal) ;;
-            *) echo 'Invalid change kind' >&2; exit 1 ;;
+            false:normal) ;;
+            *) echo 'Invalid draft run or change kind' >&2; exit 1 ;;
           esac
           test "$POLICY_RESULT" = success
           if [ "$CODEGEN" = true ]; then test "$CODEGEN_RESULT" = success; else test "$CODEGEN_RESULT" = skipped; fi
@@ -699,7 +706,7 @@ jobs:
   previous_release_upgrade:
     needs: plan
     # Upgrade, installer and Store-format paths only; promotion runs it on both systems for every batch.
-    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && needs.plan.outputs.upgrade == 'true' }}
+    if: ${{ github.event_name == 'pull_request' && needs.plan.outputs.upgrade == 'true' }}
     uses: ./.github/workflows/previous-release-upgrade.yml
     with:
       candidate-ref: ${{ needs.plan.outputs.candidate_ref }}
