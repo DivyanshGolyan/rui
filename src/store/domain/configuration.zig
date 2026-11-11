@@ -78,8 +78,22 @@ fn defaultProvider(routes: provider_route.Routes) ?provider_name.Provider {
 fn toolsRejection(catalog: *const tool_catalog.Catalog, provider: provider_name.Provider, tools: *const command_input.ToolsField) ?configuration_admission.Rejection {
     var names = tools.iterator();
     while (names.next()) |name| {
-        const index = catalog.find(name) orelse return .unknown_tool;
+        const index = switch (catalog.resolve(name)) {
+            .found => |index| index,
+            .unknown_tool => return .unknown_tool,
+            .mcp_server_unavailable => return .mcp_server_unavailable,
+        };
         if (catalog.records[index].owner == .provider and !provider.runsTool(name)) return .provider_tool_missing;
+    }
+    return null;
+}
+
+/// Rejection codes are durable; this advisory detail describes the current
+/// Host's launch-only MCP configuration, also on replay. No Store read is needed.
+pub fn missingToolMessage(catalog: *const tool_catalog.Catalog, tools: *const command_input.ToolsField) ?tool_catalog.Catalog.MissingTool {
+    var names = tools.iterator();
+    while (names.next()) |name| {
+        if (catalog.resolve(name) != .found) return catalog.missingTool(name);
     }
     return null;
 }

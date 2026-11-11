@@ -12059,10 +12059,10 @@ test "start_agent narrows configured tool names including unloaded MCP members" 
                 .{ .names = &.{} },
                 .{ .names = &.{"other_page"}, .refusal = "spec.tools: other_page is not one of your tools. Nothing was started." },
                 .{ .names = &.{"bash"}, .refusal = "spec.tools: bash is not one of your tools. Nothing was started." },
-                .{ .names = &.{"fetch"}, .refusal = "spec.tools: fetch is not one of your tools. Nothing was started." },
+                .{ .names = &.{"fetch"}, .refusal = "spec.tools: fetch is not a known tool (unknown_tool). Nothing was started." },
                 // Parent membership still passes after catalog removal; configure
                 // retains authority to refuse a name absent from today's catalog.
-                .{ .names = &.{"fetch_page"}, .remove_catalog = true, .refusal = "Rui could not start the agent (unknown_tool). Nothing was started." },
+                .{ .names = &.{"fetch_page"}, .remove_catalog = true, .refusal = "spec.tools: fetch_page is not a known tool (unknown_tool). Nothing was started." },
             };
             var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer memory.deinit();
@@ -13818,6 +13818,105 @@ test "Session settings Current report and typed Settings round trip every settin
             try std.testing.expectEqualStrings("Every setting", current.label.?.slice());
             try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest("Every setting instructions."), .lower), current.instructions.sha256.slice());
             try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest("{}"), .lower), current.output_schema.?.sha256.slice());
+        }
+    }.run);
+}
+
+test "MCP missing tools refuse create update creating Message and start_agent with one catalog rule" {
+    try store_testing.forEachEngine(struct {
+        fn check(reply: anytype, unavailable: bool, message: []const u8, replayed: bool) !void {
+            try std.testing.expect(reply == .rejected);
+            try std.testing.expectEqualStrings(if (unavailable) "mcp_server_unavailable" else "unknown_tool", @tagName(reply.rejected.code));
+            var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer text.deinit();
+            if (reply.rejected.message) |detail| try detail.write(&text.writer);
+            try std.testing.expectEqualStrings(if (unavailable) message else "", text.written());
+            try std.testing.expectEqual(replayed, reply.rejected.replayed);
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            const offered = @import("../mcp/offered.zig");
+            const listing = @import("../mcp/Listing.zig");
+            for (0..5) |mode| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer memory.deinit();
+                var collision: offered.Collision = .{};
+                const entries = [_]listing.Entry{.{ .name = "kept", .description = "Saved tool", .input_schema = "{\"type\":\"object\"}", .read_only = false }};
+                const saved = try offered.merge(memory.allocator(), null, &.{.{ .server = "notes", .listed = &entries }}, &collision);
+                const sources: []const offered.Source = switch (mode) {
+                    0 => &.{.{ .server = "notes", .listed = null }},
+                    1 => &.{ .{ .server = "notes", .listed = null }, .{ .server = "other", .listed = null } },
+                    2 => &.{.{ .server = "notes", .listed = &entries }},
+                    3 => &.{.{ .server = "notes", .listed = null }},
+                    else => &.{},
+                };
+                const catalog = try offered.merge(memory.allocator(), if (mode == 3) &saved else null, sources, &collision);
+                try storage.saveCatalog(&catalog);
+                const unavailable = mode < 2;
+                const detail = if (mode == 1)
+                    "spec.tools: lookup is not a known tool; MCP servers notes, other are unavailable and may provide it"
+                else
+                    "spec.tools: lookup is not a known tool; MCP server notes is unavailable and may provide it";
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var create = try completeConfiguration("mcp-missing-parent", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                const parent_names: []const []const u8 = if (mode == 2 or mode == 3) &.{ "kept", "start_agent" } else &.{"start_agent"};
+                create.configuration.tools = try .of(parent_names);
+                const parent = (try storage.configure(&create, .{})).accepted.session;
+
+                try create.key.set("mcp-missing-create");
+                create.configuration.tools = try .of(&.{"lookup"});
+                try check(try storage.configure(&create, .{}), unavailable, detail, false);
+                try check(try storage.configure(&create, .{}), unavailable, detail, true);
+                var update: wire_request.ConfigureCommand = .{ .session = parent };
+                try update.key.set("mcp-missing-update");
+                update.configuration.tools = try .of(&.{"lookup"});
+                try check(try storage.configure(&update, .{}), unavailable, detail, false);
+                try check(try storage.configure(&update, .{}), unavailable, detail, true);
+                var message: wire_request.MessageCommand = .{ .configuration = create.configuration, .text = .{ .state = .value, .borrowed = "task".ptr, .length = 4, .digest = protocol.contentDigest("task") } };
+                try message.key.set("mcp-missing-message");
+                try check(storage.submitMessageWithModel(&message, null, .{}), unavailable, detail, false);
+                try check(storage.submitMessageWithModel(&message, null, .{}), unavailable, detail, true);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+                const unchanged = try storage.inspectSessionForTesting(parent.slice());
+                try expectToolSetNames(&storage, unchanged.tool_set_id, parent_names);
+
+                // A known saved copy is admitted by every spec entry point.
+                if (mode == 3) {
+                    try create.key.set("mcp-kept-create");
+                    create.configuration.tools = try .of(&.{"kept"});
+                    try std.testing.expect(try storage.configure(&create, .{}) == .accepted);
+                    try update.key.set("mcp-kept-update");
+                    update.configuration.tools = try .of(&.{ "kept", "start_agent" });
+                    try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
+                }
+
+                try submitTestMessage(&storage, &tmp, "mcp-parent-message", "mcp-parent-message", parent.slice(), "start a child");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const call: TestingCall = .{ .item_id = "missing-child", .name = "start_agent", .encoded_call_id = "missing-child", .decoded_call_id = "missing-child", .encoded_arguments = "{}", .decoded_arguments = "{}" };
+                try settleCallsForTesting(&storage, &tmp, model, "mcp-child-calls", &.{call});
+                const action = (try storage.nextCoreWork()).?.action;
+                var spec = try testingAgentSpec(if (mode == 3) &.{"kept"} else &.{"lookup"}, "ask");
+                const result = try storage.startAgent(action.binding, parent.slice(), "read", true, &spec, null, .{});
+                if (mode == 3) {
+                    try std.testing.expectEqual(command_domain.AgentStart.started, result);
+                    try message.key.set("mcp-kept-message");
+                    message.configuration.?.tools = try .of(&.{"kept"});
+                    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
+                } else {
+                    try std.testing.expectEqual(command_domain.AgentStart.failed, result);
+                    const text = if (unavailable)
+                        try std.fmt.allocPrint(memory.allocator(), "{s} (mcp_server_unavailable). Nothing was started.", .{detail})
+                    else
+                        "spec.tools: lookup is not a known tool (unknown_tool). Nothing was started.";
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2", .{ action.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
+                }
+                try std.testing.expect(!storage.isFenced());
+            }
         }
     }.run);
 }

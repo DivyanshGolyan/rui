@@ -193,6 +193,73 @@ pub const Catalog = struct {
     /// Each record's `recordDigest`, in the same order.
     digests: []const [32]u8,
 
+    /// Launch-only names, borrowed until Host shutdown. Never part of a saved
+    /// tool set or its digest: an empty server has no record to persist.
+    configured_servers: []const []const u8 = &.{},
+
+    pub const Resolution = union(enum) { found: usize, unknown_tool, mcp_server_unavailable };
+    pub const max_refusal_message_bytes = 768;
+
+    /// The name is owned; the Host catalog is borrowed until shutdown.
+    /// Keep reply values small instead of copying formatted text along the
+    /// engine's transaction/queue chain.
+    pub const MissingTool = struct {
+        name: Bounded(tool_name.max_bytes),
+        catalog: *const Catalog,
+
+        pub fn write(self: *const MissingTool, out: *std.Io.Writer) !void {
+            try self.catalog.writeMissingTool(self.name.slice(), out);
+        }
+    };
+
+    pub fn missingTool(self: *const Catalog, name: []const u8) MissingTool {
+        var detail: MissingTool = .{ .name = .{ .len = 0 }, .catalog = self };
+        detail.name.set(name) catch unreachable; // ingress already checked the name
+        return detail;
+    }
+
+    /// Raw MCP names carry no ownership hint. A missing name may belong to
+    /// any configured server with no records, including no saved copies.
+    pub fn resolve(self: *const Catalog, name: []const u8) Resolution {
+        if (self.find(name)) |index| return .{ .found = index };
+        var empty = self.emptyServers();
+        if (empty.next() != null) return .mcp_server_unavailable;
+        return .unknown_tool;
+    }
+
+    pub const EmptyServers = struct {
+        catalog: *const Catalog,
+        at: usize = 0,
+
+        pub fn next(self: *EmptyServers) ?[]const u8 {
+            while (self.at < self.catalog.configured_servers.len) {
+                const name = self.catalog.configured_servers[self.at];
+                self.at += 1;
+                for (self.catalog.records) |entry| {
+                    if (entry.owner == .mcp and std.mem.eql(u8, entry.server, name)) break;
+                } else return name;
+            }
+            return null;
+        }
+    };
+
+    pub fn emptyServers(self: *const Catalog) EmptyServers {
+        return .{ .catalog = self };
+    }
+
+    /// Advisory detail about this Host, not a claim of name ownership. The
+    /// launch frame bounds this to eight server names of at most 64 bytes.
+    pub fn writeMissingTool(self: *const Catalog, name: []const u8, out: *std.Io.Writer) !void {
+        try out.print("spec.tools: {s} is not a known tool", .{name});
+        var empty = self.emptyServers();
+        const first = empty.next() orelse return;
+        if (empty.next()) |second| {
+            try out.print("; MCP servers {s}, {s}", .{ first, second });
+            while (empty.next()) |server| try out.print(", {s}", .{server});
+            try out.writeAll(" are unavailable and may provide it");
+        } else try out.print("; MCP server {s} is unavailable and may provide it", .{first});
+    }
+
     /// The index of the record named `name`.
     pub fn find(self: *const Catalog, name: []const u8) ?usize {
         var low: usize = 0;
@@ -372,3 +439,27 @@ pub fn builtIn(name: []const u8) ?Tool {
 pub const ToolSet = built_in_tool.Selection;
 
 pub const Description = Bounded(tool_presentation.max_description_bytes);
+
+test "MCP missing tools catalog resolution covers every empty-server combination" {
+    const servers = [_][]const u8{ "notes", "other" };
+    for (0..4) |mask| {
+        var entries: [2]Record = undefined;
+        var hashes: [2][32]u8 = undefined;
+        var count: usize = 0;
+        for (servers, 0..) |server, index| {
+            if (mask & (@as(usize, 1) << @intCast(index)) == 0) continue;
+            entries[count] = .{ .name = server, .owner = .mcp, .server = server, .input_schema = "{}" };
+            hashes[count] = recordDigest(&entries[count]);
+            count += 1;
+        }
+        const catalog: Catalog = .{ .records = entries[0..count], .digests = hashes[0..count], .configured_servers = &servers };
+        try std.testing.expect(catalog.valid());
+        try std.testing.expectEqualStrings(if (mask == 3) "unknown_tool" else "mcp_server_unavailable", @tagName(catalog.resolve("lookup")));
+        for (entries[0..count], 0..) |entry, index| try std.testing.expectEqual(index, catalog.resolve(entry.name).found);
+        var empty = catalog.emptyServers();
+        for (servers, 0..) |server, index| {
+            if (mask & (@as(usize, 1) << @intCast(index)) == 0) try std.testing.expectEqualStrings(server, empty.next().?);
+        }
+        try std.testing.expectEqual(@as(?[]const u8, null), empty.next());
+    }
+}

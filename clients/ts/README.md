@@ -49,6 +49,12 @@ Errors:
 - `RuiRequestError { code }`: Rui rejected one request.
 - `RuiUnavailableError`: the child is gone.
 
+For `sessions.create` and `session.update`, `mcp_server_unavailable` means a requested tool is unknown and at least one configured MCP server has no tools, including no saved copies.
+The error's `message` names the unavailable server(s) that may provide the name; it does not assert ownership.
+If every configured server has tools, an unknown name gets `unknown_tool` instead.
+Saved tool copies remain usable in specs even when their server is unreachable; calling such a tool can still fail with `mcp_server_unavailable` as a tool result.
+A creating Message uses the same request rule, and `start_agent` reports it as a tool error naming `spec.tools` rather than starting an agent.
+
 ## Session feed
 
 `session.listActivity()` reads to the current end; `{ follow: true }` follows new entries.

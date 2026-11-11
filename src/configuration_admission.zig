@@ -14,6 +14,7 @@ pub const Rejection = enum {
     invalid_output_reservation,
     unsupported_reasoning_effort,
     unknown_tool,
+    mcp_server_unavailable,
     provider_tool_missing,
     loaded_tools_not_in_tools,
     loaded_tools_unreachable,

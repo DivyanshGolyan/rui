@@ -2966,6 +2966,7 @@
                       "invalid_output_reservation",
                       "unsupported_reasoning_effort",
                       "unknown_tool",
+                      "mcp_server_unavailable",
                       "provider_tool_missing",
                       "loaded_tools_not_in_tools",
                       "loaded_tools_unreachable",
@@ -2980,13 +2981,26 @@
                       "revision_exhausted",
                       "skills_unavailable"
                     ]
+                  },
+                  "message": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 768,
+                        "x-rui-max-bytes": 768
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
                   "status",
                   "replayed",
                   "session",
-                  "code"
+                  "code",
+                  "message"
                 ],
                 "additionalProperties": false
               },
@@ -5147,6 +5161,7 @@
                       "invalid_output_reservation",
                       "unsupported_reasoning_effort",
                       "unknown_tool",
+                      "mcp_server_unavailable",
                       "provider_tool_missing",
                       "loaded_tools_not_in_tools",
                       "loaded_tools_unreachable",
@@ -5164,13 +5179,26 @@
                       "skill_file_too_large",
                       "skill_text_invalid"
                     ]
+                  },
+                  "message": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 768,
+                        "x-rui-max-bytes": 768
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
                   "status",
                   "replayed",
                   "session",
-                  "code"
+                  "code",
+                  "message"
                 ],
                 "additionalProperties": false
               },

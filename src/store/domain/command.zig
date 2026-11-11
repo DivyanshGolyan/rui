@@ -9,6 +9,7 @@ const message_admission = @import("../../message_admission.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
+const tool_catalog = @import("../../tool_record.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -698,11 +699,21 @@ pub fn startAgent(
         try a.abandon(.{});
         return .stopped;
     }
-    var result_buffer: [192]u8 = undefined;
+    var result_buffer: [tool_catalog.Catalog.max_refusal_message_bytes]u8 = undefined;
     const refusal: ?[]const u8 = refusal: {
         if (saved != null) break :refusal "Rui could not start the agent: its command key is already taken. Nothing was started.";
         var requested = configuration.tools.iterator();
         while (requested.next()) |name| {
+            const resolution = a.store.catalog().catalog.resolve(name);
+            switch (resolution) {
+                .found => {},
+                .unknown_tool, .mcp_server_unavailable => {
+                    var writer = std.Io.Writer.fixed(&result_buffer);
+                    try a.store.catalog().catalog.writeMissingTool(name, &writer);
+                    try writer.print(" ({s}). Nothing was started.", .{@tagName(resolution)});
+                    break :refusal writer.buffered();
+                },
+            }
             var allowed = std.mem.splitScalar(u8, parent.tools.slice(), ',');
             while (allowed.next()) |member| {
                 if (std.mem.eql(u8, name, member)) break;
