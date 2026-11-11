@@ -390,7 +390,7 @@ SLEEP_ORDERED = {
     ("tests/integration/human_cli_integration.py", "main"):
         (2, "input paced past the bare-ESC ambiguity timeout and the repaint window"),
     ("tests/integration/human_cli_integration.py", "renderer_cases"):
-        (5, "settle sleeps before screen and request assertions"),
+        (3, "settle sleeps before screen and request assertions"),
     ("tests/integration/model_fixture.py", "FailureHandler.do_POST"):
         (2, "slow-body and stall peers pace bytes against the client's real deadlines"),
     ("tests/integration/model_fixture.py", "SuccessHandler.do_POST"):
