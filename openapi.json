@@ -6273,8 +6273,8 @@
                   "anyOf": [
                     {
                       "type": "string",
-                      "maxLength": 100,
-                      "x-rui-max-bytes": 100
+                      "maxLength": 200,
+                      "x-rui-max-bytes": 200
                     },
                     {
                       "type": "null"
@@ -12870,8 +12870,8 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 100,
-                "x-rui-max-bytes": 100
+                "maxLength": 200,
+                "x-rui-max-bytes": 200
               },
               {
                 "type": "null"
