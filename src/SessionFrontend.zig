@@ -575,7 +575,9 @@ fn appDecision(raw: *anyopaque, ctx: *vxfw.EventContext, decision: ConsentPolicy
     const self: *Self = @ptrCast(@alignCast(raw));
     self.screen.releaseAction();
     self.app_input.permission = null;
-    try self.submission.begin(.{ .decision = .{ .action = decision.action, .decision = switch (decision.choice) {
+    // Refused by an Upgrade's hold, the Action waits at the Host and its
+    // card shows again once the conversation has read again.
+    _ = try self.beginSubmission(.{ .decision = .{ .action = decision.action, .decision = switch (decision.choice) {
         .allow_once => .allow_once,
         .deny => .deny,
     } } });
@@ -589,7 +591,14 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         .init, .focus_in => try ctx.requestFocus(if (self.app_input.permission) |card| card.widget() else self.app_input.composer.widget()),
         .tick => {
             _ = try self.update();
-            if (self.app_consent.request) |request| if (self.live.work.first_action != request) {
+            // An Upgrade's hold shows no choice: nothing decided could be
+            // sent. The read after the hold finds the Action again.
+            const held = self.upgradeHeld();
+            if (held and self.reading.prepared_action != null) {
+                self.reading.prepared_action = null;
+                if (self.reader.thread == null) self.reading.phase = .activity;
+            }
+            if (self.app_consent.request) |request| if (held or self.live.work.first_action != request) {
                 self.app_consent.withdraw();
                 self.screen.withdrawAction();
                 self.app_input.permission = null;
@@ -2134,7 +2143,7 @@ fn withdrawDecided(self: *Self) void {
 
 /// Sends a Message, alone or as the reason an Action is denied.
 fn beginMessage(self: *Self, intent: Submission.Intent) !void {
-    try self.submission.begin(intent);
+    if (!try self.beginSubmission(intent)) return;
     // A sent Message continues the conversation: show it and its reply
     // rather than the frozen transcript or page the reader was browsing,
     // or a page asked for before it.
@@ -2468,7 +2477,22 @@ fn admit(self: *Self) !void {
 /// leaves the Message shown and itself retained as not sent.
 fn followAdmission(self: *Self, end: AdmissionEnd) !void {
     try self.presentAdmission(end);
-    if (end == .accepted) if (end.accepted.denies) |action| try self.submission.begin(.{ .decision = .{ .action = action, .decision = .deny } });
+    if (end == .accepted) if (end.accepted.denies) |action| {
+        _ = try self.beginSubmission(.{ .decision = .{ .action = action, .decision = .deny } });
+    };
+}
+
+/// The one place a fresh submission starts, a Message or a decision. An
+/// Upgrade's hold refuses it and says why; one already in flight settles
+/// on its own.
+fn beginSubmission(self: *Self, intent: Submission.Intent) !bool {
+    const phase = self.upgradePhase();
+    if (phase != .active) {
+        self.notice = session_upgrade.refusal(phase);
+        return false;
+    }
+    try self.submission.begin(intent);
+    return true;
 }
 
 fn joinAdmission(self: *Self) AdmissionEnd {
@@ -4334,6 +4358,35 @@ test "no command waits its turn across an Upgrade: /upgrade is refused while one
         try std.testing.expectEqual(Updated.waiting, try self.update());
         try std.testing.expect(self.atRest());
     }
+}
+
+test "an Upgrade's hold shows no permission card and sends no decision, shown or prepared" {
+    for (0..3) |hold| for ([_]bool{ false, true }) |shown| for ([_]bool{ false, true }) |ticked| {
+        errdefer std.debug.print("hold={d} shown={} ticked={}\n", .{ hold, shown, ticked });
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        var file: ?std.Io.File = null;
+        defer if (file) |open| open.close(std.testing.io);
+        if (shown) {
+            file = try held.adopt(3);
+            try std.testing.expectEqual(@as(?u64, 0xa), self.app_consent.request);
+        } else {
+            // A permission read that finished and is not yet shown.
+            self.reading.prepared_action = 0xa;
+            self.live.work.first_action = 0xa;
+        }
+        held.upgrade = heldUpgrade(hold, .{ .reobserving, .blocked });
+        // The overview's pass may come first: a key before this
+        // conversation's own pass still decides nothing.
+        if (ticked) try held.settle();
+        if (ticked) try std.testing.expect(self.app_input.permission == null and self.app_consent.request == null and self.reading.prepared_action == null);
+        try stepKeys(held, "\r");
+        try std.testing.expect(self.submission.view() == null and self.submission.task.thread == null);
+        try held.settle();
+        try std.testing.expect(self.app_input.permission == null and self.app_consent.request == null);
+        try std.testing.expect(self.submission.view() == null and self.submission.task.thread == null);
+    };
 }
 
 test "upgrade quiescing reobservation and protocol holds refuse a fresh Message without clearing its draft" {
