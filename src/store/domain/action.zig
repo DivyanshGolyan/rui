@@ -786,9 +786,13 @@ pub fn recoverOneUncertainAction(candidate: anytype, a: anytype, active: ActiveO
     return true;
 }
 
+// Reads share a wave; writes fence every unresolved earlier MCP call. An
+// attempted write remains a barrier even if its Action is later in order.
+// Both hints come from the Operations' frozen offers, never today's catalog.
 const mcp_serial_sql = "NOT EXISTS(SELECT 1 FROM action_operation earlier JOIN model_operation earlier_operation ON earlier_operation.operation_id=earlier.parent_operation_id " ++
     "WHERE earlier.session_ref=action.session_ref AND earlier.resolution_code IS NULL " ++
-    "AND (earlier.action_id<action.action_id OR earlier.attempt_ordinal>0) AND " ++ mcpCallSql("earlier", "earlier_operation") ++ ")";
+    "AND (earlier.action_id<action.action_id OR earlier.attempt_ordinal>0) AND EXISTS(" ++ mcpCallSelectSql("earlier", "earlier_operation", "1") ++
+    " AND (tool.read_only=0 OR (" ++ mcpCallSelectSql("action", "operation", "tool.read_only") ++ ")=0)))";
 
 const mcp_facts_sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position,NULL AS timeout_override_ms " ++
     "FROM action_operation action @index(action_operation_executable) " ++

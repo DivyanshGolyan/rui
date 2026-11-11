@@ -4483,7 +4483,7 @@ test "loaded tools select saved records even after the Host catalog changes or r
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             var records = comptime testingCatalogRecords(&.{
-                .{ .name = "fetch_page", .owner = .mcp, .server = "original", .description = "Original page", .input_schema = "{\"type\":\"object\"}" },
+                .{ .name = "fetch_page", .owner = .mcp, .server = "original", .read_only = true, .description = "Original page", .input_schema = "{\"type\":\"object\"}" },
                 .{ .name = "other_page", .owner = .mcp, .server = "original", .description = "Other page", .input_schema = "{\"type\":\"object\"}" },
             });
             var digests: [records.len][32]u8 = undefined;
@@ -4515,6 +4515,8 @@ test "loaded tools select saved records even after the Host catalog changes or r
             const loaded_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.loaded_tool_set_id " ++
                 "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
             try std.testing.expectEqual(saved_record, loaded_record);
+            const expected_loaded = tool_set_domain.Selection.of(&original, &update.configuration.loaded_tools).?;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set saved ON saved.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1 AND saved.digest=?2", .{ first.slice(), store_testing.Blob{ .bytes = &expected_loaded.digest } }));
 
             var removed_records: [records.len - 1]tool_catalog.Record = undefined;
             removed_records[0] = records[0];
@@ -13763,8 +13765,8 @@ test "saved MCP call lines survive all work reads pending, running and completed
                     .decoded_arguments = args,
                 }});
                 try reads(&storage, &tmp, session.slice(), "pending", text);
-                const action = (try storage.nextMcpAction()).?;
-                const binding = (try storage.admitMcpActionAttempt(action.action_id, 600_000, .{})).?;
+                const action = (try storage.nextAction(.mcp)).?;
+                const binding = (try storage.admitActionAttempt(action, 600_000, .{})).?.permit.binding;
                 try reads(&storage, &tmp, session.slice(), "bash", text);
                 _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
                 try reads(&storage, &tmp, session.slice(), "pending", text);
@@ -13985,6 +13987,9 @@ test "runner action seam covers selection admission input settlement stop and re
                 break :blk out;
             };
             const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            // The replay fixture executes every write transaction twice.
+            // Keep the exact two-round budget per execution on both passes.
+            const write_rounds: u64 = if (case.rerun) 4 else 2;
             inline for (.{ .bash, .mcp }) |runner| {
                 for (0..4) |scenario| {
                     var tmp = std.testing.tmpDir(.{});
@@ -14041,11 +14046,11 @@ test "runner action seam covers selection admission input settlement stop and re
                     } else if (scenario == 3) {
                         const resolve_rounds = storage.testing_content_work.rounds;
                         try storage.resolveAction(selected, .spawn_failed, expected_text, .{});
-                        if (runner == .bash) try std.testing.expectEqual(resolve_rounds + 2, storage.testing_content_work.rounds);
+                        if (runner == .bash) try std.testing.expectEqual(resolve_rounds + write_rounds, storage.testing_content_work.rounds);
                     } else {
                         const admission_rounds = storage.testing_content_work.rounds;
                         const binding = (try storage.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
-                        if (runner == .bash) try std.testing.expectEqual(admission_rounds + 2, storage.testing_content_work.rounds);
+                        if (runner == .bash) try std.testing.expectEqual(admission_rounds + write_rounds, storage.testing_content_work.rounds);
                         try std.testing.expectEqual(selected.action_id, binding.action_id);
                         var input: action_domain.ActionExecutionInput = undefined;
                         try storage.readActionExecutionInput(runner, binding, &input);
@@ -14085,6 +14090,117 @@ test "runner action seam covers selection admission input settlement stop and re
                     try std.testing.expectEqualStrings(expected_code, actions[0].object.get("resolution").?.string);
                     try std.testing.expectEqualStrings(expected_text, actions[0].object.get("result").?.object.get("text").?.string);
                 }
+            }
+        }
+    }.run);
+}
+
+test "MCP read-only ordering uses frozen offers and admits read waves between writes" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const records = comptime testingCatalogRecords(&.{
+                .{ .name = "read_page", .owner = .mcp, .server = "docs", .read_only = true, .description = "Read a page.", .input_schema = "{\"type\":\"object\"}" },
+                .{ .name = "write_page", .owner = .mcp, .server = "docs", .description = "Write a page.", .input_schema = "{\"type\":\"object\"}" },
+            });
+            const digests = comptime blk: {
+                @setEvalBranchQuota(1_000_000);
+                var out: [records.len][32]u8 = undefined;
+                for (&records, &out) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+                break :blk out;
+            };
+            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            const patterns = [_]struct { reads: []const bool, waves: []const usize }{
+                .{ .reads = &.{ false, true, true, false }, .waves = &.{ 1, 2, 1 } },
+                .{ .reads = &.{ true, true }, .waves = &.{2} },
+                .{ .reads = &.{ false, false }, .waves = &.{ 1, 1 } },
+            };
+            for (patterns) |pattern| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var configure = try completeConfiguration("read-only-order", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                configure.configuration.tools = try .of(&.{ "read_page", "write_page" });
+                configure.configuration.permission_mode.state = .value;
+                try configure.configuration.permission_mode.value.set("bypass");
+                const configured = try storage.configure(&configure, .{});
+                try std.testing.expect(configured == .accepted);
+                const session = configured.accepted.session;
+                try submitTestMessage(&storage, &tmp, "read-only-input", "read-only-message", session.slice(), "exercise read waves");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                var calls: [4]TestingCall = undefined;
+                const ids = [_][]const u8{ "call-a", "call-b", "call-c", "call-d" };
+                for (pattern.reads, 0..) |read, index| calls[index] = .{
+                    .item_id = ids[index],
+                    .name = if (read) "read_page" else "write_page",
+                    .encoded_call_id = ids[index],
+                    .decoded_call_id = ids[index],
+                    .encoded_arguments = "{}",
+                    .decoded_arguments = "{}",
+                };
+                try settleCallsForTesting(&storage, &tmp, model, "read-only-calls", calls[0..pattern.reads.len]);
+
+                // Today's catalog now says the opposite. Admission must still
+                // follow each call's frozen offer, and both record identities
+                // must coexist rather than overwrite one another.
+                var changed_records = records;
+                var changed_digests = digests;
+                for (&changed_records, &changed_digests) |*record, *digest| {
+                    if (record.owner == .mcp) record.read_only = !record.read_only;
+                    digest.* = tool_catalog.recordDigest(record);
+                }
+                const changed: tool_catalog.Catalog = .{ .records = &changed_records, .digests = &changed_digests };
+                try storage.saveCatalog(&changed);
+                try std.testing.expectEqual(@as(u64, 4), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE owner='mcp'", .{}));
+                for ([_][]const u8{ "read_page", "write_page" }) |name| {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE name=?1 AND read_only=0", .{name}));
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE name=?1 AND read_only=1", .{name}));
+                }
+                var saved = (try storage.readCatalog(std.testing.allocator)).?;
+                defer saved.deinit(std.testing.allocator);
+                const saved_catalog = saved.catalog();
+                for (changed.records, changed.digests) |record, digest| {
+                    const index = saved_catalog.find(record.name).?;
+                    try std.testing.expectEqual(record.read_only, saved_catalog.records[index].read_only);
+                    try std.testing.expectEqualSlices(u8, &digest, &saved_catalog.digests[index]);
+                }
+                // Re-saving the original catalog reuses its set and records.
+                const sets = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{});
+                try storage.saveCatalog(&catalog);
+                try std.testing.expectEqual(sets, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{}));
+                try storage.saveCatalog(&changed);
+
+                var ready: [4]action_domain.ReadyAction = undefined;
+                var bindings: [4]ActionAttemptBinding = undefined;
+                for (ready[0..pattern.reads.len], 0..) |*action, index| {
+                    action.* = .{ .action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1 AND call_ordinal=?2", .{ model.operation_id, index }), .runner = .mcp };
+                    try action.server.set("docs");
+                }
+                var start: usize = 0;
+                for (pattern.waves) |width| {
+                    const end = start + width;
+                    for (start..end) |index| {
+                        const next = try storage.nextAction(.mcp);
+                        try std.testing.expect(next != null);
+                        const selected = next.?;
+                        try std.testing.expectEqual(ready[index].action_id, selected.action_id);
+                        bindings[index] = (try storage.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
+                        // A caller cannot bypass selection's barrier by holding
+                        // a later Action id and asking for admission directly.
+                        for (ready[end..pattern.reads.len]) |blocked| {
+                            try std.testing.expect((try storage.admitActionAttempt(blocked, 1234, .{})) == null);
+                        }
+                    }
+                    try std.testing.expect((try storage.nextAction(.mcp)) == null);
+                    for (start..end) |index| {
+                        try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(bindings[index], .succeeded, "done", .{}));
+                        if (index + 1 < end) try std.testing.expect((try storage.nextAction(.mcp)) == null);
+                    }
+                    start = end;
+                }
+                try std.testing.expect((try storage.nextAction(.mcp)) == null);
             }
         }
     }.run);
