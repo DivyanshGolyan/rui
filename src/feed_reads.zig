@@ -9,7 +9,7 @@ const feed = @import("widgets/Feed.zig");
 /// Only an applied opening or scan advances this deadline. A fill or permission
 /// read must leave it alone: otherwise back-to-back fills could defer scans
 /// forever even though nextRead gives due scans priority. Reuse today's 250 ms
-/// interval and /status exception until the old policy is removed at cut-over.
+/// interval and /status exception.
 pub const scanDue = reading.scanDue;
 pub const scan_interval_ns = reading.scan_interval_ns;
 
@@ -286,8 +286,7 @@ test "feed_reads policy: opening, fair fills, stale edges, live scan, jump and p
         state.action_named = named;
         state.choice_open = choice;
         state.submission = submitted;
-        const old = reading.background(.{ .opening = false, .now_ns = 0, .scan_due_ns = 1, .older_remain = false, .older_failed = false, .at_top = false, .action_named = named, .choice_open = choice, .submission = submitted });
-        try std.testing.expectEqual(old == .permission, P.nextRead(state) == .permission);
+        try std.testing.expectEqual(named and !choice and !submitted, P.nextRead(state) == .permission);
     };
     try std.testing.expectEqual(@as(i96, 250_000_000), scanDue(0, false));
     try std.testing.expectEqual(@as(i96, 0), scanDue(10, true));

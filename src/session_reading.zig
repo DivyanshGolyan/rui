@@ -16,46 +16,6 @@ pub fn scanDue(now_ns: i96, status_requested: bool) i96 {
     return if (status_requested) 0 else now_ns + scan_interval_ns;
 }
 
-/// What an idle reader knows when nothing was asked of it.
-pub const Idle = struct {
-    now_ns: i96,
-    scan_due_ns: i96,
-    /// The opening read has not been applied.
-    opening: bool,
-    /// Older pages or listed Messages remain above the transcript.
-    older_remain: bool,
-    /// The last older load failed; the next scroll retries it.
-    older_failed: bool,
-    /// The transcript shows its top row.
-    at_top: bool,
-    /// An Action's choice holds the input.
-    choice_open: bool,
-    /// The latest applied page names a first Action.
-    action_named: bool,
-    /// A Message or decision is still submitted or retained.
-    submission: bool,
-};
-
-pub const Background = enum {
-    /// Older history, at the transcript's top.
-    history,
-    /// The live scan, once due.
-    activity,
-    /// The read that prepares an Action no choice shows yet.
-    permission,
-};
-
-/// The read an idle reader starts unasked: older history while the
-/// transcript's top is on screen, else the scan once due, else the
-/// permission read for a named Action once nothing else waits on input.
-/// Before the opening read is applied, only the scan starts.
-pub fn background(idle: Idle) ?Background {
-    if (!idle.opening and idle.older_remain and !idle.older_failed and idle.at_top) return .history;
-    if (idle.now_ns >= idle.scan_due_ns) return .activity;
-    if (!idle.opening and idle.action_named and !idle.choice_open and !idle.submission) return .permission;
-    return null;
-}
-
 /// How a joined read's failure counts: a pending inspection, or an Upgrade
 /// asked for, supersedes a silent read it cancelled.
 pub fn settleMode(upgrade_requested: bool, command_queued: bool) departure.Mode {
@@ -67,8 +27,6 @@ pub const Inspection = enum { copy, command, other };
 
 /// What a completed read shows, by the phase it read.
 pub const Shows = enum {
-    /// Prepends the older page to the transcript it was read for.
-    older,
     /// Opens the Message page asked for.
     message,
     /// Lands a recall step on the draft.
@@ -83,7 +41,6 @@ pub const Shows = enum {
 
 pub fn shows(phase: ReadPhase, inspection: Inspection) Shows {
     return switch (phase) {
-        .history => .older,
         .message => .message,
         .recall => .recalled,
         .activity, .permission => .staged,
@@ -131,7 +88,7 @@ pub fn copyFailure(to_file: bool, err: anyerror) []const u8 {
 
 /// Where a page is asked from: live output or one transcript. No page is
 /// asked from elsewhere.
-pub const Place = union(enum) { live, transcript: u64, elsewhere };
+pub const Place = enum { feed, elsewhere };
 
 /// What a Message page was asked over: its place, the Messages sent so
 /// far, and the generation of page requests.
@@ -154,50 +111,17 @@ test "the next scan waits its interval after a read, except for a /status asked 
     try std.testing.expectEqual(@as(i96, 0), scanDue(1_000_000_000, true));
 }
 
-test "older history comes first at the transcript's top; the scan when due; a named Action's read only once input is quiet" {
-    const quiet: Idle = .{ .now_ns = 10, .scan_due_ns = 20, .opening = false, .older_remain = false, .older_failed = false, .at_top = false, .choice_open = false, .action_named = false, .submission = false };
-    try std.testing.expectEqual(@as(?Background, null), background(quiet));
-    var idle = quiet;
-    idle.older_remain = true;
-    idle.at_top = true;
-    idle.now_ns = 20;
-    try std.testing.expectEqual(@as(?Background, .history), background(idle));
-    // A failed load waits for the next scroll; the due scan goes instead.
-    idle.older_failed = true;
-    try std.testing.expectEqual(@as(?Background, .activity), background(idle));
-    // Before the opening read is applied, only the scan starts.
-    idle = quiet;
-    idle.opening = true;
-    idle.older_remain = true;
-    idle.at_top = true;
-    idle.action_named = true;
-    try std.testing.expectEqual(@as(?Background, null), background(idle));
-    idle.now_ns = 20;
-    try std.testing.expectEqual(@as(?Background, .activity), background(idle));
-    // A named Action is read between scans, unless its choice already
-    // shows or a submission waits.
-    idle = quiet;
-    idle.action_named = true;
-    try std.testing.expectEqual(@as(?Background, .permission), background(idle));
-    inline for (.{ "choice_open", "submission" }) |held| {
-        var waiting = idle;
-        @field(waiting, held) = true;
-        try std.testing.expectEqual(@as(?Background, null), background(waiting));
-    }
-}
-
 test "a Message page shows only over the place, sends and requests it was asked over" {
-    const asked: Asked = .{ .place = .{ .transcript = 2 }, .sent = 3, .generation = 7 };
+    const asked: Asked = .{ .place = .feed, .sent = 3, .generation = 7 };
     try std.testing.expect(messageShows(asked, asked));
     const changes = [_]Asked{
-        .{ .place = .{ .transcript = 1 }, .sent = 3, .generation = 7 },
-        .{ .place = .live, .sent = 3, .generation = 7 },
         .{ .place = .elsewhere, .sent = 3, .generation = 7 },
-        .{ .place = .{ .transcript = 2 }, .sent = 4, .generation = 7 },
-        .{ .place = .{ .transcript = 2 }, .sent = 3, .generation = 8 },
+        .{ .place = .elsewhere, .sent = 3, .generation = 7 },
+        .{ .place = .feed, .sent = 4, .generation = 7 },
+        .{ .place = .feed, .sent = 3, .generation = 8 },
     };
     for (changes) |now| try std.testing.expect(!messageShows(asked, now));
-    const live: Asked = .{ .place = .live, .sent = 0, .generation = 0 };
+    const live: Asked = .{ .place = .feed, .sent = 0, .generation = 0 };
     try std.testing.expect(messageShows(live, live));
     // Nothing asked from elsewhere shows, even over itself.
     const elsewhere: Asked = .{ .place = .elsewhere, .sent = 0, .generation = 0 };
@@ -217,7 +141,6 @@ test "a pending inspection or Upgrade supersedes the silent read it cancelled" {
 
 test "a completed read shows what its phase read; only /copy's inspection copies" {
     const cases = [_]struct { ReadPhase, Inspection, Shows }{
-        .{ .history, .copy, .older },
         .{ .message, .copy, .message },
         .{ .recall, .other, .recalled },
         .{ .activity, .other, .staged },
@@ -249,7 +172,7 @@ test "a read that failed while preparing says which page is unavailable" {
     try std.testing.expectEqualStrings("! Sent message unavailable; draft retained.", unavailable(.recall, .other).say);
     try std.testing.expectEqualStrings("! Inspection unavailable; draft retained.", unavailable(.inspection, .command).say);
     try std.testing.expect(unavailable(.inspection, .copy) == .copy);
-    try std.testing.expectEqualStrings("! Earlier messages unavailable; scroll up to retry. Draft retained.", unavailable(.history, .copy).say);
+    try std.testing.expectEqualStrings("! Earlier messages unavailable; scroll up to retry. Draft retained.", unavailable(.activity, .copy).say);
     try std.testing.expectEqualStrings("! This directory is not writable; draft retained.", copyFailure(true, error.ReadOnlyFileSystem));
     try std.testing.expectEqualStrings("! Copy unavailable; draft retained.", copyFailure(false, error.AccessDenied));
     try std.testing.expectEqualStrings("! Copy unavailable; draft retained.", copyFailure(true, error.BrokenPipe));
