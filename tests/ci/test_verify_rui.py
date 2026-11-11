@@ -170,6 +170,34 @@ class FramesTest(unittest.TestCase):
         self.assertEqual(states["tools-running"]["expect"],
                          ["⠹ Build the docs", "Run the slow tests", "ctrl+x stop"])
 
+    def test_default_frames_cover_inline_tool_folds(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        self.assertEqual(self.helper["KEYS"]["C-o"], b"\x0f")
+        self.assertEqual(self.helper["KEYS"]["S-Up"], b"\x1b[1;2A")
+        for name in ("tool-open", "tool-open-two", "tool-open-long", "tool-open-nocolor"):
+            with self.subTest(state=name):
+                self.assertIn(name, states)
+                state = states[name]
+                keys = [key for step in state["steps"] for key in step.get("keys", [])]
+                self.assertIn("C-o", keys)
+                self.assertIn("ctrl+o close", state["expect"])
+                self.assertTrue(any(text.startswith("▸ ") for text in state["expect"]))
+                self.assertTrue(any(text.startswith("    ") for text in state["expect"]))
+                # Do not capture the asynchronous opening notice as the finished fold.
+                self.assertIn({"gone": "Opening tool output…"}, state["steps"])
+        self.assertEqual(states["tool-open-nocolor"]["env"], {"NO_COLOR": "1"})
+        for name in ("tool-open", "tool-open-long", "tool-open-nocolor"):
+            self.assertEqual(states[name]["sizes"], [(46, 30), (140, 40)])
+        keys = [key for step in states["tool-open-two"]["steps"] for key in step.get("keys", [])]
+        self.assertEqual(keys.count("C-o"), 2)
+        self.assertTrue(any(text.startswith("    … ") and text.endswith(" more lines")
+                            for text in states["tool-open-long"]["expect"]))
+        for name in ("help", "slash"):
+            self.assertIn({"gone": "/details"}, states[name]["steps"])
+        self.assertIn("ctrl+o                 open", states["help"]["expect"])
+        self.assertIn("× Fail with exit 127 · exit 127", states["chat"]["expect"])
+
     def test_cumulative_cast_and_counted_labels(self):
         data = self.scenario()
         data["states"][1]["cast"].append({"label": "Batch {n}", "count": 3, "workspace": "code/batch",
@@ -234,6 +262,8 @@ class FramesTest(unittest.TestCase):
         summary = self.helper["fixture_summary"]
         self.assertEqual(summary("hello", 4, 3), 'Fixture tool summary 4: 3 tool results for "hello".')
         self.assertIn("Two of the three commands failed", summary("hello", 4, 3, "realistic"))
+        self.assertEqual(summary("Show long tool output.", 4, 1, "realistic"),
+                         "Printed thirty-two numbered lines.")
 
     def test_ansi_sgr_and_html_escaping(self):
         render = self.helper["ansi_render"]

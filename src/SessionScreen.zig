@@ -158,10 +158,9 @@ pub fn beginTranscript(self: *Self, front: u64) !void {
     self.browsing.discardFront(front);
     try self.browsing.prepare();
     // Moves apply to the transcript's own height, which its heading and the
-    // absent calls make differ from the live view's: start at its end so the
-    // same rows down as up return to live output.
+    // absent calls make differ from the live view's. An unpinned live view
+    // starts at its end; an open tool's explicit anchor survives the handoff.
     self.height = self.browsing_height;
-    self.browsing.top = null;
     self.newer_trimmed = false;
     self.overscroll = 0;
     self.view = .transcript;
@@ -331,7 +330,10 @@ pub fn latest(self: *Self) !void {
         const seen = self.action_seen;
         try self.showFile(action.io, action.file, true);
         self.action_seen = seen;
-    } else self.view = .live;
+    } else {
+        self.live.top = null;
+        self.view = .live;
+    }
 }
 
 /// Inspection and Action files show their prefix; an older page keeps its
@@ -476,4 +478,27 @@ test "a transcript's front is taken after escaping, which can grow live text pas
     try std.testing.expectEqual(front, screen.browsing.origin);
     try std.testing.expectEqualStrings(screen.live.text(), screen.browsing.text());
     try std.testing.expectEqual(front + screen.live.length, try screen.liveEnd());
+}
+
+test "pinned live anchors survive transcript entry, and latest releases the anchor" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    screen.vx.screen.width = 40;
+    screen.browsing_height = 5;
+    for (0..32) |_| try screen.append("Line\n");
+    try screen.live.prepare();
+    for ([_]?Position{ null, .{}, .{ .offset = 20 }, screen.live.bottom(screen.textLayout(), 6) }) |anchor| {
+        screen.height = 6;
+        screen.live.top = anchor;
+        try screen.beginTranscript(0);
+        try std.testing.expectEqualDeep(anchor, screen.browsing.top);
+        try screen.latest();
+        try std.testing.expectEqual(.live, screen.view);
+        try std.testing.expect(screen.live.top == null);
+        try std.testing.expect(screen.live.atBottom(screen.textLayout(), screen.height));
+    }
 }

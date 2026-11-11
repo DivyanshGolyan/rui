@@ -142,7 +142,7 @@
     },
     {
       "name": "chat",
-      "note": "10-conversation",
+      "note": "10-conversation: tool rows stay folded, with named failed exits",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -162,7 +162,195 @@
         {
           "wait": "The project has a README"
         }
+      ],
+      "expect": [
+        "✓ List project files",
+        "× Fail with exit 127 · exit 127",
+        "× Fail with an excerpt · exit 1",
+        "The project has a README"
       ]
+    },
+    {
+      "name": "tool-open",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "wait": "The project has a README"
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "wait": "ctrl+o close"
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        }
+      ],
+      "expect": [
+        "✓ List project files",
+        "× Fail with exit 127 · exit 127",
+        "▸ × Fail with an excerpt · exit 1",
+        "    Bash failed. Exit code: 1.",
+        "    usage: example",
+        "    unknown option --help",
+        "ctrl+o close"
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded"
+    },
+    {
+      "name": "tool-open-two",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "wait": "The project has a README"
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "S-Up",
+            "S-Up",
+            "S-Up",
+            "S-Up"
+          ]
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "PgDn",
+            "PgDn",
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        }
+      ],
+      "expect": [
+        "▸ ✓ List project files",
+        "▸ × Fail with an excerpt",
+        "    README.md",
+        "    unknown option --help",
+        "ctrl+o close"
+      ],
+      "sizes": [
+        "140x40"
+      ],
+      "note": "10b-tool-open-two: two independent selected rows keep their output bands"
+    },
+    {
+      "name": "tool-open-long",
+      "open": "Long tool output",
+      "cast": [
+        {
+          "label": "Long tool output",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Show long tool output."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Printed thirty-two numbered lines."
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "wait": "more lines"
+        },
+        {
+          "gone": "Opening tool output…"
+        }
+      ],
+      "expect": [
+        "▸ ✓ Print thirty-two lines",
+        "    output line 18",
+        "    … 14 more lines",
+        "ctrl+o close"
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "note": "10c-tool-open-long: twenty output rows and a quiet exact remainder, not a result page"
+    },
+    {
+      "name": "tool-open-nocolor",
+      "open": "Fix retry deadline",
+      "env": {
+        "NO_COLOR": "1"
+      },
+      "steps": [
+        {
+          "wait": "The project has a README"
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "wait": "ctrl+o close"
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        }
+      ],
+      "expect": [
+        "✓ List project files",
+        "× Fail with exit 127 · exit 127",
+        "▸ × Fail with an excerpt · exit 1",
+        "    Bash failed. Exit code: 1.",
+        "    usage: example",
+        "    unknown option --help",
+        "ctrl+o close"
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds"
     },
     {
       "name": "chat-scrolled",
@@ -364,7 +552,7 @@
     },
     {
       "name": "help",
-      "note": "00-help",
+      "note": "20-help: Ctrl-O opens a row; no separate tool-details command",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -377,12 +565,22 @@
         },
         {
           "wait": "Marks"
+        },
+        {
+          "gone": "/details"
         }
+      ],
+      "expect": [
+        "Marks",
+        "Keys",
+        "ctrl+o                 open",
+        "Commands",
+        "/copy [code|file]"
       ]
     },
     {
       "name": "slash",
-      "note": "00-slash",
+      "note": "21-slash: conversation commands without a tool-details page",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -390,7 +588,16 @@
         },
         {
           "wait": "/help"
+        },
+        {
+          "gone": "/details"
         }
+      ],
+      "expect": [
+        "/copy [code|file]",
+        "/effort LEVEL",
+        "/help",
+        "/history"
       ]
     },
     {

@@ -2275,7 +2275,11 @@ fn shownWork(self: *const Self) protocol.session_work.Kind {
 fn scroll(self: *Self, down: bool, rows: usize) !void {
     const screen = self.screen;
     if (screen.view == .live) {
-        if (down) return; // Live output already shows the latest rows.
+        if (down) {
+            // An open tool can pin live output above its newest rows.
+            screen.live.browse(screen.textLayout(), true, rows, screen.height, null);
+            return;
+        }
         try self.beginTranscript();
     }
     self.transcript.older_failed = false; // A new scroll may retry a failed load.
@@ -5561,6 +5565,25 @@ test "tool folds share key and click ownership across live output, bounds, failu
         try Harness.complete(&fixture, &wide);
         const output_row = document.nextLine(document.findTool(first).?).?;
         try std.testing.expectEqual(@as(u16, 1), document.lineRows(.{ .width = 12, .method = .unicode }, output_row));
+        // Pinned live output is not necessarily at the bottom. Every down
+        // binding must reach rows arriving below the still-open tool.
+        for (0..40) |_| try document.append("Later live rows\n");
+        _ = try fixture.draw();
+        const pinned = self.app_content.first;
+        try std.testing.expect(pinned.order(document.bottom(fixture.screen.textLayout(), fixture.screen.height)) == .lt);
+        for ([_]vaxis.Key{
+            .{ .codepoint = vaxis.Key.page_down },
+            .{ .codepoint = vaxis.Key.down },
+            .{ .codepoint = vaxis.Key.down, .mods = .{ .shift = true } },
+        }) |down| {
+            document.top = pinned;
+            _ = try fixture.draw();
+            try fixture.press(down);
+            _ = try fixture.draw();
+            try std.testing.expectEqual(.live, fixture.screen.view);
+            try std.testing.expect(self.app_content.first.order(pinned) == .gt);
+            try std.testing.expect(document.toolIsOpen(document.findTool(first).?));
+        }
         // A lower collapsed Message still joins the same openable set.
         try document.append("› Later message\n  " ++ View.Mark.summary ++ "┄ 4 more lines" ++ View.Mark.reset ++ "\n");
         self.live.blocks.append(.{ .source = .activity, .position = 99, .ordinal = 0, .content = first.content, .row = false });
