@@ -5761,7 +5761,7 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
     var closed = try rig.shown(80, 24);
     defer closed.deinit();
     try closed.expectLines(20, &.{ "────────────────────────────────────────────────────────────────────────────────", " › /m" });
-    try std.testing.expect(std.mem.endsWith(u8, try closed.line(23), "enter start"));
+    try std.testing.expect(std.mem.endsWith(u8, try closed.line(23), "enter run"));
 }
 
 test "the cursor sits at the composer's caret and hides while a start is pending" {
@@ -5781,7 +5781,8 @@ test "the cursor sits at the composer's caret and hides while a start is pending
     try std.testing.expectEqual(view.InputMode.frozen, rig.overview.state.inputMode());
     var pending = try rig.shown(80, 24);
     defer pending.deinit();
-    try std.testing.expect(std.mem.endsWith(u8, try pending.line(23), "enter start"));
+    // The frozen composer takes no Enter, so the Footer offers none.
+    try std.testing.expect(std.mem.indexOf(u8, try pending.line(23), "enter ") == null);
     try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, null), pending.cursor());
 }
 

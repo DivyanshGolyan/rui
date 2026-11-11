@@ -2321,29 +2321,15 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
 
         },
         .none, .append, .redraw => {},
-        // Enter in a list the latest frame drew takes the highlighted
-        // entry: it runs the command that entry completes, or adds the word
-        // another follows. A screen too short for the list shows none.
-        .submit => if (picker != null) {
-            pick(state, effects);
-        } else if (shownCommands(state, value.draft)) |shown| {
-            const taken = shown.list.enter(shown.highlight);
-            if (taken.runs and value.draft.bytes.len + taken.rest.len <= draft_capacity) {
-                var line: [draft_capacity]u8 = undefined;
-                @memcpy(line[0..value.draft.bytes.len], value.draft.bytes);
-                @memcpy(line[value.draft.bytes.len..][0..taken.rest.len], taken.rest);
-                const completed = line[0 .. value.draft.bytes.len + taken.rest.len];
-                if (std.mem.eql(u8, completed, "/model")) {
-                    effects.add(.{ .replace = .{ .start = value.draft.bytes.len, .end = value.draft.bytes.len, .text = "/model "[value.draft.bytes.len..] } });
-                    openModelPicker(state, effects);
-                } else try enter(state, completed, effects);
-            } else {
-                // The draft grows, or refuses a word it cannot hold, so the
-                // next list starts at its top.
-                effects.add(.{ .replace = skill_completion.edit(value.draft.bytes, value.draft.cursor, shown) });
-                shown.highlight = 0;
+        // Enter does what `enterAction` decides, which the Footer names.
+        .submit => {
+            const listed = shownCommands(state, value.draft);
+            switch (enterAction(state, listed != null, value.draft.bytes)) {
+                .pick_model => pick(state, effects),
+                .pick_command => try pickCommand(state, value.draft, listed.?, effects),
+                else => try enter(state, value.draft.bytes, effects),
             }
-        } else try enter(state, value.draft.bytes, effects),
+        },
         .refused => |why| {
             if (why.endsLine()) effects.add(.clear_draft);
             switch (why) {
@@ -2354,6 +2340,28 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
                 .unbound => {},
             }
         },
+    }
+}
+
+/// Enter in a list the latest frame drew takes the highlighted entry: it
+/// runs the command that entry completes, or adds the word another
+/// follows. A screen too short for the list shows none.
+fn pickCommand(state: *State, draft: Draft, shown: *slash_commands.Shown, effects: *Effects) error{OutOfMemory}!void {
+    const taken = shown.list.enter(shown.highlight);
+    if (taken.runs and draft.bytes.len + taken.rest.len <= draft_capacity) {
+        var line: [draft_capacity]u8 = undefined;
+        @memcpy(line[0..draft.bytes.len], draft.bytes);
+        @memcpy(line[draft.bytes.len..][0..taken.rest.len], taken.rest);
+        const completed = line[0 .. draft.bytes.len + taken.rest.len];
+        if (std.mem.eql(u8, completed, "/model")) {
+            effects.add(.{ .replace = .{ .start = draft.bytes.len, .end = draft.bytes.len, .text = "/model "[draft.bytes.len..] } });
+            openModelPicker(state, effects);
+        } else try enter(state, completed, effects);
+    } else {
+        // The draft grows, or refuses a word it cannot hold, so the
+        // next list starts at its top.
+        effects.add(.{ .replace = skill_completion.edit(draft.bytes, draft.cursor, shown) });
+        shown.highlight = 0;
     }
 }
 
@@ -2452,48 +2460,100 @@ fn startUpgrade(state: *State) void {
     if (state.upgrade.start()) state.notice = null;
 }
 
-fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
-    const parsed: ?commands.Parsed = if (text.len != 0 and text[0] == '/' and !std.mem.startsWith(u8, text, "//")) commands.parse(text) else null;
-    if (parsed) |result| switch (result) {
-        .command => |command| switch (command.name) {
-            .archive => return archiveIntent(state, .{ .selected_archive = .submitted }, effects),
-            .unarchive => return archiveIntent(state, .selected_restore, effects),
-            else => {},
-        },
-        else => {},
-    };
-    // The Upgrade's own command and leaving are no Host requests, so no
-    // hold refuses them.
-    if (parsed) |result| switch (result) {
-        .command => |command| switch (command.name) {
-            .upgrade => return startUpgrade(state),
-            .exit => return effects.add(.exit),
-            else => {},
-        },
-        else => {},
-    };
-    if (std.mem.trim(u8, text, " \t\r\n").len == 0 and state.selected != .session) {
-        if (text.len != 0) effects.add(.clear_draft);
-        if (state.selected == .settings) effects.add(.open_settings);
-        return;
-    }
-    if (!admitHostRequest(state)) return;
-    // As in a conversation, the draft is sent byte for byte; only a blank
-    // draft opens the selected row instead.
-    if (std.mem.trim(u8, text, " \t\r\n").len == 0) {
-        if (text.len != 0) effects.add(.clear_draft);
-        const row = state.selectedRow() orelse return;
-        // The conversation's own commands write where this one does.
-        if (waitForCommand(state)) return;
-        state.closePanel();
-        return effects.add(.{ .open = row.reference });
-    }
+/// What Enter does over the composer: the one decision `compose` acts on
+/// and the Footer names.
+pub const EnterAction = enum {
+    /// Nothing: the composer is frozen, or no task could start now.
+    none,
+    /// Saves the model picker's highlighted row as the default.
+    pick_model,
+    /// Takes the command list's highlighted entry.
+    pick_command,
+    /// A blank draft on the New Session row: Enter waits for the task it
+    /// would start.
+    await_task,
+    open_settings,
+    open_session,
+    /// Starts a Session with the draft.
+    start,
+    /// Runs the draft's slash command, or says why it cannot.
+    run,
+    /// Host requests are held after an Upgrade: Enter says so and keeps the
+    /// draft.
+    held,
+};
+
+/// `listed` says a command list is on the screen.
+pub fn enterAction(state: *const State, listed: bool, text: []const u8) EnterAction {
+    if (state.inputMode() == .frozen) return .none;
+    if (state.picker != null) return .pick_model;
+    if (listed) return .pick_command;
+    return textAction(state, text);
+}
+
+/// What `enter` does with `text`, without a picker or a list.
+fn textAction(state: *const State, text: []const u8) EnterAction {
+    const blank = std.mem.trim(u8, text, " \t\r\n").len == 0;
     // As in a conversation, `//` starts text with one slash.
-    if (text[0] != '/' or std.mem.startsWith(u8, text, "//")) {
-        if (!state.request(.start, null)) return;
-        return effects.add(.{ .start = .{ .settings = &state.settings, .text = if (text[0] == '/') text[1..] else text, .binding = state.nextBinding(), .local_effort = state.localEffort() } });
+    if (!blank and text[0] == '/' and !std.mem.startsWith(u8, text, "//")) {
+        // The Upgrade's own command and leaving are no Host requests, so no
+        // hold refuses them.
+        const free = switch (commands.parse(text)) {
+            .command => |command| command.name == .upgrade or command.name == .exit,
+            else => false,
+        };
+        return if (!free and state.holdsHost()) .held else .run;
     }
-    const command = switch (parsed.?) {
+    if (blank) switch (state.selected) {
+        .new_session => return if (state.holdsHost()) .none else .await_task,
+        .settings => return .open_settings,
+        .session => {},
+    };
+    if (state.holdsHost()) return .held;
+    return if (blank) .open_session else .start;
+}
+
+/// The Footer's words for `action`.
+fn enterWords(action: EnterAction) []const u8 {
+    return switch (action) {
+        .none, .held => "",
+        .pick_model, .pick_command => "enter pick / esc close",
+        .await_task, .start => "enter start",
+        .open_settings, .open_session => "enter open",
+        .run => "enter run",
+    };
+}
+
+fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
+    switch (textAction(state, text)) {
+        .pick_model, .pick_command => unreachable, // Decided over the draft, never its text.
+        .none, .await_task => if (text.len != 0) effects.add(.clear_draft),
+        .open_settings => {
+            if (text.len != 0) effects.add(.clear_draft);
+            effects.add(.open_settings);
+        },
+        .held => _ = admitHostRequest(state),
+        // As in a conversation, the draft is sent byte for byte; only a
+        // blank draft opens the selected row instead.
+        .open_session => {
+            if (text.len != 0) effects.add(.clear_draft);
+            const row = state.selectedRow() orelse return;
+            // The conversation's own commands write where this one does.
+            if (waitForCommand(state)) return;
+            state.closePanel();
+            effects.add(.{ .open = row.reference });
+        },
+        .start => {
+            if (!state.request(.start, null)) return;
+            effects.add(.{ .start = .{ .settings = &state.settings, .text = if (text[0] == '/') text[1..] else text, .binding = state.nextBinding(), .local_effort = state.localEffort() } });
+        },
+        .run => try runCommand(state, text, effects),
+    }
+}
+
+/// Runs the slash command `text`.
+fn runCommand(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
+    const command = switch (commands.parse(text)) {
         .unknown => {
             var buffer: [slash_commands.unknown_bytes]u8 = undefined;
             return state.say(.attention, "{s}", .{slash_commands.unknown(&buffer, text)});
@@ -2502,7 +2562,8 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         .command => |command| command,
     };
     switch (command.name) {
-        .archive, .unarchive => unreachable, // Routed through archiveIntent.
+        .archive => archiveIntent(state, .{ .selected_archive = .submitted }, effects),
+        .unarchive => archiveIntent(state, .selected_restore, effects),
         .sessions => {
             const filter: ArchiveFilter = if (std.mem.eql(u8, command.argument, "archived")) .archived else if (std.mem.eql(u8, command.argument, "all")) .all else if (std.mem.eql(u8, command.argument, "unarchived")) .active else {
                 state.say(.quiet, "Sessions: {s}. /sessions unarchived|archived|all", .{archiveViewName(state.archive)});
@@ -3578,11 +3639,15 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
     return .{ .segments = try segmentsOf(arena, spans, width, .{}), .heading = item == .empty, .selected = item == .new_session and state.selected == .new_session };
 }
 
+/// The Footer's key: what Enter does (`enterAction`), after Esc when a
+/// cancellable Upgrade takes it. The frame keeps the list it draws in
+/// `state.commands` before asking.
 pub fn footerRight(state: *const State, draft: Draft) []const u8 {
-    if (state.upgrade.takesEscape()) return "esc cancels";
-    if (state.upgrade.going()) return "";
-    if (state.commands) |shown| if (shown.seen != .closed) return "enter pick / esc close";
-    return if (std.mem.trim(u8, draft.bytes, " \t\r\n").len != 0 or state.selected == .new_session) "enter start" else "enter open";
+    const listed = if (state.commands) |shown| shown.seen != .closed else false;
+    const action = enterAction(state, listed, draft.bytes);
+    // Esc closes the picker first (`compose`).
+    if (action != .pick_model and state.upgrade.takesEscape()) return "esc cancels";
+    return enterWords(action);
 }
 
 /// The Footer's facts, always: a notice takes rows of its own above it
@@ -4878,7 +4943,7 @@ test "Esc closes a shown command list and keeps the draft; a change opens it aga
     try std.testing.expectEqual(.drawn, state.commands.?.seen);
     try expectEffects(&.{}, try press(&state, draft, .clear));
     try std.testing.expectEqual(.closed, state.commands.?.seen);
-    try expectLastLine(&state, draft, "enter start");
+    try expectLastLine(&state, draft, "enter run");
     // With the list closed, Esc clears the draft.
     drawWithRoom(&state, draft);
     try std.testing.expectEqual(.closed, state.commands.?.seen);
@@ -4888,7 +4953,7 @@ test "Esc closes a shown command list and keeps the draft; a change opens it aga
     drawWithRoom(&state, draft);
     try std.testing.expectEqual(.drawn, state.commands.?.seen);
     // The hint says what Enter does to each slash draft.
-    try expectLastLine(&state, try typeText(&state, "/exit "), "enter start");
+    try expectLastLine(&state, try typeText(&state, "/exit "), "enter run");
 }
 
 test "the composer sends its draft byte for byte, as a conversation does" {
@@ -7521,6 +7586,78 @@ test "overview single footer keeps the working Enter key for every selection and
         try std.testing.expectEqualStrings("enter open", footerRight(&state, .{}));
         _ = try press(&state, .{}, .first);
         try std.testing.expectEqual(null, try noticeSegments(arena.allocator(), &state, width, .{}));
+    }
+}
+
+test "the Footer names the Enter action submission takes, over every composer state" {
+    // How the composer stands before Enter: as typed (a slash draft's list
+    // drawn), its list dismissed with Esc, the model picker open, a start
+    // in flight, or Host requests held after an Upgrade (its list dismissed).
+    const Setup = enum { typed, dismissed, picker, frozen, held };
+    const Tag = std.meta.Tag(Effect);
+    const k7: Selection = .{ .session = "k7m2qx".* };
+    const cases = [_]struct { setup: Setup, selection: Selection = .new_session, draft: []const u8, action: EnterAction, right: []const u8, effects: []const Tag }{
+        // Ordinary and blank drafts on each selection.
+        .{ .setup = .typed, .draft = "", .action = .await_task, .right = "enter start", .effects = &.{} },
+        .{ .setup = .typed, .draft = "a task", .action = .start, .right = "enter start", .effects = &.{.start} },
+        .{ .setup = .typed, .draft = "//not a command", .action = .start, .right = "enter start", .effects = &.{.start} },
+        .{ .setup = .typed, .selection = k7, .draft = "", .action = .open_session, .right = "enter open", .effects = &.{.open} },
+        .{ .setup = .typed, .selection = k7, .draft = " \n", .action = .open_session, .right = "enter open", .effects = &.{ .clear_draft, .open } },
+        .{ .setup = .typed, .selection = k7, .draft = "a task", .action = .start, .right = "enter start", .effects = &.{.start} },
+        .{ .setup = .typed, .selection = .settings, .draft = "", .action = .open_settings, .right = "enter open", .effects = &.{.open_settings} },
+        .{ .setup = .typed, .selection = .settings, .draft = "a task", .action = .start, .right = "enter start", .effects = &.{.start} },
+        // Command completion open: Enter takes the highlighted entry.
+        .{ .setup = .typed, .draft = "/he", .action = .pick_command, .right = "enter pick / esc close", .effects = &.{.clear_draft} },
+        .{ .setup = .typed, .draft = "/exit", .action = .pick_command, .right = "enter pick / esc close", .effects = &.{.exit} },
+        // Completion dismissed, or none for a command with its argument:
+        // Enter runs the draft as written.
+        .{ .setup = .dismissed, .draft = "/he", .action = .run, .right = "enter run", .effects = &.{} },
+        .{ .setup = .dismissed, .draft = "/exit", .action = .run, .right = "enter run", .effects = &.{.exit} },
+        .{ .setup = .typed, .selection = k7, .draft = "/rename NAME", .action = .run, .right = "enter run", .effects = &.{ .clear_draft, .command } },
+        // The model picker saves the highlighted default.
+        .{ .setup = .picker, .draft = "/model gpt-6-luna", .action = .pick_model, .right = "enter pick / esc close", .effects = &.{ .clear_draft, .save_default } },
+        // A frozen composer takes no Enter.
+        .{ .setup = .frozen, .draft = "a task", .action = .none, .right = "", .effects = &.{} },
+        .{ .setup = .frozen, .selection = k7, .draft = "", .action = .none, .right = "", .effects = &.{} },
+        // Held Host requests refuse all but leaving, /upgrade and Settings.
+        .{ .setup = .held, .draft = "", .action = .none, .right = "", .effects = &.{} },
+        .{ .setup = .held, .draft = " \n", .action = .none, .right = "", .effects = &.{.clear_draft} },
+        .{ .setup = .held, .draft = "a task", .action = .held, .right = "", .effects = &.{} },
+        .{ .setup = .held, .selection = k7, .draft = "", .action = .held, .right = "", .effects = &.{} },
+        .{ .setup = .held, .selection = .settings, .draft = "", .action = .open_settings, .right = "enter open", .effects = &.{.open_settings} },
+        .{ .setup = .held, .draft = "/help", .action = .held, .right = "", .effects = &.{} },
+        .{ .setup = .held, .draft = "/exit", .action = .run, .right = "enter run", .effects = &.{.exit} },
+    };
+    for (cases) |case| {
+        var state = if (case.setup == .picker) try pickerState(Default.of("codex", "gpt-6.1-sol")) else try opened(&mixed);
+        defer state.deinit();
+        try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 24 } }));
+        state.selected = case.selection;
+        switch (case.setup) {
+            .typed, .dismissed => {},
+            .picker => try openPicker(&state, &.{chatgpt}),
+            .frozen => try expectEffects(&.{.{ .start = .{ .settings = &state.settings, .text = "first" } }}, try submit(&state, try typeText(&state, "first"))),
+            .held => state.upgrade.after = .reobserving,
+        }
+        const draft: Draft = if (case.setup == .frozen) .{ .bytes = case.draft } else try typeText(&state, case.draft);
+        if (case.setup == .dismissed or (case.setup == .held and state.commands != null)) {
+            try std.testing.expectEqual(.drawn, state.commands.?.seen);
+            try expectEffects(&.{}, try press(&state, draft, .clear));
+            drawWithRoom(&state, draft);
+        }
+        const listed = if (state.commands) |shown| shown.seen == .drawn else false;
+        try std.testing.expectEqual(case.action, enterAction(&state, listed, draft.bytes));
+        try expectLastLine(&state, draft, case.right);
+        // Submission takes that action. The frozen composer's route turns
+        // Enter into no input at all.
+        if (case.setup == .frozen) {
+            try std.testing.expectEqual(Route.frozen, state.route(.enter));
+            continue;
+        }
+        const effects = try submit(&state, draft);
+        try std.testing.expectEqual(case.effects.len, effects.len);
+        for (case.effects, effects.slice()) |want, got| try std.testing.expectEqual(want, std.meta.activeTag(got));
+        if (case.action == .held) try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
     }
 }
 
