@@ -47,7 +47,10 @@ export interface AgentSpec {
 export type SessionSpec = AgentSpec;
 
 /** Creation needs a complete spec, or a named preset with explicit overrides. */
-export type SessionCreate = (AgentSpec & { preset?: never }) | ({ preset: string } & Partial<AgentSpec>);
+export type SessionCreate = ((AgentSpec & { preset?: never }) | ({ preset: string } & Partial<AgentSpec>)) & {
+	/** Create an attached child, inheriting provider, workspace and Bash environment. */
+	parent?: string;
+};
 
 /** The settings `update` may change: everything but the ones fixed at creation. */
 export type SessionUpdate = Partial<Pick<SessionSpec, "model" | "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label" | "loadedTools" | "outputReservation">>;
@@ -128,14 +131,14 @@ export function agentSpec(spec: Partial<SessionSpec>): Schemas["Configuration"] 
 	};
 }
 
-function configureBody(store: string, key: string, session: string, spec: Partial<AgentSpec> & { preset?: string }): string {
+function configureBody(store: string, key: string, session: string, spec: Partial<AgentSpec> & { preset?: string; parent?: string }): string {
 	return JSON.stringify({
 		version: WIRE_VERSION,
 		kind: "configure",
 		store,
 		key,
 		session,
-		configuration: agentSpec(spec),
+		configuration: { ...agentSpec(spec), ...(spec.parent === undefined ? {} : { parent: spec.parent }) },
 		...(spec.preset === undefined ? {} : { preset: spec.preset }),
 	} satisfies Schemas["ConfigureRequest"]);
 }

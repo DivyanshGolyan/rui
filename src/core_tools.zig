@@ -255,6 +255,7 @@ pub fn parseAgentSpec(arena: std.mem.Allocator, spec: std.json.ObjectMap, config
 }
 
 fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *wire_request.Configuration, comptime inherits_parent: bool) error{OutOfMemory}!StartAgentCheck {
+    if (spec.contains("parent")) return refused("spec.parent: parent is only valid on Session creation");
     // D221 applies after preset resolution too: no preset can change these.
     if (inherits_parent) {
         if (spec.contains("workspace")) return refused("spec.workspace: an agent always works in your Workspace");

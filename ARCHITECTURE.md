@@ -180,6 +180,14 @@ Enabling Bash later runs it in the saved Workspace, which a later configure cann
 Creation atomically establishes Session, baseline, Workspace bookkeeping, access scope and request answer.
 The CLI and TUI send their own explicit creation defaults: Bash and web search, `bypass`, a supported saved effort or the product's effort choice, and the provider's compactAt default as described under [Supported model IDs](#supported-model-ids).
 Addressed configure preserves every omitted setting; provider and Workspace remain immutable, while the model may change within the provider (D192).
+A creating spec may also name `parent`, a Session ID relation, never a revisioned setting (D178).
+The child inherits that Session's Workspace and provider and may only narrow its configured tool names and Permission Mode, through the same admission owner as `start_agent` (D122, D140).
+Naming provider or Workspace, even equal values, is refused, as is a wider tool set or bypass under an asking parent; refusals name the field and never silently intersect the spec.
+Missing parents and parents with an archive intent are refused as `unknown_session`; an update naming `parent` is refused as `parent_on_update`.
+A native configure creation admits no task Message. Child approval forwarding and ending Messages use the saved parent relation as for attached agents.
+`parent` participates in the creation request digest only when present, retaining every earlier configuration digest and the existing Store format.
+
+
 A creation-only `preset` seeds configure from a connect-time spec: supplied values or nulls override it, omissions inherit it, and resolved answers bind the resolved configuration for idempotent replay (D22).
 Preset lookup/update rejections instead bind the original request, including the preset name, and replay that saved rejection even if the Host can later resolve the preset.
 
@@ -1846,6 +1854,7 @@ An environment over 64 KiB is refused before connecting, naming its size, the li
 The Host refuses before admission a Message with no header (400 `environment_required`), one over 64 KiB (413 `environment_too_large`, from the header alone) and malformed entries, a repeated name, a repeated or unreadable header, a header that claims the whole body (a record is never empty) or the header on another route (400 `invalid_environment`).
 It strips any `RUI_` name the entries still hold.
 Configure, stop, interruption and permission-decision exchanges carry no environment.
+A creation with `parent`, like `start_agent`, snapshots the parent's Host-memory environment through `child_environment.zig` and installs it only after the real creation COMMIT, before the Store releases its lock (D169, D176, D178). Replays and refusals install nothing; a missing saved environment keeps the normal fallback.
 The environment never enters the Store, caller request records, digests, logs or diagnostics, and `rui request recover` sends the recovering process's environment.
 
 The Host keeps one environment per Session in a [capped register](#resident-memory-invariant) (`src/SessionEnvironments.zig`).
