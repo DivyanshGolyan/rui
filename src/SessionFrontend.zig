@@ -11,7 +11,6 @@ const ActionConsent = @import("ActionConsent.zig");
 const PermissionCard = @import("PermissionCard.zig");
 const Palette = @import("Palette.zig");
 const SessionChrome = @import("SessionChrome.zig");
-const FactsRow = @import("FactsRow.zig");
 const viewport = @import("ConversationViewport.zig");
 const tool_fold = @import("tool_fold.zig");
 const ToolFolds = @import("ToolFolds.zig");
@@ -86,7 +85,7 @@ app_preview: Transcript = undefined,
 app_consent: ActionConsent = .{},
 app_card: PermissionCard = undefined,
 app_palette: Palette = undefined,
-app_hooks: AppHooks = undefined,
+app_hooks: AppHooks = .{ .root = undefined, .context = undefined, .leave = undefined, .copy = undefined, .on_open = undefined },
 app_caps: overview_view.Caps = .{},
 /// Stops when the caller is signalled; a running command stops with it.
 interrupted: *client.Cancellation = undefined,
@@ -327,10 +326,10 @@ test "reader freezes borrowed HOME independently of process initialization" {
     }
 }
 
-pub const SkillRead = *const fn (client.Requests, std.mem.Allocator, []const u8, []const u8, []const u8) anyerror!skill_suggestions.Page;
+pub const SkillRead = *const fn (client.ReadContext, std.mem.Allocator, []const u8, []const u8, []const u8) anyerror!skill_suggestions.Page;
 
-fn clientSkills(requests: client.Requests, gpa: std.mem.Allocator, store: []const u8, session: []const u8, prefix: []const u8) !skill_suggestions.Page {
-    return requests.skillSuggestions(gpa, store, .{ .session = session }, prefix);
+fn clientSkills(read: client.ReadContext, gpa: std.mem.Allocator, store: []const u8, session: []const u8, prefix: []const u8) !skill_suggestions.Page {
+    return read.requests().skillSuggestions(gpa, store, .{ .session = session }, prefix);
 }
 
 /// A skills read's inputs, copied when it starts, and its page.
@@ -345,7 +344,7 @@ const SkillJob = struct {
 
     fn work(raw: *anyopaque, task: *Task) !void {
         const job: *SkillJob = @ptrCast(@alignCast(raw));
-        job.page = try job.run(task.requests(), job.gpa, job.store, job.session, job.prefix.slice());
+        job.page = try job.run(task.readContext(), job.gpa, job.store, job.session, job.prefix.slice());
     }
 };
 
@@ -366,12 +365,14 @@ fn serviceSkills(self: *Self) !void {
             }
             job.page = null;
         } else |err| {
-            self.skills.fail(job.read);
+            if (err != error.Cancelled and self.skill_task.result.failure_origin == .host_transport and self.hostFailure()) {
+                self.skills.retry(job.read);
+            } else self.skills.fail(job.read);
             if (err == error.CanonicalStoreFailure) return err;
         }
         self.dirty = true;
     }
-    if (self.upgradeHeld()) return;
+    if (self.upgradeHeld() or self.hostHeld()) return;
     const draft = self.input.composition();
     const word = skill_completion.skillWordAt(draft.bytes, draft.cursor) orelse return;
     const ask = self.skills.ask(word.name(draft.bytes)) orelse return;
@@ -451,10 +452,22 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
     self.app_content = .{ .document = &screen.live, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick } };
     self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
-    self.app_screen = .{ .content = &self.app_content, .input = &self.app_input, .userdata = self, .on_event = appEvent };
+    self.app_screen = .{ .content = &self.app_content, .input = &self.app_input, .content_gutter = true, .userdata = self, .on_event = appEvent };
 }
 
+/// The shell owns Host availability; the Session only reads it and forwards
+/// a transport loss or the person's explicit start gesture.
+pub const HostAccess = struct {
+    context: *anyopaque,
+    /// Unreachable, not the reachable Host's new-Turn admission hold.
+    held: *const fn (*anyopaque) bool,
+    lost: *const fn (*anyopaque) void,
+    start: *const fn (*anyopaque, *vxfw.EventContext) anyerror!bool,
+    notice: *const fn (*anyopaque) ?vxfw.Widget,
+};
+
 pub const AppHooks = struct {
+    host: ?HostAccess = null,
     drafts: ?*session_drafts.Drafts = null,
     root: *Root,
     context: *anyopaque,
@@ -613,6 +626,7 @@ fn appDragScroll(raw: *anyopaque, _: *vxfw.EventContext, up: bool) !void {
 
 fn appDecision(raw: *anyopaque, ctx: *vxfw.EventContext, decision: ConsentPolicy.Decision) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.hostHeld()) return;
     self.screen.releaseAction();
     self.app_input.permission = null;
     // Refused by an Upgrade's hold, the Action waits at the Host and its
@@ -624,6 +638,22 @@ fn appDecision(raw: *anyopaque, ctx: *vxfw.EventContext, decision: ConsentPolicy
     try ctx.requestFocus(self.app_input.composer.widget());
 }
 
+pub fn hostStartKey(key: vaxis.Key) bool {
+    return key.matchExact('r', .{});
+}
+
+fn hostHeld(self: *const Self) bool {
+    const host = self.app_hooks.host orelse return false;
+    return host.held(host.context);
+}
+
+fn hostFailure(self: *Self) bool {
+    const host = self.app_hooks.host orelse return false;
+    host.lost(host.context);
+    self.dirty = true;
+    return true;
+}
+
 fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.leaving != null) return;
@@ -633,7 +663,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
             _ = try self.update();
             // An Upgrade's hold shows no choice: nothing decided could be
             // sent. The read after the hold finds the Action again.
-            const held = self.upgradeHeld();
+            const held = self.upgradeHeld() or self.hostHeld();
             if (held and self.reading.prepared_action != null) {
                 self.reading.prepared_action = null;
                 if (self.reader.thread == null) self.reading.phase = .activity;
@@ -666,6 +696,12 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
             const pasting = self.app_hooks.root.pasting;
+            if (event == .key_press and !pasting and self.input.composition().bytes.len == 0 and hostStartKey(event.key_press)) if (self.app_hooks.host) |host| {
+                if (try host.start(host.context, ctx)) {
+                    ctx.consumeEvent();
+                    return;
+                }
+            };
             self.shown_notice.dismiss();
             const question = self.app_consent.request == null and event == .key_press and !pasting and typesQuestion(event.key_press);
             const shortcut = session_chrome.shortcut(self.shortcuts_open, self.input.composition().bytes.len == 0, question);
@@ -717,7 +753,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 self.notice = null;
                 // One submission at a time: a decision or Message in flight,
                 // or an original still held, makes Enter say so and keep the draft.
-                const allowed = !self.reading.opening and self.reading.phase != .permission and !self.commandActive() and self.submission.intent == null;
+                const allowed = !self.hostHeld() and !self.reading.opening and self.reading.phase != .permission and !self.commandActive() and self.submission.intent == null;
                 if (!(event == .key_press and !pasting and Editor.isEnter(event.key_press) and (self.startChange() or self.takeShownRow()))) {
                     switch (self.input.appEvent(conversation_keys, event, pasting, allowed)) {
                         .message => |ticket| try self.beginMessage(.{ .message = ticket }),
@@ -852,7 +888,9 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const held = self.heldOriginal();
     const send = session_chrome.send(session_notice.status(self.reading.opening, self.app_consent.request != null, held), self.reading.opening or (held != null and held.?.state == .submitting));
     const facts_buffer = try ctx.arena.create([session_chrome.facts_bytes]u8);
+    const list_visible = self.app_hooks.root.listVisible();
     chrome.place(&self.app_screen, .{
+        .list_visible = list_visible,
         .browsing = browsing,
         .new_entries = if (self.browsed_from) |from| self.live.entries - from else 0,
         .needs = send.needs,
@@ -860,7 +898,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         // A conversation reading itself again says so until Host requests go on.
         .progress = if (self.upgradePhase() == .reobserving) session_upgrade.rereading else send.progress,
         .stoppable = said.stoppable,
-        .facts = session_chrome.factsRow(facts_buffer, self.line.facts(&self.hint, self.session), self.session, status_page.archiveBadge(self.line.archive_state), ctx.max.width.? -| FactsRow.text_column, self.app_caps.width),
+        .facts = session_chrome.factsRow(facts_buffer, self.line.facts(&self.hint, self.session), self.session, status_page.archiveBadge(self.line.archive_state), ctx.max.width.? -| SessionChrome.factsInset(list_visible), self.app_caps.width),
         .notice = self.shown_notice.current(now_ms),
         .overview = said.text,
         .shortcuts = self.shortcuts_open,
@@ -868,6 +906,8 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .width = ctx.max.width.?,
     });
     self.app_preview.size = .{};
+    self.app_content.size = .{};
+    self.app_screen.host = if (self.app_hooks.host) |host| host.notice(host.context) else null;
     var surface = try self.app_screen.widget().draw(ctx);
     const visible = if (self.app_consent.request != null) &self.app_preview else &self.app_content;
     screen.height = visible.size.height;
@@ -934,7 +974,7 @@ test "App Session retains the draft across a permission card arriving during pas
         var rendered: vaxis.Screen = try .init(arena.allocator(), .{ .rows = 24, .cols = 80, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 24, .screen = &rendered };
         surface.render(window, self.app_input.composer.widget());
-        const user = rendered.readCell(0, 0).?;
+        const user = rendered.readCell(1, 0).?;
         try std.testing.expectEqualStrings("t", user.char.grapheme);
         try std.testing.expectEqual(style.of(case.caps, .{ .colour = .quiet }).fg, user.style.fg);
         try std.testing.expect(!user.style.dim);
@@ -1819,7 +1859,7 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     const Fake = struct {
         var calls: usize = 0;
         var session: [6]u8 = undefined;
-        fn read(_: client.Requests, gpa: std.mem.Allocator, _: []const u8, reference: []const u8, prefix: []const u8) !skill_suggestions.Page {
+        fn read(_: client.ReadContext, gpa: std.mem.Allocator, _: []const u8, reference: []const u8, prefix: []const u8) !skill_suggestions.Page {
             calls += 1;
             @memcpy(&session, reference);
             const entries = try gpa.alloc(skill_suggestions.Entry, 2);
@@ -1895,7 +1935,7 @@ test "a Session's /reload-skills drops the skills it listed, and the next read l
     const Fake = struct {
         var reloaded = false;
         var calls: usize = 0;
-        fn read(_: client.Requests, gpa: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !skill_suggestions.Page {
+        fn read(_: client.ReadContext, gpa: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !skill_suggestions.Page {
             calls += 1;
             const entries = try gpa.alloc(skill_suggestions.Entry, 1);
             entries[0] = .{ .name = try gpa.dupe(u8, if (reloaded) "release" else "recap"), .description = try gpa.dupe(u8, "") };
@@ -2190,6 +2230,7 @@ fn update(self: *Self) !Updated {
     if (self.reading.pending_diagnostic) |pending| {
         if (pending.recoverable) try self.presentReadDiagnostic(self.screen);
     }
+    if (self.hostHeld()) return .waiting;
     try self.startQueuedCommand();
     // Scans continue during consent, so an Action decided elsewhere leaves.
     if (self.reader.thread == null and self.reading.prepared_action == null) {
@@ -2277,6 +2318,7 @@ fn recoverable(self: *const Self) ?*const [36]u8 {
 /// Ctrl-R, or /recover with the original's key: retries the original,
 /// except while an Action waits, which only its choice decides.
 fn recover(self: *Self, key: ?[]const u8) !void {
+    if (self.hostHeld()) return;
     if (self.waitingAction()) |action| {
         self.notice = session_notice.decision(action);
         return;
@@ -2479,6 +2521,7 @@ fn converse(self: *Self, input: overview_view.ConversationInput) !void {
         .other, .upgrade, .cancel_upgrade, .upgrade_failed => false,
         .stop, .archive, .unarchive => true,
     };
+    if (host_intent and self.hostHeld()) return;
     if (host_intent and self.upgradeHeld()) {
         self.notice = session_upgrade.refusal(self.upgradePhase());
         return;
@@ -2892,6 +2935,13 @@ fn heldFailure(self: *const Self) ?@TypeOf(self.failure.?) {
 
 fn settleReader(self: *Self) !void {
     const end = self.joinReader();
+    const fenced = if (self.reading.pending_diagnostic) |pending|
+        pending.failure.status == 503 and std.mem.eql(u8, pending.failure.diagnostic.code.slice(), "dispatch_fenced")
+    else
+        false;
+    const lost = (fenced or (end == .failed and self.reader.result.failure_origin == .host_transport)) and self.hostFailure();
+    // Each phase settles the request it owns first, whatever the read's end:
+    // a request left outstanding would refuse every later one.
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
     const phase = self.reading.phase;
     if (phase == .tool) {
@@ -2901,10 +2951,18 @@ fn settleReader(self: *Self) !void {
                     try self.finishTool(request, .failed);
                     return err;
                 }) .shown else .failed
-            else if (end == .failed) .failed else .cancelled;
+            else if (end == .failed and !lost) .failed else .cancelled;
             try self.finishTool(request, outcome);
         }
     } else if (end != .complete and phase == .message) self.expansion.reading = null;
+    if (lost) {
+        // A joined failed read has published no staged output. Keep its
+        // cursor, opening state, documents, draft and scroll for the next scan.
+        self.reading.pending_diagnostic = null;
+        self.inspection.command_running = false;
+        self.poll_at = 0;
+        return;
+    }
     // A fatal failure leaves command output for exit to print.
     if (end.failure(reader_policy.settleMode(self.upgradePhase() == .quiescing, self.input.queuedCommand() != null))) |err| return err;
     const inspection = self.readInspection();
@@ -4325,7 +4383,7 @@ test "a pending decision, or a Message that carries one, has no /recover row, an
 
 test "Enter on a rejected draft clears it even while a skill list shows" {
     const Fake = struct {
-        fn read(_: client.Requests, gpa: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !skill_suggestions.Page {
+        fn read(_: client.ReadContext, gpa: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !skill_suggestions.Page {
             const entries = try gpa.alloc(skill_suggestions.Entry, 1);
             entries[0] = .{ .name = try gpa.dupe(u8, "recap"), .description = try gpa.dupe(u8, "") };
             return .{ .entries = entries, .total = 1 };
@@ -4642,39 +4700,39 @@ test "the /status page marks one changeable row, which Up and Down move and Ente
     held.self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .high };
     try held.self.line.model.set("gpt-5.5");
     try showStatus(held, true, "fix-safari-export");
-    try std.testing.expectEqualStrings(" › Effort          high  Session override", (try rowWith(held, "Effort ")).?);
-    try std.testing.expectEqualStrings("   Permissions     bypass · Bash and MCP run without asking", (try rowWith(held, "Permissions")).?);
+    try std.testing.expectEqualStrings("  › Effort          high  Session override", (try rowWith(held, "Effort ")).?);
+    try std.testing.expectEqualStrings("    Permissions     bypass · Bash and MCP run without asking", (try rowWith(held, "Permissions")).?);
     // Shift-Down scrolls as before; the mark stays.
     try sendKeys(&held.self, "\x1b[1;2B");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, " › Effort"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, "  › Effort"));
     // Down reaches the Session's changeable Model before the defaults;
     // PageUp and PageDown still scroll.
     try sendKeys(&held.self, "\x1b[B");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, "   Effort"));
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Permissions")).?, " › Permissions"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, "    Effort"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Permissions")).?, "  › Permissions"));
     for (0..6) |_| try sendKeys(&held.self, "\x1b[B");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Model           gpt-5.5")).?, " › Model"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Model           gpt-5.5")).?, "  › Model"));
     try sendKeys(&held.self, "\r");
     try std.testing.expectEqualStrings("/configure --model gpt-5.5", held.self.input.composition().bytes);
     held.self.input.clear();
     // Down skips only Store and Instructions, which remain fixed.
     try sendKeys(&held.self, "\x1b[B");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Rui default")).?, " › Model"));
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "fixed for this Session")).?, "   Store"));
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "set from a shell")).?, "   Instructions"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Rui default")).?, "  › Model"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "fixed for this Session")).?, "    Store"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "set from a shell")).?, "    Instructions"));
     // A refresh, as the open page's next read, keeps the mark.
     try showStatus(held, false, "fix-safari-export");
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Rui default")).?, " › Model"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Rui default")).?, "  › Model"));
     try sendKeys(&held.self, "\x1b[A");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Model           gpt-5.5")).?, " › Model"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Model           gpt-5.5")).?, "  › Model"));
     try sendKeys(&held.self, "\x1b[A");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Headroom")).?, " › Headroom"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Headroom")).?, "  › Headroom"));
     // Enter on Headroom drafts only its command, whose list offers
     // `default`: the model's default never becomes an override of its value.
     try sendKeys(&held.self, "\r");
@@ -4682,11 +4740,11 @@ test "the /status page marks one changeable row, which Up and Down move and Ente
     // With a draft, Up and Down keep their meaning: the mark stays.
     try sendKeys(&held.self, "\x1b[A");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Headroom")).?, " › Headroom"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Headroom")).?, "  › Headroom"));
     held.self.input.clear();
     for (0..8) |_| try sendKeys(&held.self, "\x1b[A");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, " › Effort"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, "  › Effort"));
     // Enter on a choice row lists its choices; Down and Enter take one and run it.
     try sendKeys(&held.self, "\r");
     try std.testing.expectEqualStrings("/configure --reasoning-effort ", held.self.input.composition().bytes);
@@ -4699,7 +4757,7 @@ test "the /status page marks one changeable row, which Up and Down move and Ente
     var expected: [64]u8 = undefined;
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "/configure --reasoning-effort {s}", .{list.shown()[1].word}), held.self.input.queuedCommand().?);
     try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, " › Effort"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, "  › Effort"));
 }
 
 test "a change run from the /status page replies under the page, which shows the new value on its row; a long failure opens as before" {
@@ -4728,7 +4786,7 @@ test "a change run from the /status page replies under the page, which shows the
         const readiness: preferences.Readinesses = .initFill(.missing);
         _ = try preferences.update(held.self.home, .{ .notifications = false }, &readiness);
         try showStatus(held, false, "fix-safari-export");
-        try std.testing.expectEqualStrings("   Notifications   on", (try rowWith(held, "Notifications")).?);
+        try std.testing.expectEqualStrings("    Notifications   on", (try rowWith(held, "Notifications")).?);
         for (0..3) |_| try sendKeys(&held.self, "\x1b[B");
         try sendKeys(&held.self, "\r");
         try std.testing.expectEqualStrings("/configure --label fix-safari-export", held.self.input.composition().bytes);
@@ -4757,11 +4815,11 @@ test "a change run from the /status page replies under the page, which shows the
             // The reply is the notice on the last row, under the page.
             try std.testing.expectEqualStrings("Configured.", (try rowWith(held, "Configured.")).?);
             // A command run over the page reads them again.
-            try std.testing.expectEqualStrings("   Notifications   off", (try rowWith(held, "Notifications")).?);
-            try std.testing.expectEqualStrings(" › Name            fix-safari-export", (try rowWith(held, "Name")).?);
+            try std.testing.expectEqualStrings("    Notifications   off", (try rowWith(held, "Notifications")).?);
+            try std.testing.expectEqualStrings("  › Name            fix-safari-export", (try rowWith(held, "Name")).?);
             // The open page's next read shows the new value, its mark where it was.
             try showStatus(held, false, "lane four");
-            try std.testing.expectEqualStrings(" › Name            lane four", (try rowWith(held, "Name")).?);
+            try std.testing.expectEqualStrings("  › Name            lane four", (try rowWith(held, "Name")).?);
         } else {
             try std.testing.expect((try rowWith(held, "--label is 1-100")) != null);
             try std.testing.expect((try rowWith(held, " Name ")) == null);
@@ -5029,7 +5087,7 @@ test "Alt-A and Ctrl-X during opening forward no intent and keep the draft" {
 const UnusedArchiveCommand = struct {
     var calls: usize = 0;
 
-    fn command(_: std.process.Init, _: client.Requests, _: []const u8, _: []const u8, _: []u8) !void {
+    fn command(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, _: []u8) !void {
         calls += 1;
         return error.TestUnexpectedCommand;
     }
@@ -5324,6 +5382,452 @@ test "a card taller than the screen says how many lines it hides and Shift-Down 
     } else return error.TestUnexpectedResult;
 }
 
+test "reader failure provenance keeps transport loss separate from local copy failures, reachable or held" {
+    const Probe = struct {
+        const Mode = enum { read_disconnect, copy_disconnect, command_disconnect, inspect_disconnect, inspect_free, inspect_held, inspect_local, temporary, sink, rename };
+        var mode: Mode = undefined;
+        var local_effects: usize = 0;
+        fn create(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
+            if (mode == .temporary and std.mem.startsWith(u8, path, ".rui-")) {
+                local_effects += 1;
+                return error.FileNotFound;
+            }
+            return std.testing.io.vtable.dirCreateFile(userdata, dir, path, options);
+        }
+        fn write(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) std.Io.File.WritePositionalError!usize {
+            if (mode == .sink) {
+                local_effects += 1;
+                return error.BrokenPipe;
+            }
+            return std.testing.io.vtable.fileWritePositional(userdata, file, header, data, splat, offset);
+        }
+        fn rename(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir, _: []const u8) std.Io.Dir.RenameError!void {
+            local_effects += 1;
+            return error.FileNotFound;
+        }
+        fn command(_: std.process.Init, read: client.ReadContext, store: []const u8, session: []const u8, _: []u8) !void {
+            const requests = read.requests();
+            try std.testing.expect(requests.cancellation != null);
+            _ = try requests.activityPage(store, session, .{});
+            return error.TestUnexpectedResult;
+        }
+    };
+    const Peer = struct {
+        mode: Probe.Mode,
+        listener: *std.Io.net.Server,
+        stopping: std.atomic.Value(bool) = .init(false),
+        result: anyerror!void = {},
+        pages: usize = 0,
+        contents: usize = 0,
+        const answer = "answer";
+        fn run(self: *@This()) void {
+            self.result = self.serve();
+        }
+        fn request(self: *@This(), route: []const u8) !std.Io.net.Stream {
+            const stream = try self.listener.accept(std.testing.io);
+            errdefer stream.close(std.testing.io);
+            if (self.stopping.load(.acquire)) return error.Cancelled;
+            var bytes: [4096]u8 = undefined;
+            var used: usize = 0;
+            while (true) {
+                const count = try std.posix.read(stream.socket.handle, bytes[used..]);
+                if (count == 0) return error.UnexpectedEof;
+                used += count;
+                if (std.mem.indexOf(u8, bytes[0..used], "\r\n\r\n")) |end| {
+                    const start = std.mem.indexOf(u8, bytes[0..end], "Content-Length: ").? + "Content-Length: ".len;
+                    const finish = std.mem.indexOf(u8, bytes[start..end], "\r\n").? + start;
+                    if (used == end + 4 + try std.fmt.parseInt(usize, bytes[start..finish], 10)) break;
+                }
+            }
+            var prefix: [96]u8 = undefined;
+            try std.testing.expectStringStartsWith(bytes[0..used], try std.fmt.bufPrint(&prefix, "POST {s} HTTP/1.1\r\n", .{route}));
+            return stream;
+        }
+        fn reply(stream: std.Io.net.Stream, content_type: []const u8, length: usize, extra: []const u8, body: []const u8) !void {
+            var header: [512]u8 = undefined;
+            var writer = stream.writer(std.testing.io, &.{});
+            try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n{s}Connection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{ content_type, length, extra }));
+            try writer.interface.writeAll(body);
+        }
+        fn serve(self: *@This()) !void {
+            {
+                const page = try self.request(if (self.mode == .read_disconnect or self.mode == .command_disconnect) "/v1/activity-page" else if (self.mode == .inspect_disconnect) "/v1/inspect-session" else "/v1/conversation-page");
+                defer page.close(std.testing.io);
+                self.pages += 1;
+                if (self.mode == .read_disconnect or self.mode == .command_disconnect or self.mode == .inspect_disconnect) return; // Physical EOF, no response.
+                var bytes: [1024]u8 = undefined;
+                var body = std.Io.Writer.fixed(&bytes);
+                const shape = protocol.conversation_page_reply;
+                try protocol.writeShape(&body, shape.head, .{1});
+                try protocol.writeShape(&body, shape.item(.assistant), .{ 1, 0, answer.len, protocol.contentDigest(answer) });
+                try protocol.writeShape(&body, shape.item_end ++ shape.last, .{});
+                try reply(page, "application/json", body.buffered().len, "", body.buffered());
+            }
+            if (self.mode == .temporary) return; // The local create fails next.
+            const content = try self.request("/v1/conversation-content");
+            defer content.close(std.testing.io);
+            self.contents += 1;
+            var extra: [128]u8 = undefined;
+            try reply(content, "application/octet-stream", answer.len, try std.fmt.bufPrint(&extra, "X-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ answer.len, answer.len }), if (self.mode == .copy_disconnect) answer[0..1] else answer);
+        }
+    };
+    const Discovery = struct {
+        unavailable: bool = false,
+        losses: usize = 0,
+        fn held(raw: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.unavailable;
+        }
+        fn lost(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.unavailable = true;
+            self.losses += 1;
+        }
+        fn start(_: *anyopaque, _: *vxfw.EventContext) !bool {
+            return error.TestUnexpectedResult;
+        }
+        fn notice(_: *anyopaque) ?vxfw.Widget {
+            return null;
+        }
+    };
+    const io = std.testing.io;
+    for (std.enums.values(Probe.Mode)) |mode| for ([_]bool{ false, true }) |already_unavailable| {
+        errdefer std.debug.print("mode={s}, already unavailable={}\n", .{ @tagName(mode), already_unavailable });
+        Probe.mode = mode;
+        Probe.local_effects = 0;
+        var fixture: ChromeFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const self = fixture.self;
+        var tmp = try @import("socket_fixture.zig").Directory.init();
+        defer tmp.cleanup();
+        const root = tmp.root[0..tmp.root_len];
+        var lease: ?@import("platform.zig").StoreLease = try .acquire(io, root);
+        defer if (lease) |*held| held.release();
+        try lease.?.prepareForServing(false);
+        const paths = lease.?.paths;
+        const no_listener = mode == .inspect_free or mode == .inspect_held or mode == .inspect_local;
+        if (mode == .inspect_free) {
+            lease.?.release();
+            lease = null;
+        }
+        var listener: ?std.Io.net.Server = if (no_listener) null else try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+        defer if (listener) |*server| {
+            server.deinit(io);
+            std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+        };
+        var peer: Peer = .{ .mode = mode, .listener = if (listener) |*server| server else undefined };
+        const thread: ?std.Thread = if (listener != null) try std.Thread.spawn(.{}, Peer.run, .{&peer}) else null;
+        var joined = false;
+        defer if (!joined and thread != null) {
+            peer.stopping.store(true, .release);
+            if ((std.Io.net.UnixAddress.init(paths.socket.slice()) catch unreachable).connect(io)) |wake| wake.close(io) else |_| {}
+            thread.?.join();
+        };
+        var vtable = io.vtable.*;
+        vtable.dirCreateFile = Probe.create;
+        vtable.fileWritePositional = Probe.write;
+        if (mode == .rename) vtable.dirRename = Probe.rename;
+        self.init.io = .{ .userdata = io.userdata, .vtable = &vtable };
+        self.store = root;
+        if (mode == .inspect_local) {
+            var missing: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            try fixture.environ.put("TMPDIR", try std.fmt.bufPrint(&missing, "{s}/missing-local-scratch", .{root}));
+        }
+        self.live.cursor = .{ .position = 19 };
+        self.reading.opening = mode == .read_disconnect;
+        _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
+        var discovery: Discovery = .{};
+        self.app_hooks.host = .{ .context = &discovery, .held = Discovery.held, .lost = Discovery.lost, .start = Discovery.start, .notice = Discovery.notice };
+        const inspect = mode == .inspect_disconnect or mode == .inspect_free or mode == .inspect_held or mode == .inspect_local;
+        self.command = if (inspect) @import("cli.zig").sessionCommand else Probe.command;
+        self.inspection.kind = if (mode == .command_disconnect or inspect) .command else .{ .copy = if (mode == .temporary or mode == .rename) .file else .answer };
+        const job = self.freeze(if (mode == .read_disconnect) .activity else .inspection);
+        if (inspect) {
+            const command = "/inspect-action";
+            @memcpy(job.command_text[0..command.len], command);
+            job.command_text_length = command.len;
+        }
+        try self.launch(job, if (mode == .read_disconnect) reads.scan else if (mode == .command_disconnect or inspect) reads.runCommand else reads.copyAnswer);
+        // An independent discovery change while this job is in flight must
+        // not change where its own error came from or suppress a local notice.
+        discovery.unavailable = already_unavailable;
+        if (mode == .inspect_local) {
+            // The command already owns rendering, so its local scratch error
+            // keeps the original departure policy, not a Host recovery hold.
+            try std.testing.expectError(error.FileNotFound, self.settleReader());
+        } else try self.settleReader();
+        if (thread) |worker| worker.join();
+        joined = true;
+        try peer.result;
+        const transport = mode == .read_disconnect or mode == .copy_disconnect or mode == .command_disconnect or (inspect and mode != .inspect_local);
+        try std.testing.expectEqual(if (transport) client.FailureOrigin.host_transport else .local, self.reader.result.failure_origin);
+        try std.testing.expectError(if (mode == .inspect_free) error.HostNotServing else if (mode == .inspect_held) error.HostStopping else if (transport) error.TruncatedResponse else if (mode == .sink) error.BrokenPipe else error.FileNotFound, self.reader.result.outcome.?);
+        try std.testing.expectEqual(@as(usize, @intFromBool(transport)), discovery.losses);
+        try std.testing.expectEqual(already_unavailable or transport, self.hostHeld());
+        try std.testing.expectEqual(@as(usize, @intFromBool(!transport and !inspect)), Probe.local_effects);
+        try std.testing.expectEqual(@as(usize, @intFromBool(!no_listener)), peer.pages);
+        try std.testing.expectEqual(@as(usize, @intFromBool(mode != .read_disconnect and mode != .command_disconnect and !inspect and mode != .temporary)), peer.contents);
+        try std.testing.expect(self.reader.thread == null and self.leaving == null);
+        try std.testing.expectEqual(mode == .read_disconnect, self.reading.opening);
+        try std.testing.expectEqual(@as(u64, 19), self.live.cursor.position);
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        if (transport or mode == .inspect_local) {
+            try std.testing.expect(self.notice == null);
+        } else {
+            try std.testing.expectEqualStrings("! Copy unavailable; draft retained.", self.notice.?);
+            try self.afterInput(&fixture.ctx);
+            const rows = try fixture.rows();
+            for (rows) |line| {
+                if (std.mem.indexOf(u8, line, "Copy unavailable; draft retained.") != null) break;
+            } else {
+                for (rows) |line| std.debug.print("{s}\n", .{line});
+                return error.TestUnexpectedResult;
+            }
+        }
+    };
+}
+
+test "required read adapter contexts cannot omit provenance" {
+    inline for (.{ Command, Requests, SkillRead }, .{ 1, 1, 0 }) |Callback, index| {
+        const signature = @typeInfo(@typeInfo(Callback).pointer.child).@"fn";
+        try std.testing.expect(signature.param_types[index].? == client.ReadContext);
+    }
+    const context = @typeInfo(client.ReadContext).@"struct";
+    inline for (context.field_names, context.field_types, context.field_attrs) |name, Type, attrs| {
+        if (comptime std.mem.eql(u8, name, "origin")) {
+            try std.testing.expect(Type == *client.FailureOrigin);
+            try std.testing.expect(attrs.default_value_ptr == null);
+        }
+    }
+}
+
+test "skills transport recovery retains the held page and retries the same prefix after reobservation" {
+    const Discovery = struct {
+        unavailable: bool = false,
+        losses: usize = 0,
+        fn held(raw: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.unavailable;
+        }
+        fn lost(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.losses += 1;
+            self.unavailable = true;
+        }
+        fn start(_: *anyopaque, _: *vxfw.EventContext) !bool {
+            return false;
+        }
+        fn notice(_: *anyopaque) ?vxfw.Widget {
+            return null;
+        }
+        fn completed(task: *Task) bool {
+            return task.completed();
+        }
+    };
+    const Peer = struct {
+        listener: *std.Io.net.Server,
+        stopping: std.atomic.Value(bool) = .init(false),
+        result: anyerror!void = {},
+        fn run(self: *@This()) void {
+            self.result = self.serve();
+        }
+        fn serve(self: *@This()) !void {
+            const stream = try self.listener.accept(std.testing.io);
+            defer stream.close(std.testing.io);
+            if (self.stopping.load(.acquire)) return error.Cancelled;
+            var bytes: [4096]u8 = undefined;
+            var used: usize = 0;
+            while (true) {
+                const count = try std.posix.read(stream.socket.handle, bytes[used..]);
+                if (count == 0) return error.UnexpectedEof;
+                used += count;
+                if (std.mem.indexOf(u8, bytes[0..used], "\r\n\r\n")) |end| {
+                    const start = std.mem.indexOf(u8, bytes[0..end], "Content-Length: ").? + "Content-Length: ".len;
+                    const finish = std.mem.indexOf(u8, bytes[start..end], "\r\n").? + start;
+                    if (used == end + 4 + try std.fmt.parseInt(usize, bytes[start..finish], 10)) break;
+                }
+            }
+            try std.testing.expectStringStartsWith(bytes[0..used], "POST /v1/skill-suggestions HTTP/1.1\r\n");
+            try std.testing.expect(std.mem.indexOf(u8, bytes[0..used], "\"prefix\":\"re\"") != null);
+            const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"skill_suggestions\",\"revision\":\"2\",\"total\":\"1\",\"entries\":[{\"name\":\"recap\",\"description\":\"Summarise\"}]}";
+            var header: [256]u8 = undefined;
+            var out = stream.writer(std.testing.io, &.{});
+            try out.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{body.len}));
+            try out.interface.writeAll(body);
+        }
+    };
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    defer if (self.dropSkills()) |err| std.debug.panic("skills cleanup failed: {}", .{err});
+    const io = std.testing.io;
+    var directory = try @import("socket_fixture.zig").Directory.init();
+    defer directory.cleanup();
+    const root = directory.root[0..directory.root_len];
+    var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    self.store = root;
+    var discovery: Discovery = .{};
+    self.app_hooks.host = .{ .context = &discovery, .held = Discovery.held, .lost = Discovery.lost, .start = Discovery.start, .notice = Discovery.notice };
+    const old = self.skills.ask("old").?;
+    try std.testing.expect(self.skills.answer(old.read, .{}, "old") == null);
+    _ = self.input.replace(.{ .start = 0, .end = 0, .text = "please /re" });
+    try self.serviceSkills();
+    const first = self.skill_job.read;
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &self.skill_task, Discovery.completed);
+    try self.serviceSkills();
+    try std.testing.expectError(error.FileNotFound, self.skill_task.result.outcome.?);
+    try std.testing.expectEqual(client.FailureOrigin.host_transport, self.skill_task.result.failure_origin);
+    try std.testing.expectEqual(@as(usize, 1), discovery.losses);
+    try std.testing.expect(self.skill_task.thread == null and self.skills.failed == null and self.skills.pending == null);
+    try std.testing.expectEqual(old.read, self.skills.held.?.read);
+    try self.serviceSkills();
+    try std.testing.expectEqual(first, self.skill_job.read); // No automatic attempt while held.
+    var listener = try (try std.Io.net.UnixAddress.init(lease.paths.socket.slice())).listen(io, .{});
+    defer {
+        listener.deinit(io);
+        std.Io.Dir.cwd().deleteFile(io, lease.paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    }
+    var peer: Peer = .{ .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    var joined = false;
+    defer if (!joined) {
+        peer.stopping.store(true, .release);
+        if ((std.Io.net.UnixAddress.init(lease.paths.socket.slice()) catch unreachable).connect(io)) |wake| wake.close(io) else |_| {}
+        thread.join();
+    };
+    defer self.stop();
+    discovery.unavailable = false; // A fresh shell observation permits reads again.
+    try self.serviceSkills();
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &self.skill_task, Discovery.completed);
+    try self.serviceSkills();
+    thread.join();
+    joined = true;
+    try peer.result;
+    try std.testing.expect(self.skill_job.read > first);
+    try std.testing.expectEqual(client.FailureOrigin.local, self.skill_task.result.failure_origin);
+    try std.testing.expectEqual(@as(usize, 1), discovery.losses);
+    try std.testing.expectEqualStrings("recap", self.skills.held.?.page.entries[0].name);
+    try std.testing.expectEqualStrings("please /re", self.input.composition().bytes);
+    try std.testing.expect(self.skill_task.thread == null and self.leaving == null);
+}
+
+test "Host recovery joins unavailable reads in every phase without losing the Session" {
+    const Fault = struct {
+        failure: anyerror,
+        origin: client.FailureOrigin = .local,
+        lost: usize = 0,
+        fenced: bool = false,
+        fn run(raw: *anyopaque, task: *Task) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.fenced) {
+                var failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
+                try failure.diagnostic.type.set("busy");
+                try failure.diagnostic.code.set("dispatch_fenced");
+                return task.requests().failRead(failure);
+            }
+            task.result.failure_origin = self.origin;
+            return self.failure;
+        }
+        fn held(_: *anyopaque) bool {
+            return false;
+        }
+        fn lose(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.lost += 1;
+        }
+        fn start(_: *anyopaque, _: *vxfw.EventContext) !bool {
+            return false;
+        }
+        fn notice(_: *anyopaque) ?vxfw.Widget {
+            return null;
+        }
+    };
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
+    for (std.enums.values(ReadPhase)) |phase| {
+        for ([_]anyerror{ error.FileNotFound, error.ConnectionRefused, error.UnixConnectFailed, error.ConnectionResetByPeer, error.BrokenPipe, error.TruncatedResponse, error.ResponseInactive, error.HostNotServing, error.HostStopping }) |failure| {
+            var fault: Fault = .{ .failure = failure, .origin = .host_transport };
+            self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+            self.reading.phase = phase;
+            self.reading.opening = true;
+            self.inspection.command_running = phase == .inspection;
+            try self.reader.start(std.testing.io, &fault, Fault.run);
+            try self.settleReader();
+            try std.testing.expectEqual(@as(usize, 1), fault.lost);
+            try std.testing.expect(self.reader.thread == null);
+            try std.testing.expect(self.reading.opening);
+            try std.testing.expect(self.reading.pending_diagnostic == null);
+            try std.testing.expect(self.leaving == null);
+            try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        }
+    }
+    {
+        // A tool output read in flight when the Host goes settles its
+        // request: the same row opens again once the Host is back.
+        const Sink = struct {
+            document: *viewport.Document,
+            pub fn feed(sink: *@This(), bytes: []const u8) !void {
+                try sink.document.append(bytes);
+            }
+            pub fn tool(sink: *@This(), reference: tool_fold.Reference) !void {
+                try tool_fold.marker(reference, sink);
+            }
+        };
+        const reference: tool_fold.Reference = .{ .position = 41, .ordinal = 1, .content = .{ .length = 4, .digest = protocol.contentDigest("src\n") } };
+        var sink: Sink = .{ .document = &fixture.screen.live };
+        var compact = true;
+        var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+        try description.set("List project files");
+        try View.toolResultRow(.{ .description = description, .code = .succeeded, .publication_position = null }, .{ .exit = null }, reference, &sink, self.colour, &compact);
+        var fault: Fault = .{ .failure = error.ConnectionRefused, .origin = .host_transport };
+        self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+        self.reading.opening = false;
+        for (0..2) |round| {
+            _ = try fixture.draw();
+            const handler = self.app_content.handler.?;
+            try handler.on_click.?(handler.userdata, &fixture.ctx, .{ .offset = fixture.screen.live.findTool(reference).? });
+            try std.testing.expectEqual(ToolFolds.State.requested, self.tools.state(reference));
+            try std.testing.expect(self.tools.start(self.pageAsked()) != null);
+            self.reading.phase = .tool;
+            try self.reader.start(std.testing.io, &fault, Fault.run);
+            try self.settleReader();
+            try std.testing.expectEqual(round + 1, fault.lost);
+            try std.testing.expect(self.tools.in_flight == null);
+            try std.testing.expect(!fixture.screen.live.toolIsOpen(fixture.screen.live.findTool(reference).?));
+        }
+    }
+    var fenced: Fault = .{ .failure = error.HostInvocationFailed, .fenced = true };
+    self.app_hooks.host = .{ .context = &fenced, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+    self.reading.phase = .activity;
+    try self.reader.start(std.testing.io, &fenced, Fault.run);
+    try self.settleReader();
+    try std.testing.expectEqual(@as(usize, 1), fenced.lost);
+    try std.testing.expect(self.reading.pending_diagnostic == null);
+    // Cancellation wins even if earlier work on this invocation touched transport.
+    var cancelled: Fault = .{ .failure = error.Cancelled, .origin = .host_transport };
+    self.app_hooks.host = .{ .context = &cancelled, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+    self.reading.phase = .activity;
+    try self.reader.start(std.testing.io, &cancelled, Fault.run);
+    try std.testing.expectError(error.Cancelled, self.settleReader());
+    try std.testing.expectEqual(@as(usize, 0), cancelled.lost);
+    // A canonical or unrelated failure still has its original fatal boundary.
+    for ([_]anyerror{ error.CanonicalStoreFailure, error.AccessDenied }) |failure| {
+        var fault: Fault = .{ .failure = failure };
+        self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+        self.reading.phase = .activity;
+        try self.reader.start(std.testing.io, &fault, Fault.run);
+        try std.testing.expectError(failure, self.settleReader());
+        try std.testing.expectEqual(@as(usize, 0), fault.lost);
+    }
+}
+
 /// An App Session with a settled live view, for the chrome's tests.
 const ChromeFixture = struct {
     /// What the fixture's overview says under the input.
@@ -5440,6 +5944,49 @@ const ChromeFixture = struct {
         return value;
     }
 };
+
+test "App Session shell gutter and back control follow list visibility through resize" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .low, .left = 100, .label = .{} };
+    try self.line.label.?.set("demo");
+    try self.line.model.set("gpt-5.5");
+    _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
+    try fixture.screen.browsing.append("› Build the docs…\n✓ Build the docs\n");
+    try fixture.screen.browsing.prepare();
+    fixture.screen.browsing.top = .{};
+    fixture.screen.view = .transcript;
+    try fixture.root.openSession(&fixture.ctx, fixture.widget);
+    const arena = fixture.arena.allocator();
+    for ([_]u16{ 140, 46, 100, 99, 140, 46 }) |width| {
+        const frame = try fixture.root.widget().draw(.{ .arena = arena, .min = .{}, .max = .{ .width = width, .height = 26 }, .cell_size = .{} });
+        var screen: vaxis.Screen = try .init(arena, .{ .cols = width, .rows = 26, .x_pixel = 0, .y_pixel = 0 });
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 26, .screen = &screen };
+        frame.render(window, self.app_input.composer.widget());
+        const wide = width >= 100;
+        const start: u16 = if (wide) 41 else 0;
+        try std.testing.expectEqual(wide, fixture.root.listVisible());
+        if (wide) try std.testing.expectEqualStrings("│", screen.readCell(40, 0).?.char.grapheme);
+        // Exactly one shell-owned feed gutter, both beside the divider and alone.
+        try std.testing.expectEqualStrings(" ", screen.readCell(start, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("›", screen.readCell(start + 1, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("✓", screen.readCell(start + 1, 1).?.char.grapheme);
+        try std.testing.expectEqualStrings(if (wide) "d" else "‹", screen.readCell(start + 1, 24).?.char.grapheme);
+        var facts: std.Io.Writer.Allocating = .init(arena);
+        for (start..width) |column| try facts.writer.writeAll(screen.readCell(@intCast(column), 24).?.char.grapheme);
+        try std.testing.expectEqualStrings(if (wide) " demo · gpt-5.5 · low · 100% left" else " ‹ demo · gpt-5.5 · low · 100% left", std.mem.trimEnd(u8, facts.written(), " "));
+        try std.testing.expect(fixture.root.session.?.eql(fixture.widget));
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        try std.testing.expectEqual(viewport.Position{}, fixture.screen.browsing.top.?);
+    }
+    // The inset must remain bounded even when there is no room for feed text.
+    for ([_]vxfw.Size{ .{ .width = 0, .height = 0 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 1 }, .{ .width = 1, .height = 26 } }) |size| {
+        const frame = try fixture.root.widget().draw(.{ .arena = arena, .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
+        try std.testing.expectEqual(size, frame.size);
+    }
+}
 
 test "App Session shows running calls in order above the input, with +N more running and the work line below them" {
     var fixture: ChromeFixture = undefined;
@@ -5671,7 +6218,7 @@ test "App Session's last row says a refused environment until the original goes,
     for (0..4) |_| try sendKeys(&held.self, "\x1b[6~");
     try held.settle();
     try std.testing.expect((try rowWith(held, "BIG_TOKEN")) != null);
-    try std.testing.expectEqualStrings("Unset or shorten them in another shell, then run rui request recover there.", (try rowWith(held, "rui request recover")).?);
+    try std.testing.expectEqualStrings(" Unset or shorten them in another shell, then run rui request recover there.", (try rowWith(held, "rui request recover")).?);
     try std.testing.expect((try rowWith(held, "Ctrl-R retries this exact original")) == null);
 }
 
@@ -6009,18 +6556,19 @@ test "tool folds share key and click ownership across live output, bounds, failu
             const cell = screen.readCell(@intCast(col), @intCast(row)).?;
             if (std.mem.eql(u8, cell.char.grapheme, "R") and col + 1 < 80 and std.mem.eql(u8, screen.readCell(@intCast(col + 1), @intCast(row)).?.char.grapheme, "E")) {
                 saw_output = true;
-                try std.testing.expectEqual(@as(usize, 4), col);
+                // The screen's one-column feed gutter comes before every row.
+                try std.testing.expectEqual(@as(usize, 5), col);
                 try std.testing.expectEqual(if (colour) self.app_content.colours.band else self.app_content.style.bg, cell.style.bg);
                 try std.testing.expectEqual(if (colour) self.app_content.colours.quiet else self.app_content.style.fg, cell.style.fg);
             }
             try std.testing.expect(!std.mem.eql(u8, cell.char.grapheme, "▸"));
             if (std.mem.eql(u8, cell.char.grapheme, @import("marks.zig").marks.get(.finished).unicode)) {
                 saw_heading = true;
-                try std.testing.expectEqual(@as(usize, 0), col);
-                try std.testing.expectEqualStrings("L", screen.readCell(2, @intCast(row)).?.char.grapheme);
+                try std.testing.expectEqual(@as(usize, 1), col);
+                try std.testing.expectEqualStrings("L", screen.readCell(3, @intCast(row)).?.char.grapheme);
                 try std.testing.expectEqual(if (colour) self.app_content.colours.selection else self.app_content.style.bg, cell.style.bg);
             }
-            if (col == 4 and std.mem.eql(u8, cell.char.grapheme, "e") and std.mem.eql(u8, screen.readCell(5, @intCast(row)).?.char.grapheme, "r")) {
+            if (col == 5 and std.mem.eql(u8, cell.char.grapheme, "e") and std.mem.eql(u8, screen.readCell(6, @intCast(row)).?.char.grapheme, "r")) {
                 saw_second_line = true;
                 try std.testing.expectEqual(if (colour) self.app_content.colours.quiet else self.app_content.style.fg, cell.style.fg);
                 try std.testing.expectEqual(if (colour) self.app_content.colours.band else self.app_content.style.bg, cell.style.bg);

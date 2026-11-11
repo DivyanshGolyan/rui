@@ -127,6 +127,13 @@ pub const Reads = struct {
         self.pending = null;
     }
 
+    /// A transport interruption left this read unanswered. Keep its prefix
+    /// retryable after Host reobservation, without dropping the held page.
+    pub fn retry(self: *Reads, read: u64) void {
+        const pending = self.pending orelse return;
+        if (pending.read == read) self.pending = null;
+    }
+
     /// Another scope: nothing held or in flight counts. Returns the held
     /// page to free.
     pub fn reset(self: *Reads) ?skill_suggestions.Page {
@@ -455,4 +462,22 @@ test "skill rows are the held page's, numbered by the read that made them" {
     const start = reads.shown(&rows, "/st", 3, 3, commands, null).?;
     try std.testing.expectEqual(commands.count, start.list.count);
     try std.testing.expectEqual(@as(u64, 0), start.source);
+}
+
+test "a transport-interrupted skills read is retryable without discarding the held page" {
+    for ([_]bool{ false, true }) |stale| {
+        var reads: Reads = .{};
+        const old = reads.ask("old").?;
+        try std.testing.expect(reads.answer(old.read, .{}, "old") == null);
+        const pending = reads.ask("re").?;
+        reads.retry(if (stale) old.read else pending.read);
+        try std.testing.expectEqual(stale, reads.pending != null);
+        try std.testing.expectEqual(old.read, reads.held.?.read);
+        try std.testing.expect(reads.failed == null);
+        if (stale) reads.retry(pending.read);
+        const next = reads.ask("re").?;
+        try std.testing.expect(next.read > pending.read);
+        reads.fail(next.read); // Local failure still suppresses the same prefix.
+        try std.testing.expect(reads.ask("re") == null);
+    }
 }
