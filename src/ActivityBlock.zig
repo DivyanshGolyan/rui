@@ -19,6 +19,7 @@ const Self = @This();
 const more_bytes = std.fmt.count("+{d} more running · /status", .{std.math.maxInt(u64)});
 
 pub const Styles = struct {
+    ink: vaxis.Style = .{},
     normal: vaxis.Style = .{},
     quiet: vaxis.Style = .{ .dim = true },
     attention: vaxis.Style = .{},
@@ -188,7 +189,8 @@ fn fitWords(words: []const u8, clock: []const u8, width: u16, method: vaxis.gwid
 
 fn style(self: *const Self, value: session_view.Style) vaxis.Style {
     return switch (value) {
-        .normal, .user => self.styles.normal,
+        .normal => self.styles.normal,
+        .user => self.styles.ink,
         .quiet => self.styles.quiet,
         .attention => self.styles.attention,
         .failure => self.styles.failure,
@@ -230,7 +232,12 @@ const Click = struct {
 
 test "the activity tail puts the clock on the running call's own row, and the work line only when no shown row carries it" {
     var click: Click = .{};
-    var block: Self = .{ .more = .{ .label = "", .userdata = &click, .on_click = Click.status }, .styles = .{ .quiet = .{ .fg = .{ .index = 8 } } } };
+    const coloured: Styles = .{
+        .normal = .{ .fg = .{ .index = 7 } },
+        .ink = .{ .fg = .{ .index = 4 } },
+        .quiet = .{ .fg = .{ .index = 8 } },
+    };
+    var block: Self = .{ .more = .{ .label = "", .userdata = &click, .on_click = Click.status }, .styles = coloured };
     block.live.entries[0] = entry(7, 1, "Read src/overview_view.zig", .succeeded);
     block.live.entries[1] = entry(7, 2, "Run zig build test", .unresolved);
     block.live.entries[2] = entry(7, 3, "Run zig build test-store", .unresolved);
@@ -247,13 +254,35 @@ test "the activity tail puts the clock on the running call's own row, and the wo
     try std.testing.expectEqualStrings("⠹ Run zig build test-store", try rowText(drawn, 2));
     // Finished calls are quiet; active calls use ink and their clocks stay quiet.
     try std.testing.expectEqual(vaxis.Color{ .index = 8 }, drawn.readCell(2, 0).style.fg);
-    try std.testing.expectEqual(vaxis.Color.default, drawn.readCell(2, 1).style.fg);
+    for ([_]u16{ 1, 2 }) |row| {
+        try std.testing.expectEqual(vaxis.Color{ .index = 4 }, drawn.readCell(0, row).style.fg);
+        try std.testing.expectEqual(vaxis.Color{ .index = 4 }, drawn.readCell(2, row).style.fg);
+        try std.testing.expectEqual(vaxis.Color{ .index = 7 }, drawn.readCell(79, row).style.fg);
+    }
     try std.testing.expectEqual(vaxis.Color{ .index = 8 }, drawn.readCell(24, 1).style.fg);
     try std.testing.expectEqual(@as(usize, 1), drawn.children.len);
     try std.testing.expectEqual(@as(i17, 3), drawn.children[0].origin.row);
     try std.testing.expectEqual(@as(i17, 2), drawn.children[0].origin.col);
     try std.testing.expectEqualStrings("+2 more running · /status", block.more.label);
     try std.testing.expect(drawn.children[0].surface.widget.eql(block.more.widget()));
+
+    // NO_COLOR clears both heading colours without changing the rows or clock.
+    const widget_style = @import("widget_style.zig");
+    block.styles = .{
+        .normal = widget_style.of(.{ .depth = .none }, .{ .colour = .normal }),
+        .ink = widget_style.of(.{ .depth = .none }, .{ .colour = .ink }),
+        .quiet = widget_style.of(.{ .depth = .none }, .{ .colour = .quiet }),
+        .attention = widget_style.of(.{ .depth = .none }, .{ .colour = .attention }),
+        .failure = widget_style.of(.{ .depth = .none }, .{ .colour = .failure }),
+    };
+    const plain = try block.widget().draw(ctx);
+    try std.testing.expectEqualStrings("⠹ Run zig build test · 42s", try rowText(plain, 1));
+    try std.testing.expectEqualStrings("⠹ Run zig build test-store", try rowText(plain, 2));
+    for (plain.buffer) |cell| {
+        try std.testing.expectEqual(vaxis.Color.default, cell.style.fg);
+        try std.testing.expectEqual(vaxis.Color.default, cell.style.bg);
+    }
+    block.styles = coloured;
 
     // The model works with no call shown: one dim work row, never stacked.
     block.live = .{};

@@ -755,7 +755,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const queued = if (browsing) null else self.queuedRow();
     chrome.activity.queued = if (queued) |row| row.waiting else null;
     chrome.activity.method = self.app_caps.width;
-    chrome.activity.styles = .{ .normal = normal, .quiet = quiet, .attention = attention, .failure = failure };
+    chrome.activity.styles = .{ .ink = style.of(self.app_caps, .{ .colour = .ink }), .normal = normal, .quiet = quiet, .attention = attention, .failure = failure };
     chrome.status.method = self.app_caps.width;
     chrome.status.quiet = quiet;
     chrome.status.attention = attention;
