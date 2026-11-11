@@ -1596,7 +1596,8 @@ fn startInput(self: *const Self, start: *const view.OwnedStart, compaction_buffe
         .reasoning_effort = held.policy(held_effort),
         .label = label,
     };
-    configuration.completeCreation(std.meta.stringToEnum(protocol.Provider, start.binding().provider orelse product_defaults.provider).?, start.binding().model orelse product_defaults.recommended_model, saved_effort, compaction_buffer);
+    const saved_permission = if (configuration.permission_mode.present or self.options.home.len == 0) null else (try preferences.load(self.options.home)).permission_mode;
+    configuration.completeCreation(std.meta.stringToEnum(protocol.Provider, start.binding().provider orelse product_defaults.provider).?, start.binding().model orelse product_defaults.recommended_model, saved_effort, saved_permission, compaction_buffer);
     return .{ .store = self.options.store, .session = "", .text_path = "", .text = start.text(), .configuration = configuration };
 }
 
@@ -3234,6 +3235,33 @@ test "a start sends the held tools and loaded tools" {
     try std.testing.expectEqualStrings("none", Seen.now.start.loaded_tools.?.slice());
 }
 
+test "overview starts read saved permissions even with explicit selectors and held flags win" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    for ([_]?protocol.PermissionMode{ null, .ask, .bypass }) |saved| {
+        if (saved) |mode| _ = try preferences.update(home, .{ .permission_mode = .{ .set = mode } }, &.initFill(.configured));
+        for ([_]bool{ false, true }) |explicit| {
+            for ([_]?protocol.PermissionMode{ null, .ask, .bypass }) |flag| {
+                var cancellation: client.Cancellation = .{};
+                const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .selectors = if (explicit) explicit_selectors else .{} }, fake_operations, &cancellation);
+                defer rig.close();
+                if (flag) |mode| {
+                    var buffer: [64]u8 = undefined;
+                    const command = try std.fmt.bufPrint(&buffer, "/configure --permission-mode {s}\r", .{@tagName(mode)});
+                    try std.testing.expect(try rig.press(command) == null);
+                }
+                try std.testing.expect(try rig.press("hello\r") == null);
+                try std.testing.expect(try rig.settle() == null);
+                try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
+                const expected = if (flag orelse saved) |mode| @tagName(mode) else product_defaults.permission_mode;
+                try std.testing.expectEqualStrings(expected, Seen.now.start.permission_mode.slice());
+            }
+        }
+    }
+}
+
 test "a start with no held loaded tools sends none" {
     const rig = try openComposer();
     defer rig.close();
@@ -3286,7 +3314,7 @@ test "a failed save from unreadable preferences keeps the local pick for the nex
     try std.testing.expect(try rig.press("\x1b[B\r") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqualStrings("Default not saved (check ~/.config/rui/preferences); new Sessions here still use gpt-6-luna · low · ChatGPT", rig.overview.state.notice.?.text());
-    try std.testing.expect(try rig.press("hello\r") == null);
+    try std.testing.expect(try rig.press("/configure --permission-mode bypass\rhello\r") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
     try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.start.model.?.slice());
@@ -3307,7 +3335,7 @@ test "a start takes the saved effort only when the launch read saved defaults" {
         try std.testing.expect(try rig.settle() == null);
         if (explicit) try std.testing.expectEqualStrings(product_defaults.reasoning_effort, Seen.now.start.reasoning_effort.?.slice()) else try std.testing.expectEqualStrings("high", Seen.now.start.reasoning_effort.?.slice());
     }
-    // A launch that named everything starts even over an unreadable file.
+    // Naming the binding and permission mode bypasses an unreadable file.
     var config = try tmp.dir.openDir(std.testing.io, ".config/rui", .{});
     defer config.close(std.testing.io);
     const bad = try config.createFile(std.testing.io, "preferences", .{ .permissions = .fromMode(0o600) });
@@ -3317,7 +3345,7 @@ test "a start takes the saved effort only when the launch read saved defaults" {
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .selectors = explicit_selectors }, fake_operations, &cancellation);
     defer rig.close();
     const starts = Seen.now.starts;
-    try std.testing.expect(try rig.press("hello\r") == null);
+    try std.testing.expect(try rig.press("/configure --permission-mode bypass\rhello\r") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(starts + 1, Seen.now.starts);
 }
@@ -6457,7 +6485,7 @@ test "App settings typed saves own their strings and settle through the Overview
     try std.testing.expect(try rig.press("kept draft") == null);
     var provider = "codex".*;
     var model = "gpt-5.5".*;
-    try overview.saveDefaults(.{ .provider = .{ .set = &provider }, .model = .{ .set = &model }, .reasoning_effort = .{ .set = .low }, .notifications = false });
+    try overview.saveDefaults(.{ .provider = .{ .set = &provider }, .model = .{ .set = &model }, .reasoning_effort = .{ .set = .low }, .notifications = false, .permission_mode = .{ .set = .ask } });
     @memset(&provider, 'x');
     @memset(&model, 'x');
     try std.testing.expectEqual(AppSettings.SaveState.pending, backend.save_state(backend.context));
@@ -6469,6 +6497,7 @@ test "App settings typed saves own their strings and settle through the Overview
     try std.testing.expectEqualStrings("gpt-5.5", saved.model.slice());
     try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), saved.reasoning_effort);
     try std.testing.expect(!saved.notifications);
+    try std.testing.expectEqual(@as(?protocol.PermissionMode, .ask), saved.permission_mode);
     try std.testing.expectEqual(AppSettings.SaveState.saved, backend.save_state(backend.context));
     try std.testing.expectEqualStrings("gpt-5.5", overview.state.default.?.model.slice());
     try std.testing.expectEqualStrings("kept draft", overview.composerDraft().bytes);
@@ -6490,6 +6519,23 @@ test "App settings typed saves own their strings and settle through the Overview
     try std.testing.expect(page.failures.get(.notifications) == null);
     try std.testing.expect(overview.state.command == null and overview.state.panel == null);
     try std.testing.expectEqualStrings("kept draft", overview.composerDraft().bytes);
+
+    page.select(.permissions);
+    for ([_]protocol.PermissionMode{ .bypass, .ask }) |mode| {
+        try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expect(page.hasChoice());
+        page.panel.choice.?.selected = if (mode == .bypass) 0 else 1;
+        try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expectEqual(AppSettings.SaveState.pending, backend.save_state(backend.context));
+        try std.testing.expectEqual(@as(?AppSettings.Row, .permissions), page.saving_row);
+        try std.testing.expect(try rig.settle() == null);
+        try page.widget().handleEvent(&ctx, .tick);
+        try std.testing.expectEqual(mode, (try preferences.load(home)).permission_mode.?);
+        try std.testing.expectEqual(@as(?protocol.PermissionMode, mode), page.values.permission_mode);
+        try std.testing.expectEqual(@as(?AppSettings.Row, null), page.saving_row);
+        try std.testing.expectEqualStrings("gpt-5.5", overview.state.default.?.model.slice());
+        try std.testing.expectEqualStrings("kept draft", overview.composerDraft().bytes);
+    }
 }
 
 test "App settings typed worker failure reaches its row and a later save recovers" {

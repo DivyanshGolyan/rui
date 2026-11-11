@@ -389,8 +389,9 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     if (parsed.has("clear-model")) edit.model = .clear;
     if (parsed.get("notifications")) |choice| edit.notifications = if (std.mem.eql(u8, choice, "on")) true else if (std.mem.eql(u8, choice, "off")) false else return error.InvalidArguments;
     if (parsed.get("reasoning-effort")) |text| edit.reasoning_effort = try effortEdit(text);
+    if (parsed.get("permission-mode")) |text| edit.permission_mode = .{ .set = std.meta.stringToEnum(cli_value.PermissionMode, text).? };
     const readiness = localReadiness(init);
-    const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep or edit.notifications != null or edit.reasoning_effort != .keep;
+    const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep or edit.notifications != null or edit.reasoning_effort != .keep or edit.permission_mode != .keep;
     const values = (if (changed) preferences.update(home, edit, &readiness) else preferences.load(home)) catch |err| {
         if (err == error.InvalidPreferenceStore and edit.store == .set) holdStore(edit.store.set);
         const said = preferences.failure(err);
@@ -421,6 +422,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         .model = if (values.model.len != 0) values.model.slice() else null,
         .notifications = values.notifications,
         .reasoning_effort = values.reasoning_effort,
+        .permission_mode = values.permission_mode,
         .readiness = &readiness,
     });
     // Preferences are local hints, not Session settings or Host facts.
@@ -437,6 +439,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
     try std.Io.File.stdout().writeStreamingAll(init.io, if (values.notifications) "Notifications: on\n" else "Notifications: off\n");
     try writeSafeField(init.io, "Reasoning effort: ", if (values.reasoning_effort) |effort| @tagName(effort) else "each model's default");
+    try writeSafeField(init.io, "Permissions: ", if (values.permission_mode) |mode| @tagName(mode) else @import("product_defaults.zig").permission_mode);
     var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
     try std.Io.File.stdout().writeStreamingAll(init.io, switch (readiness.get(.codex)) {
         .configured => "Codex credential: configured locally (remote acceptance not checked).\n",
@@ -503,6 +506,7 @@ const DefaultsFacts = struct {
     model: ?[]const u8,
     notifications: bool,
     reasoning_effort: ?model_capability.ReasoningEffort,
+    permission_mode: ?cli_value.PermissionMode,
     readiness: *const provider_selection.Readinesses,
 };
 
@@ -530,6 +534,8 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
     try writer.print(",\"notifications\":{}", .{facts.notifications});
     try writer.writeAll(",\"reasoning_effort\":");
     try std.json.Stringify.value(if (facts.reasoning_effort) |effort| @tagName(effort) else null, .{}, writer);
+    try writer.writeAll(",\"permission_mode\":");
+    try std.json.Stringify.value(if (facts.permission_mode) |mode| @tagName(mode) else null, .{}, writer);
     try writer.writeAll(",\"local_credentials\":{");
     for (std.enums.values(protocol.Provider), 0..) |provider, index|
         try writer.print("{s}\"{s}\":\"{s}\"", .{ if (index == 0) "" else ",", @tagName(provider), @tagName(facts.readiness.get(provider)) });
@@ -2056,18 +2062,18 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
             .provider = if (input.provider.present) input.provider.value else null,
             .model = if (input.model.present) input.model.value else null,
         };
-        // The saved effort comes with the saved defaults: a configuration
-        // naming both provider and model reads none, so a script that
-        // spells them never depends on the preferences file.
-        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (intent.provider == null or intent.model == null) blk: {
-            const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without --provider and --model reads saved defaults");
+        // Explicit provider/model still bypass saved effort. Permissions are
+        // independent: every start without its own mode reads the saved one.
+        const reads_binding_defaults = intent.provider == null or intent.model == null;
+        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (reads_binding_defaults or !input.permission_mode.present) blk: {
+            const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without explicit binding or permission mode reads saved defaults");
             break :blk preferences.load(home) catch |err| return preferenceFailure(err);
         } else .{} };
-        saved_effort = snapshot.defaults.reasoning_effort;
+        saved_effort = if (reads_binding_defaults) snapshot.defaults.reasoning_effort else null;
         binding = try snapshot.resolveUnprompted();
         input.provider = .{ .present = true, .value = binding.provider.slice() };
         input.model = .{ .present = true, .value = binding.model.slice() };
-        input.completeCreation(std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?, binding.model.slice(), snapshot.defaults.reasoning_effort, &compaction_buffer);
+        input.completeCreation(std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?, binding.model.slice(), saved_effort, snapshot.defaults.permission_mode, &compaction_buffer);
         if (!input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);

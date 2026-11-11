@@ -456,6 +456,20 @@ def preference_edits(home, store):
     assert defaults(home, "--notifications", "on")["notifications"] is True
     assert saved.read_text() == pinned
 
+    # Permissions-only edits publish through setup, and inspection reads them.
+    original = saved.read_bytes()
+    for mode in ("ask", "bypass"):
+        changed = defaults(home, "--permission-mode", mode)
+        assert changed["changed"] and changed["permission_mode"] == mode, changed
+        inspected = defaults(home)
+        assert not inspected["changed"] and inspected["permission_mode"] == mode, inspected
+        assert saved.read_text().startswith("version=4\n"), saved.read_text()
+        assert saved.read_text().endswith(f"reasoning_effort=\npermission_mode={mode}\n"), saved.read_text()
+    retained = saved.read_bytes()
+    defaults(home, "--permission-mode", "plan", success=False)
+    assert saved.read_bytes() == retained, "invalid permission mode changed preferences"
+    saved.write_bytes(original)
+
 
 def read_pipe_output(stream, *, count=None, timeout=10):
     """Read one complete line or an exact prefix without consuming later output.
@@ -983,8 +997,10 @@ def saved_capture_cases(state, store, workspace):
     # Recovery must ignore a newly selected, nonexistent preference Store.
     defaults(home, "--store", store)
     preferences = home / ".config/rui/preferences"
+    saved_preferences = preferences.read_bytes()
     preferences.write_text(f"version=1\nstore={state / 'missing-capture-store'}\n")
     assert json.loads(run(home, "request", "recover", handle))["answer"]["replayed"] is True
+    preferences.write_bytes(saved_preferences)
 
     # Rejected creation has no allocated Session. It remains inspectable and
     # recoverable, without hiding another Session's valid recovery handles.
