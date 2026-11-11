@@ -39,7 +39,7 @@ pub fn renderConfigureReply(
     const shapes = protocol.configuration_reply;
     try switch (result) {
         .accepted => |value| if (value.skills) |status| response.appendShape(shapes.accepted_skills, .{ value.replayed, value.session.slice(), value.revision, status }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.revision, value.created }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, value.code }),
+        .rejected => |value| renderToolRejection(response, session, value, shapes.rejected),
         .conflict => response.appendShape(shapes.conflict, .{session}),
         .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
     };
@@ -54,10 +54,23 @@ pub fn renderMessageReply(
     const shapes = protocol.message_reply;
     try switch (result) {
         .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.admission_id, value.content.length, value.content.digest, value.admission_id }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, value.code, value.content.length, value.content.digest }),
+        .rejected => |value| renderToolRejection(response, session, value, shapes.rejected),
         .conflict => response.appendShape(shapes.conflict, .{session}),
         .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
     };
+}
+
+// Rare diagnostic scratch stays off the engine and the ordinary reply frame.
+noinline fn renderToolRejection(response: protocol.JsonOut, session: []const u8, value: anytype, comptime shape: anytype) !void {
+    var buffer: [@import("tool_record.zig").HostToolSet.max_refusal_message_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    const message: ?[]const u8 = if (value.message) |detail| message: {
+        try detail.write(&writer);
+        break :message writer.buffered();
+    } else null;
+    if (comptime @hasField(@TypeOf(value), "content")) {
+        try response.appendShape(shape, .{ value.replayed, session, value.code, message, value.content.length, value.content.digest });
+    } else try response.appendShape(shape, .{ value.replayed, session, value.code, message });
 }
 
 pub fn renderConversationPage(response: protocol.JsonOut, page: *const command_reply.PublicConversationPage) !void {
@@ -311,17 +324,28 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         }
     };
 
-    try std.testing.expectEqual(protocol.configuration_reply.max_bytes, try Worst.reply(renderConfigureReply, @as([]const u8, &escaped_session), .{
-        command_reply.ConfigureReply{ .accepted = .{ .replayed = false, .revision = max, .created = false, .session = session, .skills = .unchanged } },
-        command_reply.ConfigureReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.ConfigurationRejection) } },
-        command_reply.ConfigureReply.conflict,
-    }));
+    // The semantic diagnostic only contains valid names. Exercise the
+    // string hole's arbitrary-escaping bound separately from the other arms.
+    const message_expansion = protocol.Hole.maxBytes(.{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }) - "null".len;
+    try std.testing.expectEqual(protocol.configuration_reply.max_bytes, @max(
+        try Worst.reply(renderConfigureReply, @as([]const u8, &escaped_session), .{
+            command_reply.ConfigureReply{ .accepted = .{ .replayed = false, .revision = max, .created = false, .session = session, .skills = .unchanged } },
+            command_reply.ConfigureReply.conflict,
+        }),
+        try Worst.reply(renderConfigureReply, @as([]const u8, &escaped_session), .{
+            command_reply.ConfigureReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.ConfigurationRejection) } },
+        }) + message_expansion,
+    ));
 
-    try std.testing.expectEqual(protocol.message_reply.max_bytes, try Worst.reply(renderMessageReply, @as([]const u8, &escaped_session), .{
-        command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = content, .session = session } },
-        command_reply.MessageReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.MessageRejection), .content = content } },
-        command_reply.MessageReply.conflict,
-    }));
+    try std.testing.expectEqual(protocol.message_reply.max_bytes, @max(
+        try Worst.reply(renderMessageReply, @as([]const u8, &escaped_session), .{
+            command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = content, .session = session } },
+            command_reply.MessageReply.conflict,
+        }),
+        try Worst.reply(renderMessageReply, @as([]const u8, &escaped_session), .{
+            command_reply.MessageReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.MessageRejection), .content = content } },
+        }) + message_expansion,
+    ));
 
     try std.testing.expectEqual(protocol.session_stop_reply.max_bytes, try Worst.reply(renderSessionStopReply, @as([]const u8, &escaped_session), .{
         command_reply.SessionStopReply{ .accepted = .{ .replayed = false, .selection = .{ .selected_turn_id = max, .admission_cutoff = max }, .completion = Worst.tag(protocol.SessionStopCompletion) } },

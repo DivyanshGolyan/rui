@@ -79,8 +79,22 @@ fn defaultProvider(routes: provider_route.Routes) ?provider_name.Provider {
 fn toolsRejection(host_tool_set: *const tool_defs.HostToolSet, provider: provider_name.Provider, tools: *const command_input.ToolsField) ?configuration_admission.Rejection {
     var names = tools.iterator();
     while (names.next()) |name| {
-        const index = host_tool_set.find(name) orelse return .unknown_tool;
+        const index = switch (host_tool_set.resolve(name)) {
+            .found => |index| index,
+            .unknown_tool => return .unknown_tool,
+            .mcp_server_unavailable => return .mcp_server_unavailable,
+        };
         if (host_tool_set.records[index].owner == .provider and !provider.runsTool(name)) return .provider_tool_missing;
+    }
+    return null;
+}
+
+/// Rejection codes are durable; this advisory detail describes the current
+/// Host's launch-only MCP configuration, also on replay. No Store read is needed.
+pub fn missingToolMessage(host_tool_set: *const tool_defs.HostToolSet, tools: *const command_input.ToolsField) ?tool_defs.HostToolSet.MissingTool {
+    var names = tools.iterator();
+    while (names.next()) |name| {
+        if (host_tool_set.resolve(name) != .found) return host_tool_set.missingTool(name);
     }
     return null;
 }
@@ -556,14 +570,16 @@ fn prepareParent(a: anytype, reference: []const u8, reads: *ConfigurationReads) 
 
 /// Consumes the parent read from the existing first round, without a query or
 /// a second path-sized configuration. Nothing is silently intersected.
-pub fn inheritParent(configuration: *const content_custody.Configuration, reads: *ConfigurationReads) !?configuration_admission.Rejection {
+pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) !?configuration_admission.Rejection {
     if (!reads.inherits_parent) return null;
     if (!reads.parent_found.get()) return .unknown_session;
     if (reads.parent_checked) return if (reads.parent_failure) |failure| failure.code else null;
-    reads.parent_checked = true;
     const failure: ?ParentFailure = refusal: {
         if (configuration.workspace.state != .omitted) break :refusal .{ .code = .parent_workspace_forbidden };
         if (configuration.provider.state != .omitted) break :refusal .{ .code = .parent_provider_forbidden };
+        // Missing tool names keep the same refusal at both child doors,
+        // before narrowing known tools against the parent's saved selection.
+        if (toolsRejection(host_tool_set, reads.inherited.provider, &configuration.tools)) |code| return code;
         var requested = configuration.tools.iterator();
         while (requested.next()) |name| {
             var allowed = std.mem.splitScalar(u8, reads.inherited.tools.slice(), ',');
@@ -576,6 +592,7 @@ pub fn inheritParent(configuration: *const content_custody.Configuration, reads:
             break :refusal .{ .code = .permission_mode_wider_than_parent };
         break :refusal null;
     };
+    reads.parent_checked = true;
     reads.parent_failure = failure;
     if (failure) |refused| return refused.code;
     reads.next.provider = reads.inherited.provider;
@@ -958,7 +975,7 @@ pub fn validateConfiguration(
     if (reads.found.get()) try checkSaved(next);
     const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
     if (!creating and configuration.parent.state != .omitted) return .{ .rejected = .parent_on_update };
-    if (creating) if (try inheritParent(configuration, reads)) |code| return .{ .rejected = code };
+    if (creating) if (try inheritParent(a.store.hostTools().host_tool_set, configuration, reads)) |code| return .{ .rejected = code };
     const default_provider = if (reads.inherits_parent) reads.next.provider else defaultProvider(a.store.served);
     var selected: model_facts.Model = .{};
     selected.read(a, if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice());
