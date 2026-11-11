@@ -157,6 +157,19 @@ class FramesTest(unittest.TestCase):
         self.assertEqual(default["sizes"], [(140, 40), (46, 30)])
         self.assertGreater(len(default["states"]), 25)
 
+    def test_default_frames_use_plain_endings_and_active_tool_marks(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        for name, words in (("stopped", "■ Stopped"),
+                            ("chat-failed", "× Model reply unreadable")):
+            with self.subTest(state=name):
+                self.assertEqual(states[name]["steps"], [{"wait": words}])
+                self.assertEqual(states[name]["expect"], [words])
+        self.assertEqual(states["start-busy"]["steps"][-1], {"wait": "⠹ 2"})
+        self.assertEqual(states["start-busy"]["expect"], ["⠹ 2"])
+        self.assertEqual(states["tools-running"]["expect"],
+                         ["⠹ Build the docs", "Run the slow tests", "ctrl+x stop"])
+
     def test_cumulative_cast_and_counted_labels(self):
         data = self.scenario()
         data["states"][1]["cast"].append({"label": "Batch {n}", "count": 3, "workspace": "code/batch",
