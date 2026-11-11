@@ -591,7 +591,7 @@ test "list rows share every mark and script with the chat heading table" {
             const caps: overview.Caps = .{ .unicode = unicode_script };
             try std.testing.expect(!overview.markSpins(&state, .{ .row = 0 }, caps));
             const row = try overview.rowSegments(arena.allocator(), &state, 0, 80, caps, 4);
-            try std.testing.expectEqualStrings("  ", row[0].text);
+            try std.testing.expectEqualStrings(" ", row[0].text);
             try std.testing.expectEqualStrings(if (unicode_script) shared.unicode else shared.ascii, row[1].text);
             // List colours remain their own policy, including idle and finished.
             try std.testing.expectEqual(case.colour, row[1].style.colour);

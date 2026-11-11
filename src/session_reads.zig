@@ -643,7 +643,8 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         // an Admission visible without adding another Activity row.
         const pending = item.value == .admission and item.value.admission.state == .queued;
         var row: RenderedRow = .{ .key = key, .offset = offset, .length = 0, .tight = false, .provisional = pending };
-        const open = if (toggled != null and toggled.?.key.order(key) == .eq) toggled.?.open else job.opened.has(key);
+        if (toggled != null and toggled.?.key.order(key) != .eq) continue;
+        const open = if (toggled) |one| one.open else job.opened.has(key);
         var capture: RowCapture = .{ .task = task, .file = job.files.inspection, .start = offset, .row = &row, .cap_target = switch (item.value) {
             .assistant => |answer| .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .row = false, .content = answer.content },
             else => null,
@@ -698,12 +699,21 @@ fn latestEnding(requests: client.Requests, job: *Job, end: u64) !void {
 }
 
 /// Ctrl-O on a tool row: that one row again, with its output shown or hidden.
+/// A cursor's ordinal must name a row the Host holds, and the row before
+/// this one is not known here, so the read starts at the boundary before
+/// the row's position and pages forward to it. Only that row is rendered.
 pub fn tool(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const key = job.target.?.tool.key;
-    job.feed_page = .{ .direction = .forward, .kinds = .visible, .limit = 1, .started_from = key, .from = key, .replace_from = key };
-    try scan(raw, task);
-    if (job.result.row_count != 1 or job.result.rows[0].key.order(key) != .eq) return error.ToolRowMissing;
+    var from: Key = .{ .position = key.position - 1, .ordinal = std.math.maxInt(u64) };
+    while (true) {
+        job.feed_page = .{ .direction = .forward, .kinds = .visible, .started_from = from, .from = from };
+        try scan(raw, task);
+        if (job.result.row_count == 1) return;
+        const reached = job.result.high orelse return error.ToolRowMissing;
+        if (job.result.at_end or reached.order(key) != .lt) return error.ToolRowMissing;
+        from = reached;
+    }
 }
 
 /// The submission the UI shows under a page.

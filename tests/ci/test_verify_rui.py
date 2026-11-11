@@ -203,8 +203,8 @@ class FramesTest(unittest.TestCase):
     def test_busy_frame_waits_for_work_text_not_a_rotating_spinner(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         state = next(state for state in scenario["states"] if state["name"] == "start-busy")
-        self.assertIn({"wait": "Run the slow tests"}, state["steps"])
-        self.assertEqual(state["expect"], ["Docs build", "Run the slow tests"])
+        self.assertIn({"wait": "Docs build"}, state["steps"])
+        self.assertEqual(state["expect"], ["Docs build", "Benchmark idle memory", "Settings"])
 
     def test_default_frames_use_plain_endings_and_active_tool_marks(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
