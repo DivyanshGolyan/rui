@@ -739,6 +739,11 @@ class ReleaseFlowTest(unittest.TestCase):
                       'mv .amp/previous-release "$RUNNER_TEMP/previous-release"',
                       'uses: actions/cache/restore@'):
             self.assertLess(body.index(setup), checks, setup)
+        # Zig 0.17.1 misses a restored cache until its inputs are restatted, and
+        # setup's restat ran before the restore, over the candidate's caches only.
+        restat = '"$RUNNER_TEMP/zig-cache-restat" "$previous/.zig-cache/h"'
+        self.assertLess(body.index('uses: actions/cache/restore@'), body.index(restat))
+        self.assertLess(body.index(restat), checks)
 
 
     def test_candidate_jobs_are_read_only_and_cache_proof_adds_macos_in_promotion(self):
