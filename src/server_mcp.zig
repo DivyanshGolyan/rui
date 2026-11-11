@@ -247,7 +247,7 @@ fn cancel(host: *Host, active: *Active) void {
     var buffer: [@max(text.stop_unknown.len, text.stop_not_sent.len)]u8 = undefined;
     var out: std.Io.Writer = .fixed(&buffer);
     // The only possible stop texts both fit this exactly derived buffer.
-    const code = @import("mcp/result_text.zig").render(&out, .{ .server_name = "", .ended = .{ .stopped = sent } }) catch unreachable;
+    const code = @import("mcp/result_text.zig").write(&out, .{ .server_name = "", .ended = .{ .stopped = sent } }) catch unreachable;
     settle(host, active.binding, switch (code) {
         .cancelled => .cancelled,
         .indeterminate => .indeterminate,

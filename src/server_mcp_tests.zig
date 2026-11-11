@@ -34,14 +34,7 @@ const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
 const reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"page payload\"}]}}");
 const arguments = "{\"q\":\"first\",\"rui_call_description\":\"Read docs\",\"unexpected\":\"must not leave Host\"}";
 const second_arguments = "{\"q\":\"second\",\"rui_call_description\":\"Read next\"}";
-const oversized_text = blk: {
-    var bytes: [16 * 1024 + 65]u8 = @splat('x');
-    @memcpy(bytes[@import("bash.zig").excerpt_bytes - 1 ..][0..2], "é");
-    @memcpy(bytes[16383..][0..4], "😀");
-    break :blk bytes;
-};
-const oversized_reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"" ++ oversized_text ++ "\"}]}}");
-const Case = enum { success, oversized, serial, timeout, down, stop, stop_unsent, shutdown, concurrent };
+const Case = enum { success, serial, timeout, down, stop, stop_unsent, shutdown, concurrent };
 
 test "Host MCP forwards schema-only arguments and metadata into a historical continuation" {
     try run(.success);

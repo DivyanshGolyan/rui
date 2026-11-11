@@ -290,6 +290,14 @@ test "Running deadline cancels a sent call and the holding peer observes close" 
 
 test "Running oversized JSON and SSE answers retain evidence and release the call" {
     const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [@import("../protocol.zig").max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    var entries: [1]output_retention.Entry = @splat(.{});
+    var queue = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = max_answer_bytes + 1024 }, &entries);
+    defer queue.cleanupAll();
     const running = try gpa.create(Running);
     defer gpa.destroy(running);
     const response = try gpa.alloc(u8, max_answer_bytes + 1024);
@@ -311,13 +319,24 @@ test "Running oversized JSON and SSE answers retain evidence and release the cal
             var script: Script = .{ .reply = wire.buffered() };
             try script.start();
             defer script.stop();
-            try running.start(gpa, testInput(script.port), 0);
+            var input = testInput(script.port);
+            input.retention = .{ .queue = &queue, .action_id = 17, .attempt_ordinal = 1 };
+            try running.start(gpa, input, 0);
             defer running.deinit();
             var out: std.Io.Writer.Allocating = .init(gpa);
             defer out.deinit();
             try std.testing.expectEqual(case.code, try drive(running, &out.writer));
             try std.testing.expect(std.mem.indexOf(u8, out.written(), "4194304-byte limit") != null);
             try std.testing.expect(std.mem.indexOf(u8, out.written(), case.prefix) != null);
+            try std.testing.expect(std.mem.indexOf(u8, out.written(), "Full output: ") != null);
+            const saved = try tmp.dir.readFileAlloc(std.testing.io, "mcp-output-17-1.tmp", gpa, .limited(max_answer_bytes + 1024));
+            defer gpa.free(saved);
+            const prefix_start = std.mem.indexOf(u8, saved, case.prefix).?;
+            try std.testing.expectEqualStrings(out.written()[0..result_text.excerpt_bytes], saved[0..result_text.excerpt_bytes]);
+            try std.testing.expectEqual(@as(usize, max_answer_bytes), saved.len - prefix_start);
+            try std.testing.expectEqual(@as(u64, saved.len), used.load(.acquire));
+            queue.cleanupAll();
+            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
             try std.testing.expectEqual(@as(usize, 0), running.answer.len);
             try std.testing.expectEqual(@as(std.posix.fd_t, -1), running.fd());
         }
@@ -384,7 +403,7 @@ test "Running retains only omitted rendered MCP answers and preserves the excerp
         };
         defer gpa.free(body);
         const full = switch (case.kind) {
-            .text, .refused => try std.fmt.allocPrint(gpa, "{s}{s}", .{ if (case.kind == .refused) "The MCP server answered HTTP 502: " else "", payload }),
+            .text, .refused => try std.fmt.allocPrint(gpa, "{s}{s}", .{ if (case.kind == .refused) "Outcome unknown: The MCP server answered HTTP 502. The call may or may not have run; it was not retried.\n" else "", payload }),
             .mixed_error => try std.fmt.allocPrint(gpa, "The tool reported an error:\n{s}\n{{\"type\":\"image\",\"data\":\"x\"}}", .{payload}),
             .structured => try std.fmt.allocPrint(gpa, "{{\"data\":\"{s}\"}}", .{payload}),
             .rpc_error => try std.fmt.allocPrint(gpa, "The MCP server returned error -1: {s}", .{payload}),
@@ -403,6 +422,7 @@ test "Running retains only omitted rendered MCP answers and preserves the excerp
         defer out.deinit();
         const expected_code: result_text.Code = switch (case.kind) {
             .text, .structured => .succeeded,
+            .refused => .indeterminate,
             else => .failed,
         };
         try std.testing.expectEqual(expected_code, try drive(running, &out.writer));
