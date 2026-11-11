@@ -174,7 +174,10 @@ def activity_case():
             os.write(master, b"HOLD-QUESTION\r")
             release.set()
             running = chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
-            tail = tail_rows(running)
+            # The activity block is the feed's final entry, directly after
+            # the person's row; no blank separator owns a separate tail pane.
+            tail = rows(running)[BOTTOM - 1:BOTTOM]
+            assert [line for line in rows(running)[:BOTTOM] if line.startswith(("⠹", "◌"))] == tail, running
             assert tail == [tail[-1]] and tail[-1].startswith("⠹ Held call · "), running
             assert rows(running)[BOTTOM - 1].startswith("⠹ Held call · ") and not rows(running)[BOTTOM].strip(), running
             assert tail[-1].removeprefix("⠹ Held call · ").rstrip("s").isdigit(), running
@@ -187,7 +190,8 @@ def activity_case():
                 count = f"{index + 1} · " if index else ""
                 waiting = chrome.frame(master, b"", lambda screen, count=count, index=index:
                     f"◌ {count}WAITING-{index}" in screen and composing(screen, ""))
-            tail = tail_rows(waiting)
+            tail = rows(waiting)[BOTTOM - 2:BOTTOM]
+            assert [line for line in rows(waiting)[:BOTTOM] if line.startswith(("⠹", "◌"))] == tail, waiting
             assert tail[-2].startswith("⠹ Held call · ") and tail[-1] == "◌ 3 · WAITING-2", waiting
             assert rows(waiting)[BOTTOM - 1] == "◌ 3 · WAITING-2" and not rows(waiting)[BOTTOM].strip(), waiting
             assert "second line" not in waiting and "queued" not in waiting.lower(), waiting
