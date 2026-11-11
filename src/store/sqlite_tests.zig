@@ -705,6 +705,32 @@ test "a full queue takes an engine pass and the round still counts once" {
     try a.abandon(.{});
 }
 
+test "a settlement's queue holds sixteen statements a pass, twice a write's" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.settlement, error{TestingGuard}) = undefined;
+    a.init(&entry);
+    defer a.deinit();
+    // A row and fifteen chunks fill one pass; a write's queue takes two.
+    const text = "sixteen in a row";
+    const digest = protocol.contentDigest(text);
+    const id = try a.identity(.content_id);
+    a.write(TestingRound.insert_content, .{ .content_id = id, .digest = digest, .length = text.len });
+    for (0..15) |index| a.writeContent(id, text[index..][0..1]);
+    try a.run();
+    try std.testing.expectEqual(1, a.passes);
+    a.writeContent(id, text[15..]);
+    for (0..16) |_| a.writeContent(id, "");
+    try a.run();
+    try std.testing.expectEqual(3, a.passes);
+    try a.abandon(.{});
+}
+
 test "a guard that fails in an engine pass fails the next run, and nothing after it steps" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
