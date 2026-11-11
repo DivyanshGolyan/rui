@@ -79,8 +79,6 @@ pub const max_requests = 8;
 pub const list_interval_ms = 1000;
 /// How long each frame of the spinner shows: one turn in two seconds.
 pub const spin_interval_ms = 200;
-/// How often the shell polls while an Upgrade holds the overview.
-pub const upgrade_poll_ms = 16;
 /// A generated request handle, as `rui request recover` takes it.
 pub const max_handle_bytes = 36;
 
@@ -1240,18 +1238,6 @@ pub const State = struct {
     /// The one rule every Host intent and the shell's lending ask.
     pub fn holdsHost(self: *const State) bool {
         return self.upgrade.held();
-    }
-
-    /// How long the shell may wait for input, in milliseconds, -1 for ever:
-    /// until the next `tick`, every `upgrade_poll_ms` while an Upgrade runs
-    /// or blocks the overview, and while the screen spins no later than
-    /// its next frame. `now_ms` is wall-clock time, as ticks are; `awake_ms`
-    /// is the monotonic clock frames count on.
-    pub fn waitMs(self: *const State, now_ms: u64, awake_ms: u64, spins: bool) i32 {
-        const next: i32 = if (self.upgrade.after == .blocked or self.upgrading()) upgrade_poll_ms else if (self.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
-        if (!spins) return next;
-        const frame: i32 = @intCast(spin_interval_ms - awake_ms % spin_interval_ms);
-        return if (next < 0) frame else @min(next, frame);
     }
 
     fn selectedRow(self: *const State) ?*const Row {
@@ -7392,10 +7378,9 @@ test "every place an Upgrade run can stand decides the hold, Esc and another /up
         defer state.deinit();
         state.upgrade.run = case.run;
         // With nothing left held by an earlier run, the run alone holds
-        // Host intents and keeps the shell polling its worker.
+        // Host intents.
         try std.testing.expectEqual(case.going, state.upgrading());
         try std.testing.expectEqual(case.going, state.holdsHost());
-        try std.testing.expectEqual(case.going, state.waitMs(0, 0, false) == upgrade_poll_ms);
         // Esc is the run's exactly while it can still change nothing.
         const draft = try typeText(&state, "keep me");
         try expectEffects(if (case.escape) &.{.cancel_upgrade} else &.{.clear_draft}, try press(&state, draft, .clear));
@@ -7879,33 +7864,6 @@ test "upgrade holds settle accepted archive restore and stop completions without
             }
         }
     };
-}
-
-test "the overview waits until its next tick, polls while an Upgrade holds it, and wakes for the spinner's next frame" {
-    var state: State = undefined;
-    try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
-    defer state.deinit();
-    state.listing = false;
-    state.next_list_ms = 10_000;
-    try std.testing.expectEqual(@as(i32, 2_500), state.waitMs(7_500, 0, false));
-    // A tick already due waits nothing; one far off is capped, not wrapped.
-    try std.testing.expectEqual(@as(i32, 0), state.waitMs(12_000, 0, false));
-    state.next_list_ms = std.math.maxInt(u64);
-    try std.testing.expectEqual(@as(i32, std.math.maxInt(i32)), state.waitMs(0, 0, false));
-    // A listing in flight wakes the loop only through its answer.
-    state.listing = true;
-    try std.testing.expectEqual(@as(i32, -1), state.waitMs(0, 0, false));
-    // The spinner's next frame on the monotonic clock comes first.
-    try std.testing.expectEqual(@as(i32, spin_interval_ms - 30), state.waitMs(0, 1_030, true));
-    state.listing = false;
-    state.next_list_ms = 10_010;
-    try std.testing.expectEqual(@as(i32, 10), state.waitMs(10_000, 1_030, true));
-    // An Upgrade that runs, or one that left the overview blocked, polls.
-    state.upgrade.run = .checking;
-    try std.testing.expectEqual(@as(i32, upgrade_poll_ms), state.waitMs(0, 0, false));
-    state.upgrade = .{ .after = .blocked };
-    try std.testing.expectEqual(@as(i32, upgrade_poll_ms), state.waitMs(0, 0, false));
-    try std.testing.expectEqual(@as(i32, 10), state.waitMs(0, 190, true));
 }
 
 test "a model list Rui cannot read says so; any other failure is no answer" {
