@@ -350,7 +350,7 @@ def mysql_host_info():
         assert "mysql" not in os.environ.get(live_engines.REQUIRE, "").split(","), "required MySQL host-info fixture has no server"
         print("MySQL host-info: skipped (no RUI_TEST_MYSQL_* server)")
         return
-    admin = pathlib.Path(sys.argv[3]).resolve()
+    admin = pathlib.Path(os.environ["RUI_TEST_MYSQL_ADMIN"]).resolve()
     database = "rui_host_info_" + secrets.token_hex(6)
 
     def sql(text):
