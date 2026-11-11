@@ -47,17 +47,37 @@ pub const start_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     std.fmt.comptimePrint("\"task\":{{\"type\":\"string\",\"description\":\"The agent's first Message: nonempty UTF-8, at most {d} bytes.\"}},", .{message_agent_max_text_bytes}) ++
     "\"attached\":{\"type\":\"boolean\",\"description\":\"true starts your child, which stops with you; false starts a standalone agent.\"}," ++
     "\"preset\":{\"type\":\"string\",\"description\":\"A connect-time preset; spec fields override it.\"}," ++
-    "\"spec\":{\"type\":\"object\",\"properties\":{" ++
-    "\"model\":{\"type\":\"string\"}," ++
-    "\"effort\":{\"type\":[\"string\",\"null\"],\"enum\":[null,\"none\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]}," ++
-    "\"compactAt\":{\"type\":\"integer\",\"description\":\"Tokens of context at which the agent compacts.\"}," ++
-    "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Tool names, each one of yours.\"}," ++
-    "\"permissionMode\":{\"type\":\"string\",\"enum\":[\"ask\",\"bypass\"]}," ++
-    "\"instructions\":{\"type\":\"string\",\"description\":\"Optional agent instructions.\"}," ++
-    "\"outputSchema\":{\"type\":[\"object\",\"null\"],\"description\":\"Optional JSON output schema.\"}," ++
-    "\"label\":{\"type\":[\"string\",\"null\"],\"description\":\"A few words naming the agent's task.\"}" ++
+    "\"spec\":{\"type\":\"object\",\"properties\":{" ++ agent_spec_properties ++
     "},\"additionalProperties\":false}" ++
     "},\"required\":[\"task\",\"attached\"],\"anyOf\":[{\"required\":[\"spec\"]},{\"required\":[\"preset\"]}],\"additionalProperties\":false}";
+
+// The same setting vocabulary and scalar kinds as the native wire. A child
+// inherits provider and Workspace, so those alone are not spec properties.
+const agent_spec_properties = blk: {
+    var properties: []const u8 = "";
+    for (@import("session_settings.zig").entries) |entry| {
+        if (std.mem.eql(u8, entry.field, "workspace") or std.mem.eql(u8, entry.field, "provider")) continue;
+        const kind = switch (entry.kind) {
+            .tools => "array",
+            .decimal_policy => "integer",
+            else => "string",
+        };
+        const json_type = if (entry.nullable) "[\"" ++ kind ++ "\",\"null\"]" else "\"" ++ kind ++ "\"";
+        const extra = switch (entry.kind) {
+            .tools => ",\"items\":{\"type\":\"string\"},\"uniqueItems\":true",
+            else => if (std.mem.eql(u8, entry.field, "reasoning_effort"))
+                ",\"enum\":[null,\"none\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]"
+            else if (std.mem.eql(u8, entry.field, "permission_mode"))
+                ",\"enum\":[\"ask\",\"bypass\"]"
+            else if (std.mem.eql(u8, entry.field, "output_schema"))
+                ",\"description\":\"Optional JSON output schema, encoded as JSON text.\""
+            else
+                "",
+        };
+        properties = properties ++ (if (properties.len == 0) "" else ",") ++ "\"" ++ entry.spec ++ "\":{\"type\":" ++ json_type ++ extra ++ "}";
+    }
+    break :blk properties;
+};
 
 pub const skill_description = "Invoke an advertised skill by name to read its complete raw SKILL.md and absolute path. Reload rescans this Session's repository and Host-home .agents/skills roots, appending only changed catalog entries. Skills are ordinary conversation content, grant no tools or permissions, and execute nothing on load.";
 pub const skill_schema = "{\"type\":\"object\",\"properties\":{\"operation\":{\"type\":\"string\",\"enum\":[\"invoke\",\"reload\"]},\"name\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64}},\"required\":[\"operation\"],\"additionalProperties\":false}";

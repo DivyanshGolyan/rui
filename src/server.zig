@@ -956,7 +956,7 @@ pub fn serve(
         if (err == error.DescriptorCapacityInsufficient) {
             stderr.print(
                 "rui: Host cannot start: descriptor soft limit {d} is below the minimum intake requirement {d} (10 ordinary clients). Rui already tried raising it. Inspect limits with ulimit -Sn and ulimit -Hn; raise the hard limit in your system/session settings (ask your administrator if needed), then retry rui host start.\n",
-                .{ descriptor_observation.soft_limit.?, descriptor_requirement.total - 4 * (product_defaults.intake_capacity - descriptor_capacity.minimum_intake) },
+                .{ descriptor_observation.soft_limit.?, descriptor_requirement.total - descriptor_capacity.ordinary_exchange_descriptors * (product_defaults.intake_capacity - descriptor_capacity.minimum_intake) },
             );
             stderr.print(
                 "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d} (required is for default intake; RLIMIT_NOFILE).\n",
@@ -4358,7 +4358,7 @@ test "presets seed configure before Store validation and idempotency" {
     defer memory.deinit();
     const arena = memory.allocator();
     const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
-        \\{"model":"gpt-6.1-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","provider":"openai","instructions":"Preset instructions","outputSchema":{"type":"object"},"label":"Preset label"}
+        \\{"model":"gpt-6.1-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","provider":"openai","instructions":"Preset instructions","outputSchema":"{\"type\":\"object\"}","label":"Preset label"}
     , .{})).object;
     const presets = [_]core_tools.Preset{.{ .name = "review", .spec = spec }};
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .presets = &presets };
@@ -4433,7 +4433,7 @@ test "presets seed configure before Store validation and idempotency" {
     // An edited preset is not saved or looked up by name in the Store. A
     // request overriding its edited field still has the same resolved digest.
     const edited_spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
-        \\{"model":"gpt-6-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","provider":"openai","instructions":"Preset instructions","outputSchema":{"type":"object"},"label":"Preset label"}
+        \\{"model":"gpt-6-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","provider":"openai","instructions":"Preset instructions","outputSchema":"{\"type\":\"object\"}","label":"Preset label"}
     , .{})).object;
     const edited_presets = [_]core_tools.Preset{.{ .name = "review", .spec = edited_spec }};
     host.presets = &edited_presets;

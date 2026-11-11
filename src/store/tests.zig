@@ -11684,7 +11684,7 @@ test "core_tools start_agent persists optional borrowed spec content" {
             defer arena.deinit();
             const core_tools = @import("../core_tools.zig");
             const start = try arena.allocator().create(core_tools.StartAgent);
-            const result = try core_tools.checkStartAgent(arena.allocator(), "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"model-a\",\"effort\":null,\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\",\"instructions\":\"Persist these instructions\",\"outputSchema\":{\"type\":\"object\"}}}", start);
+            const result = try core_tools.checkStartAgent(arena.allocator(), "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"model-a\",\"effort\":null,\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\",\"instructions\":\"Persist these instructions\",\"outputSchema\":\"{\\\"type\\\":\\\"object\\\"}\"}}", start);
             try std.testing.expect(result == .accepted);
             const Capture = struct {
                 child: protocol.Bounded(protocol.session_id_bytes) = .{},

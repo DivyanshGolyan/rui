@@ -162,6 +162,11 @@ A supplied `--session ID` selects only an existing canonical ID.
 Unknown IDs reject as `unknown_session`, presented as `no session k7m2qx in this Store`, without creating a Session or admitting Message work.
 Noncanonical references, including old UUID and NUL-bearing references, reject rather than normalize.
 
+Configure, creating Messages, `start_agent` and connect-time presets use one plain camelCase agent spec: `workspace`, `provider`, `model`, `instructions`, `tools`, `loadedTools`, `permissionMode`, `outputSchema`, `compactAt`, `outputReservation`, `effort` and `label`.
+An absent member keeps the current value or creation default; `null` clears a nullable setting; a direct value sets it.
+Token policies are JSON integers and tool lists normalize into byte order with no duplicate names.
+`instructions` and `outputSchema` are strings; the latter holds JSON text, not an embedded schema object.
+Ingress streams these strings to sealed content files rather than retaining their bodies in metadata.
 A creation configuration requires an exact nonempty model, explicit effort, a token-count `compactAt`, a tools list and Permission Mode (D104, D111, D113).
 A missing required field is a missing-field request error; an empty tools list means no tools and has no Host default.
 The agent spec also accepts instructions, output schema and label; provider defaults to the Host's single served provider, and a Host serving several has no default, so a creation must name one (D133, D221).
@@ -247,6 +252,7 @@ Scalar observations suffice; batching is optional, and reads or waits cannot req
 Before transmission, direct clients durably retain the destination Store, operation, exact key and captured inputs.
 Immutable retained content references may replace inline payloads; mutable paths or digests alone cannot.
 Retry helpers reuse that record, not a new token.
+Recovery refuses a record from another wire version before returning a transmissible captured owner, names the incompatibility, and leaves the original record and key available to a compatible build.
 In-memory retention supports recovery only while the client survives.
 Recover an uncertain reply by identity, not by guessing from content.
 
@@ -1277,12 +1283,12 @@ A strict `loaded_tools` subset must include `find_tools`; NULL in the saved load
 Newly loaded definitions join the next request as `additional_tools`; a call to an unloaded tool still settles as `unknown_tool`.
 `read_transcript(id?, kinds?, before?, limit?, query?, full?, offset?)` reads any Session's public activity feed, defaulting to the caller, and resolves only its call: newest-first outlines page up to 16 entries, and `full` opens one entry in UTF-8-aligned 16 KiB windows.
 It uses the public activity visibility and provenance rules, never private provider material; invalid arguments, unknown Sessions and missing entries resolve failed when the core runs the call, not at settlement.
-`start_agent(task, attached, spec)` creates a Session configured by the full agent `spec` (model, effort, token-count compaction threshold, tools, Permission Mode, instructions, output schema and label) in the caller's Workspace with its provider, admits `task` to it as its first Message from the caller under the key `rui.core/start_agent/<action>`, and resolves the call `Started ID.`, all in one transaction; an attached agent records the caller as its parent.
+`start_agent(task, attached, spec)` creates a Session configured by the full agent `spec` (model, effort, token-count compaction threshold, tools, initially loaded tools, Permission Mode, output reservation, instructions, output schema and label) in the caller's Workspace with its provider, admits `task` to it as its first Message from the caller under the key `rui.core/start_agent/<action>`, and resolves the call `Started ID.`, all in one transaction; an attached agent records the caller as its parent.
 Every refused `start_agent` spec fails the tool call and starts nothing, including a missing required field, a named provider or Workspace, unsupported effort or an excessive known-window compaction threshold (D140, D165, D166, D221).
 A spec that widens the caller's tools or asks for `bypass` under a caller that asks resolves the call failed with a result naming the field; the Host checks the arguments when it runs the call, not at admission.
 The agent's Bash starts from the caller's client environment, installed as the task commits.
 A core tool acts only on the Store, so admission authorizes its call at once under either Permission Mode, and a stop cancels it like any other unattempted Action.
-Removed `edit`, duplicates, other orders and alternate spellings reject rather than aliasing another selection.
+Removed `edit`, duplicate names and alternate spellings reject rather than aliasing another selection.
 Classify proposed Tool Calls against the proposing model Operation's frozen Tool Catalog, not the latest Session configuration.
 Removing Bash while that model request runs changes future model requests, not the applicability of its Bash proposal.
 A later Operation that was not offered Bash can still contain a trustworthy Bash call envelope, but classification saves its rejection result and creates no Action.
@@ -2064,7 +2070,7 @@ It does not probe existence, inherit the configuring agent's settings or apply c
 A later send failure does not undo accepted configuration.
 
 `session start` captures one Message mutation with fresh-Session configuration and an empty requested Session ID.
-Initial configuration accepts scalar settings but no instruction or schema content values, preserving the existing ingress content and descriptor bounds.
+Initial configuration accepts the same agent spec and streamed instruction and schema content as Configure; with Message text, one request carries at most three sealed content values.
 Inside one Store transaction, it validates the sender and configuration, allocates an ID through the same collision-safe allocator as configure, and admits the first Message to that new ID.
 Its successful stdout is the same JSON mutation receipt as `session send`, with the allocated six-character ID in `.context.session` and the request handle in `.context.key`, followed by newline: admission rather than execution or completion.
 Only the accepted `session start` receipt adds `configuration` immediately after `context`, containing the resolved `provider`, `model`, effective `reasoning_effort` and `effort_source`.
@@ -3521,8 +3527,8 @@ Every valid short control and its complete semantic response fit a field-derived
 Reject oversized discovery before body parsing, and route/kind disagreement as soon as `kind` is read, which is before any content capture when `kind` precedes the content.
 A request's object members may come in any order, as JSON allows, so clients generated from `openapi.json` in any language can build bodies (D212).
 Each member appears at most once, required members must all be present, and unknown members fail.
-The parser takes two passes over the metadata it has so far: the first reads `version`, `kind` and `store` wherever they sit and counts content strings as they arrive (a Message's `text` value, a configure command's `instructions` and `output_schema` values), and the second fills the command, so each content value takes the capture its string arrived in.
-Once `kind` is known, content the kind cannot carry fails before capture; before that, at most two strings are captured, and a third fails.
+The parser takes two passes over the metadata it has so far: the first reads `version`, `kind` and `store` wherever they sit and counts content strings as they arrive (`instructions` and `outputSchema` in either spec, plus a Message's `text` value), and the second fills the command, so each content value takes the capture its string arrived in.
+Once `kind` is known, content the kind cannot carry fails before capture; before that, at most three strings are captured, and a fourth fails.
 Discovery keeps one acceptance-derived ten-second absolute deadline across headers, body and all reply/error writes.
 Progress cannot renew it.
 Mutation-response waiting and transfer inactivity follow [the client transport contract](#client-transport-and-observations).
@@ -4062,22 +4068,22 @@ Before Store ownership or readiness, the Host observes inherited descriptors and
 Linux enumerates `/proc/self/fd`, or checks the bounded range with `F_GETFD` when procfs is unavailable and the limit is finite.
 An unlimited Linux limit requires procfs; macOS enumerates `/dev/fd`.
 
-For configured Active Capacity \(C\), the supported-burst requirement is \(I + F + T + 403 + 2 + E(C) + A(C)\):
+For configured Active Capacity \(C\), the supported-burst requirement is \(I + F + T + 503 + 2 + E(C) + A(C)\):
 
 | Term | Descriptor requirement |
 | --- | --- |
 | \(I\) | Inherited open descriptors. |
 | \(F\) | 7 for Store lease, database, journal, temporary storage, directory sync and listener ownership. |
-| \(T\) | 0 without transport; the HTTP/2 Client's waker: 1 Linux eventfd or a 2-descriptor macOS pipe; plus 1 socket for the OpenAI key's model list stream when \(C>0\). |
-| 403 | 100 ordinary exchanges at four descriptors each, plus two controls and one discovery socket. Default mode treats these as workload populations, not admission quotas. |
+| \(T\) | The HTTP/2 Client's waker: 1 Linux eventfd or a 2-descriptor macOS pipe; plus 1 catalog socket and, when configured, 1 OpenAI key model-list socket. |
+| 503 | 100 ordinary exchanges at five descriptors each, plus two controls and one discovery socket. Default mode treats these as workload populations, not admission quotas. |
 | 2 | Intake wake socket pair. |
 | \(E(C)\) | 0 when \(C=0\); otherwise \(5C+5\). |
 | \(A(C)\) | 0 without managed authentication or execution places; otherwise 6 on Linux or 7 on macOS for the independent authentication worker. |
 
-With three inherited descriptors, a default managed Host (\(C=100\), Codex transport and authentication) needs 927 descriptors on Linux and 929 on macOS for full intake, and 360 fewer for ten-client intake.
-A typical Linux 1024/1024 session fits without a raise. macOS's default soft limit of 256 fits after the Host raises its own soft limit, provided the hard limit and OS per-process ceiling cover the full requirement; a lower ceiling reduces intake, never Active Capacity, and a hard limit of 256 refuses startup.
+With three inherited descriptors, a default managed Host (\(C=100\), Codex transport and authentication) needs 1028 descriptors on Linux and 1030 on macOS for full intake, and 450 fewer for ten-client intake.
+A Linux 1024/1024 session fits 99 ordinary clients without a raise. macOS's default soft limit of 256 fits after the Host raises its own soft limit, provided the hard limit and OS per-process ceiling cover the full requirement; a lower ceiling reduces intake, never Active Capacity, and a hard limit of 256 refuses startup.
 
-An ordinary exchange peaks at a socket, one sealed content file, and overlapping writer/read-only handles for the second value.
+An ordinary exchange peaks at a socket, two sealed content files, and overlapping writer/read-only handles for the third value in a creating Message.
 Absolute POSIX opens use `AT_FDCWD` without a directory descriptor.
 
 A model slot budgets one request file, two response aliases and one socket: the HTTP/2 Client tries addresses one socket at a time and never holds more connections than streams.
@@ -4086,7 +4092,7 @@ These are exclusive cases of at most five descriptors, not additive pools; the B
 The five serial excess descriptors cover preparation (including both stdin aliases and their directory), trust loading, cleanup or Bash spawn.
 Spawn retains two child output pipe ends and the stdin read-only alias until `posix_spawn` returns; absent stdin opens `/dev/null` in the child.
 Authentication headroom is separate because its worker can overlap those transitions.
-The existing descriptor maximum is unchanged.
+Execution descriptor headroom is unchanged; creating-Message spec content raises only the ordinary-exchange population.
 
 Host availability takes priority over concurrent intake throughput.
 Before Store ownership, startup raises a low soft `RLIMIT_NOFILE` toward this requirement without raising the hard limit; macOS also caps the request by `kern.maxfilesperproc` and `OPEN_MAX`, never `RLIM_INFINITY`.

@@ -1414,7 +1414,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     var reader = std.json.Reader.init(fixed.allocator(), &file_reader.interface);
     defer reader.deinit();
     const fields = std.json.parseFromTokenSourceLeaky(Fields, fixed.allocator(), &reader, .{ .allocate = .alloc_if_needed, .max_value_len = protocol.max_store_bytes }) catch return file_reader.err orelse error.InvalidRequestRecord;
-    if (!fields.version.eql(protocol.wire_version)) return error.InvalidRequestRecord;
+    if (!fields.version.eql(protocol.wire_version)) return error.SavedRequestWireVersionMismatch;
     const kind = std.meta.stringToEnum(protocol.CommandKind, fields.kind.slice()) orelse return error.InvalidRequestRecord;
     var saved: protocol_reply.MutationIdentity = .{ .store = fields.store.value, .key = fields.key.value, .kind = kind };
     if (kind == .model_interruption) {
@@ -1777,61 +1777,41 @@ const Capture = struct {
         try self.writeRequest(protocol.permission_decision_request, .{ store, key, input.session, input.action_id, input.decision });
     }
 
-    fn writeOptionalPolicy(self: *Capture, value: OptionalPolicy) !void {
-        if (!value.present) return self.write("{\"state\":\"omitted\"}");
-        const text = value.value orelse return self.write("{\"state\":\"null\"}");
-        try self.writeOptionalText(.{ .present = true, .value = text });
-    }
-
-    fn writeOptionalText(self: *Capture, value: OptionalText) !void {
-        if (!value.present) return self.write("{\"state\":\"omitted\"}");
-        try self.write("{\"state\":\"value\",\"value\":");
-        try self.writeJsonString(value.value);
-        try self.write("}");
-    }
-
-    fn writeOptionalFile(self: *Capture, value: OptionalFile, allow_null: bool) !void {
-        switch (value.state) {
-            .omitted => try self.write("{\"state\":\"omitted\"}"),
-            .explicit_null => {
-                if (!allow_null) return error.NullNotAllowed;
-                try self.write("{\"state\":\"null\"}");
-            },
-            .value => {
-                try self.write("{\"state\":\"value\",\"value\":");
-                try self.writeJsonFile(value.path);
-                try self.write("}");
-            },
-        }
-    }
-
     fn writeConfiguration(self: *Capture, input: ConfigureInput) !void {
-        try self.write("{\"workspace\":");
-        try self.writeOptionalText(input.workspace);
-        try self.write(",\"provider\":");
-        try self.writeOptionalText(input.provider);
-        try self.write(",\"model\":");
-        try self.writeOptionalText(input.model);
-        try self.write(",\"instructions\":");
-        try self.writeOptionalFile(input.instructions, false);
-        try self.write(",\"tools\":");
-        try self.writeTools(input.tools);
-        if (input.loaded_tools != null) {
-            try self.write(",\"loaded_tools\":");
-            try self.writeTools(input.loaded_tools);
+        try self.write("{");
+        var separator: []const u8 = "";
+        inline for (@import("session_settings.zig").entries) |entry| {
+            const value = @field(input, entry.field);
+            const present = switch (entry.kind) {
+                .content => value.state != .omitted,
+                .tools => value != null,
+                else => value.present,
+            };
+            if (present) {
+                try self.write(separator);
+                try self.write("\"" ++ entry.spec ++ "\":");
+                separator = ",";
+                switch (entry.kind) {
+                    .text, .choice => if (comptime entry.nullable) {
+                        if (value.value) |text| try self.writeJsonString(text) else try self.write("null");
+                    } else try self.writeJsonString(value.value),
+                    .content => switch (value.state) {
+                        .omitted => unreachable,
+                        .explicit_null => {
+                            if (!entry.nullable) return error.NullNotAllowed;
+                            try self.write("null");
+                        },
+                        .value => try self.writeJsonFile(value.path),
+                    },
+                    .tools => try self.writeTools(value.?),
+                    .decimal_policy => if (value.value) |text| {
+                        const tokens = try std.fmt.parseInt(u64, text, 10);
+                        var digits: [20]u8 = undefined;
+                        try self.write(try std.fmt.bufPrint(&digits, "{d}", .{tokens}));
+                    } else try self.write("null"),
+                }
+            }
         }
-        try self.write(",\"permission_mode\":");
-        try self.writeOptionalText(input.permission_mode);
-        try self.write(",\"output_schema\":");
-        try self.writeOptionalFile(input.output_schema, true);
-        try self.write(",\"compaction_trigger\":");
-        try self.writeOptionalPolicy(input.compaction_trigger);
-        try self.write(",\"output_reservation\":");
-        try self.writeOptionalPolicy(input.output_reservation);
-        try self.write(",\"reasoning_effort\":");
-        try self.writeOptionalPolicy(input.reasoning_effort);
-        try self.write(",\"label\":");
-        try self.writeOptionalPolicy(input.label);
         try self.write("}");
     }
 
@@ -1876,9 +1856,8 @@ const Capture = struct {
         return err;
     }
 
-    fn writeTools(self: *Capture, tools: ?[]const u8) !void {
-        const value = tools orelse return self.write("{\"state\":\"omitted\"}");
-        try self.write("{\"state\":\"value\",\"value\":[");
+    fn writeTools(self: *Capture, value: []const u8) !void {
+        try self.write("[");
         // A comma list such as `bash,web_search`, each name once, written
         // sorted by bytes as the wire asks; `none` is the empty list. Which
         // names the Host offers is the Host's to check.
@@ -1905,7 +1884,7 @@ const Capture = struct {
                 try self.writeJsonString(name);
             }
         }
-        try self.write("]}");
+        try self.write("]");
     }
 };
 
@@ -2934,7 +2913,7 @@ test "capture creating Messages writes configuration and optional model admissio
         const object = parsed.value.object;
         try std.testing.expectEqualStrings("", object.get("session").?.string);
         try std.testing.expect(object.get("sender").? == .null);
-        try std.testing.expectEqualStrings("custom", object.get("configuration").?.object.get("model").?.object.get("value").?.string);
+        try std.testing.expectEqualStrings("custom", object.get("configuration").?.object.get("model").?.string);
         try std.testing.expectEqualStrings("hello", object.get("text").?.object.get("value").?.string);
         try std.testing.expectEqual(require_model, object.contains("require_model"));
         if (require_model) try std.testing.expect(object.get("require_model").?.bool);
@@ -2978,16 +2957,16 @@ test "capture configure requests a Store allocated Session and retains model adm
         try std.testing.expectEqualStrings("", parsed.value.object.get("session").?.string);
         try std.testing.expect(parsed.value.object.get("require_model").?.bool);
         const settings = parsed.value.object.get("configuration").?.object;
-        try std.testing.expect(settings.contains("reasoning_effort"));
-        const effort = settings.get("reasoning_effort").?.object;
-        try std.testing.expectEqualStrings(if (!case.effort.present) "omitted" else if (case.effort.value == null) "null" else "value", effort.get("state").?.string);
-        if (case.effort.value) |_| try std.testing.expectEqualStrings("high", effort.get("value").?.string);
+        try std.testing.expectEqual(case.effort.present, settings.contains("effort"));
+        if (case.effort.present) {
+            if (case.effort.value) |_| try std.testing.expectEqualStrings("high", settings.get("effort").?.string) else try std.testing.expect(settings.get("effort").? == .null);
+        }
         if (trigger != null) {
-            try std.testing.expectEqualStrings("100000", settings.get("compaction_trigger").?.object.get("value").?.string);
-            try std.testing.expectEqualStrings("16384", settings.get("output_reservation").?.object.get("value").?.string);
+            try std.testing.expectEqual(@as(i64, 100000), settings.get("compactAt").?.integer);
+            try std.testing.expectEqual(@as(i64, 16384), settings.get("outputReservation").?.integer);
         } else {
-            try std.testing.expectEqualStrings("null", settings.get("compaction_trigger").?.object.get("state").?.string);
-            try std.testing.expectEqualStrings("null", settings.get("output_reservation").?.object.get("state").?.string);
+            try std.testing.expect(settings.get("compactAt").? == .null);
+            try std.testing.expect(settings.get("outputReservation").? == .null);
         }
         var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = saved.key.slice() } });
         defer recovered.close(io);
@@ -4708,9 +4687,7 @@ test "capture loaded tools uses the tools comma-list grammar" {
         const length = try captured.file.readPositionalAll(io, &bytes, 0);
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
         defer parsed.deinit();
-        const loaded = parsed.value.object.get("configuration").?.object.get("loaded_tools").?.object;
-        try std.testing.expectEqualStrings("value", loaded.get("state").?.string);
-        const chosen = loaded.get("value").?.array.items;
+        const chosen = parsed.value.object.get("configuration").?.object.get("loadedTools").?.array.items;
         if (std.mem.eql(u8, names, "none")) {
             try std.testing.expectEqual(@as(usize, 0), chosen.len);
         } else {
@@ -4918,4 +4895,16 @@ test "Session settings client writes every setting and the Host parser preserves
     try std.testing.expectEqualStrings("Every setting", configuration.label.value.slice());
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Follow the test instructions."), &configuration.instructions.digest);
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest("{}"), &configuration.output_schema.digest);
+}
+
+test "saved request wire mismatch refuses recovery before returning a captured owner" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const handle = "01234567-89ab-4cde-8012-3456789abcde";
+    try tmp.dir.writeFile(io, .{ .sub_path = handle ++ ".json", .data = "{\"version\":\"" ++ protocol.previous_wire_version ++ "\",\"kind\":\"configure\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"configuration\":{}}" });
+    try std.testing.expectError(error.SavedRequestWireVersionMismatch, openCaptured(io, .{ .generated = .{ .directory = root, .handle = handle } }));
 }

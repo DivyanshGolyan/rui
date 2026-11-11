@@ -22,6 +22,7 @@ import model_fixture as fixture
 import host_process
 from host_process import HeldReplies, HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, hold, retain_failure_state, start_ready_process, stop_process, wait_for
 import os_semantics
+from product_defaults import DEFAULTS
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -576,11 +577,15 @@ def prove_accept_pressure(state):
                    "RUI_ACCEPT_RELEASE": str(backlog_release)}
             # A system shell on macOS can strip DYLD_INSERT_LIBRARIES. Use
             # the selected fixture Python to set this child's limit and exec.
+            # Full intake must remain demand-scaled: reduced intake would
+            # shed sockets before this real EMFILE counterexample can occur.
+            pressure_limit = 1024
             host, ready = start_ready_process([sys.executable, "-c",
-                "import os, resource, sys; resource.setrlimit(resource.RLIMIT_NOFILE, (512, 512)); os.execv(sys.argv[1], sys.argv[1:])",
-                str(RUI), "host", "serve", "--store", str(store), "--active-capacity", "2",
+                "import os, resource, sys; limit=int(sys.argv[1]); resource.setrlimit(resource.RLIMIT_NOFILE, (limit, limit)); os.execv(sys.argv[2], sys.argv[2:])",
+                str(pressure_limit), str(RUI), "host", "serve", "--store", str(store), "--active-capacity", "2",
                 "--provider-endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses"], env=env)
             diagnostics = HostDiagnostics(host)
+            assert int(ready["intake_capacity"]) == DEFAULTS.intake_capacity, ready
             session = configure(root, store, 0)
             if label != "shutdown-mfile":
                 message(root, store, session, 0)
@@ -598,7 +603,7 @@ def prove_accept_pressure(state):
                 arm.touch()
                 pending = connect(ready["socket"])
             else:
-                # Real per-process exhaustion, isolated to this 512-FD Host.
+                # Real per-process exhaustion, isolated to this limited Host.
                 # Incomplete headers require sockets but no content handles.
                 # Hold one real accept so backlog pressure occurs before FD
                 # exhaustion, independently of scheduler load. A failed connect
@@ -607,7 +612,7 @@ def prove_accept_pressure(state):
                 pending = connect(ready["socket"])
                 wait_for(backlog_ready.exists, "held accept before backlog fill", timeout=10)
                 attempts, deadline = 0, time.monotonic() + 10
-                while attempts < 600 and time.monotonic() < deadline:
+                while attempts < pressure_limit + 100 and time.monotonic() < deadline:
                     try:
                         pending = connect(ready["socket"])
                         attempts += 1
@@ -766,11 +771,11 @@ def main():
         fixed_host = os_semantics.HOST_FIXED_DESCRIPTORS
         execution = 5 + 10
         # The supported burst is 100 ordinary exchanges (socket + up to
-        # three content aliases each), two controls and one discovery.
+        # four content aliases each), two controls and one discovery.
         # This preflight is a resource estimate, not a runtime admission cap.
-        clients = 100 * 4 + 3
+        clients = 100 * 5 + 3
         fixed = fixed_host + clients + execution + 0 + 2
-        minimum_required = fixed - clients + 10 * 4 + 3 + 3
+        minimum_required = fixed - clients + 10 * 5 + 3 + 3
         rejected_store = state / "rejected-store"
         rejected = subprocess.run(
             limited_host(
@@ -801,14 +806,14 @@ def main():
         assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
         if fields["inherited"] != 3:
             rejected = subprocess.run(
-                limited_host(required - clients + 10 * 4 + 3 - 1, "host", "serve", "--store", rejected_store,
+                limited_host(required - clients + 10 * 5 + 3 - 1, "host", "serve", "--store", rejected_store,
                     "--active-capacity", "2", "--provider-endpoint",
                     f"http://127.0.0.1:{endpoint.server_port}/responses"),
                 text=True, capture_output=True, timeout=10)
             assert rejected.returncode != 0 and "descriptor capacity insufficient" in rejected.stderr, rejected
             assert not rejected.stdout.startswith("ready "), rejected.stdout
             fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", rejected.stderr)}
-            assert fields == {**expected, "soft_limit": required - clients + 10 * 4 + 3 - 1}, fields
+            assert fields == {**expected, "soft_limit": required - clients + 10 * 5 + 3 - 1}, fields
             assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
 
         store = state / "adequate-store"

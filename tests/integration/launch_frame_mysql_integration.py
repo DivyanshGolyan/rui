@@ -127,7 +127,7 @@ def main():
         locked = launch(dict(good, runtimeDir=str(other)))
         assert frame_host.refusal(locked)["code"] == "store_locked"
         create = {"version": frame_host.WIRE, "kind": "configure", "store": store_id, "key": "mysql-launch-create",
-                  "session": "", "preset": "review", "configuration": {"label": {"state": "null"}}}
+                  "session": "", "preset": "review", "configuration": {"label": None}}
         configured = frame_host.post(sock, "configure", create)
         assert configured["answer"]["status"] == "accepted", configured
         session = configured["answer"]["session"]

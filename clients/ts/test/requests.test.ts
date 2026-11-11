@@ -22,22 +22,12 @@ test("configuration preserves omitted, null and value states and normalizes tool
 	assert.ok(first && second && third);
 	assert.equal(first.version, WIRE_VERSION);
 	assert.deepEqual(first.configuration, {
-		workspace: { state: "omitted" },
-		provider: { state: "omitted" },
-		model: { state: "omitted" },
-		instructions: { state: "omitted" },
-		tools: { state: "value", value: ["bash", "write"] },
-		permission_mode: { state: "omitted" },
-		output_schema: { state: "omitted" },
-		compaction_trigger: { state: "value", value: "0" },
-		output_reservation: { state: "omitted" },
-		reasoning_effort: { state: "null" },
-		label: { state: "value", value: 'a"\nlabel' },
-	});
-	assert.deepEqual(second.configuration.compaction_trigger, { state: "value", value: "2000" });
-	assert.deepEqual(second.configuration.reasoning_effort, { state: "value", value: "none" });
-	assert.deepEqual(second.configuration.label, { state: "null" });
-	for (const field of Object.values(third.configuration)) assert.deepEqual(field, { state: "omitted" });
+        tools: ["bash", "write"], compactAt: 0, effort: null, label: 'a"\nlabel',
+    });
+    assert.equal(second.configuration.compactAt, 2000);
+    assert.equal(second.configuration.effort, "none");
+    assert.equal(second.configuration.label, null);
+    assert.deepEqual(third.configuration, {});
 });
 
 type CurrentReport = Extract<components["schemas"]["InspectSessionReply"], { profile: "current"; work: unknown }>;
@@ -123,13 +113,13 @@ test("creation sends explicit settings without Host client defaults", async () =
 		async exchange(_path, build) {
 			const request = JSON.parse(build("store"));
 			assert.equal(request.session, "");
-			assert.deepEqual(request.configuration.model, { state: "value", value: "custom-model" });
-			assert.deepEqual(request.configuration.compaction_trigger, { state: "value", value: "1234" });
-			assert.deepEqual(request.configuration.reasoning_effort, { state: "null" });
-			assert.deepEqual(request.configuration.tools, { state: "value", value: [] });
-			assert.deepEqual(request.configuration.permission_mode, { state: "value", value: "ask" });
-			assert.deepEqual(request.configuration.provider, { state: "omitted" });
-			assert.deepEqual(request.configuration.workspace, { state: "omitted" });
+			assert.deepEqual(request.configuration.model, "custom-model");
+			assert.deepEqual(request.configuration.compactAt, 1234);
+			assert.deepEqual(request.configuration.effort, null);
+			assert.deepEqual(request.configuration.tools, []);
+			assert.deepEqual(request.configuration.permissionMode, "ask");
+			assert.deepEqual(request.configuration.provider, undefined);
+			assert.deepEqual(request.configuration.workspace, undefined);
 			return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "abc123" } }));
 		},
 	};
@@ -156,10 +146,10 @@ test("creation can name a preset without inventing missing fields", async () => 
 		async exchange(_path, build) {
 			const request = JSON.parse(build("store"));
 			assert.equal(request.preset, "review");
-			assert.deepEqual(request.configuration.model, { state: "omitted" });
-			assert.deepEqual(request.configuration.tools, { state: "omitted" });
-			assert.deepEqual(request.configuration.reasoning_effort, { state: "null" });
-			assert.deepEqual(request.configuration.output_schema, { state: "null" });
+			assert.deepEqual(request.configuration.model, undefined);
+			assert.deepEqual(request.configuration.tools, undefined);
+			assert.deepEqual(request.configuration.effort, null);
+			assert.deepEqual(request.configuration.outputSchema, null);
 			return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "abc123" } }));
 		},
 	};

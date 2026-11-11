@@ -30,6 +30,10 @@ export interface AgentSpec {
 	outputSchema?: Record<string, unknown> | string | null;
 	/** Tool names the Host offers, such as `bash` and `web_search`. */
 	tools: readonly string[];
+	/** Tools loaded from the first model request. */
+	loadedTools?: readonly string[];
+	/** Tokens reserved for model output; null clears the override. */
+	outputReservation?: number | null;
 	permissionMode: "ask" | "bypass";
 	/** Reasoning effort. `null` sends none, so the provider uses its own; only for a model Rui does not list (D111). */
 	effort: Schemas["AgentSpec"]["effort"];
@@ -46,7 +50,7 @@ export type SessionSpec = AgentSpec;
 export type SessionCreate = (AgentSpec & { preset?: never }) | ({ preset: string } & Partial<AgentSpec>);
 
 /** The settings `update` may change: everything but the ones fixed at creation. */
-export type SessionUpdate = Partial<Pick<SessionSpec, "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label">>;
+export type SessionUpdate = Partial<Pick<SessionSpec, "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label" | "loadedTools" | "outputReservation">>;
 
 export interface WriteOptions {
 	/** Required on `create` and `send`, built as `kind:driftId`. Other writes get a fresh UUIDv4 when it is left out (D123). */
@@ -106,34 +110,21 @@ export interface ModelSummary {
 	known: boolean;
 }
 
-type Omitted = { state: "omitted" };
-const OMITTED: Omitted = { state: "omitted" };
-const NULL = { state: "null" } as const;
-
-function optional<T>(field: T | undefined): Omitted | { state: "value"; value: T } {
-	return field === undefined ? OMITTED : { state: "value", value: field };
-}
-
-function clearable<T>(field: T | null | undefined): Omitted | typeof NULL | { state: "value"; value: T } {
-	if (field === undefined) return OMITTED;
-	return field === null ? NULL : { state: "value", value: field };
-}
-
-function configuration(spec: Partial<SessionSpec>): Schemas["Configuration"] {
+/** One plain wire spec for configure and connect-time presets. */
+export function agentSpec(spec: Partial<SessionSpec>): Schemas["Configuration"] {
 	return {
-		workspace: optional(spec.workspace),
-		provider: optional(spec.provider),
-		model: optional(spec.model),
-		instructions: optional(spec.instructions),
-		// The Host takes the names sorted by bytes, each once. Tool names are
-		// ASCII, so code-unit order is byte order.
-		tools: optional(spec.tools === undefined ? undefined : [...new Set(spec.tools)].sort()),
-		permission_mode: optional(spec.permissionMode),
-		output_schema: clearable(typeof spec.outputSchema === "object" && spec.outputSchema !== null ? JSON.stringify(spec.outputSchema) : spec.outputSchema),
-		compaction_trigger: optional(spec.compactAt === undefined ? undefined : String(spec.compactAt)),
-		output_reservation: OMITTED,
-		reasoning_effort: clearable(spec.effort),
-		label: clearable(spec.label),
+		...(spec.workspace === undefined ? {} : { workspace: spec.workspace }),
+		...(spec.provider === undefined ? {} : { provider: spec.provider }),
+		...(spec.model === undefined ? {} : { model: spec.model }),
+		...(spec.instructions === undefined ? {} : { instructions: spec.instructions }),
+		...(spec.tools === undefined ? {} : { tools: [...new Set(spec.tools)].sort() }),
+		...(spec.loadedTools === undefined ? {} : { loadedTools: [...new Set(spec.loadedTools)].sort() }),
+		...(spec.permissionMode === undefined ? {} : { permissionMode: spec.permissionMode }),
+		...(spec.outputSchema === undefined ? {} : { outputSchema: typeof spec.outputSchema === "object" && spec.outputSchema !== null ? JSON.stringify(spec.outputSchema) : spec.outputSchema }),
+		...(spec.compactAt === undefined ? {} : { compactAt: spec.compactAt }),
+		...(spec.outputReservation === undefined ? {} : { outputReservation: spec.outputReservation }),
+		...(spec.effort === undefined ? {} : { effort: spec.effort }),
+		...(spec.label === undefined ? {} : { label: spec.label }),
 	};
 }
 
@@ -144,7 +135,7 @@ function configureBody(store: string, key: string, session: string, spec: Partia
 		store,
 		key,
 		session,
-		configuration: configuration(spec),
+		configuration: agentSpec(spec),
 		...(spec.preset === undefined ? {} : { preset: spec.preset }),
 	} satisfies Schemas["ConfigureRequest"]);
 }

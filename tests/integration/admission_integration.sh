@@ -38,14 +38,13 @@ from host_process import WIRE_VERSION
 from product_defaults import compaction_trigger
 binary, store, ready, key, record, encoded, *drop = sys.argv[1:]
 values = json.loads(encoded)
-fields = ('workspace', 'provider', 'model', 'instructions', 'tools', 'permission_mode', 'output_schema')
-configuration = {name: {'state': 'value', 'value': values[name]} if name in values else {'state': 'omitted'} for name in fields}
-# Every creation states the rest of its agent spec (D113); these records test
-# domain rejections, which the parser only reaches with a complete spec.
-if configuration['tools']['state'] == 'omitted': configuration['tools'] = {'state': 'value', 'value': []}
-if configuration['permission_mode']['state'] == 'omitted': configuration['permission_mode'] = {'state': 'value', 'value': 'bypass'}
-configuration['compaction_trigger'] = {'state': 'value', 'value': str(compaction_trigger('codex', None))}
-configuration['reasoning_effort'] = {'state': 'null'}
+fields = {'workspace': 'workspace', 'provider': 'provider', 'model': 'model', 'instructions': 'instructions', 'tools': 'tools', 'permission_mode': 'permissionMode', 'output_schema': 'outputSchema'}
+configuration = {spec: values[name] for name, spec in fields.items() if name in values}
+# Complete creation before exercising domain rejections.
+configuration.setdefault('tools', [])
+configuration.setdefault('permissionMode', 'bypass')
+configuration['compactAt'] = compaction_trigger('codex', None)
+configuration['effort'] = None
 body = json.dumps({'version': WIRE_VERSION, 'kind': 'configure', 'store': store,
                    'key': key, 'session': '', 'configuration': configuration}, separators=(',', ':')).encode()
 with pathlib.Path(record).open('xb') as captured:
@@ -320,15 +319,8 @@ body = json.dumps({
     "key": "draining-request",
     "session": "",
     "configuration": {
-        "workspace": {"state": "value", "value": workspace},
-        "provider": {"state": "value", "value": "codex"},
-        "model": {"state": "value", "value": "gpt-6-sol"},
-        "instructions": {"state": "omitted"},
-        "tools": {"state": "value", "value": ["bash"]},
-        "permission_mode": {"state": "value", "value": "bypass"},
-        "output_schema": {"state": "omitted"},
-        "compaction_trigger": {"state": "value", "value": str(compaction_trigger("codex", "gpt-6-sol"))},
-        "reasoning_effort": {"state": "value", "value": "medium"},
+        "workspace": workspace, "provider": "codex", "model": "gpt-6-sol", "tools": ["bash"],
+        "permissionMode": "bypass", "compactAt": compaction_trigger("codex", "gpt-6-sol"), "effort": "medium",
     },
 }, separators=(",", ":")).encode()
 client = os_semantics.unix_stream()
@@ -827,8 +819,8 @@ import os_semantics
 from host_process import WIRE_VERSION
 ready, store, pid = sys.argv[1:]
 fields = dict(part.split("=", 1) for part in open(ready).read().split()[1:])
-request = {"version":WIRE_VERSION, "kind":"configure", "store":store, "key":"crashed-first", "session":"", "configuration":{"workspace":{"state":"omitted"}, "provider":{"state":"omitted"}, "model":{"state":"omitted"}}}
-prefix = json.dumps(request)[:-2] + ',"instructions":{"state":"value","value":"'
+request = {"version":WIRE_VERSION, "kind":"configure", "store":store, "key":"crashed-first", "session":"", "configuration":{}}
+prefix = json.dumps(request)[:-2] + '"instructions":"'
 with os_semantics.unix_stream() as connection:
     connection.connect(fields["socket"])
     body = prefix.encode() + b'x' * 32768
