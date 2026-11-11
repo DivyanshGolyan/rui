@@ -343,9 +343,13 @@ def interactive_cases(state, binding=False, null_code=False):
                         os.write(master, b"\x04")
                 else:
                     if route == "/v1/control/permission-decision":
-                        proposal = human.read_terminal(master, human.CHOICE)
-                        # The card draws the exact proposal inside its border.
-                        assert "\n│ ? Check successful shell exit " in proposal and "\n│   $ true " in proposal, proposal
+                        title = "? Check successful shell exit"
+                        # read_terminal joins earlier activity frames too. Count
+                        # titles only in one committed request-and-choice frame.
+                        proposal = human.keyed_frame(master, b"",
+                            lambda frame, x, y: human.CHOICE in frame and title in frame)
+                        rows = [row.strip() for row in proposal.splitlines()]
+                        assert rows.count(title) == 1 and "$ true" in rows, proposal
                         proposal += human.action_ready(ready_read, master)
                         # Deny is picked and shown before Enter counts.
                         proposal += human.pick_deny(master)
@@ -433,8 +437,8 @@ def interactive_cases(state, binding=False, null_code=False):
                         if route == "/v1/message":
                             output += human.await_screen(master, human.CHOICE)
                             output += human.action_ready(ready_read, master)
-                    # The card takes typed keys, so /exit cannot reach the
-                    # composer while it shows; Ctrl-D leaves from the card.
+                    # A waiting choice prevents /exit from executing. Leave
+                    # from the selector with Ctrl-D, without adding an unsent draft.
                     card = binding and route == "/v1/message"
                     os.write(master, b"\x04" if card else b"/exit\r")
                 # Supply output credit during the original exit budget for

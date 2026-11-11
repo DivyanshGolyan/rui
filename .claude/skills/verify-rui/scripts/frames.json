@@ -462,7 +462,7 @@
           "text": "I am checking the migration before approving it."
         },
         {
-          "wait": "Allow once"
+          "wait": "I am checking the migration before approving it."
         }
       ]
     },

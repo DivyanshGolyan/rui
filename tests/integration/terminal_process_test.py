@@ -230,6 +230,41 @@ class TerminalProcessTest(unittest.TestCase):
         wait_for(lambda: "answer" in human.current_screen(master), "drained composer")
         self.assertIn("answer", human.read_terminal(master, "answer", timeout=.1, composer=True))
 
+    def test_approval_title_count_uses_one_committed_frame_not_read_history(self):
+        import human_cli_fixture as human
+
+        title = "? Check successful shell exit"
+        for history, expected_titles in ((True, 2), (False, 1)):
+            with self.subTest(history=history):
+                master, slave = open_pty()
+                capture = human.terminal_capture(master)
+                capture.feed(("\x1b[?1049h\x1b[?2026h\x1b[H\x1b[2J" + title +
+                              "\r\n? Needs approval\x1b[?2026l").encode())
+                generation = capture.generation
+                # The next frame contains the request and the choice, but its
+                # final synchronized-write boundary arrives in a separate read.
+                capture.feed(("\x1b[?2026h\x1b[H\x1b[2J  " + title +
+                              "\r\n    $ true\r\n────────────────────────\r\n"
+                              " › " + human.CHOICE + "\r\n────────────────────────").encode())
+                self.assertEqual(capture.generation, generation)
+                self.assertNotIn(human.CHOICE, capture.completed)
+                os.write(slave, b"\x1b[?2026l")
+                if history:
+                    proposal = human.read_terminal(master, human.CHOICE)
+                else:
+                    proposal = human.keyed_frame(master, b"",
+                        lambda frame, x, y: human.CHOICE in frame and title in frame)
+                rows = [row.strip() for row in proposal.splitlines()]
+                self.assertEqual(rows.count(title), expected_titles)
+                self.assertIn("$ true", rows)
+                self.assertIn(human.CHOICE, proposal)
+                # The committed choice frame itself always has exactly one
+                # title and the command above it, never an intermediate write.
+                current = [row.strip() for row in capture.completed.splitlines()]
+                self.assertEqual(current.count(title), 1)
+                self.assertLess(current.index(title), current.index("› " + human.CHOICE))
+                self.assertLess(current.index("$ true"), current.index("› " + human.CHOICE))
+
     def test_failed_launch_closes_terminal(self):
         with self.assertRaises(FileNotFoundError):
             with terminal_process(["/nonexistent/rui-terminal-test"], env=os.environ):
