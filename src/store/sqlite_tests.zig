@@ -9994,13 +9994,15 @@ test "MCP attempts serialize Sessions and recover without replay" {
     const unsent = (try storage.admitActionAttempt(.{ .action_id = first + 1, .runner = .mcp }, 600_000, .{})).?.permit.binding;
     var stop = try completeSessionStop("mcp-unsent-stop", sessions[0].slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    // Store stop must not replace the adapter's definite not-run evidence.
     _ = try storage.settleActionAttempt(unsent, .spawn_failed, "not available", .{});
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='cancelled' AND CAST(c.payload AS TEXT) LIKE ?2", .{ unsent.action_id, "%not sent%" }));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='spawn_failed' AND CAST(c.payload AS TEXT) LIKE ?2", .{ unsent.action_id, "%not available%" }));
     const sent = (try storage.admitActionAttempt(.{ .action_id = other, .runner = .mcp }, 5_000, .{})).?.permit.binding;
     var sent_stop = try completeSessionStop("mcp-sent-stop", sessions[1].slice());
     try std.testing.expect(storage.stopSession(&sent_stop, .{}) == .accepted);
+    // A definite remote answer also remains definite when settlement races stop.
     _ = try storage.settleActionAttempt(sent, .succeeded, "terminal result raced stop", .{});
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='cancelled' AND CAST(c.payload AS TEXT) LIKE ?2", .{ sent.action_id, "%Outcome unknown%" }));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='succeeded' AND CAST(c.payload AS TEXT) LIKE ?2", .{ sent.action_id, "%terminal result raced stop%" }));
 }
 
 test "searchActivity streams window edges filters kinds and pages newest first" {
@@ -10537,32 +10539,42 @@ test "Message recovery observation seeks stay bounded as the Turn accumulates re
     try std.testing.expectEqual(costs[0], costs[1]);
 }
 
-test "a failed model fact batch rolls back overwritten rows and source together" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "{s}/facts.sqlite3", .{root});
-    var storage: Store = undefined;
-    try storage.open(std.testing.io, path, root);
-    {
+test "runtime catalog read failures never fall back and fence only engine failure" {
+    for ([_]bool{ false, true }) |saved| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
-        try storage.saveModelFacts(&.{.{ .id = "kept", .context_window = 100, .efforts = .{}, .openai_listed = true }}, "\"old\"");
-        // The first row is overwritten and stepped before the second row's
-        // constraint fails. Neither that overwrite nor publication may stick.
-        try std.testing.expectError(error.StatementFailed, storage.saveModelFacts(&.{
-            .{ .id = "kept", .context_window = 200, .efforts = .{}, .openai_listed = false },
-            .{ .id = "", .context_window = null, .efforts = .{}, .openai_listed = false },
-        }, "\"new\""));
+        if (saved) try storage.saveModelFacts(&.{.{ .id = "read-kept", .context_window = 100, .efforts = .{}, .openai_listed = true }}, null);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        // Failure while preparing the selected-facts read is memory pressure,
+        // not permission to answer shipped facts or fence a healthy Store.
+        sqlite.testing_fail_next_insert = true;
+        defer sqlite.testing_fail_next_insert = false;
+        try std.testing.expectError(error.OutOfMemory, storage.readModelCatalog(arena.allocator()));
+        try std.testing.expect(!sqlite.testing_fail_next_insert);
+        try std.testing.expect(!storage.isFenced());
+        const selected = try storage.readModelCatalog(arena.allocator());
+        if (saved) {
+            try std.testing.expectEqual(@as(usize, 1), selected.len);
+            try std.testing.expectEqualStrings("read-kept", selected[0].id);
+        } else try std.testing.expect(selected.ptr == @import("../model_catalog.zig").shipped.ptr);
+        // Remove the selected statement before breaking its schema: schema
+        // reprepare is deliberately a panic in the normal cached-plan guard.
+        const cache = &storage.engine.sqlite.statements;
+        const selected_sql = for (cache.slots) |slot| {
+            if (slot.sql) |sql| if (std.mem.indexOf(u8, std.mem.span(sql), "LEFT JOIN model_fact") != null) break sql;
+        } else return error.TestUnexpectedResult;
+        cache.remove(selected_sql);
+        try store_testing.sqliteExec(storage.sqliteDatabase(), "DROP TABLE model_fact", .{});
+        // A failed selected read, with or without a saved source, must not
+        // return the shipped catalog as a successful answer.
+        try std.testing.expectError(error.StatementPrepareFailed, storage.readModelCatalog(arena.allocator()));
         try std.testing.expect(storage.isFenced());
+        try std.testing.expectError(error.StoreFenced, storage.readModelCatalog(arena.allocator()));
     }
-    try storage.open(std.testing.io, path, root);
-    defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(?u32, 100), (try storage.modelFact("kept")).?.context_window);
-    const source = (try storage.readModelCatalogSource()).?;
-    try std.testing.expectEqual(@as(u64, 1), source.generation);
-    try std.testing.expectEqualStrings("\"old\"", source.etag.?.slice());
 }
 
 test "schema 54 gains empty model catalog tables at 55 without changing its rows" {

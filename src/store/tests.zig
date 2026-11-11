@@ -4384,7 +4384,7 @@ test "configuration pre-Workspace decisions preserve completeness and allow mode
         const current: ?*const CurrentConfiguration = if (case.has_current) &existing else null;
         std.testing.expectEqual(
             case.expected,
-            configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, current, &requested, .codex),
+            configuration_domain.configurationBeforeWorkspace(@import("../model_catalog.zig").shipped, &tool_catalog.built_in, current, &requested, .codex),
         ) catch |err| {
             std.debug.print("configuration pre-Workspace case failed: {s}\n", .{case.name});
             return err;
@@ -4411,7 +4411,7 @@ test "configure refuses a tool name the catalog lacks and a provider tool its pr
     }) |case| {
         var requested: wire_request.Configuration = .{};
         requested.tools = try .of(case.names);
-        try std.testing.expectEqual(case.expected, configuration_domain.configurationBeforeWorkspace(&catalog, &existing, &requested, .codex));
+        try std.testing.expectEqual(case.expected, configuration_domain.configurationBeforeWorkspace(@import("../model_catalog.zig").shipped, &catalog, &existing, &requested, .codex));
     }
 }
 
@@ -8554,7 +8554,7 @@ test "explicit compaction thresholds and frozen retry survive reopen" {
                 const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
                 var configure = try completeConfiguration("config", "", workspace, model);
                 // D111: the client supplies tokens even when it chooses 90%.
-                const expected: ?u64 = model_capability.contextWindow(model) * product_defaults.compaction_trigger_percent / 100;
+                const expected: ?u64 = model_capability.contextWindow(@import("../model_catalog.zig").shipped, model) * product_defaults.compaction_trigger_percent / 100;
                 var threshold: [20]u8 = undefined;
                 try configure.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&threshold, "{d}", .{expected.?}));
                 const created_session_0_reply = try storage.configure(&configure, .{});
@@ -10302,6 +10302,7 @@ const EntryPoint = enum {
     saveCatalog,
     saveModelFacts,
     readModelCatalogSource,
+    readModelCatalog,
     modelFact,
     readOpenAiModelIds,
     readCatalogSet,
@@ -10379,7 +10380,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .commandExists = 1,
     .readSkills = 2,
     .settleSkillTool = 3,
-    .configure = 3,
+    .configure = 4,
     .submitMessageWithModel = 2,
     .stopSession = 2,
     .archiveSession = 2,
@@ -10410,7 +10411,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .deliverAgentMessage = 3,
     .deliverChildEnding = 2,
     .deliverSessionForward = 2,
-    .startAgent = 4,
+    .startAgent = 5,
     .findTools = 5,
     .stopOwedSession = 2,
     .resolveCoreCall = 2,
@@ -10442,6 +10443,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .checkAttempt = 1,
     .saveModelFacts = 2,
     .readModelCatalogSource = 1,
+    .readModelCatalog = 1,
     .modelFact = 1,
     .readOpenAiModelIds = 1,
     // A Host's tool catalog is saved once; each later open finds it.
@@ -10666,6 +10668,11 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             _ = try storage.readModelCatalogSource();
             meter.stop(.readModelCatalogSource);
+            var catalog_arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer catalog_arena.deinit();
+            meter.start();
+            _ = try storage.readModelCatalog(catalog_arena.allocator());
+            meter.stop(.readModelCatalog);
             meter.start();
             _ = try storage.modelFact("catalog-budget");
             meter.stop(.modelFact);
@@ -12401,7 +12408,7 @@ test "configuration validates effective effort across retained requested and tar
                             @tagName(requested.reasoning_effort.state),
                             if (selected) |value| @tagName(value) else null,
                         });
-                        try std.testing.expectEqual(expected, configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex));
+                        try std.testing.expectEqual(expected, configuration_domain.configurationBeforeWorkspace(@import("../model_catalog.zig").shipped, &tool_catalog.built_in, &current, &requested, .codex));
                     }
                 }
             }
@@ -12417,7 +12424,7 @@ test "effective effort carries legacy history without inferring a fresh default"
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .high), configuration_domain.effectiveReasoningEffort(&current));
     var requested: wire_request.Configuration = .{};
     requested.reasoning_effort.state = .explicit_null;
-    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex).?);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(@import("../model_catalog.zig").shipped, &tool_catalog.built_in, &current, &requested, .codex).?);
     current.reasoning_effort = .low;
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), configuration_domain.effectiveReasoningEffort(&current));
 }
@@ -13144,6 +13151,212 @@ test "model fact refresh reads existence once before batched writes" {
                 try std.testing.expectEqual(@as(?u32, @intCast(100 + refresh)), (try storage.modelFact(entries[0].id)).?.context_window);
                 try std.testing.expectEqual(@as(u64, count), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_fact fact JOIN model_catalog_source source ON source.generation=fact.generation WHERE source.slot=1", .{}));
             }
+        }
+    }.run);
+}
+
+const runtime_catalog = @import("../model_catalog.zig");
+const runtime_catalog_facts: []const runtime_catalog.Entry = &.{
+    .{ .id = "gpt-6.1-sol", .context_window = 100, .efforts = .init(.{ .none = true }), .openai_listed = true },
+    .{ .id = "runtime-null", .context_window = null, .efforts = .{}, .openai_listed = true },
+    .{ .id = "runtime-only", .context_window = 200, .efforts = .init(.{ .high = true }), .openai_listed = true },
+    .{ .id = "runtime-private", .context_window = 300, .efforts = .{}, .openai_listed = false },
+};
+
+fn runtimeCatalogListing(storage: *Store, expected: []const u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const rounds = TwinRounds.start(storage);
+    const facts = try storage.readModelCatalog(arena.allocator());
+    try std.testing.expect(rounds.taken() <= 1);
+    var out: std.Io.Writer.Allocating = .init(arena.allocator());
+    try @import("../model_list.zig").writeProviders(&out.writer, facts, &.{
+        .{ .provider = .codex, .list = .catalog },
+        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\ngpt-6.1-terra\nruntime-only\nruntime-null\nruntime-private\n" } } },
+    });
+    try std.testing.expectEqualStrings(expected, out.written());
+}
+
+const runtime_catalog_listing = "[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[" ++
+    "{\"id\":\"gpt-6.1-sol\",\"known\":true},{\"id\":\"runtime-null\",\"known\":true},{\"id\":\"runtime-only\",\"known\":true}]}," ++
+    "{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6.1-sol\",\"known\":true},{\"id\":\"gpt-6.1-terra\",\"known\":false}," ++
+    "{\"id\":\"runtime-only\",\"known\":true},{\"id\":\"runtime-null\",\"known\":true},{\"id\":\"runtime-private\",\"known\":true}]}]";
+const runtime_catalog_empty_listing = "[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[]}," ++
+    "{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6.1-sol\",\"known\":false},{\"id\":\"gpt-6.1-terra\",\"known\":false}," ++
+    "{\"id\":\"runtime-only\",\"known\":false},{\"id\":\"runtime-null\",\"known\":false},{\"id\":\"runtime-private\",\"known\":false}]}]";
+
+test "runtime catalog model list selects one owned generation and survives reopen" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            var open = true;
+            defer if (open) storage.close() catch unreachable;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const rounds = TwinRounds.start(&storage);
+            const fallback = try storage.readModelCatalog(arena.allocator());
+            try std.testing.expect(rounds.taken() <= 1);
+            try std.testing.expect(fallback.ptr == runtime_catalog.shipped.ptr);
+            var expected: std.Io.Writer.Allocating = .init(arena.allocator());
+            try @import("../model_list.zig").writeProviders(&expected.writer, runtime_catalog.shipped, &.{
+                .{ .provider = .codex, .list = .catalog },
+                .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\ngpt-6.1-terra\nruntime-only\nruntime-null\nruntime-private\n" } } },
+            });
+            try runtimeCatalogListing(&storage, expected.written());
+            try storage.saveModelFacts(runtime_catalog_facts, "\"runtime\"");
+            const selected = try storage.readModelCatalog(arena.allocator());
+            try std.testing.expectEqual(@as(usize, 4), selected.len);
+            try std.testing.expectEqual(@as(?u32, 100), runtime_catalog.find(selected, "gpt-6.1-sol").?.context_window);
+            try std.testing.expect(runtime_catalog.find(selected, "gpt-6.1-sol").?.efforts.contains(.none));
+            try std.testing.expect(!runtime_catalog.find(selected, "gpt-6.1-sol").?.efforts.contains(.low));
+            try std.testing.expectEqual(@as(?u32, null), runtime_catalog.find(selected, "runtime-null").?.context_window);
+            try runtimeCatalogListing(&storage, runtime_catalog_listing);
+            try storage.close();
+            open = false;
+            // Saved IDs and entries belong to the operation arena, not engine
+            // row buffers or the connection. They remain usable after close.
+            for (selected, runtime_catalog_facts) |actual, wanted| {
+                try std.testing.expectEqualStrings(wanted.id, actual.id);
+                try std.testing.expectEqual(wanted.context_window, actual.context_window);
+                try std.testing.expectEqual(wanted.efforts, actual.efforts);
+                try std.testing.expectEqual(wanted.openai_listed, actual.openai_listed);
+            }
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            open = true;
+            try runtimeCatalogListing(&storage, runtime_catalog_listing);
+            try storage.saveModelFacts(&.{}, "\"empty\"");
+            try runtimeCatalogListing(&storage, runtime_catalog_empty_listing);
+            // A later publication cannot mutate an earlier operation's facts.
+            try std.testing.expectEqualStrings("gpt-6.1-sol", selected[0].id);
+            try std.testing.expectEqual(@as(?u32, 100), selected[0].context_window);
+            try storage.close();
+            open = false;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            open = true;
+            try runtimeCatalogListing(&storage, runtime_catalog_empty_listing);
+        }
+    }.run);
+}
+
+fn runtimeCatalogCreation(storage: *Store, key: []const u8, model: []const u8, effort: ?[]const u8, trigger: []const u8, rejection: ?protocol.ConfigurationRejection) !void {
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var command = try completeConfiguration(key, "", try canonicalCwd(std.testing.io, &workspace_buffer), model);
+    try command.configuration.compaction_trigger.value.set(trigger);
+    command.configuration.reasoning_effort.state = if (effort != null) .value else .explicit_null;
+    if (effort) |value| try command.configuration.reasoning_effort.value.set(value);
+    const reply = try storage.configure(&command, .{});
+    if (rejection) |expected| {
+        try std.testing.expect(reply == .rejected);
+        try std.testing.expectEqual(expected, reply.rejected.code);
+    } else {
+        try std.testing.expect(reply == .accepted);
+        const current = (try store_core.readSessionForTesting(storage, reply.accepted.session.slice())).?;
+        try std.testing.expectEqualStrings(model, current.model.slice());
+        try std.testing.expectEqual(try std.fmt.parseInt(u64, trigger, 10), current.compaction_trigger.?);
+    }
+}
+
+test "runtime catalog configuration admission accepts and refuses selected saved facts" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try runtimeCatalogCreation(&storage, "runtime-fallback-yes", "gpt-6.1-sol", "low", "1000", null);
+            try runtimeCatalogCreation(&storage, "runtime-fallback-no", "gpt-6.1-sol", "none", "1000", .unsupported_reasoning_effort);
+            try storage.saveModelFacts(runtime_catalog_facts, null);
+            try runtimeCatalogCreation(&storage, "runtime-changed-yes", "gpt-6.1-sol", "none", "100", null);
+            try runtimeCatalogCreation(&storage, "runtime-changed-window", "gpt-6.1-sol", "none", "101", .compact_at_too_large);
+            try runtimeCatalogCreation(&storage, "runtime-changed-effort", "gpt-6.1-sol", "low", "100", .unsupported_reasoning_effort);
+            try runtimeCatalogCreation(&storage, "runtime-only-yes", "runtime-only", "high", "200", null);
+            try runtimeCatalogCreation(&storage, "runtime-only-window", "runtime-only", "high", "201", .compact_at_too_large);
+            try runtimeCatalogCreation(&storage, "runtime-only-effort", "runtime-only", "low", "200", .unsupported_reasoning_effort);
+            try runtimeCatalogCreation(&storage, "runtime-null-window", "runtime-null", null, "2000000", null);
+            try runtimeCatalogCreation(&storage, "runtime-null-effort", "runtime-null", "low", "2000000", .unsupported_reasoning_effort);
+            // A removed shipped ID is unknown, not an invitation to resurrect
+            // its window or effort restrictions from the offline snapshot.
+            try runtimeCatalogCreation(&storage, "runtime-removed", "gpt-6.1-terra", "none", "2000000", null);
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var create = try completeConfiguration("runtime-retained-create", "", try canonicalCwd(std.testing.io, &workspace_buffer), "gpt-6.1-sol");
+            try create.configuration.compaction_trigger.value.set("100");
+            try create.configuration.reasoning_effort.value.set("none");
+            const session = (try storage.configure(&create, .{})).accepted.session;
+            try storage.close();
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            try runtimeCatalogCreation(&storage, "runtime-reopen-yes", "gpt-6.1-sol", "none", "100", null);
+            try runtimeCatalogCreation(&storage, "runtime-reopen-no", "gpt-6.1-sol", "low", "100", .unsupported_reasoning_effort);
+            // An update with an omitted model must validate its retained
+            // settings against this operation's newly selected generation.
+            try storage.saveModelFacts(&.{.{ .id = "gpt-6.1-sol", .context_window = 50, .efforts = .init(.{ .low = true }), .openai_listed = true }}, null);
+            var update: wire_request.ConfigureCommand = .{ .session = session };
+            try update.key.set("runtime-retained-window");
+            var reply = try storage.configure(&update, .{});
+            try std.testing.expect(reply == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.compact_at_too_large, reply.rejected.code);
+            try update.key.set("runtime-retained-effort");
+            update.configuration.compaction_trigger.state = .value;
+            try update.configuration.compaction_trigger.value.set("50");
+            reply = try storage.configure(&update, .{});
+            try std.testing.expect(reply == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, reply.rejected.code);
+            try update.key.set("runtime-retained-accept");
+            update.configuration.reasoning_effort.state = .value;
+            try update.configuration.reasoning_effort.value.set("low");
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
+            const current = (try store_core.readSessionForTesting(&storage, session.slice())).?;
+            try std.testing.expectEqual(@as(?u64, 50), current.compaction_trigger);
+            try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), current.reasoning_effort);
+            try storage.saveModelFacts(&.{.{ .id = "gpt-6.1-sol", .context_window = null, .efforts = .init(.{ .none = true }), .openai_listed = true }}, null);
+            try runtimeCatalogCreation(&storage, "runtime-shipped-null-window", "gpt-6.1-sol", "none", "2000000", null);
+            try storage.saveModelFacts(&.{}, null);
+            try runtimeCatalogCreation(&storage, "runtime-empty", "gpt-6.1-sol", null, "2000000", null);
+            try runtimeCatalogCreation(&storage, "runtime-empty-effort", "runtime-only", "low", "2000000", null);
+        }
+    }.run);
+}
+
+test "runtime catalog failed publication retains the selected generation for consumers" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            {
+                defer storage.close() catch unreachable;
+                try storage.saveModelFacts(&.{.{ .id = "kept", .context_window = 100, .efforts = .{}, .openai_listed = true }}, "\"old\"");
+                // The first row is overwritten before the second row's
+                // constraint fails. Neither overwrite nor source may stick.
+                try std.testing.expectError(error.StatementFailed, storage.saveModelFacts(&.{
+                    .{ .id = "kept", .context_window = 200, .efforts = .init(.{ .low = true }), .openai_listed = false },
+                    .{ .id = "", .context_window = null, .efforts = .{}, .openai_listed = false },
+                }, "\"new\""));
+                try std.testing.expect(storage.isFenced());
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                try std.testing.expectError(error.StoreFenced, storage.readModelCatalog(arena.allocator()));
+            }
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const source = (try storage.readModelCatalogSource()).?;
+            try std.testing.expectEqual(@as(u64, 1), source.generation);
+            try std.testing.expectEqualStrings("\"old\"", source.etag.?.slice());
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const rounds = TwinRounds.start(&storage);
+            const facts = try storage.readModelCatalog(arena.allocator());
+            try std.testing.expect(rounds.taken() <= 1);
+            var out: std.Io.Writer.Allocating = .init(arena.allocator());
+            try @import("../model_list.zig").writeProviders(&out.writer, facts, &.{.{ .provider = .codex, .list = .catalog }});
+            try std.testing.expectEqualStrings("[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[{\"id\":\"kept\",\"known\":true}]}]", out.written());
+            try runtimeCatalogCreation(&storage, "runtime-rollback-accept", "kept", null, "100", null);
+            try runtimeCatalogCreation(&storage, "runtime-rollback-refuse", "kept", null, "101", .compact_at_too_large);
+            try runtimeCatalogCreation(&storage, "runtime-rollback-effort", "kept", "low", "100", .unsupported_reasoning_effort);
         }
     }.run);
 }
