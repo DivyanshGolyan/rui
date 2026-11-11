@@ -443,7 +443,7 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
     };
     self.app_caps = caps;
     self.screen.setWidth(caps.width);
-    self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour };
+    self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = true, .handler = .{ .userdata = self, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appPreviewClick } };
     self.app_card = .{ .consent = &self.app_consent, .pasting = &hooks.root.pasting, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
     self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status), .unarchive = chromeClick(.unarchive) });
     return self.widget();
@@ -575,6 +575,18 @@ fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, at: feed_window.Point) !vo
         self.dropMessageRequest();
         if (tool) |key| self.toggleTool(key) else self.openCollapsed(message.?);
     }
+    try self.afterInput(ctx);
+}
+
+/// The request's continuation uses the same open action as Ctrl-O. The
+/// complete request is already staged; reveal its omitted rows in this panel,
+/// without another page, read, or independently owned expansion state.
+fn appPreviewClick(raw: *anyopaque, ctx: *vxfw.EventContext, at: viewport.Position) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const next = self.app_preview.continuation() orelse return;
+    if (!std.meta.eql(at, next) or self.leaving != null) return;
+    self.dropMessageRequest();
+    _ = try self.expand();
     try self.afterInput(ctx);
 }
 
@@ -2299,12 +2311,16 @@ fn dropMessageRequest(self: *Self) void {
 fn expand(self: *Self) !?[session_id.bytes]u8 {
     self.expansion.queued = .none;
     self.dirty = true;
+    if (self.app_consent.request != null and self.screen.view == .action) {
+        if (self.app_preview.continuation()) |next| self.screen.browsing.top = next;
+        return null;
+    }
     if (self.pagePlace() == .elsewhere) {
-        self.notice = "! Ctrl-O opens a tool, message or Session name from the conversation.";
+        self.notice = "! Nothing to open in this view.";
         return null;
     }
     const target = switch (try self.app_content.openable(self.init.gpa) orelse {
-        self.notice = "Nothing to open in view; scroll to one, then Ctrl-O.";
+        self.notice = "Nothing to open in view.";
         return null;
     }) {
         .message => |target| target,
@@ -3266,6 +3282,64 @@ const HeldFrontend = struct {
         return file;
     }
 };
+
+test "App Session request overflow opens in place with Ctrl-O or a continuation click" {
+    for ([_]vxfw.MaxSize{ .{ .width = 46, .height = 30 }, .{ .width = 140, .height = 40 } }) |size| {
+        for ([_]bool{ false, true }) |typing| {
+            for ([_]bool{ false, true }) |click| {
+                const held = try HeldFrontend.create();
+                defer held.destroy();
+                held.size = size;
+                const file = try held.adopt(40);
+                defer file.close(std.testing.io);
+                if (typing) try held.keys("kept draft");
+                const before = try held.shown();
+                // Footer/state, selector or single-line draft (five rows),
+                // then one quiet row reporting the undisplayed request rows.
+                const expected = if (size.height.? == 30) "… 16 more lines" else "… 6 more lines";
+                try std.testing.expect(std.mem.indexOf(u8, before, expected) != null);
+                try std.testing.expect(std.mem.indexOf(u8, before, "row 039") == null);
+                try std.testing.expectEqual(.action, held.screen.view);
+                if (click) {
+                    var ctx = held.context();
+                    const preview = &held.self.app_preview;
+                    const row: i16 = @intCast(preview.drawn.height);
+                    for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
+                        try preview.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 2, .row = row, .button = .left, .mods = .{}, .type = kind } });
+                    }
+                } else {
+                    try held.keys("\x0f");
+                    try held.settle();
+                }
+                const opened = try held.shown();
+                try std.testing.expect(std.mem.indexOf(u8, opened, "row 039") != null);
+                try std.testing.expect(std.mem.indexOf(u8, opened, "more lines") == null);
+                try std.testing.expectEqual(.action, held.screen.view);
+                try std.testing.expectEqual(@as(?u64, 0xa), held.self.app_consent.request);
+                try std.testing.expectEqualStrings(if (typing) "kept draft" else "", held.self.input.composition().bytes);
+                // The whole request remains in the same panel and ordinary
+                // scrolling still reaches its first row after opening.
+                try held.keys("\x1b[5~\x1b[5~\x1b[5~\x1b[5~");
+                try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "row 000") != null);
+            }
+        }
+    }
+}
+
+test "App Session fitting request has no overflow state or open side effect" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const file = try held.adopt(3);
+    defer file.close(std.testing.io);
+    const before = try std.testing.allocator.dupe(u8, try held.shown());
+    defer std.testing.allocator.free(before);
+    try std.testing.expect(std.mem.indexOf(u8, before, "row 002") != null);
+    try std.testing.expect(std.mem.indexOf(u8, before, "more lines") == null);
+    try std.testing.expectEqual(null, held.self.app_preview.continuation());
+    try held.keys("\x0f");
+    try held.settle();
+    try std.testing.expectEqualStrings(before, try held.shown());
+}
 
 test "a held frontend stops a read still running and joins it before it is freed" {
     const Worker = struct {

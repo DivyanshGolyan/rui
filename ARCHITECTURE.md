@@ -2904,7 +2904,10 @@ Enter on an empty draft puts the row's own command in the draft: `/configure` or
 The page has no second way to change a setting; the command runs as typed over the page, which stays shown: a saved change replies in one line as a notice, and the page's next read shows the new value with `›` on the same row, while a longer reply, such as a failure with its usage, opens as any command's does.
 Complete Action inspection is staged in an independent unlinked file before choice readiness.
 Approval requires every Action row to have been displayed since adoption or the last resize or width-mode change.
-A tall Action pages from its top and shows `Action continues · PgDn`, and the input row reads `PgDn reads the rest` in place of the choice, until that condition holds.
+A request starts at its top. If it exceeds the viewport, its last row quietly reports `… N more lines`, with no key hint.
+Ctrl-O and a click on that state row share the conversation’s open dispatcher and reveal the omitted rows in the same request panel, using the already-staged complete document and its existing scroll position.
+They open no second page, retain the choice or draft input row, and never authorize the Action.
+Ordinary scrolling still reaches every request row; a fitting request has no overflow state row.
 Repeated paging, line scrolling or wheel input between frames cannot move past the first unseen row; only rows a delivered frame drew count.
 While approval is paused the input row is the draft, not the choice: typing edits the retained draft, inspection commands remain available, Enter explains that the Action needs a decision and keeps the draft, and returning to the Action requires fresh input.
 Nothing typed while paused can authorize.

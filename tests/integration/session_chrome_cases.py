@@ -85,9 +85,9 @@ class Chrome:
         if kind is None:
             shutil.rmtree(self.state)
 
-    def session(self):
+    def session(self, permission="bypass"):
         reply = json.loads(run(self.home, "session", "configure", "--workspace", self.workspace,
-            "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "bypass"))
+            "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", permission))
         return reply["answer"]["session"]
 
     def answered(self, session, *inputs):
@@ -111,6 +111,11 @@ class Chrome:
 
     def leave(self, master, caller):
         os.write(master, b"\x15/exit\r")
+        _, errors = terminal_exit(caller, master)
+        assert caller.returncode == 0, errors
+
+    def detach(self, master, caller):
+        os.write(master, b"\x03")
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
 
@@ -347,6 +352,48 @@ def pages_case():
     print("session chrome: /status and /help open as pages without a feed marker or heading, Esc returns; a page during work keeps ctrl+x stop", flush=True)
 
 
+def approval_overflow_case():
+    """A clipped request reports its omitted rows; both open gestures reveal
+    them in the same panel, keeping the decision and any draft intact."""
+    with Chrome("rui-chrome-approval-overflow.", []) as chrome:
+        for count in (40, 3):
+            session = chrome.session(permission="ask")
+            command = "\n".join(f"printf step-{index:02d}" for index in range(count))
+            chrome.endpoint.responses.append(fixture.sse_tool_calls(f"steps-{count}", [
+                ("bash", f"steps-{count}-call", json.dumps({
+                    "cmd": command, "description": "Review all steps", "timeout_ms": None}))]))
+            request = admit(chrome.home, "session", "send", "--to", session, input="Review these steps")["request"]
+            fixture.wait_for(lambda: fixture.observe(chrome.store, request)["state"] == "waiting_for_permission", "pending request")
+            for width, height in ((140, 40), (46, 30)):
+                for click in (False, True):
+                    master, slave = open_pty(width, height)
+                    chrome.descriptors += [master, slave]
+                    caller = spawn([str(fixture.RUI), "session", "resume", "--", session],
+                        env={**os.environ, "HOME": str(chrome.home)}, cwd=str(chrome.workspace),
+                        stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                    chrome.callers.append(caller)
+                    shown = chrome.frame(master, b"", lambda screen: "Allow once" in screen and "Deny" in screen)
+                    if count == 3:
+                        assert "step-02" in shown and "more lines" not in shown, shown
+                        chrome.detach(master, caller)
+                        continue
+                    assert "more lines" in shown and "step-39" not in shown, shown
+                    assert "shift+" not in shown, shown
+                    # The draft stays the input when a continuation is opened.
+                    shown = chrome.frame(master, b"kept draft", lambda screen: "kept draft" in screen)
+                    if click:
+                        row, line = next((index, line) for index, line in enumerate(rows(shown)) if "more lines" in line)
+                        col = line.rindex("…") + 1
+                        gesture = f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m".encode()
+                    else:
+                        gesture = b"\x0f"
+                    opened = chrome.frame(master, gesture, lambda screen: "step-39" in screen)
+                    assert "kept draft" in opened and "more lines" not in opened, opened
+                    assert fixture.observe(chrome.store, request)["state"] == "waiting_for_permission"
+                    chrome.detach(master, caller)
+    print("session chrome: clipped approvals report remaining rows; Ctrl-O and a click open them in place at both sizes, preserving the draft; fitting requests have no overflow state", flush=True)
+
+
 def opening_case():
     """A Session reopened while Messages wait shows them as one counted
     `◌ N · <newest>` row; Ctrl-O opens the lowest tool or collapsed Message, and Esc
@@ -425,5 +472,6 @@ def main():
     activity_case()
     scroll_marker_case()
     pages_case()
+    approval_overflow_case()
     opening_case()
     notice_case()
