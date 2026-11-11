@@ -107,8 +107,6 @@ recover_line: [slash_commands_shared.recover_line_bytes]u8 = undefined,
 reader: Task = .{},
 /// A gesture waits for the shared reader; job.retry identifies its running read.
 retry_requested: ?feed_window.Key = null,
-/// A fresh Message supersedes the failure, even before a scan sees its Turn.
-sent_after_ending: ?feed_window.Key = null,
 /// The composer's skill suggestions reads and the rows they list. One read
 /// runs at a time on `skill_task`, apart from the reader, whose only
 /// context is `skill_job`.
@@ -2060,7 +2058,9 @@ fn recover(self: *Self, key: ?[]const u8) !void {
 fn retryable(self: *const Self) bool {
     const ending = self.live.latest_ending orelse return false;
     if (ending.cause.key == null) return false;
-    if (self.sent_after_ending) |sent| if (ending.matches(sent)) return false;
+    // An ending remains visible while a newer Turn runs. Only quiescent
+    // Session facts, with no admitted input waiting, grant retry authority.
+    if (self.live.work.state.progress() != null or self.live.queued.count != 0) return false;
     return self.submission.intent == null and self.submission.task.thread == null and
         self.waitingAction() == null and self.live.work.first_action == null and
         self.reading.prepared_action == null and !self.reading.opening and
@@ -2199,7 +2199,6 @@ fn beginMessage(self: *Self, intent: Submission.Intent) !void {
     // A sent Message continues the conversation: show it and its reply
     // rather than a page the reader was browsing,
     // or a page asked for before it.
-    self.sent_after_ending = if (self.live.latest_ending) |ending| ending.key else null;
     self.admission.sent += 1;
     self.inspection.status_requested = false;
     self.details_requested = false;
@@ -5666,6 +5665,151 @@ fn failedRetryForTest(self: *Self) void {
     self.live.latest_ending = .{ .key = .{ .position = 3 }, .cause = @import("marks.zig").cause("malformed_provider_output") };
 }
 
+test "failed reply retry eligibility follows every live work state and admitted queue" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.failedRetryForTest();
+    const State = protocol.WorkState;
+    const cases = [_]struct { state: State, quiet: bool }{
+        .{ .state = .{ .idle = .{ .since = 1 } }, .quiet = true },
+        .{ .state = .{ .pending = .{ .since = 2 } }, .quiet = false },
+        .{ .state = .{ .working = .{ .since = 2 } }, .quiet = false },
+        .{ .state = .{ .retrying = .{ .since = 2, .due_at_ms = 3000, .cause = .{}, .attempt = 1 } }, .quiet = false },
+        .{ .state = .{ .bash = .{ .since = 2, .call = 1, .description = null, .running = 1, .approvals = 0 } }, .quiet = false },
+        .{ .state = .{ .approval = .{ .since = 2 } }, .quiet = false },
+        .{ .state = .{ .stopping = .{ .since = 2 } }, .quiet = false },
+        .{ .state = .{ .finished = .{ .since = 2 } }, .quiet = true },
+        .{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .quiet = true },
+        .{ .state = .{ .stopped = .{ .since = 2, .cause = .stop } }, .quiet = true },
+    };
+    comptime std.debug.assert(cases.len == @typeInfo(State).@"union".field_names.len);
+    for (cases) |case| {
+        self.live.work.state = case.state;
+        for ([_]u64{ 0, 1, 2 }) |count| {
+            self.live.queued.count = count;
+            try std.testing.expectEqual(case.quiet and count == 0, self.retryable());
+        }
+    }
+}
+
+/// The real begin transition retains the input and launches its borrower. The
+/// fixture has no Host; join that failed transport, then supply a typed answer
+/// through the same worker/advance/present handoff as Admission recovery.
+fn settleMessageForRetryTest(self: *Self, accepted: bool) !void {
+    const Worker = struct {
+        fn done(_: *anyopaque, _: *Task) !void {}
+        fn completed(owner: *Submission) bool {
+            return owner.task.completed();
+        }
+    };
+    self.submission.cancel();
+    try std.testing.expect(self.submission.join() == .failed);
+    const bytes = try self.input.message(self.submission.intent.?.message);
+    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
+    try code.set("not_allowed");
+    self.submission.reply = .{
+        .status = 200,
+        .context = .{ .kind = .message },
+        .target = .{ .message = .{ .bytes = bytes.len, .digest = protocol.contentDigest(bytes) } },
+        .answer = .{ .replayed = false, .result = if (accepted) .{ .accepted = .{ .message = .{ .admission = 37 } } } else .{ .rejected = code } },
+    };
+    try self.submission.task.start(self.init.io, &self.submission, Worker.done);
+    try test_poll.waitUntil(self.init.io, test_poll.after(self.init.io, .fromSeconds(2)), &self.submission, Worker.completed);
+    try self.admit();
+}
+
+test "failed reply retry stays hidden after successful admission releases the original into live work" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try seedFeed(held.screen, "× Model reply unreadable\n");
+    self.failedRetryForTest();
+    self.live.latest_ending.?.key = held.screen.feed.high.?;
+    const ending = self.live.latest_ending.?;
+    try std.testing.expect(self.retryable());
+    try self.beginMessage(.{ .message = self.input.submitText("new Message") });
+    try std.testing.expect(!self.retryable());
+    // Admission's queued work is a canonical fact, observed independently of
+    // its reply. Releasing the submission cannot make the older failure retry.
+    self.reading.feed_read = .scan;
+    self.job.result = .{
+        .latest_ending = ending,
+        .work = .{ .work = .{ .state = .{ .pending = .{ .since = 2 } }, .turn = 1 } },
+        .queued = .{ .count = 1, .oldest_position = 4, .newest_admission = 37, .newest_position = 4 },
+    };
+    try self.applyReader(.complete);
+    try self.settleMessageForRetryTest(true);
+    try std.testing.expect(self.submission.intent == null);
+    try std.testing.expectEqualDeep(ending, self.live.latest_ending.?);
+    try std.testing.expect(!self.retryable());
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "ctrl+r retries") == null);
+    try held.keys("\x12");
+    try std.testing.expect(self.retry_requested == null);
+    // Taking the Message out of the queue does not make its running Turn idle.
+    self.job.result.work.work = .{ .state = .{ .working = .{ .since = 3 } }, .turn = 2 };
+    self.job.result.queued = .{};
+    try self.applyReader(.complete);
+    try std.testing.expect(!self.retryable());
+}
+
+test "failed reply rejected Message then discard preserves retry of the unchanged ending" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try seedFeed(held.screen, "× Model reply unreadable\n");
+    self.failedRetryForTest();
+    self.live.latest_ending.?.key = held.screen.feed.high.?;
+    const ending = self.live.latest_ending.?;
+    try self.beginMessage(.{ .message = self.input.submitText("rejected Message") });
+    try held.keys("kept éZ\x1b[D");
+    const draft = self.input.snapshot();
+    try self.settleMessageForRetryTest(false);
+    try std.testing.expectEqual(original_state.State.rejected, self.submission.state);
+    try std.testing.expect(!self.retryable());
+    try self.slashCommand("/discard");
+    try std.testing.expect(self.submission.intent == null);
+    try std.testing.expectEqualDeep(ending, self.live.latest_ending.?);
+    try std.testing.expect(self.retryable());
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "ctrl+r retries") != null);
+    try held.keys("\x12");
+    try std.testing.expectEqualDeep(ending.key, self.retry_requested.?);
+    try std.testing.expectEqualDeep(draft, self.input.snapshot());
+}
+
+test "failed reply reopening during newer work hides retry tail and ignores Ctrl-R and click" {
+    const ending: reads.LatestEnding = .{ .key = .{ .position = 3 }, .cause = @import("marks.zig").cause("malformed_provider_output") };
+    for ([_]bool{ false, true }) |queued| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try seedFeed(held.screen, "× Model reply unreadable\n");
+        self.reading.opening = true;
+        self.reading.feed_read = .opening;
+        // An opening can find the old failure while the newer Turn has not
+        // ended. No invocation-local submission history exists in this chat.
+        self.job.result = .{
+            .latest_ending = .{ .key = held.screen.feed.high.?, .cause = ending.cause },
+            .work = .{ .work = .{ .state = if (queued) .{ .pending = .{ .since = 2 } } else .{ .working = .{ .since = 2 } }, .turn = 2 } },
+            .queued = if (queued) .{ .count = 1, .oldest_position = 4, .newest_admission = 37, .newest_position = 4 } else .{},
+        };
+        try self.applyReader(.complete);
+        try std.testing.expect(!self.reading.opening);
+        try std.testing.expect(self.live.latest_ending != null);
+        try std.testing.expect(!self.retryable());
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "ctrl+r retries") == null);
+        try held.keys("draft éZ\x1b[D\x12");
+        const before = self.input.snapshot();
+        var ctx = held.context();
+        try appRetry(self, &ctx);
+        try std.testing.expect(self.retry_requested == null);
+        try std.testing.expect(self.reader.thread == null);
+        try std.testing.expect(self.submission.intent == null);
+        try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+        try std.testing.expectEqualDeep(before, self.input.snapshot());
+    }
+}
+
 test "failed reply Ctrl-R schedules exact literal Message bytes without changing draft or caret" {
     for ([_][]const u8{ "\x12", "\x1b[114;5u", "\x1b[27;5;114~" }) |key| {
         const held = try HeldFrontend.create();
@@ -5698,8 +5842,8 @@ test "failed reply Ctrl-R schedules exact literal Message bytes without changing
         self.submission.close();
         try self.input.release(self.submission.intent.?.message);
         self.submission.intent = null;
-        try std.testing.expect(!self.retryable()); // No old tail after the resend settles.
-        self.live.latest_ending.?.key.position += 1;
+        // This fixture has no Host: no Message was admitted. Releasing an
+        // unsent original must not suppress the unchanged failed ending.
         try std.testing.expect(self.retryable());
     }
 }
@@ -5723,7 +5867,7 @@ test "failed reply retry stale and every read failure send nothing" {
 }
 
 test "failed reply retry completion revalidates every submission hold" {
-    const Hold = enum { original, action, prepared, opening, command, queued_command, upgrade, sent };
+    const Hold = enum { original, action, prepared, opening, command, queued_command, upgrade, working, queued };
     for (std.enums.values(Hold)) |hold| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -5739,7 +5883,8 @@ test "failed reply retry completion revalidates every submission hold" {
             .command => self.inspection.command_running = true,
             .queued_command => self.input.queueCommand("/help"),
             .upgrade => held.upgrade = .{ .after = .blocked },
-            .sent => self.sent_after_ending = self.live.latest_ending.?.key,
+            .working => self.live.work.state = .{ .working = .{ .since = 2 } },
+            .queued => self.live.queued.count = 1,
         }
         try self.settleReader();
         try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
