@@ -4737,6 +4737,69 @@ test "configuration planning preserves sparse defaults and rejection precedence"
     }
 }
 
+test "historical model immutability rejections replay while fresh model switches are accepted" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "historical-model-initial");
+            const initial = try storage.inspectSessionForTesting(session.slice());
+
+            var update: wire_request.ConfigureCommand = .{};
+            try update.key.set("historical-model-configure");
+            update.session = session;
+            update.configuration.model.state = .value;
+            try update.configuration.model.value.set("model-b");
+            var message: wire_request.MessageCommand = .{};
+            try message.key.set("historical-model-message");
+            message.session = session;
+            message.text = try testingBytesContent(&tmp, "historical-model-body", "a previously refused Message");
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+
+            // Seed the original answers, not current admission decisions. These
+            // literal codes and production digests model an older Store whose
+            // commands must remain replayable after its policy changes.
+            const sequence = try store_testing.queryU64(&storage, "SELECT coalesce(max(command_seq),0)+1 FROM core_command", .{});
+            const configure_digest = update.semanticDigest();
+            const message_digest = message.semanticDigest();
+            try store_testing.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,1,?2,?3,0,'model_is_immutable',0,0,?4)", .{ update.key.slice(), session.slice(), store_testing.Blob{ .bytes = &configure_digest }, sequence });
+            try store_testing.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,2,?2,?3,0,'model_is_immutable',0,0,?4)", .{ message.key.slice(), session.slice(), store_testing.Blob{ .bytes = &message_digest }, sequence + 1 });
+            try storage.close();
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+
+            const replay = try storage.configure(&update, .{});
+            try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+            try std.testing.expectEqualStrings("model_is_immutable", @tagName(replay.rejected.code));
+            const unchanged = try storage.inspectSessionForTesting(session.slice());
+            try std.testing.expectEqual(initial.revision, unchanged.revision);
+            try std.testing.expectEqualStrings(initial.model.slice(), unchanged.model.slice());
+
+            // The same requested model under a fresh key uses today's policy.
+            var fresh = update;
+            try fresh.key.set("fresh-model-configure");
+            const accepted = try storage.configure(&fresh, .{});
+            try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
+            try std.testing.expectEqual(initial.revision + 1, accepted.accepted.revision);
+            try std.testing.expectEqualStrings(session.slice(), accepted.accepted.session.slice());
+            const old_again = try storage.configure(&update, .{});
+            try std.testing.expectEqual(replay, old_again);
+            const message_replay = storage.submitMessageWithModel(&message, null, .{});
+            try std.testing.expect(message_replay == .rejected and message_replay.rejected.replayed);
+            try std.testing.expectEqualStrings("model_is_immutable", @tagName(message_replay.rejected.code));
+            try std.testing.expectEqual(message.text.length, message_replay.rejected.content.length);
+            try std.testing.expectEqualSlices(u8, &message.text.digest, &message_replay.rejected.content.digest);
+            const changed = try storage.inspectSessionForTesting(session.slice());
+            try std.testing.expectEqual(accepted.accepted.revision, changed.revision);
+            try std.testing.expectEqualStrings("model-b", changed.model.slice());
+            try std.testing.expectEqual(@as(u64, 0), changed.pending_messages);
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE accepted=0 AND code='model_is_immutable'", .{}));
+        }
+    }.run);
+}
+
 test "configuration answers replay without reverting newer settings" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
