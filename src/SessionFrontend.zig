@@ -6520,18 +6520,19 @@ test "tool folds share key and click ownership across live output, bounds, failu
             const cell = screen.readCell(@intCast(col), @intCast(row)).?;
             if (std.mem.eql(u8, cell.char.grapheme, "R") and col + 1 < 80 and std.mem.eql(u8, screen.readCell(@intCast(col + 1), @intCast(row)).?.char.grapheme, "E")) {
                 saw_output = true;
-                try std.testing.expectEqual(@as(usize, 4), col);
+                // The screen's one-column feed gutter comes before every row.
+                try std.testing.expectEqual(@as(usize, 5), col);
                 try std.testing.expectEqual(if (colour) self.app_content.colours.band else self.app_content.style.bg, cell.style.bg);
                 try std.testing.expectEqual(if (colour) self.app_content.colours.quiet else self.app_content.style.fg, cell.style.fg);
             }
             try std.testing.expect(!std.mem.eql(u8, cell.char.grapheme, "▸"));
             if (std.mem.eql(u8, cell.char.grapheme, @import("marks.zig").marks.get(.finished).unicode)) {
                 saw_heading = true;
-                try std.testing.expectEqual(@as(usize, 0), col);
-                try std.testing.expectEqualStrings("L", screen.readCell(2, @intCast(row)).?.char.grapheme);
+                try std.testing.expectEqual(@as(usize, 1), col);
+                try std.testing.expectEqualStrings("L", screen.readCell(3, @intCast(row)).?.char.grapheme);
                 try std.testing.expectEqual(if (colour) self.app_content.colours.selection else self.app_content.style.bg, cell.style.bg);
             }
-            if (col == 4 and std.mem.eql(u8, cell.char.grapheme, "e") and std.mem.eql(u8, screen.readCell(5, @intCast(row)).?.char.grapheme, "r")) {
+            if (col == 5 and std.mem.eql(u8, cell.char.grapheme, "e") and std.mem.eql(u8, screen.readCell(6, @intCast(row)).?.char.grapheme, "r")) {
                 saw_second_line = true;
                 try std.testing.expectEqual(if (colour) self.app_content.colours.quiet else self.app_content.style.fg, cell.style.fg);
                 try std.testing.expectEqual(if (colour) self.app_content.colours.band else self.app_content.style.bg, cell.style.bg);
