@@ -2954,9 +2954,10 @@ A notice takes that row, and any further rows its text wraps to, until the next 
 The rule names how many draft lines it hides above or below; a conversation drops its Session line when fewer than three rows remain under its status and the rule when fewer than four remain above the line, and an overview narrower or shorter than six cells shows no input.
 The status sits directly above the rule; conversation text starts at the top of the screen, and its tool rows and live line follow its last line (Divyansh approved this on 2026-10-31, front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 A draft wraps between words the same way on both screens: spaces at the edge hang past it rather than start a row, a word wider than the line (a URL or a path) breaks after its last `/`, `.`, `-` or similar mark that fits, and between clusters only when it has none; continuation rows align under the text.
-Presentation-owned ANSI foreground colours reinforce meaning: blue User/input markers, neutral assistant prose and settled outcomes, subdued transient status, yellow permission decisions, and red blocking failures or uncertainty.
-Settled outcomes stay quiet through concise wording and indentation, not a terminal palette's potentially unreadable dark grey.
-Nonempty `NO_COLOR` disables these foreground colours.
+The conversation paints presentation colours from the shared Khadi theme roles: ink for User markers and work under way, quiet for settled outcomes and transient status, attention for permission decisions, and failure for failures.
+Marks come from `src/marks.zig`; CLI reads keep the matching ANSI foreground codes.
+Nonempty `NO_COLOR` disables these presentation colours.
+
 Content cannot select a style, and all escaping, exact permission text and terminal cleanup guarantees remain unchanged.
 
 Historical applied Admissions are suppressed in favor of their User rows; live Admissions display once and their later User projections are suppressed.

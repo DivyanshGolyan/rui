@@ -175,10 +175,10 @@ test "a row's columns map to the clusters they show, indents and wide cells incl
     const document = try std.testing.allocator.create(Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
-    // At 10 columns "• 雪 fall fast" wraps: "• 雪 fall" then a hanging "  fast".
+    // At 10 columns "⠹ 雪 fall fast" wraps: "⠹ 雪 fall" then a hanging "  fast".
     // Spaces are drawn from no text byte: each is the point after the text
     // before it.
-    try document.append("• 雪 fall fast\n\nend");
+    try document.append("⠹ 雪 fall fast\n\nend");
     try document.prepare();
     var cells: [10 * 4]vaxis.Cell = undefined;
     layOut(document, .{}, 10, 4, &cells);
