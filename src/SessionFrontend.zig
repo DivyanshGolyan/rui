@@ -6053,3 +6053,92 @@ test "SessionFrontend huge person source keeps the following short answer bottom
         try std.testing.expect(std.mem.indexOf(u8, frame, "› ") != null);
     }
 }
+
+test "SessionFrontend summary bounds keep Ctrl-O and clicks exact across sixteen and five hundred twelve targets" {
+    const Domain = struct {
+        const line_length = "┄ item 00\n".len;
+        fn target(key: u64, index: usize) View.Collapsed {
+            return .{ .source = if (index % 2 == 0) .activity else .conversation, .position = key * 1000 + index, .ordinal = index, .content = .{ .length = 100 + index, .digest = @splat(@intCast(index)) }, .row = index % 2 != 0 };
+        }
+        fn page(fixture: FeedFixture, key: u64, aggregate: bool) !void {
+            const frontend = &fixture.held.self;
+            errdefer std.debug.print("boundary page {d} failed; rows {d}, targets {d}\n", .{ key, frontend.screen.feed.count, frontend.screen.feed.target_count });
+            const read: feed_reads.Read = if (key == 1) .opening else .scan;
+            if (read == .opening) frontend.reading.opening = true;
+            const job = frontend.freeze(.activity);
+            frontend.reading.feed_read = read;
+            job.feed_page = FeedPolicy.request(read, frontend.feedState());
+            var bytes: [2048]u8 = undefined;
+            var out = std.Io.Writer.fixed(&bytes);
+            for (0..16) |index| try out.print(View.Mark.summary ++ "┄ item {d:0>2}" ++ View.Mark.reset ++ "\n", .{index});
+            if (aggregate) try out.writeAll(View.Mark.summary ++ "┄ 9 more summaries" ++ View.Mark.reset ++ "\n");
+            try fixture.file.writePositionalAll(std.testing.io, out.buffered(), 0);
+            job.result.row_count = 1;
+            job.result.rows[0] = .{ .key = .{ .position = key }, .offset = 0, .length = out.end, .tight = false, .provisional = false, .collapsed_count = 16 };
+            for (job.result.rows[0].collapsed_targets[0..16], 0..) |*item, index| item.* = target(key, index);
+            job.result.at_start = read == .opening;
+            job.result.at_end = true;
+            job.result.low = .{ .position = key };
+            job.result.high = .{ .position = key, .ordinal = std.math.maxInt(u64) };
+            job.result.cursor = .{ .position = key };
+            job.result.new_rows = 1;
+            try frontend.launch(job, struct {
+                fn complete(_: *anyopaque, _: *Task) !void {}
+            }.complete);
+            try frontend.settleReader();
+        }
+        fn ctrlO(held: *HeldFrontend, expected: ?View.Collapsed) !void {
+            held.self.dropMessageRequest();
+            _ = try held.draw();
+            try held.keys("\x0f");
+            try held.settle();
+            errdefer std.debug.print("boundary Ctrl-O expected {any}, got {s}\n{s}\n", .{ expected, @tagName(held.self.expansion.queued), held.shown() catch "frame unavailable" });
+            if (expected) |value| {
+                try std.testing.expect(held.self.expansion.queued == .ready);
+                try std.testing.expectEqualDeep(value, held.self.expansion.queued.ready.target);
+            } else try std.testing.expect(held.self.expansion.queued == .none);
+            held.self.dropMessageRequest();
+        }
+        fn click(held: *HeldFrontend, key: u64, index: usize, expected: ?View.Collapsed) !void {
+            held.self.dropMessageRequest();
+            var ctx = held.context();
+            // The feed's real click callback resolves this keyed byte position;
+            // the test does not inject an expansion target or count from end.
+            try appClick(&held.self, &ctx, .{ .key = .{ .position = key }, .offset = index * line_length });
+            errdefer std.debug.print("boundary click key {d} summary {d}, expected {any}, got {s}\n", .{ key, index, expected, @tagName(held.self.expansion.queued) });
+            if (expected) |value| {
+                try std.testing.expect(held.self.expansion.queued == .ready);
+                try std.testing.expectEqualDeep(value, held.self.expansion.queued.ready.target);
+            } else try std.testing.expect(held.self.expansion.queued == .none);
+            held.self.dropMessageRequest();
+        }
+    };
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const held = fixture.held;
+    for (1..33) |key| try Domain.page(fixture, key, false);
+    try std.testing.expectEqual(@as(usize, 32), held.screen.feed.count);
+    try std.testing.expectEqual(@as(usize, 512), held.screen.feed.target_count);
+    try Domain.ctrlO(held, Domain.target(32, 15));
+    try Domain.click(held, 32, 0, Domain.target(32, 0));
+    try Domain.click(held, 32, 15, Domain.target(32, 15));
+    // The 513th target reaches Window's actual atomic capacity refusal and
+    // frontend trim/retry, rather than losing a target after text admission.
+    try Domain.page(fixture, 33, false);
+    try std.testing.expect(held.screen.feed.count < 33);
+    try std.testing.expect(held.screen.feed.target_count <= 512);
+    try std.testing.expect(held.screen.feed.indexOf(.{ .position = 33 }) != null);
+    try std.testing.expect(held.screen.feed.messageAt(.{ .key = .{ .position = 1 }, .offset = 0 }) == null);
+    try Domain.click(held, 1, 0, null);
+    try Domain.ctrlO(held, Domain.target(33, 15));
+    try Domain.click(held, 33, 0, Domain.target(33, 0));
+    try Domain.click(held, 33, 15, Domain.target(33, 15));
+    // Sixteen exact actionables followed by the reader's one aggregate: its
+    // visible unkeyed mark blocks both Ctrl-O fallback and per-Message clicks.
+    try Domain.page(fixture, 34, true);
+    try Domain.ctrlO(held, null);
+    try Domain.click(held, 34, 16, null);
+    try Domain.click(held, 34, 0, Domain.target(34, 0));
+    try Domain.click(held, 34, 15, Domain.target(34, 15));
+    try std.testing.expect(held.screen.anchor.following());
+}
