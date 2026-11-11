@@ -207,8 +207,8 @@ def activity_case():
 
 def send_state_case():
     """The frame that clears the composer already says `Sending…`, and every
-    frame after it shows `Sending…`, `Sent` or the Message's own row until
-    that row shows: the person never sees their Message vanish."""
+    frame after it shows `Sending…` or an empty status bar until the
+    Message's own row shows. The status bar never says `Sent`."""
     with Chrome("rui-chrome-send.", [fixture.sse_answer("sent", "r", "m", "SENT-ANSWER")[0]]) as chrome:
         session = chrome.session()
         master, caller, _ = chrome.open(session, lambda screen: True)
@@ -224,10 +224,10 @@ def send_state_case():
             seen.add(last)
             if "› SEND-ME" in shown:
                 break
-            assert last in ("Sending…", "Sent"), ("the Message vanished", frame)
+            assert last in ("Sending…", ""), ("the status bar said something else", frame)
         assert {"Sending…"} <= seen, seen
         chrome.leave(master, caller)
-    print("session chrome: Enter's clearing frame says Sending…, then Sent until the Message's row shows", flush=True)
+    print("session chrome: Enter's clearing frame says Sending…, and nothing says Sent before the Message's row shows", flush=True)
 
 
 def scroll_marker_case():

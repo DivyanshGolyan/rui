@@ -21,7 +21,7 @@ pub fn init(self: *Self, io: std.Io, environ: *std.process.Environ.Map) !void {
     inline for (Signals.handled, 0..) |signal, index| std.posix.sigaction(signal, &action, &self.previous[index]);
     errdefer self.restoreSignals(.all);
     self.app = try .init(io, std.heap.page_allocator, environ, &self.output);
-    self.attention = .of(&self.app.vx, self.app.tty.writer(), environ);
+    self.attention = .{ .vx = &self.app.vx, .out = self.app.tty.writer() };
 }
 
 pub fn deinit(self: *Self) void {
@@ -77,23 +77,16 @@ pub fn detached(store: []const u8, opened: ?[]const u8, action: ?u64) void {
 }
 
 /// The terminal's attention channel beside App's frames: each Session's
-/// program-status record where the terminal takes them, and otherwise a
-/// notification in the signal its environment understands.
+/// program status record (OSC 7501). Records go out whether or not the
+/// terminal answered the query; one that does not take them ignores them.
 pub const Attention = struct {
     vx: *vaxis.Vaxis,
     out: *std.Io.Writer,
-    signal: alert.Signal,
     statuses_shown: bool = false,
-
-    pub fn of(vx: *vaxis.Vaxis, out: *std.Io.Writer, environ: *const std.process.Environ.Map) Attention {
-        const inside = environ.get("TMUX") != null or environ.get("STY") != null;
-        return .{ .vx = vx, .out = out, .signal = alert.signal(environ.get("TERM") orelse "", environ.get("TERM_PROGRAM") orelse "", inside) };
-    }
 
     /// True once the record went out. The overview then marks its value as
     /// delivered, without a second frame ledger.
     pub fn report(self: *Attention, session: *const [session_id.bytes]u8, name: []const u8, status: ?alert.Status) !bool {
-        if (!self.vx.caps.program_status) return false;
         var id: ["rui/".len + session_id.bytes]u8 = undefined;
         @memcpy(id[0..4], "rui/");
         @memcpy(id[4..], session);
@@ -122,14 +115,6 @@ pub const Attention = struct {
         if (!self.statuses_shown) return;
         try self.vx.clearProgramStatus(self.out, "rui");
         self.statuses_shown = false;
-    }
-
-    /// A terminal that takes records shows the news from them instead, so
-    /// nothing comes twice.
-    pub fn notify(self: *Attention, name: []const u8, kind: alert.Kind, more: usize) !void {
-        if (self.vx.caps.program_status) return;
-        try alert.write(self.out, self.signal, name, kind, more);
-        try self.out.flush();
     }
 };
 

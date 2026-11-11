@@ -128,7 +128,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
 | Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
 | Session overview | `src/Overview.zig` owns the terminal surface and its reader; `src/overview_view.zig` is its presentation core. |
-| Desktop notifications | `src/attention.zig` decides which states are news and words them, and what program status record each Session has; `src/SessionTerminal.zig` owns focus and the program status probe, and writes both. |
+| Desktop notifications | `src/attention.zig` decides what program status record (OSC 7501) each Session has; `src/TerminalApp.zig`'s `Attention` writes the records through vaxis. |
 | Functional cores | The `cores` list in `src/logic_tests.zig`; `src/core_boundary.zig` defines what a core may name. |
 
 ## Admission and public requests
@@ -843,6 +843,10 @@ Generic content access cannot open private continuation; the provider view grant
 One shared, pointer-stable preparation owner retains the admitted Operation/Attempt binding, historical view and active reader, charged scratch, encoder/replay cursor and cleanup state.
 There is at most one such owner across all execution slots; it is resumable orchestration state, not durable authority, a worker or a prepared-request queue.
 Borrowed record metadata expires on reader advance; opaque handles remain stable until view release, and payload reads use bounded caller buffers.
+The view's first round reads the frozen settings, checks that the Attempt binding is still current, finds the selected base with its anchor and checks the first page of accepted outputs; opening the view reads nothing.
+It reads history in batches of 16 entries, each batch in one round with its page: each output item with its call, the items' parts in order, the first page of the tools the request ends with, and with every row the whole bytes of each content it names of at most 16 KiB.
+The page is plain values on the heap for the view's life (under 300 KiB), because history below the admission never changes; a reader of a content the page kept copies from it without entering the Store and still checks its digest, and a larger content, or one the page had no room for, is read through its own reader.
+A batch that comes back short is the Session's last, so the end of the walk costs no round.
 No SQLite transaction spans adapter processing or network activity.
 Historical retention must preserve referenced versions through required recovery; an expired or foreign handle is programmer misuse, while missing/corrupt content and resource/storage failures are explicit failures.
 
@@ -860,7 +864,7 @@ The Store also advances an in-memory control generation after each accepted cont
 The Store advances an in-memory commit generation whenever a locked entry point changed rows, before releasing its lock; each turn skips its Bash, message and tool-continuation admission scans while the generation, the free-slot count and which shared preparation owners are open are unchanged since the last read found nothing.
 An Action Attempt loses custody without a saved outcome only after dispatch is fenced or the Host is shutting down, and neither admits work again, so uncertain Actions come only from an earlier Host; the lifecycle owner stops scanning for them once a scan after startup finds none.
 Retry admission depends on time and keeps its one-second poll.
-Nothing wakes the lifecycle owner for new work, so it waits at most 100 ms between turns, 25 ms while Bash runs; transport readiness and the HTTP/2 Client's own timers end a wait sooner.
+A Store commit from any thread and a finished stream wake the lifecycle owner at once; for everything else it waits at most 100 ms between turns, 25 ms while Bash runs, and the HTTP/2 Client's own timers end a wait sooner.
 A control always commits before its hint, so a lost hint still moves the control generation.
 Before transport handoff it rechecks superseding controls; stop or shutdown cancels preparation, closes readers and prevents launch.
 Canonical read faults fence dispatch.
@@ -1471,7 +1475,8 @@ MySQL schema application and backup remain operator-owned.
 
 `rui upgrade` replaces an eligible managed released selection with the latest published stable release and conditionally activates it for the selected Store only when its Host was already running.
 `rui upgrade --check` is read-only and starts no Host.
-`/upgrade` runs inline on the status bar, with no page, without sending `/upgrade` to the model or adding an updater service.
+On the overview, `/upgrade` runs inline on the status bar, with no page, without sending `/upgrade` to the model or adding an updater service.
+In a conversation, `/upgrade` says `Run rui upgrade in the shell` and never reaches the model, until the conversation reuses the inline status row.
 It checks (`Checking for updates…`), then installs a found release at once, with no Enter step even while Sessions work, and its first line says what the restart will do: `Upgrading to 0.60.0 · restarts the Host (2 Sessions working) · esc cancels`.
 Esc cancels while it checks or prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting the Host…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
 A release the running client cannot use leaves `Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave` on the status bar until another `/upgrade`; longer text, such as PATH warnings, the full check and retained cleanup paths, prints with the departure message.
@@ -2455,7 +2460,7 @@ Every binding needs its exact modifiers: a Kitty key that reports Shift is never
 ESC ESC is Esc, and the second ESC starts whatever follows: an Esc just before a marked paste or an arrow keeps that input whole, so an ESC ESC arrow (urxvt Meta-arrow) is Esc then that arrow.
 ESC before P, X, ], ^ or _ begins a terminal string, never typed text.
 A pending ESC before Ctrl-C or Ctrl-D is discarded, so those still interrupt or end input.
-A terminal path can change a key before Rui reads it: tmux delivers Shift-Enter as Enter and Hyper or Meta chords as their bare keys, so while a draft is composed inside tmux the status says `In tmux, Shift-Enter sends · Ctrl-J adds a line`, and `/help` says so too.
+A terminal path can change a key before Rui reads it.
 At an Action's choice any chord is refused, spends freshness and authorizes nothing.
 Shift alone stays text.
 An xterm modifyOtherKeys key (`CSI 27 ; modifier ; code ~`, which Ghostty's legacy table sends for modified Enter without being asked) decodes as the Kitty key with the same modifiers and no associated text, so its bindings mean the same: Shift-Enter adds a line, Ctrl-A moves to the line start, Ctrl-J sends, and an unbound Ctrl, Alt or Super chord is dropped as its Kitty form is.
@@ -2478,53 +2483,18 @@ The editor does not promise linear total work for arbitrary Unicode editing.
 
 #### Desktop notifications
 
-Divyansh approved one behavior on 2026-10-31 (front-end plan PR 8): Rui notifies through the terminal (OSC 9/777, bell fallback) when a Session finishes or needs approval while the window is out of focus.
-The rest of this section records how this build meets it; those are builder choices, not his approval.
-While its terminal is out of focus, an open overview or conversation also notifies when a Session fails.
-The `attention` core decides both screens alike, against one record per Session in the overview's core (`State.seen`): the latest state that wanted the person any read showed, the listing's or the open conversation's.
-The record only moves forward, in the order a Session reaches such states: by Turn, then within a Turn each wait for approval by its earliest Action awaiting a decision (`first_action`), and the Turn's finish or failure after every wait in it.
-Turn and Action ids only grow, and the earliest Action awaiting moves only forward as decisions land.
-A state is news when it comes after the record; a read of an earlier one, as a listing read before a finish the conversation already announced, is no news and leaves the record, so that finish is not news again.
-A finished or failed work state is news once, by its Turn, so a later Turn's finish is news again even within the same second.
-An Action awaiting a decision, in the approval state or beside running Bash, is news once by its earliest Action, so one Action's wait is one notification as its Bash ends and the approval state begins, and the next Action to wait after a decision is news again.
-Rereading the same state, stopping, and other work under way are not news, and a read of work under way between two reads of one finish, as a slower listing's, leaves the record as it was.
-The state a screen opens on is not news: the overview's first listing and the conversation's opening page notify nothing, while a Session first seen in a later listing can.
-The overview's core returns one `notify` effect per listing, naming the most urgent Session (approval, then failure, then finish) by its row title and counting the others.
-Divyansh decided on 2026-11-01 that while a conversation is open, Rui still notifies when any Session finishes or needs approval.
-So the overview's listing jobs keep running under the conversation, which steps them between its frames.
-The conversation hands each read it applies to the overview through its lender, and the core records it as it records the listing's; news the conversation reads first is named as its Session line names the Session.
-Whichever reads a state first notifies, and the other finds it recorded, so no news comes twice: not when the listing catches up after Esc, nor when it first lists a Session the conversation already read.
-
-`SessionTerminal` asks for focus reports (mode 1004) on entry and turns them off on restoration.
-`TerminalInput` decodes `ESC [ I` and `ESC [ O` as reports, never keys, so a focus change spends no Action offer, counts as no keypress and keeps a notice.
-Rui starts focused and stays so until a report says otherwise: a terminal that never reports, such as tmux without `focus-events on`, never notifies rather than notifying while the person watches.
-The text is `Rui: NAME finished`, `failed` or `needs approval`, with `, and N more` when one listing brings several; the name is cut to 80 bytes and escaped through `TerminalText` as one line, so no byte of it ends or extends the sequence.
-The signal follows the environment: OSC 9 for iTerm2, kitty, WezTerm and Ghostty (`TERM_PROGRAM` or `TERM`), OSC 777 `notify` for foot, and a bell elsewhere.
-Inside tmux or screen (`TMUX`, `STY`, or a `tmux`/`screen` `TERM`) it is always a bell: a multiplexer drops an unknown OSC unless passthrough is configured, but passes a bell to the outer terminal.
-Under a multiplexer that sends no focus reports Rui stays focused, so it never rings.
-`SessionTerminal` holds at most one waiting notification; news that comes while it waits joins it, naming the most urgent Session and counting the rest, and the next frame writes it as its first bytes through that frame's write: it never lands inside another sequence, and a terminal that takes no output runs the frame's pump rather than failing.
-A frame that fails drops it.
-Each notification rereads the preference, so `/setup --notifications off` applies at once; unreadable preferences leave the default, on.
-
-Divyansh asked on 2026-11-02 for Mitchell Hashimoto's program status protocol, OSC 7501 (https://www.superlogical.com/rex/docs/build/program-status).
-Rui uses it alongside the signal above, not instead of it, because few terminals take it yet (Rex; Ghostty and kitty unreleased); that, and what follows, are builder choices.
-On entry, outside tmux or screen, `SessionTerminal` sends the probe `OSC 7501 ; ? ST` and then `CSI c`.
-The spec says nothing of multiplexers, and one would answer for itself, so inside one Rui never probes and keeps the bell.
-`TerminalInput` decodes the probe's answer and every device attributes answer as reports, never keys, as it does focus reports.
-An answer to the probe before the device attributes answer behind it means the terminal takes program status; a device attributes answer first, or none, means it does not, and Rui notifies as above.
-Opening never waits for either.
-The overview's own background question also ends with `CSI c`; its answers come after the probe's, so the first device attributes answer is the probe's and the second still ends that wait.
-Where the terminal takes it, Rui writes one record per Session, `id=rui/REFERENCE` with `app=rui` and the Session's row title in base64 as `msg`: `working` for pending, working, retrying, stopping and Bash work; `blocked` with `kind=permission` while an Action awaits a decision; `done` for a finish the person has not opened; `error` for a failure; `idle` after a stop, or once the person opens a Session whose outcome the record shows.
-Each record changes when the Session's state does, whether or not the terminal has focus: the terminal chooses how to show it and how often to tell the person.
-Then Rui writes no OSC 9, OSC 777 or bell, so no news comes twice.
-The records come from listings alone, which read in order, so a slower read never sets a record back.
+Divyansh decided on 2026-11-10 that Rui tells the terminal about its Sessions only through Mitchell Hashimoto's program status protocol, OSC 7501 (https://www.superlogical.com/rex/docs/build/program-status): Rui writes no OSC 9, OSC 777 or bell, inside tmux or screen too, and the terminal chooses how to show each record and how often to tell the person.
+Records go out whether or not the terminal answered vaxis's program status query; a terminal that does not take them ignores them.
+Rui writes one record per Session, `id=rui/REFERENCE` with `app=rui` and the Session's row title in base64 as `msg`: `working` for pending, working, retrying, stopping and Bash work; `blocked` with `kind=permission` while an Action awaits a decision; `done` for a finish the person has not opened; `error` for a failure; `idle` after a stop, or once the person opens a Session whose outcome the record shows.
+Each record changes when the Session's state does, whether or not the terminal has focus.
+The records come from listings alone, which read in order, so a slower read never sets a record back; the overview's listing jobs keep running while a conversation is open.
 `State.seen` keeps, per Session, the record Rui wants on the terminal (a status and a version that names it) and what the terminal holds of it (no record, the version of a report a frame wrote whole, or unknown after a clear that may have landed); each time the overview steps, `Overview.sendStatuses` reports exactly the Sessions where the two differ.
-A record follows each change a listing reads, and a later finish, failure or wait in the same state is a change, even when the open conversation read it first: a listing compares what it reads with what the listing before it read, not with the news notifications keep.
-An outcome the conversation's first read shows as the person opens the Session is one they have seen, even when no listing had read it yet: `State.seen` keeps the latest such state, a listing that reads that outcome or an earlier one gives `idle`, and only a later Turn's finish or failure is `done` or `error` again.
+A record follows each change a listing reads, and a later finish, failure or wait in the same state is a change: a listing compares what it reads with what the listing before it read, ordered by Turn, then within a Turn by the earliest Action awaiting a decision (`first_action`), with the Turn's finish or failure after every wait in it.
+An outcome the conversation's first read shows as the person opens the Session is one they have seen, even when no listing had read it yet: the conversation hands that read to the overview through its lender, `State.seen` keeps the latest such state, a listing that reads that outcome or an earlier one gives `idle`, and only a later Turn's finish or failure is `done` or `error` again.
 The listing the overview opens on gives a record only to work under way or waiting, so an outcome from before Rui opened never gets one, and a Session at rest gets none until it does something; a Session a full listing no longer shows has its record cleared.
 A new title, from a Label or a first line read later, is a new version, so the record is written again with that name.
-Reports are written first in each frame, as a notification is, and stay with `SessionTerminal` until a frame writes them whole: only then does the overview count them as held.
-A frame cut short changes nothing the core knows, so the next frame writes them again, and reports a frame cannot hold wait in the core for the next.
+`Attention.report` writes each record and flushes it, and only then does the overview count it as held.
+Each step rereads the preference, so `/setup --notifications off` applies at once; unreadable preferences leave the default, on.
 With notifications off Rui wants no record: while any record of Rui's may be on the terminal it writes one clear (`state=clear:id=rui`, which clears Rui's records and no other program's), and from the frame that carries it until one writes it whole, what the terminal holds of each record is unknown; on again, it writes every record again.
 Leaving clears Rui's records too whenever one may be on the terminal, though the spec lets `done` and `error` outlive the program: a record of a Session no Rui watches would not change again.
 
@@ -2625,8 +2595,8 @@ Sessions started from the overview composer are fresh Sessions.
 Explicitly ask-configured Sessions use the same allow-once/deny path, without special fresh-Session behavior.
 
 The frontend's caller owns the terminal and lends it.
-The caller creates the screen and `SessionTerminal`, installs the SIGINT and SIGTERM handlers and passes the cancellation they stop.
-`SessionFrontend.run` draws until the person leaves or a signal arrives, and returns how it stopped: `detached`, `interrupted` or `returned`.
+`TerminalApp` installs the SIGINT, SIGTERM and SIGHUP handlers, and the root quits on its next tick once one arrives.
+The conversation runs until the person leaves or a signal arrives, and reports how it stopped: `detached`, `interrupted` or `returned`.
 It returns `returned` only when nothing would be lost or dismissed: no draft, pending Action, sub-view or running command, and no original that is not yet saved (`not_started` or `submitting`).
 The overview then closes the frontend, which joins its reader, and draws again without restoring the terminal or printing a notice.
 A rejected original is released as `/discard` would. An unconfirmed one goes into the overview's request ledger: the overview's status bar names the newest one until the overview ends, `! Not confirmed · rui request recover KEY` (or `! REF: send not confirmed; details on exit` with no saved request), not as a notice the next key clears, and its departure prints the line the conversation's exit would have printed. When that ledger is full, the frontend leaves as Ctrl-C would and prints the line itself.
@@ -2725,7 +2695,7 @@ Divyansh approved those labels on 2026-10-31 (front-end plan PR 3, mock CFWmXwCY
 The Host reports how many wait and the newest on each Activity page (`queued`), and the row reads that Message's first line at its Admission position, which holds that Admission alone, never by text; it keeps the line with that Message's admission ID and shows it only while the Host names that Message newest.
 A Message sent when the work does not hold the queue and no older one waits is taken next, so live output shows it at once as its Admission, and never its row again, however long a pending Session takes to start it (as after Ctrl-R recovery).
 Any other waits in the row, which shows only in the latest view, whenever the Host reports a Message waiting that live output has not shown, whatever the work is doing, and counts only those; live output shows a waiting Message only when it is the oldest, so at most that one is left out; until its row, its stop or the queued row shows it, the send reads `Sent`.
-It keeps its row when rows run short, and a browsed page, which draws no tail, says `Sent` instead; it leaves in the frame that shows the Message as its row or at its stop; `queued_line.waitingRow` fits the row.
+It keeps its row when rows run short, and a browsed page, which draws no tail, says nothing in its place; it leaves in the frame that shows the Message as its row or at its stop; `queued_line.waitingRow` fits the row.
 A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
@@ -2939,7 +2909,7 @@ This presentation fact grants no permission authority.
 
 Each read borrows only its own job: inputs frozen at launch and a result the UI applies after join.
 No worker reads or writes frontend state.
-A live read renders its page into scratch; after a successful join, the UI appends it whole and applies its footer, Current, cursor and `Sent` in the same step, so one frame shows them together and none shows part of a page.
+A live read renders its page into scratch; after a successful join, the UI appends it whole and applies its footer, Current and cursor in the same step, so one frame shows them together and none shows part of a page.
 The opening is such a read, so a failed opening draws none of its content.
 Each page carries the Session's work from the same Store read as its items, so a page and its work always agree and no read repeats to pair them: its [Session work](#work-state-and-wait-conditions) state, with `since` and that state's facts (a running Bash call's saved description, a waiting retry's due time, cause and ordinal, or a quota failure's saved reset time), the latest Turn and Operation, the first actionable Action, revision and workspace.
 Session listing rows carry the same work value from the same derivation.
@@ -2948,7 +2918,7 @@ Every input of the estimate (accepted output and usage, Tool Results, queued and
 A page delivered after a later change, such as another client's decision, still applies whole, and the next page supersedes it; a decision sent from its prompt for an already decided Action is refused by the Store.
 Accepted: decisions bind to the exact Action shown, so a stale prompt can only produce a rejected decision (`action_not_pending`), never one retargeted to another Action.
 An older transcript page applies only to the transcript it was loaded for.
-An accepted Message shows `Sent` until a delivered page contains its admission or a later one.
+The status bar never says `Sent`: an accepted Message's own row, or its waiting row, is its feedback (TUI rework plan, "drop Sent").
 The Store assigns admission IDs in Session position order, so a page that ends before it, or one read before a later Message's acceptance, does not clear it, and a page delivered before its acceptance joined does.
 
 The composer uses the same `› ` marker as submitted User messages.
@@ -3840,6 +3810,7 @@ The writer rechecks after writes; accepted live-effect controls publish their re
 No SQLite watcher is required.
 The retry scans use a due-time index that excludes future deadlines, and run at most once per second.
 A scan that found nothing runs again only after a commit, a slot change or the earliest scheduled retry falling due by the wall clock, the clock the Store admits by; the admission scan reads that due time in its own round, and an idle Host sends the Store no query.
+After a commit, one read round says which kinds of dispatch work the Store holds (core and MCP Actions, Bash, waiting Messages, tool continuations), and only those kinds' scans run; the answer is a hint, since each admission reads its own facts again, and a kind it wrongly names costs one empty round.
 Missed ticks do not queue.
 Full capacity or an empty array must not cause spinning.
 

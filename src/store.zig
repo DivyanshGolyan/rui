@@ -68,6 +68,7 @@ pub const Declaration = historical_domain.Declaration;
 pub const HistoricalView = historical_domain.HistoricalView;
 pub const MessageReply = command_domain.MessageReply;
 pub const ModelAdmissionKind = model_admission_domain.ModelAdmissionKind;
+pub const DispatchWork = model_admission_domain.DispatchWork;
 pub const ModelFailure = model_settlement_domain.ModelFailure;
 pub const ModelFailureClass = model_settlement_domain.ModelFailureClass;
 pub const ModelInterruptionReply = command_domain.ModelInterruptionReply;

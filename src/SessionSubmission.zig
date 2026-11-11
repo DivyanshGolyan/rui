@@ -405,7 +405,7 @@ test "submission reservation failure retains unsent intent ahead of accepted his
         input.init();
         var self: Self = .{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .accepted = .{ .kind = .message, .key = @splat('A') } };
         const intent: Intent = if (kind == 0) .{ .message = input.submitText("original café!") } else .{ .decision = .{ .action = 9, .decision = if (kind == 1) .allow_once else .deny } };
-        for ("next té!\x1b[D") |byte| _ = input.feed(byte);
+        _ = input.typed("next té!\x1b[D");
         try std.testing.expectError(error.EntropyUnavailable, self.begin(intent));
         try std.testing.expectEqual(.not_started, self.view().?.state);
         try std.testing.expectEqual(intent.kind(), self.recovery().not_sent);
@@ -513,7 +513,7 @@ test "submission cancelled and failed joins preserve independent publication fac
                 input.init();
                 var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .accepted = .{ .kind = .message, .key = @splat('A') }, .publication = publication, .key = @splat('B'), .state = .unconfirmed };
                 self.intent = if (kind == 0) .{ .message = input.submitText("original B café!") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
-                for ("newer té!\x1b[D") |byte| _ = input.feed(byte);
+                _ = input.typed("newer té!\x1b[D");
                 try self.task.start(self.io, &self, run);
                 const end = self.join();
                 try std.testing.expectEqual(if (run == Worker.failed) error.ConnectionResetByPeer else error.Cancelled, end.failed.err);
@@ -578,7 +578,7 @@ test "submission recovery validates reopened originals and pins the saved reader
                     try client.capturePermissionDecision(io, .{ .store = store, .session = session, .action_id = if (variant == .action) 20 else 19, .decision = if ((kind == 1) != (variant == .decision)) .allow_once else .deny }, target);
                 record.close(io);
             }
-            for ("newer té!\x1b[D") |byte| _ = input.feed(byte);
+            _ = input.typed("newer té!\x1b[D");
             try std.testing.expectError(error.OriginalBindingMismatch, self.requestRecovery("wrong-gesture"));
             try std.testing.expect(try self.advance() == .absent);
             try std.testing.expect(self.join() == .absent);
@@ -690,7 +690,7 @@ test "submission settles wire Admission only after join and releases only accept
             try std.testing.expectEqual(.submitting, self.view().?.state);
             try std.testing.expectError(error.SubmissionUnresolved, self.discardRejected());
             try self.requestRecovery(null);
-            for ("next té!\x1b[D") |byte| _ = input.feed(byte);
+            _ = input.typed("next té!\x1b[D");
             const key = self.view().?.key;
             const end = self.join();
             // Acceptance releases the record; an unresolved one keeps its route.

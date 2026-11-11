@@ -21,6 +21,7 @@ import tempfile
 import termios
 import threading
 import time
+import tty
 
 import host_process
 from host_process import assert_caller_error, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, screen_fixture_root, stop_process
@@ -508,14 +509,21 @@ def status_frame(master, session, command="/status", timeout=15):
     return command_frame(master, command, page, timeout)
 
 
+def saved_default(master, command, line):
+    """The /setup reply that shows `line`. Every such reply opens with the
+    same words and stays shown until the next, so the line this command
+    changed is what tells its reply from the last one."""
+    return command_frame(master, command, lambda frame: "Saved defaults for future Sessions" in frame and shown(line, frame))
+
+
 def configured_frame(master, command):
     """The frame whose status row reports this Configure's success. Run over
     the /status page, the change leaves the page shown with its reply as a
     notice; Esc then returns to the conversation, so a later /status page is
     the one that request reads, not the page already shown."""
     frame = command_frame(master, command, lambda frame: "Configured." in frame.split("\n"))
-    if frame.startswith("Browsing"):
-        command_frame(master, "\x1b", lambda frame: not frame.startswith("Browsing"), end="")
+    if frame.startswith(" Status · "):
+        command_frame(master, "\x1b", lambda frame: not frame.startswith(" Status · "), end="")
     return frame
 
 
@@ -587,6 +595,68 @@ def pipe_wait_oracles():
         else:
             raise AssertionError("unbounded pipe record accepted")
     print("pipe wait oracles passed: exact records/prefix, unread suffix, EOF, partial deadline and byte bound", flush=True)
+
+
+def command_wait_oracles():
+    """command_frame against a scripted terminal that keeps its page shown
+    while a command runs, as Rui does. Enter follows the first frame that
+    shows typed text, and a wait that frame already satisfies is refused
+    before Enter: the page still shown would have passed for the reply. A
+    later frame that shows the whole command in the composer is not the
+    reply either, though the command's own words satisfy the wait."""
+    command = "/setup --model new"
+
+    def frame(page, draft=""):
+        composer = " ›" + (" " + draft if draft else "")
+        return terminal_frame([*page, composer], (len(page) + 1, len(composer) + 2))
+
+    old, new = ["Saved.", "Model: old"], ["Saved.", "Model: new"]
+    for accept, refused in ((lambda shown: "Saved." in shown, True), (lambda shown: "new" in shown, False)):
+        master, slave = open_pty()
+        stop_read, stop_write = os.pipe()
+        events = []
+
+        def typed_input():
+            ready = select.select([slave, stop_read], [], [], 10)[0]
+            return os.read(slave, 64) if ready == [slave] else b""
+
+        def terminal():
+            os.write(slave, frame(old))
+            typed = b""
+            while command.encode() not in typed:
+                part = typed_input()
+                if not part:
+                    return
+                typed += part
+            # Recorded before the frame that answers it.
+            events.append("command and Enter" if b"\r" in typed else "command")
+            os.write(slave, frame(old, command[:6]))
+            while b"\r" not in typed:
+                part = typed_input()
+                if not part:
+                    return
+                typed += part
+            events.append("Enter")
+            os.write(slave, frame(old, command) + frame(old) + frame(new))
+
+        peer = threading.Thread(target=terminal)
+        try:
+            tty.setraw(slave)
+            peer.start()
+            try:
+                reply = command_frame(master, command, accept, timeout=10)
+            except AssertionError as error:
+                assert refused and error.args[0][:2] == ("command result shown before the command ran", command), error
+                assert events == ["command"], events
+            else:
+                assert not refused, "a wait the shown page satisfies was accepted"
+                assert reply.split("\n")[:3] == [*new, " ›"] and events == ["command", "Enter"], (reply, events)
+        finally:
+            dispose_all(lambda: os.write(stop_write, b"x"), lambda: peer.join(timeout=5) if peer.ident else None,
+                        lambda: os.close(stop_read), lambda: os.close(stop_write),
+                        lambda: _captures.pop(master, None), lambda: close_pty(master), lambda: close_pty(slave))
+            assert not peer.is_alive(), "scripted terminal did not stop"
+    print("command wait oracles passed: Enter follows the typed frame; the shown page and the typed command are not the reply", flush=True)
 
 
 def terminal_frame(lines, cursor=None):
@@ -1817,6 +1887,7 @@ def main(selected="all"):
     if selected in ("all", "terminal-waits"):
         prove_terminal_process()
         pipe_wait_oracles()
+        command_wait_oracles()
     if selected == "terminal-waits":
         return
     if selected == "all":
@@ -2499,10 +2570,9 @@ def main(selected="all"):
             binding = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
             assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" in binding and permission_row(binding, "ask"), binding
-            help_text = terminal_step(master, "/help", "/result KEY", composer=True)
-            # The page is taller than the screen: page down to its end and read every frame on the way.
-            os.write(master, b"\x1b[6~" * 6)
-            help_text += read_terminal(master, "in your shell.", composer=True)
+            # The whole page fits this terminal's 50 rows, so one frame shows it from Marks to Login.
+            help_text = terminal_step(master, "/help", "in your shell.", composer=True)
+            assert help_text.lstrip().startswith("Marks\n"), help_text
             for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
                 assert command in help_text, help_text
             assert "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
@@ -2521,9 +2591,9 @@ def main(selected="all"):
             terminal_step(master, "/status", "ask · Bash and MCP ask first", composer=True)
             assert not credential.exists(), "unsupported in-session login created credentials"
             terminal_step(master, "/setup --model gpt-6-luna", "Saved defaults for future Sessions", composer=True)
-            terminal_step(master, "/setup --model gpt-5.5", "Saved defaults for future Sessions", composer=True)
+            saved_default(master, "/setup --model gpt-5.5", "Model: gpt-5.5")
             interactive_saved = preferences_home / ".config/rui/preferences"
-            terminal_step(master, "/setup --clear-model", "Saved defaults for future Sessions", composer=True)
+            saved_default(master, "/setup --clear-model", "Model: not selected")
             assert interactive_saved.read_text().endswith("provider=codex\nmodel=\n")
             cleared_preferences = interactive_saved.read_bytes()
             # Neighbours differ: an identical rejection draws no new frame.
@@ -2541,12 +2611,13 @@ def main(selected="all"):
             terminal_step(master, "/setup --model gpt-6-luna", "Saved defaults for future Sessions", composer=True)
             spaced_store = state / "spaced store"
             spaced_store.mkdir(mode=0o700)
-            terminal_step(master, f'/setup --store "{spaced_store}"', "Saved defaults for future Sessions", composer=True)
+            saved_default(master, f'/setup --store "{spaced_store}"', f"Store: {spaced_store.resolve()} (saved)")
             assert defaults(preferences_home)["store"] == str(spaced_store.resolve())
             quoted_store = state / 'quoted "store"'
             quoted_store.mkdir(mode=0o700)
             escaped_store = str(quoted_store).replace('"', r'\"')
-            terminal_step(master, f'/setup --store "{escaped_store}"', "Saved defaults for future Sessions", composer=True)
+            shown_store = str(quoted_store.resolve()).replace('"', r'\"')
+            saved_default(master, f'/setup --store "{escaped_store}"', f"Store: {shown_store} (saved)")
             assert defaults(preferences_home)["store"] == str(quoted_store.resolve())
             terminal_step(master, '/setup --store "unfinished', "Usage: /setup", composer=True)
             assert defaults(preferences_home)["store"] == str(quoted_store.resolve())

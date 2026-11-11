@@ -668,7 +668,6 @@ class FixtureEntryTest(unittest.TestCase):
     def test_every_fixture_entry_refuses_root_before_it_starts(self):
         entries = list(fixture_entries())
         self.assertIn("tests/integration/admission_integration.sh", entries)
-        self.assertIn("tests/integration/session_sequence_model_test.py", entries)
         self.assertNotIn("tests/integration/model_fixture.py", entries)
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory) / "tmp"

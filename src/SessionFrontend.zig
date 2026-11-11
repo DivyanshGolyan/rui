@@ -20,13 +20,10 @@ const protocol_reply = @import("protocol_reply.zig");
 const activity_reply = @import("activity_reply.zig");
 const protocol = @import("protocol.zig");
 const Input = @import("SessionInput.zig");
-const TerminalInput = @import("TerminalInput.zig");
 const Submission = @import("SessionSubmission.zig");
 const original_state = @import("submission_state.zig");
 const Task = @import("ClientTask.zig");
-const Terminal = @import("SessionTerminal.zig");
 const Screen = @import("SessionScreen.zig");
-const Frame = @import("TerminalFrame.zig");
 const Editor = @import("TerminalEditor.zig");
 const keymap = @import("keymap.zig");
 const overview_view = @import("overview_view.zig");
@@ -40,7 +37,6 @@ const session_id = @import("session_id.zig");
 const session_keys = @import("session_keys.zig");
 const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
-const UpgradePanel = @import("UpgradePanel.zig");
 const session_upgrade = @import("session_upgrade.zig");
 const Self = @This();
 const empty_app_text: vxfw.Text = .{ .text = "" };
@@ -77,7 +73,6 @@ files: Files,
 command: Command,
 requests: Requests = undefined,
 status: Status = undefined,
-terminal: *Terminal = undefined,
 screen: *Screen = undefined,
 // `begin` points it at the live Document. Shared paths such as `idleReader`
 // ask whether it drags, so until then it holds no press or drag.
@@ -92,12 +87,9 @@ app_hooks: AppHooks = undefined,
 app_caps: overview_view.Caps = .{},
 /// Stops when the caller is signalled; a running command stops with it.
 interrupted: *client.Cancellation = undefined,
-/// The overview that lent the terminal.
-/// `run` always supplies the overview; a frame drawn without one says nothing.
+/// The overview this Session belongs to; a frame drawn without one says nothing.
 lender: Lender = quiet_overview,
 colour: bool,
-/// Inside tmux, Shift-Enter reaches Rui as Enter; composing says so.
-tmux: bool = false,
 input: Input = undefined,
 submission: Submission = undefined,
 /// What the latest /requests page offers to act on, which its list shows
@@ -160,14 +152,8 @@ inspection: struct {
     // carry recovery warnings.
     command_running: bool = false,
 } = .{},
-// Messages sent and what live output has delivered of them.
+// Messages sent.
 admission: struct {
-    // The newest accepted Message admission not yet in delivered output.
-    // Admission order is Session order, so it stands for every earlier one.
-    echo: ?u64 = null,
-    // The newest Message admission live pages have taken: shown as its
-    // conversation row, or at the stop that excluded it.
-    delivered: u64 = 0,
     /// Messages begun; a /details read begun before the latest one never covers it.
     sent: u64 = 0,
     details_sent: u64 = 0,
@@ -408,11 +394,10 @@ pub const Lender = struct {
     service: *const fn (context: *anyopaque) anyerror!bool,
     /// What the overview says under the input, until its next step.
     line: *const fn (context: *anyopaque, work: protocol.session_work.Kind) Said,
-    /// Hands the overview each read of the Session's work, which it records
-    /// against what its listing read of the Session and notifies of as
-    /// news, named `name`, unless it is the read the conversation opens on.
-    /// Its failure is the overview's and ends the conversation.
-    observed: *const fn (context: *anyopaque, work: protocol.session_work.Work, name: []const u8, opening: bool) anyerror!void,
+    /// Hands the overview each read of the Session's work; the read the
+    /// conversation opens on is an outcome the person has seen. Its failure
+    /// is the overview's and ends the conversation.
+    observed: *const fn (context: *anyopaque, work: protocol.session_work.Work, opening: bool) anyerror!void,
 
     upgrade: ?*const fn (context: *anyopaque, handoff: UpgradeHandoff) anyerror!bool = null,
 
@@ -428,27 +413,6 @@ pub const Lender = struct {
 /// Host work it started continues. `returned` goes back to the overview that
 /// lent the terminal, which stays begun.
 pub const Outcome = enum { detached, interrupted, returned };
-
-/// Draws the Session on a lent terminal until the person leaves or the caller's
-/// `interrupted` stops. Returns with the terminal still begun and the reader,
-/// the Admission wait and any running command told to stop but not joined. The
-/// caller restores the terminal before `leave` joins them, so a borrower that
-/// cannot stop at once never holds the terminal raw. `self` stays in the
-/// caller's storage until `leave` returns.
-pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, terminal: *Terminal, interrupted: *client.Cancellation, lender: Lender) !Outcome {
-    self.begin(init, store, session, directory, files, command, requests, status, terminal.screen, interrupted, lender);
-    self.terminal = terminal;
-    self.tmux = if (terminal.notices) |notices| notices.tmux else false;
-    terminal.pump = .{ .context = self, .step = pump };
-    defer terminal.pump = null;
-    defer self.stop();
-    self.driveActive() catch |err| switch (err) {
-        // A pumped write reports a detach as an interruption too.
-        error.InteractiveInterrupted => return if (interrupted.stopped.load(.acquire)) .interrupted else self.leaving orelse .detached,
-        else => return err,
-    };
-    return self.leaving orelse .detached;
-}
 
 pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, screen: *Screen, interrupted: *client.Cancellation, lender: Lender) void {
     self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .screen = screen, .interrupted = interrupted, .lender = lender, .colour = screen.colour };
@@ -784,9 +748,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     chrome.shortcuts.method = self.app_caps.width;
     chrome.shortcuts.style = normal;
     const held = self.heldOriginal();
-    // An accepted Message reads Sent until live output, or the waiting row drawn, shows it.
-    const sent = if (self.admission.echo) |echo| if (queued) |row| echo > row.newest else true else false;
-    const send = session_chrome.send(session_notice.status(self.reading.opening, self.app_consent.request != null, held), self.reading.opening or (held != null and held.?.state == .submitting), sent);
+    const send = session_chrome.send(session_notice.status(self.reading.opening, self.app_consent.request != null, held), self.reading.opening or (held != null and held.?.state == .submitting));
     const facts_buffer = try ctx.arena.create([session_chrome.facts_bytes]u8);
     chrome.place(&self.app_screen, .{
         .browsing = browsing,
@@ -1284,7 +1246,7 @@ pub const Back = union(enum) {
     ended: anyerror!Outcome,
 };
 
-/// After `run` returned `returned`, which Esc only asks for: settles the
+/// After the Session left with `returned`, which Esc only asks for: settles the
 /// stopped borrowers as `leave` does, while the terminal stays lent. Esc
 /// needs no running command or submission, so they observe their stop
 /// within one transport poll. A rejected original is released as /discard
@@ -1315,7 +1277,7 @@ pub const Departure = struct {
     recovery_shown: bool,
 };
 
-/// Joins what `run` stopped, after the caller restored the terminal, and writes
+/// Joins what the Session stopped, after the caller restored the terminal, and writes
 /// the guidance that follows restoration. The caller prints the Detached notice.
 pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Departure {
     const settled = self.settle(restored);
@@ -1752,7 +1714,7 @@ test "a Session's /reload-skills drops the skills it listed, and the next read l
 test "frontend lists the efforts of the Session's model once it is read, the one in force marked" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .colour = false };
     self.input.init();
-    for ("/effort ") |byte| _ = self.input.feed(byte);
+    _ = self.input.typed("/effort ");
     try std.testing.expectEqualStrings("/effort ", self.input.composition().bytes);
     try std.testing.expect(self.nextCommands(null) == null);
     self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .medium };
@@ -1767,7 +1729,7 @@ test "frontend lists the efforts of the Session's model once it is read, the one
     shown = self.nextCommands(shown).?;
     try std.testing.expectEqualStrings("medium", shown.completion());
     // Typing moves it back to the first.
-    _ = self.input.feed('m');
+    _ = self.input.typed("m");
     try std.testing.expectEqualStrings("/effort m", self.input.composition().bytes);
     shown = self.nextCommands(shown).?;
     try std.testing.expectEqualStrings("edium", shown.completion());
@@ -1896,24 +1858,6 @@ fn quiesceUpgrade(self: *Self) !bool {
     return lender_ready and self.reader.thread == null and self.submission.task.thread == null;
 }
 
-fn showUpgrade(self: *Self) !void {
-    const outcome = try UpgradePanel.run(self.init, self.store, self.terminal, &self.input.stream, self.interrupted);
-    self.applyUpgrade(outcome);
-    if (self.lender.upgrade) |handoff| {
-        _ = try handoff(self.lender.context, if (self.upgrade.after == .blocked) .incompatible else .ready);
-    }
-}
-
-fn applyUpgrade(self: *Self, outcome: UpgradePanel.Outcome) void {
-    self.upgrade.close(outcome);
-    if (outcome == .compatible) {
-        self.poll_at = 0;
-        self.reading.prepared_action = null;
-    }
-    self.notice = self.upgrade.notice();
-    self.dirty = true;
-}
-
 fn startQueuedCommand(self: *Self) !void {
     if (self.reader.thread == null) if (self.input.takeCommand()) |text| {
         const kind = parse(text).inspection;
@@ -1994,9 +1938,8 @@ fn update(self: *Self) !Updated {
         // unfinished work in raw mode.
         self.reader.cancel();
     }
-    // A joined read may hide or withdraw the Action, so a sequence the
-    // choice is decoding finishes there first and keeps its meaning.
-    if (self.reader.thread != null and reader_policy.settles(self.reader.completed(), self.screen.inputRow() == .selector, self.input.pending() != .none)) {
+    // A joined read may hide or withdraw the Action.
+    if (self.reader.thread != null and self.reader.completed()) {
         try self.settleReader();
         self.withdrawDecided();
     }
@@ -2033,10 +1976,7 @@ fn update(self: *Self) !Updated {
             job.target = .{ .message = request.target };
             try self.launch(job, reads.fullMessage);
         }
-        // An Action's choice holds the input: no press waits for it.
-        if (self.screen.inputRow() == .selector) {
-            self.input.dropPresses();
-        } else if (self.reader.thread == null and !self.reading.opening) if (self.input.nextStep()) |recall| {
+        if (self.reader.thread == null and !self.reading.opening) if (self.input.nextStep()) |recall| {
             const job = self.freeze(.recall);
             job.recall = recall;
             try self.launch(job, reads.recall);
@@ -2051,115 +1991,6 @@ fn update(self: *Self) !Updated {
         };
     }
     return .active;
-}
-
-fn driveActive(self: *Self) !void {
-    while (self.leaving == null) {
-        if (self.upgrade.lends()) {
-            if (try self.lender.service(self.lender.context)) self.dirty = true;
-        }
-        const size = self.terminal.geometry();
-        if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
-        const updated = try self.update();
-        if (updated == .retry) continue;
-        if (updated == .upgrade) try self.showUpgrade();
-        if (updated != .active) {
-            if (self.dirty or self.screen.stale()) _ = try self.draw();
-            _ = try self.step(16);
-            continue;
-        }
-        // Input routes by the latest frame's editor. Once a transition revokes
-        // that frame, draw its replacement before reading further input.
-        for (0..1024) |_| {
-            if (try self.step(0) != .byte) break;
-            if (self.leaving != null or self.screen.stale()) break;
-        }
-        if (self.leaving != null) break;
-        // Finish chat paste/UTF-8 under its original decoder before consent.
-        if (self.reader.thread == null and self.reading.prepared_action != null and self.input.pending() == .none) {
-            // Preparation is complete and the file remains immutable through
-            // this choice. A bounded preview is export-only, never consent.
-            try self.screen.adopt(self.init.io, self.files.action, self.reading.prepared_action.?, self.input.composition().bytes.len == 0);
-            self.action_summary = self.reading.prepared_summary;
-            self.reading.prepared_action = null;
-            self.reading.phase = .activity;
-        }
-        self.withdrawDecided();
-        // Another Session's notification goes out with the next frame.
-        if (self.terminal.notificationWaiting()) self.dirty = true;
-        if (self.dirty or self.screen.stale()) if (try self.draw()) break;
-        // The classic loop has no link to follow; only the App Session does.
-        if (self.expansion.queued == .after_frame) _ = try self.expand();
-        _ = try self.step(16);
-    }
-}
-
-/// Draws a frame, applies its receipt and, when the screen says that frame
-/// awaits its offer, services input for the empty-input gate. Returns true
-/// when that service detached the caller.
-fn draw(self: *Self) !bool {
-    const screen = self.screen;
-    try self.drawFrame();
-    if (screen.awaitsOffer()) {
-        // Every prompt byte was accepted by stdout. Discard input through
-        // its decoder, not tcflush: a paste prefix or Ctrl-C arriving
-        // during the final write must retain its meaning.
-        var service: ConsentPolicy.Service = .budget_exhausted;
-        for (0..1024) |_| {
-            service = try self.step(0);
-            if (service != .byte) break;
-            service = .budget_exhausted;
-            if (self.leaving != null) break;
-        }
-        if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-        if (self.leaving != null) return true;
-        if (self.consentReceipt(service)) try Editor.testChoiceReady(self.init.io);
-    }
-    return false;
-}
-
-/// The post-write consent observation: input serviced after a delivered
-/// decision prompt offers it only when nothing arrived or remains.
-fn consentReceipt(self: *Self, service: ConsentPolicy.Service) bool {
-    return self.screen.promptCompleted(service, self.input.pending() != .none, self.commandActive() or self.dirty);
-}
-
-/// Writes one frame and applies its receipt.
-fn drawFrame(self: *Self) !void {
-    const screen = self.screen;
-    const waiting = screen.consent != null;
-    const view = self.input.composition();
-    // A waiting Action says how to decide it under the input, not here. A
-    // sent Message reads Sent until live output shows it: as its row, at
-    // its stop, or in the queued row, which the frame may drop.
-    const submission_status = session_notice.status(self.reading.opening, waiting, self.heldOriginal());
-    const base_status = submission_status orelse if (self.admission.echo != null) "Sent" else "";
-    // A waiting Action speaks for itself; elsewhere the work says what it is
-    // doing now, on every view.
-    const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
-    var live_words: [work_line.max_words_bytes]u8 = undefined;
-    const live = if (waiting) null else work_line.of(&live_words, &self.live.work.state, self.live.work.operation, now_ms);
-    var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
-    var context = std.Io.Writer.fixed(&context_buffer);
-    if (screen.actionVisible())
-        try approvalContext(&context, screen.actionTopHidden(), self.action_summary)
-    else if (self.tmux and !waiting and view.bytes.len != 0)
-        try context.writeAll("In tmux, Shift-Enter sends · Ctrl-J adds a line");
-    var status_buffer: [Frame.status_capacity]u8 = undefined;
-    const status = statusLines(&status_buffer, context.buffered(), base_status, self.line.archive_state);
-    var queued_buffer: [Frame.status_capacity]u8 = undefined;
-    const queued: ?Screen.Footer.Queued = if (self.queuedRow()) |row| .{
-        .waiting = row.waiting,
-        .status = statusLines(&queued_buffer, context.buffered(), submission_status orelse if (self.admission.echo) |echo| (if (echo <= row.newest) "" else "Sent") else "", self.line.archive_state),
-    } else null;
-    // The overview's stop prompt or notice, else the conversation's own.
-    const said = self.lender.line(self.lender.context, self.live.work.state.asOf(now_ms));
-    const notice = said.text orelse self.notice;
-    var facts = self.line.facts(&self.hint, self.session);
-    if (facts) |*shown| shown.stop = said.stoppable;
-    self.dirty = false;
-    // Reading completes only after delivery; the receipt stales the frame.
-    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.nextCommands(self.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
 }
 
 /// The list above the draft as it is now, after `previous`: the commands
@@ -2231,14 +2062,12 @@ fn tabCompletion(context: *const anyopaque, draft: []const u8, caret: usize) ?Ed
     return .{ .start = change.start, .end = change.end, .text = change.text };
 }
 
-// A notice fits the rows under the input as the status fits above it.
-comptime {
-    std.debug.assert(@typeInfo(@FieldType(Self, "notice_buffer")).array.len <= Frame.status_capacity);
-}
-
 /// The instructions always fit; a long context line is shortened, on a
 /// UTF-8 boundary, rather than pushing them out of the status region.
-fn statusLines(buffer: *[Frame.status_capacity]u8, context: []const u8, base: []const u8, archive_state: protocol.SessionArchiveState) []const u8 {
+/// The most bytes the status lines take.
+const status_capacity = 2048;
+
+fn statusLines(buffer: *[status_capacity]u8, context: []const u8, base: []const u8, archive_state: protocol.SessionArchiveState) []const u8 {
     std.debug.assert(base.len <= 256);
     var status = std.Io.Writer.fixed(buffer);
     const badge = status_page.archiveBadge(archive_state);
@@ -2265,7 +2094,7 @@ fn statusLines(buffer: *[Frame.status_capacity]u8, context: []const u8, base: []
 }
 
 test "status lines keep the instructions beside an oversized context" {
-    var buffer: [Frame.status_capacity]u8 = undefined;
+    var buffer: [status_capacity]u8 = undefined;
     // A context whose cut falls inside a two-byte scalar.
     var context: [4000]u8 = undefined;
     for (0..context.len / 2) |index| context[index * 2 ..][0..2].* = "é".*;
@@ -2277,7 +2106,7 @@ test "status lines keep the instructions beside an oversized context" {
 }
 
 test "archive badges keep submission status and whole instructions beside oversized context" {
-    var buffer: [Frame.status_capacity]u8 = undefined;
+    var buffer: [status_capacity]u8 = undefined;
     var context: [4000]u8 = undefined;
     for (0..context.len / 2) |index| context[index * 2 ..][0..2].* = "é".*;
     for ([_]struct { state: protocol.SessionArchiveState, expected: []const u8 }{
@@ -2296,31 +2125,11 @@ test "archive badges keep submission status and whole instructions beside oversi
 }
 
 /// Another client decided, or the Turn ended: the choice can no longer decide.
-/// It leaves before more input is read, so no key decides; a fragmented
-/// sequence finishes at the choice first and keeps its meaning.
+/// It leaves before more input is read, so no key decides.
 fn withdrawDecided(self: *Self) void {
     const pending = self.screen.consent orelse return;
-    if (self.live.work.first_action == pending.action or self.input.pending() != .none) return;
+    if (self.live.work.first_action == pending.action) return;
     self.screen.withdrawAction();
-}
-
-/// A paged Action keeps what it is for above the rule once paging hides its
-/// `?` row; it leaves again when that row is back on screen.
-fn approvalContext(out: *std.Io.Writer, top_hidden: bool, summary: View.ActionSummary) !void {
-    if (!top_hidden) return;
-    try out.writeAll("?");
-    if (summary.description.slice().len != 0) {
-        try out.writeAll(" ");
-        var label: TerminalText = .{ .mode = .label };
-        try label.feed(out, summary.description.slice());
-        try label.finish(out);
-    }
-}
-
-fn pump(raw: *anyopaque) !void {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    _ = try self.step(16);
-    if (self.leaving != null or self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
 }
 
 /// Sends a Message, alone or as the reason an Action is denied.
@@ -2353,12 +2162,12 @@ fn perform(self: *Self, action: ConversationAction) !void {
     const screen = self.screen;
     switch (action) {
         // A shown list takes the arrows, as the overview's model list does.
-        .previous, .next => if (if (screen.inputRow() == .draft) self.shownCommands() else null) |shown| {
+        .previous, .next => if (self.shownCommands()) |shown| {
             shown.move(action == .next);
             self.dirty = true;
-        } else if (screen.inputRow() != .draft or !try self.moveSelection(action == .next)) try self.scroll(action == .next, 1),
+        } else if (!try self.moveSelection(action == .next)) try self.scroll(action == .next, 1),
         // Shift-Up/Down move half a screen; PgUp/PgDn are their aliases.
-        .scroll_up, .scroll_down => if (if (screen.inputRow() == .draft) self.shownCommands() else null) |shown| {
+        .scroll_up, .scroll_down => if (self.shownCommands()) |shown| {
             shown.move(action == .scroll_down);
             self.dirty = true;
         } else try self.scroll(action == .scroll_down, session_chrome.halfScreen(screen.height)),
@@ -2368,7 +2177,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
         },
         .latest, .close => {
             // Esc closes only a list the person saw.
-            if (action == .close and screen.inputRow() == .draft) if (self.shownCommands()) |shown| {
+            if (action == .close) if (self.shownCommands()) |shown| {
                 shown.close();
                 self.dirty = true;
                 return;
@@ -2421,10 +2230,6 @@ fn converse(self: *Self, input: overview_view.ConversationInput) !void {
         return;
     }
     try self.lender.step(self.lender.context, self.shownWork(), input);
-}
-
-fn overviewSays(self: *const Self) Lender.Said {
-    return self.lender.line(self.lender.context, self.shownWork());
 }
 
 /// The work the conversation shows now.
@@ -2569,99 +2374,7 @@ fn idleReader(self: *const Self) reader_policy.Idle {
         .choice_open = self.screen.consent != null or self.app_consent.request != null,
         .action_named = self.live.work.first_action != null,
         .submission = self.submission.view() != null,
-        .decoder_pending = self.input.pending() != .none,
     };
-}
-
-fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
-    const stream = &self.input.stream;
-    const pending = stream.pending();
-    const read = (self.terminal.next(self.init.io, stream, wait) catch |err| switch (err) {
-        error.InputDeadline => {
-            const expired = try stream.expire();
-            if (expired != .none) {
-                self.notice = null;
-                try self.inputEvent(expired);
-            }
-            // Successful expiry releases decoder custody. Revisit redraw and
-            // its drained-input readiness gate, just as after ordinary input.
-            self.dirty = true;
-            return .decoder_expired;
-        },
-        else => return err,
-    }) orelse return if (pending == .none) .empty else .decoder_pending;
-    self.dirty = true;
-    // One stream decodes every byte; replies never reach an editor, and an
-    // event left in a suffix is delivered in order before the next byte.
-    // Input clears the notice; a reply, such as focus returning, keeps it.
-    var decoded = stream.feed(read.byte, read.at);
-    while (decoded != .none) : (decoded = stream.next()) switch (decoded) {
-        .report => |report| switch (report) {
-            .width => |method| self.screen.setWidth(method),
-            .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
-            .focus => |focused| self.terminal.focused = focused,
-            // The overview sends the records once a listing steps it.
-            .program_status => _ = self.terminal.answered(.program_status),
-            .device_attributes => _ = self.terminal.answered(.device_attributes),
-        },
-        else => {
-            self.notice = null;
-            try self.inputEvent(decoded);
-        },
-    };
-    return .byte;
-}
-
-/// The entry of every input. It spends the offer first, whatever the key
-/// does; only an arrow or Enter at the choice, or Enter in the draft beside
-/// the Action, may use it. The input row the latest frame shows takes the
-/// input.
-fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
-    const screen = self.screen;
-    const offer = screen.spendOffer();
-    if (session_keys.clearsOverviewNotice(Editor.select(conversation_keys, decoded), self.reading.opening)) try self.converse(.other);
-    if (screen.inputRow() == .selector) try self.choiceEvent(decoded, offer) else try self.draftEvent(decoded, offer);
-    if (self.leaving != null) screen.interruptConsent();
-}
-
-/// One input at an Action's Allow once / Deny choice. Only arrows and Enter
-/// act on it, and only with the offer this input spent.
-fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer) !void {
-    const screen = self.screen;
-    switch (session_keys.atChoice(Editor.select(conversation_keys, decoded), screen.selected.approval == .held)) {
-        .nothing => {},
-        .say => |text| self.notice = text,
-        .perform => |action| try self.perform(action),
-        .pick => |choice| try self.choose(.{ .pick = choice }, offer),
-        .confirm => try self.choose(.enter, offer),
-        .draft => {
-            screen.moveRow(.draft);
-            // No frame has shown this draft yet: the key offers nothing.
-            try self.draftEvent(decoded, null);
-        },
-    }
-}
-
-/// An arrow or Enter at the choice, probed against current geometry,
-/// command and the offer; one that cannot act says why.
-fn choose(self: *Self, key: Screen.ChoiceKey, offer: ?Screen.Offer) !void {
-    const screen = self.screen;
-    switch (screen.choose(key, offer, self.terminal.geometry(), self.commandActive())) {
-        .picked => {},
-        .decision => |selected| {
-            // Consumption precedes fallible submission.
-            screen.releaseAction();
-            try self.submission.begin(.{ .decision = .{ .action = selected.action, .decision = switch (selected.choice) {
-                .allow_once => .allow_once,
-                .deny => .deny,
-            } } });
-        },
-        .blocked => |why| self.notice = switch (why) {
-            .reading => "! Read the whole Action first; nothing authorized.",
-            .command => "! Command still running. Nothing authorized.",
-            .not_ready, .layout => "! Not ready; nothing authorized.",
-        },
-    }
 }
 
 /// The waiting Action, as the screen shows it now.
@@ -2675,55 +2388,6 @@ fn waitingAction(self: *const Self) ?session_notice.Action {
 fn heldOriginal(self: *const Self) ?session_notice.Held {
     const submission = self.submission.view() orelse return null;
     return .{ .kind = submission.kind, .state = submission.state, .failure = if (self.heldFailure()) |failure| failure.bar else null };
-}
-
-/// One input in the draft, with the offer this input spent. Beside an Action
-/// whose standing offer showed the draft as the reason, Enter sends it and
-/// denies the Action.
-fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer) !void {
-    const screen = self.screen;
-    const submission = self.submission.view();
-    // Only the first key after an offered frame carries an offer, so the
-    // geometry probe runs at most once per frame.
-    const reason = if (screen.consent == null or offer == null) null else screen.reasonOffered(offer, self.terminal.geometry(), self.commandActive());
-    const letter = screen.consent != null and ConsentPolicy.choiceLetter(self.input.composition().bytes);
-    // A Message waits for a pending command, which may change its configuration.
-    // A live probe immediately before sealing, with no effect between them.
-    const allowed = ConsentPolicy.messageAllowed(screen.consent, reason != null and !letter, .{
-        .opening = self.reading.opening,
-        .permission_preparing = self.reading.phase == .permission,
-        .command = self.commandActive(),
-        .original = if (submission) |value| (if (value.kind == .decision) .decision else .message) else .none,
-    });
-    if (Editor.select(conversation_keys, decoded) == .enter and self.startChange()) return;
-    const applied = self.input.applySelected(conversation_keys, decoded, allowed);
-    if (applied == .message) {
-        const size = self.terminal.geometry();
-        Frame.validateGeometry(size.col, size.row) catch |err| {
-            self.input.release(applied.message) catch unreachable;
-            return err;
-        };
-    }
-    switch (applied) {
-        .message => |ticket| if (reason) |denial| {
-            // Consumption precedes fallible submission. The Message goes
-            // first, so the Action holds it until the denial that follows.
-            screen.decide(denial);
-            screen.releaseAction();
-            try self.beginMessage(.{ .message_then_deny = .{ .ticket = ticket, .action = denial.action } });
-        } else try self.beginMessage(.{ .message = ticket }),
-        .command => try self.commandLine(),
-        .busy => self.sayBusy(self.waitingAction(), letter),
-        .editor => |outcome| switch (outcome) {
-            .action => |action| try self.perform(action),
-            .refused => |why| self.notice = refusedNotice(why),
-            // Enter on an empty draft takes a /requests row the frame drew.
-            .submit => if (self.shownCommands() != null) {
-                if (self.input.queuedCommand() != null) self.notice = "! Command still running." else try self.commandLine();
-            },
-            .none, .append, .redraw => {},
-        },
-    }
 }
 
 /// Enter on a command line, or in a shown list, which takes its highlighted
@@ -2809,8 +2473,6 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
     switch (end) {
         .accepted => |accepted| {
             self.poll_at = 0;
-            // A page may have delivered it before this acceptance joined.
-            if (accepted.admission) |admission| self.admission.echo = if (admission > self.admission.delivered) admission else null;
             if (accepted.confirmed) self.notice = if (accepted.kind == .decision) "  • Decision confirmed." else "  • Original confirmed.";
         },
         .rejected => |rejected| {
@@ -3154,18 +2816,14 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
     } else if (self.reading.phase == .details or self.reading.phase == .inspection) {
         // showInspection selected the notice.
     } else {
-        // History, footer, status, Sent and /status change together, in one frame.
+        // History, footer, status and /status change together, in one frame.
         const result = &self.job.result;
-        self.admission.delivered = @max(self.admission.delivered, result.delivered);
         observed = .{ .work = result.work.work, .opening = self.reading.opening };
         self.live.work = .fromCore(result.work.work);
         // A taken Message leaves the queued row in the frame that shows it.
         self.live.queued = result.queued;
         if (result.queued_line) |shown| self.live.queued_line = shown;
         self.live.drawn = self.job.drawn;
-        if (self.admission.echo) |admission| if (admission <= self.admission.delivered) {
-            self.admission.echo = null;
-        };
         if (self.job.open_status or self.job.watch_status) try self.applyStatus();
         if (result.line) |*line| self.line = line.*;
         if (result.hint) |*hint| self.hint = hint.*;
@@ -3182,7 +2840,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
     // A /status asked for during this read is the next read's, at once.
     self.poll_at = reader_policy.scanDue(std.Io.Clock.awake.now(self.init.io).nanoseconds, self.inspection.status_requested);
     // News goes out first in the next frame, once the read is applied.
-    if (observed) |read| try self.lender.observed(self.lender.context, read.work, if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session, read.opening);
+    if (observed) |read| try self.lender.observed(self.lender.context, read.work, read.opening);
     self.dirty = true;
 }
 
@@ -3193,7 +2851,7 @@ test "archive badges follow only completed server snapshots and stay distinct fr
     self.line = .{ .read = .{ .revision = 1, .end = 1 } };
     self.live.work.state = .{ .working = .{ .since = 1 } };
     self.reading.phase = .activity;
-    var buffer: [Frame.status_capacity]u8 = undefined;
+    var buffer: [status_capacity]u8 = undefined;
     for ([_]struct { archive: protocol.SessionArchiveState, work: protocol.WorkState, status: []const u8 }{
         .{ .archive = .archiving, .work = .{ .stopping = .{ .since = 1 } }, .status = "Command accepted\nStopping and archiving" },
         .{ .archive = .archived, .work = .{ .stopped = .{ .since = 1, .cause = .stop } }, .status = "Command accepted\nArchived · /unarchive" },
@@ -3637,6 +3295,107 @@ fn barShows(held: *HeldFrontend) ![]const u8 {
 fn sendKeys(frontend: *Self, bytes: []const u8) !void {
     const held: *HeldFrontend = @fieldParentPtr("self", frontend);
     try held.keys(bytes);
+}
+
+test "a history page read for an earlier transcript never joins the current one" {
+    const Worker = struct {
+        fn read(_: *anyopaque, _: *Task) !void {}
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.files.inspection = try held.tmp.dir.createFile(std.testing.io, "older", .{ .read = true });
+    defer self.files.inspection.close(std.testing.io);
+    try self.files.inspection.writePositionalAll(std.testing.io, "STALE PAGE ROW\n", 0);
+    try held.settle();
+    try held.keys("\x1b[5~");
+    self.job.transcript = self.transcript.id;
+    self.reading.phase = .history;
+    try self.reader.start(std.testing.io, self, Worker.read);
+    defer {
+        self.reader.cancel();
+        self.reader.join() catch {};
+    }
+    try held.keys("\x07\x1b[5~");
+    try std.testing.expect(self.job.transcript != self.transcript.id);
+    while (!self.reader.completed()) std.Thread.yield() catch {};
+    try held.settle();
+    try held.keys("\x1b[5~");
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "STALE PAGE ROW") == null);
+}
+
+test "sending a Message drops an older-page read still waiting to start" {
+    const Worker = struct {
+        var release: std.atomic.Value(bool) = .init(false);
+        fn read(_: *anyopaque, _: *Task) !void {
+            while (!release.load(.acquire)) std.Thread.yield() catch {};
+        }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    Worker.release.store(false, .release);
+    try self.reader.start(std.testing.io, self, Worker.read);
+    defer {
+        Worker.release.store(true, .release);
+        self.reader.cancel();
+        self.reader.join() catch {};
+    }
+    try held.keys("/history\r");
+    try std.testing.expect(self.transcript.history_requested != null);
+    try held.keys("hello\r");
+    try std.testing.expect(self.transcript.history_requested == null);
+    Worker.release.store(true, .release);
+    while (!self.reader.completed()) std.Thread.yield() catch {};
+    try self.settleReader();
+    try held.settle();
+    try std.testing.expect(self.transcript.history_requested == null);
+    try std.testing.expect(self.reader.thread == null);
+}
+
+test "sending a Message drops a /status read still waiting to start" {
+    const Worker = struct {
+        var release: std.atomic.Value(bool) = .init(false);
+        fn read(_: *anyopaque, _: *Task) !void {
+            while (!release.load(.acquire)) std.Thread.yield() catch {};
+        }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    Worker.release.store(false, .release);
+    try self.reader.start(std.testing.io, self, Worker.read);
+    defer {
+        Worker.release.store(true, .release);
+        self.reader.cancel();
+        self.reader.join() catch {};
+    }
+    try held.keys("/status\r");
+    try held.settle();
+    try std.testing.expect(self.inspection.status_requested);
+    try held.keys("hello\r");
+    try std.testing.expect(!self.inspection.status_requested);
+    Worker.release.store(true, .release);
+    while (!self.reader.completed()) std.Thread.yield() catch {};
+    try self.settleReader();
+    try held.settle();
+    try std.testing.expect(!self.inspection.status_requested);
+    try std.testing.expect(self.reader.thread == null);
+}
+
+test "sending a Message from a browsed page returns the screen to the latest conversation" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try held.screen.append("OLDER ROW\n");
+    for (0..60) |_| try held.screen.append("conversation row\n");
+    try held.screen.append("LATEST ROW\n");
+    try held.settle();
+    for (0..6) |_| try held.keys("\x1b[5~");
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "OLDER ROW") != null);
+    try held.keys("hello\r");
+    const shown = try held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, shown, "LATEST ROW") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "OLDER ROW") == null);
 }
 
 /// Terminal bytes, then App's next tick.
@@ -4186,7 +3945,7 @@ const quiet_overview: Lender = .{ .context = undefined, .step = struct {
         return .{};
     }
 }.line, .observed = struct {
-    fn observed(_: *anyopaque, _: protocol.session_work.Work, _: []const u8, _: bool) !void {}
+    fn observed(_: *anyopaque, _: protocol.session_work.Work, _: bool) !void {}
 }.observed };
 
 /// An overview that lent the terminal, reduced to one Session's stop
@@ -4436,8 +4195,7 @@ test "upgrade command names the shell command, consumes only its line and keeps 
     const screen = try std.testing.allocator.create(Screen);
     defer std.testing.allocator.destroy(screen);
     screen.* = .{ .colour = false };
-    var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
-    self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .screen = screen, .colour = false };
+    self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .screen = screen, .colour = false };
     self.input.init();
     const original = self.input.submitText("original indeterminate model input");
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('K'), .retry = @splat('K') };
@@ -4452,35 +4210,6 @@ test "upgrade command names the shell command, consumes only its line and keeps 
     try std.testing.expectEqualStrings(&@as([36]u8, @splat('K')), &self.submission.view().?.key);
     try std.testing.expectEqual(Submission.State.unconfirmed, self.submission.view().?.state);
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
-}
-
-test "upgrade outcomes retain Unicode draft cursor selection and unresolved original until safe reobservation" {
-    const self = try std.testing.allocator.create(Self);
-    defer std.testing.allocator.destroy(self);
-    inline for (std.enums.values(UpgradePanel.Outcome)) |outcome| {
-        for ([_]bool{ false, true }) |blocked| {
-            self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .colour = false, .upgrade = .{ .after = if (blocked) .blocked else .open } };
-            self.input.init();
-            const original = self.input.submitText("the original request");
-            self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('H') };
-            for ("next é!\x1b[D") |byte| _ = self.input.feed(byte);
-            const draft = self.input.composition();
-            const revision = self.input.revision;
-            self.inspection.selected = status_page.first;
-            const selection = self.inspection.selected;
-            self.applyUpgrade(outcome);
-            try std.testing.expectEqualStrings("next é!", self.input.composition().bytes);
-            try std.testing.expectEqual(draft.cursor, self.input.composition().cursor);
-            try std.testing.expectEqual(revision, self.input.revision);
-            try std.testing.expectEqual(selection, self.inspection.selected);
-            try std.testing.expectEqualStrings("the original request", try self.input.message(original));
-            try std.testing.expectEqualStrings(&@as([36]u8, @splat('H')), &self.submission.view().?.key);
-            try std.testing.expect(self.reader.thread == null and self.submission.task.thread == null);
-            try std.testing.expectEqual(outcome == .compatible, self.upgrade.after == .reobserving);
-            try std.testing.expectEqual(if (outcome == .unchanged) blocked else outcome == .incompatible, self.upgrade.after == .blocked);
-            if (outcome != .unchanged or blocked) try std.testing.expect(self.commandActive());
-        }
-    }
 }
 
 test "upgrade quiescing reobservation and protocol holds refuse a fresh Message without clearing its draft" {
@@ -5067,27 +4796,31 @@ test "App Session's frame after Enter shows the Message as sending, the same fra
     try std.testing.expectEqual(session_chrome.Tone.quiet, self.chrome.status.bar.tone);
 }
 
-test "App Session says Sent from the Host's acceptance until the Message's own row shows; a reply to a later key shows over it until it goes" {
+test "App Session's status bar never says Sent: an accepted Message's row is its feedback, at the latest view and scrolled back" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
     const self = fixture.self;
-    // Accepted: no original is held, and live output has not reached it.
-    self.admission.echo = 4;
-    try std.testing.expectEqualStrings("Sent", (try fixture.rows())[23]);
-    try std.testing.expectEqual(session_chrome.Tone.quiet, self.chrome.status.bar.tone);
-    // A reply to a later key shows over it; once it goes, Sent is back.
-    self.shown_notice.show("Copied 3 lines", ChromeFixture.now());
-    try std.testing.expectEqualStrings("Copied 3 lines", (try fixture.rows())[23]);
-    self.shown_notice.show("Copied 3 lines", ChromeFixture.now() - 6_000);
-    try std.testing.expectEqualStrings("Sent", (try fixture.rows())[23]);
-    // The overview's line stays below it.
+    // Accepted with no original held: the bar is empty, so the overview's
+    // line shows there.
+    try std.testing.expectEqualStrings("", (try fixture.rows())[23]);
     ChromeFixture.overview_says = "Port overview to vxfw finished";
     defer ChromeFixture.overview_says = null;
-    try std.testing.expectEqualStrings("Sent", (try fixture.rows())[23]);
-    // Live output delivered it: its row is the feedback, so the overview's line shows.
-    self.admission.echo = null;
     try std.testing.expectEqualStrings("Port overview to vxfw finished", (try fixture.rows())[23]);
+    ChromeFixture.overview_says = null;
+    // A Message waiting behind work shows as its waiting row at the latest
+    // view; scrolled back, where that row is out of view, nothing says Sent.
+    self.live.work.state = .{ .working = .{ .since = ChromeFixture.now() / 1000 } };
+    self.live.queued = .{ .count = 1, .oldest_position = 70, .newest_admission = 9, .newest_position = 70 };
+    self.live.queued_line = .{ .admission = 9, .line = .{} };
+    try self.live.queued_line.?.line.set("also update docs/using-rui.md");
+    const latest = try fixture.rows();
+    try std.testing.expect(ChromeFixture.find(&latest, "◌ also update docs/using-rui.md") != null);
+    for (latest) |row| try std.testing.expect(std.mem.indexOf(u8, row, "Sent") == null);
+    try fixture.press(.{ .codepoint = vaxis.Key.up, .mods = .{ .shift = true } });
+    const browsing = try fixture.rows();
+    try std.testing.expect(ChromeFixture.find(&browsing, "◌") == null);
+    for (browsing) |row| try std.testing.expect(std.mem.indexOf(u8, row, "Sent") == null);
 }
 
 test "App Session's Ctrl-X while the Session opens says why it stopped nothing, over Opening…, until the next key" {
@@ -5270,26 +5003,6 @@ test "App Session's chrome clicks that run a command say so while another waits 
     try self.chrome.status.key.on_click(self.chrome.status.key.userdata, &fixture.ctx);
     try std.testing.expectEqualStrings("/status", self.input.queuedCommand().?);
     try std.testing.expectEqual(Submission.State.not_started, self.submission.view().?.state);
-}
-
-test "App Session says Sent for a Message waiting behind work while scrolled back, where its waiting row is out of view" {
-    var fixture: ChromeFixture = undefined;
-    try fixture.init();
-    defer fixture.deinit();
-    const self = fixture.self;
-    self.live.work.state = .{ .working = .{ .since = ChromeFixture.now() / 1000 } };
-    self.live.queued = .{ .count = 1, .oldest_position = 70, .newest_admission = 9, .newest_position = 70 };
-    self.live.queued_line = .{ .admission = 9, .line = .{} };
-    try self.live.queued_line.?.line.set("also update docs/using-rui.md");
-    self.admission.echo = 9;
-    // The waiting row shows it: no Sent.
-    const latest = try fixture.rows();
-    try std.testing.expect(ChromeFixture.find(&latest, "◌ also update docs/using-rui.md") != null);
-    try std.testing.expect(!std.mem.startsWith(u8, latest[23], "Sent"));
-    try fixture.press(.{ .codepoint = vaxis.Key.up, .mods = .{ .shift = true } });
-    const browsing = try fixture.rows();
-    try std.testing.expect(ChromeFixture.find(&browsing, "◌") == null);
-    try std.testing.expect(std.mem.startsWith(u8, browsing[23], "Sent"));
 }
 
 test "App Session shows work under way at the transcript's tail, and the ↓ marker in its place while scrolled back" {

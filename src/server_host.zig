@@ -437,6 +437,9 @@ pub const Host = struct {
     /// and running Turns go on. Host memory only; `host_pause` sets it.
     turns_paused: std.atomic.Value(bool) = .init(false),
     control_hint_suppressed: std.atomic.Value(bool) = .init(false),
+    /// Ends the dispatch loop's wait: a Store commit and a finished stream
+    /// set it from their own threads, and only the loop resets it.
+    dispatch_wake: std.Io.Event = .unset,
     request_counter: std.atomic.Value(u64) = .init(0),
     intake_wake: ?std.posix.fd_t = null,
     intake_capacity: usize = product_defaults.intake_capacity,

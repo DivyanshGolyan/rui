@@ -42,6 +42,10 @@ def retained(state, binary, label, repetition, failed_key):
                 result = cli.terminal_step(master, f"/result {failed_key}",
                     prompt if label == "baseline" else "result: failed", composer=label != "baseline")
                 assert ("This saved Message failed" in result or "result: failed" in result) and "provider_http_422" in result, result
+                if label != "baseline":
+                    # The page stays shown: leave it, so the next read's wait
+                    # sees its own reply and not this one.
+                    cli.command_frame(master, "\x1b", lambda frame: "result: failed" not in frame, end="")
             samples.append(sample(process.pid))
         cli.terminal_step(master, "/exit", "Detached.")
         assert process.wait(timeout=5) == 0

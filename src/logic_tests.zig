@@ -144,10 +144,7 @@ test {
     _ = @import("transcript_selection.zig");
     _ = @import("session_follow.zig");
     _ = @import("SessionInput.zig");
-    _ = @import("TerminalFrame.zig");
-    _ = @import("TerminalInput.zig");
     _ = @import("TerminalEditor.zig");
-    _ = @import("terminal_input_equivalence_test.zig");
     _ = @import("tools.zig");
     _ = @import("core_tools.zig");
     inline for (cores) |core| _ = core[1];

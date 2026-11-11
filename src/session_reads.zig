@@ -274,8 +274,6 @@ pub const Job = struct {
         // `status_taken` holds /status from one Current capture, which
         // differs from the shown page.
         status: bool = false,
-        // The newest Message admission this page holds, for Sent.
-        delivered: u64 = 0,
         // Where a transcript may begin in this read's output (see Marks),
         // oldest first, as offsets into the output.
         boundaries: Boundaries = .{},
@@ -503,13 +501,6 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         job.result.hint = try readHint(requests, job, position);
     };
     job.result.live = View.Live.init(page.facts.call_activity);
-    // Selection and a stop take admission-order prefixes, so a row or a
-    // stop takes every earlier Message too.
-    for (page.facts.items[0..page.facts.count]) |item| switch (item.value) {
-        .user => |message| job.result.delivered = @max(job.result.delivered, message.admission),
-        .stop => |stop| job.result.delivered = @max(job.result.delivered, stop.cutoff),
-        else => {},
-    };
     if (job.opening) {
         var mark: ?protocol_reply.ConversationCursor = if (page.facts.more) .{ .end = page.facts.end } else null;
         if (page.facts.more) for (page.facts.items[0..page.facts.count]) |item| {
@@ -533,8 +524,6 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     // read: queued input joins the work at its next input boundary, so that
     // is at most one model step back, never the history.
     job.drawn = try View.render(requests, job.store, job.session, &page, if (job.result.line) |line| line.provider else job.provider, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued) }, job.home);
-    // One shown at its Admission is delivered too.
-    job.result.delivered = @max(job.result.delivered, job.drawn.admission);
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
@@ -984,6 +973,10 @@ const MessagePage = struct {
 /// /copy: the newest answer, bound to its length and digest before its last
 /// window arrives. A file takes it as it arrives; the clipboard's bytes wait
 /// in scratch, which only the UI may write to the terminal.
+/// The most bytes /copy sends: hterm's osc52.sh sends at most 100,000
+/// base64 bytes, the smallest limit a terminal's own tooling documents.
+pub const clipboard_limit = 100_000 / 4 * 3;
+
 pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();
@@ -1073,7 +1066,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll(session_chrome.help ++ slash_commands.conversation.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: ");
+        try output.interface.writeAll(session_chrome.help ++ slash_commands.conversation.help ++ "\nLogin: ");
         try output.interface.print("{s} in your shell.\n", .{(job.provider orelse comptime protocol.Provider.onlyWith(.sign_in)).login()});
     } else {
         std.debug.assert(job.inspection_kind == .requests);

@@ -124,17 +124,30 @@ def shown(text, screen):
 def command_frame(master, command, accept, timeout=15, *, end="\r"):
     """Send `command` and `end`; return the first committed frame after it
     that `accept`s with the composer ready in that same frame. Page identity,
-    readiness and any absence check then describe one shown frame."""
+    readiness and any absence check then describe one shown frame.
+
+    A command that ends with Enter is typed first, and Enter follows the
+    frame that shows it in the composer. The reply is then a frame whose
+    composer the command has left. That typed frame must not `accept`: a
+    page stays shown while the next command runs, so a wait it already
+    satisfies would return before the reply. Such a caller names what the
+    reply changes, or leaves the page first."""
     capture = terminal_capture(master)
     found = []
+    state = {"typed": end != "\r"}
 
     def observe(screen, x, y):
-        if not found and accept(screen) and composer_ready(screen, x, y):
+        if not state["typed"]:
+            if not composer_empty(screen, y):
+                state["typed"] = True
+                assert not accept(screen), ("command result shown before the command ran", command, screen)
+                os.write(master, end.encode())
+        elif not found and accept(screen) and composer_ready(screen, x, y) and (end != "\r" or composer_empty(screen, y)):
             found.append(screen)
 
     capture.listener = observe
     try:
-        os.write(master, (command + end).encode())
+        os.write(master, (command if end == "\r" else command + end).encode())
         deadline = time.monotonic() + timeout
         while not found:
             remaining = deadline - time.monotonic()
@@ -146,6 +159,12 @@ def command_frame(master, command, accept, timeout=15, *, end="\r"):
     finally:
         capture.listener = None
     return found[0]
+
+
+def composer_empty(screen, y):
+    """The composer holds no draft: the cursor's row is its bare mark."""
+    lines = screen.split("\n")
+    return y < len(lines) and lines[y] in (" ›", " >")
 
 
 def composer_ready(screen, x, y):

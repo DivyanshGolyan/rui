@@ -121,7 +121,7 @@ const BashPreparingSlot = struct {
 const ModelPreparingSlot = struct {
     token: execution.CustodyToken,
     binding: store_module.AttemptBinding,
-    /// Set once the view opens, before preparation starts.
+    /// Set once the request is prepared, from its settings.
     purpose: ?store_module.ModelOperationKind = null,
 };
 
@@ -531,6 +531,10 @@ pub fn executionMain(host: *Host) void {
     defer if (reactor) |active| {
         for (std.enums.values(provider.ListingKind)) |kind| endListing(active, kind, workspace.listings.getPtr(kind));
     };
+    // A commit from any thread and a finished stream end this loop's wait.
+    if (reactor) |active| active.wake = &host.dispatch_wake;
+    host.store.commitWake().store(&host.dispatch_wake, .release);
+    defer host.store.commitWake().store(null, .release);
     // Streams, PING answers and flow control move on their own thread, so a
     // Store round this thread waits on never holds them up.
     const transport: ?std.Thread = if (reactor) |active|
@@ -563,16 +567,19 @@ pub fn executionMain(host: *Host) void {
             .mcp = &mcp_calls,
             .fenced = false,
         };
+        // Reset before the pass reads anything, so a wake set while it
+        // runs ends the wait after it.
+        host.dispatch_wake.reset();
         switch (execution_turn.run(&turn_state, &native)) {
             .continue_immediately => heap_release.worked = true,
             .wait => |kind| {
                 if (heap_release.due(slots, if (reactor) |active| active.listingPending() else false)) process.releaseFreeHeap();
                 const wait_started = std.Io.Clock.Timestamp.now(host.io, .awake);
-                switch (kind) {
-                    .transport => reactor.?.awaitFinished(if (mcp_calls.any()) 25 else transportWaitMs(slots)),
-                    .bash => _ = host.io.sleep(.fromMilliseconds(25), .awake) catch {},
-                    .idle => _ = host.io.sleep(.fromMilliseconds(100), .awake) catch {},
-                }
+                awaitDispatchWake(host, switch (kind) {
+                    .transport => if (mcp_calls.any()) 25 else transportWaitMs(slots),
+                    .bash => 25,
+                    .idle => 100,
+                });
                 const wait_finished = std.Io.Clock.Timestamp.now(host.io, .awake);
                 measurement.wait_since_service_ns += @intCast(wait_started.durationTo(wait_finished).raw.nanoseconds);
             },
@@ -793,6 +800,15 @@ const NativeTurn = struct {
             .no_work => .no_work,
             .retry_later => .retry_later,
         };
+    }
+
+    pub fn scanWork(self: *NativeTurn, paused: bool) error{Fence}!execution_turn.Work {
+        const found = self.host.store.dispatchWork(paused) catch |err| {
+            fenceDispatch(self.host, "dispatch work read", err);
+            self.fenced = true;
+            return error.Fence;
+        };
+        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation };
     }
 
     pub fn scheduledRetry(self: *const NativeTurn) execution_turn.ScheduledRetry {
@@ -1030,6 +1046,16 @@ test "heap release is due once per return to all slots free" {
 /// earliest timer, so Transfers need no tick of their own. The loop still
 /// wakes at the idle cadence, which bounds new-work discovery and the control
 /// fallback, unless Bash needs its 25 ms service.
+/// Waits until another thread's commit or a finished stream, or for
+/// `timeout_ms`: what else the loop serves (controls, Bash, shutdown) it
+/// finds at that cadence.
+fn awaitDispatchWake(host: *Host, timeout_ms: u32) void {
+    host.dispatch_wake.waitTimeout(host.io, .{ .duration = .{
+        .raw = .fromMilliseconds(timeout_ms),
+        .clock = .awake,
+    } }) catch {};
+}
+
 fn transportWaitMs(slots: []const ExecutionSlot) u32 {
     return if (slotsHaveBash(slots)) 25 else 100;
 }
@@ -1883,15 +1909,7 @@ fn beginAdmittedAttempt(
     };
     // The view opens where it lives for the whole preparation; it never
     // moves.
-    slot.model_preparing.purpose = host.store.openHistoricalView(binding, &preparation.view) catch |err| {
-        if (err == error.SupersededByControl) {
-            finishCustodyNow(host, slot);
-            return .admitted;
-        }
-        fenceDispatch(host, "historical view", err);
-        finishCustodyNow(host, slot);
-        return .admitted;
-    };
+    host.store.openHistoricalView(binding, &preparation.view);
     var retained_scratch: ?named_scratch.Owner = null;
     preparation.init(
         host.io,
@@ -1925,7 +1943,7 @@ fn advanceModelPreparation(
         .model_preparing => break candidate,
         else => {},
     } else return false;
-    const owner = slot.model_preparing;
+    var owner = slot.model_preparing;
     if (execution.modelDecision(.{ .preparing = .{ .launch_allowed = host.launchAllowed() } }) == .abandon) {
         preparation.cancel();
         // Infrastructure fencing does not invent a user stop or a Resolution.
@@ -1946,6 +1964,7 @@ fn advanceModelPreparation(
             finishModelPreparationFailure(host, slot, owner, err, null);
         },
         .prepared => |request| {
+            owner.purpose = preparation.settings.operation;
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
             traceOperation(host, "preparation_completed", owner.binding);
             const leased = host.providers.get(request.provider).?.credential.leased();
@@ -3646,7 +3665,7 @@ test "preparing slots belong to their live preparations" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: model_adapter.Preparation = undefined;
-    _ = try storage.openHistoricalView(binding_a, &preparation.view);
+    storage.openHistoricalView(binding_a, &preparation.view);
     try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     var preparation_active = true;
     defer if (preparation_active) preparation.cancel();
@@ -3980,7 +3999,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     var slots = [_]ExecutionSlot{.{ .model_preparing = .{ .token = token, .binding = binding } }};
     var preparation: model_adapter.Preparation = undefined;
     var retained: ?named_scratch.Owner = null;
-    _ = try storage.openHistoricalView(binding, &preparation.view);
+    storage.openHistoricalView(binding, &preparation.view);
     try preparation.init(
         std.testing.io,
         root,

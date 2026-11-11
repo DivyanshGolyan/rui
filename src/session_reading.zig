@@ -1,7 +1,6 @@
 //! The conversation's one reader, decided over values its frontend read:
-//! which read an idle reader starts, when the next scan is due, whether a
-//! joined read settles now, what a settled read shows or says, and whether
-//! a page a read brings still shows.
+//! which read an idle reader starts, when the next scan is due, what a
+//! settled read shows or says, and whether a page a read brings still shows.
 //! `SessionFrontend` reads the clock, the screen and the input, and starts,
 //! joins and shows what these decide.
 const std = @import("std");
@@ -35,8 +34,6 @@ pub const Idle = struct {
     action_named: bool,
     /// A Message or decision is still submitted or retained.
     submission: bool,
-    /// The decoder holds part of a key sequence.
-    decoder_pending: bool,
 };
 
 pub const Background = enum {
@@ -55,15 +52,8 @@ pub const Background = enum {
 pub fn background(idle: Idle) ?Background {
     if (!idle.opening and idle.older_remain and !idle.older_failed and idle.at_top) return .history;
     if (idle.now_ns >= idle.scan_due_ns) return .activity;
-    if (!idle.opening and idle.action_named and !idle.choice_open and !idle.submission and !idle.decoder_pending) return .permission;
+    if (!idle.opening and idle.action_named and !idle.choice_open and !idle.submission) return .permission;
     return null;
-}
-
-/// Whether a joined read settles now. It may hide or withdraw the Action,
-/// so a sequence the choice is decoding finishes there first and keeps its
-/// meaning.
-pub fn settles(completed: bool, at_choice: bool, decoder_pending: bool) bool {
-    return completed and !(at_choice and decoder_pending);
 }
 
 /// How a joined read's failure counts: a pending inspection, or an Upgrade
@@ -165,7 +155,7 @@ test "the next scan waits its interval after a read, except for a /status asked 
 }
 
 test "older history comes first at the transcript's top; the scan when due; a named Action's read only once input is quiet" {
-    const quiet: Idle = .{ .now_ns = 10, .scan_due_ns = 20, .opening = false, .older_remain = false, .older_failed = false, .at_top = false, .choice_open = false, .action_named = false, .submission = false, .decoder_pending = false };
+    const quiet: Idle = .{ .now_ns = 10, .scan_due_ns = 20, .opening = false, .older_remain = false, .older_failed = false, .at_top = false, .choice_open = false, .action_named = false, .submission = false };
     try std.testing.expectEqual(@as(?Background, null), background(quiet));
     var idle = quiet;
     idle.older_remain = true;
@@ -185,24 +175,15 @@ test "older history comes first at the transcript's top; the scan when due; a na
     idle.now_ns = 20;
     try std.testing.expectEqual(@as(?Background, .activity), background(idle));
     // A named Action is read between scans, unless its choice already
-    // shows, a submission waits, or a key sequence is being decoded.
+    // shows or a submission waits.
     idle = quiet;
     idle.action_named = true;
     try std.testing.expectEqual(@as(?Background, .permission), background(idle));
-    inline for (.{ "choice_open", "submission", "decoder_pending" }) |held| {
+    inline for (.{ "choice_open", "submission" }) |held| {
         var waiting = idle;
         @field(waiting, held) = true;
         try std.testing.expectEqual(@as(?Background, null), background(waiting));
     }
-}
-
-test "a joined read settles unless the choice is decoding a key sequence" {
-    for ([_]bool{ false, true }) |completed| for ([_]bool{ false, true }) |at_choice| for ([_]bool{ false, true }) |pending| {
-        try std.testing.expectEqual(completed and !(at_choice and pending), settles(completed, at_choice, pending));
-    };
-    try std.testing.expect(!settles(true, true, true));
-    try std.testing.expect(settles(true, false, true));
-    try std.testing.expect(settles(true, true, false));
 }
 
 test "a Message page shows only over the place, sends and requests it was asked over" {
