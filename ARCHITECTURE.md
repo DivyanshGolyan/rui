@@ -787,6 +787,7 @@ The CLI resolves `--compaction-trigger default` to a concrete token count before
 Pressure uses eligible usage from the latest accepted same-binding output plus estimates for appended input and extra reservation; without same-recipe usage it estimates retained context.
 The threshold fires at equality.
 Admission reads its Session's facts with its selection, inside the Store hold and before its transaction, and does not read the appended bytes: where only their count decides the purpose it writes an assistant call whose first write is a guard that the count is under the policy's limit, and a failed guard rolls back and admits the compaction instead.
+On a network Store the admitted Attempt's request starts in the same message: its settings read follows COMMIT, whole or not at all, and a request whose settings did not ride reads them in a round of its own.
 The assistant successor of a compaction applies pending input even if the estimate remains above the threshold.
 Provider-reported overflow still permits recovery without a configured trigger; unchanged context after an accepted base, or overflow during compaction itself, fails with `ResourceExceeded` instead of repeating compaction.
 
