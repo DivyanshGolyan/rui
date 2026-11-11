@@ -226,8 +226,8 @@ def keyed_frame(master, keys, accept, timeout=15):
 
 
 def overview_title(frame):
-    """The overview's title row: रुई rui, or rui alone without Unicode."""
-    return "rui" in frame.split("\n", 1)[0].split()[:2]
+    """The overview's list and pinned Settings row, without a title band."""
+    return "  + New Session" in frame and "  Settings" in frame
 
 
 def overview_frame(master, accept, keys=b"", timeout=15):

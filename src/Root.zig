@@ -37,6 +37,12 @@ fn chooseLayout(self: *const Self) Layout {
     return if (self.session != null) .session else .overview;
 }
 
+/// Settings screen is supplied by the settings lane.
+pub fn openSettings(self: *Self, ctx: *vxfw.EventContext) !void {
+    _ = self;
+    _ = ctx;
+}
+
 pub fn openSession(self: *Self, ctx: *vxfw.EventContext, session: vxfw.Widget) !void {
     std.debug.assert(self.session == null);
     self.session = session;

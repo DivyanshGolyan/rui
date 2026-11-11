@@ -579,12 +579,14 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     try self.appNext(ctx, try self.event(.{ .clicked = click }));
+    if (click == .new_session and self.state.inputMode() != .frozen and self.root.session == null) try ctx.requestFocus(self.widget());
     ctx.redraw = true;
 }
 
 fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
     switch (next orelse return) {
         .leave => ctx.quit = true,
+        .settings => try self.root.openSettings(ctx),
         .open => |reference| {
             if (self.root.session != null) {
                 try self.app_session.?.frontend.?.openPeer(ctx, &reference);
@@ -774,11 +776,22 @@ const SessionRows = struct {
     caps: view.Caps,
     frame: u64,
 
+    fn count(raw: *const anyopaque, first: u32) u32 {
+        const self: *const SessionRows = @ptrCast(@alignCast(raw));
+        return @intCast(self.state.order.items.len -| (first -| 1));
+    }
+
+    fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
+        const segments = try arena.alloc(vaxis.Segment, 1);
+        segments[0] = .{ .text = try std.fmt.allocPrint(arena, "↓ {d} more", .{count_}) };
+        return segments;
+    }
+
     fn row(raw: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!GroupedList.Row {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
         const item = view.listItem(self.state, index).?;
         const built = try view.listSegments(arena, self.state, item, self.width, self.caps, self.frame);
-        return .{ .segments = built.segments, .heading = built.heading, .target = view.clickOf(self.state, item) };
+        return .{ .segments = built.segments, .second = if (item == .row) try view.rowSecondSegments(arena, self.state, item.row, self.width, self.caps) else null, .height = 2, .heading = built.heading, .target = view.clickOf(self.state, item) };
     }
 };
 
@@ -860,11 +873,10 @@ fn selectedListLine(self: *const Self) ?u32 {
 }
 
 /// Each visible part prepares only what it draws, at that part's width:
-/// rows once on the left, facts/status once on the right, or both when narrow.
+/// rows once on the left, the Footer once on the right, or both when narrow.
 fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) std.mem.Allocator.Error!vxfw.Surface {
     const size = ctx.max.size();
     self.caps.width = self.attention.vx.caps.unicode;
-    self.caps.devanagari = std.mem.eql(u8, @import("theme.zig").wordmark(self.caps.unicode, self.attention.vx.terminalVersion(), self.init.environ_map.get("TERM_PROGRAM")), "रुई rui");
     const normal = @import("widget_style.zig").of(self.caps, .{});
     const quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
     self.app_screen.style = normal;
@@ -896,10 +908,14 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
                 const rows = try ctx.arena.create(SessionRows);
                 rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
                 self.app_sessions.selected = self.selectedListLine();
-                self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row };
+                self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
+                self.app_sessions.belowFn = SessionRows.below;
                 break :sessions &self.app_sessions;
             },
         };
+        const settings = try ctx.arena.create(OverviewLines.Settings);
+        settings.* = .{ .selected = self.state.selected == .settings, .caps = self.caps, .userdata = self, .on_click = appClick };
+        prepared.tail = settings.widget();
         prepared.caps = self.caps;
         self.app_screen.content = prepared;
         list = prepared;
@@ -913,8 +929,11 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         self.app_input.composer.ascii = !self.caps.unicode;
         self.app_input.composer.caret = self.state.inputMode() != .frozen;
         self.state.commands = view.nextCommands(&self.state, self.composerDraft());
-        self.app_input.facts = try rich(ctx, self.caps, try view.factsSegments(ctx.arena, &self.state, size.width, self.caps));
-        self.app_input.status = try rich(ctx, self.caps, try view.statusSegments(ctx.arena, &self.state, self.composerDraft(), size.width, self.caps));
+        const footer = try ctx.arena.create(@import("widgets/Footer.zig"));
+        const keys = view.footerRight(&self.state, self.composerDraft());
+        footer.* = .{ .left = try view.footerLeft(ctx.arena, &self.state, size.width -| @as(u16, @intCast(keys.len)), self.caps), .right = keys, .style = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet, .background = .bar }) };
+        self.app_input.facts = footer.widget();
+        self.app_input.status = .{ .userdata = self, .drawFn = emptyStatus };
         self.app_screen.tail = null;
         self.app_screen.overlay = null;
         if (self.state.commands) |*shown| {
@@ -923,7 +942,10 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         }
     }
     defer {
-        if (list) |prepared| prepared.rows = .none;
+        if (list) |prepared| {
+            prepared.rows = .none;
+            prepared.tail = null;
+        }
         self.app_screen.header = null;
         self.app_screen.tail = null;
         self.app_input.facts = app_empty.widget();
@@ -934,6 +956,10 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     // resize never changes the composer's focus identity or key route.
     surface.widget = if (part == .list) self.listWidget() else self.widget();
     return surface;
+}
+
+fn emptyStatus(_: *anyopaque, _: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+    return .empty(app_empty.widget());
 }
 
 const app_empty: vxfw.Text = .{ .text = "" };
@@ -981,7 +1007,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.paintDivider();
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" } };
     self.app_screen = .{ .content = &self.app_sessions, .input = &self.app_input, .userdata = self, .on_event = appEvent };
-    self.app_header = .{ .state = &self.state, .userdata = self, .on_click = appClick };
+    self.app_header = .{ .state = &self.state };
     self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
@@ -1006,7 +1032,7 @@ const Ending = union(enum) { overview, conversation: Left };
 
 /// What the core asks of the loop: to leave, or to lend the terminal to a
 /// Session.
-const Next = union(enum) { leave, open: view.Reference };
+const Next = union(enum) { leave, settings, open: view.Reference };
 
 /// Steps the core with one event and queues the jobs it asks for. Opening a
 /// Session and leaving are the loop's to do.
@@ -1015,7 +1041,7 @@ fn event(self: *Self, value: view.Event) !?Next {
     var next: ?Next = null;
     var refused: ?keymap.Refusal = null;
     for (effects.slice()) |effect| switch (effect) {
-        .open_settings => {},
+        .open_settings => next = .settings,
         .list => |since| {
             self.traversal = .init(since);
             self.traversal_archive = self.state.listing_archive.?;
@@ -1500,6 +1526,7 @@ fn quiesceUpgrade(self: *Self) !bool {
         if (self.worker.completed()) {
             if (try self.complete()) |next| switch (next) {
                 .leave => return error.InteractiveInterrupted,
+                .settings => {},
                 .open => |reference| self.started = reference,
             };
         }
@@ -2086,10 +2113,10 @@ test "App overview paints its ground and both selvedge rows" {
         rig.overview.caps = case.caps;
         var shown = try rig.shown(80, 24);
         defer shown.deinit();
-        try std.testing.expectEqual(case.band, shown.screen.readCell(79, 0).?.style.bg);
+        try std.testing.expectEqual(@import("widget_style.zig").of(case.caps, .{ .background = .selection }).bg, shown.screen.readCell(79, 0).?.style.bg);
         try std.testing.expectEqual(case.ground, shown.screen.readCell(79, 10).?.style.bg);
-        try std.testing.expectEqual(case.band, shown.screen.readCell(79, 22).?.style.bg);
-        try std.testing.expectEqual(case.ground, shown.screen.readCell(79, 23).?.style.bg);
+        try std.testing.expectEqual(case.ground, shown.screen.readCell(79, 22).?.style.bg);
+        try std.testing.expectEqual(case.band, shown.screen.readCell(79, 23).?.style.bg);
     }
 }
 
@@ -2168,24 +2195,6 @@ test "App cursor contrasts with the painted ground after terminal theme reports"
     defer ctx.cmds.deinit(std.testing.allocator);
     try appEvent(rig.overview, &ctx, .{ .color_report = .{ .kind = .bg, .value = .{ 255, 255, 255 } } });
     try std.testing.expectEqualStrings("", rig.signalled());
-}
-
-test "App overview wordmark follows the reported terminal identity" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
-    defer rig.close();
-    rig.overview.caps = .{};
-    var unknown = try rig.shown(80, 24);
-    defer unknown.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, try unknown.text(), "रुई") == null);
-    rig.screen.vx.setTerminalVersion("kitty(0.35)");
-    var kitty = try rig.shown(80, 24);
-    defer kitty.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, try kitty.text(), "रुई") != null);
-    rig.screen.vx.setTerminalVersion("unknown 1");
-    var other = try rig.shown(80, 24);
-    defer other.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, try other.text(), "रुई") == null);
 }
 
 test "each effect runs its client operation and each result reaches the core" {
@@ -2399,7 +2408,7 @@ test "/model persists all three defaults and shows them in facts" {
     const screen = try shown.text();
     try std.testing.expect(std.mem.indexOf(u8, screen, "gpt-6-luna") != null);
     try std.testing.expect(std.mem.indexOf(u8, screen, "high") != null);
-    try std.testing.expect(std.mem.indexOf(u8, screen, "API key") != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "high · /work") != null);
 }
 
 test "/model shows the effective effort and starts with it after a quiet save" {
@@ -2449,7 +2458,7 @@ test "/model keeps the selected effort for a start after a failed save" {
     {
         var shown = try rig.shown(161, 24);
         defer shown.deinit();
-        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "new Sessions here still use gpt-6-luna · high · ChatGPT") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Default not saved") != null);
     }
     try std.testing.expect(try rig.press("hello\r") == null);
     try std.testing.expect(try rig.settle() == null);
@@ -3836,29 +3845,6 @@ fn openComposer() !*Rig {
     return Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &Shared.cancellation);
 }
 
-test "a click on the counts line's view name, as a terminal sends it, lists the default view" {
-    const rig = try openComposer();
-    defer rig.close();
-    try std.testing.expect(try rig.press("/sessions archived\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(protocol.SessionArchiveFilter.archived, Seen.now.archive_filter);
-    var shown = try rig.shown(80, 24);
-    defer shown.deinit();
-    // The name's first cell, as the terminal lays the top row out.
-    const column: u16 = for (0..79) |at| {
-        const here = shown.screen.readCell(@intCast(at), 0).?.char.grapheme;
-        const after = shown.screen.readCell(@intCast(at + 1), 0).?.char.grapheme;
-        if (std.mem.eql(u8, here, "A") and std.mem.eql(u8, after, "r")) break @intCast(at);
-    } else return error.TestUnexpectedResult;
-    // The cell just past the name is not it.
-    try std.testing.expect(try rig.click(column + 8, 0, 80, 24) == null);
-    try std.testing.expectEqual(view.ArchiveFilter.archived, rig.overview.state.archive);
-    try std.testing.expect(try rig.click(column, 0, 80, 24) == null);
-    try std.testing.expectEqual(view.ArchiveFilter.active, rig.overview.state.archive);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(protocol.SessionArchiveFilter.active, Seen.now.archive_filter);
-}
-
 test "bytes that are not text reject the composer's line at Enter, as in a conversation" {
     const rig = try openComposer();
     defer rig.close();
@@ -3906,11 +3892,11 @@ test "a command word wrapped past the composer's rows shows no list, and Esc cle
     const rig = try openListed();
     defer rig.close();
     _ = try rig.press("/configure");
-    // At 8x6 the composer shows two of the word's three rows.
-    var shown = try rig.shown(8, 6);
+    // At 8x4 the composer shows the last of the word's three rows.
+    var shown = try rig.shown(8, 4);
     defer shown.deinit();
-    try shown.expectLines(1, &.{ "   confi", "   gure" });
-    for (0..6) |row| try std.testing.expect(std.mem.indexOf(u8, try shown.line(@intCast(row)), "/configu") == null);
+    try shown.expectLines(1, &.{"   gure"});
+    for (0..4) |row| try std.testing.expect(std.mem.indexOf(u8, try shown.line(@intCast(row)), "/configu") == null);
     // With no list drawn, Esc clears the draft rather than closing one.
     _ = try rig.press("\x1b");
     try std.testing.expectEqualStrings("", rig.overview.composerDraft().bytes);
@@ -3924,15 +3910,15 @@ test "a full-capacity draft of spaces keeps the composer's caret on screen" {
     try std.testing.expectEqual(@as(usize, SessionInput.capacity), rig.overview.composerDraft().bytes.len);
     var shown = try rig.shown(80, 24);
     defer shown.deinit();
-    // The composer sits between the rules at rows 18 and 21; the caret
+    // The composer sits between the rules at rows 19 and 22; the caret
     // shows inside it.
-    for ([_]u16{ 18, 21 }) |row| {
+    for ([_]u16{ 19, 22 }) |row| {
         const line = try shown.line(row);
         try std.testing.expectEqual(@as(usize, 80), std.mem.count(u8, line, "─"));
         try std.testing.expectEqual(@as(usize, 80 * "─".len), line.len);
     }
     const caret = shown.cursor() orelse return error.TestExpectedCaret;
-    try std.testing.expect(caret.row > 18 and caret.row < 21 and caret.col < 80);
+    try std.testing.expect(caret.row > 19 and caret.row < 22 and caret.col < 80);
 }
 
 test "the composer edits at its caret, as a conversation's draft does" {
@@ -4202,7 +4188,12 @@ test "both lines of a two-line command result show under the input" {
     try std.testing.expect(try rig.settle() == null);
     var shown = try rig.shown(80, 24);
     defer shown.deinit();
-    try shown.expectLines(19, &.{ " › Type a task", "────────────────────────────────────────────────────────────────────────────────", " new Session · no model · /work", " Configured.", " ! label saved locally only" });
+    try shown.expectLines(21, &.{ " › Type a task", "────────────────────────────────────────────────────────────────────────────────" });
+    const footer = try shown.line(23);
+    try std.testing.expect(std.mem.startsWith(u8, footer, " Configured."));
+    try std.testing.expect(std.mem.endsWith(u8, footer, "enter open"));
+    try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "label saved locally only") == null);
+    try std.testing.expectEqualStrings("Configured.\n! label saved locally only", rig.overview.state.notice.?.text());
 }
 
 test "/rename and /setup run through the conversation's command hook on the worker, and what they print reaches the overview" {
@@ -4709,7 +4700,7 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
     _ = try rig.press("/");
     var all = try rig.shown(80, 24);
     defer all.deinit();
-    try all.expectLines(9, &.{
+    try all.expectLines(10, &.{
         "/archive              archive the selected Session; stop active work first",
         "/configure [OPTIONS]  hold settings for the next Session",
         "/exit                 leave; Host work continues",
@@ -4723,28 +4714,30 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
         "────────────────────────────────────────────────────────────────────────────────",
         " › /",
     });
-    try std.testing.expectEqualStrings(" esc close", try all.line(23));
-    // Eleven rows leave the list four commands and a count of the rest.
+    try std.testing.expect(std.mem.endsWith(u8, try all.line(23), "enter pick / esc close"));
+    // Eleven rows leave six commands and a count of the rest.
     var short = try rig.shown(80, 11);
     defer short.deinit();
-    try short.expectLines(1, &.{
+    try short.expectLines(0, &.{
         "/archive              archive the selected Session; stop active work first",
         "/configure [OPTIONS]  hold settings for the next Session",
         "/exit                 leave; Host work continues",
         "/help                 keys and commands",
-        "+6 more · type to narrow",
+        "/model                choose the model new Sessions use",
+        "/rename NAME          name the selected Session",
+        "+4 more · type to narrow",
         "────────────────────────────────────────────────────────────────────────────────",
     });
     // Typing narrows it; Esc closes it and keeps the draft.
     _ = try rig.press("m");
     var narrowed = try rig.shown(80, 24);
     defer narrowed.deinit();
-    try narrowed.expectLines(18, &.{ "/model                choose the model new Sessions use", "────────────────────────────────────────────────────────────────────────────────", " › /m" });
+    try narrowed.expectLines(19, &.{ "/model                choose the model new Sessions use", "────────────────────────────────────────────────────────────────────────────────", " › /m" });
     _ = try rig.press("\x1b");
     var closed = try rig.shown(80, 24);
     defer closed.deinit();
-    try closed.expectLines(18, &.{ "", "────────────────────────────────────────────────────────────────────────────────", " › /m" });
-    try std.testing.expectEqualStrings(" esc clear", try closed.line(23));
+    try closed.expectLines(20, &.{ "────────────────────────────────────────────────────────────────────────────────", " › /m" });
+    try std.testing.expect(std.mem.endsWith(u8, try closed.line(23), "enter start"));
 }
 
 test "the cursor sits at the composer's caret and hides while a start is pending" {
@@ -4753,18 +4746,18 @@ test "the cursor sits at the composer's caret and hides while a start is pending
     _ = try rig.press("Fix 中");
     var typed = try rig.shown(80, 24);
     defer typed.deinit();
-    try std.testing.expectEqualStrings(" › Fix 中", try typed.line(20));
-    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 20, .col = 9 }), typed.cursor());
+    try std.testing.expectEqualStrings(" › Fix 中", try typed.line(21));
+    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 21, .col = 9 }), typed.cursor());
     // Left steps over the wide character's two cells.
     _ = try rig.press("\x1b[D");
     var left = try rig.shown(80, 24);
     defer left.deinit();
-    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 20, .col = 7 }), left.cursor());
+    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 21, .col = 7 }), left.cursor());
     _ = try rig.press("\x1b[F\r");
     try std.testing.expectEqual(view.InputMode.frozen, rig.overview.state.inputMode());
     var pending = try rig.shown(80, 24);
     defer pending.deinit();
-    try std.testing.expectEqualStrings(" Starting…", try pending.line(23));
+    try std.testing.expect(std.mem.endsWith(u8, try pending.line(23), "enter start"));
     try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, null), pending.cursor());
 }
 
@@ -4775,38 +4768,37 @@ test "a draft past its cap scrolls inside the composer, and the rule counts what
     var tail = try rig.shown(40, 40);
     defer tail.deinit();
     // Ten rows of draft between the rules, the caret on the last.
-    try tail.expectLines(26, &.{ "──────────── ↑ 3 more lines ────────────", "   4" });
-    try tail.expectLines(36, &.{ "   13", "────────────────────────────────────────" });
-    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 36, .col = 5 }), tail.cursor());
+    try tail.expectLines(27, &.{ "──────────── ↑ 3 more lines ────────────", "   4" });
+    try tail.expectLines(37, &.{ "   13", "────────────────────────────────────────" });
+    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 37, .col = 5 }), tail.cursor());
     // The caret moving above the shown lines takes them up with it.
     for (0..11) |_| _ = try rig.press("\x1b[A");
     var up = try rig.shown(40, 40);
     defer up.deinit();
-    try up.expectLines(26, &.{ "───────── ↑ 1 · ↓ 2 more lines ─────────", "   2" });
-    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 27, .col = 4 }), up.cursor());
+    try up.expectLines(27, &.{ "───────── ↑ 1 · ↓ 2 more lines ─────────", "   2" });
+    try std.testing.expectEqual(@as(?vaxis.Screen.Cursor, .{ .row = 28, .col = 4 }), up.cursor());
     // Without Unicode the rules, marks and prompt are ASCII.
     rig.overview.caps.unicode = false;
     _ = try rig.press("\x1b[A");
     var ascii = try rig.shown(40, 40);
     defer ascii.deinit();
-    try ascii.expectLines(26, &.{ "------------ v 3 more lines ------------", " > 1" });
+    try ascii.expectLines(27, &.{ "------------ v 3 more lines ------------", " > 1" });
 }
 
 test "a click on a Session row, as a terminal sends it, opens the row under it after the list scrolls" {
     const rig = try openListed();
     defer rig.close();
-    // A short terminal with the last Session selected scrolls the list: the
-    // header holds row 0, and the list's last three rows fill rows 1 to 3.
     rig.overview.state.selected = .{ .session = shownRow(rig, 4) };
-    var shown = try rig.shown(60, 9);
+    var shown = try rig.shown(60, 13);
     defer shown.deinit();
-    try std.testing.expectEqualStrings("  ⠹ Fix the flaky test                                  13s", try shown.line(2));
-    try std.testing.expectEqualStrings("────────────────────────────────────────────────────────────", try shown.line(4));
-    // Below the list, on the rule, nothing opens.
-    try std.testing.expect(try rig.click(10, 4, 60, 9) == null);
+    const row: u16 = for (0..7) |at| {
+        const line = try shown.line(@intCast(at));
+        if (std.mem.indexOf(u8, line, "Fix the flaky test") != null and std.mem.endsWith(u8, line, "13s")) break @intCast(at);
+    } else return error.TestExpectedRow;
+    try std.testing.expectEqualStrings("────────────────────────────────────────────────────────────", try shown.line(7));
+    try std.testing.expect(try rig.click(10, 7, 60, 13) == null);
     try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
-    // Row 2 shows the fourth Session, one above the selected last.
-    try std.testing.expect(try rig.click(10, 2, 60, 9) == null);
+    try std.testing.expect(try rig.click(10, row, 60, 13) == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
     try std.testing.expectEqualStrings(&shownRow(rig, 3), &Seen.now.conversed);
 }
@@ -4816,7 +4808,7 @@ test "a click on New Session, as a terminal sends it, selects the composer" {
     defer rig.close();
     var shown = try rig.shown(60, 16);
     defer shown.deinit();
-    const row: u16 = for (1..16) |at| {
+    const row: u16 = for (0..16) |at| {
         if (std.mem.indexOf(u8, try shown.line(@intCast(at)), "+ New Session") != null) break @intCast(at);
     } else return error.TestUnexpectedResult;
     try std.testing.expect(try rig.click(3, row, 60, 16) == null);
@@ -4833,7 +4825,7 @@ test "a click on a panel's or the model picker's lines, as a terminal sends it, 
         const selected = rig.overview.state.selected.session;
         // Every row the list's place holds, the ones Sessions showed on
         // included.
-        for (1..20) |row| try std.testing.expect(try rig.click(10, @intCast(row), 80, 24) == null);
+        for (0..18) |row| try std.testing.expect(try rig.click(10, @intCast(row), 80, 24) == null);
         try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
         try std.testing.expectEqualStrings(&selected, &rig.overview.state.selected.session);
         try std.testing.expect(rig.overview.state.listArea() != .sessions);
