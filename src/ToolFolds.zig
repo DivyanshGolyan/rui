@@ -59,7 +59,6 @@ pub fn Sized(comptime maximum: usize) type {
 
         fn terminal(self: *Owner, gpa: std.mem.Allocator, at: usize, outcome: State) void {
             std.debug.assert(outcome == .failed or outcome == .cancelled or outcome == .closed);
-            self.entries.items[at].state = outcome;
             _ = self.entries.swapRemove(at);
             if (self.entries.items.len == 0) {
                 self.entries.deinit(gpa);
@@ -127,7 +126,7 @@ pub fn Sized(comptime maximum: usize) type {
 
 test "fold owner reconciles success failure cancellation supersession refusal and rebuilt identities" {
     const gpa = std.testing.allocator;
-    const first: fold.Reference = .{ .source = .activity, .position = 1, .ordinal = 0, .content = .{ .length = 0, .digest = @splat(0) } };
+    const first: fold.Reference = .{ .position = 1, .ordinal = 0, .content = .{ .length = 0, .digest = @splat(0) } };
     var second = first;
     second.content.digest[0] = 1;
     const asked: reading.Asked = .{ .place = .live, .sent = 0, .generation = 0 };
@@ -192,18 +191,17 @@ test "fold owner reconciles success failure cancellation supersession refusal an
 }
 
 test "fold owner keys every Reference field and bounds identity allocation" {
-    const first: fold.Reference = .{ .source = .activity, .position = 7, .ordinal = 2, .content = .{ .length = 8, .digest = @splat(0) } };
+    const first: fold.Reference = .{ .position = 7, .ordinal = 2, .content = .{ .length = 8, .digest = @splat(0) } };
     var owner: Sized(2) = .{};
     defer owner.deinit(std.testing.allocator);
     try owner.request(std.testing.allocator, first);
     try owner.request(std.testing.allocator, first);
     try std.testing.expectEqual(@as(usize, 1), owner.entries.items.len);
-    var changed: [5]fold.Reference = @splat(first);
-    changed[0].source = .conversation;
-    changed[1].position += 1;
-    changed[2].ordinal += 1;
-    changed[3].content.length += 1;
-    changed[4].content.digest[0] ^= 1;
+    var changed: [4]fold.Reference = @splat(first);
+    changed[0].position += 1;
+    changed[1].ordinal += 1;
+    changed[2].content.length += 1;
+    changed[3].content.digest[0] ^= 1;
     for (changed) |reference| try std.testing.expect(!owner.contains(reference));
     try owner.request(std.testing.allocator, changed[0]);
     try std.testing.expectError(error.ToolFoldViewFull, owner.request(std.testing.allocator, changed[1]));

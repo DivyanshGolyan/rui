@@ -818,7 +818,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     };
     // Live output follows the latest rows; only a drag held at its top
     // edge moves it, until the drag ends.
-    if (screen.view == .live and !self.app_content.dragging() and !screen.live.hasOpenTools() and !self.tools.pending() and self.tools.in_flight == null) screen.live.top = null;
+    if (screen.view == .live and !self.app_content.dragging()) screen.live.top = null;
     screen.commands = self.nextCommands(screen.commands);
     var palette: ?vxfw.Widget = null;
     if (self.app_consent.request == null) if (screen.commands) |*shown| {
@@ -2494,11 +2494,7 @@ fn shownWork(self: *const Self) protocol.session_work.Kind {
 fn scroll(self: *Self, down: bool, rows: usize) !void {
     const screen = self.screen;
     if (screen.view == .live) {
-        if (down) {
-            // An open tool can pin live output above its newest rows.
-            screen.live.browse(screen.textLayout(), true, rows, screen.height, null);
-            return;
-        }
+        if (down) return; // Live output already shows the latest rows.
         try self.beginTranscript();
     }
     self.transcript.older_failed = false; // A new scroll may retry a failed load.
@@ -2593,7 +2589,9 @@ fn toggleTool(self: *Self, reference: tool_fold.Reference) !void {
         self.tools.close(self.init.gpa, reference);
     } else {
         try self.tools.request(self.init.gpa, reference);
-        document.top = screen.drawn.first;
+        // A browsed row stays where it is while its output opens under it.
+        // Live output keeps following its latest rows.
+        if (screen.view == .transcript) document.top = screen.drawn.first;
         self.notice = "Opening tool output…";
     }
     self.dirty = true;
@@ -2653,7 +2651,7 @@ fn setToolOpen(self: *Self, reference: tool_fold.Reference, rows: anytype, open:
     if (!open or screen.view == .transcript) _ = try screen.browsing.checkToolOpen(reference, rows, open);
     // The live copy and an existing transcript agree for each shared row.
     // Neither inspection pages nor hidden outputs have a separate cache.
-    if (try screen.live.setToolOpen(reference, rows, open, screen.textLayout(), screen.height)) |edit| {
+    if (try screen.live.setToolOpen(reference, rows, open)) |edit| {
         for (self.live.marks.items[0..self.live.marks.count]) |*mark| mark.offset = edit.map(mark.offset);
         for (self.live.echoes.opening[0..self.live.echoes.opening_count]) |*echo| {
             echo.output = edit.map(echo.output);
@@ -2665,7 +2663,7 @@ fn setToolOpen(self: *Self, reference: tool_fold.Reference, rows: anytype, open:
         }
         if (self.live.echoes.dropped) |*span| span.end = edit.map(span.end);
     }
-    if (!open or screen.view == .transcript) _ = try screen.browsing.setToolOpen(reference, rows, open, screen.textLayout(), screen.height);
+    if (!open or screen.view == .transcript) _ = try screen.browsing.setToolOpen(reference, rows, open);
     self.dirty = true;
     return held;
 }
@@ -2903,7 +2901,8 @@ fn settleReader(self: *Self) !void {
     const inspection = self.readInspection();
     if (end == .complete) switch (reader_policy.shows(phase, inspection)) {
         .older => try self.showOlder(),
-        .message => if (phase == .message) {
+        .tool => {}, // Settled above, whatever its end.
+        .message => {
             const request = self.expansion.reading.?;
             self.expansion.reading = null;
             if (reader_policy.messageShows(request.asked, self.pageAsked())) try self.screen.showMessage(self.init.io, self.files.inspection);
@@ -5924,8 +5923,8 @@ test "tool folds share key and click ownership across live output, bounds, failu
         document.clear();
         try document.append("› Request\n");
         for (0..10) |_| try document.append("Before the tools\n");
-        const first: tool_fold.Reference = .{ .source = .activity, .position = 41, .ordinal = 1, .content = .{ .length = 4, .digest = protocol.contentDigest("src\n") } };
-        const second: tool_fold.Reference = .{ .source = .conversation, .position = 45, .ordinal = 2, .content = .{ .length = 8, .digest = protocol.contentDigest("failure\n") } };
+        const first: tool_fold.Reference = .{ .position = 41, .ordinal = 1, .content = .{ .length = 4, .digest = protocol.contentDigest("src\n") } };
+        const second: tool_fold.Reference = .{ .position = 45, .ordinal = 2, .content = .{ .length = 8, .digest = protocol.contentDigest("failure\n") } };
         try Harness.append(&fixture, first, false);
         try Harness.append(&fixture, second, true);
         for (0..9) |_| try document.append("After the tools\n");
@@ -5940,8 +5939,10 @@ test "tool folds share key and click ownership across live output, bounds, failu
         try document.append("Live delivery\n");
         try Harness.complete(&fixture, "failure\n");
         try std.testing.expect(document.toolIsOpen(document.findTool(second).?));
+        // Live output keeps following its latest rows with a tool open.
         _ = try fixture.draw();
-        try std.testing.expectEqual(before, self.app_content.first);
+        try std.testing.expect(document.top == null);
+        try std.testing.expect(self.app_content.first.order(before) == .gt);
         try std.testing.expect(std.mem.indexOf(u8, document.text(), "    failure\n") != null);
         try std.testing.expect(self.live.marks.items[0].offset > end_before);
         // Ctrl-O on the same open row closes it and removes only its output.
@@ -6020,25 +6021,12 @@ test "tool folds share key and click ownership across live output, bounds, failu
         try Harness.complete(&fixture, &wide);
         const output_row = document.nextLine(document.findTool(first).?).?;
         try std.testing.expectEqual(@as(u16, 1), document.lineRows(.{ .width = 12, .method = .unicode }, output_row));
-        // Pinned live output is not necessarily at the bottom. Every down
-        // binding must reach rows arriving below the still-open tool.
+        // Rows arriving below an open tool are followed like any others.
         for (0..40) |_| try document.append("Later live rows\n");
         _ = try fixture.draw();
-        const pinned = self.app_content.first;
-        try std.testing.expect(pinned.order(document.bottom(fixture.screen.textLayout(), fixture.screen.height)) == .lt);
-        for ([_]vaxis.Key{
-            .{ .codepoint = vaxis.Key.page_down },
-            .{ .codepoint = vaxis.Key.down },
-            .{ .codepoint = vaxis.Key.down, .mods = .{ .shift = true } },
-        }) |down| {
-            document.top = pinned;
-            _ = try fixture.draw();
-            try fixture.press(down);
-            _ = try fixture.draw();
-            try std.testing.expectEqual(.live, fixture.screen.view);
-            try std.testing.expect(self.app_content.first.order(pinned) == .gt);
-            try std.testing.expect(document.toolIsOpen(document.findTool(first).?));
-        }
+        try std.testing.expectEqual(.live, fixture.screen.view);
+        try std.testing.expect(document.top == null);
+        try std.testing.expect(document.toolIsOpen(document.findTool(first).?));
         // A lower collapsed Message still joins the same openable set.
         try document.append("› Later message\n  " ++ View.Mark.summary ++ "┄ 4 more lines" ++ View.Mark.reset ++ "\n");
         self.live.blocks.append(.{ .source = .activity, .position = 99, .ordinal = 0, .content = first.content, .row = false });
@@ -6152,7 +6140,7 @@ test "fold read settlement covers success failure cancellation supersession inse
         defer fixture.deinit();
         const self = fixture.self;
         const screen = fixture.screen;
-        const reference = tool_fold.resultReference(5, 1, .{ .length = 5, .digest = protocol.contentDigest("done\n") });
+        const reference: tool_fold.Reference = .{ .position = 5, .ordinal = 1, .content = .{ .length = 5, .digest = protocol.contentDigest("done\n") } };
         screen.live.clear();
         try Helpers.append(&screen.live, reference);
         if (case == .refused) {
@@ -6221,7 +6209,7 @@ test "history rebuild reapplies shown canonical References through the productio
     defer fixture.deinit();
     const self = fixture.self;
     const screen = fixture.screen;
-    const reference = tool_fold.resultReference(5, 1, .{ .length = 5, .digest = protocol.contentDigest("done\n") });
+    const reference: tool_fold.Reference = .{ .position = 5, .ordinal = 1, .content = .{ .length = 5, .digest = protocol.contentDigest("done\n") } };
     screen.live.clear();
     try tool_fold.marker(reference, Sink{ .document = &screen.live });
     try screen.live.append("✓ Held call\n");

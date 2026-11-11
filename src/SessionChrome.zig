@@ -223,7 +223,7 @@ test "tool close shares the facts footer line and click target without an empty 
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for ([_]u16{ 46, 80 }) |width| for ([_]?[]const u8{ null, "Copied 12 lines", "! Not confirmed: a notice that is wider than the whole footer line and must never hide Close" }) |notice| {
-        self.place(&screen, .{ .tool_open = true, .stoppable = true, .facts = "Fix retry deadline · gpt-6.1-sol · high · 100% left", .notice = notice, .width = width });
+        self.place(&screen, .{ .tool_open = true, .facts = "Fix retry deadline · gpt-6.1-sol · high · 100% left", .notice = notice, .width = width });
         const drawn = try input.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
         try std.testing.expectEqual(@as(u16, if (notice == null) 4 else 5), drawn.size.height);
         const facts = drawn.children[1];
@@ -240,4 +240,9 @@ test "tool close shares the facts footer line and click target without an empty 
         try std.testing.expectEqual(@as(u16, if (notice == null) 0 else 1), drawn.children[2].surface.size.height);
         try std.testing.expectEqual(@as(usize, 0), drawn.children[2].surface.children.len);
     };
+    // Running work keeps its Stop key: closing a row never displaces it.
+    self.place(&screen, .{ .tool_open = true, .stoppable = true, .facts = "Fix retry deadline", .width = 80 });
+    try std.testing.expect(self.facts.right == null);
+    try std.testing.expect(self.status.bar.stop and !self.status.bar.close_tool);
+    try std.testing.expectEqualStrings("ctrl+x stop", self.status.bar.right_key);
 }

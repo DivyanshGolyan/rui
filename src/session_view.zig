@@ -1703,7 +1703,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
         .tool_result => |result| {
             var scan: ToolHeaderScan = .{};
             try content(requests, store, session, item, result.content, &scan);
-            try toolResultRow(result.presentation, scan.facts(result.presentation.code), tool_fold.resultReference(item.position, item.ordinal, result.content), sink, colour, compact_tools);
+            try toolResultRow(result.presentation, scan.facts(result.presentation.code), .{ .position = item.position, .ordinal = item.ordinal, .content = result.content }, sink, colour, compact_tools);
         },
         // A call the provider ran is its line alone, grouped with
         // other tool rows like a result with no output.

@@ -5,17 +5,13 @@ const std = @import("std");
 const Text = @import("TerminalText.zig");
 const protocol = @import("protocol.zig");
 
+/// A Tool Result's Conversation identity, the same whether the live
+/// Activity feed or a history page drew its heading.
 pub const Reference = struct {
-    source: enum { activity, conversation },
     position: u64,
     ordinal: u64,
     content: protocol.ActivityItem.Content,
 };
-/// A Tool Result has one canonical Conversation identity even when the
-/// live Activity feed discovered it. Read transport is not fold identity.
-pub fn resultReference(position: u64, ordinal: u64, content: protocol.ActivityItem.Content) Reference {
-    return .{ .source = .conversation, .position = position, .ordinal = ordinal, .content = content };
-}
 
 pub const prefix = "rui-tool:";
 pub const output_uri = "rui-tool-output";
@@ -28,7 +24,7 @@ pub const max_bytes = 8192;
 pub fn marker(reference: Reference, sink: anytype) !void {
     var buffer: [192]u8 = undefined;
     const digest = std.fmt.bytesToHex(reference.content.digest, .lower);
-    const uri = try std.fmt.bufPrint(&buffer, prefix ++ "{s}:{d}:{d}:{d}:{s}", .{ if (reference.source == .activity) "a" else "c", reference.position, reference.ordinal, reference.content.length, digest });
+    const uri = try std.fmt.bufPrint(&buffer, prefix ++ "{d}:{d}:{d}:{s}", .{ reference.position, reference.ordinal, reference.content.length, digest });
     try sink.feed(Text.link_open);
     try sink.feed(uri);
     try sink.feed(Text.link_end ++ Text.link_close);
@@ -37,7 +33,6 @@ pub fn marker(reference: Reference, sink: anytype) !void {
 pub fn parse(uri: []const u8) ?Reference {
     if (!std.mem.startsWith(u8, uri, prefix)) return null;
     var parts = std.mem.splitScalar(u8, uri[prefix.len..], ':');
-    const source = parts.next() orelse return null;
     const position = std.fmt.parseInt(u64, parts.next() orelse return null, 10) catch return null;
     const ordinal = std.fmt.parseInt(u64, parts.next() orelse return null, 10) catch return null;
     const length = std.fmt.parseInt(u64, parts.next() orelse return null, 10) catch return null;
@@ -45,17 +40,12 @@ pub fn parse(uri: []const u8) ?Reference {
     if (hex.len != 64 or parts.next() != null) return null;
     var digest: [32]u8 = undefined;
     _ = std.fmt.hexToBytes(&digest, hex) catch return null;
-    return .{ .source = if (std.mem.eql(u8, source, "a")) .activity else if (std.mem.eql(u8, source, "c")) .conversation else return null, .position = position, .ordinal = ordinal, .content = .{ .length = length, .digest = digest } };
+    return .{ .position = position, .ordinal = ordinal, .content = .{ .length = length, .digest = digest } };
 }
 
 /// A minimum retained heading's hidden reference plus its newline. Bounds
 /// the possible heading population without retaining display offsets.
-pub const minimum_reference_bytes = prefix.len + "a:0:0:0:".len + 64 + 1;
-
-pub fn referenceIndex(references: []const Reference, reference: Reference) ?usize {
-    for (references, 0..) |held, index| if (std.meta.eql(held, reference)) return index;
-    return null;
-}
+pub const minimum_reference_bytes = prefix.len + "0:0:0:".len + 64 + 1;
 
 /// One toggle's bounded display prefix of the authenticated stored result.
 /// Every byte is literal input to terminal escaping, including tool envelope
@@ -135,7 +125,7 @@ pub const Output = struct {
 };
 
 test "tool references retain every authority field through the internal marker" {
-    const reference: Reference = .{ .source = .conversation, .position = 987654321, .ordinal = 42, .content = .{ .length = 12345, .digest = protocol.contentDigest("saved output") } };
+    const reference: Reference = .{ .position = 987654321, .ordinal = 42, .content = .{ .length = 12345, .digest = protocol.contentDigest("saved output") } };
     const Sink = struct {
         writer: *std.Io.Writer,
         pub fn feed(self: @This(), bytes: []const u8) !void {
@@ -147,7 +137,7 @@ test "tool references retain every authority field through the internal marker" 
     try marker(reference, Sink{ .writer = &writer });
     const address = writer.buffered()[Text.link_open.len .. writer.end - Text.link_end.len - Text.link_close.len];
     try std.testing.expect(std.meta.eql(reference, parse(address).?));
-    try std.testing.expect(parse("rui-tool:bad:1:2:3:abc") == null);
+    try std.testing.expect(parse("rui-tool:1:2:3:abc") == null);
     try std.testing.expect(parse("https://example.com") == null);
 }
 

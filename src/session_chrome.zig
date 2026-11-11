@@ -270,8 +270,9 @@ pub fn bar(facts: Facts) Bar {
         result.tone = if (std.mem.startsWith(u8, left, "!")) .attention else .quiet;
     }
     if (!facts.stoppable and !facts.tool_open) return result;
-    result.close_tool = facts.tool_open;
-    result.right_key = if (facts.tool_open) "ctrl+o close" else stop_key;
+    // Stop is never displaced: closing a tool row can wait, stopping work cannot.
+    result.close_tool = facts.tool_open and !facts.stoppable;
+    result.right_key = if (result.close_tool) "ctrl+o close" else stop_key;
     const stop_cells = session_line.cells(result.right_key, facts.method);
     const left_cells = session_line.cells(result.left, facts.method);
     // Close lives on the facts line, not beside this status/notice text.

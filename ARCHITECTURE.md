@@ -2830,7 +2830,8 @@ A page asked for before a send, Esc, Ctrl-G or a newer Ctrl-O never opens.
 A Message page never shows or decides an Action.
 A click on a tool heading toggles its output directly below it; Ctrl-O toggles the lowest openable tool heading under the same lowest-in-view rule.
 Several tool rows may be open together, and new live output leaves them open.
-Opening holds the heading's position where possible, growing the feed below it.
+In the transcript the heading keeps its row and the output grows below it.
+Live output keeps following its latest rows, with or without an open tool row.
 The frontend reads the selected immutable Store content on toggle, checking its length and digest, and retains only a bounded display prefix for the open row, never all closed outputs.
 At most 20 indented rows show, with long logical lines ending in `…` rather than wrapping past that bound, then a quiet `… N more lines` row; a byte-bound cut counts incomplete lines among those not shown.
 The printed prefix keeps at most 8,192 raw bytes and at most 8,192 bytes after terminal-control escaping, before the document escapes invisible clusters.
@@ -2843,12 +2844,13 @@ Terminal escaping and the row/byte bounds still apply; an empty result opens a b
 Opening changes neither the Store nor model-facing text or the wire protocol.
 Internal tool line markers reuse the document's hidden address representation without adding per-byte styling storage, and never become terminal hyperlinks or clipboard text.
 `ToolFolds` owns the frontend lifecycle: requested, shown, failed, cancelled and closed. Only a successful insertion becomes shown; failed, cancelled, superseded or refused reads release pending intent so the next toggle retries.
-Intent is keyed by the complete `tool_fold.Reference`, never a retained byte position. Live Activity and history construct the same canonical Conversation result Reference.
+Intent is keyed by the complete `tool_fold.Reference` (Conversation position, ordinal, length and digest), never a retained byte position. Live Activity and history construct the same Reference.
 Each request has a distinct receipt; a stale completion cannot reopen a closed row or consume a newer request for the same Reference.
 The owner keeps only requested/shown References, bounded by the retained view's maximum heading population, and releases the allocation when the last intent leaves or the frontend exits.
 Production history rebuilds reapply shown intent by matching Reference through the same authenticated reader; missing or changed References never open another row.
 Output leaves with the retained row or when closed (including hidden retained copies); neither intent nor output is saved, and the owner holds no output cache.
-The facts footer offers `ctrl+o close` in its right slot while a tool row is open, on the same line as `‹` and the Session name; it creates no separate status row.
+The facts footer offers `ctrl+o close` in its right slot while a tool row is open and no work can be stopped, on the same line as `‹` and the Session name; it creates no separate status row.
+`ctrl+x stop` keeps its place while work runs.
 Display eviction does not delete saved work.
 App enables mouse reporting, and wheel events scroll the visible widget.
 Rui does not enable alternate scroll mode 1007.
@@ -3064,8 +3066,6 @@ Tool Result streams validate even when their bytes are not displayed; label-only
 Fresh Action inspection authenticates all three complete proposal fields.
 Complete Action arguments remain available through fresh inspection; one-shot inspection also exposes the call ID.
 Opening tool output reads just the selected saved content without moving the older-navigation or live Activity cursor.
-Each Tool Result shows its last min(raw length, 8,192) raw bytes through terminal-safe escaping, with `Earlier output omitted` before a shortened suffix and a full canonical raw export command.
-The raw suffix boundary is not adjusted for UTF-8 or lines.
 Older outcome headings remain available through `/history`; oversized non-tool items retain their omission and exact raw export.
 Opening and live user and assistant content are never subject to the historical omission limit.
 Stream framing, expected length, domain digest and physical EOF must validate before the final content window is delivered.

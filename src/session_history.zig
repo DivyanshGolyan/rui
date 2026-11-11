@@ -75,7 +75,7 @@ pub const Prepared = struct {
             };
             const staged: Staged = .{ .io = io, .scratch = scratch, .start = span.offset, .bytes = span.length, .window = &window };
             if (item.kind == .tool_result or item.kind == .hosted_call) {
-                try View.toolResultRow(item.presentation.?, if (prepared_body == .tool) prepared_body.tool.facts else .{}, if (item.kind == .tool_result) tool_fold.resultReference(item.position, item.ordinal, .{ .length = item.content.bytes, .digest = item.content.digest }) else null, sink, colour, &compact);
+                try View.toolResultRow(item.presentation.?, if (prepared_body == .tool) prepared_body.tool.facts else .{}, if (item.kind == .tool_result) tool_fold.Reference{ .position = item.position, .ordinal = item.ordinal, .content = .{ .length = item.content.bytes, .digest = item.content.digest } } else null, sink, colour, &compact);
                 continue;
             }
             compact = false;

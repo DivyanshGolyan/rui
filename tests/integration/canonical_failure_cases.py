@@ -626,7 +626,7 @@ def permission_read_cases(state):
             b"X-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\nConnection: close\r\nContent-Length: "
             + str(len(body)).encode() + b"\r\n\r\n" + body)
         armed = threading.Event()
-        proxy = ReplyProxy(host, "/v1/activity-content", lambda reply: response if armed.is_set() else reply)
+        proxy = ReplyProxy(host, "/v1/conversation-content", lambda reply: response if armed.is_set() else reply)
         master, slave = open_pty()
         original = termios.tcgetattr(slave)
         caller = None

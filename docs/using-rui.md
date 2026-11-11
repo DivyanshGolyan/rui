@@ -22,7 +22,7 @@ Enter these at the `›` prompt.
 Tool outcomes start folded, showing their description and outcome, with a numeric failed exit when available.
 Click a tool heading to open or close its saved output in place.
 Ctrl-O toggles the lowest tool heading or opens the lowest collapsed Message or Session name in view, whichever is lower.
-Several tools can stay open; new live output does not close them.
+Several tools can stay open; new live output does not close them and the view keeps following it.
 Output is safely escaped and indented, with at most 20 rows followed by `… N more lines` when needed.
 Long lines end in `…`; the display prefix is also bounded to 8,192 bytes before invisible-cluster escaping.
 Opened output uses the selvedge band; with NO_COLOR it keeps its indent without a band.

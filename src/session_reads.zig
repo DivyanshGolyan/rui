@@ -839,16 +839,14 @@ pub fn fullTool(raw: *anyopaque, task: *Task) !void {
     defer job.init.gpa.destroy(output);
     output.* = .{};
     const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = target.content.length, .digest = target.content.digest };
-    const failure = switch (target.source) {
-        .activity => try requests.readActivityContent(job.store, job.session, target.position, target.ordinal, reference, output),
-        .conversation => try requests.readConversationContent(job.store, job.session, target.position, target.ordinal, reference, output),
-    };
-    if (failure) |value| return requests.failRead(value);
+    if (try requests.readConversationContent(job.store, job.session, target.position, target.ordinal, reference, output)) |failure| return requests.failRead(failure);
     try job.files.inspection.setLength(task.io, 0);
     var capture: DisplayCapture = .{ .task = task, .file = job.files.inspection };
     try output.finish(&capture);
 }
 
+/// The Ctrl-O page. The Message's length, digest and end are validated
+/// before anything shows; its full text then follows at column 0.
 pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();

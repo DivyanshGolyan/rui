@@ -548,17 +548,18 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
         /// Inserts/removes just this row's bounded output. Other folds and live
         /// text stay intact. A refused insertion changes neither text nor anchor.
-        pub fn setToolOpen(self: *Self, reference: tool_fold.Reference, rows: anytype, open: bool, layout: Layout, height: u16) !?Edit {
+        /// A held first row keeps its text; a view following its end still does.
+        pub fn setToolOpen(self: *Self, reference: tool_fold.Reference, rows: anytype, open: bool) !?Edit {
             const plan = try self.toolEdit(reference, rows, open) orelse return null;
             var start = plan.start;
             var end = plan.end;
             const added = plan.added;
             const removed = end - start;
-            const first_row = self.first(layout, height);
-            self.top = first_row;
             if (plan.discard != 0) {
+                const held = self.top;
                 self.discardFront(self.origin + plan.discard);
-                self.top = .{ .offset = first_row.offset -| plan.discard, .row = first_row.row };
+                // A first row that left with the older lines becomes the new first line.
+                if (held) |top| self.top = if (top.offset >= plan.discard) .{ .offset = top.offset - plan.discard, .row = top.row } else .{};
                 start -= plan.discard;
                 end -= plan.discard;
             }
@@ -1756,7 +1757,7 @@ test "one line band owner covers adjacent code, selected tool, output and plain 
         }
     };
     var input: Sink = .{};
-    const first: tool_fold.Reference = .{ .source = .activity, .position = 1, .ordinal = 0, .content = .{ .length = 0, .digest = @splat(0) } };
+    const first: tool_fold.Reference = .{ .position = 1, .ordinal = 0, .content = .{ .length = 0, .digest = @splat(0) } };
     var second = first;
     second.position = 2;
     try input.feed("before\n\x1b[40m  abcdefghijkl\n\x1b[0m\x1b[40m\n\x1b[0m");
@@ -1796,5 +1797,38 @@ test "one line band owner covers adjacent code, selected tool, output and plain 
                 try std.testing.expectEqualStrings("✓", screen.screen.readCell(0, @intCast(plain_start)).?.char.grapheme);
             }
         }
+    }
+}
+
+test "a fold edit keeps a held first row on its text and leaves a following view following" {
+    const Sink = struct {
+        view: *Sized(1024, true),
+        pub fn feed(self: @This(), bytes: []const u8) !void {
+            try self.view.append(bytes);
+        }
+    };
+    const reference: tool_fold.Reference = .{ .position = 1, .ordinal = 0, .content = .{ .length = 0, .digest = @splat(0) } };
+    var view: Sized(1024, true) = .{};
+    try view.append("above\n");
+    try tool_fold.marker(reference, Sink{ .view = &view });
+    try view.append("✓ A\nbelow\n");
+    try view.prepare();
+    var rows: Sized(256, true) = .{};
+    try rows.append(tool_fold.output_marker ++ "    out\n" ++ tool_fold.output_marker ++ "    err\n");
+    try rows.prepare();
+    const heading = view.findTool(reference).?;
+    const below = view.nextLine(heading).?;
+    for ([_]?Position{ null, .{}, .{ .offset = heading }, .{ .offset = below } }) |held| {
+        view.top = held;
+        try std.testing.expect((try view.setToolOpen(reference, &rows, true)) != null);
+        try std.testing.expect(view.toolIsOpen(heading));
+        const moved: ?Position = if (held) |top| .{ .offset = if (top.offset == below) below + rows.length else top.offset } else null;
+        try std.testing.expectEqualDeep(moved, view.top);
+        if (moved) |top| if (top.offset > heading) try std.testing.expect(std.mem.startsWith(u8, view.text()[top.offset..], "below\n"));
+        // A first row inside the output lands on the line after it when it closes.
+        if (held != null and held.?.offset == heading) view.top = .{ .offset = below + 3 };
+        try std.testing.expect((try view.setToolOpen(reference, &rows, false)) != null);
+        try std.testing.expect(!view.toolIsOpen(heading));
+        try std.testing.expectEqualDeep(if (held != null and held.?.offset == heading) @as(?Position, .{ .offset = below }) else held, view.top);
     }
 }

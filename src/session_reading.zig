@@ -79,12 +79,15 @@ pub const Shows = enum {
     copy,
     /// Shows the inspection page.
     page,
+    /// Opens the tool row's output under it.
+    tool,
 };
 
 pub fn shows(phase: ReadPhase, inspection: Inspection) Shows {
     return switch (phase) {
         .history => .older,
-        .message, .tool => .message,
+        .message => .message,
+        .tool => .tool,
         .recall => .recalled,
         .activity, .permission => .staged,
         .inspection => if (inspection == .copy) .copy else .page,
@@ -207,7 +210,7 @@ test "a completed read shows what its phase read; only /copy's inspection copies
     const cases = [_]struct { ReadPhase, Inspection, Shows }{
         .{ .history, .copy, .older },
         .{ .message, .copy, .message },
-        .{ .tool, .other, .message },
+        .{ .tool, .other, .tool },
         .{ .recall, .other, .recalled },
         .{ .activity, .other, .staged },
         .{ .permission, .copy, .staged },
