@@ -121,7 +121,7 @@ const BashPreparingSlot = struct {
 const ModelPreparingSlot = struct {
     token: execution.CustodyToken,
     binding: store_module.AttemptBinding,
-    /// Set once the view opens, before preparation starts.
+    /// Set once the request is prepared, from its settings.
     purpose: ?store_module.ModelOperationKind = null,
 };
 
@@ -1909,15 +1909,7 @@ fn beginAdmittedAttempt(
     };
     // The view opens where it lives for the whole preparation; it never
     // moves.
-    slot.model_preparing.purpose = host.store.openHistoricalView(binding, &preparation.view) catch |err| {
-        if (err == error.SupersededByControl) {
-            finishCustodyNow(host, slot);
-            return .admitted;
-        }
-        fenceDispatch(host, "historical view", err);
-        finishCustodyNow(host, slot);
-        return .admitted;
-    };
+    host.store.openHistoricalView(binding, &preparation.view);
     var retained_scratch: ?named_scratch.Owner = null;
     preparation.init(
         host.io,
@@ -1951,7 +1943,7 @@ fn advanceModelPreparation(
         .model_preparing => break candidate,
         else => {},
     } else return false;
-    const owner = slot.model_preparing;
+    var owner = slot.model_preparing;
     if (execution.modelDecision(.{ .preparing = .{ .launch_allowed = host.launchAllowed() } }) == .abandon) {
         preparation.cancel();
         // Infrastructure fencing does not invent a user stop or a Resolution.
@@ -1972,6 +1964,7 @@ fn advanceModelPreparation(
             finishModelPreparationFailure(host, slot, owner, err, null);
         },
         .prepared => |request| {
+            owner.purpose = preparation.settings.operation;
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
             traceOperation(host, "preparation_completed", owner.binding);
             const leased = host.providers.get(request.provider).?.credential.leased();
@@ -3672,7 +3665,7 @@ test "preparing slots belong to their live preparations" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: model_adapter.Preparation = undefined;
-    _ = try storage.openHistoricalView(binding_a, &preparation.view);
+    storage.openHistoricalView(binding_a, &preparation.view);
     try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     var preparation_active = true;
     defer if (preparation_active) preparation.cancel();
@@ -4006,7 +3999,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     var slots = [_]ExecutionSlot{.{ .model_preparing = .{ .token = token, .binding = binding } }};
     var preparation: model_adapter.Preparation = undefined;
     var retained: ?named_scratch.Owner = null;
-    _ = try storage.openHistoricalView(binding, &preparation.view);
+    storage.openHistoricalView(binding, &preparation.view);
     try preparation.init(
         std.testing.io,
         root,

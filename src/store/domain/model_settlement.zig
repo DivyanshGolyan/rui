@@ -158,7 +158,7 @@ pub noinline fn readAttemptKind(entry: *const store_core.Entry, binding: Attempt
 const standing_columns = "o.turn_id,o.attempt_ordinal,o.resolution_code IS NOT NULL AS resolved,o.interrupted_by_command_key IS NOT NULL AS interrupted";
 
 /// What decides whether a binding is current, and the Operation's purpose.
-const attempt_standing = rsql.Read(.{
+pub const attempt_standing = rsql.Read(.{
     .sql = "SELECT " ++ standing_columns ++ ",o.purpose AS compaction FROM model_operation o WHERE o.operation_id=?1",
     .Args = struct { operation_id: u64 },
     .Row = struct { turn_id: i64, attempt_ordinal: i64, resolved: bool, interrupted: bool, compaction: bool },
@@ -171,8 +171,18 @@ const attempt_standing = rsql.Read(.{
 /// name for its Attempt read. Public so a test counts its rounds.
 pub fn attemptKind(a: anytype, binding: AttemptBinding) !ModelOperationKind {
     var found: attempt_standing.Result = undefined;
-    a.read(attempt_standing, .{ .operation_id = binding.operation_id }, &found);
+    queueAttemptKind(a, binding, &found);
     try runOperationRead(a);
+    return attemptKindOf(found, binding);
+}
+
+/// Queues `attemptKind`'s read in a round its caller shares and ends;
+/// `attemptKindOf` answers from `found` after it.
+pub fn queueAttemptKind(a: anytype, binding: AttemptBinding, found: *attempt_standing.Result) void {
+    a.read(attempt_standing, .{ .operation_id = binding.operation_id }, found);
+}
+
+pub fn attemptKindOf(found: attempt_standing.Result, binding: AttemptBinding) error{ StaleAttemptBinding, SupersededByControl }!ModelOperationKind {
     const row = found orelse return error.StaleAttemptBinding;
     try attemptStanding(row, binding);
     return if (row.compaction) .compaction else .assistant_response;
