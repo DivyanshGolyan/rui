@@ -173,6 +173,19 @@
       ]
     },
     {
+      "name": "chat-draft-kept",
+      "note": "chat draft and caret kept after Esc and reopening",
+      "open": "Fix retry deadline",
+      "steps": [
+        { "text": "Keep this chat draft" },
+        { "keys": ["Left", "Left", "Esc"] },
+        { "wait": "Type a task" },
+        { "keys": ["Enter"] },
+        { "wait": "Keep this chat draft" }
+      ],
+      "expect": "Keep this chat draft"
+    },
+    {
       "name": "chat-scrolled",
       "note": "11-conversation-scrolled",
       "open": "Fix retry deadline",
@@ -494,7 +507,7 @@
           "text": "I am checking the migration before approving it."
         },
         {
-          "wait": "Allow once"
+          "wait": "I am checking the migration before approving it."
         }
       ]
     },
