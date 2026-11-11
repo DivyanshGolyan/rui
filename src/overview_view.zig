@@ -1796,10 +1796,10 @@ fn readModels(state: *State, read: ModelsRead) void {
             const picker = if (state.picker) |*open| open else return owned.deinit(state.gpa);
             var retained: ?model_picker_view.Choice = null;
             if (picker.choice) |choice| {
-                const id = state.menu.entries[choice.index].id;
+                const id = choice.entry(&state.menu).id;
                 picker.highlight.set(id) catch unreachable;
                 if (owned.find(id)) |index| {
-                    const row = model_picker.Query.parse("").row(owned.entries[index], pickerDefaults(state)).?;
+                    const row = model_picker.Query.parse("").typed(owned.entries[index], pickerDefaults(state));
                     retained = model_picker_view.retain(.{ .index = index, .row = row }, choice);
                 }
             }
@@ -2693,7 +2693,7 @@ pub fn syncPicker(state: *State, draft: Draft) void {
 fn pick(state: *State, effects: *Effects) void {
     const picker = &state.picker.?;
     const choice = picker.choice orelse return;
-    const entry = state.menu.entries[choice.index];
+    const entry = choice.entry(&state.menu);
     var binding: Default = .{ .provider = choice.row.provider, .model = .{ .len = 0 }, .effort = choice.row.effort };
     binding.model.set(entry.id) catch unreachable;
     state.default = binding;
@@ -7005,7 +7005,7 @@ test "Shift-Up and Shift-Down leave hidden Sessions unchanged while picking a mo
     try std.testing.expect(std.meta.eql(picker_choice, state.picker.?.choice));
 }
 
-test "with no sign-in served, the picker shows each login line instead of models" {
+test "with no sign-in served, the picker has no model rows or shell instructions" {
     var state = try pickerState(null);
     defer state.deinit();
     try openPicker(&state, &.{});
@@ -7013,14 +7013,14 @@ test "with no sign-in served, the picker shows each login line instead of models
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const rows = try model_picker_view.rows(arena.allocator(), &state.menu, "", pickerDefaults(&state), state.picker.?.choice, 80, .unicode, true, .read);
-    var codex = false;
-    var openai = false;
-    for (0..rows.count) |index| {
-        const row = try rows.row(arena.allocator(), index);
-        codex = codex or std.mem.indexOf(u8, row.text, Provider.codex.login()) != null;
-        openai = openai or std.mem.indexOf(u8, row.text, Provider.openai.login()) != null;
+    try std.testing.expectEqual(@as(usize, 0), rows.count);
+    try std.testing.expect(rows.selected == null and state.picker.?.choice == null);
+    const screen = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(screen);
+    for (std.enums.values(Provider)) |provider| {
+        try std.testing.expect(state.menu.sources.get(provider) == null);
+        try std.testing.expect(std.mem.indexOf(u8, screen, provider.login()) == null);
     }
-    try std.testing.expect(codex and openai);
     try expectEffects(&.{}, try submit(&state, draft));
     try std.testing.expect(state.default == null);
 }
