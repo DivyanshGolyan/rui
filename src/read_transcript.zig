@@ -212,12 +212,9 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
             note = tool.presentation.description;
             if (item.value == .tool_result) try out.print(" {s}", .{@tagName(item.value.tool_result.presentation.code)});
         },
-        // The public hosted row exposes only its presentation. web_search
-        // is the sole provider-run tool (the provider owns its arguments).
-        .hosted_call => |presentation| {
-            try out.writeAll(" web_search");
-            note = presentation.description;
-        },
+        // Hosted calls keep the provider's saved presentation, not a
+        // separate tool name. Never invent a provider tool in core.
+        .hosted_call => |presentation| note = presentation.description,
         .turn_ended => |ended| {
             try out.print(" {s}", .{@tagName(ended.ending)});
             // A descendant's ending: name the agent whose Turn it was.
@@ -689,4 +686,37 @@ test "searchActivity finds start_agent call names and stored JSON arguments not 
     try std.testing.expect(std.mem.indexOf(u8, bytes, "call start_agent") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"start_agent\\n") != null);
     try std.testing.expect(!database.isFenced());
+}
+
+test "read_transcript hosted call uses its recorded provider presentation" {
+    try storage.testing.forEachEngine(struct {
+        fn check(case: *storage.testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var database: storage.Store = undefined;
+            try storage.testing.testingStore(case, &database, &tmp, std.testing.io);
+            defer database.close() catch unreachable;
+            var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer memory.deinit();
+            const arena = memory.allocator();
+            const session = try storage.testing.configureTestSession(&database, "hosted-transcript");
+            try storage.testingSubmitMessage(&database, &tmp, "hosted-input", "hosted-input", session.slice(), "search");
+            const model = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+            // The codec currently admits only this hosted kind. Store keeps its
+            // presentation, not a distinct name: render that recorded identity.
+            try storage.settleAnswerItemsForTesting(&database, &tmp, model, &.{
+                "{\"type\":\"web_search_call\",\"id\":\"hosted\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"recorded provider query\"}}",
+                "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}",
+            }, "answer");
+            const page = try arena.create(protocol.ActivityFacts);
+            try database.activityPage(&.{ .session = session, .kinds = .initOne(.hosted_call) }, page);
+            try std.testing.expectEqual(@as(usize, 1), page.count);
+            const item = &page.items[0];
+            var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer output.deinit();
+            try outline(&database, arena, session.slice(), item, &output.writer);
+            const expected = try std.fmt.allocPrint(arena, "{d}.0 hosted_call: Search “recorded provider query”\n", .{item.position});
+            try std.testing.expectEqualStrings(expected, output.written());
+        }
+    }.check);
 }

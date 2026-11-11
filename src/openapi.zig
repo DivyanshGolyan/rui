@@ -85,7 +85,7 @@ pub const routes = [_]Route{
         .kind = .host_info,
         .summary = "The Host's identity, capacity and provider routes. Also the readiness probe.",
         .variants = &.{variant(protocol.host_info_request, .{})},
-        .reply = jsonReply(.{ protocol.host_info_reply, protocol.host_info_mysql_reply }),
+        .reply = jsonReply(.{protocol.host_info_reply.head ++ .{Optional(protocol.host_info_reply.doublewrite)} ++ protocol.host_info_reply.tail}),
     },
     .{
         .path = "/v1/control/host-stop",
@@ -1449,6 +1449,53 @@ test "replies the Host renders conform to their schemas" {
     // These are the Store's real streaming reports, not schema examples:
     // an added hand-written field must fail additionalProperties here.
     try store.checkSessionReportsForTesting(Case{ .schemas = schemas, .allocator = a });
+}
+
+test "Host information has one schema with an omittable bounded diagnostic" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var document: Document = .init(arena.allocator());
+    _ = try document.build();
+    const schema = document.schemas.get("HostInfoReply").?;
+    try std.testing.expect(!schema.object.contains("anyOf"));
+    try std.testing.expectEqualStrings("object", schema.object.get("type").?.string);
+    const properties = schema.object.get("properties").?.object;
+    const diagnostic = properties.get("innodb_doublewrite").?.object;
+    try std.testing.expectEqualStrings("string", diagnostic.get("type").?.string);
+    try std.testing.expectEqual(@as(i64, 32), diagnostic.get("maxLength").?.integer);
+    try std.testing.expectEqual(@as(i64, protocol.max_store_bytes), properties.get("store").?.object.get("maxLength").?.integer);
+    for (schema.object.get("required").?.array.items) |required|
+        try std.testing.expect(!std.mem.eql(u8, "innodb_doublewrite", required.string));
+
+    // One schema accepts both Host-emitted forms, and the diagnostic's
+    // presence does not narrow the selector to a MySQL id.
+    const host_reply = @import("host_reply.zig");
+    const stores = [_][]const u8{ "/sqlite", "0123456789abcdef0123456789abcdef", &@as([protocol.max_store_bytes]u8, @splat('s')) };
+    for (stores) |selector| {
+        for ([_]?[]const u8{ null, "OFF", &@as([32]u8, @splat(1)) }) |doublewrite| {
+            var response: protocol.ResponseBuffer = .{};
+            try response.render(host_reply.renderHostInfo, .{host_reply.HostInfo{
+                .store = selector,
+                .instance = @splat(1),
+                .active_capacity = 2,
+                .intake_capacity = 100,
+                .descriptor_soft_limit = 1024,
+                .started_at = 1792918800,
+                .custody_occupied = 0,
+                .paused = false,
+                .routes = protocol.routesAll(.unserved),
+                .doublewrite = doublewrite,
+            }});
+            var json = try std.json.parseFromSliceLeaky(Value, arena.allocator(), response.slice(), .{});
+            try std.testing.expect(conforms(document.schemas, schema, json));
+            try std.testing.expectEqual(doublewrite != null, json.object.contains("innodb_doublewrite"));
+            // Omission is not nullability, and the string has an actual bound.
+            try json.object.put(arena.allocator(), "innodb_doublewrite", .null);
+            try std.testing.expect(!conforms(document.schemas, schema, json));
+            try json.object.put(arena.allocator(), "innodb_doublewrite", .{ .string = &@as([33]u8, @splat('x')) });
+            try std.testing.expect(!conforms(document.schemas, schema, json));
+        }
+    }
 }
 
 test "Message observation schema requires Host state and bounds recovery" {

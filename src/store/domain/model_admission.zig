@@ -679,8 +679,14 @@ const IdleChecks = struct {
     }
 
     fn settle(checks: *const IdleChecks, reader: anytype) !void {
+        if (!try checks.settled()) try validateBlockedToolCalls(reader);
+    }
+
+    /// Whether the checks end here; false when a blocked Operation's
+    /// calls are still to be read, in rounds of their own.
+    fn settled(checks: *const IdleChecks) error{CorruptStore}!bool {
         if (checks.disagreeing != null) return error.CorruptStore;
-        if (checks.blocked.row != null) try validateBlockedToolCalls(reader);
+        return checks.blocked.row == null;
     }
 };
 
@@ -811,8 +817,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
 
 /// Which of the dispatch loop's commit-driven scans would find work now.
 /// A hint: each admission still selects for itself, so a stale one costs
-/// an empty scan or a pass's delay, never a wrong write. The retry scans
-/// are not here; they also skip what execution slots hold.
+/// an empty scan or a pass's delay, never a wrong write.
 pub const DispatchWork = struct {
     /// An owed stop, an owed ending, a feed hop or a core tool call.
     core: bool,
@@ -822,34 +827,82 @@ pub const DispatchWork = struct {
     /// are held (`paused`) only an open Turn's.
     message: bool,
     tool_continuation: bool,
+    /// An open Turn's Attempt is unresolved with a retry state: running,
+    /// waiting for its retry or out of retries. The retry scans find
+    /// nothing without one; they also skip what execution slots hold.
+    retry: bool,
 
     /// Before the first read, and what a loop with no Store assumes.
-    pub const unknown: DispatchWork = .{ .core = true, .mcp = true, .bash = true, .message = true, .tool_continuation = true };
+    pub const unknown: DispatchWork = .{ .core = true, .mcp = true, .bash = true, .message = true, .tool_continuation = true, .retry = true };
 };
 
-/// Reads `DispatchWork` in one round: the selections the slot-free, Bash,
-/// message and tool-continuation scans each open with, queued by those
-/// scans' own owners, and the `IdleChecks` a model admission that selects
-/// nothing would run, settled here when either has no work.
+/// The reads `DispatchWork` takes, as one round's statements: the
+/// selections the slot-free, Bash, message and tool-continuation scans
+/// each open with, queued by those scans' own owners, and the
+/// `IdleChecks` a model admission that selects nothing would run.
+pub const DispatchSurvey = struct {
+    actions: action_domain.WorkProbe = .{},
+    message: runnable_selection.Result = undefined,
+    continuation: runnable_selection.Result = undefined,
+    idle: IdleChecks = .{},
+    retry: retrying_attempt.Result = undefined,
+
+    /// The statement whose failed step names the read's failure.
+    pub const named = .{.{ blocked_operation, error.CallReadFailed }};
+
+    pub fn queue(survey: *DispatchSurvey, reader: anytype, paused: bool) void {
+        survey.actions.queue(reader);
+        queueSelection(reader, if (paused) .open_turn_message else .message, &survey.message);
+        queueSelection(reader, .tool_continuation, &survey.continuation);
+        survey.idle.queue(reader);
+        reader.read(retrying_attempt, .{}, &survey.retry);
+    }
+
+    /// Whether the idle checks, which run when either selection found
+    /// nothing, still have a blocked Operation's calls to read.
+    fn unsettled(survey: *const DispatchSurvey) error{CorruptStore}!bool {
+        if (survey.message != null and survey.continuation != null) return false;
+        return !try survey.idle.settled();
+    }
+
+    /// The round's answer once its statements stepped; null when the
+    /// idle checks need rounds of their own (`dispatchWork` takes them).
+    pub fn work(survey: *const DispatchSurvey) error{CorruptStore}!?DispatchWork {
+        if (try survey.unsettled()) return null;
+        return survey.found();
+    }
+
+    fn found(survey: *const DispatchSurvey) DispatchWork {
+        return .{
+            .core = survey.actions.core(),
+            .mcp = survey.actions.mcp(),
+            .bash = survey.actions.bash(),
+            .message = survey.message != null,
+            .tool_continuation = survey.continuation != null,
+            .retry = survey.retry != null,
+        };
+    }
+};
+
+/// Reads `DispatchWork`: `DispatchSurvey`'s round, then the blocked
+/// calls' outcomes when the idle checks ask for them.
 pub fn dispatchWork(reader: anytype, paused: bool) !DispatchWork {
-    var actions: action_domain.WorkProbe = .{};
-    var message: runnable_selection.Result = undefined;
-    var continuation: runnable_selection.Result = undefined;
-    var idle: IdleChecks = .{};
-    actions.queue(reader);
-    queueSelection(reader, if (paused) .open_turn_message else .message, &message);
-    queueSelection(reader, .tool_continuation, &continuation);
-    idle.queue(reader);
-    try store_access.runNamed(reader, .{.{ blocked_operation, error.CallReadFailed }}, error.TurnReadFailed);
-    if (message == null or continuation == null) try idle.settle(reader);
-    return .{
-        .core = actions.core(),
-        .mcp = actions.mcp(),
-        .bash = actions.bash(),
-        .message = message != null,
-        .tool_continuation = continuation != null,
-    };
+    var survey: DispatchSurvey = .{};
+    survey.queue(reader, paused);
+    try store_access.runNamed(reader, DispatchSurvey.named, error.TurnReadFailed);
+    if (try survey.unsettled()) try validateBlockedToolCalls(reader);
+    return survey.found();
 }
+
+/// Whether any Attempt the retry scans read exists: each sets
+/// `retry_due_at_ms` while unresolved, and every resolution clears it.
+const retrying_attempt = rsql.Read(.{
+    .sql = "SELECT 1 AS retrying FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
+        "WHERE active.outcome_code IS NULL AND current.resolution_code IS NULL AND current.retry_due_at_ms IS NOT NULL LIMIT 1",
+    .Args = struct {},
+    .Row = struct { retrying: u64 },
+    .cardinality = .optional,
+});
 
 /// Due retries in id order after `after`, with their Session: one page.
 const due_retries = rsql.Read(.{

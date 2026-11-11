@@ -4706,7 +4706,7 @@ test "a click on a Session row, as a terminal sends it, opens the row under it a
     rig.overview.state.selected = shownRow(rig, 4);
     var shown = try rig.shown(60, 9);
     defer shown.deinit();
-    try std.testing.expectEqualStrings("  ● Fix the flaky test                                  13s", try shown.line(2));
+    try std.testing.expectEqualStrings("  ⠹ Fix the flaky test                                  13s", try shown.line(2));
     try std.testing.expectEqualStrings("────────────────────────────────────────────────────────────", try shown.line(4));
     // Below the list, on the rule, nothing opens.
     try std.testing.expect(try rig.click(10, 4, 60, 9) == null);

@@ -182,6 +182,10 @@ pub fn open(io: std.Io, options: wire.Options, selector: []const u8, store_optio
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(state));
     var refusal_buffer: [1024]u8 = undefined;
     var refusal = std.Io.Writer.fixed(&refusal_buffer);
+    if (@import("builtin").is_test) {
+        if (options.database.len >= state.testing_database.len) return error.MysqlConfigTooLong;
+        @memcpy(state.testing_database[0..options.database.len], options.database);
+    }
     try state.connection.open(options, &refusal);
     const opened = try @import("mysql_open.zig").open(&state.connection, io, .{ .database = options.database, .found_schema_version = store_options.found_schema_version }, selector);
     state.doublewrite = opened.doublewrite;
@@ -632,6 +636,14 @@ pub fn appendCommit(self: *Mysql) bool {
     return true;
 }
 
+/// Unbinds the reads bound after `appendCommit`'s COMMIT, which is still
+/// unsent: the message ends at COMMIT again.
+pub fn dropTail(self: *Mysql) void {
+    const s = self.state;
+    std.debug.assert(s.inline_commit == .buffered and !s.long_query);
+    s.connection.writer.end = s.commit_end;
+}
+
 /// Steps `appendCommit`'s answer: the transaction is saved.
 pub fn stepCommit(self: *Mysql) Failure!void {
     const s = self.state;
@@ -655,7 +667,8 @@ pub fn settleCommit(self: *Mysql) Failure!void {
     if (state == .none) return;
     if (s.failure) |err| {
         if (err != error.CommitOutcomeUnknown) return err;
-        // Nothing follows COMMIT in its message.
+        // Reads that followed COMMIT in its message are not sent again:
+        // they were a survey's (`Store.commitWithSurvey`), which is dropped.
         s.batch_end = s.commit_end;
         return self.settleLostCommit();
     }

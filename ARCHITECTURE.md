@@ -2169,6 +2169,12 @@ Request fields are `version`, `kind`, canonical `store`, `workspace` (exact cano
 A first page may also carry `since`, an opaque token from an earlier reply.
 Response `session_list` has up to eight `sessions`, then `delta`, a new `since` token, and `next` as either `null` or a continuation.
 Each row has exact `reference`, `workspace`, `provider`, `model`, `tools`, `permission_mode`, and `archive_state`; nullable `parent` (the creator’s six-character Session reference for an attached agent, otherwise `null`); nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
+Rows also carry nullable `last_line`: `{position, text}`, with a string-valued activity position and nullable text.
+It is the later by position of the newest ended Turn's outcome and the oldest pending approval's call.
+Completed Turn text is the first non-blank line from at most the first 1 KiB of public answer content, cut to at most 200 UTF-8 bytes at a code point with “…” when longer.
+Private content and failure or stop outcomes have null text; an approval uses its saved `model_tool_call.description`.
+Deciding an approval removes that candidate, falling back to the newest ended Turn; a Session with neither candidate has null `last_line`.
+These derived facts join the existing row-settings read, adding no list-page round, stored copy, Host cache or write.
 `work` is the same value that activity pages, Current and Message observations carry.
 With `since`, the Host answers one of three `delta` values.
 `not_modified` means no row has changed on this Host since the token; it is answered before any Store entry, lock or scratch, and never while the Store is fenced.
@@ -2964,9 +2970,10 @@ A notice takes that row, and any further rows its text wraps to, until the next 
 The rule names how many draft lines it hides above or below; a conversation drops its Session line when fewer than three rows remain under its status and the rule when fewer than four remain above the line, and an overview narrower or shorter than six cells shows no input.
 The status sits directly above the rule; conversation text starts at the top of the screen, and its tool rows and live line follow its last line (Divyansh approved this on 2026-10-31, front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 A draft wraps between words the same way on both screens: spaces at the edge hang past it rather than start a row, a word wider than the line (a URL or a path) breaks after its last `/`, `.`, `-` or similar mark that fits, and between clusters only when it has none; continuation rows align under the text.
-Presentation-owned ANSI foreground colours reinforce meaning: blue User/input markers, neutral assistant prose and settled outcomes, subdued transient status, yellow permission decisions, and red blocking failures or uncertainty.
-Settled outcomes stay quiet through concise wording and indentation, not a terminal palette's potentially unreadable dark grey.
-Nonempty `NO_COLOR` disables these foreground colours.
+The conversation paints presentation colours from the shared Khadi theme roles: ink for User markers and work under way, quiet for settled outcomes and transient status, attention for permission decisions, and failure for failures.
+Marks come from `src/marks.zig`; CLI reads keep the matching ANSI foreground codes.
+Nonempty `NO_COLOR` disables these presentation colours.
+
 Content cannot select a style, and all escaping, exact permission text and terminal cleanup guarantees remain unchanged.
 
 Historical applied Admissions are suppressed in favor of their User rows; live Admissions display once and their later User projections are suppressed.
@@ -3641,7 +3648,15 @@ reclaiming each other's endpoint.
 Scratch and diagnostics live in
 `runtimeDir`.
 Requests use the persistent `store_meta.store_id` (32 lowercase
-hex characters), never the URL or runtime path.
+hex characters), never the URL or runtime path. This durable id survives a
+restore to a differently named database, but canonical identity is validated
+separately: MySQL requires a saved `store_selector` to match the selector passed
+at admission (the database name for a launched Host). A mismatch or malformed
+saved id refuses startup before any write. A missing selector is repaired
+atomically with ownership acquisition without changing an existing durable id.
+Restoring under another database name therefore requires explicitly updating
+the saved selector to that name; the durable id remains unchanged. SQLite still
+validates its saved id and canonical directory selector.
 An initial MySQL
 `host_info` probe may send an empty `store` to discover that id; every other
 request must match it.
@@ -3656,7 +3671,13 @@ MySQL readiness and `host_status` also report `innodb_doublewrite`, including
 Admission refusals use a single stdout
 `{"rui_start_error":{"code":"...","message":"..."}}` line and exit 1:
 `store_locked`, `store_schema_missing`, `store_schema_behind`, or a MySQL
-start refusal (D222):
+start refusal (D222). The existing `store_schema_behind` code has distinct,
+bounded static messages for older, newer or malformed numeric format metadata,
+a wire-version mismatch, an unexpected metadata key, a catalog mismatch and
+invalid identity metadata or connection target. These refusals precede metadata
+repair, ownership changes and sender cleanup, and expose no saved values or
+connection secrets. They add no public code or Store-format change; MySQL DDL,
+backup and forward migration application remain operator-owned:
 
 - `mysql_version`: the server is older than MySQL 8.4, or its version cannot be parsed.
 - `mariadb`: the version or version comment identifies MariaDB, separately from an old MySQL version.
@@ -3688,6 +3709,9 @@ A write that is alone in its batch sends its last writes and its COMMIT as one m
 The fence, and each write whose row count the statement itself does not fix, is followed by a statement that fails unless the count is the expected one; the server runs nothing of a message after a failed statement, so COMMIT never saves past a wrong count.
 The batch is then saved and takes no more writes: a write that queued meanwhile opens the next batch.
 A batch that runs again commits at its end.
+That message also carries the dispatch survey the Host asks for after every commit, as reads after COMMIT: the Store keeps the answer until the Host asks, once, and drops it when anything else commits first.
+The write sends that message, and the survey is in it whole or not at all: reads that do not fit after COMMIT are left out, and the Host then asks as usual, as it does when the survey's checks need a second round.
+A survey read that fails after COMMIT fences, as it does when the Host asks; the commit stands.
 
 Host information is a read-only, bounded `/v1/host-info` exchange for the canonical selected Store.
 A client first probes the existing `host.lock` with a nonblocking shared lock, without creating a Store or lock: no owner means unavailable even if a stale socket exists; an exclusive owner permits a protected socket request.
@@ -3863,6 +3887,7 @@ No SQLite watcher is required.
 The retry scans use a due-time index that excludes future deadlines, and run at most once per second.
 A scan that found nothing runs again only after a commit, a slot change or the earliest scheduled retry falling due by the wall clock, the clock the Store admits by; the admission scan reads that due time in its own round, and an idle Host sends the Store no query.
 After a commit, one read round says which kinds of dispatch work the Store holds (core and MCP Actions, Bash, waiting Messages, tool continuations), and only those kinds' scans run; the answer is a hint, since each admission reads its own facts again, and a kind it wrongly names costs one empty round.
+That round also reads whether any open Turn's Attempt is unresolved with a retry state; while none is, neither retry scan runs, since a commit is the only thing that makes one.
 Missed ticks do not queue.
 Full capacity or an empty array must not cause spinning.
 
@@ -4012,7 +4037,7 @@ Measure filesystem metadata and cleanup latency separately from logical bytes an
 
 #### Tool excerpts and full output
 
-Tool output has no per-call total capture cap.
+Bash output has no per-call total capture cap.
 Short output is complete; larger output saves status, tail excerpt, omission notice and the path of each truncated stream, preserving combined-stream allowance and valid UTF-8 boundaries before provider JSON framing.
 Failed full capture cannot masquerade as successful preservation.
 Full output is read through ordinary Bash permissions/timeouts/excerpts, not a new Read tool or whole-file context injection.
@@ -4022,6 +4047,13 @@ Canonical permission, Edit intent and outcome evidence are not disposable spillo
 A Bash result names only what carries information: the outcome line, any warnings, a `stdout tail:` section only when stdout is nonempty and a `stderr tail:` section only when stderr is nonempty.
 When either tail omits earlier bytes, `[earlier output omitted]` follows, then `Full stdout: PATH` or `Full stderr: PATH` for each truncated stream, or `Full output was not retained.` when retention is unavailable.
 An untruncated stream is complete in the result and names no file.
+
+MCP answers are bounded by the existing 4 MiB per-call answer buffer.
+Their resolution keeps the first 10,000 rendered bytes, cut at a UTF-8 boundary, and the omitted-byte suffix; fitting answers keep their complete existing bytes and create no retained file.
+When bytes are omitted, stream the whole rendered answer once to optional scratch and append `Full output: PATH`, or `Full output was not retained.` if retention is unavailable.
+MCP uses the Host's same retained-output queue, scratch budget, file capacity, eviction and cleanup as Bash, with no fsync or durable retention index.
+Scratch loss never changes the call's outcome; partial failed captures are not advertised and keep their charge until confirmed removal.
+The Store saves exactly this model-facing resolution, not the full scratch answer; saved results and history rendering are never rewritten when scratch disappears.
 
 #### Exhaustion and cleanup
 

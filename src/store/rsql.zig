@@ -284,7 +284,7 @@ pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]co
 ///                        the function each opening registers
 ///   @payload(t)          `t.payload`: the bytes of content row t, which its text keeps
 ///                        to one MySQL chunk (`schema.content_chunk_bytes`)
-///                        by bounding byte_length: `payload`
+///                        by bounding byte_length or taking a bounded `substr`: `payload`
 ///   @after(c1,..,ck,?a1,..,?ak)  the key (c1..ck) after (?a1..?ak), in
 ///                        key order: `c1>?a1` for one column, else
 ///                        `(c1,..,ck)>(?a1,..,?ak)`. A Page writes it on
@@ -2171,6 +2171,7 @@ const functions = [_]struct { name: []const u8, arguments: ?usize, mysql: []cons
     .{ .name = "min", .arguments = 2, .mysql = "LEAST" },
     .{ .name = "row_number", .arguments = 0, .mysql = "row_number" },
     .{ .name = "sum", .arguments = 1, .mysql = "sum" },
+    .{ .name = "substr", .arguments = 3, .mysql = "SUBSTRING" },
     .{ .name = "zeroblob", .arguments = 1, .mysql = "REPEAT", .leading = "X'00'," },
 };
 
@@ -3048,6 +3049,8 @@ test "a statement calls only the functions every engine spells, by argument coun
     );
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.read, "SELECT created_seq FROM session WHERE created_seq BETWEEN 1 AND 2", struct {}, Seq));
     try std.testing.expectEqualStrings("payload=REPEAT(X'00',byte_length)", comptime render(.mysql, "payload=zeroblob(byte_length)"));
+    try std.testing.expectEqualStrings("substr(content.payload,1,1024)", comptime render(.sqlite, "substr(@payload(content),1,1024)"));
+    try std.testing.expectEqualStrings("SUBSTRING(coalesce((SELECT bytes FROM content_chunk WHERE content_chunk.content_id=content.content_id AND content_chunk.chunk_index=0),X''),1,1024)", comptime render(.mysql, "substr(@payload(content),1,1024)"));
     // Neither a WITH name's column list nor an INSERT's table is a call.
     const text = "INSERT INTO turn(turn_id) WITH recent(turn_id) AS (SELECT count(*) AS n FROM turn) SELECT turn_id FROM recent";
     try std.testing.expectEqualStrings(text, comptime mysqlRendering(text).rendered.parts[0]);

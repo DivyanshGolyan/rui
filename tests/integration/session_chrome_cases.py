@@ -169,13 +169,13 @@ def activity_case():
         try:
             # Idle: no tail, nothing on the last row.
             idle = settle_screen(master, quiet=0.5)
-            assert rows(idle)[LAST].strip() == "" and "•" not in idle, idle
+            assert rows(idle)[LAST].strip() == "" and "⠹" not in idle, idle
             os.write(master, b"HOLD-QUESTION\r")
             release.set()
-            running = chrome.frame(master, b"", lambda screen: "• Held call · " in screen)
+            running = chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
             tail = tail_rows(running)
-            assert tail == [tail[-1]] and tail[-1].startswith("• Held call · "), running
-            assert tail[-1].removeprefix("• Held call · ").rstrip("s").isdigit(), running
+            assert tail == [tail[-1]] and tail[-1].startswith("⠹ Held call · "), running
+            assert tail[-1].removeprefix("⠹ Held call · ").rstrip("s").isdigit(), running
             # Alone at the right of the last row, inside its one-column margin.
             last = rows(running)[LAST]
             assert last.strip() == "ctrl+x stop" and len(last.rstrip()) == 79, running
@@ -186,13 +186,13 @@ def activity_case():
                 waiting = chrome.frame(master, b"", lambda screen, count=count, index=index:
                     f"◌ {count}WAITING-{index}" in screen and composing(screen, ""))
             tail = tail_rows(waiting)
-            assert tail[-2].startswith("• Held call · ") and tail[-1] == "◌ 3 · WAITING-2", waiting
+            assert tail[-2].startswith("⠹ Held call · ") and tail[-1] == "◌ 3 · WAITING-2", waiting
             assert "second line" not in waiting and "queued" not in waiting.lower(), waiting
             assert rows(waiting)[LAST].endswith("ctrl+x stop"), waiting
             (chrome.workspace / "release").write_text("")
             # The waiting Messages join the turn when its call ends.
             done = chrome.frame(master, b"", lambda screen: "HELD-DONE" in screen
-                and "◌" not in screen and "•" not in screen, timeout=30)
+                and "◌" not in screen and "⠹" not in screen, timeout=30)
             assert rows(done)[LAST].strip() == "", done
             # Each waiting Message is its own row once, in the order sent.
             order = [done.count(f"› WAITING-{i}") for i in range(3)]
@@ -273,7 +273,7 @@ def scroll_marker_case():
         # Work arrives below a scrolled-back view: the marker counts it.
         os.write(master, b"\x15HOLD-QUESTION\r")
         release.set()
-        chrome.frame(master, b"", lambda screen: "• Held call · " in screen)
+        chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
         chrome.frame(master, b"\x1b[1;2A", lambda screen: marker(screen) == "↓")
         (chrome.workspace / "release").write_text("")
         counted = chrome.frame(master, b"", lambda screen: (marker(screen) or "").endswith(" new"), timeout=30)
@@ -309,10 +309,10 @@ def pages_case():
             chrome.frame(master, b"\x1b", lambda screen: latest(screen, "SEED-ANSWER"))
             os.write(master, b"HOLD-QUESTION\r")
             release.set()
-            chrome.frame(master, b"", lambda screen: "• Held call · " in screen)
+            chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
             working = chrome.frame(master, b"/status\r", lambda screen: rows(screen)[0].strip() == f"Status · {session}")
             assert rows(working)[LAST].endswith("ctrl+x stop"), working
-            chrome.frame(master, b"\x1b", lambda screen: "• Held call · " in screen and marker(screen) is None)
+            chrome.frame(master, b"\x1b", lambda screen: "⠹ Held call · " in screen and marker(screen) is None)
             (chrome.workspace / "release").write_text("")
             chrome.frame(master, b"", lambda screen: latest(screen, "PAGES-DONE"), timeout=30)
             chrome.leave(master, caller)
@@ -342,9 +342,9 @@ def opening_case():
             fixture.wait_for(lambda: len(chrome.endpoint.requests) >= 2, "held request", timeout=20)
             for index in range(2):
                 admit(chrome.home, "session", "send", "--to", session, input=f"WAITING-{index}")
-            master, caller, opened = chrome.open(session, lambda screen: "◌ 2 · WAITING-1" in screen and "• Held call · " in screen)
+            master, caller, opened = chrome.open(session, lambda screen: "◌ 2 · WAITING-1" in screen and "⠹ Held call · " in screen)
             tail = tail_rows(opened)
-            assert tail[-2].startswith("• Held call · ") and tail[-1] == "◌ 2 · WAITING-1", opened
+            assert tail[-2].startswith("⠹ Held call · ") and tail[-1] == "◌ 2 · WAITING-1", opened
             assert rows(opened)[LAST].endswith("ctrl+x stop"), opened
             (chrome.workspace / "release").write_text("")
             chrome.frame(master, b"", lambda screen: latest(screen, "HELD-DONE") and "◌" not in screen, timeout=30)

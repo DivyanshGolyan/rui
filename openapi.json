@@ -3854,202 +3854,103 @@
         "additionalProperties": false
       },
       "HostInfoReply": {
-        "anyOf": [
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "12"
-              },
-              "type": {
-                "const": "host_info"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "instance": {
-                "type": "string",
-                "pattern": "^[0-9a-f]{32}$"
-              },
-              "active_capacity": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "intake_capacity": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "descriptor_limit": {
-                "type": "string",
-                "x-rui-max-bytes": 20
-              },
-              "started_at": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "custody_occupied": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "paused": {
-                "type": "boolean"
-              },
-              "capabilities": {
-                "type": "object",
-                "properties": {
-                  "bash": {
-                    "const": true
-                  },
-                  "providers": {
-                    "type": "object",
-                    "properties": {
-                      "codex": {
-                        "type": "string",
-                        "enum": [
-                          "unserved",
-                          "endpoint",
-                          "chatgpt_device",
-                          "key_file"
-                        ]
-                      },
-                      "openai": {
-                        "type": "string",
-                        "enum": [
-                          "unserved",
-                          "endpoint",
-                          "chatgpt_device",
-                          "key_file"
-                        ]
-                      }
-                    },
-                    "required": [
-                      "codex",
-                      "openai"
-                    ],
-                    "additionalProperties": false
-                  }
-                },
-                "required": [
-                  "bash",
-                  "providers"
-                ],
-                "additionalProperties": false
-              }
-            },
-            "required": [
-              "version",
-              "type",
-              "store",
-              "instance",
-              "active_capacity",
-              "intake_capacity",
-              "descriptor_limit",
-              "started_at",
-              "custody_occupied",
-              "paused",
-              "capabilities"
-            ],
-            "additionalProperties": false
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "12"
           },
-          {
+          "type": {
+            "const": "host_info"
+          },
+          "store": {
+            "type": "string",
+            "maxLength": 492,
+            "x-rui-max-bytes": 492
+          },
+          "instance": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "active_capacity": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "intake_capacity": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "descriptor_limit": {
+            "type": "string",
+            "x-rui-max-bytes": 20
+          },
+          "started_at": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "custody_occupied": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "paused": {
+            "type": "boolean"
+          },
+          "innodb_doublewrite": {
+            "type": "string",
+            "maxLength": 32,
+            "x-rui-max-bytes": 32
+          },
+          "capabilities": {
             "type": "object",
             "properties": {
-              "version": {
-                "const": "12"
+              "bash": {
+                "const": true
               },
-              "type": {
-                "const": "host_info"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 32,
-                "x-rui-max-bytes": 32
-              },
-              "instance": {
-                "type": "string",
-                "pattern": "^[0-9a-f]{32}$"
-              },
-              "active_capacity": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "intake_capacity": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "descriptor_limit": {
-                "type": "string",
-                "x-rui-max-bytes": 20
-              },
-              "started_at": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "custody_occupied": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "paused": {
-                "type": "boolean"
-              },
-              "innodb_doublewrite": {
-                "type": "string",
-                "maxLength": 32,
-                "x-rui-max-bytes": 32
-              },
-              "capabilities": {
+              "providers": {
                 "type": "object",
                 "properties": {
-                  "bash": {
-                    "const": true
+                  "codex": {
+                    "type": "string",
+                    "enum": [
+                      "unserved",
+                      "endpoint",
+                      "chatgpt_device",
+                      "key_file"
+                    ]
                   },
-                  "providers": {
-                    "type": "object",
-                    "properties": {
-                      "codex": {
-                        "type": "string",
-                        "enum": [
-                          "unserved",
-                          "endpoint",
-                          "chatgpt_device",
-                          "key_file"
-                        ]
-                      },
-                      "openai": {
-                        "type": "string",
-                        "enum": [
-                          "unserved",
-                          "endpoint",
-                          "chatgpt_device",
-                          "key_file"
-                        ]
-                      }
-                    },
-                    "required": [
-                      "codex",
-                      "openai"
-                    ],
-                    "additionalProperties": false
+                  "openai": {
+                    "type": "string",
+                    "enum": [
+                      "unserved",
+                      "endpoint",
+                      "chatgpt_device",
+                      "key_file"
+                    ]
                   }
                 },
                 "required": [
-                  "bash",
-                  "providers"
+                  "codex",
+                  "openai"
                 ],
                 "additionalProperties": false
               }
             },
             "required": [
-              "version",
-              "type",
-              "store",
-              "instance",
-              "active_capacity",
-              "intake_capacity",
-              "descriptor_limit",
-              "started_at",
-              "custody_occupied",
-              "paused",
-              "innodb_doublewrite",
-              "capabilities"
+              "bash",
+              "providers"
             ],
             "additionalProperties": false
           }
-        ]
+        },
+        "required": [
+          "version",
+          "type",
+          "store",
+          "instance",
+          "active_capacity",
+          "intake_capacity",
+          "descriptor_limit",
+          "started_at",
+          "custody_occupied",
+          "paused",
+          "capabilities"
+        ],
+        "additionalProperties": false
       },
       "HostInfoRequest": {
         "type": "object",
@@ -4584,6 +4485,31 @@
             "additionalProperties": false
           }
         ]
+      },
+      "LastLineFields": {
+        "type": "object",
+        "properties": {
+          "position": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "x-rui-max-bytes": 200
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "position",
+          "text"
+        ],
+        "additionalProperties": false
       },
       "LaunchFrame": {
         "type": "object",
@@ -10857,6 +10783,16 @@
               }
             ]
           },
+          "last_line": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastLineFields"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "work": {
             "$ref": "#/components/schemas/SessionWork"
           },
@@ -10878,6 +10814,7 @@
           "revision",
           "end",
           "first_message",
+          "last_line",
           "work",
           "peers"
         ],
