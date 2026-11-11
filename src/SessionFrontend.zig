@@ -5918,6 +5918,168 @@ test "failed reply newer Message accepted before retry completion supersedes the
     try std.testing.expect(self.retryable() == null);
 }
 
+test "failed reply stale pre-admission scan must not authorize a fresh Ctrl-R after acceptance" {
+    const Worker = struct {
+        var entered: std.atomic.Value(bool) = .init(false);
+        var release: std.atomic.Value(bool) = .init(false);
+        fn ready(task: *Task) bool {
+            return release.load(.acquire) or task.cancellation.stopped.load(.acquire);
+        }
+        fn run(_: *anyopaque, task: *Task) !void {
+            entered.store(true, .release);
+            try test_poll.waitUntil(task.io, test_poll.after(task.io, .fromSeconds(10)), task, ready);
+            if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
+        }
+    };
+    const Host = struct {
+        frontend: *Self,
+        listener: *std.Io.net.Server,
+        pages: usize = 0,
+        contents: usize = 0,
+        const text = "old literal Message";
+
+        // Service native HTTP requests while waiting for the actual ClientTask.
+        // The old-Message responses also let a reverted head check reach the
+        // erroneous second submission, rather than failing in the fixture.
+        fn pump(host: *@This()) !bool {
+            var fds = [_]std.posix.pollfd{.{ .fd = host.listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            if (try std.posix.poll(&fds, 0) != 0) {
+                const peer = try host.listener.accept(std.testing.io);
+                defer peer.close(std.testing.io);
+                var request: [4096]u8 = undefined;
+                var used: usize = 0;
+                var body_start: usize = 0;
+                while (true) {
+                    const got = try std.posix.read(peer.socket.handle, request[used..]);
+                    if (got == 0) return error.UnexpectedEof;
+                    used += got;
+                    if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| {
+                        body_start = end + 4;
+                        const start = std.mem.indexOf(u8, request[0..end], "Content-Length: ").? + "Content-Length: ".len;
+                        const finish = std.mem.indexOfScalarPos(u8, request[0..end], start, '\r').?;
+                        if (used == body_start + try std.fmt.parseInt(usize, request[start..finish], 10)) break;
+                    }
+                }
+                var storage: [4096]u8 = undefined;
+                var fixed = std.heap.FixedBufferAllocator.init(&storage);
+                const cursor = try std.json.parseFromSliceLeaky(struct { position: []const u8 }, fixed.allocator(), request[body_start..used], .{ .ignore_unknown_fields = true });
+                const position = try std.fmt.parseInt(u64, cursor.position, 10);
+                var buffer: [4096]u8 = undefined;
+                var out = std.Io.Writer.fixed(&buffer);
+                var extra_buffer: [128]u8 = undefined;
+                var extra: []const u8 = "";
+                var kind: []const u8 = "application/json";
+                if (std.mem.startsWith(u8, request[0..used], "POST /v1/activity-page ")) {
+                    host.pages += 1;
+                    // The newer Message is already admitted at Host, even
+                    // though the frontend's just-installed snapshot is idle.
+                    const reference: protocol.ActivityItem.Content = .{ .length = text.len, .digest = protocol.contentDigest(text) };
+                    var facts: protocol.ActivityFacts = .{ .end = 3, .direction = .backward, .count = 1, .queued = .{ .count = 1, .oldest_position = 3, .newest_admission = 37, .newest_position = 3 }, .work = .{ .revision = 2, .work = .{ .state = .{ .pending = .{ .since = 2 } } } } };
+                    try facts.work.workspace.set("/");
+                    facts.items[0] = .{ .position = if (position == 0) 3 else 1, .at = 1, .value = .{ .admission = .{ .admission = if (position == 0) 37 else 1, .key = .{}, .turn = null, .state = .queued, .content = reference, .admitted_at = 1 } } };
+                    try activity_reply.writePage(&out, &facts);
+                } else {
+                    try std.testing.expectStringStartsWith(request[0..used], "POST /v1/activity-content ");
+                    try std.testing.expectEqual(@as(u64, 1), position);
+                    host.contents += 1;
+                    kind = "application/octet-stream";
+                    extra = try std.fmt.bufPrint(&extra_buffer, "X-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ text.len, text.len });
+                    try out.writeAll(text);
+                }
+                var header: [512]u8 = undefined;
+                var writer = peer.writer(std.testing.io, &.{});
+                try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n{s}\r\n", .{ kind, out.buffered().len, extra }));
+                try writer.interface.writeAll(out.buffered());
+            }
+            return host.frontend.reader.completed();
+        }
+    };
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const held = fixture.held;
+    const self = &held.self;
+    try seedFeed(held.screen, "old literal Message\n");
+    try seedFeed(held.screen, "× Model reply unreadable\n");
+    self.failedRetryForTest();
+    self.live.latest_ending.?.key = held.screen.feed.high.?;
+    const ending = self.live.latest_ending.?;
+    // Capture old idle facts before Admission, but publish them only after it.
+    const job = self.freeze(.activity);
+    job.result.latest_ending = ending;
+    job.result.work.work = .{ .state = .{ .idle = .{ .since = 1 } } };
+    job.result.queued = .{};
+    Worker.entered.store(false, .release);
+    Worker.release.store(false, .release);
+    try self.launch(job, Worker.run);
+    try test_poll.waitUntil(self.init.io, test_poll.after(self.init.io, .fromSeconds(2)), &Worker.entered, test_poll.isSet);
+    try held.keys("new Message\r");
+    try self.settleMessageForRetryTest(true);
+    try std.testing.expect(self.submission.intent == null);
+    try std.testing.expect(!self.reader.completed());
+    Worker.release.store(true, .release);
+    try test_poll.waitUntil(self.init.io, test_poll.after(self.init.io, .fromSeconds(2)), &self.reader, RetrySettlementWorker.completed);
+    try self.settleReader();
+    try std.testing.expectEqualDeep(ending, self.live.latest_ending.?);
+    try std.testing.expect(self.live.work.state == .idle and self.live.queued.count == 0);
+    // A fresh gesture captures the ALREADY increased count, but the real
+    // retry walk rejects the old ending against Host's newest admitted row.
+    const io = self.init.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    const paths = lease.paths;
+    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+    defer {
+        listener.deinit(io);
+        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    }
+    self.store = root;
+    self.session = "k7m2qx";
+    defer {
+        self.reader.cancel();
+        self.reader.join() catch |err| switch (err) {
+            error.Cancelled => {},
+            else => @panic(@errorName(err)),
+        };
+    }
+    try held.keys("kept éZ\x1b[D");
+    const draft = self.input.snapshot();
+    try held.keys("\x12");
+    try std.testing.expect(self.retry_fence != null);
+    try self.startRetry();
+    var host: Host = .{ .frontend = self, .listener = &listener };
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), &host, Host.pump);
+    try self.settleReader();
+    try std.testing.expectEqual(@as(u64, 1), self.admission.sent);
+    try std.testing.expect(self.submission.intent == null and self.retry_fence == null);
+    try std.testing.expectEqual(@as(usize, 1), host.pages);
+    try std.testing.expectEqual(@as(usize, 0), host.contents);
+    try std.testing.expectEqualDeep(draft, self.input.snapshot());
+    // No local suppression marker: before observation another gesture may
+    // read Host again, but cannot send. Once work is observed, the shared
+    // predicate hides the tail and the key starts no read.
+    try held.keys("\x12");
+    try self.startRetry();
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), &host, Host.pump);
+    try self.settleReader();
+    try std.testing.expectEqual(@as(u64, 1), self.admission.sent);
+    _ = self.freeze(.activity);
+    self.job.result = .{
+        .latest_ending = ending,
+        .work = .{ .work = .{ .state = .{ .working = .{ .since = 2 } }, .turn = 2 } },
+    };
+    try self.applyReader(.complete);
+    try std.testing.expect(self.retryable() == null);
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "ctrl+r retries") == null);
+    try held.keys("\x12");
+    try std.testing.expect(self.retry_fence == null and self.reader.thread == null);
+    try std.testing.expectEqual(@as(u64, 1), self.admission.sent);
+    try std.testing.expectEqualDeep(draft, self.input.snapshot());
+}
+
 test "failed reply retry completion before newer Message admission sends once and keeps the newer Message separate" {
     const fixture = try FeedFixture.create();
     defer fixture.destroy();

@@ -303,6 +303,7 @@ pub const Job = struct {
         const key = self.retry.?;
         if (latest == null or !latest.?.matches(key)) return .stale;
         return switch (self.result.retry.?) {
+            .stale => .stale,
             .message => |message| .{ .message = message },
             .failure => |failure| .{ .failure = failure },
         };
@@ -311,7 +312,7 @@ pub const Job = struct {
 
 pub const RetryFailure = enum { no_message, too_large, incomplete, unavailable };
 pub const RetryMessage = struct { ending: Key, position: u64, length: usize };
-const Retry = union(enum) { message: RetryMessage, failure: RetryFailure };
+const Retry = union(enum) { stale, message: RetryMessage, failure: RetryFailure };
 pub const RetryCompletion = union(enum) { stale, message: RetryMessage, failure: RetryFailure };
 
 /// Runs on ClientTask, never on the key path. No fallback to an older Message:
@@ -322,8 +323,23 @@ pub fn retry(raw: *anyopaque, task: *Task) !void {
     const key = job.retry.?;
     const requests = task.requests();
     try job.files.scratch.setLength(task.io, 0);
+    // Bind the backwards walk to Host truth, not the frontend's last scan.
+    // Any activity after this ending supersedes the retry, even if a stale
+    // observation still presents the ending as the latest one.
+    const newest = switch (try requests.activityPage(job.store, job.session, .{
+        .direction = .backward,
+        .kinds = .full,
+        .limit = 1,
+    })) {
+        .page => |page| page,
+        .failure => |failure| return requests.failRead(failure),
+    };
+    job.result.retry = .stale;
+    if (newest.facts.count == 0) return;
+    const head = newest.facts.items[0];
+    if (head.position != key.position or head.ordinal != key.ordinal) return;
     const page = switch (try requests.activityPage(job.store, job.session, .{
-        .end = key.position,
+        .end = newest.facts.end,
         .position = key.position,
         .ordinal = key.ordinal,
         .direction = .backward,
@@ -2004,9 +2020,8 @@ test "session_reads retry stages exact multi-window bytes before its ending and 
         .{ .value = FakeHost.message(1) },
         .{ .value = .{ .admission = message } },
         .{ .value = testEnding("provider_http_500", .failed, "k7m2qx") },
-        .{ .value = FakeHost.message(4) }, // Newer than the requested ending: not eligible.
     };
-    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len, .content_texts = &.{ FakeHost.text, text, "", "wrong" } };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len, .content_texts = &.{ FakeHost.text, text, "" } };
     var job: Job = .{ .retry = .{ .position = 3 } };
     // FakeHost's scan capture is bounded; the large scratch is checked within
     // its lifetime instead, after the production Task's real join.
@@ -2038,7 +2053,7 @@ test "session_reads retry stages exact multi-window bytes before its ending and 
     };
     var read: Read = .{ .job = &job, .expected = text };
     try host.withHost(&read);
-    try std.testing.expectEqual(@as(usize, 1), host.pages);
+    try std.testing.expectEqual(@as(usize, 2), host.pages);
     try std.testing.expectEqual(@as(usize, 1), host.contents);
 }
 
@@ -2052,11 +2067,11 @@ test "session_reads retry fails on newest unreadable Message without falling bac
             else => {},
         }
         const tail = [_]FakeHost.Tail{
-            .{ .value = FakeHost.message(1) },
+            .{ .value = if (case == .absent) testEnding("provider_http_500", .failed, "k7m2qx") else FakeHost.message(1) },
             .{ .value = .{ .admission = message } },
             .{ .value = testEnding("provider_http_500", .failed, "k7m2qx") },
         };
-        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len, .refuse_content = case == .refused };
+        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = if (case == .absent) 1 else tail.len, .refuse_content = case == .refused };
         var job: Job = .{ .retry = .{ .position = if (case == .absent) 1 else 3 } };
         try host.readWith(&job, retry);
         const latest: LatestEnding = .{ .key = job.retry.?, .cause = @import("marks.zig").cause("provider_http_500") };
@@ -2067,8 +2082,47 @@ test "session_reads retry fails on newest unreadable Message without falling bac
             .short, .digest => .incomplete,
         };
         try std.testing.expectEqual(expected, job.retryCompletion(latest).failure);
-        try std.testing.expectEqual(@as(usize, 1), host.pages);
+        try std.testing.expectEqual(@as(usize, 2), host.pages);
         try std.testing.expectEqual(@as(usize, if (case == .absent or case == .too_large) 0 else 1), host.contents);
+    }
+}
+
+test "session_reads retry rejects newer Host activity before reading any Message" {
+    var applied = FakeHost.message(4).admission;
+    applied.state = .applied;
+    applied.turn = 2;
+    const newer = [_]FakeHost.Tail{
+        .{ .value = FakeHost.message(4) },
+        .{ .value = FakeHost.message(4), .excluded_at = 4 },
+        .{ .value = .{ .user = applied } },
+        .{ .value = .{ .assistant = .{ .content = FakeHost.content(), .final = true } } },
+        .{ .value = testEnding("provider_http_500", .failed, "k7m2qx") },
+        .{ .value = .{ .session_changed = .{ .revision = 2, .field = .label } } },
+    };
+    for (newer) |row| {
+        const tail = [_]FakeHost.Tail{
+            .{ .value = FakeHost.message(1) },
+            .{ .value = FakeHost.message(2) },
+            .{ .value = testEnding("provider_http_500", .failed, "k7m2qx") },
+            row,
+        };
+        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len };
+        var job: Job = .{ .retry = .{ .position = 3 } };
+        try host.readWith(&job, retry);
+        const latest: LatestEnding = .{ .key = job.retry.?, .cause = @import("marks.zig").cause("provider_http_500") };
+        try std.testing.expect(job.retryCompletion(latest) == .stale);
+        try std.testing.expectEqual(@as(usize, 1), host.pages);
+        try std.testing.expectEqual(@as(usize, 0), host.contents);
+    }
+    // Empty history and a different row at the same position are stale too.
+    for ([_]u64{ 0, 1 }) |end| {
+        const tail = [_]FakeHost.Tail{.{ .value = testEnding("provider_http_500", .failed, "k7m2qx") }};
+        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = end };
+        var job: Job = .{ .retry = .{ .position = 1, .ordinal = 1 } };
+        try host.readWith(&job, retry);
+        const latest: LatestEnding = .{ .key = job.retry.?, .cause = @import("marks.zig").cause("provider_http_500") };
+        try std.testing.expect(job.retryCompletion(latest) == .stale);
+        try std.testing.expectEqual(@as(usize, 0), host.contents);
     }
 }
 
