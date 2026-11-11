@@ -364,7 +364,7 @@ pub const SinceToken = change_ring.Token;
 
 comptime {
     std.debug.assert(session_work.max_code_bytes == max_code_bytes);
-    std.debug.assert(session_work.max_description_bytes == max_tool_description_bytes);
+    std.debug.assert(session_work.max_description_bytes == @import("call_classification.zig").max_bash_description_bytes);
 }
 
 /// The wire form of a `WorkState`: `kind` and `since`, then the kind's own
@@ -378,8 +378,8 @@ pub const WorkStateJson = struct {
     pub const retrying_shape = .{ "{\"kind\":\"retrying\",\"since\":\"", Hole.decimal, "\",\"due_at_ms\":\"", Hole.decimal, "\",\"cause\":", Hole{ .string = max_code_bytes }, ",\"attempt\":\"", Hole.decimal, "\"}" };
     /// A running Host survives a Rui upgrade, so a reader still meets this
     /// form, from a Host that predates `call`.
-    pub const older_bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = max_tool_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
-    pub const bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"call\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = max_tool_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
+    pub const older_bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = session_work.max_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
+    pub const bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"call\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = session_work.max_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
     pub const failed_shape = .{ "{\"kind\":\"failed\",\"since\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"resets_at\":", Hole.optional_id, "}" };
     pub const stopped_shape = .{ "{\"kind\":\"stopped\",\"since\":\"", Hole.decimal, "\",\"cause\":\"", Hole{ .tag = session_work.StopCause }, "\"}" };
     pub const max_json_bytes = maxShapeBytes(.{ plain_shape, retrying_shape, older_bash_shape, bash_shape, failed_shape, stopped_shape });

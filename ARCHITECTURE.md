@@ -1410,6 +1410,7 @@ The step to 57 adds archive intents and requested archive values, extends the co
 The step to 58 moves saved wire 9 metadata to wire 10 for nullable failed-send peers; it changes no saved command or refusal rows.
 The step to 59 adds immutable skill catalog metadata and its ordinary turnless instruction provenance, retaining unreleased wire 10 without rewriting earlier Conversation content.
 The step to 60 adds `message_skill` and the Conversation's skill entries (kind 4, naming their `message_skill` row), rebuilding `conversation_entry` on both engines, and moves Store wire metadata to 11; earlier rows are unchanged.
+The step to 61 widens saved call descriptions on `model_tool_call` and `model_output_item` to 200 UTF-8 bytes on both engines; existing rows need no rewrite.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -2983,9 +2984,10 @@ When Current exposes an actionable permission, the frontend reads the selected c
 The runner is derived from the name and owner in the Operation's frozen offer, never from argument shape or the Session's latest catalog.
 Current includes the frozen `server` only for unresolved MCP calls; legacy built-in rows omit it.
 Bash displays `? <description>`, then the decoded `$` command through terminal escaping, then `Time limit` only for an explicit timeout and `stdin:` only when the call has one.
-MCP displays `? <rui_call_description>` (at most 200 decoded bytes), `Tool`, `Server` and the original `Arguments` JSON.
-A missing, non-string or oversized description falls back to the tool name with those arguments, not a Bash parse.
-The client extracts the label with bounded streaming scratch; it does not interpret the server's schema.
+MCP displays `? <saved description>` (at most 200 decoded UTF-8 bytes), `Tool`, `Server` and the original `Arguments` JSON.
+The description is extracted once at settlement from `rui_call_description`: a valid nonblank, single-line UTF-8 string of 1–200 bytes is saved; missing, non-string, blank, multi-line or oversized text falls back to the tool name.
+The terminal and TypeScript feed read the saved line, never re-parse arguments for it.
+The client retains that bounded saved line; it does not interpret the server's schema.
 `/inspect-action` shares this MCP presentation; raw one-shot inspection stays exact.
 A permission request replaces the composer's two rules and input rows with a focused card.
 The draft stays hidden, with its bytes and caret intact, until the request is answered or withdrawn.
@@ -3181,11 +3183,11 @@ Tool Results validate the complete group's accepted call/output-item and Session
 Outcome provenance is the terminal Turn's causing model Operation, not a later Session Operation.
 Full, Current and exact Action inspection retain their independent authorities.
 
-Tool Call admission validates the original descriptor and atomically saves its nullable decoded description, bounded to 100 UTF-8 bytes, and the three accepted field lengths and digests on the immutable call.
-A valid Bash descriptor retains its label even when Bash is disabled and the call is rejected; malformed descriptors and unknown tools have null labels.
+Tool Call admission validates the original descriptor and atomically saves its nullable decoded description, bounded to 200 UTF-8 bytes, and the three accepted field lengths and digests on the immutable call.
+Bash keeps its independent 100-byte argument bound; a valid Bash descriptor retains its label even when Bash is disabled and the call is rejected; malformed Bash descriptors and unknown tools have null labels.
 The Store combines that admission-owned label with canonical outcomes for shared `ToolPresentation` metadata on Current, Activity, and Conversation.
 There is no presentation table, copied log, frontend cache, or identity-to-description map.
-One `tools.describe`, exhaustive over the Tool Catalog, gives every tool its description: Bash's is the one its model wrote, and a hosted web search, which has no field for the model to fill, gets one Rui writes from the provider's action at settlement: `Search “query”`, `Open site/page` (without the scheme or `www.`), `Find “pattern” in site/page`, or `Search the web` when the provider gives no details, on one line and cut with `…` within the same 100-byte bound.
+One `tools.describe`, exhaustive over the Tool Catalog, gives every tool its description: Bash's is the one its model wrote, and a hosted web search, which has no field for the model to fill, gets one Rui writes from the provider's action at settlement: `Search “query”`, `Open site/page` (without the scheme or `www.`), `Find “pattern” in site/page`, or `Search the web` when the provider gives no details, on one line and cut with `…` within the saved 200-byte bound.
 The search stays a model output item, not a Tool Call: the item row saves that description and whether it failed (Store schema 49).
 Conversation and Activity pages return it at the item's own position as a `hosted_call` item that carries only its `ToolPresentation` and no content, and the frontend draws it as a tool row, so successes pack with Bash rows and a failure stands apart.
 Divyansh chose to show one line per search on 2026-11-02 (web search PR 3).
@@ -3196,7 +3198,7 @@ Presentation read work is independent of command byte length, not call count or 
 These reads trust immutable admitted metadata: later corruption confined to undisplayed payload bytes need not be detected by polling.
 Full Session inspection, Action arguments/call-ID inspection, execution input and model replay check each field against its admission certificate and verify the digest of every byte they read; streamed public content retains its own integrity checks.
 Canonical result content and proposal arguments remain unchanged; descriptions grant neither execution nor permission authority.
-The additional per-call canonical data is at most 100 label bytes plus 120 field-certificate bytes, excluding SQLite row/page overhead; readers retain fixed-size metadata, not commands.
+The additional per-call canonical data is at most 200 description bytes plus 120 field-certificate bytes, excluding SQLite row/page overhead; readers retain fixed-size metadata, not commands.
 
 Each Activity page also captures `call_activity` under the same Store lock, with an exact total and at most the three oldest `(operation, ordinal)` identities awaiting presentation.
 A page whose `kinds` are not every kind reads neither `call_activity` nor `queued`, and reports both empty.

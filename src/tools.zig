@@ -58,6 +58,7 @@ pub const BashParser = @import("call_classification.zig").BashParser;
 pub const isBashDescriptorError = @import("call_classification.zig").isBashDescriptorError;
 
 test "a web search call's description says what it did, on one line, within the bound" {
+    @setEvalBranchQuota(10_000);
     const repeat = struct {
         fn of(comptime text: []const u8, comptime count: usize) *const [text.len * count]u8 {
             comptime {
@@ -69,12 +70,12 @@ test "a web search call's description says what it did, on one line, within the 
         }
     }.of;
     const Case = struct { action: codec_abi.HostedAction, target: ?[]const u8 = null, pattern: ?[]const u8 = null, expected: []const u8 };
-    const long = (comptime repeat("a", 120));
+    const long = (comptime repeat("a", 220));
     for ([_]Case{
         .{ .action = .search, .target = "zig 0.17 release notes", .expected = "Search “zig 0.17 release notes”" },
         .{ .action = .search, .target = " \n\t ", .expected = "Search the web" },
         .{ .action = .search, .expected = "Search the web" },
-        .{ .action = .search, .target = (comptime repeat("a", 83)) ++ " bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", .expected = "Search “" ++ (comptime repeat("a", 83)) ++ "…”" },
+        .{ .action = .search, .target = (comptime repeat("a", 183)) ++ " bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", .expected = "Search “" ++ (comptime repeat("a", 183)) ++ "…”" },
         .{ .action = .none, .target = "ignored", .expected = "Search the web" },
         .{ .action = .search, .target = "  two\r\nlines\u{2028}here  ", .expected = "Search “two lines here”" },
         .{ .action = .open_page, .target = "https://www.ziglang.org/download/", .expected = "Open ziglang.org/download/" },
@@ -84,12 +85,12 @@ test "a web search call's description says what it did, on one line, within the 
         .{ .action = .find_in_page, .pattern = "Io.Writer", .expected = "Find “Io.Writer”" },
         .{ .action = .find_in_page, .target = "ziglang.org", .expected = "Find in ziglang.org" },
         .{ .action = .find_in_page, .expected = "Find in a page" },
-        .{ .action = .search, .target = long, .expected = "Search “" ++ (comptime repeat("a", 84)) ++ "…”" },
+        .{ .action = .search, .target = long, .expected = "Search “" ++ (comptime repeat("a", 184)) ++ "…”" },
         // A cut never splits a scalar.
-        .{ .action = .search, .target = "a" ++ (comptime repeat("é", 60)), .expected = "Search “a" ++ (comptime repeat("é", 41)) ++ "…”" },
+        .{ .action = .search, .target = "a" ++ (comptime repeat("é", 110)), .expected = "Search “a" ++ (comptime repeat("é", 91)) ++ "…”" },
         // Two long values share the room; a short first one leaves the rest.
-        .{ .action = .find_in_page, .target = long, .pattern = long, .expected = "Find “" ++ (comptime repeat("a", 40)) ++ "…” in " ++ (comptime repeat("a", 39)) ++ "…" },
-        .{ .action = .find_in_page, .target = long, .pattern = "x", .expected = "Find “x” in " ++ (comptime repeat("a", 81)) ++ "…" },
+        .{ .action = .find_in_page, .target = long, .pattern = long, .expected = "Find “" ++ (comptime repeat("a", 90)) ++ "…” in " ++ (comptime repeat("a", 89)) ++ "…" },
+        .{ .action = .find_in_page, .target = long, .pattern = "x", .expected = "Find “x” in " ++ (comptime repeat("a", 181)) ++ "…" },
         // Bytes that are not UTF-8 show nothing; a scalar cut at the
         // excerpt's end is dropped.
         .{ .action = .search, .target = "\xff\xfe\xfd\xfc", .expected = "Search the web" },

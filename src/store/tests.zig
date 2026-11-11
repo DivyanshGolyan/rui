@@ -13335,3 +13335,85 @@ test "inline skills configuration validation borrows one Store-owned plan throug
         }.run);
     }
 }
+
+test "MCP settlement saves one decoded presentation line or the tool name" {
+    try store_testing.forEachEngine(struct {
+        fn run(engine: *store_testing.Case) !void {
+            const records = testingCatalogRecords(&.{.{
+                .name = "fetch_page",
+                .owner = .mcp,
+                .server = "docs",
+                .description = "Fetch a page.",
+                .input_schema = "{\"type\":\"object\",\"properties\":{}}",
+            }});
+            const digests = blk: {
+                var out: [records.len][32]u8 = undefined;
+                for (records, &out) |record, *digest| digest.* = tool_catalog.recordDigest(&record);
+                break :blk out;
+            };
+            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            const Case = struct { arguments: []const u8, expected: []const u8 = "fetch_page" };
+            const cases = [_]Case{
+                .{ .arguments = "{\"rui_call_description\":\"Fetch page\"}", .expected = "Fetch page" },
+                .{ .arguments = "{\"rui_call_description\":\"" ++ @as([200]u8, @splat('a')) ++ "\"}", .expected = &@as([200]u8, @splat('a')) },
+                .{ .arguments = "{\"rui_call_description\":\"" ++ @as([200]u8, @bitCast(@as([100][2]u8, @splat("é".*)))) ++ "\"}", .expected = &@as([200]u8, @bitCast(@as([100][2]u8, @splat("é".*)))) },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch \\u00e9 page\"}", .expected = "Fetch é page" },
+                .{ .arguments = "{\"rui_call_\\u0064escription\":\"" ++ @as([1200]u8, @bitCast(@as([200][6]u8, @splat("\\u0061".*)))) ++ "\"}", .expected = &@as([200]u8, @splat('a')) },
+                .{ .arguments = "{\"rui_call_description\":\"" ++ @as([201]u8, @splat('a')) ++ "\"}" },
+                .{ .arguments = "{\"rui_call_description\":\"" ++ @as([202]u8, @bitCast(@as([101][2]u8, @splat("é".*)))) ++ "\"}" },
+                .{ .arguments = "{}" },
+                .{ .arguments = "{\"rui_call_description\":7}" },
+                .{ .arguments = "{\"rui_call_description\":null}" },
+                .{ .arguments = "{\"rui_call_description\":\"\"}" },
+                .{ .arguments = "{\"rui_call_description\":\" \\t\\u00a0\"}" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch\\npage\"}" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch\\rpage\"}" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch\\u0085page\"}" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch\\u2028page\"}" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch\\u2029page\"}" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch page\",\"broken\":" },
+            };
+            for (cases) |line| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                defer storage.close() catch unreachable;
+                var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+                var configure = try completeConfiguration("mcp-line-config", "", try canonicalCwd(std.testing.io, &workspace), "model-a");
+                configure.configuration.tools = try .of(&.{"fetch_page"});
+                const configured = try storage.configure(&configure, .{});
+                const session = configured.accepted.session;
+                try submitTestMessage(&storage, &tmp, "mcp-line-input", "mcp-line-message", session.slice(), "fetch");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                var encoded: [8192]u8 = undefined;
+                var writer = std.Io.Writer.fixed(&encoded);
+                try std.json.Stringify.value(line.arguments, .{}, &writer);
+                const quoted = writer.buffered();
+                try settleCallsForTesting(&storage, &tmp, binding, "mcp-line-calls", &.{.{
+                    .item_id = "item-1",
+                    .name = "fetch_page",
+                    .encoded_call_id = "call-1",
+                    .decoded_call_id = "call-1",
+                    .encoded_arguments = quoted[1 .. quoted.len - 1],
+                    .decoded_arguments = line.arguments,
+                }});
+                errdefer std.debug.print("MCP arguments: {s}\n", .{line.arguments});
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{line.expected}));
+                if (line.expected.len == 200) {
+                    // These projections must read the frozen row, not parse
+                    // the original arguments or shorten it to the Bash bound.
+                    const page = try store_core.activityPageForTesting(&storage, .{ .session = session });
+                    try std.testing.expectEqual(@as(usize, 1), page.call_activity.count);
+                    try std.testing.expectEqualStrings(line.expected, page.call_activity.entries[0].presentation.description.?.slice());
+                    const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
+                    defer std.testing.allocator.free(report);
+                    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
+                    defer parsed.deinit();
+                    const unresolved = parsed.value.object.get("actions").?.object.get("unresolved").?.array.items;
+                    try std.testing.expectEqualStrings(line.expected, unresolved[0].object.get("presentation").?.object.get("description").?.string);
+                }
+            }
+        }
+    }.run);
+}

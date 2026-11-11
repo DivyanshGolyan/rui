@@ -1815,7 +1815,7 @@ pub const JsonWorkState = struct {
             cause: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
             attempt: OmittableJson(JsonString(20)) = .{},
             call: OmittableJson(JsonString(20)) = .{},
-            description: OmittableJson(?JsonString(protocol.max_tool_description_bytes)) = .{},
+            description: OmittableJson(?JsonString(protocol.session_work.max_description_bytes)) = .{},
             running: OmittableJson(JsonString(20)) = .{},
             approvals: OmittableJson(JsonString(20)) = .{},
             code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
@@ -1941,9 +1941,11 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         "{\"description\":null,\"code\":\"succeeded\",\"publication_position\":\"0\"}",
         "{\"description\":null,\"code\":\"succeeded\",\"publication_position\":\"9223372036854775808\"}",
         "{\"description\":null,\"code\":\"pending_permission\",\"publication_position\":\"1\"}",
+        "{\"description\":null,\"code\":\"pending_permission\",\"publication_position\":null}",
+        "{\"description\":null,\"code\":\"unresolved\",\"publication_position\":null}",
         "{\"code\":\"succeeded\",\"publication_position\":null}",
         "{\"description\":null,\"code\":\"succeeded\",\"code\":\"failed\",\"publication_position\":null}",
-        "{\"description\":\"" ++ @as([101]u8, @splat('x')) ++ "\",\"code\":\"succeeded\",\"publication_position\":null}",
+        "{\"description\":\"" ++ @as([201]u8, @splat('x')) ++ "\",\"code\":\"succeeded\",\"publication_position\":null}",
     }) |invalid| {
         if (std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, invalid, .{})) |unexpected| {
             unexpected.deinit();
@@ -1951,10 +1953,10 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         } else |_| {}
     }
     // Worst JSON escaping is six bytes per decoded byte, not the token bound.
-    const escaped = "{\"description\":\"" ++ @as([100 * 6]u8, @bitCast(@as([100][6]u8, @splat("\\u0001".*)))) ++ "\",\"code\":\"succeeded\",\"publication_position\":\"9223372036854775807\"}";
+    const escaped = "{\"description\":\"" ++ @as([200 * 6]u8, @bitCast(@as([200][6]u8, @splat("\\u0001".*)))) ++ "\",\"code\":\"succeeded\",\"publication_position\":\"9223372036854775807\"}";
     const maximum = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, escaped, .{});
     defer maximum.deinit();
-    try std.testing.expectEqual(@as(usize, 100), maximum.value.value.description.?.slice().len);
+    try std.testing.expectEqual(@as(usize, 200), maximum.value.value.description.?.slice().len);
     var buffer: [protocol.ToolPresentationJson.max_json_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try (protocol.ToolPresentationJson{ .value = maximum.value.value }).writeJson(&writer);
@@ -1990,7 +1992,7 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     try std.testing.expectEqualDeep(facts.queued, page.facts.queued);
     try std.testing.expectEqualDeep(facts.work, page.facts.work);
     for (page.facts.items) |item| {
-        try std.testing.expectEqual(@as(usize, 100), item.value.tool_result.presentation.description.?.slice().len);
+        try std.testing.expectEqual(@as(usize, 200), item.value.tool_result.presentation.description.?.slice().len);
         try std.testing.expectEqual(item.position, item.value.tool_result.presentation.publication_position.?);
         try std.testing.expectEqual(std.math.maxInt(i64) + 1 - item.position, item.at);
     }
@@ -2179,7 +2181,7 @@ test "a work state reads back exactly the facts its kind owns" {
     try cause.set("provider_temporary_http_429");
     var quota: protocol.Bounded(protocol.max_code_bytes) = .{};
     try quota.set("provider_quota");
-    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    var description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
     try description.set("Run \u{1}the resize tests");
     const states = [_]protocol.WorkState{
         .{ .idle = .{ .since = 1 } },
@@ -2925,7 +2927,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try maximal.label.?.set(&text);
     maximal.first_message = .{ .position = largest, .admission = largest, .admitted_at = largest, .sender = .{ .session = .{} }, .content = .{ .length = protocol.max_sqlite_content_bytes, .digest = @splat(0xff) } };
     try maximal.first_message.?.sender.?.session.set("zzzzzz");
-    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    var description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
     try description.set(&text);
     maximal.work = .{ .state = .{ .bash = .{ .since = largest, .call = largest, .description = description, .running = largest, .approvals = largest } }, .turn = largest, .operation = largest, .first_action = largest };
     maximal.peers = .{ .from_person_at = largest };
@@ -3419,7 +3421,9 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"{s}\",{s}\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i, if (i == 0) "fetch_page" else "bash", if (i == 0) "\"server\":\"docs\"," else "" });
-        try writer.writeAll(reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"description\":\"Run parser tests\",\"code\":\"pending_permission\",\"publication_position\":null}}");
+        try writer.writeAll(reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"description\":\"");
+        try writer.writeAll(if (i == 0) &@as([200]u8, @splat('a')) else "Run parser tests");
+        try writer.writeAll("\",\"code\":\"pending_permission\",\"publication_position\":null}}");
     }
     try writer.writeAll("],\"resolved\":[");
     for (0..257) |i| {
@@ -3465,7 +3469,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
                     try std.testing.expectEqual(@as(u64, i), row.call_ordinal.value);
                     try std.testing.expectEqual(@as(u64, 13), row.arguments.bytes.value);
                     try std.testing.expectEqualStrings(&@as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))), row.call_id.sha256.slice());
-                    try std.testing.expectEqualStrings("Run parser tests", row.presentation.value.description.?.slice());
+                    try std.testing.expectEqualStrings(if (i == 0) &@as([200]u8, @splat('a')) else "Run parser tests", row.presentation.value.description.?.slice());
                     try std.testing.expectEqual(protocol.ToolPresentation.Code.pending_permission, row.presentation.value.code);
                 },
                 .resolved => |row| {
@@ -3499,6 +3503,15 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     var again: Sink = .{};
     try roundtrip.current.traverse(io, rendered, &again);
     try std.testing.expectEqual(sink.counts, again.counts);
+    // The terminal selects the saved line from this same capture, no call read.
+    const view = @import("session_view.zig");
+    const mcp = (try view.actionToolFromCapture(&roundtrip.current, io, rendered, 31)).?;
+    try std.testing.expectEqualStrings("fetch_page", mcp.name.slice());
+    try std.testing.expectEqualStrings("docs", mcp.server.?.slice());
+    try std.testing.expectEqualStrings(&@as([200]u8, @splat('a')), mcp.description.slice());
+    const bash = (try view.actionToolFromCapture(&roundtrip.current, io, rendered, 32)).?;
+    try std.testing.expectEqualStrings("Run parser tests", bash.description.slice());
+    try std.testing.expectEqual(null, try view.actionToolFromCapture(&roundtrip.current, io, rendered, 1001));
     const Failing = struct {
         pub fn visit(_: @This(), _: Current.Attention) !void {
             return error.SinkFailed;

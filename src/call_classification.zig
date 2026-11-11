@@ -22,6 +22,9 @@ const read_transcript_record = records.read_transcript_record;
 const message_agent_record = records.message_agent_record;
 const start_agent_record = records.start_agent_record;
 
+/// Bash's argument bound is independent of the saved call-line bound.
+pub const max_bash_description_bytes = 100;
+
 /// One call, as `describe` needs it.
 pub const Call = union(Tool) {
     /// Arguments the parser accepted, whose description it required.
@@ -48,7 +51,11 @@ pub const WebSearchCall = struct {
 
 pub fn describe(call: Call) Description {
     const out: Description = switch (call) {
-        .bash => |arguments| arguments.description,
+        .bash => |arguments| blk: {
+            var out: Description = .{};
+            out.set(arguments.description.slice()) catch unreachable;
+            break :blk out;
+        },
         // The core writes its own tools' lines (D105).
         .message_agent => |arguments| blk: {
             var out: Description = .{};
@@ -197,7 +204,7 @@ fn writeCut(writer: *std.Io.Writer, text: []const u8, width: usize) void {
 
 pub const BashArguments = struct {
     timeout_ms: ?u64 = null,
-    description: Bounded(tool_presentation.max_description_bytes) = .{},
+    description: Bounded(max_bash_description_bytes) = .{},
     stdin_present: bool = false,
 };
 
@@ -275,7 +282,7 @@ pub const BashProblem = enum {
             .missing_cmd => "cmd is required",
             .missing_description => "description is required",
             .cmd_invalid => "cmd must be a string of UTF-8 text with no NUL characters",
-            .description_invalid => std.fmt.comptimePrint("description must be a nonblank, single-line string of UTF-8 text, at most {d} bytes", .{tool_presentation.max_description_bytes}),
+            .description_invalid => std.fmt.comptimePrint("description must be a nonblank, single-line string of UTF-8 text, at most {d} bytes", .{max_bash_description_bytes}),
             .stdin_invalid => "stdin must be a string of UTF-8 text",
             .timeout_invalid => std.fmt.comptimePrint("timeout_ms must be an integer from 1 to {d}", .{std.math.maxInt(i64)}),
         };

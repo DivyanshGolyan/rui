@@ -14,7 +14,7 @@ const retry_policy = @import("retry_policy.zig");
 
 /// The saved code bound (`turn.outcome_code`, `model_operation.last_failure_code`).
 pub const max_code_bytes = 96;
-/// The saved Tool Call description bound (`model_tool_call.description`).
+/// The running Bash line bound; other saved call lines may be longer.
 pub const max_description_bytes = 100;
 
 /// The greatest ordinal a retrying state's failed Attempt has: the last
