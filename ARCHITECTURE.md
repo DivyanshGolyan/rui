@@ -1400,7 +1400,7 @@ A SQLite Store at a format from 51 up to the current one takes each pending step
 Rui runs no DDL on MySQL (D203).
 `rui store schema --engine mysql` prints this build's canonical `schema.ddl(.mysql)` as one SQL file for the DB team to apply to an empty database.
 With `--from N` it instead prints every forward MySQL migration from format N to this build's format, oldest first (D223); the current format prints empty stdout successfully, and formats outside the migration baseline through the current format are usage errors naming that range, with no stdout.
-Forward steps for an existing database are `schema.mysqlMigration(from)`; this command does not apply them.
+The composed migration finishes with one update of the saved format and wire version to this build's values; individual steps remain `schema.mysqlMigration(from)`, and this command never applies the SQL.
 The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
 The step to 53 records a Session's parent (D27).
 The step to 54 records the stops and ending Messages an attached child owes (D38, D39), ancestor feed forwarding in `session_forward` (D135, D180), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.

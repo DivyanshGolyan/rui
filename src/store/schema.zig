@@ -359,15 +359,20 @@ pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
 }
 
 /// All forward steps from a runtime-selected format, oldest first, without
-/// allocation. The current format needs no SQL; unsupported formats have no text.
+/// allocation. After the steps, finalize format and wire metadata once, as
+/// opening the migrated Store requires both to match this build. The current
+/// format needs no SQL; unsupported formats have no text.
 pub fn mysqlMigrationFrom(from: u64) ?[:0]const u8 {
     const texts = comptime blk: {
         var result: [schema_version - migration_baseline + 1][:0]const u8 = undefined;
         result[result.len - 1] = "";
+        const metadata = "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n" ++
+            "UPDATE store_meta SET meta_value='" ++ wire_version ++ "' WHERE meta_key='wire_version';\n";
         var index = result.len - 1;
         while (index > 0) {
             index -= 1;
-            const text = mysqlMigration(migration_baseline + index) ++ result[index + 1];
+            const text = mysqlMigration(migration_baseline + index) ++
+                (if (index + 1 == result.len - 1) metadata else result[index + 1]);
             const terminated = text ++ "\x00";
             result[index] = terminated[0..text.len :0];
         }
@@ -377,13 +382,17 @@ pub fn mysqlMigrationFrom(from: u64) ?[:0]const u8 {
     return texts[@intCast(from - migration_baseline)];
 }
 
-test "store schema --from prints every remaining MySQL migration in order" {
+test "store schema --from prints every remaining MySQL migration then finalizes metadata once" {
     for (migration_baseline..schema_version + 1) |from| {
         var expected: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer expected.deinit();
         inline for (migrations) |step| {
             if (step.from >= from) try expected.writer.writeAll(mysqlMigration(step.from));
         }
+        if (from < schema_version) try expected.writer.print(
+            "UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format';\nUPDATE store_meta SET meta_value='{s}' WHERE meta_key='wire_version';\n",
+            .{ schema_version, wire_version },
+        );
         try std.testing.expectEqualStrings(expected.written(), mysqlMigrationFrom(@intCast(from)).?);
     }
     try std.testing.expectEqualStrings("", mysqlMigrationFrom(schema_version).?);
