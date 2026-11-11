@@ -136,8 +136,9 @@ def editor(fixture, row):
         # The expired standalone Esc leaves the chat, saving its draft. The
         # fixture creates exactly one Session, so Enter must reopen that row.
         # If Esc merged with a later byte, this overview observation must fail.
-        tty.marker("new Session · ")
+        tty.marker("+ New Session")
         tty.marker(f"○ {fixture.session}")
+        tty.marker("enter open")
         tty.send(b"\r")
         tty.marker(f"‹ {fixture.session} · ")
         tty.draft(row["reopen_draft"], 2 + len(row["reopen_draft"]))
