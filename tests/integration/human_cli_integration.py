@@ -916,7 +916,7 @@ def provider_prompt(master, ready, command=None):
     return output
 
 
-def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, caret=None):
+def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, caret=None, timeout=15):
     """Write a large input in chunks while the screen is read.
 
     With `draft`, wait instead until the composer shows exactly that draft
@@ -935,9 +935,9 @@ def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, ca
     writer = threading.Thread(target=send, daemon=True)
     writer.start()
     if draft is None:
-        output = read_terminal(master, marker)
+        output = read_terminal(master, marker, timeout=timeout)
     else:
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + timeout
         frames = []
         while not capture.draft(draft, caret):
             remaining = deadline - time.monotonic()
@@ -1774,14 +1774,12 @@ def renderer_cases():
         with terminal(session) as tty:
             tty.send("fresh start\r", marker)
             frames = tty.every_frame()
-            for _ in range(3):
-                # A scroll that changes nothing draws no frame to wait for.
-                os.write(tty.master, b"\x1b[5~")
-                shown = settle_screen(tty.master, quiet=0.3)
-                assert "› fresh start" in shown and marker in shown, shown
-                assert shown.count("› fresh start") == 1 and shown.count(marker) == 1, shown
-                assert shown.index("› fresh start") < shown.index(marker), shown
-                assert "Start of conversation" not in shown, shown
+            # Only the first PgUp moves a feed this short; the rest draw nothing.
+            shown = tty.send("\x1b[5~" * 3, predicate=lambda: "› fresh start" in tty.capture.completed
+                and marker in tty.capture.completed and "↓" in tty.capture.completed)
+            assert shown.count("› fresh start") == 1 and shown.count(marker) == 1, shown
+            assert shown.index("› fresh start") < shown.index(marker), shown
+            assert "Start of conversation" not in shown, shown
             for frame in frames:
                 assert "Earlier messages unavailable" not in frame and "Start of conversation" not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
@@ -3140,7 +3138,9 @@ def main(selected="all"):
             endpoint.responses.append(fixture.sse_answer("editor-limit-answer", "editor-limit-reason",
                 "editor-limit-message", "limit accepted")[0])
             at_limit = "a" * (64 * 1024 - 2) + "é"
-            accepted = terminal_bulk(master, at_limit, "limit accepted")
+            # 64 KiB typed a KiB at a time is a third of the default budget on
+            # an idle machine, and has run past it on a loaded runner.
+            accepted = terminal_bulk(master, at_limit, "limit accepted", timeout=60)
             assert "limit accepted" in accepted, accepted[-1000:]
             body = json.loads(endpoint.requests[-1])
             assert next(item["content"][0]["text"] for item in reversed(body["input"])

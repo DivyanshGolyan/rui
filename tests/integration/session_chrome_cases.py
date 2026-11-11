@@ -5,7 +5,9 @@ human_cli_integration.py runs these cases in its full and renderer modes, and
 alone as `session-chrome`. Each case judges the screen the person sees, at
 80×24 unless it says otherwise: the feed fills rows 0–17, row 18 is
 reserved for the marker even at the end, and the input sits
-between rules on rows 19–21, the identity/keys footer is 22 and the state slot is 23."""
+between rules on rows 19–21, the identity/keys footer is 22 and the state slot is 23.
+Feed/page/activity rows have one gutter column; input, footer and state
+retain their own margins."""
 import json
 import os
 import select
