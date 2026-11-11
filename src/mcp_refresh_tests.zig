@@ -5,14 +5,14 @@ const testing = store.testing;
 const tools = @import("tools.zig");
 const protocol = @import("protocol.zig");
 
-const Records = [tools.built_in.records.len + 2]tools.Record;
+const Records = [tools.built_in_tool_set.records.len + 2]tools.Record;
 fn records() Records {
-    return testing.catalogRecordsWith(&.{
+    return testing.hostToolRecordsWith(&.{
         .{ .name = "fetch_a", .owner = .mcp, .server = "docs", .description = "old a", .input_schema = "{}" },
         .{ .name = "fetch_b", .owner = .mcp, .server = "docs", .description = "old b", .input_schema = "{}" },
     });
 }
-fn catalog(rows: []const tools.Record, digests: [][32]u8) tools.Catalog {
+fn hostToolSet(rows: []const tools.Record, digests: [][32]u8) tools.HostToolSet {
     for (rows, digests) |*row, *digest| digest.* = tools.recordDigest(row);
     return .{ .records = rows, .digests = digests };
 }
@@ -54,15 +54,16 @@ test "MCP offer projection covers identity changes removals additions and name n
     try testing.forEachEngine(struct {
         fn run(engine: *testing.Case) !void {
             const Scenario = enum { unchanged, description, schema, server, read_only, owner, name, removed, mixed, added, builtins, narrowed, unloaded, key_namespace };
+            var rounds: std.EnumArray(Scenario, u64) = .initFill(0);
             for (std.enums.values(Scenario)) |scenario| {
                 errdefer std.debug.print("MCP refresh scenario {s}\n", .{@tagName(scenario)});
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
                 var before_rows = records();
                 var before_digests: [before_rows.len][32]u8 = undefined;
-                const before = catalog(&before_rows, &before_digests);
+                const before = hostToolSet(&before_rows, &before_digests);
                 var storage: store.Store = undefined;
-                try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &before });
+                try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &before });
                 defer storage.close() catch unreachable;
                 var cwd: [protocol.max_workspace_bytes]u8 = undefined;
                 var configure = try testing.completeConfiguration("refresh-config", "", try testing.canonicalCwd(std.testing.io, &cwd), "model-a");
@@ -108,10 +109,10 @@ test "MCP offer projection covers identity changes removals additions and name n
                 if (scenario == .added) {
                     var missing = records();
                     missing[a] = missing[missing.len - 1];
-                    testing.sortCatalogRecords(missing[0 .. missing.len - 1]);
+                    testing.sortHostToolRecords(missing[0 .. missing.len - 1]);
                     var digests: [missing.len - 1][32]u8 = undefined;
-                    const absent = catalog(missing[0 .. missing.len - 1], &digests);
-                    try storage.saveCatalog(&absent);
+                    const absent = hostToolSet(missing[0 .. missing.len - 1], &digests);
+                    try storage.saveHostToolSet(&absent);
                     try testing.submitTestMessage(&storage, &tmp, "refresh-missing", "refresh-missing", session.slice(), "missing");
                     const missing_call = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                     try std.testing.expect(!try member(&storage, session.slice(), "fetch_a"));
@@ -122,34 +123,43 @@ test "MCP offer projection covers identity changes removals additions and name n
                     count -= 1;
                     after_rows[index] = after_rows[count];
                 }
-                testing.sortCatalogRecords(after_rows[0..count]);
+                testing.sortHostToolRecords(after_rows[0..count]);
                 var after_digests: [after_rows.len][32]u8 = undefined;
-                const after = catalog(after_rows[0..count], after_digests[0..count]);
-                try storage.saveCatalog(&after);
+                const after = hostToolSet(after_rows[0..count], after_digests[0..count]);
+                try storage.saveHostToolSet(&after);
                 const old_count = try revisions(&storage, session.slice());
                 try testing.submitTestMessage(&storage, &tmp, "refresh-next", "refresh-next", session.slice(), "next");
                 // Projection interning and the admitted Operation roll back together.
                 if (scenario == .mixed and !engine.rerun) {
                     try std.testing.expectError(error.InjectedAttemptCommitFailure, storage.admitNextModelAttempt(.{ .attempt_before_commit = true }));
-                    // A fault fences; reopen with the same startup catalog.
+                    // A fault fences; reopen with the same startup tool set.
                     try storage.close();
-                    try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &after });
+                    try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &after });
                     try std.testing.expectEqual(old_count, try revisions(&storage, session.slice()));
                 }
+                const rounds_before = storage.testing_content_work.rounds;
                 const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                rounds.set(scenario, storage.testing_content_work.rounds - rounds_before);
                 try std.testing.expectEqual(old_count, try revisions(&storage, session.slice()));
+                // Loaded intent whose MCP records the Host still holds is the
+                // offer itself; only a changed loaded record saves another set.
+                const changed = switch (scenario) {
+                    .description, .schema, .server, .read_only, .owner, .name, .removed, .mixed => true,
+                    .unchanged, .added, .builtins, .narrowed, .unloaded, .key_namespace => false,
+                };
+                try std.testing.expectEqual(@as(u64, @intFromBool(!changed)), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1 AND o.tool_set_id=coalesce(s.loaded_tool_set_id,s.tool_set_id)", .{next.operation_id}));
                 try std.testing.expectEqual(scenario != .builtins and scenario != .removed and scenario != .name and scenario != .unloaded, try member(&storage, session.slice(), "fetch_a"));
                 try std.testing.expect(!try member(&storage, session.slice(), "fetch_new"));
                 if (scenario != .builtins and scenario != .removed and scenario != .name and scenario != .unloaded) {
                     // Identity equality, not just a revision increment: every
                     // field must resolve to today's saved record for this name.
-                    try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation o JOIN tool_set_member m ON m.tool_set_id=o.tool_set_id JOIN tool_record t ON t.tool_record_id=m.tool_record_id JOIN host_catalog h ON h.slot=1 JOIN tool_set_member hm ON hm.tool_set_id=h.tool_set_id AND hm.tool_record_id=m.tool_record_id WHERE o.operation_id=?1 AND t.name='fetch_a'", .{next.operation_id}));
+                    try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation o JOIN tool_set_member m ON m.tool_set_id=o.tool_set_id JOIN tool_record t ON t.tool_record_id=m.tool_record_id JOIN host_tool_set h ON h.slot=1 JOIN tool_set_member hm ON hm.tool_set_id=h.tool_set_id AND hm.tool_record_id=m.tool_record_id WHERE o.operation_id=?1 AND t.name='fetch_a'", .{next.operation_id}));
                 }
                 // Old frozen requests and their records are never rewritten.
                 try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND settings_revision=1", .{first.operation_id}));
-                // Only synthetic catalogs can change MCP ownership to an
+                // Only synthetic tool sets can change MCP ownership to an
                 // unsupported Rui tool. Refresh still preserves that identity;
-                // normal settlement correctly refuses such a catalog.
+                // normal settlement correctly refuses such a tool set.
                 if (scenario == .owner or scenario == .narrowed) continue;
                 if (scenario == .removed) {
                     try store.settleCallsForTesting(&storage, &tmp, next, "refresh-removed-call", &.{.{ .item_id = "removed", .name = "fetch_a", .encoded_call_id = "removed", .decoded_call_id = "removed", .encoded_arguments = "{}", .decoded_arguments = "{}" }});
@@ -167,6 +177,11 @@ test "MCP offer projection covers identity changes removals additions and name n
                 try done(&storage, &tmp, again);
                 try std.testing.expect(!storage.isFenced());
             }
+            // An unchanged MCP Session admits in as many rounds as a built-in
+            // one; only a changed loaded record pays for a projection.
+            try std.testing.expectEqual(rounds.get(.builtins), rounds.get(.unchanged));
+            try std.testing.expectEqual(rounds.get(.builtins), rounds.get(.unloaded));
+            try std.testing.expect(rounds.get(.description) > rounds.get(.unchanged));
         }
     }.run);
 }
@@ -189,9 +204,9 @@ test "MCP intent removal return crosses explicit equal and changed tools and loa
                 defer tmp.cleanup();
                 var rows = records();
                 var digests: [rows.len][32]u8 = undefined;
-                const full = catalog(&rows, &digests);
+                const full = hostToolSet(&rows, &digests);
                 var storage: store.Store = undefined;
-                try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &full });
+                try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &full });
                 defer storage.close() catch unreachable;
                 var cwd: [protocol.max_workspace_bytes]u8 = undefined;
                 var config = try testing.completeConfiguration("intent-create", "", try testing.canonicalCwd(std.testing.io, &cwd), "model-a");
@@ -203,10 +218,10 @@ test "MCP intent removal return crosses explicit equal and changed tools and loa
                 var missing_rows = records();
                 const a = full.find("fetch_a").?;
                 missing_rows[a] = missing_rows[missing_rows.len - 1];
-                testing.sortCatalogRecords(missing_rows[0 .. missing_rows.len - 1]);
+                testing.sortHostToolRecords(missing_rows[0 .. missing_rows.len - 1]);
                 var missing_digests: [missing_rows.len - 1][32]u8 = undefined;
-                const missing = catalog(missing_rows[0 .. missing_rows.len - 1], &missing_digests);
-                try storage.saveCatalog(&missing);
+                const missing = hostToolSet(missing_rows[0 .. missing_rows.len - 1], &missing_digests);
+                try storage.saveHostToolSet(&missing);
                 try testing.submitTestMessage(&storage, &tmp, "intent-missing", "intent-missing", session.slice(), "missing");
                 const absent = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try std.testing.expect(!try member(&storage, session.slice(), "fetch_a"));
@@ -235,9 +250,9 @@ test "MCP intent removal return crosses explicit equal and changed tools and loa
                 // A new identity returning after reopen must obey name intent,
                 // not an earlier change row or the latest reduced offer.
                 rows[a].description = "returned a";
-                const returned = catalog(&rows, &digests);
+                const returned = hostToolSet(&rows, &digests);
                 try storage.close();
-                try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &returned });
+                try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &returned });
                 try testing.submitTestMessage(&storage, &tmp, "intent-return", "intent-return", session.slice(), "returned");
                 const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try std.testing.expectEqual(field == .omitted, try member(&storage, session.slice(), "fetch_a"));
@@ -272,9 +287,9 @@ test "MCP parent creation narrows configured intent and saves no derived offer a
                 defer tmp.cleanup();
                 var rows = records();
                 var digests: [rows.len][32]u8 = undefined;
-                const full = catalog(&rows, &digests);
+                const full = hostToolSet(&rows, &digests);
                 var storage: store.Store = undefined;
-                try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &full });
+                try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &full });
                 defer storage.close() catch unreachable;
                 var cwd: [protocol.max_workspace_bytes]u8 = undefined;
                 const workspace = try testing.canonicalCwd(std.testing.io, &cwd);
@@ -291,10 +306,10 @@ test "MCP parent creation narrows configured intent and saves no derived offer a
                 missing_rows[full.find("fetch_b").?].description = "creation b";
                 const a = full.find("fetch_a").?;
                 missing_rows[a] = missing_rows[missing_rows.len - 1];
-                testing.sortCatalogRecords(missing_rows[0 .. missing_rows.len - 1]);
+                testing.sortHostToolRecords(missing_rows[0 .. missing_rows.len - 1]);
                 var missing_digests: [missing_rows.len - 1][32]u8 = undefined;
-                const missing = catalog(missing_rows[0 .. missing_rows.len - 1], &missing_digests);
-                try storage.saveCatalog(&missing);
+                const missing = hostToolSet(missing_rows[0 .. missing_rows.len - 1], &missing_digests);
+                try storage.saveHostToolSet(&missing);
                 try testing.submitTestMessage(&storage, &tmp, "parent-intent-task", "parent-intent-task", parent.slice(), "create a child");
                 const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try std.testing.expect(!try member(&storage, parent.slice(), "fetch_a"));
@@ -312,7 +327,7 @@ test "MCP parent creation narrows configured intent and saves no derived offer a
                         child_spec.configuration.parent.state = .value;
                         try child_spec.configuration.parent.value.set(parent.slice());
                         // The intent ceiling permits a, but the independent
-                        // catalog validation still refuses an unavailable name.
+                        // Host tool set validation still refuses an unavailable name.
                         var unavailable = child_spec;
                         try unavailable.key.set("parent-intent-unavailable");
                         unavailable.configuration.tools = try .of(&.{"fetch_a"});
@@ -352,16 +367,16 @@ test "MCP parent creation narrows configured intent and saves no derived offer a
                 try std.testing.expectEqual(!subset, try member(&storage, child.slice(), "fetch_b"));
                 try done(&storage, &tmp, first);
 
-                try storage.saveCatalog(&tools.built_in);
+                try storage.saveHostToolSet(&tools.built_in_tool_set);
                 try testing.submitTestMessage(&storage, &tmp, "child-intent-missing", "child-intent-missing", child.slice(), "b is missing");
                 const absent = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try std.testing.expect(!try member(&storage, child.slice(), "fetch_b"));
                 try std.testing.expect(try intended(&storage, child.slice(), "fetch_b", false));
                 try done(&storage, &tmp, absent);
                 rows[full.find("fetch_b").?].description = "returned b";
-                const returned = catalog(&rows, &digests);
+                const returned = hostToolSet(&rows, &digests);
                 try storage.close();
-                try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &returned });
+                try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &returned });
                 try testing.submitTestMessage(&storage, &tmp, "child-intent-return", "child-intent-return", child.slice(), "b returned");
                 const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try std.testing.expectEqual(!subset, try member(&storage, child.slice(), "fetch_b"));
@@ -398,9 +413,9 @@ test "MCP find_tools expands loaded intent without losing or inventing unavailab
                 defer arena.deinit();
                 var rows = records();
                 var digests: [rows.len][32]u8 = undefined;
-                const full = catalog(&rows, &digests);
+                const full = hostToolSet(&rows, &digests);
                 var storage: store.Store = undefined;
-                try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &full });
+                try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &full });
                 defer storage.close() catch unreachable;
                 var cwd: [protocol.max_workspace_bytes]u8 = undefined;
                 var config = try testing.completeConfiguration("load-intent-create", "", try testing.canonicalCwd(std.testing.io, &cwd), "model-a");
@@ -409,10 +424,10 @@ test "MCP find_tools expands loaded intent without losing or inventing unavailab
                 const session = (try storage.configure(&config, .{})).accepted.session;
                 var missing_rows = records();
                 missing_rows[full.find("fetch_a").?] = missing_rows[missing_rows.len - 1];
-                testing.sortCatalogRecords(missing_rows[0 .. missing_rows.len - 1]);
+                testing.sortHostToolRecords(missing_rows[0 .. missing_rows.len - 1]);
                 var missing_digests: [missing_rows.len - 1][32]u8 = undefined;
-                const missing = catalog(missing_rows[0 .. missing_rows.len - 1], &missing_digests);
-                try storage.saveCatalog(&missing);
+                const missing = hostToolSet(missing_rows[0 .. missing_rows.len - 1], &missing_digests);
+                try storage.saveHostToolSet(&missing);
                 try testing.submitTestMessage(&storage, &tmp, "load-intent-start", "load-intent-start", session.slice(), "find");
                 const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try store.settleCallsForTesting(&storage, &tmp, model, "load-intent-call", &.{.{ .item_id = "find", .name = "find_tools", .encoded_call_id = "find", .decoded_call_id = "find", .encoded_arguments = "{\\\"words\\\":\\\"fetch_b\\\"}", .decoded_arguments = "{\"words\":\"fetch_b\"}" }});
@@ -424,7 +439,7 @@ test "MCP find_tools expands loaded intent without losing or inventing unavailab
                 try std.testing.expect(!try member(&storage, session.slice(), "fetch_a"));
                 try std.testing.expect(try member(&storage, session.slice(), "fetch_b"));
                 try done(&storage, &tmp, continuation);
-                try storage.saveCatalog(&full);
+                try storage.saveHostToolSet(&full);
                 try testing.submitTestMessage(&storage, &tmp, "load-intent-return", "load-intent-return", session.slice(), "return");
                 const returned = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try std.testing.expectEqual(a_loaded, try member(&storage, session.slice(), "fetch_a"));

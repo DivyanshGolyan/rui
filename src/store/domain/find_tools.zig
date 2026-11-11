@@ -12,13 +12,14 @@ const action = @import("action.zig");
 const command = @import("command.zig");
 const content = @import("content.zig");
 const tool_set = @import("tool_set.zig");
-const tool_revision = @import("tool_revision.zig");
+const configuration = @import("configuration.zig");
+const tool_offer = @import("tool_offer.zig");
 const Faults = @import("../Store.zig").Faults;
 
 const settings = rsql.Read(.{
-    .sql = "SELECT revision,tool_set_id," ++ tool_set.offeredSetSql("session") ++ " AS loaded_set,loaded_tool_set_id FROM session WHERE session_ref=?1",
+    .sql = "SELECT revision,tool_set_id,loaded_tool_set_id FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { revision: rsql.Positive, tool_set_id: rsql.Positive, loaded_set: rsql.Positive, loaded_tool_set_id: ?rsql.Positive },
+    .Row = struct { revision: rsql.Positive, tool_set_id: rsql.Positive, loaded_tool_set_id: ?rsql.Positive },
     .cardinality = .one,
 });
 
@@ -31,7 +32,7 @@ const Candidates = struct {
     count: usize = 0,
     invalid: bool = false,
 
-    pub fn visit(self: *Candidates, row: *const tool_revision.OfferedRecord) bool {
+    pub fn visit(self: *Candidates, row: *const tool_offer.OfferedRecord) bool {
         if (row.loaded) return true;
         if (self.count == self.rows.len) {
             self.invalid = true;
@@ -124,6 +125,12 @@ fn includeLoadedNames(a: anytype, arena: std.mem.Allocator, loaded_set: u64, mat
     }
 }
 
+const update_loaded = rsql.Write(.{
+    .sql = "UPDATE session SET loaded_tool_set_id=?2,revision=?3 WHERE session_ref=@session(?1)",
+    .Args = struct { session: rsql.SessionHead, loaded: ?u64, revision: u64 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
 const FirstLine = struct {
     writer: *std.Io.Writer,
     ended: bool = false,
@@ -158,12 +165,14 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
     var current: settings.Result = undefined;
     a.read(settings, .{ .session = &found.session.ref }, &current);
     try a.run();
+    const configured = current.tool_set_id.get();
+    const loaded_intent: ?u64 = if (current.loaded_tool_set_id) |id| id.get() else null;
     const matches = try arena.create(Matches);
     matches.* = .{};
     if (refusal == null) {
         const pending = try arena.create(Candidates);
         pending.* = .{};
-        try tool_revision.project(a, current.tool_set_id.get(), if (current.loaded_tool_set_id) |id| id.get() else null, pending);
+        try tool_offer.project(a, configured, loaded_intent, pending);
         if (pending.invalid) return error.CorruptStore;
         matches.remaining = pending.count;
         if (pending.count > 0) {
@@ -177,7 +186,7 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
             }
         }
         if (matches.count > 0)
-            try includeLoadedNames(a, arena, current.loaded_set.get(), matches);
+            try includeLoadedNames(a, arena, loaded_intent orelse configured, matches);
     }
 
     var output: std.Io.Writer.Allocating = .init(arena);
@@ -207,15 +216,24 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
     // The call's binding uniquely identifies its saved arguments, even on retry.
     const digest = content_string.digest(key);
     if (matches.count > 0) {
-        var selected = try tool_set.Selection.ofSaved(a, current.tool_set_id.get(), &matches.names);
+        var selected = try tool_set.Selection.ofSaved(a, configured, &matches.names);
         tool_set.lookupSelection(a, &selected);
         try a.run();
-        const selected_set = try tool_set.finishSelection(a, &selected, current.tool_set_id.get());
-        const loaded: ?u64 = if (selected_set == current.tool_set_id.get()) null else selected_set;
-        try tool_revision.queue(a, found.session, revision, .{
-            .tools = current.tool_set_id.get(),
-            .loaded = if (current.loaded_tool_set_id) |id| id.get() else null,
-        }, .{ .tools = current.tool_set_id.get(), .loaded = loaded }, key, &answer);
+        const selected_set = try tool_set.finishSelection(a, &selected, configured);
+        // Sets are saved once per membership: loading every configured name
+        // is the configured set itself, which the Session saves as NULL.
+        a.write(update_loaded, .{ .session = found.session, .loaded = if (selected_set == configured) null else selected_set, .revision = revision });
+        var applied: configuration.Applied = .{
+            .session = .{},
+            .head = found.session,
+            .revision = revision,
+            .instructions_id = null,
+            .output_schema_id = null,
+            .instructions_updated = false,
+            .changes = .initOne(.loaded_tools),
+        };
+        try applied.session.set(&found.session.ref);
+        try configuration.queueConfiguredCommand(a, &applied, key, .configure, &digest, null, null, &answer);
     } else {
         try command.queueCommand(a, key, .configure, &found.session.ref, &digest, null, null, &answer);
     }

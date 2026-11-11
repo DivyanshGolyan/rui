@@ -8,7 +8,7 @@ const store_path = @import("../store_path.zig");
 const tool_name = @import("../tool_name.zig");
 const Bounded = @import("../bounded.zig").Bounded;
 const wire_version = @import("../wire_version.zig").wire_version;
-const tool_catalog = @import("../tool_record.zig");
+const tool_defs = @import("../tool_record.zig");
 const prefix_seal = @import("../prefix_seal.zig");
 const retry_policy = @import("../retry_policy.zig");
 const turn_policy = @import("../turn_policy.zig");
@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 64;
+pub const schema_version: u32 = 65;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -50,7 +50,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 61, .digest = 0xec460e03aa080495 },
     .{ .schema_version = 62, .digest = 0x3d68029b9bcbfdd0 },
     .{ .schema_version = 63, .digest = 0x7a09d94b6ba24eea },
-    .{ .schema_version = 64, .digest = 0xc22891cc2db0c9f4 },
+    .{ .schema_version = 64, .digest = 0xba89834313d6181f },
+    .{ .schema_version = 65, .digest = 0x78987c40a911dee5 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -100,9 +101,9 @@ pub const Migration = struct {
 /// The baseline snapshots (migration_baseline.*.sql) never change; the
 /// chain grows; steps already on main or released never change (D226).
 pub const migrations = [_]Migration{
-    // 52 (T1e): MCP tool records name their server, host_catalog names the
-    // Host's catalog set, and a catalog set holds up to
-    // max_catalog_records. Every record so far is Rui's or a provider's,
+    // 52 (T1e): MCP tool records name their server, host_catalog originally named
+    // the Host tool set, which holds up to
+    // max_host_tool_records. Every record so far is Rui's or a provider's,
     // so its server is empty. MySQL names a table's CHECKs in order, so
     // the third of tool_record and of tool_set is the one replaced.
     .{
@@ -399,15 +400,32 @@ pub const migrations = [_]Migration{
             "ALTER TABLE model_operation DROP COLUMN usage_content_id",
         },
     },
-    // Schema 64: Session sets become intent, conservatively retaining current
-    // names. Each old Operation keeps the offer of its own settings revision.
+    // Schema 64: name the Host tool set and runner-independent timeout.
     .{
         .from = 63,
         .sqlite = &.{
-            "ALTER TABLE model_operation RENAME TO model_operation_63",
+            "ALTER TABLE host_catalog RENAME TO host_catalog_63",
+            "CREATE TABLE host_tool_set(\n slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id)\n) STRICT",
+            "INSERT INTO host_tool_set(slot,tool_set_id) SELECT slot,tool_set_id FROM host_catalog_63",
+            "DROP TABLE host_catalog_63",
+            "ALTER TABLE action_operation RENAME COLUMN bash_timeout_ms TO attempt_timeout_ms",
+        },
+        .mysql = &.{
+            "RENAME TABLE host_catalog TO host_tool_set",
+            "ALTER TABLE action_operation DROP CHECK action_operation_chk_8, DROP CHECK action_operation_chk_17",
+            "ALTER TABLE action_operation RENAME COLUMN bash_timeout_ms TO attempt_timeout_ms",
+            "ALTER TABLE action_operation ADD CHECK(attempt_timeout_ms IS NULL OR attempt_timeout_ms>0), ADD CHECK((attempt_ordinal=0 AND attempt_timeout_ms IS NULL) OR (attempt_ordinal=1 AND attempt_timeout_ms IS NOT NULL))",
+        },
+    },
+    // Schema 65: Session sets become intent, conservatively retaining current
+    // names. Each old Operation keeps the offer of its own settings revision.
+    .{
+        .from = 64,
+        .sqlite = &.{
+            "ALTER TABLE model_operation RENAME TO model_operation_64",
             "CREATE TABLE model_operation(\n operation_id INTEGER PRIMARY KEY NOT NULL CHECK(operation_id>0),\n turn_id INTEGER NOT NULL REFERENCES turn(turn_id),\n session_ref TEXT NOT NULL,\n settings_revision INTEGER NOT NULL CHECK(settings_revision>0),\n input_cutoff INTEGER NOT NULL CHECK(input_cutoff>0),\n admission_position INTEGER NOT NULL CHECK(admission_position>0),\n purpose INTEGER NOT NULL DEFAULT 0 CHECK(purpose IN (0,1)),\n compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),\n output_reservation INTEGER NOT NULL CHECK(output_reservation>=0),\n reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR (reasoning_effort='none' OR reasoning_effort='low' OR reasoning_effort='medium' OR reasoning_effort='high' OR reasoning_effort='xhigh' OR reasoning_effort='max')),\n output_item_count INTEGER CHECK(output_item_count IS NULL OR output_item_count>=0),\n attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal BETWEEN 1 AND 4),\n auth_refresh_claimed INTEGER NOT NULL DEFAULT 0 CHECK(auth_refresh_claimed IN (0,1)),\n retry_due_at_ms INTEGER CHECK(retry_due_at_ms IS NULL OR retry_due_at_ms>=0),\n last_failure_code TEXT CHECK(last_failure_code IS NULL OR length(CAST(last_failure_code AS BLOB)) BETWEEN 1 AND 96),\n resolution_code TEXT CHECK(resolution_code IS NULL OR length(CAST(resolution_code AS BLOB)) BETWEEN 1 AND 96),\n resolution_content_id INTEGER REFERENCES content(content_id),\n response_id TEXT CHECK(response_id IS NULL OR length(CAST(response_id AS BLOB))<=256),\n model_evidence BLOB CHECK(model_evidence IS NULL OR length(model_evidence) BETWEEN 7 AND 775),\n request_id TEXT CHECK(request_id IS NULL OR length(CAST(request_id AS BLOB))<=256),\n usage_uncached_tokens INTEGER CHECK(usage_uncached_tokens IS NULL OR usage_uncached_tokens>=0),\n usage_cache_read_tokens INTEGER CHECK(usage_cache_read_tokens IS NULL OR usage_cache_read_tokens>=0),\n usage_cache_write_tokens INTEGER CHECK(usage_cache_write_tokens IS NULL OR usage_cache_write_tokens>=0),\n usage_output_tokens INTEGER CHECK(usage_output_tokens IS NULL OR usage_output_tokens>=0),\n interrupted_by_command_key TEXT REFERENCES core_command(command_key),\n attempt_at INTEGER CHECK(attempt_at IS NULL OR attempt_at>0),\n retry_scheduled_at INTEGER CHECK(retry_scheduled_at IS NULL OR retry_scheduled_at>0),\n resolved_at INTEGER CHECK(resolved_at IS NULL OR resolved_at>0),\n history_floor INTEGER CHECK(history_floor IS NULL OR history_floor>0),\n history_level INTEGER CHECK(history_level IS NULL OR history_level BETWEEN 1 AND 3),\n history_dropped INTEGER CHECK(history_dropped IS NULL OR history_dropped>=0),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id) CHECK(tool_set_id>0),\n UNIQUE(operation_id,session_ref),\n FOREIGN KEY(session_ref,settings_revision) REFERENCES session_revision(session_ref,revision),\n CHECK((usage_uncached_tokens IS NULL AND usage_cache_read_tokens IS NULL AND usage_cache_write_tokens IS NULL AND usage_output_tokens IS NULL) OR (usage_uncached_tokens IS NOT NULL AND usage_cache_read_tokens IS NOT NULL AND usage_cache_write_tokens IS NOT NULL AND usage_output_tokens IS NOT NULL)),\n CHECK((resolution_code IS NULL AND retry_due_at_ms IS NOT NULL) OR (resolution_code IS NOT NULL AND retry_due_at_ms IS NULL)),\n CHECK((resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_at IS NOT NULL AND retry_scheduled_at IS NULL AND resolved_at IS NULL) OR (resolution_code IS NULL AND retry_due_at_ms>0 AND attempt_at IS NULL AND retry_scheduled_at IS NOT NULL AND resolved_at IS NULL) OR (resolution_code IS NOT NULL AND attempt_at IS NULL AND retry_scheduled_at IS NULL AND resolved_at IS NOT NULL)),\n CHECK(((resolution_code IS 'interrupted') AND interrupted_by_command_key IS NOT NULL) OR (coalesce(resolution_code,'')!='interrupted' AND interrupted_by_command_key IS NULL)),\n CHECK((history_floor IS NULL AND history_level IS NULL AND history_dropped IS NULL) OR (history_floor IS NOT NULL AND purpose=1 AND ((history_level IS NULL AND history_dropped IS NULL) OR (history_level IS NOT NULL AND history_dropped IS NOT NULL))))\n) STRICT",
-            "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,history_floor,history_level,history_dropped,tool_set_id) SELECT operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,history_floor,history_level,history_dropped, (SELECT coalesce(r.loaded_tool_set_id,r.tool_set_id) FROM session_revision r WHERE r.session_ref=model_operation_63.session_ref AND r.revision=model_operation_63.settings_revision) FROM model_operation_63",
-            "DROP TABLE model_operation_63",
+            "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,history_floor,history_level,history_dropped,tool_set_id) SELECT operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,history_floor,history_level,history_dropped, (SELECT coalesce(r.loaded_tool_set_id,r.tool_set_id) FROM session_revision r WHERE r.session_ref=model_operation_64.session_ref AND r.revision=model_operation_64.settings_revision) FROM model_operation_64",
+            "DROP TABLE model_operation_64",
             "CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND attempt_ordinal<4",
             "CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=4",
             "CREATE INDEX model_operation_session_history ON model_operation(session_ref,operation_id)",
@@ -761,11 +779,11 @@ pub const tables = [_]Table{
         .name = "tool_record",
         .columns = &.{
             .{ .name = "tool_record_id", .type = .int, .check = "tool_record_id>0" },
-            .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = tool_catalog.max_name_bytes } }, .check = "@charset(name,'A-Za-z0-9_-')" },
+            .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = tool_defs.max_name_bytes } }, .check = "@charset(name,'A-Za-z0-9_-')" },
             .{ .name = "owner", .type = .{ .tag = &.{ "rui", "provider", "mcp" } } },
             .{
                 .name = "server",
-                .type = .{ .text = .{ .min = 0, .max = tool_catalog.max_server_bytes } },
+                .type = .{ .text = .{ .min = 0, .max = tool_defs.max_server_bytes } },
                 .check = "@charset(server,'A-Za-z0-9_-') AND (owner='mcp' AND @octets(server)>0 OR owner<>'mcp' AND @octets(server)=0)",
             },
             .{ .name = "read_only", .type = .flag, .default = "0", .check = "(read_only=0 OR owner='mcp')" },
@@ -781,14 +799,14 @@ pub const tables = [_]Table{
     },
     // An ordered set of tool records, saved once: `digest` names its
     // members' content (tool_record.zig `SetDigest`). A Session's set holds at
-    // most max_tools, the wire's bound; the Host's catalog set up to
-    // max_catalog_records.
+    // most max_tools, the wire's bound; the Host tool set up to
+    // max_host_tool_records.
     .{
         .name = "tool_set",
         .columns = &.{
             .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" },
             .{ .name = "digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
-            .{ .name = "member_count", .type = .int, .check = std.fmt.comptimePrint("member_count BETWEEN 0 AND {d}", .{tool_catalog.max_catalog_records}) },
+            .{ .name = "member_count", .type = .int, .check = std.fmt.comptimePrint("member_count BETWEEN 0 AND {d}", .{tool_defs.max_host_tool_records}) },
         },
         .primary_key = &.{"tool_set_id"},
         .uniques = &.{&.{"digest"}},
@@ -807,10 +825,10 @@ pub const tables = [_]Table{
         },
         .without_rowid = true,
     },
-    // The Host's catalog: the set its last open saved (tool_record.zig
-    // `Catalog`), which the next start reads back. One row.
+    // The Host tool set: the set its last open saved (tool_record.zig
+    // `HostToolSet`), which the next start reads back. One row.
     .{
-        .name = "host_catalog",
+        .name = "host_tool_set",
         .columns = &.{
             .{ .name = "slot", .type = .int, .check = "slot=1" },
             .{ .name = "tool_set_id", .type = .int },
@@ -1406,7 +1424,7 @@ pub const tables = [_]Table{
             .{ .name = "authorized", .type = .flag },
             .{ .name = "attempt_ordinal", .type = .int, .default = "0", .check = "attempt_ordinal IN (0,1)" },
             .{ .name = "bash_timeout_override_ms", .type = .int, .nullable = true, .check = "bash_timeout_override_ms IS NULL OR bash_timeout_override_ms>0" },
-            .{ .name = "bash_timeout_ms", .type = .int, .nullable = true, .check = "bash_timeout_ms IS NULL OR bash_timeout_ms>0" },
+            .{ .name = "attempt_timeout_ms", .type = .int, .nullable = true, .check = "attempt_timeout_ms IS NULL OR attempt_timeout_ms>0" },
             .{ .name = "sender_handle", .type = .{ .text = .{ .min = 32, .max = 32 } }, .nullable = true, .check = "@charset(sender_handle,'0-9a-f')" },
             .{
                 .name = "resolution_code",
@@ -1435,7 +1453,7 @@ pub const tables = [_]Table{
         },
         .checks = &.{
             "@distinct(resolution_code,'denied') OR (authorized=0 AND attempt_ordinal=0)",
-            "(attempt_ordinal=0 AND bash_timeout_ms IS NULL) OR (attempt_ordinal=1 AND bash_timeout_ms IS NOT NULL)",
+            "(attempt_ordinal=0 AND attempt_timeout_ms IS NULL) OR (attempt_ordinal=1 AND attempt_timeout_ms IS NOT NULL)",
             "(resolution_code IS NULL AND resolution_content_id IS NULL AND acceptance_position IS NULL) OR " ++
                 "(resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL AND acceptance_position IS NOT NULL)",
             "(attempt_ordinal=1)=(attempt_at IS NOT NULL)",

@@ -885,14 +885,14 @@ pub const Launch = struct {
     presets: []const core_tools.Preset = &.{},
 };
 
-/// Lists each MCP server and saves the Host's catalog: the built-ins and
+/// Lists each MCP server and saves the Host tool set: the built-ins and
 /// the servers' tools, with an unreachable server's last saved tools kept
 /// (D147). A name two sources share refuses the start (D142).
 noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, storage: *store_module.Store, servers: []const launch_frame.Frame.McpServer, stop: ?std.posix.fd_t) !void {
-    var saved = try storage.readCatalog(arena);
-    const kept: ?tools.Catalog = if (saved) |*found| found.catalog() else null;
+    var saved = try storage.readHostToolSet(arena);
+    const kept: ?tools.HostToolSet = if (saved) |*found| found.toolSet() else null;
     var collision: mcp_offered.Collision = .{};
-    const catalog = mcp_offered.collect(io, arena, scratch, servers, if (kept) |*value| value else null, &collision, stop) catch |err| switch (err) {
+    const host_tool_set = mcp_offered.collect(io, arena, scratch, servers, if (kept) |*value| value else null, &collision, stop) catch |err| switch (err) {
         // The launcher closed stdin: stop as a closed stdin does later.
         error.Stopped => return error.EffectAwareShutdown,
         error.ToolNameCollision => {
@@ -909,9 +909,9 @@ noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem
         },
         else => |other| return other,
     };
-    const owned = try arena.create(tools.Catalog);
-    owned.* = catalog;
-    try storage.saveCatalog(owned);
+    const owned = try arena.create(tools.HostToolSet);
+    owned.* = host_tool_set;
+    try storage.saveHostToolSet(owned);
 }
 
 pub fn serve(
@@ -1014,10 +1014,10 @@ pub fn serve(
     if (diagnostics) |*writer| try recordCapacity(writer, intake_capacity, descriptor_requirement.total, descriptor_limit_text);
     var startup_failure: []const u8 = "startup_error";
     errdefer if (diagnostics) |*writer| writer.record("failed", startup_failure);
-    // The catalog's records point into this arena, and the Store keeps the
-    // catalog for its life, so it outlives the Store.
-    var catalog_memory = std.heap.ArenaAllocator.init(allocator);
-    defer catalog_memory.deinit();
+    // The tool set's records point into this arena, and the Store keeps the
+    // tool set for its life, so it outlives the Store.
+    var tool_set_memory = std.heap.ArenaAllocator.init(allocator);
+    defer tool_set_memory.deinit();
     var storage: store_module.Store = undefined;
     openStoreForHost(io, &storage, &lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
         if (err == error.StoreIdentityMismatch) startup_failure = "store_identity_mismatch";
@@ -1037,7 +1037,7 @@ pub fn serve(
         bash_timeout_ms,
         home,
         launch,
-        &catalog_memory,
+        &tool_set_memory,
         mcp_servers,
         intake_capacity,
         descriptor_requirement.total,
@@ -1063,7 +1063,7 @@ fn serveOpened(
     bash_timeout_ms: u64,
     home: ?[]const u8,
     launch: ?Launch,
-    catalog_memory: *std.heap.ArenaAllocator,
+    tool_set_memory: *std.heap.ArenaAllocator,
     mcp_servers: []const launch_frame.Frame.McpServer,
     intake_capacity: usize,
     descriptor_requirement: usize,
@@ -1073,7 +1073,7 @@ fn serveOpened(
     diagnostic_open_error: ?anyerror,
     readiness_owned: *bool,
 ) !void {
-    if (mcp_servers.len != 0) try offerMcpTools(io, catalog_memory.allocator(), allocator, storage, mcp_servers, if (launch) |value| value.stdin else null);
+    if (mcp_servers.len != 0) try offerMcpTools(io, tool_set_memory.allocator(), allocator, storage, mcp_servers, if (launch) |value| value.stdin else null);
     try storage.validateRetryWaits(limits.retry_waits_ms);
     try lease.prepareForServing(hooks.fails(.startup_cleanup));
 
@@ -1242,8 +1242,8 @@ noinline fn openStoreForHost(
         .found_schema_version = &found_schema_version,
         .identity_mismatch = &identity_mismatch,
         .migration_notice = .{ .context = &migration, .notify = StartupMigration.notify },
-        // With MCP servers the catalog is saved below, once they are listed.
-        .catalog = if (!has_mcp) &tools.built_in else null,
+        // With MCP servers the tool set is saved below, once they are listed.
+        .host_tool_set = if (!has_mcp) &tools.built_in_tool_set else null,
     };
     // The login is borrowed only by admission and wiped on every exit.
     defer if (mysql_url) |url| url.wipe();
@@ -3159,7 +3159,7 @@ test "command observation full and both unchanged tiers render byte exactly with
     try std.testing.expectEqual(protocol.shapeBytes(protocol.command_observation_reply.absent), host_reply.commandObservationBytes(&observed));
 }
 
-test "Message observation work and recovery fit the unchanged resident response bound" {
+test "Message observation work and recovery fit their exchange-owned response bound" {
     const max = std.math.maxInt(u64);
     const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
     const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
@@ -3179,9 +3179,25 @@ test "Message observation work and recovery fit the unchanged resident response 
     var response: protocol.CommandObservationBuffer = .{};
     try response.render(host_reply.renderFullCommandObservation, .{ &escaped_key, &observation, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)) });
     try std.testing.expectEqual(protocol.command_observation_reply.maxBytes(.message) - protocol.shapeBytes(protocol.command_observation_reply.code), response.len);
-    // The existing response owner is sized by host-info's escaped Store path,
-    // not these added per-observation facts; no resident pool grows.
-    try std.testing.expectEqual(protocol.max_host_info_response_bytes, protocol.max_response_bytes);
+    // Observations use their exchange-owned writer, not ResponseBuffer.
+    // Neither host-info nor mutation diagnostics determine this bound.
+}
+
+test "MCP rejection diagnostics fit the protocol-owned response bound" {
+    // The resident owner must cover the complete string hole, not just the
+    // shorter semantic advisory emitted for valid tool/server names.
+    try std.testing.expect(protocol.configuration_reply.max_bytes <= protocol.max_response_bytes);
+    try std.testing.expect(protocol.message_reply.max_bytes <= protocol.max_response_bytes);
+    var host_tool_set = tools.built_in_tool_set;
+    host_tool_set.configured_servers = &.{"notes"};
+    var response: protocol.ResponseBuffer = .{};
+    try response.render(host_reply.renderMessageReply, .{ "", store_module.MessageReply{ .rejected = .{
+        .replayed = false,
+        .code = .mcp_server_unavailable,
+        .message = host_tool_set.missingTool("lookup"),
+        .content = .{ .length = 4, .digest = protocol.contentDigest("task") },
+    } } });
+    try std.testing.expect(std.mem.indexOf(u8, response.slice(), "MCP server notes is unavailable and may provide it") != null);
 }
 
 test "control response variants fit exact worst-case JSON bounds" {
@@ -4771,10 +4787,10 @@ test "Host startup projects MCP offers after a changed listing and restart" {
         var script: Script = .{ .reply = reply };
         try script.start();
         defer script.stop();
-        var catalog_memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer catalog_memory.deinit();
+        var tool_memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer tool_memory.deinit();
         var storage: store_module.Store = undefined;
-        try testing.testingStoreCatalog(&storage, &tmp, std.testing.io, null);
+        try testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
         defer storage.close() catch unreachable;
         var server: launch_frame.Frame.McpServer = .{};
         try server.name.set("docs");
@@ -4782,7 +4798,7 @@ test "Host startup projects MCP offers after a changed listing and restart" {
         server.bearer_token.len = 6;
         var url: [128]u8 = undefined;
         try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
-        try offerMcpTools(std.testing.io, catalog_memory.allocator(), std.testing.allocator, &storage, &.{server}, null);
+        try offerMcpTools(std.testing.io, tool_memory.allocator(), std.testing.allocator, &storage, &.{server}, null);
         if (round == 0) {
             var cwd: [protocol.max_workspace_bytes]u8 = undefined;
             var configure = try testing.completeConfiguration("restart-mcp-config", "", try testing.canonicalCwd(std.testing.io, &cwd), "model-a");

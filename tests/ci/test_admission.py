@@ -11,7 +11,7 @@ import shlex
 import unittest
 
 import build_files
-from select_tests import Graph, select
+from select_tests import select
 import steps
 from strict_paths import STRICT, strict
 
@@ -57,7 +57,7 @@ def plan_sources():
     Here the real Git/selector/workflow handoff runs on a small source graph.
     """
     names = ['tests/ci/' + name for name in (
-        'select_tests.py', 'docs_only.py', 'qualification.py', 'strict_paths.py', 'platform_boundary.py',
+        'select_tests.py', 'ci_plan.py', 'docs_only.py', 'qualification.py', 'strict_paths.py', 'platform_boundary.py',
         'import_architecture.py', 'build_files.py', 'release_numbers.py', 'stack_frames.json')]
     names += [path.relative_to(ROOT).as_posix() for path in build_files.files()]
     names += ['src/store/schema.zig']  # The format/digest tests mutate this real owner.
@@ -105,11 +105,11 @@ class PlanFixture:
         self.git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-qm', 'fixture')
         return self.git('rev-parse', 'HEAD')
 
-    def run(self, base=None, candidate=None, event='pull_request', phase='review', promotion=False):
+    def run(self, base=None, candidate=None, event='pull_request', draft=False, promotion=False):
         self.output = self.root / 'output'
         self.output.write_text('')
         script = step_script(job(CHECK.read_text(), 'plan'), 'Select existing targets')
-        env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', BASE=base or self.base, PHASE=phase, EVENT_NAME=event,
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', BASE=base or self.base, DRAFT=str(draft).lower(), EVENT_NAME=event,
                    PROMOTION=str(promotion).lower(),
                    GITHUB_REF_NAME='5/merge', CANDIDATE_REF=candidate or self.git('rev-parse', 'HEAD'),
                    GITHUB_OUTPUT=str(self.output), GITHUB_STEP_SUMMARY=str(self.root / 'summary'))
@@ -252,7 +252,7 @@ class AdmissionTest(unittest.TestCase):
 
     def test_documentation_linux_requires_exact_skips_and_controls(self):
         script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
-        env = dict(CHANGE_KIND='documentation', PLAN_RESULT='success', POLICY_RESULT='skipped',
+        env = dict(DRAFT_RUN='false', CHANGE_KIND='documentation', PLAN_RESULT='success', POLICY_RESULT='skipped',
                    TARGETS='[]', SPLIT='false', CODEGEN='false', BUILD_RESULT='skipped',
                    UNIT_RESULT='skipped', CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped',
                    TYPECHECK='false', TYPECHECK_RESULT='skipped')
@@ -265,7 +265,7 @@ class AdmissionTest(unittest.TestCase):
         for key, good in env.items():
             values = ('success', 'skipped', 'failure', 'cancelled', 'queued', 'pending', 'in_progress', '') if key.endswith('_RESULT') else ('', 'unknown', 'true', '["check"]')
             for value in values:
-                if value == good:
+                if value == good or (key == 'DRAFT_RUN' and value == 'true'):
                     continue
                 with self.subTest(key=key, value=value):
                     self.assertNotEqual(run(dict(env, **{key: value})), 0)
@@ -276,7 +276,7 @@ class AdmissionTest(unittest.TestCase):
 
     def test_linux_legacy_default_cannot_admit_an_explicit_unknown_kind(self):
         script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
-        env = dict(PLAN_RESULT='success', POLICY_RESULT='success', TARGETS='[]', SPLIT='false',
+        env = dict(DRAFT_RUN='false', PLAN_RESULT='success', POLICY_RESULT='success', TARGETS='[]', SPLIT='false',
                    CODEGEN='false', BUILD_RESULT='skipped', UNIT_RESULT='skipped',
                    CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped', TYPECHECK='false', TYPECHECK_RESULT='skipped')
         self.assertEqual(subprocess.run(['bash', '-euc', script], env=env).returncode, 0)
@@ -290,6 +290,11 @@ class AdmissionTest(unittest.TestCase):
         policy = job(text, 'policy')
         self.assertIn('needs: plan', policy)
         self.assertIn("needs.plan.outputs.change_kind == 'normal'", policy)
+        self.assertIn("needs.plan.outputs.draft_run == 'false'", policy)
+        self.assertIn('draft_run: ${{ steps.select.outputs.draft_run }}', job(text, 'plan'))
+        # Only the plan derives routing from PR state; admission independently refuses drafts.
+        for name in ('policy', 'linux', 'previous_release_upgrade'):
+            self.assertNotIn('github.event.pull_request.draft', job(text, name))
         self.assertIn("needs.plan.outputs.upgrade == 'true'", job(text, 'previous_release_upgrade'))
         for name in ('macos_build', 'macos_suites', 'macos'):
             self.assertIn("needs.plan.outputs.native == 'true'", job(text, name))
@@ -376,7 +381,7 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn('uses: ./.github/workflows/previous-release-upgrade.yml', caller)
         self.assertIn('candidate-ref: ${{ needs.plan.outputs.candidate_ref }}', caller)
         self.assertIn("github.event_name == 'pull_request'", caller)
-        self.assertIn('!github.event.pull_request.draft', caller)
+        self.assertNotIn('github.event.pull_request.draft', caller)
         text = UPGRADE.read_text()
         self.assertIn('  workflow_call:', text)
         self.assertIn('      candidate-ref:', text)
@@ -421,64 +426,6 @@ class CandidatePlanTest(unittest.TestCase):
             first.write('src/history_memo.zig', 'changed in first fixture\n')
             self.assertEqual((second.repo / 'src/history_memo.zig').read_text(), '')
             self.assertEqual(plan_sources()['src/history_memo.zig'], '')
-
-    def test_ready_plan_preserves_owner_selection_and_core_superset(self):
-        from qualification import shards, split_build
-        from select_tests import CHECK_COVERS
-        available = set(build_files.steps())
-        with PlanFixture() as fixture:
-            names = fixture.git('ls-files', '-z').split('\0')
-            graph = Graph(names, lambda name: (fixture.repo / name).read_text())
-            for path in ('README.md', 'docs/guide.md', 'docs/assets/diagram.svg',
-                         'src/store.zig', 'build.zig', 'src/os/descriptor_limit.zig',
-                         'src/AnswerRenderer.zig', 'tests/ci/unknown_policy.py',
-                         '.github/workflows/check.yml', 'unknown.txt'):
-                fixture.git('reset', '--hard', fixture.base)
-                content = ((ROOT / path).read_text() + '\n// fixture change\n' if path == 'build.zig'
-                           else 'Changed. Two sentences on one line.\n')
-                fixture.write(path, content)
-                candidate = fixture.commit()
-                for event, phase in (('pull_request', 'review'), ('pull_request', 'development'),
-                                     ('workflow_dispatch', 'review')):
-                    with self.subTest(path=path, event=event, phase=phase):
-                        try:
-                            before = fixture.git('show', f'{fixture.base}:{path}')
-                        except subprocess.CalledProcessError:
-                            before = None
-                        # The plan judges content-keyed paths by both revisions, as here.
-                        selection = select([path], phase, available, graph, contents={path: (before, content.rstrip('\n'))})
-                        output = fixture.plan(self, candidate=candidate, event=event, phase=phase)
-                        docs = event == 'pull_request' and path in (
-                            'README.md', 'docs/guide.md', 'docs/assets/diagram.svg')
-                        self.assertEqual(output['change_kind'], 'documentation' if docs else 'normal')
-                        self.assertEqual(output['candidate_ref'], candidate)
-                        if docs:
-                            self.assert_documentation_plan(output)
-                            continue
-                        codegen = event == 'pull_request' and bool({'check', 'stack-frames'} & set(selection['targets']))
-                        linux = [t for t in selection['targets'] if not (codegen and t == 'stack-frames')]
-                        self.assertEqual(json.loads(output['targets']), linux)
-                        self.assertEqual(json.loads(output['linux_matrix']), shards(linux, mysql_suites=selection['mysql_suites']))
-                        self.assertEqual(output['linux_split'], str(split_build(linux)).lower())
-                        self.assertEqual(output['linux_codegen'], str(codegen).lower())
-                        self.assertEqual(output['cache_execution'], str(selection['cache_execution_checks']).lower())
-                        self.assertEqual(output['typecheck_macos'], str(selection['typecheck_macos']).lower())
-                        self.assertEqual(output['linux_memory'], str(selection['linux_memory_checks']).lower())
-                        self.assertEqual(json.loads(output['policy_skips']), selection['policy_skips'])
-                        required = event == 'pull_request' and phase == 'review'
-                        self.assertEqual(output['upgrade'], str(required and selection['upgrade_required']).lower())
-                        if required and selection['mac_required']:
-                            expected = selection['native_targets'] or ['check']
-                            self.assertEqual(json.loads(output['native_targets']), expected)
-                            self.assertEqual(output['native'], 'true')
-                            self.assertEqual(output['retry'], 'false')
-                            self.assertEqual(json.loads(output['macos_matrix']), shards(expected, 'macos'))
-                        else:
-                            # Linux predicts Mac for every other path; promotion runs Mac.
-                            self.assertEqual(json.loads(output['native_targets']), [])
-                            self.assertEqual(output['native'], 'false')
-                            if required:
-                                self.assertEqual(output['retry'], 'false')
 
     def test_ready_prs_run_the_upgrade_only_for_what_it_exercises(self):
         available = set(build_files.steps())
@@ -527,6 +474,9 @@ class CandidatePlanTest(unittest.TestCase):
 
     def assert_documentation_plan(self, output):
         self.assertEqual(output['change_kind'], 'documentation')
+        self.assert_quick_plan(output)
+
+    def assert_quick_plan(self, output):
         for key in ('targets', 'native_targets'):
             self.assertEqual(output[key], '[]', key)
         for key in ('linux_matrix', 'macos_matrix'):
@@ -571,6 +521,22 @@ class CandidatePlanTest(unittest.TestCase):
             self.assertEqual(fixture.plan(self, base=stale)['change_kind'], 'normal')
             self.assert_documentation_plan(fixture.plan(self, base=pr_base))
 
+    def test_plan_step_serializes_the_value_owners_result(self):
+        with PlanFixture() as fixture:
+            fixture.write('tests/ci/ci_plan.py', """from types import SimpleNamespace
+
+def plan(selection, *, event_name, draft, promotion, change_kind):
+    return SimpleNamespace(outputs=dict(owner='called', event=event_name, draft=draft,
+        promotion=promotion, kind=change_kind.value, base=selection['base']),
+        selection=dict(summary='from owner'))
+""")
+            candidate = fixture.commit()
+            output = fixture.plan(self, candidate=candidate, draft=True)
+            self.assertEqual(output, dict(owner='called', event='pull_request', draft='true',
+                promotion='false', kind='normal', base=fixture.base, candidate_ref=candidate))
+            summary = (fixture.root / 'summary').read_text()
+            self.assertIn('"summary": "from owner"', summary)
+
     def test_plan_checks_whitespace_and_invalid_base(self):
         with PlanFixture() as fixture:
             fixture.write('README.md', 'Trailing whitespace.  \n')
@@ -580,7 +546,7 @@ class CandidatePlanTest(unittest.TestCase):
             self.assertIn('trailing whitespace', failed.stdout)
             self.assertNotEqual(fixture.run(base='missing-ref', candidate=candidate).returncode, 0)
 
-    def test_empty_deleted_asset_and_draft_plans(self):
+    def test_empty_deleted_and_asset_classification(self):
         with PlanFixture() as fixture:
             empty = fixture.plan(self)
             self.assertEqual(empty['change_kind'], 'normal')
@@ -592,10 +558,8 @@ class CandidatePlanTest(unittest.TestCase):
             fixture.git('reset', '--hard', fixture.base)
             fixture.write('docs/images/screen.png', 'asset\n')
             asset = fixture.commit()
-            output = fixture.plan(self, candidate=asset, phase='development')
+            output = fixture.plan(self, candidate=asset)
             self.assert_documentation_plan(output)
-            # Draft classification does not make draft admission succeed.
-            self.assertNotEqual(AdmissionTest().admission(**documentation_env(), DRAFT='true').returncode, 0)
 
     def test_documentation_plan_flows_through_real_linux_and_admission_scripts(self):
         workflow = CHECK.read_text()
@@ -611,36 +575,72 @@ class CandidatePlanTest(unittest.TestCase):
                            linux_build='skipped', linux_build_unit='skipped', linux_codegen='skipped',
                            linux_suites='skipped', macos_typecheck='skipped')
             for name, script in (('linux', linux), ('admission', admission)):
-                body = job(workflow, name)
-                env = {}
-                for key, expression in re.findall(r'(?m)^          ([A-Z_]+): \$\{\{ (.*?) \}\}$', body):
-                    if expression.startswith('needs.plan.outputs.'):
-                        env[key] = output[expression.removeprefix('needs.plan.outputs.')]
-                    elif expression == 'github.event.pull_request.draft':
-                        env[key] = 'false'
-                    elif expression == 'github.token':
-                        continue  # only the failure explanation reads it
-                    else:
-                        env[key] = results[expression.split('.')[1]]
-                self.assertTrue(env)
-                result = subprocess.run(['bash', '-euc', script], env=env, capture_output=True, text=True)
+                result = self.aggregate(workflow, name, script, output, results)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_future_selector_obligations_veto_documentation(self):
-        for key, value in (('targets', ['test-logic']), ('native_targets', ['test-logic']),
-                           ('native_required', True), ('mac_required', True), ('upgrade_required', True),
-                           ('server_targets', ['test-logic']), ('cache_execution_checks', True), ('typecheck_macos', True),
-                           ('linux_memory_checks', True), ('manual_checks', ['diagnostic'])):
-            with self.subTest(obligation=key), PlanFixture() as fixture:
-                path = fixture.repo / 'tests/ci/select_tests.py'
-                source = path.read_text().replace('    result["base"] = base',
-                    f'    result[{key!r}] = {value!r}\n    result["base"] = base')
-                path.write_text(source)
-                baseline = fixture.commit()
-                fixture.write('README.md', 'Changed documentation.\n')
-                candidate = fixture.commit()
-                output = fixture.plan(self, base=baseline, candidate=candidate)
-                self.assertEqual(output['change_kind'], 'normal')
+    @staticmethod
+    def aggregate(workflow, name, script, output, results, draft=False):
+        # Resolve real step expressions rather than restating plan values.
+        env = {}
+        for key, expression in re.findall(r'(?m)^          ([A-Z_]+): \$\{\{ (.*?) \}\}$', job(workflow, name)):
+            if expression.startswith('needs.plan.outputs.'):
+                env[key] = output[expression.removeprefix('needs.plan.outputs.')]
+            elif expression == 'github.event.pull_request.draft':
+                env[key] = str(draft).lower()
+            elif expression == 'github.token':
+                continue  # only the failure explanation reads it
+            else:
+                env[key] = results[expression.split('.')[1]]
+        assert env
+        return subprocess.run(['bash', '-euc', script], env=env, capture_output=True, text=True)
+
+    def test_draft_quick_plan_cannot_replace_ready_acceptance(self):
+        workflow = CHECK.read_text()
+        linux = step_script(job(workflow, 'linux'), 'Require every selected Linux part')
+        admission = step_script(job(workflow, 'admission'), 'Require candidate acceptance')
+        path = 'build.zig'
+        with PlanFixture() as fixture:
+            before = (fixture.repo / path).read_text() if (fixture.repo / path).exists() else ''
+            fixture.write(path, before + '\n// fixture change\n')
+            candidate = fixture.commit()
+            draft = fixture.plan(self, candidate=candidate, draft=True)
+            self.assertEqual(draft['change_kind'], 'normal')
+            self.assertEqual(draft['draft_run'], 'true')
+            self.assert_quick_plan(draft)
+            results = {name: 'skipped' for name in (
+                'policy', 'macos', 'previous_release_upgrade', 'cache_execution',
+                'linux_build', 'linux_build_unit', 'linux_codegen', 'linux_suites', 'macos_typecheck')}
+            results.update(plan='success', linux='success')
+            self.assertEqual(self.aggregate(workflow, 'linux', linux, draft, results, draft=True).returncode, 0)
+            refused = self.aggregate(workflow, 'admission', admission, draft, results, draft=True)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn('A draft never admits', refused.stdout)
+            # A ready event recomputes the plan even for the exact same tree.
+            ready = fixture.plan(self, candidate=candidate)
+            self.assertEqual(ready['change_kind'], 'normal')
+            self.assertEqual(ready['draft_run'], 'false')
+            has_targets = bool(json.loads(ready['targets']))
+            self.assertTrue(has_targets)
+            selected = dict(results, policy='success',
+                            linux_build='success' if has_targets else 'skipped',
+                            linux_suites='success' if has_targets else 'skipped',
+                            linux_build_unit='success' if ready['linux_split'] == 'true' else 'skipped',
+                            linux_codegen='success' if ready['linux_codegen'] == 'true' else 'skipped',
+                            macos_typecheck='success' if ready['typecheck_macos'] == 'true' else 'skipped')
+            self.assertEqual(self.aggregate(workflow, 'linux', linux, ready, selected).returncode, 0)
+            for part in ('policy', 'linux_build', 'linux_build_unit', 'linux_codegen', 'linux_suites', 'macos_typecheck'):
+                if selected[part] == 'success':
+                    with self.subTest(skipped=part):
+                        self.assertNotEqual(self.aggregate(workflow, 'linux', linux, ready,
+                            dict(selected, **{part: 'skipped'})).returncode, 0)
+            accepted = dict(selected,
+                macos='success' if ready['native'] == 'true' else 'skipped',
+                previous_release_upgrade='success' if ready['upgrade'] == 'true' else 'skipped',
+                cache_execution='success' if ready['cache_execution'] == 'true' else 'skipped')
+            result = self.aggregate(workflow, 'admission', admission, ready, accepted)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            # Even falsely relabelling the draft's event as ready cannot admit its skipped policy.
+            self.assertNotEqual(self.aggregate(workflow, 'admission', admission, draft, results).returncode, 0)
 
     def test_only_a_new_head_reopen_or_readiness_starts_a_candidate(self):
         # `edited` (title, body or base) and `converted_to_draft` cancelled a
@@ -702,24 +702,6 @@ class ReleaseFlowTest(unittest.TestCase):
                 with self.subTest(key=key, result=result):
                     self.assertNotEqual(subprocess.run(['bash', '-c', script],
                         env=dict(good, **{key: result}), capture_output=True).returncode, 0)
-
-    def test_promotion_plan_runs_the_full_tier_on_both_systems(self):
-        with PlanFixture() as fixture:
-            for path in ('src/history_memo.zig', 'tests/ci/unknown_policy.py'):
-                fixture.git('reset', '--hard', fixture.base)
-                fixture.write(path, 'changed\n')
-                candidate = fixture.commit()
-                with self.subTest(path=path):
-                    output = fixture.plan(self, candidate=candidate, event='workflow_dispatch', promotion=True)
-                    self.assertEqual(output['change_kind'], 'normal')
-                    linux, mac = json.loads(output['targets']), json.loads(output['native_targets'])
-                    self.assertTrue({'check-full', 'test-logic', 'admission-debug-integration', 'stack-frames'} <= set(linux))
-                    self.assertTrue({'check-full', 'test-logic', 'admission-debug-integration'} <= set(mac))
-                    self.assertNotIn('check', linux + mac)
-                    self.assertEqual(output['native'], 'true')
-                    self.assertEqual(output['retry'], 'false')
-                    self.assertEqual(output['upgrade'], 'false')  # promote.yml calls it directly
-                    self.assertEqual(output['linux_codegen'], 'false')
 
     BISECT = 'python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect"'
 

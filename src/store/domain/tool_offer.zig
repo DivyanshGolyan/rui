@@ -1,44 +1,11 @@
-//! find_tools changes intent through the same revision writer as configure.
-//! The current offer is a projection, frozen only by Operation admission.
+//! A Session's current offer: its tool intent projected onto the Host's saved
+//! tool set. Derived on every read, frozen only by Operation admission.
 const std = @import("std");
 const tools = @import("../../tool_record.zig");
 const tool_name = @import("../../tool_name.zig");
-const content_string = @import("../../content_string.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const rsql = @import("../rsql.zig");
-const command = @import("command.zig");
-const configuration = @import("configuration.zig");
 const tool_set = @import("tool_set.zig");
-
-pub const Sets = struct { tools: u64, loaded: ?u64 };
-const update = rsql.Write(.{
-    .sql = "UPDATE session SET tool_set_id=?2,loaded_tool_set_id=?3,revision=?4 WHERE session_ref=@session(?1)",
-    .Args = struct { session: rsql.SessionHead, tools: u64, loaded: ?u64, revision: u64 },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
-});
-
-/// Write changed loaded intent and its command/revision/change rows. The
-/// caller owns the transaction; this round consumes all borrowed arguments.
-pub fn queue(a: anytype, head: rsql.SessionHead, revision: u64, before: Sets, after: Sets, key: []const u8, answer: *const command.StoredAnswer) !void {
-    std.debug.assert(before.tools != after.tools or before.loaded != after.loaded);
-    a.write(update, .{ .session = head, .tools = after.tools, .loaded = after.loaded, .revision = revision });
-    var applied: configuration.Applied = .{
-        .session = .{},
-        .head = head,
-        .revision = revision,
-        .instructions_id = null,
-        .output_schema_id = null,
-        .instructions_updated = false,
-        .changes = .empty,
-    };
-    if (before.tools != after.tools) applied.changes.insert(.tools);
-    if (before.loaded != after.loaded) applied.changes.insert(.loaded_tools);
-    try applied.session.set(&head.ref);
-    const digest = content_string.digest(key);
-    try configuration.queueConfiguredCommand(a, &applied, key, .configure, &digest, null, null, answer);
-    // The command borrows the formatted Session and digest above.
-    try a.run();
-}
 
 /// One relational projection for current offers. Intent supplies membership;
 /// the Host supplies MCP identities, while built-in identities remain frozen.
@@ -47,7 +14,7 @@ const projected = rsql.Read(.{
         "description.content_id,description.byte_length,CASE WHEN intended.owner='mcp' THEN host.tool_set_id ELSE member.tool_set_id END AS source," ++
         "EXISTS(SELECT 1 FROM tool_set_member lm JOIN tool_record lt ON lt.tool_record_id=lm.tool_record_id WHERE lm.tool_set_id=?2 AND lt.name=tool.name) AS loaded " ++
         "FROM tool_set_member member JOIN tool_record intended ON intended.tool_record_id=member.tool_record_id " ++
-        "JOIN host_catalog host ON host.slot=1 " ++
+        "JOIN host_tool_set host ON host.slot=1 " ++
         "JOIN tool_record tool ON tool.tool_record_id=CASE WHEN intended.owner='mcp' THEN " ++
         "(SELECT hm.tool_record_id FROM tool_set_member hm JOIN tool_record ht ON ht.tool_record_id=hm.tool_record_id WHERE hm.tool_set_id=host.tool_set_id AND ht.name=intended.name) " ++
         "ELSE intended.tool_record_id END " ++
@@ -102,11 +69,18 @@ const Projection = struct {
     }
 };
 
-/// Only Operation admission saves the effective offer. Built-in-only intent
-/// already names its immutable effective set, requiring no additional round.
+/// True when the loaded intent of Session alias `s` names an MCP record the
+/// Host's saved tool set no longer holds. Records are saved once per identity,
+/// so otherwise the projection is the loaded intent set itself.
+pub const stale_sql = "EXISTS(SELECT 1 FROM tool_set_member tm JOIN tool_record tool ON tool.tool_record_id=tm.tool_record_id " ++
+    "WHERE tm.tool_set_id=" ++ tool_set.offeredSetSql("s") ++ " AND tool.owner='mcp' AND tm.tool_record_id NOT IN " ++
+    "(SELECT hm.tool_record_id FROM host_tool_set host JOIN tool_set_member hm ON hm.tool_set_id=host.tool_set_id WHERE host.slot=1))";
+
+/// Only Operation admission saves the effective offer. Intent that is not
+/// `stale` (see `stale_sql`) already names it, requiring no additional round.
 /// Scratch is reused Store memory; callers cannot hold another scratch lease.
-pub fn freeze(a: anytype, allowed: u64, loaded: ?u64, has_mcp: bool) !u64 {
-    if (!has_mcp) return loaded orelse allowed;
+pub fn freeze(a: anytype, allowed: u64, loaded: ?u64, stale: bool) !u64 {
+    if (!stale) return loaded orelse allowed;
     const scratch = a.store.reportScratch(Projection);
     scratch.* = .{};
     try project(a, allowed, loaded, scratch);

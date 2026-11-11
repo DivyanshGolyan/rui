@@ -12,6 +12,14 @@ pub fn Event(comptime A: type) type {
     return union(enum) { editor: keymap.Outcome(A), message: Ticket, command, busy };
 }
 pub const View = struct { bytes: []const u8, cursor: usize };
+/// The whole logical draft, borrowing bytes until the input next changes.
+/// Terminal decoding/paste state and outstanding recall reads stay local.
+pub const Snapshot = struct {
+    bytes: []const u8,
+    cursor: usize,
+    anchor: ?Recalled = null,
+    rejected: ?keymap.Refusal = null,
+};
 /// A Message the person sent, by its Activity position, read at `end`.
 pub const Recalled = struct { position: u64, end: u64 };
 /// Ctrl-P and Ctrl-N over the Messages the person sent.
@@ -89,6 +97,29 @@ pub fn replace(self: *Self, change: Editor.Replacement) Editor.KeyOutcome {
 pub fn composition(self: *const Self) View {
     const editor = &self.editors[self.active];
     return .{ .bytes = editor.buffer[0..editor.length], .cursor = editor.cursor };
+}
+
+/// Captures the active draft without transferring its storage.
+pub fn snapshot(self: *const Self) Snapshot {
+    const editor = &self.editors[self.active];
+    return .{
+        .bytes = editor.buffer[0..editor.length],
+        .cursor = editor.cursor,
+        .anchor = self.recall.shown,
+        .rejected = editor.rejected,
+    };
+}
+
+/// Copies a saved draft into the active bank, leaving any submitted loan alone.
+pub fn restore(self: *Self, draft: Snapshot) void {
+    std.debug.assert(draft.bytes.len <= capacity and draft.cursor <= draft.bytes.len);
+    self.clear();
+    const editor = &self.editors[self.active];
+    @memmove(editor.buffer[0..draft.bytes.len], draft.bytes);
+    editor.length = draft.bytes.len;
+    editor.cursor = draft.cursor;
+    editor.rejected = draft.rejected;
+    self.recall.shown = draft.anchor;
 }
 
 pub fn appEvent(self: *Self, comptime keys: anytype, event: @import("vaxis").vxfw.Event, pasting: bool, selected: bool) Event(@TypeOf(keys).Action) {
@@ -269,6 +300,52 @@ pub fn release(self: *Self, ticket: Ticket) !void {
 fn checked(self: *const Self, ticket: Ticket) !@TypeOf(self.submitted.?) {
     if (ticket.owner != self or ticket.serial != self.serial) return error.SubmissionChanged;
     return self.submitted orelse error.NoSubmission;
+}
+
+test "SessionInput snapshot restore keeps recall anchor completion and submitted loan independent" {
+    const gpa = std.testing.allocator;
+    const input = try gpa.create(Self);
+    defer gpa.destroy(input);
+    input.init();
+    _ = input.typed("original");
+    const ticket = input.typed("\r").message;
+
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "recalled", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "aéZ", 0);
+    const found: Found = .{ .at = .{ .position = 7, .end = 9 }, .length = "aéZ".len, .slash = false };
+    try input.fill(io, file, found);
+    _ = input.typed("\x1b[D");
+    var saved = input.snapshot();
+    const bytes = try gpa.dupe(u8, saved.bytes);
+    defer gpa.free(bytes);
+    saved.bytes = bytes;
+    _ = input.press(true);
+    const step = input.nextStep().?;
+    input.clear();
+    _ = input.typed("discarded");
+    const Completion = struct {
+        fn add(_: *const anyopaque, draft: []const u8, _: usize) ?Editor.Replacement {
+            return .append(draft, "!");
+        }
+    };
+    input.complete(.{ .context = &{}, .add = Completion.add });
+    input.restore(saved);
+    try std.testing.expectEqualStrings("aéZ", input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, "aé".len), input.composition().cursor);
+    try std.testing.expectEqual(found.at, input.snapshot().anchor.?);
+    try std.testing.expectEqual(Landing.stale, input.land(step, found));
+    try std.testing.expectEqualStrings("original", try input.message(ticket));
+    try input.release(ticket);
+    try std.testing.expectEqualStrings("aéZ", input.composition().bytes);
+    try std.testing.expectEqual(.queued, input.press(true));
+    try std.testing.expectEqual(found.at, input.nextStep().?.from.?);
+    _ = input.typed("\t");
+    try std.testing.expectEqualStrings("aéZ!", input.composition().bytes);
+    try std.testing.expectEqual(null, input.snapshot().anchor);
 }
 
 test "SessionInput loan release preserves next Unicode draft and cursor" {

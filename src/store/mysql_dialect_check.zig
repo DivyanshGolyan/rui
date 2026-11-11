@@ -777,7 +777,7 @@ test "metadata seed MySQL missing masks retain canonical selector and id" {
     try std.testing.expect(!std.mem.eql(u8, &first, &second));
 }
 
-test "schema 64 MySQL migration freezes each Operation offer and preserves Session intent" {
+test "schema 65 MySQL migration freezes each Operation offer and preserves Session intent" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
@@ -789,10 +789,10 @@ test "schema 64 MySQL migration freezes each Operation offer and preserves Sessi
     try load(name, store_testing.baseline_mysql_ddl, false);
     try load(name, store_testing.baseline_rows, true);
     inline for (schema.migrations) |step| {
-        if (comptime step.from < 63) try load(name, schema.mysqlMigration(step.from), false);
+        if (comptime step.from < 64) try load(name, schema.mysqlMigration(step.from), false);
     }
     try load(name, store_testing.operation_offer_migration_seed, false);
-    try load(name, schema.mysqlMigration(63), false);
+    try load(name, schema.mysqlMigration(64), false);
     var rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer rows.deinit();
     try writeResult("SELECT operation_id,tool_set_id FROM " ++ name ++ ".model_operation ORDER BY operation_id", &rows.writer);

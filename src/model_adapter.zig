@@ -2662,7 +2662,7 @@ test "request preparation freezes settings at admission" {
     const binding = try admitted.permit.consume();
     // A legal observable change after admission but before preparation
     // first reads settings: the admitted view must keep the original
-    // Bash/Edit catalog, not the current empty tool list.
+    // Bash/Edit tool set, not the current empty tool list.
     {
         var update: wire_request.ConfigureCommand = .{};
         try update.key.set("prep-settings-tools");
@@ -5175,11 +5175,11 @@ test "MCP projected offers preserve request prefixes and memo rebuilds" {
     try setup.init();
     defer setup.close();
     const testing = store.testing;
-    var records = testing.catalogRecordsWith(&.{.{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "original page", .input_schema = "{}" }});
+    var records = testing.hostToolRecordsWith(&.{.{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "original page", .input_schema = "{}" }});
     var digests: [records.len][32]u8 = undefined;
     for (&records, &digests) |*record, *digest| digest.* = tools.recordDigest(record);
-    const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
-    try setup.storage.saveCatalog(&catalog);
+    const host_tool_set: tools.HostToolSet = .{ .records = &records, .digests = &digests };
+    try setup.storage.saveHostToolSet(&host_tool_set);
     const session = try setup.configure("refresh-memo-config");
     var update: wire_request.ConfigureCommand = .{};
     try update.key.set("refresh-memo-tools");
@@ -5193,14 +5193,14 @@ test "MCP projected offers preserve request prefixes and memo rebuilds" {
     defer if (previous) |bytes| std.testing.allocator.free(bytes);
     for (0..4) |round| {
         if (round == 1) {
-            records[catalog.find("fetch_page").?].description = "reworded page";
-            records[catalog.find("fetch_page").?].input_schema = "{\"type\":\"object\"}";
+            records[host_tool_set.find("fetch_page").?].description = "reworded page";
+            records[host_tool_set.find("fetch_page").?].input_schema = "{\"type\":\"object\"}";
             for (&records, &digests) |*record, *digest| digest.* = tools.recordDigest(record);
-            try setup.storage.saveCatalog(&catalog);
+            try setup.storage.saveHostToolSet(&host_tool_set);
         } else if (round == 2) {
-            try setup.storage.saveCatalog(&tools.built_in);
+            try setup.storage.saveHostToolSet(&tools.built_in_tool_set);
         } else if (round == 3) {
-            try setup.storage.saveCatalog(&catalog);
+            try setup.storage.saveHostToolSet(&host_tool_set);
         }
         var key: [32]u8 = undefined;
         const message_key = try std.fmt.bufPrint(&key, "refresh-memo-{d}", .{round});

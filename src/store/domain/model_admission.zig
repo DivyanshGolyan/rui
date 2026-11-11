@@ -22,6 +22,7 @@ const historical_domain = @import("historical.zig");
 const history_floor_domain = @import("history_floor.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const reads_domain = @import("reads.zig");
+const tool_offer = @import("tool_offer.zig");
 const store_schema = @import("../schema.zig");
 const turn_domain = @import("turn.zig");
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
@@ -460,7 +461,7 @@ fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []con
 fn factsColumnsSql(comptime session: []const u8) []const u8 {
     return "s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation,s.reasoning_effort," ++
         configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
-        "s.tool_set_id,s.loaded_tool_set_id,EXISTS(SELECT 1 FROM tool_set_member tm JOIN tool_record tool ON tool.tool_record_id=tm.tool_record_id WHERE tm.tool_set_id=s.tool_set_id AND tool.owner='mcp') AS has_mcp," ++
+        "s.tool_set_id,s.loaded_tool_set_id," ++ tool_offer.stale_sql ++ " AS offer_stale," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
         "current.operation_id AS latest_operation,current.purpose AS latest_compaction,current.resolution_code AS latest_resolution,latest_revision.model AS latest_model," ++
         "(SELECT count(*) FROM session_revision r WHERE " ++ pendingInstructionsSql(session, "s.revision") ++ ") AS instructions";
@@ -532,7 +533,7 @@ const SelectedRow = struct {
     previous_reasoning_effort: ?model_capability.ReasoningEffort,
     tool_set_id: rsql.Positive,
     loaded_tool_set_id: ?rsql.Positive,
-    has_mcp: bool,
+    offer_stale: bool,
     latest_turn: ?rsql.Positive,
     latest_active: bool,
     latest_first: ?rsql.Positive,
@@ -823,8 +824,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
     const selected: u64 = if (purpose == .compaction) 0 else selection.selected;
     const instructions: u64 = if (purpose == .compaction) 0 else facts.instructions;
 
-    const tool_revision = @import("tool_revision.zig");
-    const offer = try tool_revision.freeze(writer, facts.tool_set_id.get(), if (facts.loaded_tool_set_id) |id| id.get() else null, facts.has_mcp);
+    const offer = try tool_offer.freeze(writer, facts.tool_set_id.get(), if (facts.loaded_tool_set_id) |id| id.get() else null, facts.offer_stale);
     if (weighed) |args| writer.write(within_pressure, args);
     const turn_id = if (selection.turn_id) |existing| existing.get() else try writer.identity(.turn_id);
     const operation_id = try writer.identity(.operation_id);
