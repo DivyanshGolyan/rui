@@ -1427,9 +1427,9 @@ const approval_request = rsql.Read(.{
 
 /// The setting Session ?1 changed at position ?2, ordinal ?3.
 const session_change = rsql.Read(.{
-    .sql = "SELECT revision,field,changed_at FROM session_change WHERE session_ref=?1 AND position=?2 AND ordinal=?3",
+    .sql = "SELECT revision,field,changed_at,provider_text FROM session_change WHERE session_ref=?1 AND position=?2 AND ordinal=?3",
     .Args = struct { session: []const u8, position: u64, ordinal: u64 },
-    .Row = struct { revision: rsql.Positive, field: session_field.SessionField, changed_at: rsql.Positive },
+    .Row = struct { revision: rsql.Positive, field: session_field.SessionField, changed_at: rsql.Positive, provider_text: ?Bounded(outcome_code.max_report_bytes) },
     .cardinality = .one,
 });
 
@@ -1894,6 +1894,7 @@ const ItemRead = struct {
                 const row = &read.state.change;
                 if (row.revision.get() != item.value.session_changed.revision) return error.CorruptStore;
                 item.value.session_changed.field = row.field;
+                item.value.session_changed.provider_text = row.provider_text;
                 item.at = row.changed_at.get();
             },
             14 => {

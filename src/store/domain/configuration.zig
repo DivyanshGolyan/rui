@@ -284,12 +284,36 @@ pub fn effectiveReasoningEffort(current: anytype) ?model_capability.ReasoningEff
     return current.reasoning_effort orelse current.previous_reasoning_effort;
 }
 
-/// Both configuration reads and admission use the same durable legacy fact.
-/// The admission index bounds the lookup, including all-null Session histories.
+/// The source of the effective effort at a revision. Unrelated revisions
+/// inherit it; a refusal removes only its named source, not later choices.
+/// All request, report and status readers resolve through this owner.
+pub fn reasoningEffortRevisionSql(comptime session: []const u8) []const u8 {
+    return reasoningEffortSourceSql(session, "revision");
+}
+
+fn reasoningEffortSourceSql(comptime session: []const u8, comptime column: []const u8) []const u8 {
+    return "(SELECT effort_revision." ++ column ++ " FROM session_revision effort_revision LEFT JOIN session_revision before_effort ON before_effort.session_ref=effort_revision.session_ref AND before_effort.revision=effort_revision.revision-1 WHERE effort_revision.session_ref=" ++ session ++ ".session_ref AND effort_revision.revision<=" ++ session ++ ".revision " ++
+        "AND (effort_revision.revision=1 OR NOT @same(effort_revision.reasoning_effort,before_effort.reasoning_effort) OR effort_revision.model<>before_effort.model OR EXISTS(SELECT 1 FROM session_change effort_change WHERE effort_change.session_ref=effort_revision.session_ref AND effort_change.revision=effort_revision.revision AND effort_change.field IN ('reasoning_effort','model'))) " ++
+        "AND NOT EXISTS(SELECT 1 FROM session_change refused WHERE refused.session_ref=effort_revision.session_ref AND refused.revision=effort_revision.revision AND refused.field='reasoning_effort_refused') " ++
+        "ORDER BY effort_revision.revision DESC LIMIT 1)";
+}
+
+pub fn reasoningEffortOverrideSql(comptime session: []const u8) []const u8 {
+    return "CASE WHEN EXISTS(SELECT 1 FROM session_change refused WHERE refused.session_ref=" ++ session ++ ".session_ref AND refused.field='reasoning_effort_refused' AND refused.revision<=" ++ session ++ ".revision) THEN " ++ reasoningEffortSourceSql(session, "reasoning_effort") ++ " ELSE " ++ session ++ ".reasoning_effort END";
+}
+
+/// Legacy null specs carry a frozen effort, never a fresh catalog default.
+/// Attempts admitted under a refused source cannot supply that fallback.
 pub fn previousReasoningEffortSql(comptime session: []const u8) []const u8 {
-    return "CASE WHEN " ++ session ++ ".reasoning_effort IS NULL THEN " ++
-        "(SELECT o.reasoning_effort FROM model_operation o @index(model_operation_admission) WHERE o.session_ref=" ++
-        session ++ ".session_ref ORDER BY o.admission_position DESC LIMIT 1) END";
+    return "CASE WHEN " ++ session ++ ".reasoning_effort IS NULL OR EXISTS(SELECT 1 FROM session_change refused WHERE refused.session_ref=" ++ session ++ ".session_ref AND refused.field='reasoning_effort_refused' AND refused.revision<=" ++ session ++ ".revision) THEN (SELECT legacy.reasoning_effort FROM model_operation legacy @index(model_operation_admission) WHERE legacy.session_ref=" ++ session ++ ".session_ref AND legacy.settings_revision<=" ++ session ++ ".revision " ++
+        "AND NOT EXISTS(SELECT 1 FROM session_change refused WHERE refused.session_ref=legacy.session_ref AND refused.field='reasoning_effort_refused' AND refused.revision<=legacy.settings_revision AND refused.revision>" ++ reasoningEffortRevisionSql(session) ++ ") " ++
+        "ORDER BY legacy.admission_position DESC LIMIT 1) END";
+}
+
+/// Preserve an Operation's frozen legacy effort when no refusal invalidates
+/// its source. Otherwise replay the same effective setting every reader sees.
+pub fn operationReasoningEffortSql(comptime operation: []const u8, comptime revision: []const u8) []const u8 {
+    return "CASE WHEN EXISTS(SELECT 1 FROM session_change refused WHERE refused.session_ref=" ++ revision ++ ".session_ref AND refused.field='reasoning_effort_refused' AND refused.revision<=" ++ revision ++ ".revision) THEN coalesce(" ++ reasoningEffortOverrideSql(revision) ++ "," ++ previousReasoningEffortSql(revision) ++ ") ELSE " ++ operation ++ ".reasoning_effort END";
 }
 
 /// `next` holds the current configuration's values, or the defaults when
@@ -578,7 +602,7 @@ pub const ConfigurationReads = struct {
 const saved_session = rsql.Read(.{
     .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,tool_set_id,loaded_tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
-        "reasoning_effort,label,created_at,workspace_key,parent_ref," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
+        reasoningEffortOverrideSql("session") ++ " AS reasoning_effort,label,created_at,workspace_key,parent_ref," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = CurrentConfiguration,
     .cardinality = .optional,

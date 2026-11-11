@@ -2305,6 +2305,7 @@ fn failureClass(
 ) store_module.ModelFailureClass {
     return switch (kind) {
         .permanent => .ordinary,
+        .effort_change_refused => .effort_change_refused,
         .context_overflow => .context_overflow,
         .temporary => .{ .retryable = .{
             .waits_ms = host.limits.retry_waits_ms,

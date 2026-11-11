@@ -19,7 +19,8 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 60;
+// Unit 4: base 60 + 1; renumber with its digest and step at landing.
+pub const schema_version: u32 = 61;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -46,6 +47,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 58, .digest = 0x4cd0a6b38d4904ed },
     .{ .schema_version = 59, .digest = 0xa3ebc37622ed945b },
     .{ .schema_version = 60, .digest = 0x6b696b3423202987 },
+    .{ .schema_version = 61, .digest = 0x08c80bd3d29e17e6 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -319,6 +321,24 @@ pub const migrations = [_]Migration{
             "CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position)",
             "ALTER TABLE conversation_entry ADD FOREIGN KEY(source_operation_id,source_item_ordinal) REFERENCES model_output_item(operation_id,item_ordinal)",
             "UPDATE store_meta SET meta_value='11' WHERE meta_key='wire_version' AND meta_value='10'",
+        },
+    },
+    // Schema 61 (base 60 + 1): immutable effort-refusal facts and wire 12.
+    .{
+        .from = 60,
+        .sqlite = &.{
+            "ALTER TABLE session_change RENAME TO session_change_before_61",
+            "CREATE TABLE session_change(\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n position INTEGER NOT NULL CHECK(position>0),\n ordinal INTEGER NOT NULL CHECK(ordinal>=0),\n revision INTEGER NOT NULL CHECK(revision>1),\n field TEXT NOT NULL CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='loaded_tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='reasoning_effort_refused' OR field='label')),\n changed_at INTEGER NOT NULL CHECK(changed_at>0),\n provider_text TEXT CHECK(provider_text IS NULL OR length(CAST(provider_text AS BLOB))<=520),\n PRIMARY KEY(session_ref,position,ordinal),\n UNIQUE(session_ref,revision,field),\n FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),\n CHECK((field='reasoning_effort_refused')=(provider_text IS NOT NULL))\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at) SELECT session_ref,position,ordinal,revision,field,changed_at FROM session_change_before_61",
+            "DROP TABLE session_change_before_61",
+            "UPDATE store_meta SET meta_value='12' WHERE meta_key='wire_version' AND meta_value='11'",
+        },
+        .mysql = &.{
+            "CREATE TABLE session_change_61(\n session_ref VARCHAR(6) NOT NULL,\n position BIGINT NOT NULL,\n ordinal BIGINT NOT NULL,\n revision BIGINT NOT NULL,\n field VARCHAR(23) NOT NULL,\n changed_at BIGINT NOT NULL,\n provider_text TEXT,\n PRIMARY KEY(session_ref,position,ordinal),\n UNIQUE(session_ref,revision,field),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),\n CHECK(position>0),\n CHECK(ordinal>=0),\n CHECK(revision>1),\n CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='loaded_tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='reasoning_effort_refused' OR field='label')),\n CHECK(changed_at>0),\n CHECK(provider_text IS NULL OR OCTET_LENGTH(provider_text)<=520),\n CHECK((field='reasoning_effort_refused')=(provider_text IS NOT NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "INSERT INTO session_change_61(session_ref,position,ordinal,revision,field,changed_at) SELECT session_ref,position,ordinal,revision,field,changed_at FROM session_change",
+            "DROP TABLE session_change",
+            "RENAME TABLE session_change_61 TO session_change",
+            "UPDATE store_meta SET meta_value='12' WHERE meta_key='wire_version' AND meta_value='11'",
         },
     },
 };
@@ -748,15 +768,17 @@ pub const tables = [_]Table{
         // revision changed, written in the revision's own commit and never
         // edited. The revision keeps the current values; a row records
         // when its change was accepted. A revision's rows share one
-        // position, one ordinal each.
+        // position, one ordinal each. An effort refusal is appended later,
+        // naming that effort revision with the provider's bounded report.
         .name = "session_change",
         .columns = &.{
             .{ .name = "session_ref", .type = .{ .text = null } },
             .{ .name = "position", .type = .int, .check = "position>0" },
             .{ .name = "ordinal", .type = .int, .check = "ordinal>=0" },
             .{ .name = "revision", .type = .int, .check = "revision>1" },
-            .{ .name = "field", .type = .{ .tag = &.{ "provider", "model", "instructions", "tools", "loaded_tools", "permission_mode", "output_schema", "compaction_trigger", "output_reservation", "reasoning_effort", "label" } } },
+            .{ .name = "field", .type = .{ .tag = &.{ "provider", "model", "instructions", "tools", "loaded_tools", "permission_mode", "output_schema", "compaction_trigger", "output_reservation", "reasoning_effort", "reasoning_effort_refused", "label" } } },
             .{ .name = "changed_at", .type = .int, .check = "changed_at>0" },
+            .{ .name = "provider_text", .type = .{ .text = .{ .min = 0, .max = @import("../outcome_code.zig").max_report_bytes } }, .nullable = true },
         },
         .primary_key = &.{ "session_ref", "position", "ordinal" },
         .uniques = &.{&.{ "session_ref", "revision", "field" }},
@@ -764,6 +786,7 @@ pub const tables = [_]Table{
             references("session_ref", "session", session_reference),
             .{ .columns = &.{ "session_ref", "revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
         },
+        .checks = &.{"(field='reasoning_effort_refused')=(provider_text IS NOT NULL)"},
         .without_rowid = true,
     },
     .{
