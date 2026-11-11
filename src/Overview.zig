@@ -351,9 +351,6 @@ draft: [view.draft_capacity]u8 = undefined,
 /// The byte the latest frame's first composer line starts at, kept first by
 /// the next frame so the composer scrolls only when its caret leaves view.
 draft_anchor: usize = 0,
-/// The worker's descriptors: it writes one byte as its job ends.
-done: [2]c_int = .{ -1, -1 },
-
 worker: ClientTask = .{},
 /// The /upgrade run's worker, for as long as the core says one runs, and
 /// the receipts runs left, which print on exit.
@@ -489,7 +486,6 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 if (self.state.upgrading()) try self.appUpgrade(ctx) else _ = try service(self);
             } else {
                 if (self.worker.thread != null and self.worker.completed()) {
-                    drain(self.done[0]);
                     try self.appNext(ctx, try self.complete());
                     ctx.redraw = true;
                 }
@@ -894,29 +890,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     if (self.state.default) |*binding| binding.effort = self.savedEffort() catch null;
-    errdefer self.closePipes();
-    try openPipe(&self.done);
-    self.worker.notify = self.done[1];
     return self;
-}
-
-/// A signal handler and the worker write without blocking; no child
-/// inherits either end.
-fn openPipe(pipe: *[2]c_int) !void {
-    if (std.c.pipe(pipe) != 0) return error.SystemResources;
-    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
-    for (pipe) |fd| {
-        const flags = std.c.fcntl(fd, std.c.F.GETFL);
-        if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) < 0) return error.SystemResources;
-        if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return error.SystemResources;
-    }
-}
-
-fn closePipes(self: *Self) void {
-    for (&self.done) |*fd| if (fd.* >= 0) {
-        _ = std.c.close(fd.*);
-        fd.* = -1;
-    };
 }
 
 fn destroy(self: *Self) void {
@@ -927,7 +901,6 @@ fn destroy(self: *Self) void {
     for (self.jobs[0..self.job_count]) |job| job.deinit(self.init.gpa);
     if (self.scratch) |file| file.close(self.init.io);
     if (self.command_page) |file| file.close(self.init.io);
-    self.closePipes();
     self.state.deinit();
     self.menu.deinit(self.init.gpa);
     if (self.skill_page) |*page| page.deinit(self.init.gpa);
@@ -939,11 +912,6 @@ const Ending = union(enum) { overview, conversation: Left };
 /// What the core asks of the loop: to leave, or to lend the terminal to a
 /// Session.
 const Next = union(enum) { leave, open: view.Reference };
-
-fn drain(fd: c_int) void {
-    var bytes: [64]u8 = undefined;
-    while (std.c.read(fd, &bytes, bytes.len) > 0) {}
-}
 
 /// Steps the core with one event and queues the jobs it asks for. Opening a
 /// Session and leaving are the loop's to do.
@@ -1392,7 +1360,6 @@ fn service(raw: *anyopaque) !bool {
     };
     const answered = self.worker.thread != null and self.worker.completed();
     if (answered) {
-        drain(self.done[0]);
         // Only a start's answer opens a Session, and none is in flight
         // while a conversation is open.
         const next = try self.complete();
@@ -1421,7 +1388,6 @@ fn quiesceUpgrade(self: *Self) !bool {
             .settle_effect => {},
         }
         if (self.worker.completed()) {
-            drain(self.done[0]);
             if (try self.complete()) |next| switch (next) {
                 .leave => return error.InteractiveInterrupted,
                 .open => |reference| self.started = reference,
@@ -1966,21 +1932,24 @@ const Rig = struct {
         while (true) {
             try overview.dispatch(.all);
             if (overview.worker.thread == null) return null;
-            var fds = [_]std.posix.pollfd{.{ .fd = overview.done[0], .events = std.posix.POLL.IN, .revents = 0 }};
-            if (try std.posix.poll(&fds, 10_000) == 0) return error.TestUnexpectedResult;
-            drain(overview.done[0]);
+            try rig.answered();
             if (try rig.next(try overview.complete())) |ending| return ending;
         }
     }
 
-    /// Services the overview as a conversation does, until no job it may
-    /// start is left.
-    fn lend(rig: *Rig) !void {
+    /// Waits for the running job's answer.
+    fn answered(rig: *Rig) !void {
         const Worker = struct {
             fn completed(overview: *Self) !bool {
                 return overview.worker.completed();
             }
         };
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), rig.overview, Worker.completed);
+    }
+
+    /// Services the overview as a conversation does, until no job it may
+    /// start is left.
+    fn lend(rig: *Rig) !void {
         const overview = rig.overview;
         for (0..100) |_| {
             _ = try service(overview);
@@ -1988,7 +1957,7 @@ const Rig = struct {
                 if (job != .start) break true;
             } else false;
             if (overview.worker.thread == null and !queued) return;
-            if (overview.worker.thread != null) try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), overview, Worker.completed);
+            if (overview.worker.thread != null) try rig.answered();
         }
         return error.TestUnexpectedResult;
     }
@@ -3107,7 +3076,10 @@ fn finishedGuidance(rig: *Rig, buffer: []u8) ![]const u8 {
 /// `failure`, and returns what it wrote to stderr.
 fn finishedWith(rig: *Rig, ended: anyerror!void, failure: ?anyerror, buffer: []u8) ![]const u8 {
     var pipe: [2]c_int = undefined;
-    try openPipe(&pipe);
+    if (std.c.pipe(&pipe) != 0) return error.SystemResources;
+    // A way out that writes nothing must read as nothing, not wait.
+    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    if (std.c.fcntl(pipe[0], std.c.F.SETFL, std.c.fcntl(pipe[0], std.c.F.GETFL) | nonblock) < 0) return error.SystemResources;
     defer for (pipe) |fd| {
         _ = std.c.close(fd);
     };
@@ -3481,8 +3453,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     try std.testing.expect(try finished.settle() == null);
     try std.testing.expect(try finished.press("\x1b[H\x18\x18") == null);
     try finished.overview.dispatch(.all);
-    var fds = [_]std.posix.pollfd{.{ .fd = finished.overview.done[0], .events = std.posix.POLL.IN, .revents = 0 }};
-    try std.testing.expectEqual(@as(usize, 1), try std.posix.poll(&fds, 10_000));
+    try finished.answered();
     try std.testing.expect(try finished.overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
     finished.overview.opened = "k7m2qx".*;
     try finished.lend();
@@ -3617,17 +3588,15 @@ test "a listing failure under a conversation ends the overview once the terminal
     rig.overview.hooks.scratch = Scratch.scratch;
     const overview = rig.overview;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
-    var fds = [_]std.posix.pollfd{.{ .fd = overview.done[0], .events = std.posix.POLL.IN, .revents = 0 }};
     try overview.dispatch(.all);
     try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.job));
-    if (try std.posix.poll(&fds, 10_000) == 0) return error.TestUnexpectedResult;
-    drain(overview.done[0]);
+    try rig.answered();
     try std.testing.expect(try overview.complete() == null);
     // The listing fails on the worker, and the conversation's first step
     // under it collects the failure.
     try overview.dispatch(.all);
     try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.job));
-    if (try std.posix.poll(&fds, 10_000) == 0) return error.TestUnexpectedResult;
+    try rig.answered();
     // The Session opens over the overview; the overview's next tick under
     // it collects the failure, which ends App.
     try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
