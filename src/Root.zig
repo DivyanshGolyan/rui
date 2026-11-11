@@ -26,8 +26,15 @@ pub fn widget(self: *Self) vxfw.Widget {
 /// Visibility follows the current viewport and screen selection, not the last
 /// time the list happened to draw. Opening a Session can hide it before drawing.
 pub fn listVisible(self: *const Self) bool {
-    return self.size.width > 0 and self.size.height > 0 and
-        (self.session == null or self.size.width >= split_at);
+    return self.size.width > 0 and self.size.height > 0 and self.chooseLayout() != .session;
+}
+
+const Layout = enum { overview, session, split };
+
+/// One layout decision drives both drawing and off-frame visibility queries.
+fn chooseLayout(self: *const Self) Layout {
+    if (self.size.width >= split_at) return .split;
+    return if (self.session != null) .session else .overview;
 }
 
 pub fn openSession(self: *Self, ctx: *vxfw.EventContext, session: vxfw.Widget) !void {
@@ -87,19 +94,22 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const size = ctx.max.size();
     self.size = size;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
-    const child = if (size.width < split_at)
-        try (self.session orelse self.overview).draw(ctx)
-    else wide: {
-        const split = try ctx.arena.create(Split);
-        split.* = .{
-            .left = self.list,
-            .right = self.session orelse self.compose,
-            .left_width = list_width,
-            .min_width = split_at,
-            .narrow = .right,
-            .divider = self.divider,
-        };
-        break :wide try split.widget().draw(ctx);
+    const child = switch (self.chooseLayout()) {
+        .overview => try self.overview.draw(ctx),
+        .session => try self.session.?.draw(ctx),
+        .split => wide: {
+            const split = try ctx.arena.create(Split);
+            split.* = .{
+                .left = self.list,
+                .right = self.session orelse self.compose,
+                .left_width = list_width,
+                // Root already chose the layout; Split only places the panes.
+                .min_width = 0,
+                .narrow = .right,
+                .divider = self.divider,
+            };
+            break :wide try split.widget().draw(ctx);
+        },
     };
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = child };
     self.frames += 1;

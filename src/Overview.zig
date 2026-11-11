@@ -368,8 +368,6 @@ app_picker: GroupedList = .{},
 app_header: OverviewLines.Header = undefined,
 app_palette: Palette = undefined,
 app_frame: u64 = 0,
-/// Whether the latest frame showed a mark that spins.
-app_spins: bool = false,
 session_screen: *SessionScreen = undefined,
 app_session: ?Left = null,
 /// Where leaving a Session goes when Session links are followed.
@@ -804,7 +802,18 @@ fn rich(ctx: vxfw.DrawContext, caps: view.Caps, segments: []const view.Segment) 
 
 /// Whether a spinning mark on screen has a step to turn.
 fn wantsFrame(self: *const Self) bool {
-    return self.root.listVisible() and self.app_spins and self.animationFrame() != self.app_frame;
+    return self.root.listVisible() and self.animationFrame() != self.app_frame and self.listSpins();
+}
+
+/// The drawn viewport is history; which current rows spin is derived. No
+/// animation-eligibility flag survives a row, capability or list-area change.
+fn listSpins(self: *const Self) bool {
+    if (self.state.listArea() != .sessions) return false;
+    for (self.app_sessions.shown.first..self.app_sessions.shown.end) |at| {
+        const item = view.listItem(&self.state, at) orelse break;
+        if (view.markSpins(&self.state, item, self.caps)) return true;
+    }
+    return false;
 }
 
 fn animationFrame(self: *const Self) u64 {
@@ -913,12 +922,6 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     // The overview remains the compose ancestor in either layout, so a
     // resize never changes the composer's focus identity or key route.
     surface.widget = if (part == .list) self.listWidget() else self.widget();
-    if (list) |prepared| {
-        self.app_spins = false;
-        if (prepared == &self.app_sessions) for (prepared.shown.first..prepared.shown.end) |at| {
-            if (view.markSpins(&self.state, view.listItem(&self.state, at).?, self.caps)) self.app_spins = true;
-        };
-    }
     return surface;
 }
 
@@ -4890,10 +4893,23 @@ test "App overview schedules spinning rows only while Root shows the list" {
             if (layout.open and overview.root.session == null) try overview.root.openSession(&ctx, session.widget());
             if (!layout.open and overview.root.session != null) try overview.root.closeSession(&ctx);
             _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = layout.width, .height = 24 }, .cell_size = .{} });
-            try std.testing.expectEqual(spinning, overview.app_spins);
+            try std.testing.expectEqual(spinning, overview.listSpins());
             // Force a due animation step without waiting for the clock. A
             // hidden list cannot advance its last frame, even on later ticks.
             overview.app_frame = std.math.maxInt(u64);
+            // Current facts govern animation even before another draw. None
+            // of these changes can leave a cached spinning flag behind.
+            const caps = overview.caps;
+            overview.caps.depth = .none;
+            try std.testing.expectEqual(false, overview.wantsFrame());
+            overview.caps = caps;
+            overview.state.unreachable_since_ms = 0;
+            try std.testing.expectEqual(false, overview.wantsFrame());
+            overview.state.unreachable_since_ms = null;
+            const row_state = overview.state.rows.items[0].state;
+            overview.state.rows.items[0].state = .{ .idle = .{ .since = test_now_s } };
+            try std.testing.expectEqual(false, overview.wantsFrame());
+            overview.state.rows.items[0].state = row_state;
             for (0..2) |_| {
                 ctx.redraw = false;
                 try overview.root.widget().handleEvent(&ctx, .tick);
@@ -5044,7 +5060,6 @@ test "App overview list stays live beside a focused child and wheels stay in the
     overview.state.next_list_ms = 0;
     _ = try service(overview);
     try rig.answered();
-    overview.app_spins = false;
     ctx.redraw = false;
     try appEvent(overview, &ctx, .tick);
     try std.testing.expect(ctx.redraw);
