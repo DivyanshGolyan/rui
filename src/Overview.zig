@@ -1144,11 +1144,11 @@ fn complete(self: *Self) !?Next {
     return next;
 }
 
-/// Steps the core with the job's answer, which it takes: a job the core
-/// hears of leaves nothing behind for the next.
+/// Steps the core with the job's answer, read where the job wrote it, since
+/// an answer may point into its own bytes, and then clears it: a job the
+/// core hears of leaves nothing behind for the next.
 fn deliver(self: *Self, outcome: anyerror!void) !?Next {
-    var answer = self.answer;
-    self.answer = .none;
+    const answer = &self.answer;
     defer answer.deinit(self.init.gpa);
     switch (self.job) {
         .host => {
@@ -1180,7 +1180,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         .skills => |read| {
             // The core owns the page it is given.
             const page: ?skill_suggestions.Page = if (outcome) |_| answer.skills else |_| null;
-            answer = .none;
+            answer.* = .none;
             view.skillsRead(&self.state, read.read, page, self.composerDraft());
             self.askSkills();
             return null;
@@ -1189,7 +1189,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             outcome catch |err| return self.event(.{ .models = .failed(err) });
             // The core owns the menu it is given.
             const menu = answer.menu;
-            answer = .none;
+            answer.* = .none;
             return self.event(.{ .models = .{ .menu = menu } });
         },
         .save => |binding| return self.event(.{
@@ -4340,6 +4340,22 @@ test "Alt-A overview archives at once and preserves draft bytes caret and revisi
         try std.testing.expectEqual(before.edits, after.edits);
         try std.testing.expectEqual(rejected, overview.composer.rejected != null);
     };
+}
+
+test "a command read shows the bytes its operation returned" {
+    const rig = try openListed();
+    defer rig.close();
+    const overview = rig.overview;
+    const row = &overview.state.rows.items[0];
+    row.command = .requested;
+    row.first_action = 7;
+    var reads: view.Commands = .{};
+    reads.items[0] = .{ .reference = row.reference, .action = 7 };
+    reads.len = 1;
+    overview.queue(.{ .commands = reads });
+    try std.testing.expect(try rig.settle() == null);
+    const shown = &overview.state.rows.items[0];
+    try std.testing.expectEqualStrings("zig build test-store", overview.state.lines.items[shown.command.read].slice());
 }
 
 test "a stop that ends with no answer reads as failed, whatever the job before it left" {
