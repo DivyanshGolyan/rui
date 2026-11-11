@@ -5169,7 +5169,7 @@ test "historical preparation fences a served call that does not match its certif
     }
 }
 
-test "MCP refresh revisions preserve request prefixes and memo rebuilds" {
+test "MCP projected offers preserve request prefixes and memo rebuilds" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();
     defer setup.close();

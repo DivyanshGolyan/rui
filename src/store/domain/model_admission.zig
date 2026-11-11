@@ -457,7 +457,7 @@ fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []con
 const admission_facts = rsql.Read(.{
     .sql = "SELECT " ++ rsql.session_head_columns ++ ",s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation,s.reasoning_effort," ++
         configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
-        "EXISTS(SELECT 1 FROM tool_set_member tm JOIN tool_record tool ON tool.tool_record_id=tm.tool_record_id WHERE tm.tool_set_id=s.tool_set_id AND tool.owner='mcp') AS has_mcp," ++
+        "s.tool_set_id,s.loaded_tool_set_id,EXISTS(SELECT 1 FROM tool_set_member tm JOIN tool_record tool ON tool.tool_record_id=tm.tool_record_id WHERE tm.tool_set_id=s.tool_set_id AND tool.owner='mcp') AS has_mcp," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
         "current.operation_id AS latest_operation,current.purpose AS latest_compaction,current.resolution_code AS latest_resolution,latest_revision.model AS latest_model," ++
         "(SELECT count(*) FROM session_revision r WHERE " ++ pendingInstructionsSql("?1", "s.revision") ++ ") AS instructions " ++
@@ -476,6 +476,8 @@ const admission_facts = rsql.Read(.{
         output_reservation: ?u64,
         reasoning_effort: ?model_capability.ReasoningEffort,
         previous_reasoning_effort: ?model_capability.ReasoningEffort,
+        tool_set_id: rsql.Positive,
+        loaded_tool_set_id: ?rsql.Positive,
         has_mcp: bool,
         latest_turn: ?rsql.Positive,
         latest_active: bool,
@@ -628,8 +630,8 @@ const project_instructions = rsql.Write(.{
 
 const insert_operation = rsql.Write(.{
     .sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,attempt_ordinal,retry_due_at_ms,attempt_at) " ++
-        "VALUES(?1,?2,@session(?3),?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,@now)",
+        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id) " ++
+        "VALUES(?1,?2,@session(?3),?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,@now,?14)",
     .Args = struct {
         operation_id: u64,
         turn_id: u64,
@@ -644,6 +646,7 @@ const insert_operation = rsql.Write(.{
         history_floor: ?u64,
         history_level: ?u8,
         history_dropped: ?u64,
+        tool_set_id: u64,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -735,18 +738,12 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
     var facts: admission_facts.Result = undefined;
     var bytes: context_bytes.Result = undefined;
     const tool_revision = @import("tool_revision.zig");
-    var tool_intent: tool_revision.Intent = undefined;
     writer.read(admission_facts, .{ .session = session_ref }, &facts);
     if (coverage) |args| writer.read(context_bytes, args, &bytes);
     try store_access.runNamed(writer, .{.{ context_bytes, error.CorruptStore }}, error.SessionReadFailed);
-    if (tool_revision.needed(facts.has_mcp, writer.store.catalog().catalog)) {
-        tool_revision.prepare(writer, session_ref, &tool_intent);
-        try writer.run();
-        if (try tool_revision.refresh(writer, selection.session, &tool_intent)) {
-            writer.read(admission_facts, .{ .session = session_ref }, &facts);
-            try writer.run();
-        }
-    }
+    const intended_tools = facts.tool_set_id.get();
+    const intended_loaded = if (facts.loaded_tool_set_id) |id| id.get() else null;
+    const offer = try tool_revision.freeze(writer, intended_tools, intended_loaded, facts.has_mcp);
     if (facts.session.next_position != selection.session.next_position or !facts.model.eql(context_model)) return error.SelectionChanged;
 
     const policy = model_capability.compactionPolicy(facts.model.slice(), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);
@@ -820,6 +817,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         .history_floor = floor,
         .history_level = if (room) |choice| choice.level else null,
         .history_dropped = if (room != null) dropped else null,
+        .tool_set_id = offer,
     });
     // The writes are queued, not run, as in every converted entry point.
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;

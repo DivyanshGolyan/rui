@@ -782,3 +782,30 @@ test "metadata seed MySQL missing masks retain canonical selector and id" {
     try std.testing.expect(schema.isStoreId(&second));
     try std.testing.expect(!std.mem.eql(u8, &first, &second));
 }
+
+test "schema 63 MySQL migration freezes each Operation offer and preserves Session intent" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    const name = "rui_offer_migration";
+    try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
+    defer restore("DROP DATABASE IF EXISTS " ++ name);
+    try load(name, store_testing.baseline_mysql_ddl, false);
+    try load(name, store_testing.baseline_rows, true);
+    inline for (schema.migrations) |step| {
+        if (comptime step.from < 62) try load(name, schema.mysqlMigration(step.from), false);
+    }
+    try load(name, store_testing.operation_offer_migration_seed, false);
+    try load(name, schema.mysqlMigration(62), false);
+    var rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer rows.deinit();
+    try writeResult("SELECT operation_id,tool_set_id FROM " ++ name ++ ".model_operation ORDER BY operation_id", &rows.writer);
+    try std.testing.expectEqualStrings("\n 1:1 1:4\n 1:2 1:2\n 2:99 1:2", rows.written());
+    rows.clearRetainingCapacity();
+    try writeResult("SELECT revision,tool_set_id,loaded_tool_set_id FROM " ++ name ++ ".session WHERE session_ref='d8mv7p'", &rows.writer);
+    try std.testing.expectEqualStrings("\n 1:2 1:4 1:2", rows.written());
+    done.migrations += 1;
+    writeRecord();
+}

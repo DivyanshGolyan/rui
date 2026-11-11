@@ -1004,19 +1004,21 @@ Every Operation is placed, whatever its outcome, because its own request carried
 Under `openai-responses/2` function tools are declared inside the history too, so adding, rewording or removing one keeps the provider cache (D53-D55, D75).
 After each Operation element the history view declares, with `{"type":"additional_tools","role":"developer","tools":[…]}`, the function tools that Operation's frozen set holds and the set of the last earlier Operation since the span's start lacks; a tool record is saved once, so a reworded tool is a new record and is declared again.
 The first Operation after the span's start, or after a compaction base's anchor, declares its whole set, since the base covers the earlier declarations.
-A removed tool stays declared in the history, and a call to it gets the tool result `This tool was removed.`: settlement offers the Operation's own set and withdraws every tool an earlier revision of the Session offered.
+A removed tool stays declared in the history, and a call to it gets the tool result `This tool was removed.`: settlement offers the Operation's own set and withdraws every tool an earlier Operation offered or an earlier configuration revision loaded.
 The top-level `tools` holds only the provider-run tools (web search), which OpenAI ignores inside the history ([live check](research/responses-tools-probe/README.md)); turning one on or off changes the top and costs that one request the cache.
 Under `openai-responses/1` the top-level `tools` holds the Operation's whole set, as before.
 
 The Host lists each MCP server only at startup; it never re-lists or handles list-change notifications while running (D110).
-Before admitting a new model Operation, `store/domain/tool_revision.zig` reconciles that startup catalog with the Session's saved configured and loaded name sets.
-It replaces each permitted MCP record with today's identity (including server and read-only hint), drops unavailable names, and leaves frozen built-ins unchanged.
+The Session's configured and loaded tool sets hold caller **intent**, snapshotted in each configuration revision; neither is a materialized current offer.
+Only configure and `find_tools` write that intent. Catalog changes never write Session intent or create configuration revisions, and change rows are not used to reconstruct it.
+`store/domain/tool_revision.zig` owns one projection from intent and the Host's saved tool set: permitted MCP names resolve to today's identity (including server and read-only hint), unavailable names disappear, and built-ins retain their saved identity.
 The configured names remain a ceiling, including for a K1-narrowed child: a new Host tool with an unpermitted name is not granted automatically.
-Core refresh revisions change availability, not that ceiling or loaded-name intent; the last explicit settings changes in saved revisions retain them, so a removed permitted name can return without widening permission.
-The derived core command key and its saved digest identify a refresh; a caller-chosen key with the same spelling is still an explicit configuration and cannot bypass narrowing.
-An unchanged offer appends nothing; all changes for the next Operation share one core-keyed Session revision and its change rows, atomically with admission.
-Refresh and `find_tools` share the core tool-revision writer and ordinary configured-command path; the existing history declaration and withdrawn-call check need no new encoder or Store format.
-A cheap current-MCP check shares admission's existing facts round; built-in-only Hosts and Sessions need no extra round, and reconciliation uses the Store's existing fixed scratch, not text-sized allocations.
+An unavailable name returns only if it is still intended; an explicit equal-valued narrowing is authoritative, regardless of command-key spelling.
+Operation admission freezes the projected loaded offer in `model_operation.tool_set_id`, atomically with admission; retries, history declarations, settlement and MCP dispatch use that immutable offer, never a new projection.
+`find_tools` searches the same current projection and expands loaded intent, preserving previously loaded names that are temporarily unavailable, without loading unavailable names the caller never selected.
+A cheap current-MCP check shares admission's existing facts round; built-in-only Sessions need no extra round, and projection uses the Store's existing fixed scratch, not text-sized allocations.
+Schema 63 adds the Operation offer reference. Migration backfills each Operation from its own revision's effective loaded set, preserving historical requests exactly.
+Existing Session sets become intent as-is: conservatively, a name already missing from the Session's current effective sets does not return unless the caller asks again. No historical change-row inference attempts to recover lost intent.
 
 ### Codex wire binding
 
@@ -1294,13 +1296,13 @@ The model-visible **Tool Catalog** contains definitions/schema/result contracts,
 It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_transcript`, `skill` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
 The CLI and TUI put `bash`, `skill` and `web_search` in a fresh Session's spec; the Host never supplies a tools list (D104).
 CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_transcript`, `skill`, `start_agent`, `web_search`).
-A Session's optional `loaded_tools` uses the same name-list grammar (`--loaded-tools a,b|none` in the CLI), defaults to all its `tools`, and is the set sent to the model and used to validate calls.
+A Session's optional `loaded_tools` uses the same name-list grammar (`--loaded-tools a,b|none` in the CLI), defaults to all its `tools`, and records loaded-name intent; the Operation's projected, frozen offer is sent to the model and used to validate calls.
 Every loaded name must be in its resulting tools or configure refuses `loaded_tools_not_in_tools`; a strict subset must contain `find_tools` or configure refuses `loaded_tools_unreachable`.
 Changing tools without specifying loaded_tools keeps equality when the saved sets were equal; otherwise it intersects the saved loaded set with the new tools and applies the same checks.
-The Session and each revision store a nullable `loaded_tool_set_id`, interned like `tool_set_id`, with NULL denoting equality; Current and Full reports expose both sets, and a newly loaded tool follows the existing `additional_tools` history path without discarding the cache prefix.
+The Session and each revision store intent as a nullable `loaded_tool_set_id`, interned like `tool_set_id`, with NULL denoting equality; Current and Full reports expose both sets, and a newly loaded tool follows the existing `additional_tools` history path without discarding the cache prefix.
 Who runs an accepted call is derived from its name, never stored.
 A **core tool** call runs as one core command, with no process: `message_agent(id, text)` admits `text` to Session `id` as a Message from the calling Session, with no client environment, and resolves the call `Delivered to ID.` in the same transaction; an unknown `id` resolves it failed and sends nothing.
-`find_tools(words)` searches the Session's saved, not-yet-loaded tools by name or description, ignoring ASCII case and matching any of one to eight space-separated words.
+`find_tools(words)` searches the Session's currently available, not-yet-loaded projected tools by name or description, ignoring ASCII case and matching any of one to eight space-separated words.
 SQL selects only unloaded candidates; the Host streams names and description windows through the shared `word_search.Matcher`, whose ASCII folding and carry give every Store engine the same answers (D216).
 It loads at most eight matches in name order, in one call-keyed command and one revision naming `loaded_tools`, committed with the call result.
 A no-match call writes no revision.

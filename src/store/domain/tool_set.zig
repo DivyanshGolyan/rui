@@ -45,8 +45,8 @@ const insert_member = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// SQL for the set offered by a Session or revision: its loaded set when
-/// explicit, otherwise its configured set.
+/// SQL for loaded intent on a Session or configuration revision: its explicit
+/// loaded set, otherwise all configured names. Frozen offers live on Operations.
 pub fn offeredSetSql(comptime revision_alias: []const u8) []const u8 {
     return "coalesce(" ++ revision_alias ++ ".loaded_tool_set_id," ++ revision_alias ++ ".tool_set_id)";
 }
@@ -361,16 +361,14 @@ pub const Member = struct {
     name: Bounded(tool_catalog.max_name_bytes),
     source: u64,
     digest: [32]u8,
-    loaded: bool,
 };
 
-/// Intern a name-ordered selection, optionally only its loaded members. All
-/// members and their names must outlive the Access's next round.
-pub fn internMembers(a: anytype, members: []const Member, loaded_only: bool) !u64 {
+/// Intern a name-ordered effective offer. All members and their names must
+/// outlive the Access's next round.
+pub fn internMembers(a: anytype, members: []const Member) !u64 {
     var digest: tool_catalog.SetDigest = .init();
     var count: usize = 0;
     for (members) |*member| {
-        if (loaded_only and !member.loaded) continue;
         digest.add(&member.digest);
         count += 1;
     }
@@ -383,7 +381,6 @@ pub fn internMembers(a: anytype, members: []const Member, loaded_only: bool) !u6
     a.write(insert_set, .{ .id = id, .digest = value, .count = count });
     var ordinal: u64 = 0;
     for (members) |*member| {
-        if (loaded_only and !member.loaded) continue;
         a.writeCount(insert_selected_member, .{ .set = id, .ordinal = ordinal, .source = member.source, .name = member.name.slice() }, 1);
         ordinal += 1;
     }

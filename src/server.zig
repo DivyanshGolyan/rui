@@ -4671,7 +4671,7 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
     try std.testing.expect(fail_index > 0);
 }
 
-test "Host startup refreshes saved MCP offers after a changed listing and restart" {
+test "Host startup projects MCP offers after a changed listing and restart" {
     const Script = @import("mcp/test_server.zig");
     const testing = store_module.testing;
     var tmp = std.testing.tmpDir(.{});
@@ -4706,9 +4706,9 @@ test "Host startup refreshes saved MCP offers after a changed listing and restar
         const key = if (round == 0) "restart-mcp-first" else "restart-mcp-next";
         try testing.submitTestMessage(&storage, &tmp, key, key, session.slice(), "read page");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try std.testing.expectEqual(@as(u64, round + 1), try testing.queryU64(&storage, "SELECT settings_revision FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
+        try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT settings_revision FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
         const description = protocol.contentDigest(if (round == 0) "old page" else "new page");
-        try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation m JOIN session_revision r ON r.session_ref=m.session_ref AND r.revision=m.settings_revision JOIN tool_set_member tm ON tm.tool_set_id=r.tool_set_id JOIN tool_record t ON t.tool_record_id=tm.tool_record_id JOIN content c ON c.content_id=t.description_content_id WHERE m.operation_id=?1 AND c.digest=?2 AND t.read_only=?3", .{ binding.operation_id, testing.Blob{ .bytes = &description }, @intFromBool(round == 1) }));
+        try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation m JOIN session_revision r ON r.session_ref=m.session_ref AND r.revision=m.settings_revision JOIN tool_set_member tm ON tm.tool_set_id=m.tool_set_id JOIN tool_record t ON t.tool_record_id=tm.tool_record_id JOIN content c ON c.content_id=t.description_content_id WHERE m.operation_id=?1 AND c.digest=?2 AND t.read_only=?3", .{ binding.operation_id, testing.Blob{ .bytes = &description }, @intFromBool(round == 1) }));
         try testing.settleItemsForTesting(&storage, &tmp, binding, &.{"{\"type\":\"message\",\"id\":\"done\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
         try std.testing.expect(script.request_received.load(.acquire));
         try std.testing.expect(std.mem.indexOf(u8, script.seen[0..script.seen_len], "tools/list") != null);
