@@ -1756,11 +1756,10 @@ fn readModels(state: *State, read: ModelsRead) void {
             var owned = menu;
             // The answer came after the picker closed.
             const picker = if (state.picker) |*open| open else return owned.deinit(state.gpa);
-            if (picker.choice) |choice| {
-                picker.choice = model_picker_view.reconcile(&owned, pickerDefaults(state), choice);
-            }
-            // A menu reply is not a draft edit: reconciliation has already
-            // refreshed the choice, so the next frame must not reselect it.
+            // Keep the owned ID and controls until the next frame reconciles
+            // them with this menu AND the current draft. A previously typed ID
+            // must yield to listed matches, not become an extra row.
+            picker.edits = null;
             state.menu.deinit(state.gpa);
             state.menu = owned;
             state.menu_read = .read;
@@ -6549,8 +6548,7 @@ test "/model reconciles owned choices across absent listed and changed sign-ins"
                 .list = .{ .live = .{ .bytes = if (initially_listed) "first-chat\nprivate-refresh\n" else "first-chat\n" } },
             };
             try openPicker(&state, &initial);
-            const draft = try typeText(&state, if (initially_listed) "/model" else "/model " ++ id);
-            if (initially_listed) try highlightModel(&state, draft, id);
+            const draft = try typeText(&state, "/model " ++ id);
             _ = try step(&state, .{ .picker_action = .{ .action = .higher_effort, .draft = draft } });
             _ = try step(&state, .{ .picker_action = .{ .action = .next_sign_in, .draft = draft } });
             try std.testing.expectEqual(ReasoningEffort.medium, state.picker.?.choice.?.row.effort.?);
@@ -6566,8 +6564,9 @@ test "/model reconciles owned choices across absent listed and changed sign-ins"
                 count += 1;
             }
             try answerModels(&state, refreshed_lists[0..count]);
-            // Inspect the refresh transition, then exercise the next-frame sync
-            // and the durable save boundary: neither may reconstruct defaults.
+            syncPicker(&state, draft);
+            // The next-frame reconciliation and cached frames keep controls
+            // while this ID remains the choice, whether listed or typed.
             for (0..2) |_| {
                 try std.testing.expectEqual(true, state.picker.?.choice != null);
                 const choice = state.picker.?.choice.?;
@@ -6589,6 +6588,67 @@ test "/model reconciles owned choices across absent listed and changed sign-ins"
             try std.testing.expectEqualStrings(id, saved.model.slice());
             try std.testing.expectEqual(ReasoningEffort.medium, saved.effort.?);
             try std.testing.expectEqual(scenario.provider, saved.provider);
+        }
+    }
+}
+
+test "/model pending typed choices yield only to listed matches after a menu reply" {
+    const Case = struct { models: []const u8, matches: usize };
+    const cases = [_]Case{
+        .{ .models = "unrelated-chat\n", .matches = 0 },
+        .{ .models = "gpt-6-luna\n", .matches = 1 },
+        .{ .models = "gpt-5.6-luna\ngpt-6-luna\n", .matches = 2 },
+    };
+    for ([_]bool{ false, true }) |saved_matches| {
+        for (cases) |case| {
+            var state = try pickerState(Default.of("codex", if (saved_matches) "gpt-6-luna" else "gpt-5.5"));
+            defer state.deinit();
+            state.default.?.effort = .medium;
+            try openPicker(&state, &.{
+                .{ .provider = .codex, .list = .{ .live = .{ .bytes = "unrelated-chat\n" } } },
+                .{ .provider = .openai, .list = .{ .live = .{ .bytes = "unrelated-chat\n" } } },
+            });
+            const draft = try typeText(&state, "/model luna");
+            _ = try step(&state, .{ .picker_action = .{ .action = .higher_effort, .draft = draft } });
+            _ = try step(&state, .{ .picker_action = .{ .action = .next_sign_in, .draft = draft } });
+            try std.testing.expectEqualStrings("luna", state.picker.?.choice.?.id.slice());
+            try std.testing.expectEqual(ReasoningEffort.high, state.picker.?.choice.?.row.effort.?);
+            try std.testing.expectEqual(Provider.openai, state.picker.?.choice.?.row.provider);
+            try answerModels(&state, &.{
+                .{ .provider = .codex, .list = .{ .live = .{ .bytes = case.models } } },
+                .{ .provider = .openai, .list = .{ .live = .{ .bytes = case.models } } },
+            });
+            // Even an unreconciled owned choice cannot add a synthetic row
+            // beside matching entries. Exercise both locales and fixture widths.
+            for ([_]bool{ false, true }) |use_unicode| {
+                for ([_]usize{ 50, 80 }) |width| {
+                    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                    defer arena.deinit();
+                    const plan = try model_picker_view.rows(arena.allocator(), &state.menu, "luna", pickerDefaults(&state), state.picker.?.choice, width, .unicode, use_unicode, .read);
+                    try std.testing.expectEqual(@max(@as(usize, 1), case.matches), plan.count);
+                    try std.testing.expectEqual(case.matches == 0, plan.typed_row);
+                    for (0..plan.count) |at| {
+                        const line = try plan.row(arena.allocator(), at);
+                        try std.testing.expectEqual(case.matches == 0, line.model.? == state.menu.entries.len);
+                    }
+                }
+            }
+            // No draft edit occurs: the model reply itself must invalidate
+            // cached selection and reconcile it against the current query.
+            syncPicker(&state, draft);
+            const expected = if (case.matches == 0) "luna" else if (case.matches == 1 or saved_matches) "gpt-6-luna" else "gpt-5.6-luna";
+            try std.testing.expectEqualStrings(expected, state.picker.?.choice.?.id.slice());
+            try std.testing.expectEqual(if (case.matches == 0) ReasoningEffort.high else .medium, state.picker.?.choice.?.row.effort.?);
+            try std.testing.expectEqual(if (case.matches == 0) Provider.openai else .codex, state.picker.?.choice.?.row.provider);
+            // Down moves among listed matches, with no extra typed stop.
+            _ = try step(&state, .{ .picker_action = .{ .action = .next, .draft = draft } });
+            const final_id = if (case.matches == 0) "luna" else "gpt-6-luna";
+            try std.testing.expectEqualStrings(final_id, state.picker.?.choice.?.id.slice());
+            const effects = try submit(&state, draft);
+            const saved = effects.items[1].save_default;
+            try std.testing.expectEqualStrings(final_id, saved.model.slice());
+            try std.testing.expectEqual(if (case.matches == 0) ReasoningEffort.high else .medium, saved.effort.?);
+            try std.testing.expectEqual(if (case.matches == 0) Provider.openai else .codex, saved.provider);
         }
     }
 }
@@ -6664,7 +6724,7 @@ test "a model Rui does not list shows under Other models and is picked like any 
     try std.testing.expectEqualStrings("unlisted-z", effects.items[1].save_default.model.slice());
 }
 
-test "a pick remains selected before its save ends and refresh preserves its identity" {
+test "a pick remains selected before its save ends and refresh preserves matching identity" {
     var state = try pickerState(Default.of("codex", "gpt-6-luna"));
     defer state.deinit();
     try openPicker(&state, &.{chatgpt});
@@ -6682,7 +6742,7 @@ test "a pick remains selected before its save ends and refresh preserves its ide
     try std.testing.expectEqualStrings("gpt-6.1-sol", state.picker.?.choice.?.id.slice());
     try answerModels(&state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\n" } } }});
     syncPicker(&state, draft);
-    try std.testing.expectEqualStrings("gpt-6.1-sol", state.picker.?.choice.?.id.slice());
+    try std.testing.expectEqualStrings("gpt-5.5", state.picker.?.choice.?.id.slice());
 }
 
 test "a start submitted before the pick's save ends runs on the pick" {

@@ -109,12 +109,11 @@ pub const Rows = struct {
             if (self.end != self.total and wanted == self.count - 1) return simpleLine(arena, try std.fmt.allocPrint(arena, "{s} {d} more", .{ if (self.unicode) "↓" else "v", self.total - self.end }), false);
         }
         const ordinal = self.first + wanted - @as(usize, @intFromBool(self.first != 0 and self.selected != 0));
-        if (self.typed_row and ordinal == 0) return self.modelLine(arena, unlistedEntry(self.menu, self.query, self.defaults, &self.choice), self.menu.entries.len);
-        const model_ordinal = ordinal - @intFromBool(self.typed_row);
+        if (self.typed_row) return self.modelLine(arena, typedEntry(self.menu, self.query.words, self.defaults), self.menu.entries.len);
         var at: usize = 0;
         for (self.menu.entries, 0..) |entry, index| {
             _ = self.query.row(entry, self.defaults) orelse continue;
-            if (at == model_ordinal) return self.modelLine(arena, entry, index);
+            if (at == ordinal) return self.modelLine(arena, entry, index);
             at += 1;
         }
         unreachable;
@@ -143,12 +142,6 @@ fn typedEntry(menu: *const picker.Menu, words: []const u8, defaults: picker.Defa
     return .{ .id = words, .known = false, .catalogued = false, .providers = providers };
 }
 
-/// A retained choice keeps its own ID even when a refresh omits it or
-/// introduces other matches. Without a choice, use the admitted typed words.
-fn unlistedEntry(menu: *const picker.Menu, query: picker.Query, defaults: picker.Defaults, choice: *const ?Choice) picker.Entry {
-    return typedEntry(menu, if (choice.*) |*c| c.id.slice() else query.words, defaults);
-}
-
 /// Multiword filters may narrow real rows, but only a valid model ID can
 /// become a typed row. Invalid unmatched words leave the full chat list.
 fn matchingQuery(menu: *const picker.Menu, words: []const u8, defaults: picker.Defaults) picker.Query {
@@ -175,11 +168,10 @@ pub fn rows(arena: std.mem.Allocator, menu: *const picker.Menu, words: []const u
         };
         count += 1;
     }
-    // A refresh may omit the selected ID. Keep that owned choice visible
-    // alongside any matching live rows, not hidden behind a different model.
-    const typed_row = selected == null and (choice != null or (count == 0 and model_catalog.validModelSyntax(query.words)));
+    // A typed ID is a fallback, never an extra row beside listed matches.
+    const typed_row = count == 0 and model_catalog.validModelSyntax(query.words);
     if (typed_row) {
-        const entry = unlistedEntry(menu, query, defaults, &choice);
+        const entry = typedEntry(menu, query.words, defaults);
         widest = @max(widest, entry.id.len);
         providers.setUnion(entry.providers);
         count += 1;
@@ -206,12 +198,12 @@ fn lines(arena: std.mem.Allocator, menu: *const picker.Menu, words: []const u8, 
 }
 
 fn needed(buffer: []u8, menu: *const picker.Menu, query: picker.Query, defaults: picker.Defaults, choice: ?Choice, id_width: usize, columns: Columns, method: gwidth.Method, unicode: bool, typed_row: bool) usize {
-    var max: usize = 0;
     if (typed_row) {
-        const entry = unlistedEntry(menu, query, defaults, &choice);
-        const row = if (choice) |c| c.row else query.typed(entry, defaults);
-        max = gwidth.gwidth(format(buffer, entry, row, true, id_width, columns, method, unicode).text, method);
+        const entry = typedEntry(menu, query.words, defaults);
+        const row = if (choice) |c| if (c.id.eql(entry.id)) c.row else query.typed(entry, defaults) else query.typed(entry, defaults);
+        return gwidth.gwidth(format(buffer, entry, row, true, id_width, columns, method, unicode).text, method);
     }
+    var max: usize = 0;
     for (menu.entries) |entry| {
         const base = query.row(entry, defaults) orelse continue;
         const highlighted = if (choice) |c| c.id.eql(entry.id) else false;
@@ -311,16 +303,17 @@ fn format(buffer: []u8, entry: picker.Entry, row: picker.Row, highlighted: bool,
 /// Opening highlights the saved default when offered and matching, without
 /// moving it out of its group. Otherwise it selects the first matching row.
 pub fn open(menu: *const picker.Menu, words: []const u8, defaults: picker.Defaults) ?Choice {
-    const wanted = if (defaults.model) |id| menu.find(id) else null;
-    return select(menu, words, defaults, wanted);
+    return select(menu, words, defaults, null);
 }
 
-/// Select after a draft edit. Keep the
-/// highlighted row if it still matches, otherwise select the first match.
+/// Select after a draft edit or menu reply. Keep a matching highlighted ID,
+/// then prefer the matching default, otherwise the first listed match.
+/// Only when none match may the words themselves become a typed choice.
 pub fn select(menu: *const picker.Menu, words: []const u8, defaults: picker.Defaults, wanted: ?usize) ?Choice {
     const query = matchingQuery(menu, words, defaults);
-    if (wanted) |index| if (index < menu.entries.len) {
-        if (query.row(menu.entries[index], defaults)) |row| return Choice.of(menu.entries[index], row);
+    const saved = if (defaults.model) |id| menu.find(id) else null;
+    for ([_]?usize{ wanted, saved }) |candidate| if (candidate) |index| {
+        if (index < menu.entries.len) if (query.row(menu.entries[index], defaults)) |row| return Choice.of(menu.entries[index], row);
     };
     for (menu.entries) |entry| {
         if (query.row(entry, defaults)) |row| return Choice.of(entry, row);
@@ -339,13 +332,6 @@ pub fn retain(choice: Choice, previous: Choice) Choice {
     }
     if (kept.row.providers.contains(previous.row.provider)) kept.row.provider = previous.row.provider;
     return kept;
-}
-
-/// Reconcile by owned ID even when a refresh no longer lists the model.
-/// Only controls the replacement model/sign-ins still offer survive.
-pub fn reconcile(menu: *const picker.Menu, defaults: picker.Defaults, previous: Choice) Choice {
-    const entry = if (menu.find(previous.id.slice())) |at| menu.entries[at] else typedEntry(menu, previous.id.slice(), defaults);
-    return retain(Choice.of(entry, picker.Query.parse("").typed(entry, defaults)), previous);
 }
 
 /// Apply a key or a hit-tested click. A save borrows the choice's model ID.
