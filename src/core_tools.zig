@@ -280,17 +280,7 @@ fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configu
         return refused("spec.permissionMode must be ask or bypass");
     if (configuration.label.state == .value and !protocol.validLabel(configuration.label.value.slice()))
         return refused("spec.label must be one nonblank line of UTF-8");
-    if (configuration.output_schema.borrowedBytes()) |schema| {
-        const json = @import("codecs/json.zig");
-        const Ignore = struct {
-            pub fn key(_: *@This(), _: *const json.Reader, _: u8) void {}
-            pub fn begin(_: *@This(), _: *const json.Reader, _: json.Kind, _: u8) void {}
-            pub fn end(_: *@This(), _: *const json.Reader, _: json.Kind, _: u8) void {}
-        };
-        var ignore: Ignore = .{};
-        var reader: json.Reader = undefined;
-        reader.read(schema, &ignore) catch return refused("spec.outputSchema must be JSON text encoding an object, or null");
-    }
+
     return .accepted;
 }
 
@@ -501,12 +491,12 @@ test "core_tools start_agent optional instructions and output schema" {
     const base = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"custom\",\"effort\":null,\"compactAt\":1,\"tools\":[],\"permissionMode\":\"ask\"";
     const Case = struct { extra: []const u8, refusal: ?[]const u8 = null };
     for ([_]Case{
-        .{ .extra = ",\"instructions\":\"Be helpful\",\"outputSchema\":\"{\\\"type\\\":\\\"object\\\"}\"" },
+        .{ .extra = ",\"instructions\":\"Be helpful\",\"outputSchema\":{\"type\":\"object\"}" },
         .{ .extra = ",\"instructions\":\"\",\"outputSchema\":null" },
         .{ .extra = ",\"instructions\":null", .refusal = "spec.instructions" },
         .{ .extra = ",\"instructions\":123", .refusal = "spec.instructions" },
         .{ .extra = ",\"outputSchema\":[]", .refusal = "spec.outputSchema" },
-        .{ .extra = ",\"outputSchema\":{}", .refusal = "spec.outputSchema" },
+        .{ .extra = ",\"instructions\":\"\",\"outputSchema\":{}" },
         .{ .extra = ",\"outputSchema\":\"[]\"", .refusal = "spec.outputSchema" },
         .{ .extra = ",\"outputSchema\":\"false\"", .refusal = "spec.outputSchema" },
         .{ .extra = ",\"outputSchema\":\"not JSON\"", .refusal = "spec.outputSchema" },
@@ -535,7 +525,7 @@ test "core_tools start_agent optional instructions and output schema" {
             if (start.instructions.?.len != 0) {
                 try std.testing.expectEqualStrings("Be helpful", start.instructions.?);
                 try std.testing.expectEqualStrings("{\"type\":\"object\"}", start.output_schema.?);
-            } else try std.testing.expect(start.output_schema == null);
+            } else if (start.output_schema) |schema| try std.testing.expectEqualStrings("{}", schema);
         }
     }
 }
@@ -715,7 +705,7 @@ test "presets resolve start_agent overrides including explicit null before check
     defer memory.deinit();
     const arena = memory.allocator();
     const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
-        \\{"model":"model-a","effort":"low","compactAt":1000,"tools":["bash"],"permissionMode":"ask","instructions":"Preset text","outputSchema":"{\"type\":\"object\"}","label":"Preset label"}
+        \\{"model":"model-a","effort":"low","compactAt":1000,"tools":["bash"],"permissionMode":"ask","instructions":"Preset text","outputSchema":{"type":"object"},"label":"Preset label"}
     , .{})).object;
     const presets = [_]Preset{.{ .name = "review", .spec = spec }};
     const start = try arena.create(StartAgent);
@@ -822,7 +812,7 @@ test "skills model arguments separate invoke and reload without authority fields
 // Independent expected names include both fields absent from the old tool schema.
 test "start_agent and configure parse the same plain agent spec into the same Configuration" {
     const spec =
-        \\{"model":"custom","effort":null,"compactAt":1000,"tools":["web_search","start_agent"],"loadedTools":["web_search"],"permissionMode":"ask","outputReservation":123,"label":"one spec","instructions":"Follow this","outputSchema":"{\"type\":\"object\"}"}
+        \\{"model":"custom","effort":null,"compactAt":1000,"tools":["web_search","start_agent"],"loadedTools":["web_search"],"permissionMode":"ask","outputReservation":123,"label":"one spec","instructions":"Follow this","outputSchema":{"type":"object","description":"caf\u00e9\/","state":"value","value":{},"bytes":"0","sha256":"not a reference"}}
     ;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

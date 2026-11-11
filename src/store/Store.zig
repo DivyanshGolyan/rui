@@ -46,6 +46,7 @@ const Access = store_access.Access;
 const ReadAccess = reads_domain.ReadAccess;
 const Engine = @import("engine.zig").Engine;
 const Sqlite = @import("engine/Sqlite.zig");
+const Kind = @import("../store_target.zig").Kind;
 const Mysql = @import("engine/Mysql.zig");
 const mysql_connection = @import("wire/mysql_connection.zig");
 const ActionAttemptAdmission = action_domain.ActionAttemptAdmission;
@@ -59,8 +60,8 @@ const ActionResolutionCode = action_domain.ActionResolutionCode;
 const ActionSettlement = action_domain.ActionSettlement;
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
 const AttemptAdmission = model_admission_domain.AttemptAdmission;
-const McpExecutionInput = action_domain.McpExecutionInput;
-const BashExecutionInput = action_domain.BashExecutionInput;
+const ActionExecutionInput = action_domain.ActionExecutionInput;
+const ReadyAction = action_domain.ReadyAction;
 const CommandObservation = command_domain.CommandObservation;
 const ConfigureReply = configuration_domain.ConfigureReply;
 const Found = @import("access.zig").Found;
@@ -103,7 +104,7 @@ pub const Store = struct {
     /// the generation the commit advances to.
     touched: change_ring.Touched = .{},
     /// Which Sessions changed at recent generations: Session listing's
-    /// `since` hint, touched only by the Store's holder. Owned: `openWithOptions` maps it
+    /// `since` hint, touched only by the Store's holder. Owned: `openTarget` maps it
     /// and `close` unmaps it.
     changes: *change_ring.Ring,
     /// This opening's identity: a `since` token from any other opening
@@ -123,7 +124,7 @@ pub const Store = struct {
     /// `.open` once it commits, each later write in a savepoint; `.lost`
     /// once a rollback failed, so the batch never commits. A write outside
     /// a batch (a test's own Entry) opens and commits its own.
-    batch: enum(u8) { none, ready, first, open, lost } = .none,
+    batch: enum(u8) { none, ready, first, open, saved, lost } = .none,
     /// Whether the current write's savepoint is open in the batch.
     savepoint: bool = false,
     /// Release a bulk writer's cache after the queue's outer commit, not
@@ -156,9 +157,7 @@ pub const Store = struct {
         return observation;
     }
 
-    /// Test fixture for a historical producing binding unavailable through
-    /// today's immutable Session configuration admission. Requires a newer
-    /// current revision, leaving that revision and its frozen inputs intact.
+    /// Reads the seal applicable to this frozen Operation's model.
     pub fn prefixSealForTesting(self: *Store, binding: AttemptBinding) !?PrefixSeal {
         return self.queue().run(prefixSealForTestingHeld, .{ self, binding });
     }
@@ -195,43 +194,53 @@ pub const Store = struct {
         try self.engine.sqlite.damageOutputBagForTesting(binding.operation_id);
     }
 
-    /// Opens in place: the Host holds exactly one Store, never a copy. It
-    /// runs once per process; noinline keeps its work off the caller's
-    /// frame, which lives as long as the Host.
-    pub noinline fn openWithOptions(
+    /// Opens in final storage. Admission borrows `target` and `selector` only
+    /// for this call; the Store owns its public selector and served routes.
+    /// Startup scratch must not live on the resident Host frame.
+    pub noinline fn openTarget(
         self: *Store,
         io: std.Io,
-        database_path: []const u8,
+        target: Target,
         selector: []const u8,
         options: OpenOptions,
     ) !void {
         errdefer self.* = undefined;
-        const opened = try Sqlite.open(io, database_path, selector, options);
-        errdefer opened.abandon();
+        var opened: Engine = switch (target) {
+            .sqlite => |path| .{ .sqlite = try Sqlite.open(io, path, selector, options) },
+            .mysql => |connection| .{ .mysql = try Mysql.open(io, connection, selector, options) },
+        };
+        // Preserve the admission error. Closing here only releases the partly
+        // opened connection and prepared statements; there is no caller to retry.
+        var opening: *Engine = &opened;
+        errdefer opening.close() catch {};
 
         var stored_selector: Bounded(store_path.max_bytes) = .{};
-        try stored_selector.set(selector);
+        try stored_selector.set(opened.publicSelector(selector));
         const changes = try createRing();
         errdefer destroyRing(changes);
         const ids: *HostValues = &@as(*OutOfLine, @fieldParentPtr("ring", changes)).ids;
         ids.* = .{ .next = undefined };
-        self.* = .{ .io = io, .engine = .{ .sqlite = opened }, .selector = stored_selector, .changes = changes };
-        self.served = options.served;
-        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .arm = armRerun, .recover = recoverRerun });
-        // The Store is in final storage, so the function may keep its address.
-        try self.engine.sqlite.serve(&self.served);
-        // Tells this opening's `since` tokens from another's. It grants
-        // nothing, so the process CSPRNG serves, and Session IDs keep sole
-        // use of secure draws.
+        self.* = .{ .io = io, .engine = opened, .selector = stored_selector, .changes = changes, .served = options.served };
+        // Cleanup follows the final engine too: its statement cache is populated
+        // below, after the admitted value has moved to its only stable address.
+        opening = &self.engine;
+        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .closed = batchClosed, .arm = armRerun, .recover = recoverRerun });
+        try self.engine.serve(&self.served);
+        // This opening's since tokens grant nothing; Session IDs alone use
+        // secure draws. Draw before identity and catalog initialization.
         io.random(&self.instance);
-        errdefer self.engine.sqlite.statements.deinit();
-        try self.engine.sqlite.prepareRollback();
+        try self.engine.prepareRollback();
         try loadIdentities(self, .full);
         self.queue().opened();
         if (options.catalog) |offered| try self.saveCatalog(offered) else {
             const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
             owned.tools = .{ .catalog = &tool_catalog.built_in, .set_id = 0 };
         }
+    }
+
+    /// Compatibility convenience; all initialization belongs to openTarget.
+    pub fn openWithOptions(self: *Store, io: std.Io, database_path: []const u8, selector: []const u8, options: OpenOptions) !void {
+        return self.openTarget(io, .{ .sqlite = database_path }, selector, options);
     }
 
     /// Atomically replaces the saved models.dev generation. Access flushes
@@ -253,6 +262,22 @@ pub const Store = struct {
         var access: Access(.write, error{}) = .open(&entry);
         defer access.deinit();
         return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, model_facts_domain.save(&access, entries, etag)));
+    }
+
+    /// The selected generation for one operation. Saved entries/IDs belong to
+    /// the caller's arena; without a source this borrows the shipped snapshot.
+    /// Store failures propagate through the normal read/fencing boundary.
+    pub fn readModelCatalog(self: *Store, arena: std.mem.Allocator) ![]const model_catalog.Entry {
+        return self.queue().run(readModelCatalogHeld, .{ self, arena });
+    }
+
+    fn readModelCatalogHeld(self: *Store, arena: std.mem.Allocator) ![]const model_catalog.Entry {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.read, error{OutOfMemory}) = .open(&entry);
+        defer access.deinit();
+        const facts = model_facts_domain.readSelected(&access, arena);
+        return entry.finish(error{OutOfMemory}, facts);
     }
 
     pub fn readModelCatalogSource(self: *Store) !?model_facts_domain.Source {
@@ -306,54 +331,24 @@ pub const Store = struct {
         return ids.items.toOwnedSlice(allocator);
     }
 
-    /// Opens the network engine in place. Its buffers live out of line;
-    /// SQLite never allocates them. The existing holder remains the sole owner.
-    pub noinline fn openMysql(
-        self: *Store,
-        io: std.Io,
-        connection: mysql_connection.Options,
-        selector: []const u8,
-        options: OpenOptions,
-    ) !void {
-        errdefer self.* = undefined;
-        var opened = try Mysql.open(io, connection, selector, options);
-        errdefer opened.close() catch {};
-        var stored_selector: Bounded(store_path.max_bytes) = .{};
-        try stored_selector.set(selector);
-        const changes = try createRing();
-        errdefer destroyRing(changes);
-        const ids: *HostValues = &@as(*OutOfLine, @fieldParentPtr("ring", changes)).ids;
-        ids.* = .{ .next = undefined };
-        self.* = .{ .io = io, .engine = .{ .mysql = opened }, .selector = stored_selector, .changes = changes };
-        self.served = options.served;
-        self.engine.mysql.state.served = &self.served;
-        if (@import("builtin").is_test) {
-            if (connection.database.len >= self.engine.mysql.state.testing_database.len) return error.MysqlConfigTooLong;
-            @memcpy(self.engine.mysql.state.testing_database[0..connection.database.len], connection.database);
-        }
-        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .arm = armRerun, .recover = recoverRerun });
-        io.random(&self.instance);
-        try loadIdentities(self, .full);
-        self.queue().opened();
-        if (options.catalog) |offered| try self.saveCatalog(offered) else {
-            const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
-            owned.tools = .{ .catalog = &tool_catalog.built_in, .set_id = 0 };
-        }
+    /// Compatibility convenience; all initialization belongs to openTarget.
+    pub fn openMysql(self: *Store, io: std.Io, connection: mysql_connection.Options, selector: []const u8, options: OpenOptions) !void {
+        return self.openTarget(io, .{ .mysql = connection }, selector, options);
     }
 
-    /// Stable opaque identity read at MySQL admission; never the URL or the
-    /// location selector used to validate the database's metadata.
-    pub fn mysqlStoreId(self: *const Store) []const u8 {
-        return &self.engine.mysql.state.store_id;
+    pub fn kind(self: *const Store) Kind {
+        return std.meta.activeTag(self.engine);
     }
 
-    /// The immutable admission diagnostic; safe at readiness without queuing
-    /// work on the holder. SQLite has no MySQL setting to report.
-    pub fn mysqlDoublewrite(self: *const Store) ?[]const u8 {
-        return switch (self.engine) {
-            .sqlite => null,
-            .mysql => |mysql| mysql.state.doublewrite.slice(),
-        };
+    /// Borrowed until close: canonical path on SQLite, admitted opaque id on
+    /// MySQL. SQLite's persisted random id is not its protocol selector.
+    pub fn storeId(self: *const Store) []const u8 {
+        return self.selector.slice();
+    }
+
+    /// Immutable admission facts only: safe on the nonblocking host-info path.
+    pub fn admissionDiagnostic(self: *const Store) AdmissionDiagnostic {
+        return .{ .doublewrite = self.engine.admissionDoublewrite() };
     }
 
     /// The tools the Host offers, and the id of their saved set.
@@ -446,7 +441,7 @@ pub const Store = struct {
             try self.readCatalogText(row.schema_id.get(), schema);
             if (!std.mem.eql(u8, &content_string.digest(description), &row.description_digest) or
                 !std.mem.eql(u8, &content_string.digest(schema), &row.schema_digest)) return error.CorruptStore;
-            out.* = .{ .name = name, .owner = row.owner, .server = server, .description = description, .input_schema = schema };
+            out.* = .{ .name = name, .owner = row.owner, .server = server, .read_only = row.read_only, .description = description, .input_schema = schema };
             digest.* = tool_catalog.recordDigest(out);
         }
         if (!saved.catalog().valid()) return error.CorruptStore;
@@ -503,20 +498,12 @@ pub const Store = struct {
         return entry.finish(Ordinary.none, access.readRaw(content_id, start, window));
     }
 
-    pub fn sqliteDiagnostic(self: *Store) SqliteDiagnostic {
-        return self.queue().run(sqliteDiagnosticHeld, .{self});
+    pub fn diagnostic(self: *Store) Diagnostic {
+        return self.queue().run(diagnosticHeld, .{self});
     }
 
-    fn sqliteDiagnosticHeld(self: *Store) SqliteDiagnostic {
-        return self.engine.sqlite.diagnostic();
-    }
-
-    pub fn mysqlDiagnostic(self: *Store) Mysql.Diagnostic {
-        return self.queue().run(mysqlDiagnosticHeld, .{self});
-    }
-
-    fn mysqlDiagnosticHeld(self: *Store) Mysql.Diagnostic {
-        return self.engine.mysql.diagnostic();
+    fn diagnosticHeld(self: *Store) Diagnostic {
+        return self.engine.diagnostic();
     }
 
     /// The SQLite connection, for SQLite-only tests and fixtures.
@@ -1129,58 +1116,69 @@ pub const Store = struct {
 
     /// Never inlined: its two Accesses and admission's rows (about 4 KiB)
     /// stay off the frame of a caller that goes on to dispatch the Attempt.
-    pub fn admitModelAttempt(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
-        return self.queue().write(admitModelAttemptHeld, .{ self, kind, faults });
+    pub fn admitModelAttempt(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
+        return self.queue().write(admitModelAttemptHeld, .{ self, admission_kind, faults });
     }
 
-    noinline fn admitModelAttemptHeld(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
+    noinline fn admitModelAttemptHeld(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
         var reader: ReadAccess = .open(&entry);
         defer reader.deinit();
         var writer: Access(.write, error{ SelectionChanged, ProjectionFailed, InstructionSelectionFailed }) = .open(&entry);
         defer writer.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, writer.end(faults, model_admission_domain.admitNextModelAttempt(&reader, &writer, kind, faults)));
+        return entry.finishTransaction(Ordinary.none, faults, writer.end(faults, model_admission_domain.admitNextModelAttempt(&reader, &writer, admission_kind, faults)));
     }
 
     pub fn admitNextActionAttempt(
         self: *Store,
-        bash_timeout_ms: u64,
+        timeout_ms: u64,
         faults: Faults,
     ) !?ActionAttemptAdmission {
-        return self.queue().write(admitNextActionAttemptHeld, .{ self, bash_timeout_ms, faults });
+        return self.queue().write(admitNextActionAttemptHeld, .{ self, timeout_ms, faults });
     }
 
     fn admitNextActionAttemptHeld(
         self: *Store,
-        bash_timeout_ms: u64,
+        timeout_ms: u64,
         faults: Faults,
     ) !?ActionAttemptAdmission {
-        if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
+        if (timeout_ms == 0 or timeout_ms > std.math.maxInt(i64)) return error.InvalidActionTimeout;
         const entry = try enter(self, .none);
         defer entry.release();
         var candidate: ReadAccess = .open(&entry);
         defer candidate.deinit();
         var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitNextActionAttempt(&candidate, &access, self.io, bash_timeout_ms, faults)));
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitNextActionAttempt(&candidate, &access, self.io, timeout_ms, faults)));
     }
 
-    pub fn admitMcpActionAttempt(self: *Store, action_id: u64, timeout_ms: u64, faults: Faults) !?ActionAttemptBinding {
-        return self.queue().write(admitMcpActionAttemptHeld, .{ self, action_id, timeout_ms, faults });
+    /// Admit a selected Rui-run Action; selection is rechecked under the writer.
+    /// Bash's slot owner uses `admitNextActionAttempt` to fuse selection and
+    /// admission at its existing one-read, one-write cost.
+    pub fn admitActionAttempt(self: *Store, selected: ReadyAction, timeout_ms: u64, faults: Faults) !?ActionAttemptAdmission {
+        return self.queue().write(admitActionAttemptHeld, .{ self, selected, timeout_ms, faults });
     }
-    fn admitMcpActionAttemptHeld(self: *Store, action_id: u64, timeout_ms: u64, faults: Faults) !?ActionAttemptBinding {
-        if (timeout_ms == 0 or timeout_ms > std.math.maxInt(i64)) return error.InvalidMcpTimeout;
+    fn admitActionAttemptHeld(self: *Store, selected: ReadyAction, timeout_ms: u64, faults: Faults) !?ActionAttemptAdmission {
+        if (timeout_ms == 0 or timeout_ms > std.math.maxInt(i64)) return error.InvalidActionTimeout;
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitMcpActionAttempt(&access, self.io, action_id, timeout_ms, faults)));
+        const binding = try entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitActionAttempt(&access, self.io, selected, timeout_ms, faults)));
+        return if (binding) |value| .{ .permit = .{ .binding = value } } else null;
     }
-    pub fn readMcpExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *McpExecutionInput) !void {
-        return self.queue().run(readMcpExecutionInputHeld, .{ self, binding, out });
+    /// `out` is decoded in place and valid only on success. The compile-time
+    /// runner selects the adapter's existing read plan, not persisted state.
+    pub fn readActionExecutionInput(self: *Store, comptime runner: tool_catalog.Runner, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
+        return switch (runner) {
+            .bash => self.queue().run(readBashExecutionInputHeld, .{ self, binding, out }),
+            .mcp => self.queue().run(readMcpExecutionInputHeld, .{ self, binding, out }),
+            .core, .provider => @compileError("only Action runners have execution input"),
+        };
     }
-    fn readMcpExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *McpExecutionInput) !void {
+
+    fn readMcpExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -1188,12 +1186,7 @@ pub const Store = struct {
         return entry.finish(Ordinary.action_attempt, action_domain.readMcpExecutionInput(&access, binding, out));
     }
 
-    /// `out` is valid only when this returns without error.
-    pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
-        return self.queue().run(readBashExecutionInputHeld, .{ self, binding, out });
-    }
-
-    fn readBashExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
+    fn readBashExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -1208,16 +1201,9 @@ pub const Store = struct {
     fn revokeActionSenderHeld(self: *Store, binding: ActionAttemptBinding) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        // SQLite's one-statement autocommit is already atomic. Network
-        // writes must include the ownership fence in the same transaction.
-        if (self.engine == .mysql) {
-            var access: Access(.write, error{}) = .open(&entry);
-            defer access.deinit();
-            return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.revokeActionSender(&access, binding)));
-        }
         var access: Access(.single, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, action_domain.revokeActionSender(&access, binding));
+        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.revokeActionSender(&access, binding)));
     }
 
     pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
@@ -1324,6 +1310,13 @@ pub const Store = struct {
     }
 
     fn dispatchWorkHeld(self: *Store, paused: bool) !DispatchWork {
+        const survey = self.identities().survey;
+        const asked: @FieldType(Survey, "asked") = if (paused) .paused else .running;
+        self.identities().survey.kept = .none;
+        self.identities().survey.asked = asked;
+        // Nothing committed since the survey ran, right after its COMMIT.
+        if (survey.kept == .ready and survey.asked == asked and !self.isFenced())
+            return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation, .retry = survey.retry };
         const entry = try enter(self, .none);
         defer entry.release();
         var access: store_access.Access(.survey, error{}) = .open(&entry);
@@ -1429,26 +1422,31 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.resolveCoreCall(&access, binding, code, result, faults)));
     }
 
-    pub fn nextMcpAction(self: *Store) !?action_domain.McpAction {
-        return self.queue().run(nextMcpActionHeld, .{self});
+    pub fn nextAction(self: *Store, comptime runner: tool_catalog.Runner) !?ReadyAction {
+        if (runner != .bash and runner != .mcp) @compileError("only Action runners can select Actions");
+        return self.queue().run(nextActionHeld, .{ self, runner });
     }
-    fn nextMcpActionHeld(self: *Store) !?action_domain.McpAction {
+    fn nextActionHeld(self: *Store, runner: tool_catalog.Runner) !?ReadyAction {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, action_domain.nextMcpAction(&access));
+        return entry.finish(Ordinary.none, switch (runner) {
+            .bash => action_domain.nextAction(&access, .bash),
+            .mcp => action_domain.nextAction(&access, .mcp),
+            .core, .provider => unreachable,
+        });
     }
-    pub fn resolveMcpAction(self: *Store, action_id: u64, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
-        return self.queue().write(resolveMcpActionHeld, .{ self, action_id, code, text, faults });
+    pub fn resolveAction(self: *Store, selected: ReadyAction, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
+        return self.queue().write(resolveActionHeld, .{ self, selected, code, text, faults });
     }
-    fn resolveMcpActionHeld(self: *Store, action_id: u64, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
+    fn resolveActionHeld(self: *Store, selected: ReadyAction, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
         if (text.len == 0) return error.InvalidActionResult;
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.resolveMcpAction(&access, action_id, code, text, faults)));
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.resolveAction(&access, selected, code, text, faults)));
     }
 
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
@@ -1723,6 +1721,14 @@ pub const OpenOptions = struct {
     catalog: ?*const tool_catalog.Catalog = &tool_catalog.built_in,
 };
 
+pub const Target = union(Kind) {
+    sqlite: []const u8,
+    mysql: mysql_connection.Options,
+};
+
+pub const AdmissionDiagnostic = struct { doublewrite: ?[]const u8 };
+pub const Diagnostic = union(Kind) { sqlite: SqliteDiagnostic, mysql: Mysql.Diagnostic };
+
 pub const SqliteDiagnostic = struct {
     process_memory_current_bytes: ?u64 = null,
     process_memory_highwater_bytes: ?u64 = null,
@@ -1956,10 +1962,14 @@ pub const Entry = struct {
         store.scratch_use = .none;
         // Counts autocommit and explicit-transaction writes alike. A
         // rolled-back change touched everything: never a missed change.
-        if (store.engine.totalChanges() != self.changes) {
+        // An attempt that lost its connection with nothing saved, and runs
+        // again, changed nothing yet: its second run records the change.
+        const reruns = store.engine == .mysql and store.engine.mysql.defersFence();
+        if (store.engine.totalChanges() != self.changes and !reruns) {
             if (@import("builtin").is_test) if (untouchedForTesting(store)) |id|
                 std.debug.panic("rows of Session {s} changed, but the entry point that changed them did not touch it", .{&id});
             const generation = store.commit_generation.fetchAdd(1, .release) + 1;
+            store.identities().survey.kept = if (store.identities().survey.kept == .fresh) .ready else .none;
             store.changes.record(generation, &store.touched);
             if (store.commitWake().load(.acquire)) |wake| wake.set(store.io);
         }
@@ -2030,7 +2040,8 @@ pub fn begin(self: *Store) !void {
             return;
         },
         .open => {},
-        .first, .lost => unreachable,
+        // The Queue ends a saved batch before its next write.
+        .first, .saved, .lost => unreachable,
     }
     std.debug.assert(!self.savepoint);
     try self.engine.control(.savepoint);
@@ -2043,7 +2054,8 @@ pub fn begin(self: *Store) !void {
 pub fn commit(self: *Store) !void {
     switch (self.batch) {
         .first => {
-            self.batch = .open;
+            // Its COMMIT rode its last writes (`commitsWithWrites`).
+            self.batch = if (self.engine.inTransaction()) .open else .saved;
             return;
         },
         .open => {
@@ -2052,11 +2064,66 @@ pub fn commit(self: *Store) !void {
             return;
         },
         .none => {},
-        .ready, .lost => unreachable,
+        .ready, .saved, .lost => unreachable,
     }
     try self.engine.control(.commit);
     self.identities().taken = .empty;
     self.identities().second = 0;
+}
+
+/// Whether a write Access that commits now sends COMMIT with its last
+/// writes: on a network engine, when it is its batch's first write and no
+/// other write waits to share the batch's COMMIT. The batch is then saved
+/// and takes no more (`batchClosed`). A batch that runs again
+/// (`recoverRerun`) is no longer armed and holds every write it held, so
+/// it commits at its end.
+pub fn commitsWithWrites(self: *Store) bool {
+    return self.engine.commitArmed() and self.batch == .first and !self.queue().writeWaiting();
+}
+
+/// Sends `writer`'s last writes and COMMIT, which it bound, with the
+/// dispatch survey's reads after them: the Host asks for that survey
+/// after every commit (`dispatchWork`), and here it costs no round trip
+/// of its own. The reads follow COMMIT, so they run in autocommit and see
+/// what it saved. The writer sends the message; the survey is in it whole
+/// or not at all, so one whose reads do not fit after COMMIT is dropped
+/// before the send, as is one the Host has not asked for yet. Its answer
+/// is kept only beside a writer that did not fail, and only when that one
+/// round gave it: checks that need more rounds are left to the Host's own
+/// `dispatchWork`. A read that fails after COMMIT fences, as it does when
+/// the Host asks, and the commit stands.
+pub noinline fn commitWithSurvey(self: *Store, writer: anytype) void {
+    const kept = &self.identities().survey;
+    if (kept.asked == .never) return writer.passCommit(null);
+    kept.kept = .none;
+    var reads: store_access.Access(.survey, error{}) = .{ .store = self, .tail = true };
+    defer reads.deinit();
+    var survey: model_admission_domain.DispatchSurvey = .{};
+    survey.queue(&reads, kept.asked == .paused);
+    if (reads.failure != null) {
+        self.engine.dropTail();
+        return writer.passCommit(null);
+    }
+    writer.passCommit(reads.asTail());
+    if (writer.failure != null) return;
+    const answer: anyerror!?DispatchWork = if (reads.failure) |err| err else survey.work();
+    const found = (answer catch |err| {
+        @as(anyerror!void, fence(self, err)) catch {};
+        return;
+    }) orelse return;
+    kept.core = found.core;
+    kept.mcp = found.mcp;
+    kept.bash = found.bash;
+    kept.message = found.message;
+    kept.tool_continuation = found.tool_continuation;
+    kept.retry = found.retry;
+    kept.kept = .fresh;
+}
+
+/// `Queue.Batch.closed`: the batch's COMMIT already ran.
+fn batchClosed(context: *anyopaque) bool {
+    const self: *Store = @ptrCast(@alignCast(context));
+    return self.batch == .saved;
 }
 
 fn startBatch(context: *anyopaque) void {
@@ -2149,7 +2216,7 @@ fn recoverRerun(context: *anyopaque) bool {
 
 fn commitBatch(self: *Store) !void {
     switch (self.batch) {
-        .ready => {},
+        .ready, .saved => {},
         .open => self.engine.control(.commit) catch |err| return fence(self, err),
         .lost => return fence(self, error.CanonicalRollbackFailed),
         .none, .first => unreachable,
@@ -2311,6 +2378,26 @@ const HostValues = struct {
     /// (`Store.admitted`): one per write at most.
     admitted: [Queue.drain_limit + 1]Admitted = undefined,
     admitted_len: u8 = 0,
+    /// How the Host last asked `dispatchWork`, with new Turns held or not;
+    /// until it asks, no commit carries the survey. With it, the dispatch
+    /// survey a commit's message carried
+    /// (`commitWithSurvey`), for the `dispatchWork` that asks before
+    /// anything else commits: `fresh` until its writer's entry point ends
+    /// and advances the generation, then `ready` until the next advance.
+    /// It fits the padding after `admitted_len`.
+    survey: Survey = .{},
+};
+
+const Survey = packed struct(u16) {
+    asked: enum(u2) { never, running, paused } = .never,
+    kept: enum(u2) { none, fresh, ready } = .none,
+    core: bool = false,
+    mcp: bool = false,
+    bash: bool = false,
+    message: bool = false,
+    tool_continuation: bool = false,
+    retry: bool = false,
+    _: u6 = 0,
 };
 
 const Admitted = struct {
@@ -2373,14 +2460,12 @@ fn IdentityCeiling(comptime column: Identity) type {
 }
 
 fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
-    if (self.engine == .mysql) {
+    if (self.engine.batches()) {
         inline for (comptime std.enums.values(Identity)) |column| if (columns.contains(column)) {
             const Ceiling = IdentityCeiling(column);
             try self.engine.bind(null, Ceiling, &.{}, 0);
         };
-        if (@import("builtin").is_test) {
-            if (columns.count() != 0) self.engine.mysql.state.testing_shape.identity_passes += 1;
-        }
+        if (columns.count() != 0) self.engine.notePass(.identity);
         try self.engine.startPass();
     }
     errdefer self.engine.finishPass() catch {};
@@ -2425,7 +2510,7 @@ pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
             self.batch = .ready;
             return;
         },
-        .none, .ready => return rollbackTransaction(self, faults),
+        .none, .ready, .saved => return rollbackTransaction(self, faults),
         // A rollback that failed once fails again: nothing undid the write.
         .lost => return error.CanonicalRollbackFailed,
     }

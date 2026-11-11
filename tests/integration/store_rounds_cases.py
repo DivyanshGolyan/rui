@@ -45,15 +45,15 @@ IDLE_SECONDS = 5
 BUDGET = {
     # A Session's first operation, exact.
     "first_commits": 4,
-    "first_write_round_trips": 14,
+    "first_write_round_trips": 10,
     # Each later operation, exact.
     "commits": 3,
-    "write_round_trips": 10,
+    "write_round_trips": 7,
     # Any operation, upper bound: rescans and the observe loop below make
-    # the total vary (33 for a first operation and 26 for a later one
-    # over five runs once a request read its settings in one round and its
-    # history and tools in one more; earlier work varied by up to 6).
-    "round_trips": 39,
+    # the total vary (20 for a first operation and 15 for a later one
+    # over four runs once an observation read its command and Message
+    # in one round; earlier work varied by up to 6).
+    "round_trips": 26,
     # Over IDLE_SECONDS with no Session, exact: the Host asks again only
     # after a commit, a slot change or a scheduled retry falling due.
     "idle_round_trips": 0,
@@ -137,9 +137,11 @@ def shape(queries):
         if open_transaction == 0 and not text.lstrip().startswith("START TRANSACTION"):
             continue
         open_transaction += 1
-        tail = text.rstrip().rstrip(";").upper()
-        if tail.endswith("COMMIT") or tail.endswith("ROLLBACK"):
-            commits += tail.endswith("COMMIT")
+        # Reads may follow COMMIT in its message; every literal is hex, so
+        # no statement holds ';'.
+        statements = [part.strip().upper() for part in text.split(";")]
+        if "COMMIT" in statements or "ROLLBACK" in statements:
+            commits += "COMMIT" in statements
             write_round_trips += open_transaction
             open_transaction = 0
     return commits, write_round_trips

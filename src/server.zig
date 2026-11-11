@@ -1201,7 +1201,7 @@ fn serveOpened(
 fn finishServing(io: std.Io, storage: *const store_module.Store, launched: bool, result: anyerror!void) !void {
     // This is the sole decision and publication site, after intake, workers
     // and execution have drained. A fence wins over every serving outcome.
-    if (launched and storage.engine == .mysql and storage.isFenced()) {
+    if (launched and storage.kind() == .mysql and storage.isFenced()) {
         launch_frame.writeRefusal(io, .{ .code = .store_fenced, .message = "the MySQL Store lost ownership or its connection; restart the Host" });
         return error.StoreFenced;
     }
@@ -1242,22 +1242,25 @@ noinline fn openStoreForHost(
         // With MCP servers the catalog is saved below, once they are listed.
         .catalog = if (!has_mcp) &tools.built_in else null,
     };
-    if (mysql_url) |url| {
-        // Only this call borrows the login. Neither metadata nor filesystem
-        // paths ever see the URL, and admission failure wipes it too.
-        defer url.wipe();
-        try storage.openMysql(io, url.options(), url.database.slice(), store_options);
-        lease.paths.store.set(storage.mysqlStoreId()) catch unreachable;
-        storage.selector.set(storage.mysqlStoreId()) catch unreachable;
-    } else storage.openWithOptions(io, lease.paths.database.slice(), lease.paths.store.slice(), store_options) catch |err| {
-        if (err == error.WrongStoreVersion) {
-            try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
-            if (diagnostics) |writer| writer.record("failed", "unsupported_store_version");
-        } else if (err == error.StoreIdentityMismatch) {
-            try reportStoreIdentityMismatch(identity_mismatch.saved_selector.slice(), lease.paths.store.slice());
+    // The login is borrowed only by admission and wiped on every exit.
+    defer if (mysql_url) |url| url.wipe();
+    const target: store_module.Target = if (mysql_url) |url|
+        .{ .mysql = url.options() }
+    else
+        .{ .sqlite = lease.paths.database.slice() };
+    const selector = if (mysql_url) |url| url.database.slice() else lease.paths.store.slice();
+    storage.openTarget(io, target, selector, store_options) catch |err| {
+        if (mysql_url == null) {
+            if (err == error.WrongStoreVersion) {
+                try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
+                if (diagnostics) |writer| writer.record("failed", "unsupported_store_version");
+            } else if (err == error.StoreIdentityMismatch) {
+                try reportStoreIdentityMismatch(identity_mismatch.saved_selector.slice(), lease.paths.store.slice());
+            }
         }
         return err;
     };
+    lease.paths.store.set(storage.storeId()) catch unreachable;
 }
 
 noinline fn reportStoreIdentityMismatch(saved_selector: []const u8, actual_selector: []const u8) !void {
@@ -1617,7 +1620,7 @@ noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.Co
 fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer) !void {
     // The first MySQL readiness probe learns the opaque id over the private
     // socket. All subsequent work must name that exact id, never the URL.
-    const discovering = request.* == .host_info and request.store().len == 0 and host.store.engine == .mysql;
+    const discovering = request.* == .host_info and request.store().len == 0 and host.store.kind() == .mysql;
     if (!discovering and !std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
     }
@@ -1648,7 +1651,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .custody_occupied = host.custody.held(),
                 .paused = host.turns_paused.load(.acquire),
                 .routes = host.providers.routes(),
-                .doublewrite = host.store.mysqlDoublewrite(),
+                .doublewrite = host.store.admissionDiagnostic().doublewrite,
             }});
         },
         .host_pause => |pause| {
@@ -1869,11 +1872,18 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             defer page.deinit(host.allocator);
             try fd.jsonGrowing(200, protocol.skill_suggestions_reply.max_bytes, host_reply.renderSkillSuggestions, .{&page});
         },
-        // Host memory only: never SQLite or the network.
-        // Sized as written: the bound is tens of KiB, a reply mostly far less.
+        // Refresh is asynchronous; the selected facts are an operation-scoped
+        // Store read, never retained beside the provider's live account list.
         .model_list => {
             host.listings_requested.store(true, .release);
-            try fd.jsonGrowing(200, protocol.model_list_reply.max_bytes, renderModelList, .{host});
+            var arena: std.heap.ArenaAllocator = .init(host.allocator);
+            defer arena.deinit();
+            const facts = host.store.readModelCatalog(arena.allocator()) catch |err| {
+                if (err == error.OutOfMemory) return error.OutOfMemory;
+                fenceDispatch(host, "model catalog", err);
+                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+            };
+            try fd.jsonGrowing(200, protocol.model_list_reply.maxBytes(facts), renderModelList, .{ host, facts });
         },
     }
 }
@@ -1889,9 +1899,9 @@ fn readSkillSuggestions(host: *Host, allocator: std.mem.Allocator, scope: @impor
     };
 }
 
-fn renderModelList(out: protocol.JsonOut, host: *Host) error{BufferTooLarge}!void {
+fn renderModelList(out: protocol.JsonOut, host: *Host, facts: []const @import("model_catalog.zig").Entry) error{BufferTooLarge}!void {
     out.writer.writeAll(protocol.model_list_reply.head) catch return error.BufferTooLarge;
-    host.model_lists.render(out.writer) catch return error.BufferTooLarge;
+    host.model_lists.render(out.writer, facts) catch return error.BufferTooLarge;
     out.writer.writeAll(protocol.model_list_reply.tail) catch return error.BufferTooLarge;
 }
 
@@ -2364,7 +2374,7 @@ const Reply = struct {
     }
 
     /// As `json`, growing from empty: for a bound far above most replies.
-    fn jsonGrowing(self: *Reply, status: u16, comptime max_bytes: usize, comptime render: anytype, args: anytype) !void {
+    fn jsonGrowing(self: *Reply, status: u16, max_bytes: usize, comptime render: anytype, args: anytype) !void {
         return self.jsonInto(.init(self.allocator), status, max_bytes, render, args);
     }
 
@@ -3091,11 +3101,13 @@ test "Message observation work and recovery fit the unchanged resident response 
     const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
     var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
     try description.set(&@as([protocol.max_tool_description_bytes]u8, @splat(1)));
+    var bash_description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
+    try bash_description.set(&@as([protocol.session_work.max_description_bytes]u8, @splat(1)));
     var observation = store_module.CommandObservation{ .status = .accepted, .kind = .{ .message = .{
         .content = .{ .length = max, .digest = @splat(0xff) },
         .queue = .{ .admission_id = max, .state = .{ .processing = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max } } },
         .admitted_at = max,
-        .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = description, .running = max, .approvals = max } }, .first_action = max },
+        .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = bash_description, .running = max, .approvals = max } }, .first_action = max },
     } } };
     try observation.target.set(&escaped_session);
     observation.kind.message.?.recovery.count = protocol.message_recovery_limit;
@@ -4345,8 +4357,10 @@ test "MySQL Host readiness reports doublewrite OFF while SQLite stays unchanged"
     info.doublewrite = null;
     try response.render(host_reply.renderHostInfo, .{info});
     try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
-    // MySQL's bounded opaque id fits within SQLite's existing reply budget.
-    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_reply), protocol.max_host_info_response_bytes);
+    // The common public bound includes the optional diagnostic even beside
+    // a maximum-width selector; SQLite omits that entire fragment.
+    const shape = protocol.host_info_reply;
+    try std.testing.expectEqual(protocol.shapeBytes(shape.head) + protocol.shapeBytes(shape.doublewrite) + protocol.shapeBytes(shape.tail), protocol.max_host_info_response_bytes);
 }
 
 test "MCP socket capacity is reserved beside model and Bash descriptors" {

@@ -60,6 +60,7 @@ const agent_spec_properties = blk: {
         const kind = switch (entry.kind) {
             .tools => "array",
             .decimal_policy => "integer",
+            .content => if (entry.json_object) "object" else "string",
             else => "string",
         };
         const json_type = if (entry.nullable) "[\"" ++ kind ++ "\",\"null\"]" else "\"" ++ kind ++ "\"";
@@ -70,7 +71,7 @@ const agent_spec_properties = blk: {
             else if (std.mem.eql(u8, entry.field, "permission_mode"))
                 ",\"enum\":[\"ask\",\"bypass\"]"
             else if (std.mem.eql(u8, entry.field, "output_schema"))
-                ",\"description\":\"Optional JSON output schema, encoded as JSON text.\""
+                ",\"description\":\"Optional JSON output schema object; null clears it.\""
             else
                 "",
         };
@@ -110,6 +111,8 @@ pub const Record = struct {
     owner: Owner,
     /// The MCP server that serves the tool, for an `.mcp` record only.
     server: []const u8 = "",
+    /// MCP ordering hint only; it never authorizes or retries a call.
+    read_only: bool = false,
 
     pub fn runner(self: *const Record) Runner {
         return Runner.of(self);
@@ -125,12 +128,13 @@ pub const max_tools = tool_name.max_tools;
 
 /// A record's identity: its name, owner, server and the content digests
 /// of its description and input schema. A tool that moves to another
-/// server is another record.
+/// server or changes its read-only hint is another record.
 pub fn recordDigest(member: *const Record) [32]u8 {
     return (RecordIdentity{
         .name = member.name,
         .owner = member.owner,
         .server = member.server,
+        .read_only = member.read_only,
         .description = content_string.digest(member.description),
         .input_schema = content_string.digest(member.input_schema),
     }).digest();
@@ -142,6 +146,7 @@ pub const RecordIdentity = struct {
     name: []const u8,
     owner: Owner,
     server: []const u8,
+    read_only: bool = false,
     description: [32]u8,
     input_schema: [32]u8,
 
@@ -153,6 +158,8 @@ pub const RecordIdentity = struct {
         hashField(&hash, self.server);
         hash.update(&self.description);
         hash.update(&self.input_schema);
+        // Absent/false keeps every pre-hint record and saved set byte-identical.
+        if (self.read_only) hashField(&hash, "read_only");
         return hash.finalResult();
     }
 };
@@ -224,7 +231,7 @@ pub const Catalog = struct {
 /// An MCP record names its server, in the tool-name grammar; any other
 /// record names none.
 pub fn validServer(each: *const Record) bool {
-    return if (each.owner == .mcp) tool_name.valid(each.server) else each.server.len == 0;
+    return if (each.owner == .mcp) tool_name.valid(each.server) else each.server.len == 0 and !each.read_only;
 }
 
 /// The most records a Host's catalog holds; its saved set holds as many.
@@ -278,34 +285,83 @@ pub const start_agent_record: Record = .{
 
 pub const web_search_record: Record = .{ .name = "web_search", .owner = .provider };
 
-/// Who carries out an accepted call to a tool Rui owns, derived from its
-/// name and never stored (D46): Bash runs as an Action process; a core tool
-/// runs as a core command (D24).
+/// Who carries out an accepted call, derived from its frozen record and
+/// never stored (D46). The two Action adapters run Rui-run Actions; core
+/// tools run core commands (D24), and provider tools remain provider-owned.
 pub const Runner = enum {
     bash,
     core,
     mcp,
     provider,
 
+    pub fn beforeAdmissionStopText(self: Runner) []const u8 {
+        return switch (self) {
+            .bash => @import("bash_action_text.zig").stopped_before_admission,
+            .mcp => @import("mcp/action_text.zig").stopped_before_admission,
+            .core => @import("action_text.zig").stopped_before_admission,
+            .provider => unreachable,
+        };
+    }
+
+    /// Adapter-owned wording, not Store policy or persisted runner state.
+    pub fn stoppedText(self: Runner, _: anytype, result: []const u8) []const u8 {
+        return switch (self) {
+            .bash => @import("bash_action_text.zig").stopped,
+            .mcp => result,
+            .core, .provider => unreachable,
+        };
+    }
+
+    pub fn indeterminateText(self: Runner) []const u8 {
+        return switch (self) {
+            .bash => @import("bash_action_text.zig").indeterminate,
+            .mcp => @import("mcp/action_text.zig").indeterminate,
+            .core, .provider => unreachable,
+        };
+    }
+
     pub fn of(tool: *const Record) Runner {
         if (tool.owner == .mcp) return .mcp;
         if (tool.owner == .provider) return .provider;
-        const core = std.mem.eql(u8, tool.name, find_tools_record.name) or std.mem.eql(u8, tool.name, message_agent_record.name) or std.mem.eql(u8, tool.name, read_transcript_record.name) or std.mem.eql(u8, tool.name, start_agent_record.name) or std.mem.eql(u8, tool.name, skill_record.name);
-        return if (core) .core else .bash;
+        for (built_in_rows.values) |row| {
+            if (std.mem.eql(u8, tool.name, row.record.name)) return row.runner;
+        }
+        return .bash;
     }
 };
 
+/// One row per BuiltInTool, in its name order. This is the authority for
+/// each built-in's record and runner; EnumArray requires every tag once.
+pub const BuiltInRow = struct { record: *const Record, runner: Runner };
+pub const built_in_rows = std.enums.EnumArray(Tool, BuiltInRow).init(.{
+    .bash = .{ .record = &bash_record, .runner = .bash },
+    .find_tools = .{ .record = &find_tools_record, .runner = .core },
+    .message_agent = .{ .record = &message_agent_record, .runner = .core },
+    .read_transcript = .{ .record = &read_transcript_record, .runner = .core },
+    .skill = .{ .record = &skill_record, .runner = .core },
+    .start_agent = .{ .record = &start_agent_record, .runner = .core },
+    .web_search = .{ .record = &web_search_record, .runner = .provider },
+});
+
+/// Core tools in table order. The Host's exhaustive dispatch switch over
+/// this generated enum requires a runner arm for every core row.
+pub const CoreTool = blk: {
+    var names: []const []const u8 = &.{};
+    for (built_in_rows.values) |row| {
+        if (row.runner == .core) names = names ++ .{row.record.name};
+    }
+    var values: [names.len]u8 = undefined;
+    for (&values, 0..) |*value, i| value.* = @intCast(i);
+    break :blk @Enum(u8, .exhaustive, names, &values);
+};
+
+pub fn coreTool(name: []const u8) ?CoreTool {
+    return std.meta.stringToEnum(CoreTool, name);
+}
+
 /// The built-in record of each tool `Tool` names: the text a new set saves.
 pub fn record(tool: Tool) *const Record {
-    return switch (tool) {
-        .bash => &bash_record,
-        .find_tools => &find_tools_record,
-        .message_agent => &message_agent_record,
-        .read_transcript => &read_transcript_record,
-        .start_agent => &start_agent_record,
-        .skill => &skill_record,
-        .web_search => &web_search_record,
-    };
+    return built_in_rows.get(tool).record;
 }
 
 /// The built-ins, as the catalog of a Host with no other tools.
@@ -334,6 +390,7 @@ test "the built-in catalog is valid and finds each built-in by name" {
 comptime {
     for (std.enums.values(Tool)) |tool| {
         const r = record(tool);
+        if (built_in_rows.get(tool).runner == .mcp) @compileError("built-in MCP runner");
         if (!std.mem.eql(u8, r.name, @tagName(tool)) or r.name.len > max_name_bytes) @compileError("tool record name");
     }
 }
@@ -372,3 +429,30 @@ pub fn builtIn(name: []const u8) ?Tool {
 pub const ToolSet = built_in_tool.Selection;
 
 pub const Description = Bounded(tool_presentation.max_description_bytes);
+
+test "every built-in runner matches its table row" {
+    for (std.enums.values(Tool)) |tool| {
+        const row = built_in_rows.get(tool);
+        try std.testing.expectEqual(row.runner, Runner.of(record(tool)));
+        try std.testing.expectEqual(row.runner == .core, coreTool(row.record.name) != null);
+    }
+}
+
+test "tool record read-only identity preserves existing digests" {
+    // Pinned from the pre-hint v1 recipe, including content's domain prefix.
+    const provider = recordDigest(&web_search_record);
+    try std.testing.expectEqualStrings("effe976e5ce171d6033b8cfefd755255535a6bbb32c075577842ac0358417fa0", &std.fmt.bytesToHex(provider, .lower));
+    const before: Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" };
+    const old = recordDigest(&before);
+    try std.testing.expectEqualStrings("d7da1c4de845e471addfa3cc2335b2c3204d24499001d6cdc5e7f94b6169d822", &std.fmt.bytesToHex(old, .lower));
+    var read = before;
+    read.read_only = true;
+    try std.testing.expect(validServer(&read));
+    try std.testing.expect(!std.mem.eql(u8, &old, &recordDigest(&read)));
+    const identity: RecordIdentity = .{ .name = read.name, .owner = read.owner, .server = read.server, .read_only = true, .description = content_string.digest(read.description), .input_schema = content_string.digest(read.input_schema) };
+    try std.testing.expectEqualSlices(u8, &recordDigest(&read), &identity.digest());
+    inline for (.{ Owner.rui, Owner.provider }) |owner| {
+        const invalid: Record = .{ .name = "invalid", .owner = owner, .read_only = true };
+        try std.testing.expect(!validServer(&invalid));
+    }
+}

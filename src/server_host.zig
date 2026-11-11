@@ -540,7 +540,7 @@ pub const ModelLists = struct {
     }
 
     /// Each served provider's list, borrowed under the lock for `write`.
-    pub fn render(self: *ModelLists, out: *std.Io.Writer) !void {
+    pub fn render(self: *ModelLists, out: *std.Io.Writer, facts: []const @import("model_catalog.zig").Entry) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         var entries: [std.enums.values(protocol.Provider).len]model_list.Entry = undefined;
@@ -553,7 +553,7 @@ pub const ModelLists = struct {
             } };
             count += 1;
         }
-        try model_list.writeProviders(out, entries[0..count]);
+        try model_list.writeProviders(out, facts, entries[0..count]);
     }
 };
 
@@ -1220,7 +1220,10 @@ pub inline fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
 noinline fn writeSqliteDiagnosticTrace(host: *Host, subject: []const u8) void {
     var publication = beginTestObservation(host, "sqlite_diagnostic", subject);
     defer if (publication) |*value| value.finish();
-    const value = host.store.sqliteDiagnostic();
+    const value = switch (host.store.diagnostic()) {
+        .sqlite => |value| value,
+        .mysql => return,
+    };
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"") catch return;
     trace.appendFmt("{d}", .{nowNs(host)}) catch return;

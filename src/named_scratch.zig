@@ -11,6 +11,7 @@ pub const NumericName = enum {
     @"bash-stdout",
     @"bash-stderr",
     @"bash-stdin",
+    @"mcp-output",
     report,
     @"history-memo",
 
@@ -137,6 +138,7 @@ test "numeric scratch names preserve exact producer spelling" {
         .{ NumericName.@"response-metadata", "response-metadata-" },
         .{ NumericName.@"bash-stdout", "bash-stdout-" },
         .{ NumericName.@"bash-stderr", "bash-stderr-" },
+        .{ NumericName.@"mcp-output", "mcp-output-" },
         .{ NumericName.report, "report-" },
     }) |case| {
         var buffer: [96]u8 = undefined;

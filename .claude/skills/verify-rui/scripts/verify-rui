@@ -8,6 +8,10 @@ or writes the user's default Store, credentials or tmux server.
 import argparse
 import functools
 import hashlib
+import html
+import io
+import math
+import contextlib
 import json
 import os
 import pathlib
@@ -70,10 +74,14 @@ def atomic_write(path, text):
 
 def process_start(pid):
     """Process start time and command line, used to prove a PID is still ours."""
-    result = subprocess.run(["ps", "-o", "lstart=,command=", "-p", str(pid)], capture_output=True, text=True)
+    result = subprocess.run(["ps", "-o", "stat=,lstart=,command=", "-p", str(pid)], capture_output=True, text=True)
     line = result.stdout.strip()
     if result.returncode != 0 or not line:
         return None
+    state, _, line = line.partition(" ")
+    if state.startswith("Z"):
+        return None  # Exited owned children may await the container's reaper.
+    line = line.lstrip()
     return line[:24].strip(), line[24:].strip()
 
 
@@ -188,20 +196,21 @@ def cmd_build(args):
     with open(log, "w") as handle:
         result = subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe", "--summary", "all"], cwd=source,
                                 env=env, stdout=handle, stderr=subprocess.STDOUT)
-        if result.returncode == 0:
+        if result.returncode == 0 and not args.no_screen:
             # The committed-screen observer's terminal emulator, for the tap.
             result = subprocess.run(["zig", "build", "screen-emulator", "--prefix", str(build / "screen"), "--summary", "all"],
                                     cwd=source, env=env, stdout=handle, stderr=subprocess.STDOUT)
     if result.returncode != 0:
         die(f"zig build failed (rc={result.returncode}); see {log}")
-    screen_library = next(path for path in sorted((build / "screen/lib").iterdir()) if not path.is_symlink())
+    screen_library = None if args.no_screen else next(path for path in sorted((build / "screen/lib").iterdir()) if not path.is_symlink())
     bin_dir = build / "bin"
     if bin_dir.exists():
         shutil.rmtree(bin_dir)
     shutil.copytree(source / "zig-out/bin", bin_dir, symlinks=False)
     files = {p.name: sha256(p) for p in sorted(bin_dir.iterdir())}
     record = {"sha": sha, "tree": tree, "source": str(source), "binary": str(bin_dir / "rui"),
-              "screen_library": str(screen_library), "screen_library_sha256": sha256(screen_library),
+              "screen_library": str(screen_library) if screen_library else None,
+              "screen_library_sha256": sha256(screen_library) if screen_library else None,
               "files_sha256": files, "optimize": "ReleaseSafe", "built_at": wall(),
               "build_seconds": round(time.monotonic() - started, 1),
               "zig": subprocess.run(["zig", "version"], capture_output=True, text=True).stdout.strip(),
@@ -217,6 +226,76 @@ def load_build(sha):
     return json.loads(manifest.read_text())
 
 
+def fixture_answer(text, n, answers="echo"):
+    """One answer policy, shared by the echo and realistic fixture modes."""
+    text = text or ""
+    if "compact rich answer" in text:
+        return """## What I changed
+
+1. `retry.zig` checks the deadline.
+
+```zig
+pub fn next(self: *Retry, now: i64) ?u64 {
+    if (now >= self.deadline) return null; // expired
+
+    return 2;
+}
+```
+
+| Case | Before | After |
+| --- | --- | --- |
+| Late request | waits 30 s | fails at once |
+| 2 s left | waits 30 s | waits 2 s |
+
+See the [retry policy notes](https://example.com/docs/retry-policy).
+"""
+    if "rich answer" in text:
+        return """The retry loop sleeps before it checks the deadline, so a request that is already late still waits one more backoff.
+
+## What I changed
+
+1. `retry.zig` checks the deadline **before** sleeping.
+2. The backoff is capped at the time left, not at a fixed 30 s.
+3. Added a test for a deadline that expires mid-backoff.
+
+```zig
+pub fn next(self: *Retry, now: i64) ?u64 {
+    if (now >= self.deadline) return null;
+    const wait = @min(self.backoff, self.deadline - now);
+    self.backoff *= 2;
+    return wait;
+}
+```
+
+| Case | Before | After |
+| --- | --- | --- |
+| Late request | waits 30 s | fails at once |
+| 2 s left | waits 30 s | waits 2 s |
+
+- All 214 tests pass.
+- Nothing else calls `Retry.sleep`, so I removed it.
+
+See the [retry policy notes](https://example.com/docs/retry-policy) for the reasoning. *One thing to check:* the cap changes the worst-case wait in `fetch.zig`.
+"""
+    if "long answer" in text:
+        return "\n\n".join(f"Step {i}. " + "The Host keeps each Session in its Store and wakes it only when a model reply or a tool result arrives, so an idle Session costs no CPU. " * 2 for i in range(1, 15))
+    if answers == "echo":
+        return f"Fixture answer {n}: received {json.dumps(text, ensure_ascii=False)}"
+    if "Seed" in text or "opened" in text:
+        return "Ready. The project has a README and an empty `src` folder."
+    return "The deadline check now runs before the backoff sleep, and the test suite passes (214 tests). I did not touch `fetch.zig`."
+
+def fixture_summary(text, n, tool_count, answers="echo"):
+    if answers == "realistic":
+        return "The project has a README and an empty `src` folder. Two of the three commands failed: `exit 127` (command not found) and the usage check, which printed `unknown option --help`."
+    return f"Fixture tool summary {n}: {tool_count} tool results for {json.dumps(text)}."
+
+
+def require_screen(build):
+    if not build.get("screen_library"):
+        die("this build has no screen library")
+
+
 # ---------------------------------------------------------------- fixture provider
 
 
@@ -224,7 +303,7 @@ def fixture_main(args):
     """Deterministic Responses endpoint. Every request and reply is logged.
 
     Policy (by the latest user text, or by a pending tool result):
-      * after a function_call_output: "Fixture tool summary N: ..." answer
+      * after a function_call_output: echo tool summary, or believable prose in realistic mode
       * text containing "tool demonstration": three Bash calls (ls, exit 127, stderr+exit 1)
       * text containing "consent check": one 32-line Bash command (needs approval in ask mode)
       * text containing "long bash": one Bash command that sleeps 8 s
@@ -235,7 +314,9 @@ def fixture_main(args):
       * text containing "slow": the echo answer streamed slowly (~10 s in flight)
       * text containing "invalid output": a stream that is not JSON, so the Turn fails
       * text containing "rate limit": HTTP 429 with Retry-After 8 the first time, then the echo answer
-      * otherwise: "Fixture answer N: received <json of the exact text>"
+      * text containing "rich answer": markdown with a heading, list, code, table and link
+      * text containing "long answer": a fourteen-step answer
+      * otherwise: "Fixture answer N: received <json of the exact text>" (echo), or realistic prose
     Unbounded: it never exhausts, so extra submissions stay visible instead of failing.
     """
     run = Run(args.run)
@@ -300,7 +381,7 @@ def fixture_main(args):
                 return
             if tool_results:
                 kind = "tool-summary"
-                summary = f"Fixture tool summary {n}: {len(tool_results)} tool results for {json.dumps(user_text)}."
+                summary = fixture_summary(user_text, n, len(tool_results), run.meta.get("answers", "echo"))
                 if user_text and ("show environment" in user_text or "start a child" in user_text):
                     # Say what Bash printed, so the conversation shows it.
                     printed = [r.get("output", "").partition("stdout tail:\n")[2].rstrip("\n") for r in tool_results]
@@ -344,7 +425,7 @@ def fixture_main(args):
             else:
                 kind = "echo"
                 payload = fixture.sse_answer(f"r{n}", f"rs{n}", f"rm{n}",
-                    f"Fixture answer {n}: received {json.dumps(user_text, ensure_ascii=False)}")[0]
+                    fixture_answer(user_text, n, run.meta.get("answers", "echo")))[0]
                 if user_text and "slow" in user_text:
                     # About 10 s in flight, whatever the answer's length.
                     kind, chunk_delay = "echo-slow", 10.0 / -(-len(payload) // 64)
@@ -411,14 +492,15 @@ def tap_main(args):
     import struct
     import termios
     import tty
+    source = pathlib.Path(args.source)
+    head = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
+    build = load_build(head.stdout.strip())
+    require_screen(build)
     term = pathlib.Path(args.term_dir)
     term.mkdir(parents=True, exist_ok=True)
-    source = pathlib.Path(args.source)
     sys.path.insert(0, str(source / "tests/integration"))
     try:
-        head = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
-        build = json.loads((CACHE / "builds" / head.stdout.strip() / "manifest.json").read_text())
-        os.environ["RUI_TEST_GHOSTTY_VT"] = build["screen_library"]  # Absent from builds made before it.
+        os.environ["RUI_TEST_GHOSTTY_VT"] = build["screen_library"]
         from terminal_screen import ScreenCapture
     except Exception as error:  # no observer library: still record bytes
         ScreenCapture = None
@@ -664,7 +746,7 @@ def cmd_new(args):
             "binary_sha256": build["files_sha256"]["rui"], "source": build["source"],
             "scratch": str(scratch), "home": str(scratch / "home"), "store": str(scratch / "store"),
             "project": str(scratch / "project"), "created": wall(), "label": args.label,
-            "helper_sha256": sha256(HERE)}
+            "helper_sha256": sha256(HERE), "answers": getattr(args, "answers", "echo")}
     (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
     run = Run(root)
     (run.home / ".config/rui").mkdir(parents=True, mode=0o700)
@@ -820,6 +902,8 @@ def session_argv(run, session):
 
 def cmd_term(args):
     run = Run(args.run)
+    if not args.no_tap:
+        require_screen(load_build(run.meta["sha"]))
     name = args.name
     term = run.term_dir(name)
     if term.exists():
@@ -915,8 +999,8 @@ def term_record(run, name):
     return json.loads(path.read_text())
 
 
-KEYS = {"Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-r": b"\x12", "BSpace": b"\x7f",
-        "PgUp": b"\x1b[5~", "PgDn": b"\x1b[6~", "Up": b"\x1b[A", "Down": b"\x1b[B", "End": b"\x1b[F", "Home": b"\x1b[H",
+KEYS = {"Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-r": b"\x12", "C-x": b"\x18", "BSpace": b"\x7f",
+        "PgUp": b"\x1b[5~", "PgDn": b"\x1b[6~", "Up": b"\x1b[A", "Down": b"\x1b[B", "Right": b"\x1b[C", "Left": b"\x1b[D", "End": b"\x1b[F", "Home": b"\x1b[H",
         "Tab": b"\t", "S-PgUp": b"\x1b[5;2~",
         # Unsolicited mouse reports: Rui never enables mouse tracking (it uses ?1007
         # alternate scroll), so a physical wheel arrives as Up/Down, not as these.
@@ -999,6 +1083,7 @@ def composer_ready(screen, cursor):
 def cmd_wait(args):
     """Wait for a committed frame (after --after GEN) that contains MARKER."""
     run = Run(args.run)
+    require_screen(load_build(run.meta["sha"]))
     deadline = time.monotonic() + args.timeout
     after = args.after
     if after is None:
@@ -1706,6 +1791,547 @@ def cmd_list(_args):
         print(f"{root}  sha={meta['sha'][:12]} label={meta.get('label')} {'cleaned' if cleaned else 'LIVE'}")
 
 
+# ---------------------------------------------------------------- named frames (plain tmux, no screen library)
+
+
+THEMES = {"night": ("#121933", "#d4cebf"), "day": ("#f3eee2", "#2f2b25"), "mist": ("#e6e9ef", "#2f2b25")}
+ANSI_BASE = ["#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
+             "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#ffffff"]
+
+
+ANSI_ESCAPE = re.compile(r"\x1b\[([0-9;:]*)m|\x1b\]8;[^\x1b\x07]*(?:\x1b\\|\x07)|\x1b\([B0]|\x0e|\x0f")
+
+
+def ansi_color(n):
+    if not 0 <= n <= 255:
+        return None
+    if n < 16:
+        return ANSI_BASE[n]
+    if n < 232:
+        n -= 16
+        levels = [0, 95, 135, 175, 215, 255]
+        return "#%02x%02x%02x" % (levels[n // 36], levels[n // 6 % 6], levels[n % 6])
+    return "#%02x%02x%02x" % ((8 + 10 * (n - 232),) * 3)
+
+
+def ansi_render(text, bg, fg):
+    """Render tmux SGR (including indexed/RGB colours) without interpreting HTML."""
+    default = dict(fg=None, bg=None, bold=False, dim=False, ital=False, ul=False, rev=False, strike=False)
+    style = default.copy()
+    out = []
+
+    def span(chunk):
+        f, b = style["fg"] or fg, style["bg"] or bg
+        if style["rev"]:
+            f, b = b, f
+        css = [f"color:{f}"]
+        if b != bg:
+            css.append(f"background:{b}")
+        for key, rule in (("bold", "font-weight:700"), ("dim", "opacity:.6"), ("ital", "font-style:italic")):
+            if style[key]:
+                css.append(rule)
+        deco = [d for d, key in (("underline", "ul"), ("line-through", "strike")) if style[key]]
+        if deco:
+            css.append("text-decoration:" + " ".join(deco))
+        return f'<span style="{";".join(css)}">{html.escape(chunk)}</span>'
+
+    pos = 0
+    for match in ANSI_ESCAPE.finditer(text):
+        if match.start() > pos:
+            out.append(span(text[pos:match.start()]))
+        pos = match.end()
+        if match.group(1) is None:
+            continue
+        fields = match.group(1).split(";")
+        i = 0
+        while i < len(fields):
+            parts = [int(v or 0) for v in fields[i].split(":")]
+            value = parts[0]
+            if value == 0:
+                style = default.copy()
+            elif value in (38, 48):
+                key = "fg" if value == 38 else "bg"
+                if len(parts) > 1:
+                    colour = parts[1:]
+                else:
+                    colour = [int(v or 0) for v in fields[i + 1:i + 5] if ":" not in v]
+                    count = 2 if colour and colour[0] == 5 else 4 if colour and colour[0] == 2 else 0
+                    i += min(count, len(fields) - i - 1)
+                if len(colour) >= 2 and colour[0] == 5:
+                    style[key] = ansi_color(colour[1])
+                elif len(colour) >= 4 and colour[0] == 2 and all(0 <= v <= 255 for v in colour[-3:]):
+                    style[key] = "#%02x%02x%02x" % tuple(colour[-3:])
+            elif 30 <= value <= 37:
+                style["fg"] = ANSI_BASE[value - 30]
+            elif 90 <= value <= 97:
+                style["fg"] = ANSI_BASE[value - 90 + 8]
+            elif 40 <= value <= 47:
+                style["bg"] = ANSI_BASE[value - 40]
+            elif 100 <= value <= 107:
+                style["bg"] = ANSI_BASE[value - 100 + 8]
+            elif value in (39, 49):
+                style["fg" if value == 39 else "bg"] = None
+            else:
+                toggles = {1: ("bold", True), 2: ("dim", True), 3: ("ital", True), 4: ("ul", True),
+                           7: ("rev", True), 9: ("strike", True), 23: ("ital", False), 24: ("ul", False),
+                           27: ("rev", False), 29: ("strike", False)}
+                if value == 22:
+                    style["bold"] = style["dim"] = False
+                elif value in toggles:
+                    key, enabled = toggles[value]
+                    style[key] = enabled
+            i += 1
+    if pos < len(text):
+        out.append(span(text[pos:]))
+    return "".join(out)
+
+
+def ansi_page(body, bg, fg, cols, rows, cursor):
+    cx, cy = cursor
+    return f"""<!doctype html><meta charset=utf-8><style>
+body{{margin:0;background:#0000}}
+#t{{display:inline-block;padding:14px 16px;background:{bg};border-radius:10px;position:relative}}
+pre{{margin:0;font:14px/1.35 'JetBrains Mono','DejaVu Sans Mono',monospace;color:{fg};width:{cols}ch;height:{rows * 1.35}em;overflow:hidden;position:relative;font-variant-ligatures:none}}
+#c{{position:absolute;left:{cx}ch;top:{cy * 1.35}em;width:1ch;height:1.35em;background:{fg};opacity:.55}}
+</style><div id=t><pre>{body}<i id=c></i></pre></div>"""
+
+
+def parse_sizes(value):
+    """Normalize scenario or CLI sizes to (columns, rows), before execution."""
+    values = value.split(",") if isinstance(value, str) else value
+    if not isinstance(values, list) or not values:
+        raise ValueError("sizes must be a nonempty list or comma-separated WxH values")
+    result = []
+    for size in values:
+        if not isinstance(size, str) or not re.fullmatch(r"[1-9][0-9]*x[1-9][0-9]*", size):
+            raise ValueError(f"invalid size {size!r}; expected positive WxH")
+        dimensions = tuple(map(int, size.split("x")))
+        if dimensions in result:
+            raise ValueError(f"duplicate size {size}")
+        result.append(dimensions)
+    return result
+
+
+def size_name(size):
+    cols, rows = size
+    return f"{cols}x{rows}"
+
+
+def frame_expectations(state):
+    """One expectation policy for validation and the capture owner."""
+    if "expect" in state:
+        value = state["expect"]
+    else:
+        steps = state["steps"]
+        last_wait = next((index for index in range(len(steps) - 1, -1, -1) if "wait" in steps[index]), None)
+        if last_wait is not None and any(set(step) & {"text", "keys", "send", "host"} for step in steps[last_wait + 1:]):
+            raise ValueError(f"{state['name']}: an action follows the last wait; set expect explicitly")
+        value = steps[last_wait]["wait"] if last_wait is not None else []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or not all(isinstance(text, str) and text and "\0" not in text for text in value):
+        raise ValueError(f"{state['name']}: expect must be text or a list of nonempty text markers")
+    return value
+
+
+def cast_entries(entries):
+    for entry in entries:
+        for n in range(1, entry.get("count", 1) + 1):
+            yield {**entry, "label": entry["label"].replace("{n}", str(n))}
+
+
+def validate_scenario(data, sizes=None):
+    """Validate before allocating a run or sending any side effects."""
+    def require(ok, message):
+        if not ok:
+            raise ValueError(message)
+
+    def duration(value):
+        return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+    require(isinstance(data, dict), "scenario must be an object")
+    default_sizes = parse_sizes(data.get("sizes"))
+    override = parse_sizes(sizes) if sizes is not None else None
+    normalized_states = []
+    states = data.get("states")
+    require(isinstance(states, list) and bool(states), "states must be a nonempty list")
+    names, labels = set(), set()
+    for state in states:
+        require(isinstance(state, dict), "state must be an object")
+        name = state.get("name")
+        require(isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name), "invalid state name")
+        require(name not in names, f"duplicate state {name}")
+        names.add(name)
+        require(isinstance(state.get("theme", "night"), str) and state.get("theme", "night") in THEMES, f"{name}: invalid theme")
+        env = state.get("env", {})
+        require(isinstance(env, dict) and all(isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k)
+                                             and isinstance(v, str) and "\0" not in v for k, v in env.items()), f"{name}: invalid env")
+        require("note" not in state or isinstance(state["note"], str) and "\n" not in state["note"], f"{name}: note must be one line")
+        state_sizes = parse_sizes(state["sizes"]) if "sizes" in state else default_sizes
+        cast = state.get("cast", [])
+        require(isinstance(cast, list), f"{name}: cast must be a list")
+        for entry in cast:
+            require(isinstance(entry, dict), f"{name}: cast entry must be an object")
+            label, workspace = entry.get("label"), entry.get("workspace")
+            require(isinstance(label, str) and bool(label) and "\n" not in label, f"{name}: invalid cast label")
+            require(isinstance(workspace, str) and bool(workspace) and not pathlib.PurePath(workspace).is_absolute()
+                    and ".." not in pathlib.PurePath(workspace).parts, f"{name}: workspace must be relative to HOME")
+            require(entry.get("mode") in ("bypass", "ask"), f"{name}: invalid cast mode")
+            require(entry.get("settle", "answered") in ("answered", "pending", "stop"), f"{name}: invalid settle")
+            require(type(entry.get("count", 1)) is int and entry.get("count", 1) > 0, f"{name}: count must be positive")
+            require("count" not in entry or "{n}" in label, f"{name}: counted label must contain {{n}}")
+            require(all(isinstance(entry.get(k, ""), str) for k in ("model", "effort")), f"{name}: invalid model/effort")
+            messages = entry.get("messages")
+            require(isinstance(messages, list) and bool(messages) and all(isinstance(m, str) and m for m in messages), f"{name}: messages must be nonempty strings")
+        for entry in cast_entries(cast):
+            require(entry["label"] not in labels and entry["label"] != "overview", f"{name}: duplicate/reserved cast label {entry['label']}")
+            labels.add(entry["label"])
+        require(isinstance(state.get("open"), str) and (state["open"] == "overview" or state["open"] in labels), f"{name}: unknown cast label in open: {state.get('open')}")
+        steps = state.get("steps")
+        require(isinstance(steps, list), f"{name}: steps must be a list")
+        for step in steps:
+            require(isinstance(step, dict), f"{name}: step must be an object")
+            actions = set(step) - {"timeout"}
+            require(len(actions) == 1 and actions <= {"text", "keys", "wait", "gone", "sleep", "send", "host"}, f"{name}: unknown or ambiguous step {step}")
+            action = next(iter(actions))
+            value = step[action]
+            require("timeout" not in step or action in ("wait", "gone") and duration(step["timeout"]), f"{name}: invalid timeout")
+            if action in ("text", "wait", "gone"):
+                require(isinstance(value, str) and "\0" not in value, f"{name}: {action} must be text")
+            elif action == "keys":
+                require(isinstance(value, list) and bool(value) and all(isinstance(k, str) and k in KEYS for k in value), f"{name}: unknown key")
+            elif action == "sleep":
+                require(duration(value), f"{name}: invalid sleep")
+            elif action == "host":
+                require(value in ("pause", "start"), f"{name}: invalid host action")
+            else:
+                require(isinstance(value, dict) and isinstance(value.get("to"), str) and value["to"] in labels and isinstance(value.get("text"), str)
+                        and type(value.get("wait", True)) is bool, f"{name}: invalid send or unknown cast label")
+        normalized_states.append({**state, "sizes": override or state_sizes, "expect": frame_expectations(state)})
+    return {**data, "sizes": override or default_sizes, "states": normalized_states}
+
+
+def load_scenario(path, sizes=None):
+    return validate_scenario(json.loads(pathlib.Path(path).read_text()), sizes)
+
+
+def scenario_snapshot(scenario):
+    """Keep the evidence copy reusable as a scenario input, not internal tuples."""
+    return {**scenario, "sizes": [size_name(size) for size in scenario["sizes"]],
+            "states": [{**state, "sizes": [size_name(size) for size in state["sizes"]]} for state in scenario["states"]]}
+
+
+class FrameFailure(Exception):
+    pass
+
+
+def frame_command(result, description):
+    if result.returncode:
+        raise FrameFailure(f"{description}: {(result.stderr or result.stdout).strip()}")
+    return result
+
+
+def frame_bash_running(report):
+    state = report.get("work", {}).get("state", {})
+    return state.get("kind") == "bash" and int(state.get("running", "0")) > 0
+
+
+def frame_request(run, result, settle="answered", sid=None):
+    frame_command(result, "Session message")
+    match = re.search(r"request: (\S+)", result.stderr)
+    if not match:
+        raise FrameFailure("Session message returned no request handle")
+    key = match.group(1)
+    if settle == "pending":
+        return
+    deadline = time.monotonic() + 40
+    while time.monotonic() < deadline:
+        if settle == "stop":
+            inspection = run.rui_cmd("session", "inspect", "--store", run.store, "--session", sid, log=False)
+            # Public Session inspection exposes the live Bash call.
+            if inspection.returncode == 0 and frame_bash_running(json.loads(inspection.stdout)):
+                frame_command(run.rui_cmd("session", "stop", "--store", run.store, "--session", sid), "stop Session")
+                settle = "answered"
+        inspection = run.rui_cmd("request", "inspect", "--store", run.store, "--key", key, log=False)
+        if inspection.returncode == 0:
+            data = json.loads(inspection.stdout)
+            status = data.get("observation", {}).get("state")
+            if status in ("completed", "failed", "cancelled", "rejected"):
+                if settle == "stop":
+                    raise FrameFailure("Session settled before its Bash call could be stopped")
+                return data
+        time.sleep(0.1)
+    raise FrameFailure(f"request {key} did not settle ({settle})")
+
+
+def seed_cast(run, entries):
+    for entry in cast_entries(entries):
+        workspace = run.home / entry["workspace"]
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "README.md").write_text("verify-rui project\n")
+        (workspace / "src").mkdir(exist_ok=True)
+        sid = None
+        for i, text in enumerate(entry["messages"]):
+            if sid is None:
+                model = entry.get("model", "gpt-6.1-sol")
+                argv = ["session", "start", "--store", run.store, "--workspace", workspace, "--provider", "codex",
+                        "--model", model, "--permission-mode", entry["mode"], "--label", entry["label"]]
+                if entry.get("effort"):
+                    argv += ["--reasoning-effort", entry["effort"]]
+                result = run.rui_cmd(*argv, input=text)
+                if result.returncode and model != "gpt-5.5" and "[selection_model_unsupported]" in result.stderr:
+                    refusal = result.stderr
+                    argv[argv.index("--model") + 1] = "gpt-5.5"
+                    result = run.rui_cmd(*argv, input=text)
+                    print(f"verify-rui: {entry['label']}: {model} refused; using gpt-5.5", file=sys.stderr)
+                    append_jsonl(run.evidence / "frames-model-fallback.jsonl", {"label": entry["label"], "requested": model,
+                                                                             "used": "gpt-5.5", "refusal": refusal})
+                frame_command(result, f"start {entry['label']}")
+                sid = json.loads(result.stdout)["context"]["session"]
+                run.meta["sessions"][entry["label"]] = sid
+                atomic_write(run.root / "run.json", json.dumps(run.meta, indent=1) + "\n")
+            else:
+                result = run.rui_cmd("session", "send", "--store", run.store, "--to", sid, input=text)
+            settle = entry.get("settle", "answered") if i == len(entry["messages"]) - 1 else "answered"
+            frame_request(run, result, settle, sid)
+
+
+def frame_pane(run, target):
+    return frame_command(run.tmux("capture-pane", "-p", "-t", target, check=False), "capture pane").stdout
+
+
+def frame_dead(run, target):
+    return run.tmux("display-message", "-p", "-t", target, "#{pane_dead}", check=False).stdout.strip() != "0"
+
+
+def frame_wait(run, target, text, absent=False, timeout=20, allow_exit=False):
+    deadline = time.monotonic() + timeout
+    while True:
+        screen = frame_pane(run, target)
+        if not allow_exit and frame_dead(run, target):
+            raise FrameFailure("Rui exited before the state was reached")
+        if (text in screen) != absent:
+            return
+        if time.monotonic() >= deadline:
+            raise FrameFailure(f"timeout waiting for {'absence of ' if absent else ''}{text!r}")
+        time.sleep(0.1)
+
+
+def frame_steps(run, target, steps, exiting=False):
+    for step in steps:
+        if "text" in step:
+            frame_command(run.tmux("send-keys", "-l", "-t", target, "--", step["text"], check=False), "type text")
+            time.sleep(0.4)  # Separate paste-sized literal input from the submit key, as in d.sh.
+            exiting = exiting or step["text"] == "/exit"
+        elif "keys" in step:
+            for key in step["keys"]:
+                raw = KEYS[key]
+                frame_command(run.tmux("send-keys", "-H", "-t", target, *[f"{b:02x}" for b in raw], check=False), "send keys")
+                # Let a lone Escape expire before any following key can become Alt-key input.
+                time.sleep(0.35 if key == "Esc" else 0.08)
+        elif "wait" in step or "gone" in step:
+            action = "wait" if "wait" in step else "gone"
+            frame_wait(run, target, step[action], action == "gone", step.get("timeout", 20), exiting)
+        elif "sleep" in step:
+            time.sleep(step["sleep"])
+        elif "send" in step:
+            message = step["send"]
+            sid = run.sid(message["to"])
+            result = run.rui_cmd("session", "send", "--store", run.store, "--to", sid, input=message["text"])
+            frame_request(run, result, "answered" if message.get("wait", True) else "pending", sid)
+        elif step["host"] == "pause":
+            frame_command(run.rui_cmd("host", "pause", "--store", run.store), "pause Host")
+        else:
+            launch_host(run)
+        if not exiting and frame_dead(run, target):
+            raise FrameFailure("Rui exited before the state was reached")
+    return exiting
+
+
+def frame_capture(run, target, out, state, size, reason):
+    cols, rows = size
+    name = size_name(size)
+    stem = f"{state['name']}@{name}"
+    files = {ext: f"{stem}.{ext}" for ext in ("txt", "ansi", "html")}
+    ansi = frame_command(run.tmux("capture-pane", "-e", "-N", "-p", "-t", target, check=False), "capture ANSI").stdout
+    # Derive text and HTML from this same snapshot: a second capture could
+    # already show the next state while the first still satisfied its marker.
+    plain = "\n".join(line.rstrip(" ") for line in ANSI_ESCAPE.sub("", ansi).split("\n"))
+    missing = next((text for text in frame_expectations(state) if text not in plain), None)
+    if missing is not None and reason is None:
+        reason = f"state left before capture: {missing}"
+    info = run.tmux("display-message", "-p", "-t", target,
+                    "#{cursor_x} #{cursor_y} #{cursor_flag}").stdout.split()
+    cx, cy, visible = map(int, info)
+    bg, fg = THEMES[state.get("theme", "night")]
+    (out / files["txt"]).write_text(plain)
+    (out / files["ansi"]).write_text(ansi)
+    (out / files["html"]).write_text(ansi_page(ansi_render(ansi.removesuffix("\n"), bg, fg), bg, fg, cols, rows,
+                                              (cx, cy) if visible else (-5, -5)))
+    return {"name": state["name"], "size": name, "files": files, "status": "failed" if reason else "ok",
+            "ok": not bool(reason), "reason": reason, "sha": run.meta["sha"], "note": state.get("note", "")}
+
+
+def frames_index(out, frames, png):
+    sections = []
+    for frame in frames:
+        caption = html.escape(f"{frame['name']} · {frame['size']}")
+        files = frame["files"]
+        links = " · ".join(f'<a href="{html.escape(path, quote=True)}">{ext}</a>' for ext, path in files.items())
+        view = f'<img src="{files["png"]}" alt="{caption}">' if png and "png" in files else \
+            f'<iframe title="{caption}" src="{files["html"]}"></iframe>' if "html" in files else ""
+        sections.append(f'<section><h2>{caption}</h2><p>{html.escape(frame["note"])}</p>'
+                        f'<p>{frame["status"]}: {html.escape(frame["reason"] or "")}</p><p>{links}</p>{view}</section>')
+    (out / "frames.json").write_text(json.dumps(frames, indent=2) + "\n")
+    (out / "index.html").write_text('<!doctype html><meta charset="utf-8"><title>Rui frames</title>'
+                                    '<style>body{font:16px system-ui;background:#ddd;padding:20px}'
+                                    'img{max-width:100%}iframe{width:100%;height:900px;border:0}</style>' + "\n".join(sections))
+
+
+def cmd_frames(args):
+    try:
+        scenario = load_scenario(args.scenario, args.sizes)
+        selected = set(args.only.split(",")) if args.only else {s["name"] for s in scenario["states"]}
+        unknown = selected - {s["name"] for s in scenario["states"]}
+        if unknown:
+            raise ValueError("unknown states: " + ", ".join(sorted(unknown)))
+    except (OSError, ValueError, TypeError) as error:
+        die(str(error))
+    if not shutil.which("tmux"):
+        die("frames requires tmux")
+    if not args.no_png:
+        if not shutil.which("node"):
+            die("frames requires node and Playwright; use --no-png")
+        probe = subprocess.run(["node", str(HERE.with_name("frames_png.js")), "--check"], capture_output=True, text=True)
+        if probe.returncode:
+            die("frames requires node and Playwright with Chromium; use --no-png")
+    # Keep the existing new command as the one run/fixture owner.
+    output = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(output):
+            cmd_new(argparse.Namespace(sha=args.sha, seed=0, no_sessions=True, answers="realistic", label="frames",
+                                       active_capacity=2, host_setenv=[]))
+    except BaseException:
+        # Even a partially initialized run must be torn down; cmd_new writes run.json first.
+        candidates = sorted((CACHE / "runs").glob(f"*-{args.sha[:7]}-{os.getpid()}"))
+        if candidates and not args.keep:
+            with contextlib.redirect_stdout(sys.stderr):
+                try:
+                    cmd_cleanup(argparse.Namespace(run=str(candidates[-1]), no_export=True))
+                except SystemExit:
+                    pass
+        raise
+    run = Run(output.getvalue().strip())
+    # Match the review's home-relative working directory even in the empty overview.
+    run.project = run.home / "code/rui"
+    run.project.mkdir(parents=True, exist_ok=True)
+    (run.project / "README.md").write_text("verify-rui project\n")
+    (run.project / "src").mkdir(exist_ok=True)
+    run.meta["project"] = str(run.project)
+    atomic_write(run.root / "run.json", json.dumps(run.meta, indent=1) + "\n")
+    out = pathlib.Path(args.out).resolve() if args.out else run.evidence / "frames"
+    records = []
+    failed = False
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "scenario.json").write_text(json.dumps(scenario_snapshot(scenario), indent=2) + "\n")
+        # A keeper window preserves the private server and its options between states.
+        run.tmux("-f", "/dev/null", "new-session", "-d", "-s", "frames", "-n", "keeper", "sleep 86400")
+        run.own("tmux-server", int(run.tmux("display-message", "-p", "#{pid}").stdout), socket=str(run.sock))
+        run.tmux("set-option", "-g", "remain-on-exit", "on")
+        run.tmux("set-option", "-g", "escape-time", "0")
+        run.tmux("set-option", "-g", "status", "off")
+        last = max(i for i, state in enumerate(scenario["states"]) if state["name"] in selected)
+        for state in scenario["states"][:last + 1]:
+            state_sizes = state["sizes"]
+            cols, rows = state_sizes[0]
+            target = f"=frames:={state['name']}"
+            reason = None
+            opened = False
+            failure_capture = None
+            try:
+                seed_cast(run, state.get("cast", []))
+                bg, fg = THEMES[state.get("theme", "night")]
+                run.tmux("set-option", "-g", "window-style", f"bg={bg},fg={fg}")
+                run.tmux("set-option", "-g", "window-active-style", f"bg={bg},fg={fg}")
+                env = run.env(**{"COLORTERM": "truecolor", **state.get("env", {})})
+                argv = session_argv(run, state["open"])
+                command = "exec env -i " + shlex.join([f"{k}={v}" for k, v in env.items()]) + " " + shlex.join(argv)
+                # No client is attached: default-size sets the PTY before exec.
+                # Resizing only after exec can lose SIGWINCH during Rui startup.
+                run.tmux("set-option", "-g", "default-size", f"{cols}x{rows}")
+                run.tmux("set-option", "-g", "window-size", "latest")
+                run.tmux("new-window", "-d", "-t", "frames", "-n", state["name"], "-c", run.project, command)
+                opened = True
+                run.tmux("set-option", "-g", "window-size", "manual")
+                run.tmux("resize-window", "-t", target, "-x", cols, "-y", rows)
+                # An explicit Host-stopped diagnostic is an intentionally exited
+                # surface, unlike an early exit in a normal interactive state.
+                stopped_marker = next((step["wait"] for step in state["steps"]
+                                       if "The Host stopped." in step.get("wait", "")), None)
+                time.sleep(1.2)  # Rui's first composer precedes its opening transcript read.
+                first_wait = state["steps"][0].get("wait") if state["steps"] else None
+                frame_wait(run, target, first_wait or "›", allow_exit=bool(stopped_marker))
+                frame_steps(run, target, state["steps"], exiting=bool(stopped_marker))
+            except (Exception, SystemExit) as error:
+                reason = str(error)
+                failed = True
+                print(f"verify-rui: {state['name']}: {reason}", file=sys.stderr)
+                if opened and state["name"] in selected:
+                    try:
+                        failure_capture = frame_capture(run, target, out, state, state_sizes[0], reason)
+                    except (Exception, SystemExit):
+                        pass  # The capture error below retains the primary state failure.
+            try:
+                if state["name"] in selected:
+                    for index, size in enumerate(state_sizes):
+                        if failure_capture and index == 0:
+                            records.append(failure_capture)
+                            continue
+                        try:
+                            if index > 0:
+                                width, height = size
+                                frame_command(run.tmux("resize-window", "-t", target, "-x", width, "-y", height, check=False), "resize window")
+                                time.sleep(0.8)
+                            # The first viewport is already sized. Capture directly
+                            # after its steps/wait, while a transient is still visible.
+                            record = frame_capture(run, target, out, state, size, reason)
+                        except (Exception, SystemExit) as error:
+                            failed = True
+                            record = {"name": state["name"], "size": size_name(size), "files": {}, "status": "failed", "ok": False,
+                                      "reason": reason or str(error), "sha": args.sha, "note": state.get("note", "")}
+                        failed = failed or not record["ok"]
+                        if not record["ok"] and reason is None:
+                            print(f"verify-rui: {state['name']}@{record['size']}: {record['reason']}", file=sys.stderr)
+                        records.append(record)
+                    frames_index(out, records, False)
+            finally:
+                if opened:
+                    run.tmux("kill-window", "-t", target, check=False)
+        if not args.no_png:
+            result = subprocess.run(["node", str(HERE.with_name("frames_png.js")), str(out)], capture_output=True, text=True)
+            if result.returncode:
+                failed = True
+                print("verify-rui: PNG rendering failed: " + " ".join(result.stderr.strip().splitlines()), file=sys.stderr)
+            for record in records:
+                png = f"{record['name']}@{record['size']}.png"
+                if (out / png).exists():
+                    record["files"]["png"] = png
+                elif "html" in record["files"]:
+                    record.update(ok=False, status="failed", reason=record["reason"] or "PNG rendering failed")
+        frames_index(out, records, not args.no_png)
+    finally:
+        if not args.keep:
+            with contextlib.redirect_stdout(sys.stderr):
+                try:
+                    cmd_cleanup(argparse.Namespace(run=str(run.root), no_export=True))
+                except SystemExit as error:
+                    failed = failed or bool(error.code)
+    print(out)
+    if failed:
+        raise SystemExit(1)
+
+
 # ---------------------------------------------------------------- CLI
 
 
@@ -1715,6 +2341,7 @@ def main():
     p = sub.add_parser("build", help="build a pinned SHA once (ReleaseSafe) into the cache")
     p.add_argument("sha"); p.add_argument("--repo"); p.add_argument("--pkg-dir"); p.add_argument("--force", action="store_true")
     p.add_argument("--source", help="existing clean detached worktree of SHA (default: cache worktree)")
+    p.add_argument("--no-screen", action="store_true", help="skip the committed-screen observer library")
     p.set_defaults(func=cmd_build)
     p = sub.add_parser("new", help="new run: synthetic HOME/Store, fixture provider, Host, Sessions demo(bypass)/approve(ask)")
     p.add_argument("sha"); p.add_argument("--seed", type=int, default=0, help="seed N answered messages into demo")
@@ -1723,7 +2350,17 @@ def main():
     p.add_argument("--host-setenv", action="append", default=[], metavar="NAME=VALUE",
                    help="add one variable to the Host's own environment (e.g. a Host-only secret)")
     p.add_argument("--label", default="")
+    p.add_argument("--answers", choices=["realistic", "echo"], default="echo")
     p.set_defaults(func=cmd_new)
+    p = sub.add_parser("frames", help="render named screen states to text, HTML and PNG without a screen library")
+    p.add_argument("sha")
+    p.add_argument("--scenario", default=str(HERE.with_name("frames.json")))
+    p.add_argument("--only", metavar="NAME,...")
+    p.add_argument("--sizes", metavar="WxH,...")
+    p.add_argument("--out")
+    p.add_argument("--no-png", action="store_true")
+    p.add_argument("--keep", action="store_true")
+    p.set_defaults(func=cmd_frames)
     p = sub.add_parser("restart-host", help="stop the run's Host and start a fresh one on the same Store and fixture")
     p.add_argument("run")
     p.set_defaults(func=cmd_restart_host)

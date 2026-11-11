@@ -260,7 +260,7 @@ pub fn runTool(a: anytype, allocator: std.mem.Allocator, binding: @import("actio
     const action = @import("action.zig");
     var facts: action.core_facts.Result = undefined;
     const names: action.CoreNames = .of();
-    a.read(action.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &facts);
+    a.read(action.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
     try a.run();
     const found = facts orelse return error.StaleActionAttemptBinding;
     if (found.stopped) {
@@ -273,7 +273,7 @@ pub fn runTool(a: anytype, allocator: std.mem.Allocator, binding: @import("actio
     try a.run();
     if (faults.content_import) return error.InjectedContentImportFailure;
     const outcome_id = try content.importBytes(a, &outcome, result.bytes);
-    try action.queueCoreResolution(a, binding, found.session, if (result.succeeded) .succeeded else .failed, outcome_id);
+    try action.queueResolution(a, binding, found.session, if (result.succeeded) .succeeded else .failed, outcome_id);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
     return true;

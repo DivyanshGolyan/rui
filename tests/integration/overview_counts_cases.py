@@ -58,7 +58,7 @@ def top_style(screen, frame, text):
 
 
 def counts_by_mark():
-    """? needs you, ● works, ◌ queues, × failed; zeros left out; slots only
+    """? needs you, ⠹ works, ◌ queues, × failed; zeros left out; slots only
     while something queues; only ? and × coloured."""
     holds = {name: threading.Event() for name in ("w1", "w2", "q1")}
     ask = fixture.sse_tool_calls("ask-calls", [("bash", "ask-call", json.dumps(
@@ -80,37 +80,37 @@ def counts_by_mark():
             for name in ("w1", "w2"):
                 send(w, w.session("--label", name), name)
             # Both slots in use but nothing waits for one: no slots.
-            frame = screen.wait(lambda f: counts(f) == f"{WORDMARK}  ? 1  ● 2  × 1", "? 1  ● 2  × 1")
+            frame = screen.wait(lambda f: counts(f) == f"{WORDMARK}  ? 1  ⠹ 2  × 1", "? 1  ⠹ 2  × 1")
             assert "slots" not in top(frame), frame
 
             queued = w.session("--label", "q1")
             send(w, queued, "q1")
-            frame = screen.wait(lambda f: counts(f) == f"{WORDMARK}  ? 1  ● 2  ◌ 1 · slots 2/2  × 1",
-                                "? 1  ● 2  ◌ 1 · slots 2/2  × 1")
+            frame = screen.wait(lambda f: counts(f) == f"{WORDMARK}  ? 1  ⠹ 2  ◌ 1 · slots 2/2  × 1",
+                                "? 1  ⠹ 2  ◌ 1 · slots 2/2  × 1")
             assert "◌ q1" in frame, frame
 
             # Only needs you and failures take a colour; working, queued
             # and the slots draw in one ink, every count in its mark's.
             needs, failed = (top_style(screen, frame, text) for text in ("? 1", "× 1"))
-            plain = [top_style(screen, frame, text) for text in ("● 2", "◌ 1", "slots 2/2")]
+            plain = [top_style(screen, frame, text) for text in ("⠹ 2", "◌ 1", "slots 2/2")]
             assert len({cell.fg for cell in plain}) == 1, (plain, frame)
             ink = plain[0].fg
             assert needs.fg not in (None, ink) and failed.fg not in (None, ink), (needs, failed, ink, frame)
             assert needs.fg != failed.fg, (needs, failed, frame)
-            for text in ("? 1", "● 2", "◌ 1", "× 1"):
+            for text in ("? 1", "⠹ 2", "◌ 1", "× 1"):
                 assert screen.style(text, 2).fg == screen.style(text).fg, (text, frame)
 
             # A slot frees, the queued Session takes it: the slots go.
             # (Your own working row's mark spins, so read q1's row as
             # neither queued nor finished.)
             holds["w1"].set()
-            frame = screen.wait(lambda f: counts(f) == f"{WORDMARK}  ? 1  ● 2  × 1" and "✓ w1" in f
+            frame = screen.wait(lambda f: counts(f) == f"{WORDMARK}  ? 1  ⠹ 2  × 1" and "✓ w1" in f
                                 and not re.search(r"[◌✓] q1", f), "q1 running, slots gone")
             for held in holds.values():
                 held.set()
             frame = screen.wait(lambda f: counts(f) == f"{WORDMARK}  ? 1  × 1" and "✓ q1" in f,
                                 "only ? and × left")
-    print("overview counts: the top row counts ? ● ◌ × by mark, leaves zeros out, shows slots 2/2 only "
+    print("overview counts: the top row counts ? ⠹ ◌ × by mark, leaves zeros out, shows slots 2/2 only "
           "while a Session queues, and colours only ? and ×", flush=True)
 
 
@@ -190,14 +190,14 @@ def memory():
     hold = threading.Event()
     with world("counts-memory", {"work": (answer("work"), hold)}) as w, released(hold):
         send(w, w.session("--label", "Work"), "work")
-        with w.overview(columns=100) as screen:
-            screen.wait(lambda f: counts(f) == f"{WORDMARK}  ● 1", "● 1")
+        with w.overview(columns=99) as screen:
+            screen.wait(lambda f: counts(f) == f"{WORDMARK}  ⠹ 1", "⠹ 1")
             frame = screen.wait(lambda f: re.search(rf"  {MEMORY.pattern}$", top(f).rstrip()), "rui N MB on the right")
-            assert counts(frame) == f"{WORDMARK}  ● 1", frame
+            assert counts(frame) == f"{WORDMARK}  ⠹ 1", frame
             # The same screen narrowed: 14 columns hold the counts (9
             # cells) but not two spaces and memory too.
             screen.resize(14, ROWS)
-            frame = screen.wait(lambda f: top(f).rstrip() == f"{WORDMARK}  ● 1", "● 1 alone")
+            frame = screen.wait(lambda f: top(f).rstrip() == f"{WORDMARK}  ⠹ 1", "⠹ 1 alone")
             assert not MEMORY.search(top(frame)), frame
     print("overview counts: live memory shows as rui N MB on the right and drops before the counts "
           "on a narrow screen", flush=True)

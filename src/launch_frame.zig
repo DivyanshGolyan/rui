@@ -675,7 +675,13 @@ fn mysqlRefusal(err: anyerror) ?Refusal {
     return switch (err) {
         error.StoreLocked => .{ .code = .store_locked, .message = "another Host owns this Store" },
         error.StoreSchemaMissing => .{ .code = .store_schema_missing, .message = "apply this build's MySQL schema before starting the Host" },
-        error.StoreSchemaBehind, error.WrongStoreVersion, error.WrongStoreSchema => .{ .code = .store_schema_behind, .message = "the MySQL schema does not match this build" },
+        error.StoreSchemaBehind => .{ .code = .store_schema_behind, .message = "the MySQL Store format is older than this build; apply its forward migrations" },
+        error.StoreSchemaAhead => .{ .code = .store_schema_behind, .message = "the MySQL Store format is newer than this build; use a compatible build" },
+        error.MalformedStoreFormat => .{ .code = .store_schema_behind, .message = "the MySQL Store format metadata is not a valid number" },
+        error.WrongStoreVersion => .{ .code = .store_schema_behind, .message = "the MySQL Store wire version does not match this build" },
+        error.WrongStoreSchema => .{ .code = .store_schema_behind, .message = "the MySQL Store metadata contains an unexpected key" },
+        error.StoreCatalogMismatch => .{ .code = .store_schema_behind, .message = "the MySQL Store catalog does not match this build" },
+        error.WrongStoreIdentity => .{ .code = .store_schema_behind, .message = "the MySQL Store identity metadata or connection target is invalid" },
         error.MysqlTooOld, error.UnsupportedServer => .{ .code = .mysql_version, .message = "MySQL 8.4 or newer is required" },
         error.MysqlIsMariadb => .{ .code = .mariadb, .message = "MariaDB is not supported; use MySQL 8.4 or newer" },
         error.MysqlReadOnly => .{ .code = .read_only_replica, .message = "MySQL requires read_only=OFF and super_read_only=OFF" },
@@ -731,6 +737,25 @@ test "a MySQL launch frame keeps presets after wiping its login" {
     try std.testing.expect(frame.store == .sqlite_dir);
     try std.testing.expectEqual(@as(usize, 0), frame.presets.len);
     try std.testing.expect(frame.presets_memory == null);
+}
+
+test "MySQL metadata admission failures have distinct bounded static diagnostics" {
+    const cases = .{
+        .{ error.StoreSchemaBehind, "the MySQL Store format is older than this build; apply its forward migrations" },
+        .{ error.StoreSchemaAhead, "the MySQL Store format is newer than this build; use a compatible build" },
+        .{ error.MalformedStoreFormat, "the MySQL Store format metadata is not a valid number" },
+        .{ error.WrongStoreVersion, "the MySQL Store wire version does not match this build" },
+        .{ error.WrongStoreSchema, "the MySQL Store metadata contains an unexpected key" },
+        .{ error.StoreCatalogMismatch, "the MySQL Store catalog does not match this build" },
+        .{ error.WrongStoreIdentity, "the MySQL Store identity metadata or connection target is invalid" },
+    };
+    inline for (cases) |case| {
+        const refusal = startRefusal(.mysql_url, case[0]).?;
+        try std.testing.expectEqual(StartError.store_schema_behind, refusal.code);
+        try std.testing.expectEqualStrings(case[1], refusal.message);
+        try std.testing.expect(refusal.message.len <= max_refusal_message_bytes);
+        try std.testing.expect(startRefusal(.sqlite_dir, case[0]) == null);
+    }
 }
 
 test "each MySQL policy refusal has a static launch-frame code" {

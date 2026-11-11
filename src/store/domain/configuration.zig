@@ -17,6 +17,7 @@ const provider_name = @import("../../provider_name.zig");
 const session_id = @import("../../session_id.zig");
 const content_custody = @import("../../content_custody.zig");
 const model_catalog = @import("../../model_catalog.zig");
+const model_facts = @import("model_facts.zig");
 const model_capability = @import("../../model_capability.zig");
 const product_defaults = @import("../../product_defaults.zig");
 const tool_catalog = @import("../../tool_record.zig");
@@ -192,6 +193,7 @@ fn tokenCount(text: []const u8, allow_zero: bool) !u64 {
 }
 
 pub fn configurationBeforeWorkspace(
+    selected_facts: []const model_catalog.Entry,
     catalog: *const tool_catalog.Catalog,
     current: ?*const CurrentConfiguration,
     requested: *const content_custody.Configuration,
@@ -200,6 +202,8 @@ pub fn configurationBeforeWorkspace(
     if (requested.compaction_trigger.state == .explicit_null) return .invalid_compaction_trigger;
     const compact_at = if (requested.compaction_trigger.state == .value)
         tokenCount(requested.compaction_trigger.value.slice(), false) catch return .invalid_compaction_trigger
+    else if (current) |existing|
+        existing.compaction_trigger
     else
         null;
     _ = configurationTokens(requested.output_reservation, null, true) catch return .invalid_output_reservation;
@@ -221,32 +225,31 @@ pub fn configurationBeforeWorkspace(
         if (provider) |value| {
             if (value != existing.provider) return .provider_is_immutable;
         }
-        if (requested.model.state == .value and
-            !existing.model.eql(requested.model.value.slice()))
-        {
-            return .model_is_immutable;
-        }
     }
     if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
     if (requested.tools.state == .value) if (toolsRejection(catalog, provider orelse (if (current) |existing| existing.provider else default_provider.?), &requested.tools)) |rejection| return rejection;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     // D166: an unlisted model has no known window to enforce.
-    if (compact_at) |tokens| if (model_catalog.find(model_catalog.shipped, model)) |known| {
+    if (compact_at) |tokens| if (model_catalog.find(selected_facts, model)) |known| {
         if (known.context_window) |window| if (tokens > window) return .compact_at_too_large;
     };
     if (compact_at) |tokens| if (tokens > std.math.maxInt(i64)) return .invalid_compaction_trigger;
-    // A listed model with effort levels requires one of them. Models with no
-    // listed efforts can omit reasoning, but v2 cannot clear an assigned effort.
-    if (requested.reasoning_effort.state == .explicit_null) {
-        if (model_catalog.find(model_catalog.shipped, model)) |known| {
-            if (known.efforts.count() != 0) return .unsupported_reasoning_effort;
-        }
-        if (current) |existing| if (effectiveReasoningEffort(existing) != null) return .unsupported_reasoning_effort;
-    }
-    if (requested.reasoning_effort.state == .value) {
-        const effort = std.meta.stringToEnum(model_capability.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
-            return .unsupported_reasoning_effort;
-        if (!model_capability.supportsReasoningEffort(model, effort)) return .unsupported_reasoning_effort;
+    // Resolve the settings once: omission retains the effective historical
+    // effort, while a supplied value (including null) overrides it. Validate
+    // that result even when only the model, or neither setting, was supplied.
+    const retained_effort = if (current) |existing| effectiveReasoningEffort(existing) else null;
+    const effort = switch (requested.reasoning_effort.state) {
+        .omitted => retained_effort,
+        .explicit_null => null,
+        .value => std.meta.stringToEnum(model_capability.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
+            return .unsupported_reasoning_effort,
+    };
+    // The codec cannot encode a boundary back to unspecified effort.
+    if (requested.reasoning_effort.state == .explicit_null and retained_effort != null) return .unsupported_reasoning_effort;
+    if (effort) |value| {
+        if (!model_capability.supportsReasoningEffort(selected_facts, model, value)) return .unsupported_reasoning_effort;
+    } else if (model_catalog.find(selected_facts, model)) |known| {
+        if (known.efforts.count() != 0) return .unsupported_reasoning_effort;
     }
     return null;
 }
@@ -957,7 +960,10 @@ pub fn validateConfiguration(
     if (!creating and configuration.parent.state != .omitted) return .{ .rejected = .parent_on_update };
     if (creating) if (try inheritParent(configuration, reads)) |code| return .{ .rejected = code };
     const default_provider = if (reads.inherits_parent) reads.next.provider else defaultProvider(a.store.served);
-    if (configurationBeforeWorkspace(a.store.catalog().catalog, current_configuration, configuration, default_provider)) |rejection| {
+    var selected: model_facts.Model = .{};
+    selected.read(a, if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice());
+    try a.run();
+    if (configurationBeforeWorkspace(selected.facts(), a.store.catalog().catalog, current_configuration, configuration, default_provider)) |rejection| {
         return .{ .rejected = rejection };
     }
 
@@ -1249,6 +1255,7 @@ test "Session settings changed detects each mutable value without comparing boun
     try current.label.?.set("label");
     const before = Settings.of(&current);
     inline for (.{
+        session_field.SessionField.model,
         session_field.SessionField.instructions,
         session_field.SessionField.tools,
         session_field.SessionField.loaded_tools,
@@ -1261,6 +1268,7 @@ test "Session settings changed detects each mutable value without comparing boun
     }) |field| {
         var next = current;
         switch (field) {
+            .model => try next.model.set("gpt-5.5"),
             .instructions => next.instructions_id = 1,
             .tools => next.tool_set_id = 2,
             .loaded_tools => next.loaded_tool_set_id = 1,

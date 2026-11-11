@@ -34,7 +34,7 @@ const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
 const reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"page payload\"}]}}");
 const arguments = "{\"q\":\"first\",\"rui_call_description\":\"Read docs\",\"unexpected\":\"must not leave Host\"}";
 const second_arguments = "{\"q\":\"second\",\"rui_call_description\":\"Read next\"}";
-const Case = enum { success, serial, timeout, down, stop, shutdown, concurrent };
+const Case = enum { success, serial, timeout, down, stop, stop_unsent, shutdown, concurrent };
 
 test "Host MCP forwards schema-only arguments and metadata into a historical continuation" {
     try run(.success);
@@ -52,8 +52,9 @@ test "Host MCP unavailable server records failed not run and continues" {
     try run(.down);
 }
 
-test "Host MCP Session stop closes a sent request without inventing success" {
+test "Host MCP Session stop after send preserves indeterminate through Action settlement" {
     try run(.stop);
+    try run(.stop_unsent);
 }
 
 test "Host MCP shutdown closes sent socket and recovery records indeterminate without retry" {
@@ -130,9 +131,9 @@ fn run(case: Case) !void {
         try expectHere(@src(), work == .mcp);
         try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(host, work.mcp));
         if (case != .down) {
-            const input = try allocator.create(store.McpExecutionInput);
+            const input = try allocator.create(store.ActionExecutionInput);
             defer allocator.destroy(input);
-            try storage.readMcpExecutionInput(.{ .action_id = work.mcp.action_id, .parent_operation_id = binding.operation_id, .turn_id = binding.turn_id }, input);
+            try storage.readActionExecutionInput(.mcp, .{ .action_id = work.mcp.action_id, .parent_operation_id = binding.operation_id, .turn_id = binding.turn_id }, input);
             try std.testing.expectEqual(servers[0].timeout_ms, input.timeout_ms);
         }
         if (case == .serial) try expectHere(@src(), (try storage.nextCoreWork()) == null);
@@ -195,15 +196,15 @@ fn run(case: Case) !void {
             try expectHere(@src(), !try storage.recoverOneUncertainAction(.empty()));
             try expectHere(@src(), (try storage.nextCoreWork()) == null);
         }
-        if (case == .stop) {
-            try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), context, Context.sent);
+        if (case == .stop or case == .stop_unsent) {
+            if (case == .stop) try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), context, Context.sent);
             var stop: protocol.SessionStopCommand = .{};
             try stop.key.set("mcp-stop");
             stop.session = session;
             try expectHere(@src(), storage.stopSession(&stop, .{}) == .accepted);
         }
         try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), context, Context.done);
-        if (case != .down) {
+        if (case != .down and case != .stop_unsent) {
             try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), &script.request_received, poll.isSet);
             const seen = script.seen[0..script.seen_len];
             const body_start = (std.mem.indexOf(u8, seen, "\r\n\r\n") orelse return error.MissingHttpBody) + 4;
@@ -234,13 +235,23 @@ fn run(case: Case) !void {
     const expected = switch (case) {
         .success, .serial => "page payload",
         .timeout, .stop => "Outcome unknown",
+        .stop_unsent => "not sent",
         .shutdown, .concurrent => "Outcome unknown",
         .down => "Failed, not run",
     };
     const report = try store.testingSessionReportWithProfile(storage, &tmp, session.slice(), 1024 * 1024, .full);
     defer allocator.free(report);
     try expectHere(@src(), std.mem.indexOf(u8, report, expected) != null);
-    if (case == .stop) return;
+    if (case == .stop or case == .stop_unsent) {
+        const indeterminate_count = try store.testing.sqlite_only.queryU64(storage, "SELECT count(*) FROM action_operation WHERE resolution_code='indeterminate'", .{});
+        try std.testing.expectEqual(@as(u64, if (case == .stop) 1 else 0), indeterminate_count);
+        const cancelled_count = try store.testing.sqlite_only.queryU64(storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{});
+        try std.testing.expectEqual(@as(u64, if (case == .stop_unsent) 1 else 0), cancelled_count);
+        if (case == .stop) try expectHere(@src(), std.mem.indexOf(u8, report, "not retried") != null);
+        if (case == .stop_unsent) try std.testing.expect(!script.request_received.load(.acquire));
+        try expectHere(@src(), (try storage.nextCoreWork()) == null);
+        return;
+    }
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
     const view = try allocator.create(store.HistoricalView);

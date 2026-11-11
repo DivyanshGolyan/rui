@@ -37,10 +37,10 @@ def untimed(row):
     return match.group(1) if match else row
 
 
-# What work under way says: the running call's row, "• Run tests · 42s", or
-# the conversation's last line, "• Waiting · 12s",
-# "! Rate limited · retry 2 in 18s", "Stopping…".
-LIVE_LINE = re.compile(r"^(?:[•!?] .+ · (?:\d|retry )|Stopping…)", re.M)
+# What work under way says: the running call's row, "⠹ Run tests · 42s", or
+# the conversation's last line, "⠹ Waiting · 12s",
+# "⠹ Rate limited · retry 2 in 18s", "Stopping…".
+LIVE_LINE = re.compile(r"^(?:[⠹◌?] .+ · (?:\d|retry )|Stopping…)", re.M)
 # What the line under a draft beside an Action says once Enter there denies
 # the Action and sends the draft as the reason.
 REASON = "enter denies the call and sends this"
@@ -57,7 +57,7 @@ def send_reason(master, ready, description):
     beside the Action; return the frames up to the Action's denial."""
     shown = action_ready(ready, master, shows=reason_shown)
     os.write(master, b"\r")
-    return shown + read_terminal(master, f"• {description} — Denied")
+    return shown + read_terminal(master, f"■ {description} · denied")
 
 
 def time_limit(milliseconds):
@@ -72,7 +72,7 @@ from terminal_process import close_pty, answers_to, open_pty, spawn, terminal_pr
 import model_fixture as fixture
 import codex_fixture
 import os_semantics
-from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, command_frame, composer_ready, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
+from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, command_frame, composer_ready, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
 
 
 def terminal_safe_json(text):
@@ -317,7 +317,7 @@ def compiled_model_cases():
     windows = {model: CATALOG[model].context_window for model in models}
     assert DEFAULTS.recommended_model in models
     listing = "Supported model IDs: " + ", ".join(models) + "\n"
-    unlisted_note = "it uses default limits"
+    unlisted_note = "client defaults use estimated limits"
     root = canonical_fixture_root(pathlib.Path(tempfile.mkdtemp(prefix="rui-compiled-models.")))
     home, store = root / "home", root / "host-store"
     home.mkdir(mode=0o700)
@@ -1146,7 +1146,7 @@ def silent_read_edit_cases():
 def wait_for_listed_call(tty):
     # A matching Bash projection supplies the unresolved row's clock. The
     # command stays held until after traversal; a bare heading can precede claim.
-    running = re.compile(r"• Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
+    running = re.compile(r"⠹ Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
     tty.wait(predicate=lambda: any(running.fullmatch(row) for row in tty.capture.completed.splitlines()), timeout=30)
 
 
@@ -1158,16 +1158,16 @@ def listed_call_readiness_cases():
         def __init__(self, elapsed):
             self.capture = ScreenCapture(80, 24)
             self.frames = (
-                "• Held call\n• Queued · 0s",
+                "⠹ Held call\n◌ Queued · 0s",
                 "✓ Held call · 42s",
-                "• Other call · 42s",
-                "prefix • Held call · 42s",
-                "• Held call · 42s extra",
-                "• Held call · " + elapsed,
+                "⠹ Other call · 42s",
+                "prefix ⠹ Held call · 42s",
+                "⠹ Held call · 42s extra",
+                "⠹ Held call · " + elapsed,
             )
             self.offered = None
             # Accumulated output already contains a timed row: it is not current.
-            self.frame("• Held call · 99s")
+            self.frame("⠹ Held call · 99s")
             self.frame(self.frames[0])
 
         def frame(self, text):
@@ -3055,8 +3055,8 @@ def main(selected="all"):
                     observed = terminal_step(master, typed, f"edited {index}")
                 assert f"edited {index}" in observed, observed
                 if index == 2:
-                    assert "\n› line1\n  line2" in "\n".join(map(untimed, observed.split("\n"))), observed
-                    assert "\nedited 2" in observed, observed
+                    assert "\n› line1\n  line2" in "\n".join(map(untimed, conversation_text(observed).split("\n"))), observed
+                    assert "\nedited 2" in conversation_text(observed), observed
                 if "› " not in observed.split(f"edited {index}", 1)[1]:
                     await_screen(master, "", composer=True)
                 body = json.loads(endpoint.requests[-1])
@@ -3083,7 +3083,7 @@ def main(selected="all"):
                 os.write(master, b"\x7f")
                 time.sleep(0.025)  # Longer than the editor's repaint window.
             observed = terminal_step(master, "Z", "paced edited")
-            assert "\n› Z" in observed, observed
+            assert "\n› Z" in conversation_text(observed), observed
             body = json.loads(endpoint.requests[-1])
             actual = next(item["content"][0]["text"] for item in reversed(body["input"])
                 if item.get("role") == "user")

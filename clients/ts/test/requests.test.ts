@@ -127,6 +127,24 @@ test("creation sends explicit settings without Host client defaults", async () =
 });
 
 
+test("model updates serialize without changing omitted settings", async () => {
+	let calls = 0;
+	const update: SessionUpdate = { model: "other-model" };
+	const link: Link = {
+		async exchange(path, build) {
+			calls++;
+			assert.equal(path, "/v1/configure");
+			const request = JSON.parse(build("store"));
+			assert.equal(request.session, "existing-session");
+			assert.equal(request.key, "change-model");
+			assert.deepEqual(request.configuration, { model: "other-model" });
+			return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+		},
+	};
+	await new Session(link, "existing-session").update(update, { idempotencyKey: "change-model" });
+	assert.equal(calls, 1);
+});
+
 // Compile-time API contract checks; these declarations never send requests.
 function sessionTypeContract(spec: SessionSpec): void {
 	const { effort: _effort, ...withoutEffort } = spec;
@@ -134,10 +152,8 @@ function sessionTypeContract(spec: SessionSpec): void {
 	const missingEffort: SessionSpec = withoutEffort;
 	// @ts-expect-error compaction is never nullable
 	const nullCompaction: SessionUpdate = { compactAt: null };
-	// @ts-expect-error model is immutable
-	const immutable: SessionUpdate = { model: "other" };
 	const sparse: SessionUpdate = {};
-	void [missingEffort, nullCompaction, immutable, sparse];
+	void [missingEffort, nullCompaction, sparse];
 }
 void sessionTypeContract;
 

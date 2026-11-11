@@ -25,7 +25,7 @@ pub const Prepared = struct {
     /// The transcript matches live presentation; details show bounded raw tails.
     pub const Mode = enum { transcript, details };
 
-    pub fn render(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype, mode: Mode, colour: bool, home: []const u8) !void {
+    pub fn render(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype, mode: Mode, colour: bool, home: []const u8, destination: View.Destination) !void {
         var window: [protocol.content_window_bytes]u8 = undefined;
         var compact = false;
         for (0..self.page.count) |reverse| {
@@ -106,7 +106,7 @@ pub const Prepared = struct {
                 .assistant => {
                     try sink.feed("\n");
                     var answer: View.Answer(@TypeOf(sink)) = undefined;
-                    answer.init(sink, home);
+                    answer.init(sink, home, colour, destination);
                     try staged.read(&answer);
                     try answer.finish();
                 },
@@ -255,7 +255,7 @@ test "historical export preserves hex Store escaping and canonical Session IDs" 
     prepared.bodies[1] = .omitted;
     prepared.bodies[2] = .omitted;
     var sink: Sink = .{};
-    try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)\x1b[2J\né\u{202e}", "09azvw", &sink, .details, false, "");
+    try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)\x1b[2J\né\u{202e}", "09azvw", &sink, .details, false, "", .terminal);
     try std.testing.expectEqualSlices(u64, &.{2}, sink.positions[0..sink.notes]);
     // Independent UTF-8 byte-to-hex oracle for Store controls and directional text.
     const identity = " --store-hex 2f746d702f6127242866616c7365291b5b324a0ac3a9e280ae --session 09azvw";
@@ -317,13 +317,13 @@ test "history tool tails are exact bounded suffixes and transcript headers only"
                 var extra: [1]u8 = undefined;
                 try std.testing.expectEqual(@as(usize, 0), try scratch.readPositionalAll(io, &extra, retained));
                 var sink: Sink = .{};
-                try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false, "");
+                try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false, "", .terminal);
                 var heading: Sink = .{};
                 var compact = false;
                 try View.toolResult(page.items[0].presentation.?, .{ .exit = if (code == .failed and size >= first.len) 7 else null }, &heading, false, &compact);
                 try std.testing.expectEqualStrings(heading.bytes[0..heading.length], sink.bytes[0..sink.length]);
                 sink.length = 0;
-                try prepared.render(io, scratch, "store", "09azvw", &sink, .details, false, "");
+                try prepared.render(io, scratch, "store", "09azvw", &sink, .details, false, "", .terminal);
                 const output = sink.bytes[0..sink.length];
                 try std.testing.expect(std.mem.startsWith(u8, output, heading.bytes[0..heading.length]));
                 try std.testing.expectEqual(size > item_bytes, std.mem.indexOf(u8, output, "Earlier output omitted") != null);
@@ -419,8 +419,8 @@ test "history reopened transcript keeps only the failed numeric header" {
     page.items[0] = .{ .position = 7, .ordinal = 2, .kind = .tool_result, .content = .{ .bytes = result.len, .digest = protocol.contentDigest(result) }, .presentation = .{ .description = description, .code = .failed, .publication_position = 7 } };
     const prepared = try stagePage(io, page, scratch, Bytes{});
     var sink: Sink = .{};
-    try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false, "");
-    try std.testing.expectEqualStrings("\n! Run check — Failed (exit 7)\n", sink.bytes[0..sink.length]);
+    try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false, "", .terminal);
+    try std.testing.expectEqualStrings("\n× Run check · exit 7\n", sink.bytes[0..sink.length]);
 }
 
 test "history preparation binds wire and staged bytes before exposure" {
@@ -700,7 +700,7 @@ test "history tool suffix authenticates discarded prefixes through the productio
                 _ = stagePage(requests.io, page, scratch, Source{ .requests = requests, .root = root }) catch |err| break :blk err;
                 break :blk {};
             } else blk: {
-                _ = View.render(requests, root, "09azvw", &activity, null, &sink, false, &compact, .{ .drawn = .{}, .from = null }, "") catch |err| break :blk err;
+                _ = View.render(requests, root, "09azvw", &activity, null, &sink, false, &compact, .{ .drawn = .{}, .from = null }, "", .terminal) catch |err| break :blk err;
                 break :blk {};
             };
             peer.join();
@@ -711,7 +711,7 @@ test "history tool suffix authenticates discarded prefixes through the productio
                     var retained: [8192]u8 = undefined;
                     try std.testing.expectEqual(item_bytes, try scratch.readPositionalAll(io, &retained, 0));
                     try std.testing.expectEqualSlices(u8, body[body.len - item_bytes ..], &retained);
-                } else try std.testing.expectEqualStrings("\n! Tool call — Failed\n", sink.bytes[0..sink.length]);
+                } else try std.testing.expectEqualStrings("\n× Tool call\n", sink.bytes[0..sink.length]);
             } else {
                 try std.testing.expectEqual(@as(usize, 0), sink.length);
                 try std.testing.expectError(switch (mode) {
@@ -868,7 +868,7 @@ test "history tool raw suffix boundary stays exact while details escape controls
     try std.testing.expectEqual(raw.len, try scratch.readPositionalAll(io, &raw, 0));
     try std.testing.expectEqualSlices(u8, body[8..], &raw);
     var sink: Sink = .{};
-    try prepared.render(io, scratch, "store", "09azvw", &sink, .details, false, "");
+    try prepared.render(io, scratch, "store", "09azvw", &sink, .details, false, "", .terminal);
     const output = sink.bytes[0..sink.length];
     const prefix = "\n✓ Tool call\n  Earlier output omitted\n  \\xa9\\x00\\x1b\\u202e";
     try std.testing.expect(std.mem.startsWith(u8, output, prefix));
@@ -896,6 +896,36 @@ test "history assistant local paths use the borrowed HOME and leave punctuation 
     prepared.page.items[0] = .{ .position = 1, .ordinal = 0, .kind = .assistant, .content = .{ .bytes = text.len, .digest = protocol.contentDigest(text) } };
     prepared.bodies[0] = .{ .whole = .{ .offset = 0, .length = text.len } };
     var sink: Sink = .{};
-    try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false, "/home/a b");
+    try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false, "/home/a b", .terminal);
     try std.testing.expectEqualStrings("\nThe report is at \x1b]8;;file:///home/a%20b/report.md\x1b\\\x1b[4m~/report.md\x1b[0m\x1b]8;;\x1b\\;\n", sink.bytes[0..sink.length]);
+}
+
+test "history fenced code uses backgrounds only for viewport destinations" {
+    const Sink = struct {
+        bytes: [1024]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(io, "history", .{ .read = true });
+    defer scratch.close(io);
+    const text = "```zig\nbody\n\n```\n";
+    try scratch.writePositionalAll(io, text, 0);
+    var prepared: Prepared = .{ .page = .{ .end = 1, .count = 1, .more = false } };
+    prepared.page.items[0] = .{ .position = 1, .ordinal = 0, .kind = .assistant, .content = .{ .bytes = text.len, .digest = protocol.contentDigest(text) } };
+    prepared.bodies[0] = .{ .whole = .{ .offset = 0, .length = text.len } };
+    for ([_]View.Destination{ .terminal, .{ .viewport = .wcwidth } }) |destination| for ([_]bool{ false, true }) |colour| {
+        for ([_]Prepared.Mode{ .transcript, .details }) |mode| {
+            var sink: Sink = .{};
+            try prepared.render(io, scratch, "store", "09azvw", &sink, mode, colour, "", destination);
+            const band = destination == .viewport and colour;
+            try std.testing.expectEqualStrings(if (band) "\n\x1b[40mbody\n\x1b[0m\x1b[40m\n\x1b[0m\n" else "\n  body\n  \n\n", sink.bytes[0..sink.length]);
+            if (!band) try std.testing.expectEqual(@as(?usize, null), std.mem.indexOfScalar(u8, sink.bytes[0..sink.length], 0x1b));
+        }
+    };
 }

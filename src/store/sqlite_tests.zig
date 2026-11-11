@@ -45,7 +45,7 @@ const ActionSettlement = action_domain.ActionSettlement;
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
 const AttemptAdmission = model_admission_domain.AttemptAdmission;
 const AttemptBinding = store_core.AttemptBinding;
-const BashExecutionInput = action_domain.BashExecutionInput;
+const ActionExecutionInput = action_domain.ActionExecutionInput;
 const ConfigurationContentAction = configuration_domain.ConfigurationContentAction;
 const ConfigurationUpdatePlan = configuration_domain.ConfigurationUpdatePlan;
 const ConfigureReply = configuration_domain.ConfigureReply;
@@ -168,6 +168,49 @@ test "Store open failures return typed errors without unwinding panics" {
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/missing-dir/store.sqlite3", .{root});
     var refused: Store = undefined;
     try std.testing.expectError(error.StoreOpenFailed, refused.open(std.testing.io, database, root));
+}
+
+test "Store target owns SQLite identity routes and neutral diagnostics" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var expected: @import("../bounded.zig").Bounded(protocol.max_store_bytes) = .{};
+    try expected.set(root);
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite3", .{root});
+    var storage: Store = undefined;
+    try storage.openTarget(std.testing.io, .{ .sqlite = path }, root, .{});
+    defer storage.close() catch unreachable;
+    @memset(&root_buffer, 'x');
+    @memset(&path_buffer, 'x');
+    try std.testing.expectEqual(.sqlite, storage.kind());
+    try std.testing.expectEqualStrings(expected.slice(), storage.storeId());
+    try std.testing.expect(storage.admissionDiagnostic().doublewrite == null);
+    const diagnostic = storage.diagnostic();
+    try std.testing.expect(diagnostic == .sqlite);
+    try std.testing.expectEqualStrings("wal", diagnostic.sqlite.journal_mode.?.slice());
+    try std.testing.expect(storage.catalog().set_id != 0);
+    // The SQL callback must borrow final Store storage, not the opening's
+    // temporary options or the admitted engine value.
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT rui_served('openai')"));
+    storage.served.openai = .unserved;
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT rui_served('openai')"));
+}
+
+test "Store target SQLite tail failure closes statements and releases the heap limit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const empty_catalog: tool_catalog.Catalog = .{ .records = &.{}, .digests = &.{} };
+    var refused: Store = undefined;
+    try std.testing.expectError(error.InvalidToolCatalog, testingStoreCatalog(&refused, &tmp, std.testing.io, &empty_catalog));
+    try std.testing.expectEqual(@as(i64, 0), c.sqlite3_hard_heap_limit64(-1));
+    // Reopening the same file proves statement finalization and connection
+    // cleanup, not merely that the error made it to the caller.
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try std.testing.expect(storage.catalog().set_id != 0);
 }
 
 fn createMaximumCanonicalStore(tmp: *std.testing.TmpDir, path_buffer: []u8) ![]const u8 {
@@ -1059,8 +1102,8 @@ test "canonical report and Action read failures fence later commands" {
                 .arguments => if (storage.actionArguments(allocated_session_2.slice(), try store_testing.sqlite_only.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{}))) |_| {} else |err| err,
                 .execution => blk: {
                     const action = (try storage.admitNextActionAttempt(300_000, .{})).?;
-                    var input: BashExecutionInput = undefined;
-                    break :blk storage.readBashExecutionInput(action.permit.binding, &input);
+                    var input: ActionExecutionInput = undefined;
+                    break :blk storage.readActionExecutionInput(.bash, action.permit.binding, &input);
                 },
             };
             try std.testing.expectError(error.CorruptStore, result);
@@ -3050,7 +3093,7 @@ test "controls wait behind an active model settlement transaction" {
     );
 }
 
-fn expectBindingPreserved(storage: *Store, session: []const u8, phase: []const u8) !void {
+fn expectModelRevisions(storage: *Store, session: []const u8, phase: []const u8) !void {
     for (0..6) |variant| {
         const before = try storage.inspectSessionForTesting(session);
         var key_buffer: [128]u8 = undefined;
@@ -3065,24 +3108,27 @@ fn expectBindingPreserved(storage: *Store, session: []const u8, phase: []const u
             update.configuration.model.state = .value;
             try update.configuration.model.value.set(if (variant == 5) "model-b" else "model-a");
         }
-        if (variant >= 4) {
+        if (variant == 4) {
             update.configuration.tools.state = .value;
             update.configuration.tools.count = 0;
             update.configuration.permission_mode.state = .value;
             try update.configuration.permission_mode.value.set("bypass");
         }
         const reply = try storage.configure(&update, .{});
-        if (variant < 4) {
+        if (variant != 4) {
             try std.testing.expect(reply == .accepted);
             try std.testing.expectEqual(before.revision + 1, reply.accepted.revision);
         } else {
             try std.testing.expect(reply == .rejected);
-            try std.testing.expectEqual(if (variant == 4) protocol.ConfigurationRejection.unsupported_provider else protocol.ConfigurationRejection.model_is_immutable, reply.rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_provider, reply.rejected.code);
         }
         const after = try storage.inspectSessionForTesting(session);
-        try std.testing.expectEqual(before.revision + @as(u64, if (variant < 4) 1 else 0), after.revision);
+        try std.testing.expectEqual(before.revision + @as(u64, if (variant != 4) 1 else 0), after.revision);
         try std.testing.expectEqual(protocol.Provider.codex, after.provider.?);
-        try std.testing.expectEqualStrings("model-a", after.model.slice());
+        try std.testing.expectEqualStrings(if (update.configuration.model.state == .value) update.configuration.model.value.slice() else before.model.slice(), after.model.slice());
+        if (variant == 5) {
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(storage, "SELECT count(*) FROM session_change WHERE session_ref=?1 AND revision=?2 AND field='model'", .{ session, after.revision }));
+        }
         try std.testing.expectEqual(before.tool_set_id, after.tool_set_id);
         try std.testing.expectEqualStrings(before.permission_mode.slice(), after.permission_mode.slice());
         try std.testing.expectEqualDeep(before.instructions, after.instructions);
@@ -3105,7 +3151,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     const created_session_0_reply = try storage.configure(&configuration, .{});
     try std.testing.expect(created_session_0_reply == .accepted);
     const created_session_0 = created_session_0_reply.accepted.session;
-    try expectBindingPreserved(&storage, created_session_0.slice(), "before-reopen");
+    try expectModelRevisions(&storage, created_session_0.slice(), "before-reopen");
     try storage.close();
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
@@ -3113,7 +3159,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try std.testing.expectEqual(protocol.Provider.codex, reopened.provider.?);
     try tests.expectToolSetNames(&storage, reopened.tool_set_id, &.{"bash"});
     try std.testing.expectEqualStrings("ask", reopened.permission_mode.slice());
-    try expectBindingPreserved(&storage, created_session_0.slice(), "after-reopen");
+    try expectModelRevisions(&storage, created_session_0.slice(), "after-reopen");
 
     const file = try tmp.dir.createFile(std.testing.io, "provider-reopen-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "message");
@@ -3602,26 +3648,72 @@ test "a Bash binding that is unknown, unattempted or without its revision is sta
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "stale-bash-config");
     const action = try attemptBashForTesting(&storage, &tmp, session.slice());
-    var input: BashExecutionInput = undefined;
-    try storage.readBashExecutionInput(action, &input);
+    var input: ActionExecutionInput = undefined;
+    try storage.readActionExecutionInput(.bash, action, &input);
     try std.testing.expectEqualStrings(session.slice(), input.session.slice());
     try std.testing.expectEqual(@as(u64, 300_000), input.timeout_ms);
 
     var unknown = action;
     unknown.action_id += 1000;
-    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(unknown, &input));
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.bash, unknown, &input));
     // The other Action of the call pair, never attempted: its timeout is NULL.
     var unattempted = action;
     unattempted.action_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT action_id FROM action_operation WHERE session_ref=?1 AND attempt_ordinal=0", .{session.slice()});
-    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(unattempted, &input));
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.bash, unattempted, &input));
     var rebound = action;
     rebound.turn_id += 1000;
-    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(rebound, &input));
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.bash, rebound, &input));
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET permission_revision=999 WHERE session_ref=?1 AND attempt_ordinal=1", .{session.slice()});
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
-    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(action, &input));
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.bash, action, &input));
     try std.testing.expect(!storage.isFenced());
+}
+
+test "SQLite single Access keeps autocommit on success guard failure and abandon" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const read = rsql.Read(.{
+        .sql = "SELECT min(content_id) AS id FROM content",
+        .Args = struct {},
+        .Row = struct { id: u64 },
+        .cardinality = .one,
+    });
+    const write = rsql.Write(.{
+        .sql = "UPDATE content SET private=private WHERE content_id=?1",
+        .Args = struct { id: u64 },
+        .expect = .{ .exact = .{ .rows = 1, .otherwise = error.TestingGuard } },
+    });
+    for ([_]enum { success, guard, abandon, no_op }{ .success, .guard, .abandon, .no_op }) |outcome| {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var a: store_access.Access(.single, error{TestingGuard}) = .open(&entry);
+        defer a.deinit();
+        var statements: TestingStatements = .{};
+        statements.begin(storage.sqliteDatabase());
+        defer statements.end(storage.sqliteDatabase());
+        var row: read.Result = undefined;
+        a.read(read, .{}, &row);
+        try a.run();
+        try std.testing.expect(!storage.engine.inTransaction());
+        if (outcome != .no_op) a.write(write, .{ .id = if (outcome == .guard) 0 else row.id });
+        if (outcome == .no_op or outcome == .abandon) {
+            // Even a rollback fault is irrelevant: no transaction opened,
+            // and a queued, unstepped autocommit write is simply discarded.
+            try a.abandon(.{ .rollback_failure = true });
+        } else if (outcome == .guard) {
+            const result = a.end(.{ .rollback_failure = true }, a.commit());
+            try std.testing.expectError(error.TestingGuard, entry.finishTransaction(error{TestingGuard}, .{}, result));
+        } else {
+            try entry.finishTransaction(error{TestingGuard}, .{}, a.end(.{}, a.commit()));
+        }
+        try std.testing.expectEqual(@as(u64, if (outcome == .success or outcome == .guard) 2 else 1), statements.count);
+        try std.testing.expect(!storage.engine.inTransaction());
+        try std.testing.expect(!storage.isFenced());
+    }
 }
 
 test "revoking a sender runs main's statements, with no transaction, and a missing Attempt changes nothing" {
@@ -3781,7 +3873,7 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.sqliteDatabase(), c.SQLITE_LIMIT_ATTACHED, -1));
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.sqliteDatabase(), c.SQLITE_LIMIT_WORKER_THREADS, -1));
 
-    const diagnostic = storage.sqliteDiagnostic();
+    const diagnostic = storage.diagnostic().sqlite;
     try std.testing.expectEqual(@as(?u64, sqlite_heap_bytes), diagnostic.hard_heap_limit_bytes);
     try std.testing.expectEqual(@as(?u64, 4096), diagnostic.page_size_bytes);
     try std.testing.expectEqual(@as(?i64, -1024), diagnostic.cache_size_setting);
@@ -3903,15 +3995,15 @@ test "measurement Store can disable cache spill without changing other limits" {
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
     var storage: Store = undefined;
-    try storage.openWithOptions(
+    try storage.openTarget(
         std.testing.io,
-        database,
+        .{ .sqlite = database },
         root,
         .{ .cache_spill = false },
     );
     defer storage.close() catch unreachable;
 
-    const diagnostic = storage.sqliteDiagnostic();
+    const diagnostic = storage.diagnostic().sqlite;
     try std.testing.expectEqual(@as(?i64, 0), diagnostic.cache_spill_threshold);
     try std.testing.expectEqual(@as(?u64, sqlite_heap_bytes), diagnostic.hard_heap_limit_bytes);
     try std.testing.expectEqual(@as(?i64, -1024), diagnostic.cache_size_setting);
@@ -3929,18 +4021,18 @@ test "measurement Store can force a smaller SQLite cache without changing produc
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
 
     var storage: Store = undefined;
-    try storage.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 32 });
+    try storage.openTarget(std.testing.io, .{ .sqlite = database }, root, .{ .cache_kib = 32 });
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(?i64, -32), storage.sqliteDiagnostic().cache_size_setting);
+    try std.testing.expectEqual(@as(?i64, -32), storage.diagnostic().sqlite.cache_size_setting);
     var refused: Store = undefined;
 
     try std.testing.expectError(
         error.InvalidSqliteCacheSize,
-        refused.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 0 }),
+        refused.openTarget(std.testing.io, .{ .sqlite = database }, root, .{ .cache_kib = 0 }),
     );
     try std.testing.expectError(
         error.InvalidSqliteCacheSize,
-        refused.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 4097 }),
+        refused.openTarget(std.testing.io, .{ .sqlite = database }, root, .{ .cache_kib = 4097 }),
     );
 }
 
@@ -4079,7 +4171,7 @@ test "SQLite selector mismatch retains caller-owned evidence after failed open" 
     var refused: Store = undefined;
     try std.testing.expectError(error.StoreIdentityMismatch, refused.open(std.testing.io, database, root));
     var evidence: store_schema.IdentityMismatch = .{};
-    try std.testing.expectError(error.StoreIdentityMismatch, refused.openWithOptions(std.testing.io, database, root, .{ .identity_mismatch = &evidence }));
+    try std.testing.expectError(error.StoreIdentityMismatch, refused.openTarget(std.testing.io, .{ .sqlite = database }, root, .{ .identity_mismatch = &evidence }));
     try std.testing.expectEqualStrings(saved_selector, evidence.saved_selector.slice());
     try refused.open(std.testing.io, database, saved_selector);
     try refused.close();
@@ -4116,6 +4208,19 @@ test "SQLite selector mismatch retains migration evidence and rolls back metadat
     try std.testing.expectEqualStrings(&original_id, &try storeId(database));
 }
 
+test "metadata seed preserves exact SQLite bootstrap bytes and digest" {
+    // The pre-refactor seed text: parameter slots, tuple order and random
+    // expression are format, not merely row-equivalent implementation details.
+    try std.testing.expectEqualStrings(
+        "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','" ++
+            std.fmt.comptimePrint("{d}", .{schema_version}) ++ "'),('store_id',lower(hex(randomblob(16))))",
+        comptime store_schema.sqliteMetaSeedSql(),
+    );
+    const pinned = store_schema.bootstrap_digests[store_schema.bootstrap_digests.len - 1];
+    try std.testing.expectEqual(schema_version, pinned.schema_version);
+    try std.testing.expectEqual(pinned.digest, comptime store_schema.digest());
+}
+
 test "SQLite invalid identity metadata is not a selector mismatch" {
     const cases = .{
         .{ "PRAGMA application_id=0", error.WrongStoreIdentity },
@@ -4144,7 +4249,7 @@ test "SQLite invalid identity metadata is not a selector mismatch" {
             var evidence: store_schema.IdentityMismatch = .{};
             try evidence.saved_selector.set("unchanged");
             var refused: Store = undefined;
-            try std.testing.expectError(case[1], refused.openWithOptions(std.testing.io, database, selector, .{ .identity_mismatch = &evidence }));
+            try std.testing.expectError(case[1], refused.openTarget(std.testing.io, .{ .sqlite = database }, selector, .{ .identity_mismatch = &evidence }));
             try std.testing.expectEqualStrings("unchanged", evidence.saved_selector.slice());
         }
     }
@@ -4969,12 +5074,9 @@ test "one committed selection freezes its settings and input prefix" {
     update.configuration.model.state = .value;
     try update.configuration.model.value.set("model-b");
     const active_update = try storage.configure(&update, .{});
-    try std.testing.expect(active_update == .rejected);
-    try std.testing.expectEqual(
-        protocol.ConfigurationRejection.model_is_immutable,
-        active_update.rejected.code,
-    );
-    try expectBindingPreserved(&storage, created_session_0.slice(), "during-work");
+    try std.testing.expect(active_update == .accepted);
+    try std.testing.expectEqualStrings("model-b", (try storage.inspectSessionForTesting(created_session_0.slice())).model.slice());
+    try expectModelRevisions(&storage, created_session_0.slice(), "during-work");
 
     var view: HistoricalView = undefined;
     storage.openHistoricalView(binding, &view);
@@ -5033,9 +5135,9 @@ test "one committed selection freezes its settings and input prefix" {
 
     try update.key.set("configure-after-failure");
     const failed_update = try storage.configure(&update, .{});
-    try std.testing.expect(failed_update == .rejected);
-    try std.testing.expectEqual(protocol.ConfigurationRejection.model_is_immutable, failed_update.rejected.code);
-    try expectBindingPreserved(&storage, created_session_0.slice(), "after-failure");
+    try std.testing.expect(failed_update == .accepted);
+    try std.testing.expectEqualStrings("model-b", (try storage.inspectSessionForTesting(created_session_0.slice())).model.slice());
+    try expectModelRevisions(&storage, created_session_0.slice(), "after-failure");
 
     var tools_update: wire_request.ConfigureCommand = .{};
     try tools_update.key.set("tools-after-failure");
@@ -5051,7 +5153,7 @@ test "one committed selection freezes its settings and input prefix" {
     var later_settings: HistoricalSettings = undefined;
     try later_view.settings(&later_settings);
     try std.testing.expectEqual(protocol.Provider.codex, later_settings.provider);
-    try std.testing.expectEqualStrings("model-a", later_settings.model.slice());
+    try std.testing.expectEqualStrings("model-b", later_settings.model.slice());
     try std.testing.expectEqual(@as(u64, 0), later_settings.tool_count);
     var position: u64 = 0;
     // The failed first Operation keeps its boundary between the inputs.
@@ -5063,7 +5165,7 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expect((try later_view.nextEntry(position)) == null);
 }
 
-test "continued accepted output keeps model immutable and public text readable" {
+test "continued accepted output allows model revisions and keeps public text readable" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -5193,19 +5295,16 @@ test "continued accepted output keeps model immutable and public text readable" 
     try update.session.set(created_session_0.slice());
     update.configuration.model.state = .value;
     try update.configuration.model.value.set("model-b");
-    const rejected = try storage.configure(&update, .{});
-    try std.testing.expect(rejected == .rejected);
-    try std.testing.expectEqual(
-        protocol.ConfigurationRejection.model_is_immutable,
-        rejected.rejected.code,
-    );
+    const changed = try storage.configure(&update, .{});
+    try std.testing.expect(changed == .accepted);
+    try std.testing.expectEqualStrings("model-b", (try storage.inspectSessionForTesting(created_session_0.slice())).model.slice());
 
     const completion_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try storage.settleModelSuccess(completion_binding, &output, .{});
     // The same output is an answer both before and after pending input is
     // consumed. Only the owning Turn's completion decision differs.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code='answer'", .{}));
-    try expectBindingPreserved(&storage, created_session_0.slice(), "after-output");
+    try expectModelRevisions(&storage, created_session_0.slice(), "after-output");
     const completed = (try store_testing.observeCommandForTesting(&storage, "continued-first")).kind.message.?.queue.?;
     const completion = switch (completed.state) {
         .completed => |value| value,
@@ -7390,13 +7489,14 @@ test "a Current report's step faults answer the name of the earliest round that 
     // Each read keeps main's name; when reads in two rounds fail, the
     // earlier round's name wins. The Action count steps after the tool
     // outcome rule in their round, so a faulted action_operation answers
-    // the rule's CallReadFailed, as on main. A list with nothing to show
-    // is not read, where main read every list and answered
-    // ActionReadFailed for a faulted session_revision.
+    // the rule's CallReadFailed. Model-bound compaction facts read the
+    // producing session_revision before Action lists and answer CorruptStore
+    // for that fault. With no Turn or list to read, an idle Session does not
+    // step session_revision.
     inline for (.{
         .{ TestingWorkShape.awaiting, "model_tool_call", error.CallReadFailed },
         .{ TestingWorkShape.awaiting, "action_operation", error.CallReadFailed },
-        .{ TestingWorkShape.awaiting, "session_revision", error.ActionReadFailed },
+        .{ TestingWorkShape.awaiting, "session_revision", error.CorruptStore },
         .{ TestingWorkShape.idle, "session_revision", null },
     }) |case| {
         var tmp = std.testing.tmpDir(.{});
@@ -7482,8 +7582,15 @@ test "a failed context read answers its reader's name and fences" {
     // as main named the estimate's. Admission reads the context within
     // `admission_facts`, whose failed step is SessionReadFailed. The second
     // Message follows a Turn with usage under a trigger, so admission
-    // weighs the context, and the report estimates it.
-    for ([_]bool{ false, true }) |report| {
+    // weighs the context, and the report estimates it. Both readers name a
+    // failed uncovered-byte read CorruptStore, after selecting the recipe.
+    for ([_]struct { report: bool, bytes: bool }{
+        .{ .report = false, .bytes = false },
+        .{ .report = true, .bytes = false },
+        .{ .report = false, .bytes = true },
+        .{ .report = true, .bytes = true },
+    }) |case| {
+        const report = case.report;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
@@ -7500,7 +7607,9 @@ test "a failed context read answers its reader's name and fences" {
         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two");
         try settleCallsForTestingWithFaults(&storage, &tmp, first, "context-fold-output", &.{}, .{}, "{\"input_tokens\":10,\"output_tokens\":0}");
-        var fault: TestingStatementFault = .{ .sql = if (report)
+        var fault: TestingStatementFault = .{ .sql = if (case.bytes)
+            namedStatementForTesting(model_admission_domain.compaction_failures, null, " AS uncovered_bytes")
+        else if (report)
             namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT")
         else
             model_admission_domain.admission_facts_sql };
@@ -7509,7 +7618,7 @@ test "a failed context read answers its reader's name and fences" {
         if (report)
             try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024))
         else
-            try std.testing.expectError(error.SessionReadFailed, storage.admitNextModelAttempt(.{}));
+            try std.testing.expectError(if (case.bytes) error.CorruptStore else error.SessionReadFailed, storage.admitNextModelAttempt(.{}));
         try std.testing.expect(fault.failed > 0);
         try std.testing.expect(storage.isFenced());
     }
@@ -9568,7 +9677,7 @@ test "MCP Actions follow ask and bypass permission and continue after resolution
         try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
         try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
         if (std.mem.eql(u8, mode, "ask")) {
-            try std.testing.expect((try storage.nextMcpAction()) == null);
+            try std.testing.expect((try storage.nextAction(.mcp)) == null);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=0 AND approval_position IS NOT NULL", .{}));
             var allow: protocol.PermissionDecisionCommand = .{ .action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation", .{}), .decision = .allow_once };
             try allow.key.set("mcp-permission-allow");
@@ -9576,12 +9685,12 @@ test "MCP Actions follow ask and bypass permission and continue after resolution
             try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
         }
         try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1", .{}));
-        const action = (try storage.nextMcpAction()).?;
+        const action = (try storage.nextAction(.mcp)).?;
         try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
-        try storage.resolveMcpAction(action.action_id, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
-        try std.testing.expect((try storage.nextMcpAction()) == null);
+        try storage.resolveAction(action, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
+        try std.testing.expect((try storage.nextAction(.mcp)) == null);
         // A selected Action that was resolved before dispatch is a harmless no-op.
-        try storage.resolveMcpAction(action.action_id, .spawn_failed, "not used", .{});
+        try storage.resolveAction(action, .spawn_failed, "not used", .{});
         try std.testing.expect(!storage.isFenced());
         const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
@@ -9706,7 +9815,7 @@ test "MCP permission and core authorization coexist in one Turn" {
     try settleCallsForTesting(&storage, &tmp, model, "mixed-metadata", &calls);
     try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1", .{}));
     try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
-    try std.testing.expect((try storage.nextMcpAction()) == null);
+    try std.testing.expect((try storage.nextAction(.mcp)) == null);
     const report = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.indexOf(u8, report, "\"tool\":\"fetch_page\"") != null);
@@ -9725,10 +9834,10 @@ test "MCP permission and core authorization coexist in one Turn" {
     try allow.key.set("mixed-allow");
     allow.session = session;
     try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-    const mcp = (try storage.nextMcpAction()).?;
+    const mcp = (try storage.nextAction(.mcp)).?;
     try std.testing.expectEqual(action_id, mcp.action_id);
     try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
-    try storage.resolveMcpAction(mcp.action_id, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
+    try storage.resolveAction(mcp, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expectEqual(model.turn_id, continuation.turn_id);
 }
@@ -9758,9 +9867,9 @@ test "MCP work selected before its parent stops yields to the owed child stop" {
     var stop = try completeSessionStop("mcp-parent-stop", parent.slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
     // A selection is not authority: the parent's stop committed first.
-    try storage.resolveMcpAction(selected.action_id, .spawn_failed, "must not resolve", .{});
+    try storage.resolveAction(selected, .spawn_failed, "must not resolve", .{});
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code IS NOT NULL", .{}));
-    try std.testing.expect((try storage.nextMcpAction()) == null);
+    try std.testing.expect((try storage.nextAction(.mcp)) == null);
     const owed = (try storage.nextCoreWork()).?.stop;
     var owed_stop = try completeSessionStop(owed.key.slice(), owed.session.slice());
     try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
@@ -9780,7 +9889,7 @@ test "MCP work selected before its parent stops yields to the owed child stop" {
         .{ .item_id = "item-2", .name = "fetch_page", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{}", .decoded_arguments = "{}" },
     });
     const again = (try storage.nextCoreWork()).?.mcp;
-    try storage.resolveMcpAction(again.action_id, .spawn_failed, "interim", .{});
+    try storage.resolveAction(again, .spawn_failed, "interim", .{});
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NOT NULL", .{again.action_id}));
     try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
 }
@@ -9860,19 +9969,19 @@ test "MCP attempts serialize Sessions and recover without replay" {
     const first = (try storage.nextCoreWork()).?.mcp.action_id;
     // Selection repeats until admission: later calls cannot overtake it.
     try std.testing.expectEqual(first, (try storage.nextCoreWork()).?.mcp.action_id);
-    const binding = (try storage.admitMcpActionAttempt(first, 1234, .{})).?;
-    try std.testing.expect((try storage.admitMcpActionAttempt(first + 1, 600_000, .{})) == null);
-    var input: action_domain.McpExecutionInput = undefined;
-    try storage.readMcpExecutionInput(binding, &input);
+    const binding = (try storage.admitActionAttempt(.{ .action_id = first, .runner = .mcp }, 1234, .{})).?.permit.binding;
+    try std.testing.expect((try storage.admitActionAttempt(.{ .action_id = first + 1, .runner = .mcp }, 600_000, .{})) == null);
+    var input: action_domain.ActionExecutionInput = undefined;
+    try storage.readActionExecutionInput(.mcp, binding, &input);
     try std.testing.expectEqualStrings(sessions[0].slice(), input.session.slice());
-    try std.testing.expectEqualStrings(input.session.slice(), input.root.slice());
-    try std.testing.expect(input.parent == null);
-    try std.testing.expectEqualStrings("fetch_page", input.name.slice());
+    try std.testing.expectEqualStrings(input.session.slice(), input.runner.mcp.root.slice());
+    try std.testing.expect(input.runner.mcp.parent == null);
+    try std.testing.expectEqualStrings("fetch_page", input.runner.mcp.name.slice());
     try std.testing.expectEqual(@as(u64, 1234), input.timeout_ms);
     try std.testing.expectEqual(@as(usize, 32), input.sender_handle.slice().len);
-    try std.testing.expectEqualStrings("docs", input.server.slice());
-    try std.testing.expectEqual(@as(u64, mcp_record.input_schema.len), input.input_schema.length);
-    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(mcp_record.input_schema), &input.input_schema.digest);
+    try std.testing.expectEqualStrings("docs", input.runner.mcp.server.slice());
+    try std.testing.expectEqual(@as(u64, mcp_record.input_schema.len), input.runner.mcp.input_schema.length);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(mcp_record.input_schema), &input.runner.mcp.input_schema.digest);
     // Full MCP slots must not hide a later slot-free core call.
     const core = (try storage.nextCoreWorkForHost(false)).?.action;
     try std.testing.expectEqual(first + 2, core.binding.action_id);
@@ -9882,16 +9991,18 @@ test "MCP attempts serialize Sessions and recover without replay" {
     try std.testing.expect(try storage.recoverOneUncertainAction(action_domain.ActiveOperationFilter.empty()));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='indeterminate' AND CAST(c.payload AS TEXT) LIKE ?2", .{ first, "%Host stopped%" }));
     try std.testing.expectEqual(first + 1, (try storage.nextCoreWork()).?.mcp.action_id);
-    const unsent = (try storage.admitMcpActionAttempt(first + 1, 600_000, .{})).?;
+    const unsent = (try storage.admitActionAttempt(.{ .action_id = first + 1, .runner = .mcp }, 600_000, .{})).?.permit.binding;
     var stop = try completeSessionStop("mcp-unsent-stop", sessions[0].slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    // Store stop must not replace the adapter's definite not-run evidence.
     _ = try storage.settleActionAttempt(unsent, .spawn_failed, "not available", .{});
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='cancelled' AND CAST(c.payload AS TEXT) LIKE ?2", .{ unsent.action_id, "%not sent%" }));
-    const sent = (try storage.admitMcpActionAttempt(other, 5_000, .{})).?;
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='spawn_failed' AND CAST(c.payload AS TEXT) LIKE ?2", .{ unsent.action_id, "%not available%" }));
+    const sent = (try storage.admitActionAttempt(.{ .action_id = other, .runner = .mcp }, 5_000, .{})).?.permit.binding;
     var sent_stop = try completeSessionStop("mcp-sent-stop", sessions[1].slice());
     try std.testing.expect(storage.stopSession(&sent_stop, .{}) == .accepted);
+    // A definite remote answer also remains definite when settlement races stop.
     _ = try storage.settleActionAttempt(sent, .succeeded, "terminal result raced stop", .{});
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='cancelled' AND CAST(c.payload AS TEXT) LIKE ?2", .{ sent.action_id, "%Outcome unknown%" }));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='succeeded' AND CAST(c.payload AS TEXT) LIKE ?2", .{ sent.action_id, "%terminal result raced stop%" }));
 }
 
 test "searchActivity streams window edges filters kinds and pages newest first" {
@@ -10428,32 +10539,42 @@ test "Message recovery observation seeks stay bounded as the Turn accumulates re
     try std.testing.expectEqual(costs[0], costs[1]);
 }
 
-test "a failed model fact batch rolls back overwritten rows and source together" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "{s}/facts.sqlite3", .{root});
-    var storage: Store = undefined;
-    try storage.open(std.testing.io, path, root);
-    {
+test "runtime catalog read failures never fall back and fence only engine failure" {
+    for ([_]bool{ false, true }) |saved| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
-        try storage.saveModelFacts(&.{.{ .id = "kept", .context_window = 100, .efforts = .{}, .openai_listed = true }}, "\"old\"");
-        // The first row is overwritten and stepped before the second row's
-        // constraint fails. Neither that overwrite nor publication may stick.
-        try std.testing.expectError(error.StatementFailed, storage.saveModelFacts(&.{
-            .{ .id = "kept", .context_window = 200, .efforts = .{}, .openai_listed = false },
-            .{ .id = "", .context_window = null, .efforts = .{}, .openai_listed = false },
-        }, "\"new\""));
+        if (saved) try storage.saveModelFacts(&.{.{ .id = "read-kept", .context_window = 100, .efforts = .{}, .openai_listed = true }}, null);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        // Failure while preparing the selected-facts read is memory pressure,
+        // not permission to answer shipped facts or fence a healthy Store.
+        sqlite.testing_fail_next_insert = true;
+        defer sqlite.testing_fail_next_insert = false;
+        try std.testing.expectError(error.OutOfMemory, storage.readModelCatalog(arena.allocator()));
+        try std.testing.expect(!sqlite.testing_fail_next_insert);
+        try std.testing.expect(!storage.isFenced());
+        const selected = try storage.readModelCatalog(arena.allocator());
+        if (saved) {
+            try std.testing.expectEqual(@as(usize, 1), selected.len);
+            try std.testing.expectEqualStrings("read-kept", selected[0].id);
+        } else try std.testing.expect(selected.ptr == @import("../model_catalog.zig").shipped.ptr);
+        // Remove the selected statement before breaking its schema: schema
+        // reprepare is deliberately a panic in the normal cached-plan guard.
+        const cache = &storage.engine.sqlite.statements;
+        const selected_sql = for (cache.slots) |slot| {
+            if (slot.sql) |sql| if (std.mem.indexOf(u8, std.mem.span(sql), "LEFT JOIN model_fact") != null) break sql;
+        } else return error.TestUnexpectedResult;
+        cache.remove(selected_sql);
+        try store_testing.sqliteExec(storage.sqliteDatabase(), "DROP TABLE model_fact", .{});
+        // A failed selected read, with or without a saved source, must not
+        // return the shipped catalog as a successful answer.
+        try std.testing.expectError(error.StatementPrepareFailed, storage.readModelCatalog(arena.allocator()));
         try std.testing.expect(storage.isFenced());
+        try std.testing.expectError(error.StoreFenced, storage.readModelCatalog(arena.allocator()));
     }
-    try storage.open(std.testing.io, path, root);
-    defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(?u32, 100), (try storage.modelFact("kept")).?.context_window);
-    const source = (try storage.readModelCatalogSource()).?;
-    try std.testing.expectEqual(@as(u64, 1), source.generation);
-    try std.testing.expectEqualStrings("\"old\"", source.etag.?.slice());
 }
 
 test "schema 54 gains empty model catalog tables at 55 without changing its rows" {
@@ -10497,7 +10618,7 @@ test "model catalog save releases its pager working set before leaving the queue
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     _ = sqlite.c.sqlite3_db_release_memory(storage.sqliteDatabase());
-    const baseline_cache = storage.sqliteDiagnostic().cache_used_bytes.?;
+    const baseline_cache = storage.diagnostic().sqlite.cache_used_bytes.?;
     const catalog = @import("../model_catalog.zig");
     var ids: [1024][64]u8 = undefined;
     var facts: [ids.len]catalog.Entry = undefined;
@@ -10508,10 +10629,10 @@ test "model catalog save releases its pager working set before leaving the queue
     }
     try storage.saveModelFacts(&facts, "\"one\"");
     // Only the preexisting pinned fixture pages and accounting remain.
-    try std.testing.expectEqual(baseline_cache, storage.sqliteDiagnostic().cache_used_bytes.?);
+    try std.testing.expectEqual(baseline_cache, storage.diagnostic().sqlite.cache_used_bytes.?);
     try std.testing.expectEqual(@as(?u32, 123), (try storage.modelFact(facts[999].id)).?.context_window);
     try storage.saveModelFacts(&facts, "\"two\"");
-    try std.testing.expectEqual(baseline_cache, storage.sqliteDiagnostic().cache_used_bytes.?);
+    try std.testing.expectEqual(baseline_cache, storage.diagnostic().sqlite.cache_used_bytes.?);
     try std.testing.expectEqual(@as(u64, 2), (try storage.readModelCatalogSource()).?.generation);
 }
 
@@ -10810,5 +10931,45 @@ test "an engine OutOfMemory under configure, a skills reload or a catalog read a
         }
         try std.testing.expect(!sqlite.testing_fail_next_insert);
         try std.testing.expect(!storage.isFenced());
+    }
+}
+
+test "Bash admission entry points agree on readiness" {
+    const Case = enum { ready, unauthorized, resolved, attempted, closed, stopped };
+    for (std.enums.values(Case)) |case| {
+        var results: [2]bool = undefined;
+        for (&results, 0..) |*result, entry| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var configuration = try completeConfiguration("bash-matrix", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            configuration.configuration.tools = try .of(&.{"bash"});
+            configuration.configuration.permission_mode.state = .value;
+            try configuration.configuration.permission_mode.value.set("bypass");
+            const configured = try storage.configure(&configuration, .{});
+            try std.testing.expect(configured == .accepted);
+            const session = configured.accepted.session;
+            try submitTestMessage(&storage, &tmp, "bash-matrix-input", "bash-matrix-input", session.slice(), "propose");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCallsForTesting(&storage, &tmp, model, "bash-matrix-calls", &.{.{ .item_id = "one", .name = "bash", .encoded_call_id = "one", .decoded_call_id = "one", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"true\\\"}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"true\"}" }});
+            const id = try store_testing.sqlite_only.queryU64(&storage, "SELECT action_id FROM action_operation", .{});
+            switch (case) {
+                .ready => {},
+                .unauthorized => try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET authorized=0,decided_at=NULL", .{}),
+                .resolved => try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET resolution_code='failed',resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1,resolved_at=1", .{}),
+                .attempted => try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,bash_timeout_ms=1", .{}),
+                .closed => try store_testing.sqlite_only.exec(&storage, "UPDATE turn SET outcome_code='cancelled',outcome_at=1", .{}),
+                .stopped => try store_testing.sqlite_only.exec(&storage, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) SELECT 'bash-matrix',session_ref,turn_id,0,1 FROM turn", .{}),
+            }
+            result.* = if (entry == 0)
+                (try storage.admitNextActionAttempt(300_000, .{})) != null
+            else
+                (try storage.admitActionAttempt(.{ .action_id = id, .runner = .bash }, 300_000, .{})) != null;
+        }
+        try std.testing.expectEqual(case == .ready, results[0]);
+        try std.testing.expectEqual(results[0], results[1]);
     }
 }

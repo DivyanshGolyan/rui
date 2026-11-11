@@ -14,6 +14,8 @@ pub const Entry = struct {
     spec: []const u8,
     kind: Kind,
     nullable: bool = false,
+    /// A streamed JSON object rather than a streamed text string.
+    json_object: bool = false,
     create: Create = .optional,
     changeable: bool = true,
     cli: ?Cli,
@@ -26,12 +28,12 @@ pub const Entry = struct {
 pub const entries = [_]Entry{
     .{ .field = "workspace", .spec = "workspace", .kind = .{ .text = 4096 }, .changeable = false, .cli = .{ .name = "workspace" }, .column = "workspace" },
     .{ .field = "provider", .spec = "provider", .kind = .{ .choice = 16 }, .changeable = false, .cli = .{ .name = "provider", .group = .binding }, .column = "provider" },
-    .{ .field = "model", .spec = "model", .kind = .{ .text = 256 }, .create = .must_value, .changeable = false, .cli = .{ .name = "model", .group = .binding }, .column = "model" },
+    .{ .field = "model", .spec = "model", .kind = .{ .text = 256 }, .create = .must_value, .changeable = true, .cli = .{ .name = "model", .group = .binding }, .column = "model" },
     .{ .field = "instructions", .spec = "instructions", .kind = .content, .cli = .{ .name = "instructions", .on_start = false }, .column = "instructions_content_id" },
     .{ .field = "tools", .spec = "tools", .kind = .tools, .create = .must_value, .cli = .{ .name = "tools" }, .column = "tool_set_id" },
     .{ .field = "loaded_tools", .spec = "loadedTools", .kind = .tools, .cli = .{ .name = "loaded-tools" }, .digest = .unless_omitted, .column = "loaded_tool_set_id" },
     .{ .field = "permission_mode", .spec = "permissionMode", .kind = .{ .choice = 16 }, .create = .must_value, .cli = .{ .name = "permission-mode" }, .column = "permission_mode" },
-    .{ .field = "output_schema", .spec = "outputSchema", .kind = .content, .nullable = true, .cli = .{ .name = "output-schema", .on_start = false }, .column = "output_schema_content_id" },
+    .{ .field = "output_schema", .spec = "outputSchema", .kind = .content, .json_object = true, .nullable = true, .cli = .{ .name = "output-schema", .on_start = false }, .column = "output_schema_content_id" },
     .{ .field = "compaction_trigger", .spec = "compactAt", .kind = .decimal_policy, .nullable = true, .create = .must_value, .cli = .{ .name = "compaction-trigger" }, .column = "compaction_trigger" },
     .{ .field = "output_reservation", .spec = "outputReservation", .kind = .decimal_policy, .nullable = true, .cli = .{ .name = "output-reservation" }, .column = "output_reservation" },
     .{ .field = "reasoning_effort", .spec = "effort", .kind = .{ .choice = 16 }, .nullable = true, .create = .must_state, .cli = .{ .name = "reasoning-effort" }, .column = "reasoning_effort" },

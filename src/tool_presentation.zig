@@ -1,13 +1,13 @@
 //! How a tool call shows to a reader: its saved description, outcome code
-//! and publication position. A Session Label obeys the same description rule.
+//! and publication position. A Session Label has its own smaller byte bound.
 //! protocol.zig renders it as JSON.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 
-pub const max_description_bytes = 100;
+pub const max_description_bytes = @import("mcp/shape.zig").description_max_bytes;
 
 /// A Session Label obeys the saved Bash description rule.
-pub const max_label_bytes = max_description_bytes;
+pub const max_label_bytes = 100;
 
 pub const ToolPresentation = struct {
     description: ?Bounded(max_description_bytes),
@@ -37,8 +37,7 @@ pub const ToolPresentation = struct {
 /// Whether `bytes` is a Session Label: one non-blank line of UTF-8 within
 /// `max_label_bytes`.
 pub fn validLabel(bytes: []const u8) bool {
-    comptime std.debug.assert(max_label_bytes == max_description_bytes);
-    return ToolPresentation.validDescription(bytes);
+    return bytes.len <= max_label_bytes and ToolPresentation.validDescription(bytes);
 }
 
 test "a Label is one non-blank line of at most 100 bytes" {
@@ -47,4 +46,14 @@ test "a Label is one non-blank line of at most 100 bytes" {
     try std.testing.expect(validLabel("Review PR 412") and validLabel(&longest) and validLabel("Café"));
     for ([_][]const u8{ "", " \t", "one\ntwo", "one\u{2028}two", "\xff", &overlong }) |invalid|
         try std.testing.expect(!validLabel(invalid));
+}
+
+test "saved call descriptions allow 200 bytes without widening Labels" {
+    const longest: [200]u8 = @splat('x');
+    const overlong: [201]u8 = @splat('x');
+    try std.testing.expect(ToolPresentation.validDescription(&longest));
+    try std.testing.expect(!ToolPresentation.validDescription(&overlong));
+    try std.testing.expect(!validLabel(&longest));
+    for ([_][]const u8{ "", " \t", "one\ntwo", "one\rtwo", "one\u{85}two", "one\u{2028}two", "one\u{2029}two", "\xff" }) |invalid|
+        try std.testing.expect(!ToolPresentation.validDescription(invalid));
 }

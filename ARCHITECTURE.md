@@ -124,7 +124,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Temporary storage | `src/ScratchBudget.zig` accounts for bytes; `src/named_scratch.zig` retains failed reclamation; `src/output_retention.zig` owns disposable-output retention and eviction. |
 | Product defaults | `src/product_defaults.zig`: values supplied for omitted settings, namely default Active and intake capacity, fresh-Session tools and permission mode, the recommended model and compaction policy. |
 | Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name a person knows it by, its sign-in name, whether its credential is a sign-in or a key, and whether its model list is Rui's catalog or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
-| Model capability | `src/model_catalog.zig`: identifier syntax, the reasoning-effort grammar and the shipped models.dev facts (listed efforts and optional context window); `src/model_capability.zig` derives capability from that catalog. |
+| Model capability | `src/model_catalog.zig`: identifier syntax, the reasoning-effort grammar and the shipped models.dev facts; the Store selects saved facts when a source exists, otherwise shipped facts. `src/model_capability.zig` derives capability from the operation's supplied facts (listed efforts and optional context window). |
 | Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
 | Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
 | Session overview | `src/Overview.zig` owns the terminal surface and its reader; `src/overview_view.zig` is its presentation core. |
@@ -165,8 +165,12 @@ Noncanonical references, including old UUID and NUL-bearing references, reject r
 Configure, creating Messages, `start_agent` and connect-time presets use one plain camelCase agent spec: `workspace`, `provider`, `model`, `instructions`, `tools`, `loadedTools`, `permissionMode`, `outputSchema`, `compactAt`, `outputReservation`, `effort` and `label`.
 An absent member keeps the current value or creation default; `null` clears a nullable setting; a direct value sets it.
 Token policies are JSON integers and tool lists normalize into byte order with no duplicate names.
-`instructions` and `outputSchema` are strings; the latter holds JSON text, not an embedded schema object.
-Ingress streams these strings to sealed content files rather than retaining their bodies in metadata.
+`instructions` is a text string; `outputSchema` is a JSON object or `null`, as in the shipped `start_agent` and presets.
+Ingress streams instructions and schema objects to sealed content files rather than retaining their bodies in metadata; schemas have the content bound, not the smaller metadata bound.
+Every schema object is a schema, including an object with keys such as `state`, `value`, `bytes` or `sha256`; no object is interpreted as a content reference.
+Only the parser's internal metadata uses an empty array as the out-of-band schema-custody marker; an array is not a schema object and is refused on the wire.
+The CLI refuses a malformed schema file before capture publication, since malformed JSON cannot be an object in the plain spec.
+Schema bytes are compact JSON with normalized string escapes, preserving member order and number spelling as the shipped object serializer did; configuration identity hashes these parsed bytes, not the request's whitespace or spelling of string escapes.
 A creation configuration requires an exact nonempty model, explicit effort, a token-count `compactAt`, a tools list and Permission Mode (D104, D111, D113).
 A missing required field is a missing-field request error; an empty tools list means no tools and has no Host default.
 The agent spec also accepts instructions, output schema and label; provider defaults to the Host's single served provider, and a Host serving several has no default, so a creation must name one (D133, D221).
@@ -175,7 +179,7 @@ A supplied Workspace is checked like any other, and a spec without Bash that omi
 Enabling Bash later runs it in the saved Workspace, which a later configure cannot change.
 Creation atomically establishes Session, baseline, Workspace bookkeeping, access scope and request answer.
 The CLI and TUI send their own explicit creation defaults: Bash and web search, `bypass`, a supported saved effort or the product's effort choice, and the provider's compactAt default as described under [Supported model IDs](#supported-model-ids).
-Addressed configure preserves every omitted setting; the model, provider and Workspace binding remain immutable.
+Addressed configure preserves every omitted setting; provider and Workspace remain immutable, while the model may change within the provider (D192).
 A creating spec may also name `parent`, a Session ID relation, never a revisioned setting (D178).
 The child inherits that Session's Workspace and provider and may only narrow its configured tool names and Permission Mode, through the same admission owner as `start_agent` (D122, D140).
 Naming provider or Workspace, even equal values, is refused, as is a wider tool set or bypass under an asking parent; refusals name the field and never silently intersect the spec.
@@ -183,17 +187,20 @@ Missing parents and parents with an archive intent are refused as `unknown_sessi
 A native configure creation admits no task Message. Child approval forwarding and ending Messages use the saved parent relation as for attached agents.
 `parent` participates in the creation request digest only when present, retaining every earlier configuration digest and the existing Store format.
 
+
 A creation-only `preset` seeds configure from a connect-time spec: supplied values or nulls override it, omissions inherit it, and resolved answers bind the resolved configuration for idempotent replay (D22).
 Preset lookup/update rejections instead bind the original request, including the preset name, and replay that saved rejection even if the Host can later resolve the preset.
 
 Later configurations preserve omitted provider/model values and accept explicit equal values.
-A different provider or model rejects the whole update, without a revision or partial changes.
-This applies before, during and after work, regardless of saved continuation.
-Unknown providers reject without fallback.
+A different provider rejects the whole update, without a revision or partial changes; unknown providers reject without fallback.
+A model change is an ordinary revision and writes a `session_changed` row for `model`, before, during or after work.
+The Session ID and attached children carry on.
+Validate retained or supplied effort against the new model only when the catalog lists it; an unlisted model passes any supported effort word through (D229/D137).
+The retained or supplied compactAt must fit the new model's known window.
 
-To use another binding, create a new Session.
+To use another provider, create a new Session.
 V1 has no fork, history transfer or cross-provider handoff.
-The restriction belongs to configuration admission, not permanent storage immutability: Operations resolve their frozen settings revisions, and output retains its producing Operation's provenance.
+Operations still resolve their frozen settings revisions, and output retains its producing Operation's provenance.
 
 Other supplied mutable fields apply in admission order; omitted fields remain unchanged.
 Enforce immutable Workspace/access constraints and supported Core values.
@@ -435,7 +442,7 @@ The revision does not give every setting the same application boundary:
 | Label | Presentation only. It takes effect at commit and no Operation freezes it. |
 
 No separate settings store or applied-state machinery is required.
-Session identity, Workspace/access scope and the V1 provider/model binding are fixed under [configuration admission](#naming-and-configuring-a-session); other supported settings are mutable.
+Session identity, Workspace/access scope and provider binding are fixed under [configuration admission](#naming-and-configuring-a-session); other supported settings are mutable.
 Core validates updates atomically.
 The adapter must establish continuation compatibility for the exact frozen Operation without changing Conversation membership.
 Revisions do not add provider capabilities.
@@ -476,6 +483,7 @@ This preserves exact-model syntax without guessing capabilities from model famil
 
 A listed model with effort levels takes one of those values; explicit `null` is accepted only for an unlisted model or a catalog entry with no effort levels.
 On an existing Session, omission preserves the saved effort and an accepted explicit `null` leaves provider effort unspecified, without a catalog fallback.
+Configuration validates the effective requested-or-retained effort against the effective requested-or-current model, including null effort on a model revision.
 The pinned `openai-responses/2` codec cannot encode a boundary back to unspecified effort, so clearing an assigned value rejects atomically as `unsupported_reasoning_effort`; a client reset sends a concrete supported effort instead (D165).
 The CLI resolves `--reasoning-effort default` on the client to the client's product effort choice or explicit null; `--reasoning-effort VALUE` selects a value for `session configure`, initial `session start` and interactive `/configure`.
 Current inspection reports the effective `reasoning_effort` and saved nullable `reasoning_effort_override`; an explicit saved value wins.
@@ -596,6 +604,14 @@ Session facts and Operation admission share one committed per-Session order on t
 The Operation's admission position fixes its historical boundary.
 Accepted model output, call rejection and Action Resolution become available at their acceptance positions, not a producing Operation's earlier admission position.
 Historical visibility does not bypass pending-input applicability, expose an incomplete Tool Result group or change Conversation/tool-call order.
+
+If the transport answer exceeds 4 MiB, retain the received JSON prefix through the optional scratch path with a larger-than-limit note, not a claim that the complete answer was saved.
+`mcp/reply.zig` judges complete and cut answers with the same envelope, result-type, content-shape, `isError` and JSON-RPC error rules; `mcp/result_text.zig` renders that judgment and classifies transport endings without an answer.
+HTTP status and media type accompany the retained bytes: a proven JSON-RPC outcome takes precedence, otherwise HTTP 4xx is a definite refusal and other statuses (including 5xx) are indeterminate, without retry.
+A cut result must establish each defaultable semantic field explicitly, or close its result object before missing fields take their defaults; an unread `resultType`, content shape or `isError` is not invented. A matching envelope and a valid error code with a complete message can establish a JSON-RPC error before its data finishes.
+An unsent request is failed-not-run; a lost sent request is indeterminate.
+Session stop before send cancels the call; after send, closing the connection leaves the remote outcome indeterminate.
+Shared Action settlement preserves MCP adapter evidence, including a definite answer when stop races settlement; Bash's confirmed local stop remains cancelled.
 
 Replacement Attempts retain that historical view.
 With unchanged adapter rules, they reconstruct equivalent request semantics; meaningless JSON spelling need not match.
@@ -733,7 +749,7 @@ An omitted update preserves the override.
 Explicit `null` resets it to provider/model policy, spelled `default` in the CLI.
 Triggers are positive token counts; output reservation is nonnegative extra heuristic headroom, not a provider output limit.
 Current inspection and `/status` show effective values and whether each value is a Session override.
-Current inspection also reports `context_estimate`: the estimated tokens the next model call starts from (accepted usage since the compaction base, uncovered bytes / 4 and output reservation), read by the same facts purpose selection reads, when that selection would compare it with the trigger.
+Current inspection also reports `context_estimate`: the estimated tokens the next model call starts from (eligible accepted usage, uncovered bytes / 4 and output reservation), read by the same facts purpose selection reads, when that selection would compare it with the trigger.
 It is null without a trigger and when the next call's purpose does not depend on it: a Session's first call, the call after a compaction, a recovery compaction and context unchanged since the last compaction.
 So whenever it is shown, it reaches the trigger exactly when a model call admitted at that moment compacts, and the Session line's `0% left` means that.
 `/status` shows it beside the trigger, and the conversation's Session line shows the share of the trigger it leaves.
@@ -742,6 +758,9 @@ Later settings or capability changes cannot change its purpose or retry policy.
 
 The Store keeps usage in Rui's form: four counts, uncached input, cache read, cache write and output, each a whole SQLite integer, all present or all absent.
 Pressure is their sum, saturating at its maximum.
+Usage anchors pressure only when its frozen request used the same model, selected Compaction Base (or no base), and effective history floor as the next request.
+Replay selection owns that identity; a model return does not make older compact-recipe usage cover a restored visible prefix.
+When the recipes differ, estimate retained context without that usage anchor.
 The Responses provider maps uniquely named top-level `input_tokens` and `output_tokens`, with `input_tokens_details.cached_tokens` as the cache read (zero when its details are absent or null) and zero cache writes, which Responses does not bill.
 A provider total is not a count.
 A missing, invalid or duplicate count, or a cache read above the input, leaves usage absent, and pressure falls back to retained-context estimates; a missing counter is not zero.
@@ -755,7 +774,7 @@ The catalog only bounds a requested count against the exact model's known contex
 An explicit count does not claim a model capacity or entitlement.
 A stored null threshold uses a fixed 115,200-token safety threshold independent of the catalog; new specs cannot save a null threshold.
 The CLI resolves `--compaction-trigger default` to a concrete token count before capture.
-Pressure uses valid usage from the latest accepted same-binding output plus estimates for appended input and extra reservation; without valid usage it estimates retained context.
+Pressure uses eligible usage from the latest accepted same-binding output plus estimates for appended input and extra reservation; without same-recipe usage it estimates retained context.
 The threshold fires at equality.
 The assistant successor of a compaction applies pending input even if the estimate remains above the threshold.
 Provider-reported overflow still permits recovery without a configured trigger; unchanged context after an accepted base, or overflow during compaction itself, fails with `ResourceExceeded` instead of repeating compaction.
@@ -779,13 +798,17 @@ Select the newest accepted base in the current lineage, then validate that exact
 
 Both checks must pass; no validity flag is stored.
 Failed or unresolved compaction cannot replace a base.
-Unsupported or incompatible selected material fails `continuation_unavailable`, without falling back to an older base or reconstructing from visible Conversation.
+Unsupported selected material fails `continuation_unavailable`, without falling back to an older base.
+A selected base made for another requested model is not replayable: use the visible canonical history it covered, including exchanges its floor omitted, rather than its opaque state.
 Missing or corrupt required canonical state fences the Host instead of failing only the Operation.
 
 Configuration changes do not prevalidate or discard saved continuation.
 Request preparation validates the frozen Operation's selected recipe.
-Codex initially restricts continuation to the same requested model binding and records requested/served-model evidence; actual provider qualification requires adapter evidence even though V1 configuration admission fixes the Session binding.
-Incompatible continuation fails that Operation with `continuation_unavailable`, without replaying it or dropping private meaning.
+The producing Operation's frozen revision supplies each item's requested model; served-model evidence never substitutes for that identity.
+One output-item replay rule permits visible assistant messages, tool calls and tool results across models, but omits reasoning and compaction items from a different requested model (D192).
+A model switch therefore rebuilds from visible history, costing one unavoidable cache miss; it changes no canonical output and needs no new Store column.
+The ordinary compaction trigger weighs this rebuilt history for the new model; old-model compaction floors and successor exemptions do not apply.
+Actual provider qualification still requires adapter evidence.
 If complete retained input still cannot fit, fail with `ResourceExceeded` under terminal-settlement rules.
 Never discard pending instructions to fit or impose a durable-history limit.
 
@@ -973,7 +996,8 @@ Sessions are durable and have no end event, so an idle Session's memo lasts unti
 
 The provider caches requests by their prefix, so a Host that encodes the same history differently, after an upgrade or through a bug, would lose a Session's cache without any sign.
 Each Session therefore stores one 56-byte prefix seal: the anchor and admission position of the view whose fully rebuilt span it records, that span's length and its SHA-256.
-Every full rebuild of a span, under the same anchor and with a view containing the sealing view, must begin with exactly the sealed bytes.
+Every full rebuild of a span, under the same model and anchor and with a view containing the sealing view, must begin with exactly the sealed bytes.
+Derive the seal's model from the existing Operation at its admission position; a different model's seal does not bind or change the 56-byte encoding.
 After the request seals, preparation hashes the span from the sealed request in chunks under the preparation byte allowance, handing each chunk on to the memo being written, so the span is read once; a mismatch, or a span shorter than the seal, fails the Attempt `encoding_drift` before anything is sent, keeps no memo, and leaves the seal in place.
 A memo copy is this Host's own earlier encoding and is not hashed again.
 The seal is replaced by the whole span once a rebuilt span is at least twice the sealed length, so a Session writes its seal a logarithmic number of times per anchor and the seal always covers at least half of a rebuilt span; between replacements a rebuild hashes only the sealed bytes.
@@ -985,7 +1009,9 @@ The seal covers the history span, not the request's settings and instructions be
 
 A Session pins its codec at creation, and new Sessions pin `openai-responses/2`; a Session on `openai-responses/1` keeps it and its exact bytes, since requests use the codec the Session pinned.
 Under `openai-responses/1` each request's top-level `reasoning.effort` is its Operation's frozen effort, so an effort change costs the provider cache.
-Under `openai-responses/2` the top-level effort is the effort the Session's first Operation froze, for the Session's life.
+Under `openai-responses/2` the top-level effort is the effort the Session's first Operation for the requested model froze.
+A rebuilt history preserves effort boundaries only from Operations requesting that model; other models' effort settings are not visible conversation and may not be supported by this model.
+Their tool declarations remain in place for the visible calls.
 The history view yields an Operation element at each earlier Operation's admission position, with the effort it froze, and the request being prepared gets its own Operation item after `history_end`, where a later request's span will place it.
 At an Operation whose effort differs from the one in force, the codec writes `{"type":"configuration_update","reasoning":{"effort":…}}` and its carry takes the new effort; an unchanged effort writes nothing.
 A compaction base covers the Operation elements before its anchor with the output it covers, so effort there is the top's again.
@@ -1410,10 +1436,15 @@ The Store's format version is the `format` row of `store_meta`, and SQLite's `PR
 Before any write, open compares the format and then each table's and index's stored CREATE text with the DDL this binary renders, so a Store missing an object, holding an extra one, or carrying a changed column, CHECK or index is refused as the wrong schema.
 The Host opens schema 51 (41 let a failed, overflowed or retry-exhausted Turn outcome reference its report content; 42 saves each Model Output Item's replay rule, judged once at import, and replaces raw items with the neutral form: `model_output_item` keeps kind, phase, part count and an item bag; `model_output_part` keeps each part's array, kind, text and part bag; no answer or string projection tables remain; and content payloads are non-null with their recorded length; 43 certifies a Tool Call by its name, call ID and arguments only, since the provider item ID lives in the item bag, stores usage as four neutral counts beside the provider's report, pins each Session's codec (`openai-responses/1` for `codex`) and optional codec options of at most 512 bytes at creation, checks a provider label's syntax instead of a provider list, so adding a provider is no format change, and keeps each Session's [prefix seal](#prefix-seal); 44 stores a message's text once, as the item's message text row, with each text part keeping only its length into it, while a reasoning part keeps its own private row; 45 orders the index of Messages without a Session sender by Admission position; 46 names each Tool Call's Session on its row, and indexes every Activity row source by Session and position, so an Activity page is a range seek whatever the history's length; 47 makes the schema's tables expressible on SQLite, Postgres and MySQL and holds every statement to the reserved-name and `rowid` rules: no name any engine reserves outside its keyword place, no `rowid` (Sessions carry `created_seq` and Commands `command_seq`, each allocated max+1 in its creating transaction), a stored Workspace digest and key, foreign keys checked when each row is written rather than at commit, non-null key columns, byte-length checks, and the format marker in `store_meta`, while statements keep SQLite-only forms such as `unixepoch`, `GLOB`, `||`, `IS`, `INDEXED BY`, `ON CONFLICT`, `INSERT OR IGNORE` and `printf` until the typed statements bring their dialect rules; 48 and 49 record OpenAI web search; 50 drops the per-Session read-through position that 46 added; 51 makes a Command's `command_seq` its primary key and `command_key` unique, and indexes Commands by target, kind and `command_seq` in place of `command_seq`'s own index, so a Session's decisions, stops and interruptions are a range seek, and indexes Tool Calls by Session, Operation and call ordinal, and rejected Tool Calls and resolved Actions by Session, Operation and acceptance position, in place of the rejected calls' index by Operation, so a Session's calls and Tool Results are a range seek on their own tables, indexes revisions by Session and content so a Full report finds each content's first revision in SQL, and limits `store_meta`'s key to its three names, because MySQL keys only bounded text): a Store at any earlier version is rejected as unsupported and requires a compatible build or a separate fresh Store.
 Schema 51 is the migration baseline (Divyansh, D204): every later format change ships one forward step in `schema.migrations`, for SQLite and MySQL, and the build fails when `schema_version` and the steps disagree, and `tests/ci/test_store_schema_version.py` fails when a step whose `from` is below the released schema_version differs from its text at the release.
-A SQLite Store at a format from 51 up to the current one takes each pending step at open, in one transaction that also sets its format and commits only when every foreign key holds and every object's text equals a fresh bootstrap's; otherwise nothing changes and the Store is refused.
+A SQLite Store at a format from 51 up to the current one takes each pending step at open, in one transaction that also sets its format and the current wire label (from the last released wire after historical steps), and commits only when every foreign key holds and every object's text equals a fresh bootstrap's; otherwise nothing changes and the Store is refused.
+The typed statement marker `@index(name)` renders as `INDEXED BY name` on SQLite.
+On MySQL it renders as `FORCE INDEX (name)` only when `schema.mysqlCanForceIndex` confirms that the named MySQL DDL index uses real columns; generated-leading and functional partial indexes remain unhinted, since forcing their lowered keys can turn a lookup into a full index scan.
+MySQL open includes every forceable index's canonical name in its catalog comparison and refuses a renamed index as `store_schema_behind` before any write; server-generated keys remain checked by definition.
+This admission digest is computed, not stored or pinned by Store format, so tightening its comparison changes no format or migration.
 Rui runs no DDL on MySQL (D203).
 `rui store schema --engine mysql` prints this build's canonical `schema.ddl(.mysql)` as one SQL file for the DB team to apply to an empty database.
-Forward steps for an existing database are `schema.mysqlMigration(from)`; this command does not apply them.
+With `--from N` it instead prints every forward MySQL migration from format N to this build's format, oldest first (D223); the current format prints empty stdout successfully, and formats outside the migration baseline through the current format are usage errors naming that range, with no stdout.
+The composed migration finishes with one update of the saved format and wire version to this build's values; individual steps remain `schema.mysqlMigration(from)`, and this command never applies the SQL.
 The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
 The step to 53 records a Session's parent (D27).
 The step to 54 records the stops and ending Messages an attached child owes (D38, D39), ancestor feed forwarding in `session_forward` (D135, D180), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
@@ -1424,6 +1455,7 @@ The step to 57 adds archive intents and requested archive values, extends the co
 The step to 58 moves saved wire 9 metadata to wire 10 for nullable failed-send peers; it changes no saved command or refusal rows.
 The step to 59 adds immutable skill catalog metadata and its ordinary turnless instruction provenance, retaining unreleased wire 10 without rewriting earlier Conversation content.
 The step to 60 adds `message_skill` and the Conversation's skill entries (kind 4, naming their `message_skill` row), rebuilding `conversation_entry` on both engines, and moves Store wire metadata to 11; earlier rows are unchanged.
+The step to 61 widens saved call descriptions on `model_tool_call` and `model_output_item` to 200 UTF-8 bytes on both engines; existing rows need no rewrite.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -1704,7 +1736,7 @@ One thread at a time holds the Store: its connection, its scratch and its id all
 A caller that finds the Store free holds it and runs its entry point on its own thread; a caller that finds it busy queues its request and sleeps, and the holder runs queued requests in arrival order before it lets go, so each waiter wakes once, with its answer.
 A holder runs at most 64 requests for others, then hands the Store to the next waiter.
 Writes the holder runs back to back share one transaction and one fsync: each later write runs in a savepoint, so a write that fails rolls back alone, and no caller hears its answer until the batch's COMMIT; a failed COMMIT fences the Store and every write in the batch hears the Store as fenced.
-A lone write costs BEGIN and COMMIT, as before.
+A lone write costs BEGIN and COMMIT, as before; on MySQL its COMMIT shares the message of its last writes.
 A Message's commit callback runs once the batch's COMMIT succeeds, before any of its writers hears an answer.
 A dispatch check is never run for its caller: the holder hands that caller the Store, which keeps it until it has launched the Attempt or Action, so no stop commits between the check and the launch.
 
@@ -2154,6 +2186,12 @@ Request fields are `version`, `kind`, canonical `store`, `workspace` (exact cano
 A first page may also carry `since`, an opaque token from an earlier reply.
 Response `session_list` has up to eight `sessions`, then `delta`, a new `since` token, and `next` as either `null` or a continuation.
 Each row has exact `reference`, `workspace`, `provider`, `model`, `tools`, `permission_mode`, and `archive_state`; nullable `parent` (the creator’s six-character Session reference for an attached agent, otherwise `null`); nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
+Rows also carry nullable `last_line`: `{position, text}`, with a string-valued activity position and nullable text.
+It is the later by position of the newest ended Turn's outcome and the oldest pending approval's call.
+Completed Turn text is the first non-blank line from at most the first 1 KiB of public answer content, cut to at most 200 UTF-8 bytes at a code point with “…” when longer.
+Private content and failure or stop outcomes have null text; an approval uses its saved `model_tool_call.description`.
+Deciding an approval removes that candidate, falling back to the newest ended Turn; a Session with neither candidate has null `last_line`.
+These derived facts join the existing row-settings read, adding no list-page round, stored copy, Host cache or write.
 `work` is the same value that activity pages, Current and Message observations carry.
 With `since`, the Host answers one of three `delta` values.
 `not_modified` means no row has changed on this Host since the token; it is answered before any Store entry, lock or scratch, and never while the Store is fenced.
@@ -2573,8 +2611,14 @@ Full's existing streaming consumer and inventory remain unchanged.
 `model_catalog.shipped` is the single compiled-in catalog of model facts, generated from a models.dev snapshot.
 Each exact ID has its listed efforts, optional context window and OpenAI membership; there is no catalog default effort or per-Adapter context cap.
 For duplicate IDs, models.dev's OpenAI entry wins, otherwise the first provider's entry wins.
-`rui session configure --help`, invalid-model errors and ChatGPT's model list render the catalog's OpenAI IDs in catalog order; help's effort exceptions derive from the same entries.
-The model-list source is `catalog` on the wire for the shipped catalog and `catalog_fallback` when a live fetch fails.
+For each Host consumer operation, the Store selects the saved source's generation and facts together; only absence of a saved source selects shipped facts.
+A saved generation is authoritative even when empty, or when the requested ID is absent: neither case merges in or resurrects a shipped entry.
+Capability and list renderers take the caller's selected facts explicitly; they do not own a mutable catalog or read the Store themselves.
+`rui session configure --help` and offline CLI configuration/default calculations use shipped facts, need no Host or credentials, and do not claim to show a Host's saved facts.
+There is no Host help request or fact-discovery extension to the wire.
+Help and invalid-model errors render shipped OpenAI IDs in catalog order; help's effort exceptions derive from those same entries.
+ChatGPT's Host model list instead renders the selected generation's OpenAI IDs in catalog order.
+The model-list source is `catalog` on the wire for a catalog list (saved or shipped), and `catalog_fallback` when a live provider-list fetch fails.
 `product_defaults.recommended_model` must name an OpenAI entry; a catalog test checks this.
 IDs are exact and case-sensitive, without aliases, prefix matching or inferred providers.
 Inclusion claims neither account entitlement nor cross-model continuation qualification.
@@ -2592,8 +2636,12 @@ This keeps 244,800 tokens for large windows but uses 115,200 for a 128,000-token
 Other providers default to 90% of the catalog window, or 115,200 tokens for a missing or null window.
 These client choices do not change existing Sessions, the Host's fixed fallback for stored null thresholds, or frozen Operations.
 
-The only fetched live list is a Host's OpenAI key list behind [`/v1/model-list`](#public-session-activity); ChatGPT uses the shipped OpenAI IDs because it has no public list.
-The Host also refreshes the models.dev fact catalog and saves it across Host runs; help, CLI configuration and Session admission/compaction still read the shipped catalog in this step.
+The only fetched live list is a Host's OpenAI key list behind [`/v1/model-list`](#public-session-activity); ChatGPT uses the selected catalog's OpenAI IDs because it has no public list.
+The Host refreshes the models.dev fact catalog and saves it across Host runs.
+Host Session configuration admission uses operation-scoped selected facts for effort support and known-window bounds; successful refreshes affect later configuration admissions, not existing Session settings or frozen Operations.
+Historical compaction escalation for an already frozen Operation deliberately uses shipped windows: settlement and later admission independently recompute the same deeper floor, and no Store field freezes a saved catalog window between those calls.
+Using a refreshed window there could make their decisions disagree and produce `CorruptStore`; changing that historical rule requires an explicit freeze/format decision.
+Offline CLI defaults can therefore be refused by Host admission when its saved facts differ; the CLI does not silently substitute another model, effort or threshold.
 There is no model-list command.
 Help needs no Host or credentials.
 Clients do not read credentials for peer configuration.
@@ -2949,20 +2997,27 @@ A notice takes that row, and any further rows its text wraps to, until the next 
 The rule names how many draft lines it hides above or below; a conversation drops its Session line when fewer than three rows remain under its status and the rule when fewer than four remain above the line, and an overview narrower or shorter than six cells shows no input.
 The status sits directly above the rule; conversation text starts at the top of the screen, and its tool rows and live line follow its last line (Divyansh approved this on 2026-10-31, front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 A draft wraps between words the same way on both screens: spaces at the edge hang past it rather than start a row, a word wider than the line (a URL or a path) breaks after its last `/`, `.`, `-` or similar mark that fits, and between clusters only when it has none; continuation rows align under the text.
-Presentation-owned ANSI foreground colours reinforce meaning: blue User/input markers, neutral assistant prose and settled outcomes, subdued transient status, yellow permission decisions, and red blocking failures or uncertainty.
-Settled outcomes stay quiet through concise wording and indentation, not a terminal palette's potentially unreadable dark grey.
-Nonempty `NO_COLOR` disables these foreground colours.
+The conversation paints presentation colours from the shared Khadi theme roles: ink for User markers and work under way, quiet for settled outcomes and transient status, attention for permission decisions, and failure for failures.
+Marks come from `src/marks.zig`; CLI reads keep the matching ANSI foreground codes.
+Nonempty `NO_COLOR` disables these presentation colours.
+
 Content cannot select a style, and all escaping, exact permission text and terminal cleanup guarantees remain unchanged.
 
 Historical applied Admissions are suppressed in favor of their User rows; live Admissions display once and their later User projections are suppressed.
 Successful outcome aggregates do not repeat assistant rows.
 Assistant opening, live, history and human keyed-result text use `AnswerRenderer`; User, Tool Result and inspection fields use terminal escaping without Markdown interpretation.
+Inline code uses ink (indigo), without underline; only links underline. Complete bounded fenced code blocks hide their delimiters; in the TUI they show body-colour text on the selvedge band across every row, including blank and wrapped rows. Nonempty `NO_COLOR` removes ink and the band; code lines retain a two-space indent.
+Only output explicitly destined for the viewport emits SGR 40 on each code body line through its newline, then resets it. Plain-terminal and CLI output never emit a background for code: they use the same two-space indent as `NO_COLOR`, even with foreground colour enabled. The viewport strips the SGR and stores code in the unused foreground slot of its existing one-byte style, including the newline of an empty line; no marker text, line allocation or larger retained document is added, and selection copies only the displayed text.
+Code continuations retain their logical line's own leading indentation, clamped only to leave a cell for progress in very narrow windows; layout derives it from retained text with no per-line metadata.
+`display_text` owns viewport cluster normalization and display widths. Table padding measures those same displayed pieces, including bordering-space grapheme context, with the negotiated method carried by the viewport destination. Read jobs freeze that method from the screen; plain-terminal output uses the same width owner with its emitted representation and the CLI's wcwidth method.
+A run of lines beginning with `|` is a table when its second line is a separator. The renderer holds the bounded run until the first non-pipe line or answer end, drops the separator and pipes, and emits two leading spaces and two spaces between display-width-padded columns. The header is quiet, with inline code, strong, emphasis and links retaining their styles. A run exceeding the bound falls back literally without dropping bytes; incomplete and oversized fences keep their existing literal fallback.
 `AnswerRenderer` shows a Markdown link to an `http` or `https` address as its underlined text and a bare web address or local path as itself, each an OSC 8 hyperlink, so the terminal opens it on click and the address is not laid out (Divyansh asked for web links on 2026-11-02 and local paths without sentence semicolons on 2026-11-06).
 Bare local paths start at a prose-token boundary with a single `/` or `~/` and a nonempty path payload; only `~/` needs the process's explicitly borrowed, valid absolute HOME, and neither form resolves the filesystem or interprets line or column suffixes.
 Local links percent-encode the expanded path's bytes into a `file:///` URI, preserving only slashes and URI-unreserved ASCII; malformed UTF-8, controls or bidi controls leave the candidate literal.
 Bare links omit trailing sentence punctuation, including `;` and unmatched final `)`, from the clickable span without changing the visible text or internal punctuation; local filenames also keep trailing `_`, `~` and `*`.
 Other link targets (including Markdown file targets), links inside code or emphasis, Markdown link titles and complete addresses longer than 2,048 bytes after local expansion and encoding stay literal, and `/copy` still sends the original Markdown with every address.
 The conversation view keeps each address in its text as bytes it never draws, just before the text it links, so the address moves with that text through escaping, older pages and eviction.
+Only trusted OSC 8 labels may combine an explicit foreground with underline: the viewport retains that foreground in its existing style byte and uses underline to recognize the link; uncoloured or non-underlined labels keep the dedicated link slot.
 A frame links at most 128 KiB of address bytes across its cells, because the terminal grid copies the address into every cell of a link; text past that bound, or whose address left the view, stays underlined but opens nothing.
 Normal tool presentation shows only the canonical outcome heading, including an optional numeric failed exit.
 A fixed 64-byte first-line scan derives the exit from a complete matching Bash outcome line; it retains no output excerpt, warnings or hints.
@@ -2999,9 +3054,10 @@ When Current exposes an actionable permission, the frontend reads the selected c
 The runner is derived from the name and owner in the Operation's frozen offer, never from argument shape or the Session's latest catalog.
 Current includes the frozen `server` only for unresolved MCP calls; legacy built-in rows omit it.
 Bash displays `? <description>`, then the decoded `$` command through terminal escaping, then `Time limit` only for an explicit timeout and `stdin:` only when the call has one.
-MCP displays `? <rui_call_description>` (at most 200 decoded bytes), `Tool`, `Server` and the original `Arguments` JSON.
-A missing, non-string or oversized description falls back to the tool name with those arguments, not a Bash parse.
-The client extracts the label with bounded streaming scratch; it does not interpret the server's schema.
+MCP displays `? <saved description>` (at most 200 decoded UTF-8 bytes), `Tool`, `Server` and the original `Arguments` JSON.
+The description is extracted once at settlement from `rui_call_description`: a valid nonblank, single-line UTF-8 string of 1–200 bytes is saved; missing, non-string, blank, multi-line or oversized text falls back to the tool name.
+The terminal and TypeScript feed read the saved line, never re-parse arguments for it.
+The client retains that bounded saved line; it does not interpret the server's schema.
 `/inspect-action` shares this MCP presentation; raw one-shot inspection stays exact.
 A permission request replaces the composer's two rules and input rows with a focused card.
 The draft stays hidden, with its bytes and caret intact, until the request is answered or withdrawn.
@@ -3197,11 +3253,11 @@ Tool Results validate the complete group's accepted call/output-item and Session
 Outcome provenance is the terminal Turn's causing model Operation, not a later Session Operation.
 Full, Current and exact Action inspection retain their independent authorities.
 
-Tool Call admission validates the original descriptor and atomically saves its nullable decoded description, bounded to 100 UTF-8 bytes, and the three accepted field lengths and digests on the immutable call.
-A valid Bash descriptor retains its label even when Bash is disabled and the call is rejected; malformed descriptors and unknown tools have null labels.
+Tool Call admission validates the original descriptor and atomically saves its nullable decoded description, bounded to 200 UTF-8 bytes, and the three accepted field lengths and digests on the immutable call.
+Bash keeps its independent 100-byte argument bound; a valid Bash descriptor retains its label even when Bash is disabled and the call is rejected; malformed Bash descriptors and unknown tools have null labels.
 The Store combines that admission-owned label with canonical outcomes for shared `ToolPresentation` metadata on Current, Activity, and Conversation.
 There is no presentation table, copied log, frontend cache, or identity-to-description map.
-One `tools.describe`, exhaustive over the Tool Catalog, gives every tool its description: Bash's is the one its model wrote, and a hosted web search, which has no field for the model to fill, gets one Rui writes from the provider's action at settlement: `Search “query”`, `Open site/page` (without the scheme or `www.`), `Find “pattern” in site/page`, or `Search the web` when the provider gives no details, on one line and cut with `…` within the same 100-byte bound.
+One `tools.describe`, exhaustive over the Tool Catalog, gives every tool its description: Bash's is the one its model wrote, and a hosted web search, which has no field for the model to fill, gets one Rui writes from the provider's action at settlement: `Search “query”`, `Open site/page` (without the scheme or `www.`), `Find “pattern” in site/page`, or `Search the web` when the provider gives no details, on one line and cut with `…` within the saved 200-byte bound.
 The search stays a model output item, not a Tool Call: the item row saves that description and whether it failed (Store schema 49).
 Conversation and Activity pages return it at the item's own position as a `hosted_call` item that carries only its `ToolPresentation` and no content, and the frontend draws it as a tool row, so successes pack with Bash rows and a failure stands apart.
 Divyansh chose to show one line per search on 2026-11-02 (web search PR 3).
@@ -3212,7 +3268,7 @@ Presentation read work is independent of command byte length, not call count or 
 These reads trust immutable admitted metadata: later corruption confined to undisplayed payload bytes need not be detected by polling.
 Full Session inspection, Action arguments/call-ID inspection, execution input and model replay check each field against its admission certificate and verify the digest of every byte they read; streamed public content retains its own integrity checks.
 Canonical result content and proposal arguments remain unchanged; descriptions grant neither execution nor permission authority.
-The additional per-call canonical data is at most 100 label bytes plus 120 field-certificate bytes, excluding SQLite row/page overhead; readers retain fixed-size metadata, not commands.
+The additional per-call canonical data is at most 200 description bytes plus 120 field-certificate bytes, excluding SQLite row/page overhead; readers retain fixed-size metadata, not commands.
 
 Each Activity page also captures `call_activity` under the same Store lock, with an exact total and at most the three oldest `(operation, ordinal)` identities awaiting presentation.
 A page whose `kinds` are not every kind reads neither `call_activity` nor `queued`, and reports both empty.
@@ -3268,7 +3324,9 @@ Neither fetch waits behind or reserves a model slot.
 The provider IDs (at most 512, 16 KiB together) stay in Host memory and are replaced on refresh.
 While that fetch runs the source is `pending` with the catalog's OpenAI IDs; after it, `live` with the provider's IDs in its order (IDs Rui cannot select are dropped), or `catalog_fallback` with the catalog's OpenAI IDs when it failed, answered with something else or listed more than that bound.
 A refresh keeps the previous provider source while in flight; the initial provider fetch alone starts `pending`.
-The reply only signals refresh and reads known Host memory: it waits for neither SQLite nor the network.
+The reply signals refresh, then reads one selected fact generation from the Store and renders it with the independently retained provider list; it does not wait for the network.
+Its operation-owned facts and reply storage are released after the request; the Host retains no fact snapshot between requests.
+Reply capacity derives from that selected generation, not the shipped snapshot's model count or ID bytes; the independent live-provider bounds remain unchanged.
 
 The models.dev GET asks for identity encoding and sends `If-None-Match` with the saved ETag when present.
 A 304 leaves the saved generation untouched.
@@ -3286,8 +3344,9 @@ Bounded SQL batches share one queued write transaction, with source publication 
 Readers therefore see the old or new catalog whole.
 Removed IDs retain their older rows but current-generation reads ignore them; runtime SQL never deletes them.
 ETags are nullable and bounded to 512 bytes; an oversized or duplicate response ETag refuses that refresh.
-Queued reads expose one model's current facts and the current OpenAI IDs for later catalog consumers.
-In this step these reads are only exercised by tests; Session admission, effort validation and compaction are unchanged.
+One Store read selects source presence and the corresponding generation's facts in the same statement, including a source-only result for an empty generation or absent requested ID.
+Single-model admission reads and complete-catalog model-list reads share this selection rule; no consumer separately tests source existence before reading facts.
+304 responses, failed refreshes and failed publication preserve the previously committed source; restart reads that same authority without waiting for discovery.
 
 Each row has position/ordinal, `at`, and one closed tagged `value`.
 `at` is the Host Unix second the row's owning fact committed: the admission for Message admission and sent Message rows, which is the same time on both rows of one Message; the Conversation entry for User and assistant rows; the producing Operation's resolution for a Tool Call; the group's last acceptance, the one at its greatest position, for a Tool Result (an Action's resolution, or the producing Operation's for a rejected call); and the fact itself for a Turn outcome, Session stop and refused send.
@@ -3353,7 +3412,7 @@ Each state carries `since`, the Host Unix second the Session entered it, read fr
 | The active Turn's model Operation has an Attempt in flight | `working` | Attempt admission |
 | The active Turn's model Operation waits for a retry due in the future | `retrying`, with due time, cause and the failed Attempt's ordinal, which is below the retry policy's maximum | retry scheduling |
 | That retry is already due | `pending` | its due second, never before scheduling |
-| A Bash Action the active Turn's Operation proposed is launched and unresolved | `bash`, with the oldest running call's ordinal (`call`; a running Host that predates it omits it, and a reader then gives the clock to the live line) and saved description, the running count and the count awaiting permission | the oldest launch |
+| A Bash or MCP Action the active Turn's Operation proposed is launched and unresolved | `bash`, with the oldest running call's ordinal (`call`; a running Host that predates it omits it, and a reader then gives the clock to the live line) and saved description (up to the shared 200-byte saved-call-line bound), the running count and the count awaiting permission | the oldest launch |
 | Every unresolved Action the active Turn's Operation proposed awaits a Permission Decision | `approval` | the group's latest change, else the proposing resolution |
 | Otherwise, with an active Turn | `pending` | the group's latest change, else the Operation's resolution |
 | No active Turn, and an eligible Message is queued | `pending` | the oldest queued admission, or the latest outcome when that Message was queued before it |
@@ -3535,7 +3594,7 @@ Every valid short control and its complete semantic response fit a field-derived
 Reject oversized discovery before body parsing, and route/kind disagreement as soon as `kind` is read, which is before any content capture when `kind` precedes the content.
 A request's object members may come in any order, as JSON allows, so clients generated from `openapi.json` in any language can build bodies (D212).
 Each member appears at most once, required members must all be present, and unknown members fail.
-The parser takes two passes over the metadata it has so far: the first reads `version`, `kind` and `store` wherever they sit and counts content strings as they arrive (`instructions` and `outputSchema` in either spec, plus a Message's `text` value), and the second fills the command, so each content value takes the capture its string arrived in.
+The parser takes two passes over the metadata it has so far: the first reads `version`, `kind` and `store` wherever they sit and counts content values as they arrive (`instructions` text and `outputSchema` objects in either spec, plus a Message's `text` value), and the second fills the command, so each content value takes the capture its string arrived in.
 Once `kind` is known, content the kind cannot carry fails before capture; before that, at most three strings are captured, and a fourth fails.
 Discovery keeps one acceptance-derived ten-second absolute deadline across headers, body and all reply/error writes.
 Progress cannot renew it.
@@ -3625,7 +3684,15 @@ reclaiming each other's endpoint.
 Scratch and diagnostics live in
 `runtimeDir`.
 Requests use the persistent `store_meta.store_id` (32 lowercase
-hex characters), never the URL or runtime path.
+hex characters), never the URL or runtime path. This durable id survives a
+restore to a differently named database, but canonical identity is validated
+separately: MySQL requires a saved `store_selector` to match the selector passed
+at admission (the database name for a launched Host). A mismatch or malformed
+saved id refuses startup before any write. A missing selector is repaired
+atomically with ownership acquisition without changing an existing durable id.
+Restoring under another database name therefore requires explicitly updating
+the saved selector to that name; the durable id remains unchanged. SQLite still
+validates its saved id and canonical directory selector.
 An initial MySQL
 `host_info` probe may send an empty `store` to discover that id; every other
 request must match it.
@@ -3640,7 +3707,13 @@ MySQL readiness and `host_status` also report `innodb_doublewrite`, including
 Admission refusals use a single stdout
 `{"rui_start_error":{"code":"...","message":"..."}}` line and exit 1:
 `store_locked`, `store_schema_missing`, `store_schema_behind`, or a MySQL
-start refusal (D222):
+start refusal (D222). The existing `store_schema_behind` code has distinct,
+bounded static messages for older, newer or malformed numeric format metadata,
+a wire-version mismatch, an unexpected metadata key, a catalog mismatch and
+invalid identity metadata or connection target. These refusals precede metadata
+repair, ownership changes and sender cleanup, and expose no saved values or
+connection secrets. They add no public code or Store-format change; MySQL DDL,
+backup and forward migration application remain operator-owned:
 
 - `mysql_version`: the server is older than MySQL 8.4, or its version cannot be parsed.
 - `mariadb`: the version or version comment identifies MariaDB, separately from an old MySQL version.
@@ -3668,6 +3741,13 @@ A second loss in that rerun fences, as does a lost read, which may already have 
 Only when no reconnect succeeds does the outcome stay unknown (`CommitOutcomeUnknown`).
 COMMIT is a statement of its message, and reads may follow it in that message; every message sets `autocommit=1`, so they run outside any transaction.
 The transaction is saved once COMMIT's own OK arrives: a connection lost before that OK is settled as above, with the reads sent again on the new connection when the transaction landed, and one lost after it, while the reads stream, keeps the commit and fences, and the batch never runs again.
+A write that is alone in its batch sends its last writes and its COMMIT as one message.
+The fence, and each write whose row count the statement itself does not fix, is followed by a statement that fails unless the count is the expected one; the server runs nothing of a message after a failed statement, so COMMIT never saves past a wrong count.
+The batch is then saved and takes no more writes: a write that queued meanwhile opens the next batch.
+A batch that runs again commits at its end.
+That message also carries the dispatch survey the Host asks for after every commit, as reads after COMMIT: the Store keeps the answer until the Host asks, once, and drops it when anything else commits first.
+The write sends that message, and the survey is in it whole or not at all: reads that do not fit after COMMIT are left out, and the Host then asks as usual, as it does when the survey's checks need a second round.
+A survey read that fails after COMMIT fences, as it does when the Host asks; the commit stands.
 
 Host information is a read-only, bounded `/v1/host-info` exchange for the canonical selected Store.
 A client first probes the existing `host.lock` with a nonblocking shared lock, without creating a Store or lock: no owner means unavailable even if a stale socket exists; an exclusive owner permits a protected socket request.
@@ -3843,6 +3923,7 @@ No SQLite watcher is required.
 The retry scans use a due-time index that excludes future deadlines, and run at most once per second.
 A scan that found nothing runs again only after a commit, a slot change or the earliest scheduled retry falling due by the wall clock, the clock the Store admits by; the admission scan reads that due time in its own round, and an idle Host sends the Store no query.
 After a commit, one read round says which kinds of dispatch work the Store holds (core and MCP Actions, Bash, waiting Messages, tool continuations), and only those kinds' scans run; the answer is a hint, since each admission reads its own facts again, and a kind it wrongly names costs one empty round.
+That round also reads whether any open Turn's Attempt is unresolved with a retry state; while none is, neither retry scan runs, since a commit is the only thing that makes one.
 Missed ticks do not queue.
 Full capacity or an empty array must not cause spinning.
 
@@ -3992,7 +4073,7 @@ Measure filesystem metadata and cleanup latency separately from logical bytes an
 
 #### Tool excerpts and full output
 
-Tool output has no per-call total capture cap.
+Bash output has no per-call total capture cap.
 Short output is complete; larger output saves status, tail excerpt, omission notice and the path of each truncated stream, preserving combined-stream allowance and valid UTF-8 boundaries before provider JSON framing.
 Failed full capture cannot masquerade as successful preservation.
 Full output is read through ordinary Bash permissions/timeouts/excerpts, not a new Read tool or whole-file context injection.
@@ -4002,6 +4083,13 @@ Canonical permission, Edit intent and outcome evidence are not disposable spillo
 A Bash result names only what carries information: the outcome line, any warnings, a `stdout tail:` section only when stdout is nonempty and a `stderr tail:` section only when stderr is nonempty.
 When either tail omits earlier bytes, `[earlier output omitted]` follows, then `Full stdout: PATH` or `Full stderr: PATH` for each truncated stream, or `Full output was not retained.` when retention is unavailable.
 An untruncated stream is complete in the result and names no file.
+
+MCP answers are bounded by the existing 4 MiB per-call answer buffer.
+Their resolution keeps the first 10,000 rendered bytes, cut at a UTF-8 boundary, and the omitted-byte suffix; fitting answers keep their complete existing bytes and create no retained file.
+When bytes are omitted, stream the whole rendered answer once to optional scratch and append `Full output: PATH`, or `Full output was not retained.` if retention is unavailable.
+MCP uses the Host's same retained-output queue, scratch budget, file capacity, eviction and cleanup as Bash, with no fsync or durable retention index.
+Scratch loss never changes the call's outcome; partial failed captures are not advertised and keep their charge until confirmed removal.
+The Store saves exactly this model-facing resolution, not the full scratch answer; saved results and history rendering are never rewritten when scratch disappears.
 
 #### Exhaustion and cleanup
 

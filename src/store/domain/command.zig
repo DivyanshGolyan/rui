@@ -132,6 +132,62 @@ const admit_sent_message = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
+/// The one writer of a Message from another Session. Heads were read (or
+/// created) by the caller in this transaction; admission never adds a round.
+fn admitFromSession(
+    a: anytype,
+    sender: *const rsql.SessionHead,
+    target: *const rsql.SessionHead,
+    key: []const u8,
+    content_id: u64,
+    digest: *const [32]u8,
+    configured: ?*const configuration_domain.Applied,
+    answer: *const StoredAnswer,
+    bound: []const skills_domain.BoundSkill,
+    faults: Faults,
+) !u64 {
+    try queueMessageCommand(a, target, key, content_id, digest, configured, answer);
+    const admission_id = try a.identity(.admission_id);
+    a.write(admit_sent_message, .{
+        .admission_id = admission_id,
+        .session = target.*,
+        .key = key,
+        .content_id = content_id,
+        .position = try (try a.positions(target.*)).take(1),
+        .sender = sender.*,
+        .sender_position = try (try a.positions(sender.*)).take(1),
+    });
+    try skills_domain.saveBound(a, admission_id, bound, faults);
+    return admission_id;
+}
+
+fn queueMessageCommand(a: anytype, target: *const rsql.SessionHead, key: []const u8, content_id: u64, digest: *const [32]u8, configured: ?*const configuration_domain.Applied, answer: *const StoredAnswer) !void {
+    if (configured) |applied| {
+        try configuration_domain.queueConfiguredCommand(a, applied, key, .message, digest, content_id, null, answer);
+    } else {
+        try queueCommand(a, key, .message, &target.ref, digest, content_id, null, answer);
+    }
+}
+
+fn sentDigest(comptime domain: []const u8, content_digest: *const [32]u8) [32]u8 {
+    var digest = std.crypto.hash.sha2.Sha256.init(.{});
+    digest.update(domain);
+    digest.update(content_digest);
+    return digest.finalResult();
+}
+
+/// Commit before announcing an admission. Entry.release owns the engine wake
+/// for every write; admitted also defers the caller's hint until a batch commits.
+fn commitMessage(a: anytype, target: rsql.SessionHead, admission_id: u64, from_peer: bool, committed: ?MessageCommitted, faults: Faults) !void {
+    if (faults.before_commit) return error.InjectedCommitFailure;
+    try a.commit();
+    if (committed) |callback| store_core.admitted(a.store, callback, .{
+        .session = &target.ref,
+        .admission_id = admission_id,
+        .from_peer = from_peer,
+    });
+}
+
 /// A peer's rejected Message, at its sender's next position.
 const reject_sent = rsql.Write(.{
     .sql = "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,@session(?2),?3,@now)",
@@ -257,35 +313,16 @@ fn admitMessage(
 ) !MessageReply {
     const text_id = try content_domain.importSealed(a, io, &command.text, &reads.text, faults);
     const answer: StoredAnswer = .{ .accepted = true };
-    if (configured) |applied| {
-        try configuration_domain.queueConfiguredCommand(a, applied, command.key.slice(), .message, &reads.digest, text_id, null, &answer);
-    } else {
-        try queueCommand(a, command.key.slice(), .message, session.slice(), &reads.digest, text_id, null, &answer);
-    }
-    const admission_id = try a.identity(.admission_id);
-    const position = try (try a.positions(head)).take(1);
-    if (command.sender != null) {
-        const sender = reads.sender.?.session;
-        a.write(admit_sent_message, .{
-            .admission_id = admission_id,
-            .session = head,
-            .key = command.key.slice(),
-            .content_id = text_id,
-            .position = position,
-            .sender = sender,
-            .sender_position = try (try a.positions(sender)).take(1),
-        });
-    } else {
-        a.write(admit_message, .{ .admission_id = admission_id, .session = head, .key = command.key.slice(), .content_id = text_id, .position = position });
-    }
-    try skills_domain.saveBound(a, admission_id, reads.bound, faults);
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-    if (committed) |callback| store_core.admitted(a.store, callback, .{
-        .session = session.slice(),
-        .admission_id = admission_id,
-        .from_peer = command.sender != null,
-    });
+    const admission_id = if (command.sender != null)
+        try admitFromSession(a, &reads.sender.?.session, &head, command.key.slice(), text_id, &reads.digest, configured, &answer, reads.bound, faults)
+    else person: {
+        try queueMessageCommand(a, &head, command.key.slice(), text_id, &reads.digest, configured, &answer);
+        const admission_id = try a.identity(.admission_id);
+        a.write(admit_message, .{ .admission_id = admission_id, .session = head, .key = command.key.slice(), .content_id = text_id, .position = try (try a.positions(head)).take(1) });
+        try skills_domain.saveBound(a, admission_id, reads.bound, faults);
+        break :person admission_id;
+    };
+    try commitMessage(a, head, admission_id, command.sender != null, committed, faults);
     return .{
         .accepted = .{
             .replayed = false,
@@ -470,7 +507,7 @@ pub fn deliverAgentMessage(
     const key = agentMessageKey(&key_buffer, binding.action_id);
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &facts);
+    a.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     var receiver: target_session.Result = null;
@@ -505,30 +542,22 @@ pub fn deliverAgentMessage(
     try a.run();
 
     if (faults.content_import) return error.InjectedContentImportFailure;
+    var admission_id: u64 = 0;
     if (delivered) {
         const head = receiver.?.session;
         if (receiver.?.archive_state == .archived) a.write(clear_archive, .{ .session = head });
         const text_id = try content_domain.importBytes(a, &message, text);
-        var digest = std.crypto.hash.sha2.Sha256.init(.{});
-        digest.update("rui/core/message_agent/v1");
-        digest.update(&content_string.digest(text));
-        try queueCommand(a, key, .message, target, &digest.finalResult(), text_id, null, &.{ .accepted = true });
-        const admission_id = try a.identity(.admission_id);
-        a.write(admit_sent_message, .{
-            .admission_id = admission_id,
-            .session = head,
-            .key = key,
-            .content_id = text_id,
-            .position = try (try a.positions(head)).take(1),
-            .sender = found.session,
-            .sender_position = try (try a.positions(found.session)).take(1),
-        });
-        try skills_domain.saveBound(a, admission_id, boundOf(captured), faults);
+        const digest = sentDigest("rui/core/message_agent/v1", &content_string.digest(text));
+        admission_id = try admitFromSession(a, &found.session, &receiver.?.session, key, text_id, &digest, null, &.{ .accepted = true }, boundOf(captured), faults);
     }
     const outcome_id = try content_domain.importBytes(a, &outcome, result);
-    try action_domain.queueCoreResolution(a, binding, found.session, if (delivered) .succeeded else .failed, outcome_id);
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
+    try action_domain.queueResolution(a, binding, found.session, if (delivered) .succeeded else .failed, outcome_id);
+    if (delivered) {
+        try commitMessage(a, receiver.?.session, admission_id, true, null, faults);
+    } else {
+        if (faults.before_commit) return error.InjectedCommitFailure;
+        try a.commit();
+    }
     return if (delivered) .delivered else .failed;
 }
 
@@ -537,9 +566,9 @@ fn childEndingKey(buffer: *[idempotency_key.max_bytes]u8, turn_id: u64) []const 
 }
 
 /// The owed ending of `turn_id`: its child's Session, its parent, and how
-/// its Turn ended, with the answer's digest when it is done.
+/// its Turn ended, with the answer's digest when done or its bounded report.
 const owed_ending_facts = rsql.Read(.{
-    .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref AS parent,t.outcome_code,t.outcome_content_id,c.digest," ++
+    .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref AS parent,t.outcome_code,t.outcome_content_id,c.digest,CASE WHEN t.outcome_content_id IS NOT NULL AND t.outcome_code<>'completed' THEN @payload(c) ELSE NULL END AS report," ++
         action_domain.ending_stop_sql ++ " FROM session_ending_owed e JOIN turn t ON t.turn_id=e.turn_id " ++
         "JOIN session child ON child.session_ref=t.session_ref LEFT JOIN content c ON c.content_id=t.outcome_content_id WHERE e.turn_id=?1 AND e.delivered=0",
     .Args = struct { turn_id: u64 },
@@ -549,6 +578,7 @@ const owed_ending_facts = rsql.Read(.{
         outcome_code: Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         digest: ?[32]u8,
+        report: ?Bounded(outcome_code.max_report_bytes),
         stopped: bool,
         quiet: bool,
     },
@@ -563,15 +593,20 @@ const settle_owed_ending = rsql.Write(.{
 
 /// What the parent of a child that ended without an answer reads, as a
 /// Message from the child (D161).
-fn endingText(buffer: []u8, ending: turn_ending.TurnEnding) []const u8 {
-    return std.fmt.bufPrint(buffer, "[Rui: this agent's Turn ended without an answer: {s}.]", .{@tagName(ending)}) catch unreachable;
+fn endingText(buffer: []u8, ending: turn_ending.TurnEnding, report: ?[]const u8) []const u8 {
+    return std.fmt.bufPrint(buffer, "[Rui: this agent's Turn ended without an answer: {s}.]{s}{s}", .{
+        @tagName(ending),
+        if (report != null) "\n" else "",
+        report orelse "",
+    }) catch unreachable;
 }
 
 /// Delivers the ending of an attached child's Turn `turn_id` to its parent
 /// as a Message from the child (D39), which wakes the parent, and settles
 /// what was owed, in one transaction. A done Turn's Message is its saved
 /// answer itself, so nothing is copied; any other ending is a short line
-/// naming it. An ending its parent's own stop caused only settles (D139).
+/// naming it and the saved provider report, if any. An ending its parent's
+/// own stop caused only settles (D139).
 /// False when nothing was owed any more. Its `rui.core/` key is free:
 /// clients cannot use one, and settling marks the row with the admission.
 pub fn deliverChildEnding(a: anytype, turn_id: u64, captured: ?*const skills_domain.MessageCapture, faults: Faults) !bool {
@@ -594,8 +629,8 @@ pub fn deliverChildEnding(a: anytype, turn_id: u64, captured: ?*const skills_dom
         return true;
     }
     const outcome = try TurnOutcome.decode(found.outcome_code.slice(), if (found.outcome_content_id) |id| @intCast(id.get()) else null);
-    var text_buffer: [96]u8 = undefined;
-    const text = endingText(&text_buffer, outcome.ending(found.stopped));
+    var text_buffer: [96 + outcome_code.max_report_bytes]u8 = undefined;
+    const text = endingText(&text_buffer, outcome.ending(found.stopped), if (found.report) |*report| report.slice() else null);
     var receiver: target_session.Result = null;
     readTarget(a, found.parent.slice(), &receiver);
     var message: content_domain.Import = .ofBytes(text, false);
@@ -613,25 +648,10 @@ pub fn deliverChildEnding(a: anytype, turn_id: u64, captured: ?*const skills_dom
         .completed => |answer| .{ @intCast(answer), found.digest orelse return error.CorruptStore },
         else => .{ try content_domain.importBytes(a, &message, text), content_string.digest(text) },
     };
-    var digest = std.crypto.hash.sha2.Sha256.init(.{});
-    digest.update("rui/core/child_ending/v1");
-    digest.update(&content_digest);
-    try queueCommand(a, key, .message, found.parent.slice(), &digest.finalResult(), content_id, null, &.{ .accepted = true });
-    const admission_id = try a.identity(.admission_id);
-    a.write(admit_sent_message, .{
-        .admission_id = admission_id,
-        .session = head,
-        .key = key,
-        .content_id = content_id,
-        .position = try (try a.positions(head)).take(1),
-        .sender = found.child,
-        .sender_position = try (try a.positions(found.child)).take(1),
-    });
-    // An ending is owed, so it cannot be refused: when a skill its answer
-    // bound could not be read, the ending is delivered with no skills.
-    try skills_domain.saveBound(a, admission_id, boundOf(captured), faults);
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
+    const digest = sentDigest("rui/core/child_ending/v1", &content_digest);
+    // An owed ending cannot be refused; unreadable skills leave it unbound.
+    const admission_id = try admitFromSession(a, &found.child, &head, key, content_id, &digest, null, &.{ .accepted = true }, boundOf(captured), faults);
+    try commitMessage(a, head, admission_id, true, null, faults);
     return true;
 }
 
@@ -673,7 +693,7 @@ pub fn startAgent(
     const key = std.fmt.bufPrint(&key_buffer, "rui.core/start_agent/{d}", .{binding.action_id}) catch unreachable;
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &facts);
+    a.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     configuration.parent.state = .value;
@@ -729,29 +749,19 @@ pub fn startAgent(
     var admission_id: u64 = 0;
     if (applied) |value| {
         const text_id = try content_domain.importBytes(a, &message, task);
-        var digest = std.crypto.hash.sha2.Sha256.init(.{});
-        digest.update("rui/core/start_agent/v1");
-        digest.update(&content_string.digest(task));
+        const digest = sentDigest("rui/core/start_agent/v1", &content_string.digest(task));
         const answer: StoredAnswer = .{ .accepted = true, .revision = value.revision, .created = true };
-        try configuration_domain.queueConfiguredCommand(a, value, key, .message, &digest.finalResult(), text_id, null, &answer);
-        admission_id = try a.identity(.admission_id);
-        a.write(admit_sent_message, .{
-            .admission_id = admission_id,
-            .session = value.head,
-            .key = key,
-            .content_id = text_id,
-            .position = try (try a.positions(value.head)).take(1),
-            .sender = found.session,
-            .sender_position = try (try a.positions(found.session)).take(1),
-        });
-        try skills_domain.saveBound(a, admission_id, boundOf(captured), faults);
+        admission_id = try admitFromSession(a, &found.session, &value.head, key, text_id, &digest, value, &answer, boundOf(captured), faults);
     }
     const outcome_id = try content_domain.importBytes(a, &outcome, result);
-    try action_domain.queueCoreResolution(a, binding, found.session, if (applied != null) .succeeded else .failed, outcome_id);
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-    const value = applied orelse return .failed;
-    if (committed) |callback| store_core.admitted(a.store, callback, .{ .session = value.session.slice(), .admission_id = admission_id, .from_peer = true });
+    try action_domain.queueResolution(a, binding, found.session, if (applied != null) .succeeded else .failed, outcome_id);
+    if (applied) |value| {
+        try commitMessage(a, value.head, admission_id, true, committed, faults);
+    } else {
+        if (faults.before_commit) return error.InjectedCommitFailure;
+        try a.commit();
+        return .failed;
+    }
     return .started;
 }
 
@@ -760,7 +770,7 @@ pub fn startAgent(
 pub fn resolveCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, code: action_domain.ActionResolutionCode, result: []const u8, faults: Faults) !bool {
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &facts);
+    a.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
     var outcome: content_domain.Import = .ofBytes(result, false);
     content_domain.lookup(a, &outcome);
     try a.run();
@@ -771,7 +781,7 @@ pub fn resolveCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, 
     }
     if (faults.content_import) return error.InjectedContentImportFailure;
     const outcome_id = try content_domain.importBytes(a, &outcome, result);
-    try action_domain.queueCoreResolution(a, binding, found.session, code, outcome_id);
+    try action_domain.queueResolution(a, binding, found.session, code, outcome_id);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
     return true;
@@ -1053,7 +1063,7 @@ fn stopRounds(a: anytype, command: *const command_input.SessionStopCommand, owed
     var interrupted_operation_id: ?u64 = null;
     // The cancellation text's identity: its queued row reads the digest in
     // place until commit.
-    var cancellation = content_domain.stop_cancellation;
+    var cancellation = unattempted_stop_content;
     if (turn) |open| {
         if (open.running) {
             a.write(interrupt_operation, .{ .operation_id = open.operation_id.get(), .command_key = key, .session = head });
@@ -1076,6 +1086,24 @@ fn stopRounds(a: anytype, command: *const command_input.SessionStopCommand, owed
     } };
 }
 
+/// All unattempted runners use the same bytes today. Prove that before
+/// sharing one content import and one cancellation batch, without another
+/// read or a runner column. A runner that changes this must split the batch.
+const unattempted_stop_text = blk: {
+    const runners = @import("../../tool_record.zig").Runner;
+    const text = runners.bash.beforeAdmissionStopText();
+    for (.{ runners.bash, runners.mcp, runners.core }) |runner| {
+        if (!std.mem.eql(u8, text, runner.beforeAdmissionStopText()))
+            @compileError("unattempted cancellation batch requires one runner text");
+    }
+    break :blk text;
+};
+
+const unattempted_stop_content: content_domain.Import = blk: {
+    @setEvalBranchQuota(1_000_000);
+    break :blk .ofBytes(unattempted_stop_text, false);
+};
+
 /// Cancels the open Turn's `open.cancellable` Actions in call order, each
 /// at the Session's next position, with the stop's cancellation text.
 fn cancelActions(
@@ -1091,7 +1119,7 @@ fn cancelActions(
     a.readEach(cancellable_actions, .{ .operation_id = open.operation_id.get(), .after = 0 }, cancel_chunk, &chunk);
     try a.run();
     if (faults.content_import) return error.InjectedContentImportFailure;
-    const content_id = try content_domain.importBytes(a, cancellation, content_domain.stop_cancellation_text);
+    const content_id = try content_domain.importBytes(a, cancellation, unattempted_stop_text);
     var cancelled: u64 = 0;
     // The count says when the last page was read, so a multiple of
     // `cancel_chunk` costs no empty round.
@@ -1708,7 +1736,7 @@ const message_observation = rsql.Read(.{
         admitted_at: rsql.Positive,
         has_recovery: bool,
     },
-    .cardinality = .one,
+    .cardinality = .optional,
 });
 
 /// The Action and decision a permission decision saved.
@@ -1727,6 +1755,10 @@ const permission_target = rsql.Read(.{
 pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservation) !void {
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
+    // Most observed commands are Messages, so the command's round also
+    // reads the Message it accepted: both are keyed by the command key.
+    var message: message_observation.Result = undefined;
+    a.read(message_observation, .{ .key = key }, &message);
     try a.run();
     const command = try savedAnswer(&saved) orelse {
         observation.* = .{ .status = .absent };
@@ -1742,9 +1774,7 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
         .message => {
             observation.kind = .{ .message = null };
             if (!command.accepted) return;
-            var row: message_observation.Row = undefined;
-            a.read(message_observation, .{ .key = key }, &row);
-            try a.run();
+            const row = message orelse return error.CorruptStore;
             const content_id = command.primary_content_id orelse return error.CorruptStore;
             if (!row.session_ref.eql(command.target.slice()) or row.content_id.get() != content_id) return error.CorruptStore;
             const queue = try messageQueue(&row);

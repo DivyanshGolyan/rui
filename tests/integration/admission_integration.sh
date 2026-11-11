@@ -224,7 +224,7 @@ finally:
 assert temporary.exists()
 recovered = subprocess.run(args, input=b'new capture', capture_output=True, timeout=10)
 assert recovered.returncode == 0, recovered.stderr
-assert json.loads(record.read_text())['configuration']['instructions']['value'] == 'new capture'
+assert json.loads(record.read_text())['configuration']['instructions'] == 'new capture'
 assert not temporary.exists()
 saved = record.read_bytes()
 duplicate = subprocess.run(args, input=b'replacement', capture_output=True, timeout=5)
@@ -489,7 +489,7 @@ printf '{"type":"object"}' >"$state/rejected-schema.json"
 unknown_configuration=$(python3 - "$root" "$state/rejected-instructions.txt" "$state/rejected-schema.json" <<'PY'
 import json, pathlib, sys
 print(json.dumps({'workspace': sys.argv[1], 'provider': 'anthropic', 'model': 'gpt-6-sol',
-    'instructions': pathlib.Path(sys.argv[2]).read_text(), 'output_schema': pathlib.Path(sys.argv[3]).read_text(), 'tools': []}))
+    'instructions': pathlib.Path(sys.argv[2]).read_text(), 'output_schema': json.loads(pathlib.Path(sys.argv[3]).read_text()), 'tools': []}))
 PY
 )
 unknown_provider=$(not_accepted wire_configure unknown-provider "$records/unknown-provider.json" "$unknown_configuration")
@@ -497,8 +497,8 @@ contains "$unknown_provider" '"code":"unsupported_provider"'
 require_test 'rejected providers create no Session' "$(session_refs)" = "$before_provider"
 require_test 'rejected provider releases all request scratch' -z "$(find "$store/scratch" -name 'request-*.tmp' -print)"
 
-# Equal and omitted binding fields preserve the initial binding. An unequal
-# model rejects the entire mixed update before work and across Host restart.
+# Equal and omitted values preserve settings; model changes are ordinary
+# atomic revisions, including mixed updates and updates after Host restart.
 binding=$($rui session configure --store "$store" --record "$records/binding.json" --key binding --workspace "$root" --provider codex --model gpt-6-sol)
 contains "$binding" '"revision":"1"'
 binding_session=$(printf '%s' "$binding" | session_id)
@@ -506,14 +506,14 @@ equal_binding=$($rui session configure --store "$store" --record "$records/equal
 contains "$equal_binding" '"revision":"2"'
 omitted_binding=$($rui session configure --store "$store" --record "$records/omitted-binding.json" --key omitted-binding --session "$binding_session" --permission-mode bypass)
 contains "$omitted_binding" '"revision":"3"'
-mixed_model=$(not_accepted "$rui" session configure --store "$store" --record "$records/mixed-model.json" --key mixed-model --session "$binding_session" --model gpt-6.1-sol --tools bash --permission-mode ask)
-contains "$mixed_model" '"code":"model_is_immutable"'
+mixed_model=$("$rui" session configure --store "$store" --record "$records/mixed-model.json" --key mixed-model --session "$binding_session" --model gpt-6.1-sol --tools bash --permission-mode ask)
+contains "$mixed_model" '"revision":"4"'
 binding_current=$($rui session inspect --store "$store" --session "$binding_session" --profile current)
 contains "$binding_current" '"provider":"codex"'
-contains "$binding_current" '"model":"gpt-6-sol"'
-contains "$binding_current" '"revision":"3"'
-contains "$binding_current" '"tools":[]'
-contains "$binding_current" '"permission_mode":"bypass"'
+contains "$binding_current" '"model":"gpt-6.1-sol"'
+contains "$binding_current" '"revision":"4"'
+contains "$binding_current" '"tools":["bash"]'
+contains "$binding_current" '"permission_mode":"ask"'
 stop_host
 start_host
 unknown_replay=$(not_accepted "$rui" request recover --store "$store" --record "$records/unknown-provider.json" --kind configure)
@@ -521,14 +521,14 @@ contains "$unknown_replay" '"code":"unsupported_provider"'
 contains "$unknown_replay" '"replayed":true'
 binding_full=$($rui session inspect --store "$store" --session "$binding_session" --profile full)
 contains "$binding_full" '"provider":"codex"'
-contains "$binding_full" '"model":"gpt-6-sol"'
-contains "$binding_full" '"revision":"3"'
-printf '%s' "$binding_full" | python3 -c 'import json,sys; rows=json.load(sys.stdin)["full"]["session_revisions"]; assert len(rows)==3; assert all(r["provider"]=="codex" and r["model"]=="gpt-6-sol" for r in rows)'
-restarted_model=$(not_accepted "$rui" session configure --store "$store" --record "$records/restarted-model.json" --key restarted-model --session "$binding_session" --model gpt-6.1-sol --tools bash)
-contains "$restarted_model" '"code":"model_is_immutable"'
+contains "$binding_full" '"model":"gpt-6.1-sol"'
+contains "$binding_full" '"revision":"4"'
+printf '%s' "$binding_full" | python3 -c 'import json,sys; rows=json.load(sys.stdin)["full"]["session_revisions"]; assert len(rows)==4; assert all(r["provider"]=="codex" for r in rows); assert [r["model"] for r in rows]==["gpt-6-sol"]*3+["gpt-6.1-sol"]'
+restarted_model=$("$rui" session configure --store "$store" --record "$records/restarted-model.json" --key restarted-model --session "$binding_session" --model gpt-6-sol --tools bash)
+contains "$restarted_model" '"revision":"5"'
 binding_rechecked=$($rui session inspect --store "$store" --session "$binding_session" --profile current)
-contains "$binding_rechecked" '"revision":"3"'
-contains "$binding_rechecked" '"tools":[]'
+contains "$binding_rechecked" '"revision":"5"'
+contains "$binding_rechecked" '"tools":["bash"]'
 
 # Lose an accepted reply, change current settings, and kill both processes.
 printf 'initial instructions\n' >"$state/instructions.txt"
@@ -632,12 +632,17 @@ contains "$partial_message" '"status":"absent"'
 partial_session=$($rui session inspect --store "$store" --session "$main_session")
 contains "$partial_session" '"pending_messages":"0"'
 
-# Invalid schemas are definite saved rejections. A known-Session message keeps
+# A malformed schema cannot be a plain object spec: refuse it before capture.
+# A known-Session message keeps
 # its original captured bytes and queue admission through lost reply, source
 # mutation, client exit and Host restart.
 printf '{invalid' >"$state/invalid-schema.json"
-invalid_schema=$(not_accepted "$rui" session configure --store "$store" --record "$records/schema.json" --key schema-key --session "$main_session" --output-schema "$state/invalid-schema.json")
-contains "$invalid_schema" '"code":"invalid_output_schema"'
+status=0
+"$rui" session configure --store "$store" --record "$records/schema.json" --key schema-key --session "$main_session" --output-schema "$state/invalid-schema.json" >"$state/schema.out" 2>"$state/schema.err" || status=$?
+require_test 'malformed schema is a caller refusal' "$status" -eq 2
+contains "$(cat "$state/schema.err")" '[invalid_output_schema]'
+require_test 'malformed schema publishes no capture' ! -e "$records/schema.json"
+require_test 'malformed schema admits no command' "$("$rui" request inspect --store "$store" --key schema-key | python3 -c 'import json,sys; print(json.load(sys.stdin)["observation"]["status"])')" = absent
 printf 'original message with "quotes", slash \\, newline\nand emoji 🙂\n' >"$state/message-source.txt"
 if "$rui" session send --store "$store" --to "$main_session" --record "$records/known-message.json" --key msg-known --test-drop-reply after-commit <"$state/message-source.txt" >"$state/drop.out" 2>"$state/drop.err"; then
     echo "lost message acceptance unexpectedly produced a complete reply" >&2

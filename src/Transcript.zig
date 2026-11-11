@@ -18,7 +18,7 @@ size: vxfw.Size = .{},
 method: vaxis.gwidth.Method = .unicode,
 colour: bool = true,
 style: vaxis.Style = .{},
-quiet: vaxis.Color = .default,
+colours: viewport.Colours = .{},
 /// The key that scrolls this view. When set and the text runs past the
 /// view, the last row says how many rows lie below and names the key.
 more: ?[]const u8 = null,
@@ -196,7 +196,7 @@ fn spotAt(self: *const Self, gpa: std.mem.Allocator, at: Point) !Spot {
     if (self.rowPosition(first, index)) |position| {
         var screen: vaxis.Screen = .{ .width = self.drawn.width, .height = 1, .width_method = self.method, .buf = cells };
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.width, .height = 1, .screen = &screen };
-        _ = self.document.draw(window, position, true, false, .{}, .default);
+        _ = self.document.draw(window, position, true, false, .{}, .{});
     }
     return self.rowAt(cells, first, index).spot(col);
 }
@@ -226,11 +226,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const below = if (self.more == null or self.size.height < 2) 0 else self.document.measure(shape, self.first, std.math.maxInt(u16)).rows;
     var text = window;
     if (below > self.size.height) text.height -= 1;
-    const drawn = self.document.draw(text, self.first, true, self.colour, self.style, self.quiet);
+    const drawn = self.document.draw(text, self.first, true, self.colour, self.style, self.colours);
     self.next = drawn.next;
     if (below > self.size.height) {
         var hint_style = self.style;
-        hint_style.fg = self.quiet;
+        hint_style.fg = self.colours.quiet;
         const hint = try std.fmt.allocPrint(ctx.arena, "{d} more lines · {s}", .{ below - drawn.rows, self.more.? });
         _ = window.child(.{ .y_off = text.height, .height = 1 }).print(&.{.{ .text = hint, .style = hint_style }}, .{ .wrap = .none });
     }
@@ -300,7 +300,7 @@ test "Transcript user text keeps theme contrast without terminal dim" {
     for ([_]?view.Rgb{ .{ 255, 255, 255 }, null }) |background| for ([_]view.Caps.Depth{ .direct, .indexed }) |depth| {
         const quiet = widget_style.of(.{ .background = background, .depth = depth }, .{ .colour = .quiet });
         const normal = widget_style.of(.{ .background = background, .depth = depth }, .{});
-        var transcript: Self = .{ .document = document, .style = normal, .quiet = quiet.fg };
+        var transcript: Self = .{ .document = document, .style = normal, .colours = .{ .quiet = quiet.fg } };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const surface = try transcript.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 2 }, .cell_size = .{} });
@@ -311,6 +311,35 @@ test "Transcript user text keeps theme contrast without terminal dim" {
         const bg = Check.luminance(Check.rgb(style.bg));
         try std.testing.expect((@max(fg, bg) + 0.05) / (@min(fg, bg) + 0.05) >= 4.5);
     };
+}
+
+test "Transcript forwards foreground roles and keeps its hint row quiet" {
+    const document = try std.testing.allocator.create(viewport.Document);
+    defer std.testing.allocator.destroy(document);
+    document.* = .{};
+    try document.append("\x1b[94mu\x1b[90mq\x1b[33ma\x1b[91mf\x1b[0m\n\x1b[2muser text\x1b[0m\nthird\nfourth");
+    document.top = .{};
+    const colours: viewport.Colours = .{
+        .user = .{ .rgb = .{ 17, 34, 51 } },
+        .quiet = .{ .index = 102 },
+        .attention = .{ .index = 143 },
+        .failure = .{ .rgb = .{ 170, 187, 204 } },
+    };
+    const plain: vaxis.Style = .{ .fg = .{ .index = 255 }, .bg = .{ .index = 19 } };
+    var transcript: Self = .{ .document = document, .style = plain, .colours = colours, .more = "shift+↓" };
+    for ([_]bool{ true, false }) |colour| {
+        transcript.colour = colour;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const surface = try transcript.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 32, .height = 3 }, .cell_size = .{} });
+        for ([_]vaxis.Color{ colours.user, colours.quiet, colours.attention, colours.failure }, 0..) |foreground, column| {
+            try std.testing.expectEqual(if (colour) foreground else plain.fg, surface.readCell(@intCast(column), 0).style.fg);
+        }
+        try std.testing.expectEqual(if (colour) colours.quiet else plain.fg, surface.readCell(0, 1).style.fg);
+        try std.testing.expectEqualStrings("2", surface.readCell(0, 2).char.grapheme);
+        try std.testing.expectEqual(colours.quiet, surface.readCell(0, 2).style.fg);
+        for (surface.buffer) |cell| try std.testing.expectEqual(plain.bg, cell.style.bg);
+    }
 }
 
 test "Transcript draws only the requested rows and retains the first unread row" {
