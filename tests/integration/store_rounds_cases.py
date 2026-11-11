@@ -50,9 +50,10 @@ BUDGET = {
     "commits": 3,
     "write_round_trips": 10,
     # Any operation, upper bound: rescans and the observe loop below make
-    # the total vary (32 to 38 over five runs once a history batch's
-    # items, parts and small contents came in one round).
-    "round_trips": 44,
+    # the total vary (33 for a first operation and 26 for a later one
+    # over five runs once a request read its settings in one round and its
+    # history and tools in one more; earlier work varied by up to 6).
+    "round_trips": 39,
     # Over IDLE_SECONDS with no Session, exact: the Host asks again only
     # after a commit, a slot change or a scheduled retry falling due.
     "idle_round_trips": 0,
