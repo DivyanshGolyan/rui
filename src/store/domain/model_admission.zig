@@ -21,6 +21,7 @@ const configuration_domain = @import("configuration.zig");
 const historical_domain = @import("historical.zig");
 const history_floor_domain = @import("history_floor.zig");
 const model_settlement_domain = @import("model_settlement.zig");
+const model_facts_domain = @import("model_facts.zig");
 const reads_domain = @import("reads.zig");
 const store_schema = @import("../schema.zig");
 const turn_domain = @import("turn.zig");
@@ -664,8 +665,9 @@ const project_instructions = rsql.Write(.{
 
 const insert_operation = rsql.Write(.{
     .sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,attempt_ordinal,retry_due_at_ms,attempt_at) " ++
-        "VALUES(?1,?2,@session(?3),?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,@now)",
+        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,context_window,attempt_ordinal,retry_due_at_ms,attempt_at) " ++
+        "VALUES(?1,?2,@session(?3),?4,?5,?6,?7,?8,?9,?10,?11,?12,?13," ++
+        model_facts_domain.contextWindowSql("?14", "?15", "?16") ++ ",1,0,@now)",
     .Args = struct {
         operation_id: u64,
         turn_id: u64,
@@ -680,6 +682,9 @@ const insert_operation = rsql.Write(.{
         history_floor: ?u64,
         history_level: ?u8,
         history_dropped: ?u64,
+        model: []const u8,
+        shipped_context_window: u64,
+        unlisted_context_window: u64,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -858,6 +863,9 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         .history_floor = floor,
         .history_level = if (room) |choice| choice.level else null,
         .history_dropped = if (room != null) dropped else null,
+        .model = facts.model.slice(),
+        .shipped_context_window = model_capability.contextWindow(@import("../../model_catalog.zig").shipped, facts.model.slice()),
+        .unlisted_context_window = @import("../../product_defaults.zig").unlisted_context_window,
     });
     // The writes are queued, not run, as in every converted entry point.
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;

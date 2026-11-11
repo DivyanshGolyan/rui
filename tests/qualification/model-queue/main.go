@@ -218,7 +218,8 @@ func initializeTemplate(binary, sqliteBinary, directory, store string, deadline 
 
 func populate(deadline measurement.Deadline, sqliteBinary, store string, p population) error {
 	// Production initialization above owns schema and content creation. This SQL only
-	// expands controlled durable populations while no Host is running.
+	// expands controlled durable populations while no Host is running. Failed history
+	// never escalates; its synthetic zero capacity makes no catalog/default claim.
 	query := fmt.Sprintf(`PRAGMA foreign_keys=ON; BEGIN;
 CREATE TEMP TABLE q(v INTEGER);
 INSERT INTO q SELECT content_id FROM content WHERE byte_length>0 ORDER BY content_id DESC LIMIT 1;
@@ -233,8 +234,8 @@ INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_i
  SELECT 100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),100+i,100+i,100+i,'provider_http_422',NULL,4*i,unixepoch() FROM n;
 UPDATE message_admission SET turn_id=admission_id WHERE admission_id BETWEEN 101 AND 100+%[1]d;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
-INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,attempt_ordinal,retry_due_at_ms,resolution_code,output_reservation,resolved_at)
- SELECT 100+i,100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),1,100+i,4*i-1,1,NULL,'provider_http_422',0,unixepoch() FROM n;
+INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,attempt_ordinal,retry_due_at_ms,resolution_code,output_reservation,resolved_at,context_window)
+ SELECT 100+i,100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),1,100+i,4*i-1,1,NULL,'provider_http_422',0,unixepoch(),0 FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
 INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id,recorded_at)
  SELECT (SELECT target FROM core_command WHERE command_key='template-configure'),i,4*i-2,1,100+i,100+i,NULL,NULL,(SELECT v FROM q),unixepoch() FROM n;

@@ -5974,11 +5974,11 @@ test "retry due index excludes future population and preserves age ordering" {
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at) " ++
-                "SELECT value,value,printf('%06d',value),1,1,1,1,9223372036854775807,0,1 FROM sequence; " ++
+                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,context_window) " ++
+                "SELECT value,value,printf('%06d',value),1,1,1,1,9223372036854775807,0,1,0 FROM sequence; " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at) VALUES" ++
-                "({1},{1},'0der00',1,1,1,1,99,0,1),({2},{2},'ear1er',1,1,1,1,1,0,1)",
+                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,context_window) VALUES" ++
+                "({1},{1},'0der00',1,1,1,1,99,0,1,0),({2},{2},'ear1er',1,1,1,1,1,0,1,0)",
             .{ future_count, future_count + 1, future_count + 2 },
             0,
         );
@@ -5998,8 +5998,8 @@ test "retry due index excludes future population and preserves age ordering" {
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at) " ++
-                "SELECT value,value,printf('%06d',value),1,1,1,1,1,0,1 FROM sequence",
+                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,context_window) " ++
+                "SELECT value,value,printf('%06d',value),1,1,1,1,1,0,1,0 FROM sequence",
             .{due_count},
             0,
         );
@@ -6012,10 +6012,10 @@ test "retry due index excludes future population and preserves age ordering" {
 
     try store_testing.sqlite_only.exec(&storage, "DELETE FROM model_operation", .{});
     try store_testing.sqlite_only.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-        "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at) VALUES" ++
-        "(1,1,'000001',1,1,1,1,99,0,1)," ++
-        "(2,2,'000002',1,1,1,1,50,0,1)," ++
-        "(3,3,'000003',1,1,1,1,1,0,1)", .{});
+        "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,context_window) VALUES" ++
+        "(1,1,'000001',1,1,1,1,99,0,1,0)," ++
+        "(2,2,'000002',1,1,1,1,50,0,1,0)," ++
+        "(3,3,'000003',1,1,1,1,1,0,1,0)", .{});
     try insertTestingSessionsForOperations(storage.sqliteDatabase());
     const Active = struct {
         fn contains(_: *const anyopaque, operation_id: u64) bool {
@@ -6114,8 +6114,8 @@ test "retry admission reads past a full page of active Operations" {
     const insert = try std.testing.allocator.printSentinel(
         "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at) " ++
-            "SELECT value,value,printf('%06d',value),1,1,1,1,1,0,1 FROM sequence",
+            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,context_window) " ++
+            "SELECT value,value,printf('%06d',value),1,1,1,1,1,0,1,0 FROM sequence",
         .{retry_admission_page_rows + 1},
         0,
     );
@@ -6146,9 +6146,9 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     try store_testing.sqlite_only.exec(&storage, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<201) " ++
         "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-        "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at) " ++
+        "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,context_window) " ++
         "SELECT value,value,printf('%06d',value),1,1,1,1," ++
-        "CASE WHEN value<=100 THEN 9223372036854775807 ELSE 1 END,0,1 FROM sequence", .{});
+        "CASE WHEN value<=100 THEN 9223372036854775807 ELSE 1 END,0,1,0 FROM sequence", .{});
     try insertTestingSessionsForOperations(storage.sqliteDatabase());
 
     const Active = struct {
@@ -6207,8 +6207,8 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
         try sqlite.bindText(insert_turn, 2, session.slice());
         try sqlite.expectDone(insert_turn);
         const insert_operation = try sqlite.prepare(storage.sqliteDatabase(), "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,attempt_at) " ++
-            "VALUES(?1,?1,?2,1,1,1,4,0,0,1)");
+            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,attempt_at,context_window) " ++
+            "VALUES(?1,?1,?2,1,1,1,4,0,0,1,0)");
         defer _ = c.sqlite3_finalize(insert_operation);
         try sqlite.bindU64(insert_operation, 1, value);
         try sqlite.bindText(insert_operation, 2, session.slice());
@@ -6543,8 +6543,8 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows" {
                 "SELECT value,next_position+4*(value-1) AS position,instructions_content_id AS content FROM sequence,session; " ++
                 "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
                 "SELECT value,'{1s}',printf('history-%d',value),content,position,value,1 FROM history; " ++
-                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
-                "SELECT value,value,'{1s}',1,value,position,0,1,'tool_proposals',1 FROM history; " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,context_window) " ++
+                "SELECT value,value,'{1s}',1,value,position,0,1,'tool_proposals',1,0 FROM history; " ++
                 "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
                 "SELECT value,0,'{1s}',position+1,3,1,zeroblob(32),0,content,0 FROM history; " ++
                 "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,rejection_code,rejection_content_id,acceptance_position) " ++
@@ -6645,8 +6645,8 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
         const insert = try std.testing.allocator.printSentinel(
             "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "SELECT 1000+value AS value,next_position+3*(value-1) AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
-                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
-                "SELECT value,value,'{1s}',1,value,position,0,1,'tool_proposals',1 FROM history; " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,context_window) " ++
+                "SELECT value,value,'{1s}',1,value,position,0,1,'tool_proposals',1,0 FROM history; " ++
                 "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
                 "SELECT value,0,'{1s}',position,3,1,zeroblob(32),0,content,0 FROM history; " ++
                 "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,rejection_code,rejection_content_id,acceptance_position) " ++
@@ -7048,9 +7048,9 @@ test "historical context selection work excludes nonmatching Operation populatio
             const insert = try sqlite.prepare(storage.sqliteDatabase(), "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
-                "output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+                "output_reservation,attempt_ordinal,resolution_code,resolved_at,context_window) " ++
                 "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
-                "0,1,'failed',1 FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+                "0,1,'failed',1,current.context_window FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
             defer _ = c.sqlite3_finalize(insert);
             try sqlite.bindU64(insert, 1, population);
             try sqlite.bindU64(insert, 2, current.operation_id);
@@ -7098,9 +7098,9 @@ test "model admission work excludes failed historical Operation population" {
             const insert = try sqlite.prepare(storage.sqliteDatabase(), "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
-                "output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+                "output_reservation,attempt_ordinal,resolution_code,resolved_at,context_window) " ++
                 "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
-                "0,1,'failed',1 FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+                "0,1,'failed',1,current.context_window FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
             defer _ = c.sqlite3_finalize(insert);
             try sqlite.bindU64(insert, 1, population);
             try sqlite.bindU64(insert, 2, current.operation_id);
@@ -10396,8 +10396,8 @@ test "K4 forwarded approval hydration steps exclude prior forward history" {
             // permission revision but assigning distinct operation identities
             // and child positions. Every forward has a genuine ask Action.
             try store_testing.sqlite_only.exec(&storage, sequence ++
-                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,output_item_count) " ++
-                "SELECT value+1000000,turn_id,session_ref,settings_revision,input_cutoff,?3+3*(value-1),output_reservation,attempt_ordinal,resolution_code,resolved_at,1 FROM model_operation CROSS JOIN sequence WHERE operation_id=?2", .{ history, model.operation_id, child_start });
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,output_item_count,context_window) " ++
+                "SELECT value+1000000,turn_id,session_ref,settings_revision,input_cutoff,?3+3*(value-1),output_reservation,attempt_ordinal,resolution_code,resolved_at,1,context_window FROM model_operation CROSS JOIN sequence WHERE operation_id=?2", .{ history, model.operation_id, child_start });
             try store_testing.sqlite_only.exec(&storage, sequence ++
                 "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
                 "SELECT value+1000000,0,session_ref,?3+3*(value-1)+1,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count FROM model_output_item CROSS JOIN sequence WHERE operation_id=?2 AND item_ordinal=0", .{ history, model.operation_id, child_start });
@@ -10976,4 +10976,47 @@ test "Bash admission entry points agree on readiness" {
         try std.testing.expectEqual(case == .ready, results[0]);
         try std.testing.expectEqual(results[0], results[1]);
     }
+}
+
+test "frozen context window schema 64 migration pins legacy policy and rolls back failed backfill" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/legacy.sqlite3", .{root});
+    const raw = try openRaw(path);
+    defer _ = c.sqlite3_close(raw);
+    try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+    try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(raw, store_testing.baseline_rows);
+    for (store_schema.migrations) |step| {
+        if (step.from == 63) break;
+        for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+    }
+    try sqlite.exec(raw, @embedFile("migration_window_rows.sql"));
+    try sqlite.exec(raw, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF;PRAGMA user_version=63");
+    try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d}", .{store_schema.application_id}));
+    const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','63'),('wire_version',?1),('store_selector',?2)");
+    defer _ = c.sqlite3_finalize(meta);
+    try sqlite.bindText(meta, 1, protocol.wire_version);
+    try sqlite.bindText(meta, 2, root);
+    try sqlite.expectDone(meta);
+    const step = store_schema.migrations[63 - store_schema.migration_baseline];
+    // Fail after the complete rebuild/backfill, at its new bounded CHECK.
+    const bad = step.sqlite[0..step.sqlite.len].* ++ [_][:0]const u8{"UPDATE model_operation SET context_window=-1"};
+    try std.testing.expectError(error.SqliteExecFailed, store_schema.migrate(std.testing.io, raw, root, 63, &.{.{ .from = 63, .sqlite = &bad, .mysql = &.{} }}, null));
+    try std.testing.expectEqual(@as(u32, 63), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_table_info('model_operation') WHERE name='context_window'"));
+    try std.testing.expectEqual(@as(u32, 4), try sqlite.pragmaInt(raw, "SELECT count(*) FROM model_operation"));
+    try store_schema.openExisting(std.testing.io, raw, root, null, null);
+    try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+    try std.testing.expectEqual(@as(u32, 2), try sqlite.pragmaInt(raw, "SELECT count(*) FROM model_operation WHERE operation_id IN (1,3) AND context_window=1050000"));
+    try std.testing.expectEqual(@as(u32, 2), try sqlite.pragmaInt(raw, "SELECT count(*) FROM model_operation WHERE operation_id IN (2,4) AND context_window=128000"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM model_operation WHERE operation_id=3 AND resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_at=1"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM model_operation WHERE operation_id=4 AND resolution_code='context_overflow' AND history_floor=3 AND history_level=2 AND history_dropped=4 AND output_reservation=8"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_table_info('model_operation') WHERE name='context_window' AND \"notnull\"=1 AND dflt_value IS NULL"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(raw, "UPDATE model_operation SET context_window=4294967296 WHERE operation_id=1"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(raw, "UPDATE model_operation SET context_window=NULL WHERE operation_id=1"));
+    try store_schema.openExisting(std.testing.io, raw, root, null, null);
 }

@@ -42,7 +42,19 @@ pub const openai_ids = rsql.Read(.{
 // One statement selects the authority and its facts together. The LEFT JOIN
 // deliberately emits a source-only row for an empty generation or absent ID:
 // neither may resurrect a shipped entry. No source emits no rows.
-const selection_sql = "SELECT fact.model_id,fact.context_window,fact.efforts,fact.openai_listed FROM model_catalog_source source LEFT JOIN model_fact fact ON fact.generation=source.generation AND (?1 IS NULL OR fact.model_id=?1) WHERE source.slot=1 ORDER BY fact.model_id";
+fn selectionSql(comptime columns: []const u8, comptime model: []const u8) []const u8 {
+    return "SELECT " ++ columns ++ " FROM model_catalog_source source LEFT JOIN model_fact fact " ++
+        "ON fact.generation=source.generation AND (" ++ model ++ " IS NULL OR fact.model_id=" ++ model ++ ") WHERE source.slot=1";
+}
+const selection_sql = selectionSql("fact.model_id,fact.context_window,fact.efforts,fact.openai_listed", "?1") ++ " ORDER BY fact.model_id";
+
+/// Effective window selected inside an Operation's INSERT, with no extra round.
+/// A source-only row (empty generation, missing model or null window) uses the
+/// unlisted fallback; only no source uses the bound shipped window. Keep that
+/// authority selection shared with Model and the full-catalog reader.
+pub fn contextWindowSql(comptime model: []const u8, comptime shipped: []const u8, comptime unlisted: []const u8) []const u8 {
+    return "coalesce((" ++ selectionSql("coalesce(fact.context_window," ++ unlisted ++ ")", model) ++ ")," ++ shipped ++ ")";
+}
 const SelectionRow = struct {
     model_id: ?Bounded(256),
     context_window: ?u32,

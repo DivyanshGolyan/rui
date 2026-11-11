@@ -776,3 +776,34 @@ test "metadata seed MySQL missing masks retain canonical selector and id" {
     try std.testing.expect(schema.isStoreId(&second));
     try std.testing.expect(!std.mem.eql(u8, &first, &second));
 }
+
+test "frozen context window schema 64 MySQL migration pins legacy policy and preserves live and settled rows" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
+    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database, store_testing.baseline_rows, true);
+    inline for (schema.migrations) |step| {
+        if (step.from < 63) try load(migrated_database, schema.mysqlMigration(step.from), false);
+    }
+    try load(migrated_database, @embedFile("migration_window_rows.sql"), false);
+    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','63'),('wire_version','11')", false);
+    try load(migrated_database, schema.mysqlMigrationFrom(63).?, false);
+    try expectSameResults(&.{
+        "SELECT operation_id,context_window FROM model_operation ORDER BY operation_id",
+        "SELECT operation_id FROM model_operation WHERE operation_id=3 AND resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_at=1",
+        "SELECT operation_id FROM model_operation WHERE operation_id=4 AND resolution_code='context_overflow' AND history_floor=3 AND history_level=2 AND history_dropped=4 AND output_reservation=8",
+        "SELECT IS_NULLABLE,COLUMN_DEFAULT FROM information_schema.columns WHERE table_schema='" ++ migrated_database ++ "' AND table_name='model_operation' AND column_name='context_window'",
+    }, &.{
+        "SELECT 1,1050000 UNION ALL SELECT 2,128000 UNION ALL SELECT 3,1050000 UNION ALL SELECT 4,128000",
+        "SELECT 3",
+        "SELECT 4",
+        "SELECT 'NO',NULL",
+    });
+    try expectCatalog(migrated_database);
+    done.migrations += 1;
+    writeRecord();
+}

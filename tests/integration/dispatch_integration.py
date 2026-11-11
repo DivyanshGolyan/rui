@@ -4214,9 +4214,9 @@ def main(mode="all", correlation_case="all"):
             database.execute("PRAGMA foreign_keys=OFF")
             database.executemany(
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
-                "admission_position,attempt_ordinal,retry_due_at_ms,retry_scheduled_at,output_reservation) "
-                "VALUES(?,?,?,1,1,1,1,9223372036854775807,1,0)",
-                [(index, index, session) for index, session in enumerate(backlog_history, 1)],
+                "admission_position,attempt_ordinal,retry_due_at_ms,retry_scheduled_at,output_reservation,context_window) "
+                "VALUES(?,?,?,1,1,1,1,9223372036854775807,1,0,?)",
+                [(index, index, session, DEFAULTS.unlisted_context_window) for index, session in enumerate(backlog_history, 1)],
             )
             database.commit()
         finally:
@@ -4303,9 +4303,9 @@ def main(mode="all", correlation_case="all"):
             database.execute("PRAGMA foreign_keys=OFF")
             database.executemany(
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
-                "admission_position,attempt_ordinal,retry_due_at_ms,retry_scheduled_at,output_reservation) "
-                "VALUES(?,?,?,1,1,1,1,9223372036854775807,1,0)",
-                [(index, index, session) for index, session in enumerate(recovery_history, 1)],
+                "admission_position,attempt_ordinal,retry_due_at_ms,retry_scheduled_at,output_reservation,context_window) "
+                "VALUES(?,?,?,1,1,1,1,9223372036854775807,1,0,?)",
+                [(index, index, session, DEFAULTS.unlisted_context_window) for index, session in enumerate(recovery_history, 1)],
             )
             database.commit()
         finally:
