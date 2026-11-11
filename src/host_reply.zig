@@ -400,6 +400,10 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
 
     var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
     try description.set(&@as([protocol.max_tool_description_bytes]u8, @splat(1)));
+    var label: protocol.Bounded(protocol.max_label_bytes) = .{};
+    try label.set(&@as([protocol.max_label_bytes]u8, @splat(1)));
+    var bash_description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
+    try bash_description.set(&@as([protocol.session_work.max_description_bytes]u8, @splat(1)));
     const presentation: protocol.ToolPresentation = .{ .description = description, .code = Worst.tag(protocol.ToolPresentation.Code), .publication_position = max };
     var longest_conversation: usize = 0;
     for (std.meta.tags(protocol.ConversationItemKind)) |kind| {
@@ -411,7 +415,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
             .content = content,
             .presentation = if (kind == .tool_result or kind == .hosted_call) presentation else null,
             .admitted_at = if (kind == .user) max else null,
-            .sender = if (kind == .user) .{ .session = session, .label = description } else null,
+            .sender = if (kind == .user) .{ .session = session, .label = label } else null,
         };
         var response: protocol.FixedJsonBuffer(protocol.max_conversation_page_response_bytes) = .{};
         try response.render(renderConversationPage, .{&page});
@@ -421,8 +425,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
 
     var key: protocol.Bounded(protocol.max_key_bytes) = .{};
     try key.set(&escaped_key);
-    // A label is a description's size, so the worst one doubles as both.
-    const peer: protocol.NamedPeer = .{ .session = session, .label = description };
+    const peer: protocol.NamedPeer = .{ .session = session, .label = label };
     const reference: protocol.ActivityItem.Content = .{ .length = max, .digest = content.digest };
     const field: protocol.ProposalFieldReference = .{ .length = max, .digest = content.digest };
     const values = [_]protocol.ActivityItem.Value{
@@ -465,7 +468,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var longest_state_bytes: usize = 0;
     for ([_]protocol.WorkState{
         .{ .retrying = .{ .since = max, .due_at_ms = max, .cause = code, .attempt = max } },
-        .{ .bash = .{ .since = max, .call = max, .description = description, .running = max, .approvals = max } },
+        .{ .bash = .{ .since = max, .call = max, .description = bash_description, .running = max, .approvals = max } },
         .{ .failed = .{ .since = max, .code = code, .resets_at = max } },
         .{ .stopped = .{ .since = max, .cause = Worst.tag(protocol.session_work.StopCause) } },
         .{ .approval = .{ .since = max } },

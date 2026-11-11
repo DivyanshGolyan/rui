@@ -8,6 +8,9 @@ const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const tool_catalog = @import("../../call_classification.zig");
 const tool_record = @import("../../tool_record.zig");
+const tool_presentation = @import("../../tool_presentation.zig");
+const mcp_arguments = @import("../../mcp/arguments.zig");
+const mcp_document = @import("../../mcp/document.zig");
 const tool_set = @import("tool_set.zig");
 const output_format = @import("../../output_format.zig");
 const retry_policy = @import("../../retry_policy.zig");
@@ -1722,16 +1725,24 @@ fn Settlement(comptime A: type) type {
                 }
                 break :id row.id;
             } else null;
+            try s.recordCall(&fields, .{ name_content_id, call_id_content_id, arguments_content_id }, &call_facts, rejection_code, rejection_content_id);
+        }
+
+        /// All content sinks have closed before saving the certificate and
+        /// line. Keep their bounded row-binding scratch off those sink paths.
+        noinline fn recordCall(s: *Self, fields: *const [3]OutputMetadataRecord, content_ids: [3]u64, call_facts: *const tool_catalog.CallFacts, rejection_code: ?tool_proposal.Rejection, rejection_content_id: ?u64) !void {
+            const record = fields[2];
+            const name_content_id, const call_id_content_id, const arguments_content_id = content_ids;
             // The call's certificate: (little-endian length, SHA-256) for its
             // name, call_id and arguments, in ProposalField order.
             var field_metadata: [120]u8 = undefined;
-            for (fields, 0..) |field, at| {
+            for (fields.*, 0..) |field, at| {
                 std.mem.writeInt(u64, field_metadata[at * 40 ..][0..8], field.decoded_length, .little);
                 @memcpy(field_metadata[at * 40 + 8 ..][0..32], &field.content_digest);
             }
-            // A call has its description whether or not it was offered; one
-            // whose arguments the parser rejected has none.
-            const description = try callDescription(&call_facts);
+            // A Bash call keeps its valid line even when not offered; malformed
+            // Bash arguments have none. MCP uses its saved line or tool name.
+            const description = try callDescription(call_facts, s.io, s.output.source, record);
 
             s.a.write(insert_call, .{
                 .operation_id = s.binding.operation_id,
@@ -1744,7 +1755,7 @@ fn Settlement(comptime A: type) type {
                 .rejection_content_id = rejection_content_id,
                 .acceptance_position = if (rejection_code != null) try s.positions.take(1) else null,
                 .action_kind = if (rejection_code == null) 1 else null,
-                .description = if (description) |text| if (text.len != 0) text else null else null,
+                .description = description,
                 .field_metadata = field_metadata,
                 .session = s.session,
             });
@@ -1890,13 +1901,30 @@ fn writeDecoded(io: std.Io, output: *const ValidatedOutput, sink: store_access.C
 
 /// Noinline: description rendering does not retain its bounded scratch on
 /// the import frame while that frame opens SQLite content sinks.
-noinline fn callDescription(facts: *const tool_catalog.CallFacts) !?tool_record.Description {
+noinline fn callDescription(facts: *const tool_catalog.CallFacts, io: std.Io, file: std.Io.File, arguments: OutputMetadataRecord) !?tool_record.Description {
     if (facts.tool) |*tool| if (tool.runner() == .mcp) {
-        // Keep the existing 100-byte description; the richer 200-byte MCP
-        // projection is deferred. The raw arguments remain unchanged.
         var fallback: tool_record.Description = .{ .len = 0 };
         try fallback.set(tool.name);
-        return fallback;
+        // Classification already checked the JSON. Invalid arguments retain
+        // the name without trying to extract a line from a rejected document.
+        if (facts.invalid_mcp_arguments) return fallback;
+        var source: output_format.JsonStringSource = .{
+            .encoded = .{ .io = io, .file = file, .position = arguments.start, .end = try arguments.end() },
+        };
+        const range = try mcp_arguments.descriptionRange(&source) orelse return fallback;
+        // The range addresses the decoded arguments, not the provider's outer
+        // JSON string. Replay that bounded source to read the selected contents.
+        source = .{ .encoded = .{ .io = io, .file = file, .position = arguments.start, .end = try arguments.end() } };
+        for (0..@intCast(range.start)) |_| _ = try source.take();
+        var encoded: [6 * tool_presentation.max_description_bytes]u8 = undefined;
+        if (range.length > encoded.len) return error.CorruptOutputMetadata;
+        const contents = encoded[0..@intCast(range.length)];
+        for (contents) |*byte| byte.* = try source.take();
+        var description: tool_record.Description = .{ .len = 0 };
+        var decoded = std.Io.Writer.fixed(&description.bytes);
+        try mcp_document.writeDecoded(&decoded, contents);
+        description.len = decoded.end;
+        return if (tool_presentation.ToolPresentation.validDescription(description.slice())) description else fallback;
     };
     return facts.description();
 }
