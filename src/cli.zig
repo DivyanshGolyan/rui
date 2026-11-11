@@ -858,11 +858,11 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
 
 /// App reuses the launch owner, but its worker leaves all feedback to the
 /// overview's Host state instead of writing beneath the active screen.
-fn startOverviewHost(init: std.process.Init, selected: []const u8) !void {
-    return startHostWithFeedback(init, selected, true, null, null, .screen);
+fn startOverviewHost(init: std.process.Init, selected: []const u8, notice: *?Overview.HostStartNotice) !void {
+    return startHostWithFeedback(init, selected, true, null, null, .{ .screen = notice });
 }
 
-fn startHostWithFeedback(init: std.process.Init, selected: []const u8, quiet: bool, capacity: ?usize, readiness: ?*const provider_selection.Readinesses, feedback: enum { terminal, screen }) !void {
+fn startHostWithFeedback(init: std.process.Init, selected: []const u8, quiet: bool, capacity: ?usize, readiness: ?*const provider_selection.Readinesses, feedback: HostStartFeedback) !void {
     const io = init.io;
     const selection = platform.resolveClientSelection(selected);
     const resolved: ?platform.Paths = selection.paths(io) catch |err| switch (err) {
@@ -905,7 +905,7 @@ fn startHostWithFeedback(init: std.process.Init, selected: []const u8, quiet: bo
     // A saved OpenAI key makes the Host serve openai too. One the Host could
     // not read is left to `rui host serve --provider openai` to report.
     const openai: provider_selection.Readiness = if (readiness) |known| known.get(.openai) else providerReadiness(init, .openai) catch .credential_error;
-    if (openai.usable() and openAiBaseUrlUsable(init)) {
+    if (openai.usable() and launchOpenAi(init, feedback)) {
         argv[argc] = "--provider";
         argv[argc + 1] = "openai";
         argc += 2;
@@ -1649,13 +1649,30 @@ const invalid_base_url = "rui: " ++ providers.openai_base_url_variable ++ " must
 
 /// Whether an auto-started Host can serve OpenAI at its base URL. A bad one
 /// is OpenAI's alone to fail, so the Host still starts and serves Codex.
-fn openAiBaseUrlUsable(init: std.process.Init) bool {
+fn openAiBaseUrlDiagnostic(init: std.process.Init) ?Overview.HostStartNotice {
     _ = providers.openAiEndpoint(init.environ_map, init.arena.allocator()) catch |err| {
-        if (err != error.InvalidBaseUrl) return true; // `host serve` reports it.
-        stderr.diagnostic(invalid_base_url ++ "; this Host starts without OpenAI.\n", .{});
-        return false;
+        if (err != error.InvalidBaseUrl) return null; // `host serve` reports it.
+        return .invalid_openai_base_url;
     };
-    return true;
+    return null;
+}
+
+const HostStartFeedback = union(enum) {
+    terminal,
+    // The caller owns this until the synchronous launch returns, on error too.
+    screen: *?Overview.HostStartNotice,
+};
+
+/// The launch owner routes helper diagnostics through its caller's channel.
+fn launchOpenAi(init: std.process.Init, feedback: HostStartFeedback) bool {
+    const diagnostic = openAiBaseUrlDiagnostic(init) orelse return true;
+    switch (feedback) {
+        .terminal => switch (diagnostic) {
+            .invalid_openai_base_url => stderr.diagnostic(invalid_base_url ++ "; this Host starts without OpenAI.\n", .{}),
+        },
+        .screen => |notice| notice.* = diagnostic,
+    }
+    return false;
 }
 
 /// The OpenAI key a served `openai` presents; a Host never starts serving
@@ -4045,6 +4062,41 @@ test "fresh instruction validation renders both source and stdin conflict refusa
         var out = std.Io.Writer.fixed(&storage);
         try caller_error.writeLine(&out, refusal.code, refusal.held("session", "configure"));
         try std.testing.expectEqualStrings(case.expected, out.buffered());
+    }
+}
+
+test "Host launcher routes invalid OpenAI base URL diagnostics to terminal or screen" {
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var init: std.process.Init = undefined;
+    init.environ_map = &environment;
+    init.arena = &arena;
+    for ([_]?[]const u8{ null, "https://example.com/v1", "http://invalid.example" }) |url| {
+        if (url) |value| try environment.put(providers.openai_base_url_variable, value);
+        for ([_]bool{ true, false }) |screen| {
+            const descriptors = try testPipe();
+            defer closeDescriptor(descriptors[0]);
+            var notice: ?Overview.HostStartNotice = null;
+            const invalid = url != null and std.mem.startsWith(u8, url.?, "http:");
+            {
+                defer closeDescriptor(descriptors[1]);
+                const saved = std.c.dup(2);
+                if (saved < 0) return error.TestRedirectFailed;
+                defer closeDescriptor(saved);
+                if (std.c.dup2(descriptors[1], 2) != 2) return error.TestRedirectFailed;
+                defer std.debug.assert(std.c.dup2(saved, 2) == 2);
+                // The helper has no output policy; only the launch owner does.
+                try std.testing.expectEqual(if (invalid) @as(?Overview.HostStartNotice, .invalid_openai_base_url) else null, openAiBaseUrlDiagnostic(init));
+                try std.testing.expectEqual(!invalid, launchOpenAi(init, if (screen) .{ .screen = &notice } else .terminal));
+            }
+            var bytes: [1024]u8 = undefined;
+            const count = std.c.read(descriptors[0], &bytes, bytes.len);
+            if (count < 0) return error.TestReadFailed;
+            try std.testing.expectEqualStrings(if (invalid and !screen) "\n" ++ invalid_base_url ++ "; this Host starts without OpenAI.\n" else "", bytes[0..@intCast(count)]);
+            try std.testing.expectEqual(if (invalid and screen) @as(?Overview.HostStartNotice, .invalid_openai_base_url) else null, notice);
+        }
     }
 }
 

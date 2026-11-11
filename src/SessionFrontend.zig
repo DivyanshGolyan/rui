@@ -430,6 +430,7 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
 /// a transport loss or the person's explicit start gesture.
 pub const HostAccess = struct {
     context: *anyopaque,
+    /// Unreachable, not the reachable Host's new-Turn admission hold.
     held: *const fn (*anyopaque) bool,
     lost: *const fn (*anyopaque) void,
     start: *const fn (*anyopaque, *vxfw.EventContext) anyerror!bool,
