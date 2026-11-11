@@ -2709,19 +2709,12 @@ The frontend retains the diagnostic until successful presentation; fatal fallbac
 Read errors grant no admission or absence certainty.
 Optional stderr diagnostics are bounded and nonblocking; reporting failure never replaces restoration or the original error.
 
-Opening captures Current and the newest backward page of at most 16 Activity rows before content presentation.
-It freezes older Conversation navigation at that page's end, then renders the Activity rows chronologically in one content pass.
-Only a successfully joined opening starts forward catch-up at the captured end.
-Later appends cannot enter the opening or older traversal.
-Current supplies status and attention; it is not a pending-input inventory.
-Messages a person or script sent that wait at the opening's end show dimmed above the input, in the queued row, as they would live.
-Divyansh approved "A queued message shows dimmed above the input" on 2026-10-31 (front-end plan).
-The page's own `queued` report says how many wait and which is newest, and the row reads that one's first line; a refused or unreadable line fails the read like a refused page.
-The opening's page leaves them out, except the oldest when nothing holds the queue, which it shows unlabelled as live output would at its Admission; each other shows live as its row once taken, and any a stop excludes, that one included, shows labelled at the stop.
-The opening says no count of its own.
-Otherwise its page shows each of its Messages once, collapsed like any other Message and labelled as of its end, and a transcript lists older ones at the page's seam: those not applied at its end, except those that wait.
-The opening reads no Activity rows before its page, whatever the history.
-Which older Messages the seam lists is known only by reading them, so the first transcript that reaches the seam searches back to the history's first position, one Message per step; where it found none below, later searches stop.
+Opening reads the newest backward Activity page of at most 16 rows, with all kinds for its live facts, and Current when the Session line needs it.
+The joined page paints immediately; earlier rows are fetched by the feed's margin rule, not by a separate opening traversal.
+Forward catch-up starts at the captured end; later appends cannot enter that opening read.
+Current supplies settings and attention, not a pending-input inventory.
+The page's own `queued` facts identify waiting Messages and the newest one's first line; a refused line fails the read like a refused page.
+Applied Messages belong at their user rows, excluded Messages at their stop, and waiting Messages derive their provisional placement from those page facts in either direction.
 
 The conversation frontend is one full-screen libvaxis interface with a composer; there is no inline renderer or renderer selection.
 Interactive entry requires a terminal and refuses `TERM=dumb` with guidance before changing any Host or Session state.
@@ -2737,7 +2730,8 @@ Call rows keep their places, in issue order.
 While the work is a running Bash call, that call's own row carries the clock, `• Run zig build test-store · 42s`, found by the call's Operation and ordinal, never by its text.
 Any other work is the conversation's last line: `• Queued · 3s` while the Session waits for a model slot, `• Waiting · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
 The time counts from the state's `since`, against the terminal's clock.
-A browsed page or transcript draws no activity tail: the transcript is one row shorter and a `↓` chip sits alone at the right of the freed row, `↓ N new` once N entries have shown text below since the view left the latest (`session_reads.DisplayCapture` counts an entry when it first shows text, never Activity positions).
+The activity tail remains part of the feed's measured height while scrolled away; inspection and Message panels show their own documents instead.
+The `↓` chip uses a permanently reserved row. Its count names newly rendered Activity entries arriving beyond the scan's starting cursor, not invisible Activity positions or replayed provisional entries.
 When rows run short, the work line and a waiting Message's row keep theirs and call rows give way to the overflow row, which counts them; a running call whose row is not drawn hands its clock to the work line.
 While a permission prompt is open the Action's instructions speak instead.
 An overview row whose work needs the person or explains a wait (approval, a retry, a running command, stopping) says the same words beside its own age column, so it adds only a retry's countdown, and takes its tone; one functional core, `work_line`, holds the wording and tone for both.
@@ -2748,10 +2742,10 @@ Divyansh asked for the counts on 2026-11-02 and on 2026-11-09 chose Needs you fi
 A Message a person or script sends while work is under way waits as the activity tail's last row, `◌ also update docs …`, or `◌ 3 · also update docs …` when more than one waits, with the newest such Message's first line cut to fit, until it shows as its conversation row; a Message a stop excluded shows labelled `! Stopped before it ran · send it again to run it` before `! Session stopped.`.
 Divyansh approved those labels on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF); the row's `◌` form is the vxfw rework plan's.
 The Host reports how many wait and the newest on each Activity page (`queued`), and the row reads that Message's first line at its Admission position, which holds that Admission alone, never by text; it keeps the line with that Message's admission ID and shows it only while the Host names that Message newest.
-A Message sent when the work does not hold the queue and no older one waits is taken next, so live output shows it at once as its Admission, and never its row again, however long a pending Session takes to start it (as after Ctrl-R recovery).
-Any other waits in the row, which shows only in the latest view, whenever the Host reports a Message waiting that live output has not shown, whatever the work is doing, and counts only those; live output shows a waiting Message only when it is the oldest, so at most that one is left out; until its row, its stop or the queued row shows it, the send reads `Sent`.
-It keeps its row when rows run short, and a browsed page, which draws no tail, says nothing in its place; it leaves in the frame that shows the Message as its row or at its stop; `queued_line.waitingRow` fits the row.
-A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
+When nothing holds the queue, its oldest waiting Message echoes at its Admission as a provisional row; the remaining Messages wait in the queued strip.
+Forward replay replaces that suffix, so a taken Message appears once at its user row rather than retaining its Admission echo.
+The queued strip keeps its row when space runs short and leaves in the same frame as the Message's applied or excluded row.
+A stop finds excluded Messages by walking Admission-only pages backward from itself, then renders them in admission order; no previous read's queue or drawing state decides placement.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
 
