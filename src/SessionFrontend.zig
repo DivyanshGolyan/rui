@@ -702,7 +702,9 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                         .busy => self.notice = "Not sent: this Action needs a decision",
                         .editor => |outcome| switch (outcome) {
                             .action => |action| try self.perform(action),
-                            .refused => |why| self.notice = refusedNotice(why),
+                            .refused => |why| if (why != .unbound) {
+                                self.notice = refusedNotice(why);
+                            },
                             .none, .append, .redraw, .submit => {},
                         },
                         .message, .command => unreachable, // Sending is disabled while consent waits.
@@ -723,7 +725,9 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                         .busy => self.sayBusy(null, false),
                         .editor => |outcome| switch (outcome) {
                             .action => |action| try self.perform(action),
-                            .refused => |why| self.notice = refusedNotice(why),
+                            .refused => |why| if (why != .unbound) {
+                                self.notice = refusedNotice(why);
+                            },
                             .submit => if (self.shownCommands() != null) try self.commandLine(),
                             .none, .append, .redraw => {},
                         },
@@ -2800,7 +2804,7 @@ fn takeRow(self: *Self, shown: *slash_commands_shared.Shown) void {
 fn refusedNotice(why: keymap.Refusal) []const u8 {
     return switch (why) {
         .invalid, .edit_rejected => "! Input rejected; nothing sent. Enter plain text or paste again.",
-        .unbound => "! Key combination not recognized; ignored. Draft unchanged.",
+        .unbound => unreachable,
         .overflow => "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
         .paste_overflow => "! Paste too long; draft unchanged.",
     };
@@ -3691,6 +3695,31 @@ fn barShows(held: *HeldFrontend) ![]const u8 {
 fn sendKeys(frontend: *Self, bytes: []const u8) !void {
     const held: *HeldFrontend = @fieldParentPtr("self", frontend);
     try held.keys(bytes);
+}
+
+test "unbound chat input posts no notice and closing shortcuts redraws" {
+    for ([_]bool{ false, true }) |shortcuts_open| {
+        for ([_]bool{ false, true }) |notice_present| {
+            const held = try HeldFrontend.create();
+            defer held.destroy();
+            if (shortcuts_open) {
+                try held.keys("?");
+                try std.testing.expect(held.self.shortcuts_open);
+            } else {
+                try held.keys("abc");
+            }
+            if (notice_present) held.self.shown_notice.show("existing", held.self.nowMs());
+            var parser: vaxis.Parser = .{};
+            const parsed = try parser.parse("\x1bx", null);
+            var ctx = held.context();
+            ctx.redraw = false;
+            try held.deliver(&ctx, .{ .key_press = parsed.event.?.key_press });
+            try std.testing.expect(ctx.redraw);
+            try std.testing.expect(!held.self.shortcuts_open);
+            try std.testing.expectEqualStrings(if (shortcuts_open) "" else "abc", held.self.input.composition().bytes);
+            try std.testing.expect(held.self.shown_notice.current(held.self.nowMs()) == null);
+        }
+    }
 }
 
 test "App Session draft storage still guards pending originals Actions and commands" {

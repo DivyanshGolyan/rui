@@ -4148,7 +4148,7 @@ test "keys the editor declines say so and leave the draft" {
     try expectStarted(rig, "\u{200d}", null);
     try std.testing.expectEqualStrings("! Can't add that character alone.", rig.overview.state.notice.?.text());
     try expectStarted(rig, "ab\x1bx", null);
-    try std.testing.expectEqualStrings("! That key does nothing here.", rig.overview.state.notice.?.text());
+    try std.testing.expect(rig.overview.state.notice == null);
     try expectStarted(rig, "c\r", "abc");
 }
 
