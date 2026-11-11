@@ -139,7 +139,7 @@ test "PermissionCard decides the drawn request at tiny sizes and ignores text an
     var owner: Owner = .{};
     var consent: Consent = .{};
     const body: vxfw.Text = .{ .text = "$ zig build test\nsecond line\nthird line" };
-    var root: @import("Root.zig") = .{ .overview = body.widget() };
+    var root: @import("Root.zig") = .{ .overview = body.widget(), .list = body.widget(), .compose = body.widget() };
     var card: Self = .{ .consent = &consent, .pasting = &root.pasting, .description = "Run the tests", .body = body.widget(), .userdata = &owner, .on_decision = Owner.decide };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -220,7 +220,7 @@ fn testPasteFocus(arrives_during_paste: bool) !void {
     var owner: Owner = .{};
     var consent: Consent = .{};
     const text: vxfw.Text = .{ .text = "Kept draft" };
-    var root: @import("Root.zig") = .{ .overview = text.widget() };
+    var root: @import("Root.zig") = .{ .overview = text.widget(), .list = text.widget(), .compose = text.widget() };
     var card: Self = .{ .consent = &consent, .pasting = &root.pasting, .description = "Run", .body = text.widget(), .userdata = &owner, .on_decision = Owner.decide };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

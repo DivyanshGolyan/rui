@@ -41,9 +41,17 @@ pub const reserved_key_prefix = idempotency_key.reserved_prefix;
 pub const max_session_bytes = session_id.max_reference_bytes;
 pub const max_store_bytes = store_path.max_bytes;
 pub const max_workspace_bytes = workspace_path.max_bytes;
-/// Content strings one request carries at most: a configure command's
-/// instructions and output schema.
-pub const max_request_contents = 2;
+/// Content values one request carries at most: a configure command's
+/// instructions and output schema, plus a creating Message's text.
+const spec_content_count = count: {
+    var total: usize = 0;
+    for (session_settings.entries) |entry| {
+        if (entry.kind == .content) total += 1;
+    }
+    break :count total;
+};
+/// A creating Message carries its text and every spec content setting.
+pub const max_request_contents = 1 + spec_content_count;
 pub const max_sender_handle_bytes = command_input.max_sender_handle_bytes;
 /// Most bytes of client environment entries one Message carries.
 pub const max_environment_bytes = 64 * 1024;
@@ -680,7 +688,7 @@ pub const contentHasher = content_string.hasher;
 pub const contentDigest = content_string.digest;
 
 /// The metadata an Ingress has received so far, the Parser's only input.
-/// Content strings never reach it: the Ingress captures them.
+/// Content bodies never reach it: the Ingress captures them.
 pub const MetadataSource = struct {
     input: []const u8,
     start: usize = 0,
@@ -711,6 +719,8 @@ fn ParserOf(comptime Custody: type) type {
         expected_kind: ?Kind = null,
         content_ordinal: u8 = 0,
         captured: []const ContentField = &.{},
+        /// Last spec member, for bounded caller diagnostics.
+        spec_field: Bounded(32) = .{},
 
         /// Members of every request object may come in any order, as JSON
         /// allows, so a client generated in any language can build one (D212).
@@ -882,8 +892,7 @@ fn ParserOf(comptime Custody: type) type {
                     },
                     .configuration => {
                         if (kind) |named| if (named != .configure and named != .message) return error.UnexpectedField;
-                        // Only a configure command's configuration carries content.
-                        try self.scanConfiguration(if (kind) |named| named == .configure else true);
+                        try self.scanConfiguration();
                     },
                 }
             }
@@ -891,24 +900,28 @@ fn ParserOf(comptime Custody: type) type {
             return .{ .kind = kind orelse return error.MissingField, .store = store };
         }
 
-        fn scanConfiguration(self: *Parser, content: bool) !void {
+        fn scanConfiguration(self: *Parser) !void {
             try self.expectByte('{');
             var members: Members = .{};
-            var instructions = false;
-            var output_schema = false;
+            var seen = std.enums.EnumSet(std.meta.FieldEnum(Configuration)).empty;
             var key: Bounded(32) = .{};
             while (try members.next(self, &key)) {
-                const seen = if (key.eql("instructions"))
-                    &instructions
-                else if (key.eql("output_schema"))
-                    &output_schema
-                else {
-                    try self.skipValue();
-                    continue;
-                };
-                if (seen.*) return error.UnexpectedField;
-                seen.* = true;
-                try self.scanContentEnvelope(content);
+                const field = try specField(&key, &seen);
+                switch (field) {
+                    inline else => |tag| {
+                        const entry = session_settings.entries[@backingInt(tag)];
+                        if (entry.kind == .content) {
+                            // Suspend at the colon, before the first content
+                            // byte. Ingress may resume with a quote or null.
+                            self.skipWhitespace() catch |err| return if (err == error.NeedInput and self.content_ordinal >= self.captured.len) (if (entry.json_object) error.NeedSchema else error.NeedContent) else err;
+                            if (!try self.readNull()) {
+                                if (self.content_ordinal == max_request_contents) return error.UnexpectedField;
+                                var counted: ContentField = .{};
+                                if (entry.json_object) try self.readSchema(&counted) else try self.readContentString(&counted);
+                            }
+                        } else try self.skipValue();
+                    },
+                }
             }
         }
 
@@ -925,7 +938,7 @@ fn ParserOf(comptime Custody: type) type {
                 if (value) return error.UnexpectedField;
                 if (!content) return error.InvalidFieldState;
                 value = true;
-                // A third content string has no capture to go to.
+                // Content beyond the creating-Message maximum has no capture.
                 if (self.content_ordinal == max_request_contents) return error.UnexpectedField;
                 var counted: ContentField = .{};
                 try self.readContentString(&counted);
@@ -1038,7 +1051,7 @@ fn ParserOf(comptime Custody: type) type {
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readCommandKey(&out.key),
                 .session => try self.readSmallString(&out.session),
-                .configuration => try self.parseConfiguration(true, &out.configuration),
+                .configuration => try self.parseConfiguration(&out.configuration),
                 .preset => {
                     out.preset = .{};
                     try self.readSmallString(&out.preset.?);
@@ -1050,42 +1063,79 @@ fn ParserOf(comptime Custody: type) type {
             if (out.session.len == 0 and out.preset == null) try validateCreatingConfiguration(&out.configuration);
         }
 
-        /// Fills `out`, which holds its defaults.
-        fn parseConfiguration(self: *Parser, allow_content: bool, out: *Configuration) !void {
-            const Field = std.meta.FieldEnum(Configuration);
+        fn specField(key: *const Bounded(32), seen: *std.enums.EnumSet(std.meta.FieldEnum(Configuration))) !std.meta.FieldEnum(Configuration) {
+            inline for (session_settings.entries, 0..) |entry, index| {
+                if (key.eql(entry.spec)) {
+                    const field: std.meta.FieldEnum(Configuration) = @fromBackingInt(@intCast(index));
+                    if (seen.contains(field)) return error.UnexpectedField;
+                    seen.insert(field);
+                    return field;
+                }
+            }
+            return error.UnexpectedField;
+        }
+
+        /// The one plain agent-spec grammar. Strings are written directly into
+        /// the caller's Configuration; content uses the caller's capture custody.
+        pub fn parseConfiguration(self: *Parser, out: *Configuration) !void {
             try self.expectByte('{');
             var members: Members = .{};
-            var seen: std.enums.EnumSet(Field) = .empty;
-            while (try self.nextField(Field, &members, &seen)) |field| switch (field) {
-                inline else => |tag| {
-                    const entry = session_settings.entries[@backingInt(tag)];
-                    const name = entry.field;
-                    const value = &@field(out, name);
-                    switch (entry.kind) {
-                        .text, .choice => |capacity| try self.readOptionalSmallNullable(capacity, value, entry.nullable),
-                        .content => try self.readContent(value, entry.nullable, allow_content),
-                        .tools => try self.readTools(value, entry.nullable),
-                        .decimal_policy => try self.readOptionalSmallNullable(20, value, entry.nullable),
-                    }
-                },
+            var seen = std.enums.EnumSet(std.meta.FieldEnum(Configuration)).empty;
+            while (try members.next(self, &self.spec_field)) {
+                const field = try specField(&self.spec_field, &seen);
+                switch (field) {
+                    inline else => |tag| {
+                        const entry = session_settings.entries[@backingInt(tag)];
+                        const name = entry.field;
+                        const value = &@field(out, name);
+                        if (try self.readNull()) {
+                            if (!entry.nullable) return error.InvalidFieldState;
+                            value.state = .explicit_null;
+                            continue;
+                        }
+                        value.state = .value;
+                        switch (entry.kind) {
+                            .text, .choice => try self.readSmallString(&value.value),
+                            .content => if (entry.json_object) try self.readSchema(value) else try self.readContentString(value),
+                            .tools => try self.readToolList(value),
+                            .decimal_policy => try self.readSpecDecimal(&value.value),
+                        }
+                    },
+                }
+            }
+        }
+
+        fn readSpecDecimal(self: *Parser, value: *Bounded(20)) !void {
+            try self.skipWhitespace();
+            value.len = 0;
+            while (true) {
+                const byte = try self.source.readByte();
+                if (byte < '0' or byte > '9') {
+                    self.source.start -= 1;
+                    break;
+                }
+                if (value.len == value.bytes.len) return error.ValueTooLong;
+                value.bytes[value.len] = byte;
+                value.len += 1;
+            }
+            if (value.len == 0 or (value.len > 1 and value.bytes[0] == '0')) return error.InvalidJsonShape;
+        }
+
+        fn readToolList(self: *Parser, tools: *ToolsField) !void {
+            try self.expectByte('[');
+            tools.count = 0;
+            tools.names.len = 0;
+            if (!try self.consumeIf(']')) while (true) {
+                var name: Bounded(max_tool_name_bytes) = .{};
+                self.readSmallString(&name) catch |err| return if (err == error.ValueTooLong) error.InvalidToolName else err;
+                try tools.insert(name.slice());
+                if (try self.consumeIf(']')) break;
+                try self.expectByte(',');
             };
         }
 
         fn validateCreatingConfiguration(configuration: *const Configuration) !void {
-            inline for (session_settings.entries) |entry| {
-                const name = entry.field;
-                const state = @field(configuration, name).state;
-                switch (entry.create) {
-                    .optional => {},
-                    .must_value => if (state != .value) return error.MissingField,
-                    .must_state => if (state == .omitted) return error.MissingField,
-                }
-            }
-            var tools = configuration.tools.iterator();
-            while (tools.next()) |tool| {
-                if (std.mem.eql(u8, tool, "bash") and configuration.workspace.state != .value)
-                    return error.MissingField;
-            }
+            if (missingCreatingSetting(configuration, false) != null) return error.MissingField;
         }
 
         fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
@@ -1105,7 +1155,7 @@ fn ParserOf(comptime Custody: type) type {
                 },
                 .configuration => {
                     out.configuration = .{ .workspace = .{ .value = .{ .len = 0 } } };
-                    try self.parseConfiguration(false, &out.configuration.?);
+                    try self.parseConfiguration(&out.configuration.?);
                 },
                 .text => try self.readContent(&out.text, false, true),
                 .require_model => out.require_model = try self.readBoolean(),
@@ -1416,10 +1466,6 @@ fn ParserOf(comptime Custody: type) type {
             if (out.position == 0 or out.position > std.math.maxInt(i64) or out.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
         }
 
-        fn readOptionalSmall(self: *Parser, comptime capacity: usize, field: *OptionalBounded(capacity)) !void {
-            try self.readOptionalSmallNullable(capacity, field, false);
-        }
-
         /// The members of a `{"state":…,"value":…}` envelope.
         const Envelope = enum { state, value };
 
@@ -1439,18 +1485,6 @@ fn ParserOf(comptime Custody: type) type {
             return result;
         }
 
-        fn readOptionalSmallNullable(self: *Parser, comptime capacity: usize, field: *OptionalBounded(capacity), allow_null: bool) !void {
-            try self.expectByte('{');
-            var members: Members = .{};
-            var seen: std.enums.EnumSet(Envelope) = .empty;
-            var state: Bounded(16) = .{};
-            while (try self.nextField(Envelope, &members, &seen)) |member| switch (member) {
-                .state => try self.readSmallString(&state),
-                .value => try self.readSmallString(&field.value),
-            };
-            field.state = try envelopeState(&state, seen, allow_null);
-        }
-
         fn readContent(self: *Parser, field: *ContentField, allow_null: bool, allow_value: bool) !void {
             try self.expectByte('{');
             var members: Members = .{};
@@ -1464,30 +1498,6 @@ fn ParserOf(comptime Custody: type) type {
                 },
             };
             field.state = try envelopeState(&state, seen, allow_null);
-        }
-
-        fn readTools(self: *Parser, tools: *ToolsField, allow_null: bool) !void {
-            try self.expectByte('{');
-            var members: Members = .{};
-            var seen: std.enums.EnumSet(Envelope) = .empty;
-            var state: Bounded(16) = .{};
-            while (try self.nextField(Envelope, &members, &seen)) |member| switch (member) {
-                .state => try self.readSmallString(&state),
-                .value => {
-                    try self.expectByte('[');
-                    tools.* = .{};
-                    if (!try self.consumeIf(']')) while (true) {
-                        var name: Bounded(max_tool_name_bytes) = .{};
-                        self.readSmallString(&name) catch |err| return if (err == error.ValueTooLong) error.InvalidToolName else err;
-                        if (!validToolName(name.slice())) return error.InvalidToolName;
-                        // The Host offers the built-ins; MCP servers' tools join them later.
-                        try tools.append(name.slice());
-                        if (try self.consumeIf(']')) break;
-                        try self.expectByte(',');
-                    };
-                },
-            };
-            tools.state = try envelopeState(&state, seen, allow_null);
         }
 
         /// Reads a literal null, or leaves the input where it was.
@@ -1530,6 +1540,11 @@ fn ParserOf(comptime Custody: type) type {
                             continue;
                         }
                     },
+                    '0'...'9' => {
+                        self.source.start -= 1;
+                        var digits: Bounded(20) = .{};
+                        try self.readSpecDecimal(&digits);
+                    },
                     else => return error.InvalidJsonShape,
                 }
                 // A value ended: close each container it finished, then step to
@@ -1565,6 +1580,20 @@ fn ParserOf(comptime Custody: type) type {
             if (!std.unicode.utf8ValidateSlice(destination.slice())) return error.InvalidUtf8;
         }
 
+        /// Schema custody is out of band. Only the ingress/DOM adapter writes
+        /// this array marker; a wire schema is always an object, never an array.
+        fn readSchema(self: *Parser, field: *ContentField) !void {
+            self.content_ordinal += 1;
+            if (self.content_ordinal > self.captured.len) return error.NeedSchema;
+            try self.expectByte('[');
+            try self.expectByte(']');
+            const original = self.captured[self.content_ordinal - 1];
+            field.length = original.length;
+            field.digest = original.digest;
+            field.capture = self.content_ordinal;
+            field.borrowed = original.borrowed;
+        }
+
         /// Reads the empty placeholder the Ingress left for a captured string.
         fn readContentString(self: *Parser, field: *ContentField) !void {
             self.content_ordinal += 1;
@@ -1576,6 +1605,7 @@ fn ParserOf(comptime Custody: type) type {
             field.length = original.length;
             field.digest = original.digest;
             field.capture = self.content_ordinal;
+            field.borrowed = original.borrowed;
         }
 
         fn readJsonString(self: *Parser, sink: anytype) !void {
@@ -1630,6 +1660,72 @@ fn ParserOf(comptime Custody: type) type {
             }
         }
     };
+}
+
+/// Creation completeness belongs to the same table for every spec door.
+/// A child alone inherits its Workspace rather than naming one.
+pub fn missingCreatingSetting(configuration: anytype, inherits_parent: bool) ?[]const u8 {
+    inline for (session_settings.entries) |entry| {
+        const name = entry.field;
+        const state = @field(configuration, name).state;
+        switch (entry.create) {
+            .optional => {},
+            .must_value => if (state != .value) return entry.spec,
+            .must_state => if (state == .omitted) return entry.spec,
+        }
+    }
+    if (!inherits_parent) {
+        var tools = configuration.tools.iterator();
+        while (tools.next()) |tool| {
+            if (std.mem.eql(u8, tool, "bash") and configuration.workspace.state != .value) return "workspace";
+        }
+    }
+    return null;
+}
+
+/// Adapter for bounded, already-decoded model calls and launch presets. It
+/// borrows content from their arena, substitutes the same empty placeholders
+/// Ingress uses, and calls the wire parser. No content body is copied into the
+/// metadata JSON, and no path-sized spec string is returned by value.
+pub fn parseAgentSpec(comptime Custody: type, arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *Requests(Custody).Configuration) error{OutOfMemory}!?[]const u8 {
+    const ContentField = Requests(Custody).ContentField;
+    var captured: [spec_content_count]ContentField = @splat(.{});
+    var content_count: usize = 0;
+    var metadata: std.json.ObjectMap = .empty;
+    var fields = spec.iterator();
+    while (fields.next()) |field| {
+        var value = field.value_ptr.*;
+        inline for (session_settings.entries) |entry| {
+            if (entry.kind == .content and std.mem.eql(u8, entry.spec, field.key_ptr.*)) {
+                if (entry.json_object and value != .object and value != .null)
+                    return try std.fmt.allocPrint(arena, "spec.{s} must be a JSON object or null", .{entry.spec});
+                const content: ?[]const u8 = if (entry.json_object and value == .object)
+                    try std.json.Stringify.valueAlloc(arena, value, .{})
+                else if (!entry.json_object and value == .string)
+                    value.string
+                else
+                    null;
+                if (content) |bytes| {
+                    if (!std.unicode.utf8ValidateSlice(bytes)) return try std.fmt.allocPrint(arena, "spec.{s} must be UTF-8 text", .{entry.spec});
+                    captured[content_count] = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = contentDigest(bytes) };
+                    content_count += 1;
+                    value = if (entry.json_object) .{ .array = std.json.Array.init(arena) } else .{ .string = "" };
+                }
+            }
+        }
+        try metadata.put(arena, field.key_ptr.*, value);
+    }
+    const bytes = try std.json.Stringify.valueAlloc(arena, std.json.Value{ .object = metadata }, .{});
+    var source: MetadataSource = .{ .input = bytes };
+    var parser: Requests(Custody).Parser = .{ .source = &source, .captured = captured[0..content_count] };
+    configuration.* = .{ .workspace = .{ .value = .{ .len = 0 } } };
+    parser.parseConfiguration(configuration) catch |err| {
+        if (parser.spec_field.eql("tools") or parser.spec_field.eql("loadedTools"))
+            return try std.fmt.allocPrint(arena, "spec.{s} must be a list of distinct tool names", .{parser.spec_field.slice()});
+        return try std.fmt.allocPrint(arena, "spec.{s}: invalid agent spec ({s})", .{ parser.spec_field.slice(), @errorName(err) });
+    };
+    std.debug.assert(source.atEnd());
+    return null;
 }
 
 pub const Utf8State = @import("utf8_validation.zig").State;
@@ -2248,7 +2344,13 @@ pub const max_host_info_response_bytes: usize = host_info_reply.max_bytes;
 pub const model_list_reply = struct {
     pub const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"model_list\",\"providers\":";
     pub const tail = "}";
-    pub const max_bytes = head.len + model_list.max_providers_bytes + tail.len;
+    /// Offline fixtures use the shipped bound. A Host sizes from the selected
+    /// generation: saved catalogs are not bounded by the snapshot's ID count.
+    pub const max_bytes = maxBytes(@import("model_catalog.zig").shipped);
+
+    pub fn maxBytes(facts: []const @import("model_catalog.zig").Entry) usize {
+        return head.len + model_list.providersBytes(facts) + tail.len;
+    }
 };
 pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 /// Hole: whether new Turns are now paused.
@@ -2512,37 +2614,37 @@ test "an activity page names its kinds once each, in order, and a limit from 1 t
 test "configuration token heuristics and effort parse sparsely and bind idempotency" {
     const longest_label: [max_label_bytes]u8 = @splat('x');
     const overlong_label: [max_label_bytes + 1]u8 = @splat('x');
-    const cases = [_]struct { suffix: []const u8, trigger: ?[]const u8 = null, reservation: ?[]const u8 = null, label: ?[]const u8 = null, failure: ?anyerror = null }{
-        .{ .suffix = "" },
-        .{ .suffix = ",\"compaction_trigger\":{\"state\":\"omitted\"},\"output_reservation\":{\"state\":\"omitted\"}" },
-        .{ .suffix = ",\"compaction_trigger\":{\"state\":\"value\",\"value\":\"100000\"}", .trigger = "100000" },
-        .{ .suffix = ",\"output_reservation\":{\"state\":\"value\",\"value\":\"16384\"}", .reservation = "16384" },
-        // Numeric meaning belongs to atomic Store admission, not wire parsing.
-        .{ .suffix = ",\"compaction_trigger\":{\"state\":\"value\",\"value\":\"0\"}", .trigger = "0" },
-        .{ .suffix = ",\"output_reservation\":{\"state\":\"value\",\"value\":\"9223372036854775808\"}", .reservation = "9223372036854775808" },
-        .{ .suffix = ",\"compaction_trigger\":{\"state\":\"null\"}" },
-        .{ .suffix = ",\"output_reservation\":{\"state\":\"null\"}" },
-        .{ .suffix = ",\"compaction_trigger\":{\"state\":\"value\",\"value\":100000}", .failure = error.InvalidJsonShape },
-        .{ .suffix = ",\"compaction_trigger\":{\"state\":\"value\",\"value\":\"123456789012345678901\"}", .failure = error.ValueTooLong },
-        .{ .suffix = ",\"context_capacity\":{\"state\":\"omitted\"}", .failure = error.UnexpectedField },
-        .{ .suffix = ",\"output_reservation\":{\"state\":\"omitted\"},\"output_reservation\":{\"state\":\"omitted\"}", .failure = error.UnexpectedField },
-        .{ .suffix = ",\"reasoning_effort\":{\"state\":\"value\",\"value\":\"high\"}" },
-        .{ .suffix = ",\"reasoning_effort\":{\"state\":\"value\",\"value\":\"none\"}" },
-        .{ .suffix = ",\"reasoning_effort\":{\"state\":\"null\"}" },
-        .{ .suffix = ",\"reasoning_effort\":{\"state\":\"value\",\"value\":\"ultra\"}" },
-        .{ .suffix = ",\"reasoning_effort\":{\"state\":\"null\"},\"reasoning_effort\":{\"state\":\"null\"}", .failure = error.UnexpectedField },
-        .{ .suffix = ",\"label\":{\"state\":\"value\",\"value\":\"Review PR 412\"}", .label = "Review PR 412" },
-        .{ .suffix = ",\"label\":{\"state\":\"null\"}" },
-        .{ .suffix = ",\"label\":{\"state\":\"value\",\"value\":\"" ++ longest_label ++ "\"}", .label = &longest_label },
-        .{ .suffix = ",\"label\":{\"state\":\"value\",\"value\":\"" ++ overlong_label ++ "\"}", .failure = error.ValueTooLong },
-        .{ .suffix = ",\"label\":{\"state\":\"null\"},\"label\":{\"state\":\"null\"}", .failure = error.UnexpectedField },
+    const cases = [_]struct { fields: []const u8, field: ?[]const u8 = null, value: ?[]const u8 = null, failure: ?anyerror = null }{
+        .{ .fields = "" },
+        .{ .fields = "\"compactAt\":100000", .field = "compaction_trigger", .value = "100000" },
+        .{ .fields = "\"outputReservation\":16384", .field = "output_reservation", .value = "16384" },
+        // Numeric meaning belongs to atomic Store admission, not parsing.
+        .{ .fields = "\"compactAt\":0", .field = "compaction_trigger", .value = "0" },
+        .{ .fields = "\"outputReservation\":9223372036854775808", .field = "output_reservation", .value = "9223372036854775808" },
+        .{ .fields = "\"compactAt\":null", .field = "compaction_trigger" },
+        .{ .fields = "\"outputReservation\":null", .field = "output_reservation" },
+        .{ .fields = "\"compactAt\":\"100000\"", .failure = error.InvalidJsonShape },
+        .{ .fields = "\"compactAt\":123456789012345678901", .failure = error.ValueTooLong },
+        .{ .fields = "\"compactAt\":01", .failure = error.InvalidJsonShape },
+        .{ .fields = "\"compactAt\":1.5", .failure = error.InvalidJsonShape },
+        .{ .fields = "\"compactAt\":1e3", .failure = error.InvalidJsonShape },
+        .{ .fields = "\"context_capacity\":null", .failure = error.UnexpectedField },
+        .{ .fields = "\"outputReservation\":null,\"outputReservation\":null", .failure = error.UnexpectedField },
+        .{ .fields = "\"effort\":\"high\"", .field = "reasoning_effort", .value = "high" },
+        .{ .fields = "\"effort\":\"none\"", .field = "reasoning_effort", .value = "none" },
+        .{ .fields = "\"effort\":null", .field = "reasoning_effort" },
+        .{ .fields = "\"effort\":\"ultra\"", .field = "reasoning_effort", .value = "ultra" },
+        .{ .fields = "\"effort\":null,\"effort\":null", .failure = error.UnexpectedField },
+        .{ .fields = "\"label\":\"Review PR 412\"", .field = "label", .value = "Review PR 412" },
+        .{ .fields = "\"label\":null", .field = "label" },
+        .{ .fields = "\"label\":\"" ++ longest_label ++ "\"", .field = "label", .value = &longest_label },
+        .{ .fields = "\"label\":\"" ++ overlong_label ++ "\"", .failure = error.ValueTooLong },
+        .{ .fields = "\"label\":null,\"label\":null", .failure = error.UnexpectedField },
     };
     var omitted_digest: [32]u8 = undefined;
     for (cases, 0..) |case, index| {
         var buffer: [2048]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
-            "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
-            "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"omitted\"}},\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}{s}}}}}", .{case.suffix});
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{{s}}}}}", .{case.fields});
         var source: MetadataSource = .{ .input = json };
         var parser = Tested.Parser{ .source = &source };
         if (case.failure) |failure| {
@@ -2550,39 +2652,29 @@ test "configuration token heuristics and effort parse sparsely and bind idempote
             continue;
         }
         const command = (try parseForTest(&parser)).configure;
-        if (case.trigger) |value| try std.testing.expectEqualStrings(value, command.configuration.compaction_trigger.value.slice());
-        if (case.reservation) |value| try std.testing.expectEqualStrings(value, command.configuration.output_reservation.value.slice());
-        if (case.label) |value| try std.testing.expectEqualStrings(value, command.configuration.label.value.slice());
-        if (std.mem.indexOf(u8, case.suffix, "\"state\":\"null\"") != null) {
-            const state = if (std.mem.indexOf(u8, case.suffix, "compaction_trigger") != null)
-                command.configuration.compaction_trigger.state
-            else if (std.mem.indexOf(u8, case.suffix, "reasoning_effort") != null)
-                command.configuration.reasoning_effort.state
-            else if (std.mem.indexOf(u8, case.suffix, "label") != null)
-                command.configuration.label.state
-            else
-                command.configuration.output_reservation.state;
-            try std.testing.expectEqual(FieldState.explicit_null, state);
+        inline for (.{ "compaction_trigger", "output_reservation", "reasoning_effort", "label" }) |name| {
+            if (case.field != null and std.mem.eql(u8, case.field.?, name)) {
+                const field = @field(command.configuration, name);
+                if (case.value) |value| try std.testing.expectEqualStrings(value, field.value.slice()) else try std.testing.expectEqual(FieldState.explicit_null, field.state);
+            }
         }
         const digest = command.semanticDigest();
-        if (index == 0) omitted_digest = digest else if (index == 1) {
-            try std.testing.expectEqualSlices(u8, &omitted_digest, &digest);
-        } else try std.testing.expect(!std.mem.eql(u8, &omitted_digest, &digest));
+        if (index == 0) omitted_digest = digest else try std.testing.expect(!std.mem.eql(u8, &omitted_digest, &digest));
     }
 }
 
-test "configuration provider envelope preserves exact spelling and omission" {
+test "configuration provider value preserves exact spelling and omission" {
     const cases = [_]struct { field: []const u8, expected: ?[]const u8, suffix: []const u8 = "", failure: ?anyerror = null }{
-        .{ .field = "{\"state\":\"omitted\"}", .expected = null },
-        .{ .field = "{\"state\":\"value\",\"value\":\"codex\"}", .expected = "codex" },
-        .{ .field = "{\"state\":\"value\",\"value\":\"c\\u006fdex\"}", .expected = "codex" },
-        .{ .field = "{\"state\":\"value\",\"value\":\"codex\"}", .expected = "codex", .suffix = ",\"require_model\":true" },
+        .{ .field = "", .expected = null },
+        .{ .field = "\"codex\"", .expected = "codex" },
+        .{ .field = "\"c\\u006fdex\"", .expected = "codex" },
+        .{ .field = "\"codex\"", .expected = "codex", .suffix = ",\"require_model\":true" },
         // Admission, not parsing, rejects bounded unsupported spellings.
-        .{ .field = "{\"state\":\"value\",\"value\":\"Codex\"}", .expected = "Codex" },
-        .{ .field = "{\"state\":\"value\",\"value\":\"other\"}", .expected = "other" },
-        .{ .field = "{\"state\":\"value\",\"value\":\"anthropic\"}", .expected = "anthropic" },
-        .{ .field = "{\"state\":\"value\",\"value\":\"12345678901234567\"}", .expected = null, .failure = error.ValueTooLong },
-        .{ .field = "{\"state\":\"null\"}", .expected = null, .failure = error.InvalidFieldState },
+        .{ .field = "\"Codex\"", .expected = "Codex" },
+        .{ .field = "\"other\"", .expected = "other" },
+        .{ .field = "\"anthropic\"", .expected = "anthropic" },
+        .{ .field = "\"12345678901234567\"", .expected = null, .failure = error.ValueTooLong },
+        .{ .field = "null", .expected = null, .failure = error.InvalidFieldState },
     };
     var omitted_digest: [32]u8 = undefined;
     var codex_digest: [32]u8 = undefined;
@@ -2590,11 +2682,8 @@ test "configuration provider envelope preserves exact spelling and omission" {
         var buffer: [1024]u8 = undefined;
         const json = try std.fmt.bufPrint(
             &buffer,
-            "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
-                "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{s},\"model\":{{\"state\":\"omitted\"}}," ++
-                "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"omitted\"}}," ++
-                "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}{s}}}",
-            .{ case.field, case.suffix },
+            "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{{s}{s}}}{s}}}",
+            .{ if (case.field.len == 0) "" else "\"provider\":", case.field, case.suffix },
         );
         var source: MetadataSource = .{ .input = json };
         var parser = Tested.Parser{ .source = &source };
@@ -2633,18 +2722,14 @@ test "configuration tools and loaded tools are tool names, sorted, each once" {
         .{ .value = "[\"bash.v2\"]", .failure = error.InvalidToolName },
         .{ .value = "[\"" ++ @as([65]u8, @splat('x')) ++ "\"]", .failure = error.InvalidToolName },
         .{ .value = "[\"bash\",\"bash\"]", .failure = error.InvalidJsonShape },
-        .{ .value = "[\"web_search\",\"bash\"]", .failure = error.InvalidJsonShape },
+        .{ .value = "[\"web_search\",\"bash\"]", .names = "bash web_search", .count = 2 },
         .{ .value = "[\"bash\",\"web_search\",\"bash\"]", .failure = error.InvalidJsonShape },
     };
     inline for (.{ "tools", "loaded_tools" }) |field_name| {
         for (cases) |case| {
             var buffer: [1024]u8 = undefined;
-            const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
-                "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
-                "\"instructions\":{{\"state\":\"omitted\"}}," ++
-                (if (comptime std.mem.eql(u8, field_name, "loaded_tools")) "\"tools\":{{\"state\":\"omitted\"}}," else "") ++
-                "\"" ++ field_name ++ "\":{{\"state\":\"value\",\"value\":{s}}}," ++
-                "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}}}", .{case.value});
+            const spec_name = if (comptime std.mem.eql(u8, field_name, "loaded_tools")) "loadedTools" else "tools";
+            const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{\"" ++ spec_name ++ "\":{s}}}}}", .{case.value});
             var source: MetadataSource = .{ .input = json };
             var parser = Tested.Parser{ .source = &source };
             if (case.failure) |failure| {
@@ -2879,11 +2964,11 @@ test "SessionRow borrowed fields preserve offered tool names" {
 
 test "protocol creation requires five explicit settings independent of field order" {
     const fields = [_][]const u8{
-        "\"model\":{\"state\":\"value\",\"value\":\"model\"}",
-        "\"compaction_trigger\":{\"state\":\"value\",\"value\":\"1000\"}",
-        "\"tools\":{\"state\":\"value\",\"value\":[]}",
-        "\"permission_mode\":{\"state\":\"value\",\"value\":\"default\"}",
-        "\"reasoning_effort\":{\"state\":\"null\"}",
+        "\"model\":\"model\"",
+        "\"compactAt\":1000",
+        "\"tools\":[]",
+        "\"permissionMode\":\"default\"",
+        "\"effort\":null",
     };
     inline for (.{ "configure", "message" }) |kind| {
         for (0..fields.len + 1) |skip| {
@@ -2961,11 +3046,10 @@ test "the request parser refuses what each command's grammar forbids" {
         .{ .json = v ++ "\"store\":\"s\"}", .failure = error.MissingField },
         .{ .json = v ++ "\"kind\":\"host_info\",\"store\":\"s\"}", .failure = error.RouteKindMismatch, .route = .host_stop },
         .{ .json = v ++ "\"kind\":\"host_info\",\"store\":\"s\"}", .route = .host_info },
-        // Content strings are counted before the kind is known; a third has
-        // no capture to go to.
-        .{ .json = "{\"text\":" ++ value ++ ",\"configuration\":{\"instructions\":" ++ value ++ ",\"output_schema\":" ++ value ++ "}," ++ "\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\"}", .failure = error.UnexpectedField },
-        .{ .json = configure ++ "\"instructions\":" ++ value ++ ",\"output_schema\":" ++ value ++ "}}" },
-        .{ .json = configure ++ "\"instructions\":" ++ value ++ ",\"instructions\":" ++ value ++ "}}", .failure = error.UnexpectedField },
+        // Content can arrive before the kind, but configure cannot carry text.
+        .{ .json = "{\"text\":" ++ value ++ ",\"configuration\":{\"instructions\":\"\"" ++ ",\"outputSchema\":[]" ++ "}," ++ "\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\"}", .failure = error.UnexpectedField },
+        .{ .json = configure ++ "\"instructions\":\"\"" ++ ",\"outputSchema\":[]" ++ "}}" },
+        .{ .json = configure ++ "\"instructions\":\"\"" ++ ",\"instructions\":\"\"" ++ "}}", .failure = error.UnexpectedField },
         // A Message to an existing Session carries no configuration and no
         // capability condition.
         .{ .json = message ++ "\"text\":" ++ value ++ "}" },
@@ -2991,16 +3075,16 @@ test "the request parser refuses what each command's grammar forbids" {
         .{ .json = content ++ "\"position\":\"0\",\"ordinal\":\"0\"}", .failure = error.InvalidCursor },
         .{ .json = content ++ "\"position\":" ++ i64_past ++ ",\"ordinal\":\"0\"}", .failure = error.InvalidCursor },
         .{ .json = content ++ "\"position\":\"1\",\"ordinal\":" ++ i64_past ++ "}", .failure = error.InvalidCursor },
-        // An envelope holds a value exactly when its state says so.
-        .{ .json = configure ++ "\"model\":{\"state\":\"value\",\"value\":\"m\"}}}" },
-        .{ .json = configure ++ "\"model\":{\"state\":\"value\"}}}", .failure = error.InvalidFieldState },
-        .{ .json = configure ++ "\"model\":{\"state\":\"omitted\",\"value\":\"m\"}}}", .failure = error.InvalidFieldState },
-        .{ .json = configure ++ "\"model\":{\"value\":\"m\"}}}", .failure = error.MissingField },
+        // Legacy wrappers are refused, not silently treated as omitted.
+        .{ .json = configure ++ "\"model\":\"m\"}}" },
+        .{ .json = configure ++ "\"model\":{\"state\":\"value\"}}}", .failure = error.InvalidJsonShape },
+        .{ .json = configure ++ "\"model\":{\"state\":\"omitted\",\"value\":\"m\"}}}", .failure = error.InvalidJsonShape },
+        .{ .json = configure ++ "\"model\":{\"value\":\"m\"}}}", .failure = error.InvalidJsonShape },
     };
     for (cases, 0..) |case, index| {
         errdefer std.debug.print("case {d}: {s}\n", .{ index, case.json });
         var source: MetadataSource = .{ .input = case.json };
-        var parser: Tested.Parser = .{ .source = &source, .expected_kind = case.route, .captured = &.{ .{}, .{} } };
+        var parser: Tested.Parser = .{ .source = &source, .expected_kind = case.route, .captured = &.{ .{}, .{}, .{} } };
         if (case.failure) |failure| try std.testing.expectError(failure, parseForTest(&parser)) else _ = try parseForTest(&parser);
     }
 }
@@ -3009,7 +3093,7 @@ test "presets allow partial creating configure in either field order" {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",";
     for ([_][]const u8{
         head ++ "\"configuration\":{},\"preset\":\"review\"}",
-        head ++ "\"preset\":\"review\",\"configuration\":{\"reasoning_effort\":{\"state\":\"null\"}}}",
+        head ++ "\"preset\":\"review\",\"configuration\":{\"effort\":null}}",
         head ++ "\"preset\":\"review\",\"configuration\":{},\"require_model\":true}",
     }, 0..) |json, index| {
         var source: MetadataSource = .{ .input = json };
@@ -3033,7 +3117,7 @@ test "Session reader since is optional nullable and rejects invalid tokens" {
         .{ .suffix = ",\"since\":\"abababababababababababababababab.42.k7m2qx\"}", .generation = 42 },
         .{ .suffix = ",\"since\":\"abababababababababababababababab.042.k7m2qx\"}", .failure = error.InvalidSince },
         .{ .suffix = ",\"since\":\"abababababababababababababababab.42\"}", .failure = error.InvalidSince },
-        .{ .suffix = ",\"since\":17}", .failure = error.InvalidJsonShape },
+        .{ .suffix = ",\"since\":17}", .failure = error.InvalidSince },
     };
     for (heads) |head| for (cases) |case| {
         var input: [512]u8 = undefined;
@@ -3194,31 +3278,32 @@ test "Session settings configure digest golden" {
 
 // Expectations are the pre-table wire grammar, not facts read from the table.
 test "Session settings preserve omitted and nullable wire states for every field" {
+    // Independent expected field names and nullability, not read from the table.
     inline for (.{
-        .{ "workspace", false },
-        .{ "provider", false },
-        .{ "model", false },
-        .{ "instructions", false },
-        .{ "tools", false },
-        .{ "loaded_tools", false },
-        .{ "permission_mode", false },
-        .{ "output_schema", true },
-        .{ "compaction_trigger", true },
-        .{ "output_reservation", true },
-        .{ "reasoning_effort", true },
-        .{ "label", true },
+        .{ "workspace", "workspace", false },
+        .{ "provider", "provider", false },
+        .{ "model", "model", false },
+        .{ "instructions", "instructions", false },
+        .{ "tools", "tools", false },
+        .{ "loaded_tools", "loadedTools", false },
+        .{ "permission_mode", "permissionMode", false },
+        .{ "output_schema", "outputSchema", true },
+        .{ "compaction_trigger", "compactAt", true },
+        .{ "output_reservation", "outputReservation", true },
+        .{ "reasoning_effort", "effort", true },
+        .{ "label", "label", true },
     }) |case| {
-        inline for (.{ "omitted", "null" }) |state| {
-            const json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"configuration\":{\"" ++ case[0] ++ "\":{\"state\":\"" ++ state ++ "\"}}}";
+        inline for (.{ false, true }) |is_null| {
+            const member = if (is_null) "\"" ++ case[1] ++ "\":null" else "";
+            const json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"configuration\":{" ++ member ++ "}}";
             var source: MetadataSource = .{ .input = json };
             var parser: Tested.Parser = .{ .source = &source };
-            if (comptime std.mem.eql(u8, state, "null") and !case[1]) {
+            if (is_null and !case[2]) {
                 try std.testing.expectError(error.InvalidFieldState, parseForTest(&parser));
             } else {
                 const request = try parseForTest(&parser);
-                const expected: FieldState = if (comptime std.mem.eql(u8, state, "null")) .explicit_null else .omitted;
                 const name = case[0];
-                try std.testing.expectEqual(expected, @field(request.configure.configuration, name).state);
+                try std.testing.expectEqual(if (is_null) FieldState.explicit_null else FieldState.omitted, @field(request.configure.configuration, name).state);
             }
         }
     }

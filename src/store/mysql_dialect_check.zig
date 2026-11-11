@@ -583,9 +583,7 @@ test "schema 55 migrates recovery index and wire 8 together to the current schem
         if (step.from < 55) try load(migrated_database, schema.mysqlMigration(step.from), false);
     }
     try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','8'),('format','55')", false);
-    inline for (schema.migrations) |step| {
-        if (step.from >= 55) try load(migrated_database, schema.mysqlMigration(step.from), false);
-    }
+    try load(migrated_database, schema.mysqlMigrationFrom(55).?, false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
@@ -637,9 +635,7 @@ test "skills schema 56 wire 9 MySQL migration preserves ordinary rows and reache
     defer before.deinit();
     try writeResult(ordinary_rows, &before.writer);
     try std.testing.expect(before.written().len > 100);
-    inline for (schema.migrations) |step| {
-        if (step.from >= 56) try load(migrated_database, schema.mysqlMigration(step.from), false);
-    }
+    try load(migrated_database, schema.mysqlMigrationFrom(56).?, false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
@@ -707,9 +703,7 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     defer before.deinit();
     try writeResult(ordinary_rows, &before.writer);
     try std.testing.expect(before.written().len > 100);
-    inline for (schema.migrations) |step| {
-        if (step.from >= 58) try load(migrated_database, schema.mysqlMigration(step.from), false);
-    }
+    try load(migrated_database, schema.mysqlMigrationFrom(58).?, false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);

@@ -211,7 +211,9 @@ pub fn deeperFloor(a: anytype, operation: u64) !?Room {
     const compatible = if (facts.base_model) |*model| output_item.Kind.compaction.replayableTo(model.slice(), facts.model.slice(), .selected_base) else true;
     const base_floor: u64 = if (compatible) (if (facts.base_floor) |floor| floor.get() else 0) else 0;
     const previous: u64 = if (facts.history_floor) |floor| floor.get() else base_floor;
-    var walk: Walk = .init(model_capability.contextWindow(facts.model.slice()), facts.output_reservation, facts.admission_position.get());
+    // Settlement and admission must agree about an already frozen Operation's
+    // escalation. A refresh between them must not change its historical walk.
+    var walk: Walk = .init(model_capability.contextWindow(@import("../../model_catalog.zig").shipped, facts.model.slice()), facts.output_reservation, facts.admission_position.get());
     while (!walk.done()) {
         walk.page_rows = 0;
         a.readEach(units, .{

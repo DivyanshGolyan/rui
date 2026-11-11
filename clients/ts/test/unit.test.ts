@@ -45,14 +45,15 @@ test("launch frame carries the MCP servers, an empty list when none are given", 
 	assert.deepEqual(frame({ tools: [{ ...tools[0], extra: true }, tools[1]] }).mcpServers, tools);
 });
 
-test("launch presets preserve creation fields and decode output schema JSON", () => {
-	const spec = { model: "custom", effort: null, compactAt: 1000, tools: ["bash"] as const, permissionMode: "ask" as const, provider: "openai" as const, workspace: "/w", outputSchema: '{"type":"object"}' };
+test("launch presets preserve creation fields and encode the same plain spec", () => {
+	const spec = { model: "custom", effort: null, compactAt: 1000, tools: ["bash"] as const, permissionMode: "ask" as const, provider: "openai" as const, workspace: "/w", outputSchema: { type: "object" } };
 	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" }, presets: { review: spec } };
 	const frame = launchFor(options, "/r").frame;
-	assert.deepEqual(frame.presets, { review: { ...spec, outputSchema: { type: "object" } } });
-	for (const [text, decoded] of [["[]", []], ["false", false], ["not JSON", "not JSON"]] as const) {
+	assert.deepEqual(frame.presets, { review: spec });
+	for (const text of ["[]", "false", "not JSON"]) {
+		// @ts-expect-error The runtime Host also refuses non-object schemas.
 		const invalid = launchFor({ ...options, presets: { review: { ...spec, outputSchema: text } } }, "/r").frame;
-		assert.deepEqual(JSON.parse(JSON.stringify(invalid)).presets.review.outputSchema, decoded);
+		assert.deepEqual(JSON.parse(JSON.stringify(invalid)).presets.review.outputSchema, text);
 	}
 });
 
@@ -248,4 +249,20 @@ test("approval and ending feed entries expose the child sessionId", async () => 
 		assert.equal(sessionId, "ch1ld1");
 		assert.equal("session" in entry, false);
 	}
+});
+
+test("presets and configure encode one spec including loaded tools and output reservation", async () => {
+	const spec = { model: "custom", effort: null, compactAt: 1000, tools: ["web_search", "find_tools"], loadedTools: ["find_tools"], outputReservation: 42, permissionMode: "ask" as const, instructions: "rules", outputSchema: { type: "object" } };
+	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" }, presets: { review: spec } };
+	let configuration: unknown;
+	const sessions = new Sessions({ async exchange(_path, build) {
+		configuration = JSON.parse(build("/s")).configuration;
+		return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "k7m2qx" } }));
+	} });
+	await sessions.create(spec, { idempotencyKey: "one-spec" });
+	const preset = JSON.parse(JSON.stringify(launchFor(options, "/r").frame)).presets.review;
+	assert.deepEqual(configuration, preset);
+	assert.deepEqual(preset.loadedTools, ["find_tools"]);
+	assert.equal(preset.outputReservation, 42);
+	assert.deepEqual(preset.outputSchema, { type: "object" });
 });
