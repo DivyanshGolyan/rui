@@ -2661,7 +2661,7 @@ test "request preparation freezes settings at admission" {
     const binding = try admitted.permit.consume();
     // A legal observable change after admission but before preparation
     // first reads settings: the admitted view must keep the original
-    // Bash/Edit catalog, not the current empty tool list.
+    // Bash/Edit tool set, not the current empty tool list.
     {
         var update: wire_request.ConfigureCommand = .{};
         try update.key.set("prep-settings-tools");

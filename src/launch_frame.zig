@@ -13,12 +13,12 @@ const platform = @import("platform.zig");
 pub const MysqlUrl = @import("mysql_url.zig");
 const http1 = @import("http1/request.zig");
 
-test "launch presets resolve MCP tools through the same catalog as configure" {
+test "launch presets resolve MCP tools through the same tool set as configure" {
     const store_testing = @import("store.zig").testing;
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const launch_frame = @import("launch_frame.zig");
-            const tool_catalog = @import("tools.zig");
+            const tool_defs = @import("tools.zig");
             const store = @import("store.zig");
             var frame: launch_frame.Frame = .{};
             defer frame.deinit();
@@ -26,12 +26,12 @@ test "launch presets resolve MCP tools through the same catalog as configure" {
             try launch_frame.parse(std.testing.allocator,
                 \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","mcpServers":[{"name":"pages","url":"http://127.0.0.1:3000/mcp","bearerToken":"t","callTimeoutMs":1000}],"presets":{"reader":{"model":"model-a","effort":null,"compactAt":1000,"tools":["fetch_page"],"permissionMode":"ask"}}}
             , &frame, &refusal);
-            var records = comptime store.testingCatalogRecords(&.{
+            var records = comptime store.testingHostToolRecords(&.{
                 .{ .name = "fetch_page", .owner = .mcp, .server = "pages", .description = "Fetch page", .input_schema = "{\"type\":\"object\"}" },
             });
             var digests: [records.len][32]u8 = undefined;
-            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
-            const offered: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            const offered: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
             var routes = protocol.routesAll(.unserved);
             routes.openai = .endpoint;
             for ([_]bool{ false, true }) |available| {
@@ -40,7 +40,7 @@ test "launch presets resolve MCP tools through the same catalog as configure" {
                 var storage: store.Store = undefined;
                 try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{
                     .served = routes,
-                    .catalog = if (available) &offered else &tool_catalog.built_in,
+                    .host_tool_set = if (available) &offered else &tool_defs.built_in_tool_set,
                 });
                 defer storage.close() catch unreachable;
 
@@ -803,7 +803,7 @@ test "presets in a launch frame are owned until frame deinit" {
     try std.testing.expect(frame.presets_memory == null);
 }
 
-test "presets in a launch frame accept catalog-backed tool names" {
+test "presets in a launch frame accept tool-set-backed names" {
     var frame: Frame = .{};
     defer frame.deinit();
     var refusal: Refusal = undefined;

@@ -32,7 +32,7 @@ const content_domain = @import("domain/content.zig");
 const tool_set_domain = @import("domain/tool_set.zig");
 const model_facts_domain = @import("domain/model_facts.zig");
 const model_catalog = @import("../model_catalog.zig");
-const tool_catalog = @import("../tool_record.zig");
+const tool_record = @import("../tool_record.zig");
 const historical_domain = @import("domain/historical.zig");
 const model_admission_domain = @import("domain/model_admission.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
@@ -46,6 +46,7 @@ const Access = store_access.Access;
 const ReadAccess = reads_domain.ReadAccess;
 const Engine = @import("engine.zig").Engine;
 const Sqlite = @import("engine/Sqlite.zig");
+const Kind = @import("../store_target.zig").Kind;
 const Mysql = @import("engine/Mysql.zig");
 const mysql_connection = @import("wire/mysql_connection.zig");
 const ActionAttemptAdmission = action_domain.ActionAttemptAdmission;
@@ -103,7 +104,7 @@ pub const Store = struct {
     /// the generation the commit advances to.
     touched: change_ring.Touched = .{},
     /// Which Sessions changed at recent generations: Session listing's
-    /// `since` hint, touched only by the Store's holder. Owned: `openWithOptions` maps it
+    /// `since` hint, touched only by the Store's holder. Owned: `openTarget` maps it
     /// and `close` unmaps it.
     changes: *change_ring.Ring,
     /// This opening's identity: a `since` token from any other opening
@@ -193,43 +194,53 @@ pub const Store = struct {
         try self.engine.sqlite.damageOutputBagForTesting(binding.operation_id);
     }
 
-    /// Opens in place: the Host holds exactly one Store, never a copy. It
-    /// runs once per process; noinline keeps its work off the caller's
-    /// frame, which lives as long as the Host.
-    pub noinline fn openWithOptions(
+    /// Opens in final storage. Admission borrows `target` and `selector` only
+    /// for this call; the Store owns its public selector and served routes.
+    /// Startup scratch must not live on the resident Host frame.
+    pub noinline fn openTarget(
         self: *Store,
         io: std.Io,
-        database_path: []const u8,
+        target: Target,
         selector: []const u8,
         options: OpenOptions,
     ) !void {
         errdefer self.* = undefined;
-        const opened = try Sqlite.open(io, database_path, selector, options);
-        errdefer opened.abandon();
+        var opened: Engine = switch (target) {
+            .sqlite => |path| .{ .sqlite = try Sqlite.open(io, path, selector, options) },
+            .mysql => |connection| .{ .mysql = try Mysql.open(io, connection, selector, options) },
+        };
+        // Preserve the admission error. Closing here only releases the partly
+        // opened connection and prepared statements; there is no caller to retry.
+        var opening: *Engine = &opened;
+        errdefer opening.close() catch {};
 
         var stored_selector: Bounded(store_path.max_bytes) = .{};
-        try stored_selector.set(selector);
+        try stored_selector.set(opened.publicSelector(selector));
         const changes = try createRing();
         errdefer destroyRing(changes);
         const ids: *HostValues = &@as(*OutOfLine, @fieldParentPtr("ring", changes)).ids;
         ids.* = .{ .next = undefined };
-        self.* = .{ .io = io, .engine = .{ .sqlite = opened }, .selector = stored_selector, .changes = changes };
-        self.served = options.served;
+        self.* = .{ .io = io, .engine = opened, .selector = stored_selector, .changes = changes, .served = options.served };
+        // Cleanup follows the final engine too: its statement cache is populated
+        // below, after the admitted value has moved to its only stable address.
+        opening = &self.engine;
         self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .closed = batchClosed, .arm = armRerun, .recover = recoverRerun });
-        // The Store is in final storage, so the function may keep its address.
-        try self.engine.sqlite.serve(&self.served);
-        // Tells this opening's `since` tokens from another's. It grants
-        // nothing, so the process CSPRNG serves, and Session IDs keep sole
-        // use of secure draws.
+        try self.engine.serve(&self.served);
+        // This opening's since tokens grant nothing; Session IDs alone use
+        // secure draws. Draw before identity and catalog initialization.
         io.random(&self.instance);
-        errdefer self.engine.sqlite.statements.deinit();
-        try self.engine.sqlite.prepareRollback();
+        try self.engine.prepareRollback();
         try loadIdentities(self, .full);
         self.queue().opened();
-        if (options.catalog) |offered| try self.saveCatalog(offered) else {
+        if (options.host_tool_set) |offered| try self.saveHostToolSet(offered) else {
             const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
-            owned.tools = .{ .catalog = &tool_catalog.built_in, .set_id = 0 };
+            owned.tools = .{ .host_tool_set = &tool_record.built_in_tool_set, .set_id = 0 };
         }
+    }
+
+    /// Compatibility convenience; all initialization belongs to openTarget.
+    pub fn openWithOptions(self: *Store, io: std.Io, database_path: []const u8, selector: []const u8, options: OpenOptions) !void {
+        return self.openTarget(io, .{ .sqlite = database_path }, selector, options);
     }
 
     /// Atomically replaces the saved models.dev generation. Access flushes
@@ -304,116 +315,86 @@ pub const Store = struct {
         return ids.items.toOwnedSlice(allocator);
     }
 
-    /// Opens the network engine in place. Its buffers live out of line;
-    /// SQLite never allocates them. The existing holder remains the sole owner.
-    pub noinline fn openMysql(
-        self: *Store,
-        io: std.Io,
-        connection: mysql_connection.Options,
-        selector: []const u8,
-        options: OpenOptions,
-    ) !void {
-        errdefer self.* = undefined;
-        var opened = try Mysql.open(io, connection, selector, options);
-        errdefer opened.close() catch {};
-        var stored_selector: Bounded(store_path.max_bytes) = .{};
-        try stored_selector.set(selector);
-        const changes = try createRing();
-        errdefer destroyRing(changes);
-        const ids: *HostValues = &@as(*OutOfLine, @fieldParentPtr("ring", changes)).ids;
-        ids.* = .{ .next = undefined };
-        self.* = .{ .io = io, .engine = .{ .mysql = opened }, .selector = stored_selector, .changes = changes };
-        self.served = options.served;
-        self.engine.mysql.state.served = &self.served;
-        if (@import("builtin").is_test) {
-            if (connection.database.len >= self.engine.mysql.state.testing_database.len) return error.MysqlConfigTooLong;
-            @memcpy(self.engine.mysql.state.testing_database[0..connection.database.len], connection.database);
-        }
-        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .closed = batchClosed, .arm = armRerun, .recover = recoverRerun });
-        io.random(&self.instance);
-        try loadIdentities(self, .full);
-        self.queue().opened();
-        if (options.catalog) |offered| try self.saveCatalog(offered) else {
-            const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
-            owned.tools = .{ .catalog = &tool_catalog.built_in, .set_id = 0 };
-        }
+    /// Compatibility convenience; all initialization belongs to openTarget.
+    pub fn openMysql(self: *Store, io: std.Io, connection: mysql_connection.Options, selector: []const u8, options: OpenOptions) !void {
+        return self.openTarget(io, .{ .mysql = connection }, selector, options);
     }
 
-    /// Stable opaque identity read at MySQL admission; never the URL or the
-    /// location selector used to validate the database's metadata.
-    pub fn mysqlStoreId(self: *const Store) []const u8 {
-        return &self.engine.mysql.state.store_id;
+    pub fn kind(self: *const Store) Kind {
+        return std.meta.activeTag(self.engine);
     }
 
-    /// The immutable admission diagnostic; safe at readiness without queuing
-    /// work on the holder. SQLite has no MySQL setting to report.
-    pub fn mysqlDoublewrite(self: *const Store) ?[]const u8 {
-        return switch (self.engine) {
-            .sqlite => null,
-            .mysql => |mysql| mysql.state.doublewrite.slice(),
-        };
+    /// Borrowed until close: canonical path on SQLite, admitted opaque id on
+    /// MySQL. SQLite's persisted random id is not its protocol selector.
+    pub fn storeId(self: *const Store) []const u8 {
+        return self.selector.slice();
+    }
+
+    /// Immutable admission facts only: safe on the nonblocking host-info path.
+    pub fn admissionDiagnostic(self: *const Store) AdmissionDiagnostic {
+        return .{ .doublewrite = self.engine.admissionDoublewrite() };
     }
 
     /// The tools the Host offers, and the id of their saved set.
-    pub fn catalog(self: *Store) *const HostTools {
+    pub fn hostTools(self: *Store) *const HostTools {
         const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
         return &owned.tools;
     }
 
-    /// Saves `offered` as the catalog set, if no set holds it yet: its
+    /// Saves `offered` as the Host tool set, if no set holds it yet: its
     /// records a few to a transaction, then the set in one more. It becomes
-    /// the catalog `readCatalog` reads back. Once per open, before any
+    /// the tool set `readHostToolSet` reads back. Once per open, before any
     /// request.
-    pub fn saveCatalog(self: *Store, offered: *const tool_catalog.Catalog) !void {
-        if (!offered.valid()) return error.InvalidToolCatalog;
-        for (std.enums.values(tool_catalog.Tool)) |tool| {
-            const index = offered.find(@tagName(tool)) orelse return error.InvalidToolCatalog;
-            if (!std.mem.eql(u8, &offered.digests[index], &tool_catalog.built_in.digests[@backingInt(tool)])) return error.InvalidToolCatalog;
+    pub fn saveHostToolSet(self: *Store, offered: *const tool_record.HostToolSet) !void {
+        if (!offered.valid()) return error.InvalidHostToolSet;
+        for (std.enums.values(tool_record.Tool)) |tool| {
+            const index = offered.find(@tagName(tool)) orelse return error.InvalidHostToolSet;
+            if (!std.mem.eql(u8, &offered.digests[index], &tool_record.built_in_tool_set.digests[@backingInt(tool)])) return error.InvalidHostToolSet;
         }
         const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
-        owned.tools = .{ .catalog = offered, .set_id = 0 };
-        const digest = tool_set_domain.catalogDigest(offered);
-        if (try self.queue().write(saveCatalogHeld, .{ self, offered, &digest, @as(?usize, null) })) |set_id| {
+        owned.tools = .{ .host_tool_set = offered, .set_id = 0 };
+        const digest = tool_set_domain.toolSetDigest(offered);
+        if (try self.queue().write(saveHostToolSetHeld, .{ self, offered, &digest, @as(?usize, null) })) |set_id| {
             owned.tools.set_id = set_id;
             return;
         }
         var start: usize = 0;
         while (start < offered.records.len) : (start += tool_set_domain.records_per_transaction)
-            _ = try self.queue().write(saveCatalogHeld, .{ self, offered, &digest, start });
-        owned.tools.set_id = (try self.queue().write(saveCatalogHeld, .{ self, offered, &digest, offered.records.len })).?;
+            _ = try self.queue().write(saveHostToolSetHeld, .{ self, offered, &digest, start });
+        owned.tools.set_id = (try self.queue().write(saveHostToolSetHeld, .{ self, offered, &digest, offered.records.len })).?;
     }
 
-    /// One transaction of `saveCatalog`: with `start` null, the saved set's
+    /// One transaction of `saveHostToolSet`: with `start` null, the saved set's
     /// id, or null when none holds `offered`; below the record count, the
     /// records from `start`; at it, the set, whose id it returns.
-    fn saveCatalogHeld(self: *Store, offered: *const tool_catalog.Catalog, digest: *const [32]u8, start: ?usize) !?u64 {
+    fn saveHostToolSetHeld(self: *Store, offered: *const tool_record.HostToolSet, digest: *const [32]u8, start: ?usize) !?u64 {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, saveCatalogStep(&access, offered, digest, start)));
+        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, saveHostToolSetStep(&access, offered, digest, start)));
     }
 
-    /// The catalog the last `saveCatalog` saved, read back with every
+    /// The Host tool set the last `saveHostToolSet` saved, read back with every
     /// text, in `allocator`'s memory; null before the first. A Host reads
     /// it at start to keep the tools of a server it cannot reach. A saved
-    /// catalog that fails its checks fences the Store.
-    pub fn readCatalog(self: *Store, allocator: std.mem.Allocator) !?SavedCatalog {
-        return self.readCatalogChecked(allocator) catch |err| switch (err) {
+    /// tool set that fails its checks fences the Store.
+    pub fn readHostToolSet(self: *Store, allocator: std.mem.Allocator) !?SavedHostToolSet {
+        return self.readHostToolSetChecked(allocator) catch |err| switch (err) {
             error.CorruptStore => fence(self, error.CorruptStore),
             else => err,
         };
     }
 
-    fn readCatalogChecked(self: *Store, allocator: std.mem.Allocator) !?SavedCatalog {
-        const head = (try self.readCatalogSet()) orelse return null;
+    fn readHostToolSetChecked(self: *Store, allocator: std.mem.Allocator) !?SavedHostToolSet {
+        const head = (try self.readHostToolSetSet()) orelse return null;
         const count = std.math.cast(usize, head.member_count) orelse return error.CorruptStore;
-        if (count > tool_catalog.max_catalog_records) return error.CorruptStore;
-        const rows = try allocator.alloc(tool_set_domain.catalog_records.Row, count);
+        if (count > tool_record.max_host_tool_records) return error.CorruptStore;
+        const rows = try allocator.alloc(tool_set_domain.host_tool_records.Row, count);
         defer allocator.free(rows);
         var filled: usize = 0;
         while (filled < count) {
-            const read = try self.readCatalogRecords(head.tool_set_id.get(), filled, rows[filled..]);
+            const read = try self.readHostToolSetRecords(head.tool_set_id.get(), filled, rows[filled..]);
             if (read == 0) return error.CorruptStore;
             filled += read;
         }
@@ -424,8 +405,8 @@ pub const Store = struct {
             text_bytes += std.math.cast(usize, row.description_length) orelse return error.CorruptStore;
             text_bytes += std.math.cast(usize, row.schema_length) orelse return error.CorruptStore;
         }
-        var saved: SavedCatalog = .{
-            .records = try allocator.alloc(tool_catalog.Record, count),
+        var saved: SavedHostToolSet = .{
+            .records = try allocator.alloc(tool_record.Record, count),
             .digests = &.{},
             .texts = &.{},
         };
@@ -440,14 +421,14 @@ pub const Store = struct {
             @memcpy(server, row.server.slice());
             const description = take(saved.texts, &used, @intCast(row.description_length));
             const schema = take(saved.texts, &used, @intCast(row.schema_length));
-            try self.readCatalogText(row.description_id.get(), description);
-            try self.readCatalogText(row.schema_id.get(), schema);
+            try self.readHostToolSetText(row.description_id.get(), description);
+            try self.readHostToolSetText(row.schema_id.get(), schema);
             if (!std.mem.eql(u8, &content_string.digest(description), &row.description_digest) or
                 !std.mem.eql(u8, &content_string.digest(schema), &row.schema_digest)) return error.CorruptStore;
             out.* = .{ .name = name, .owner = row.owner, .server = server, .read_only = row.read_only, .description = description, .input_schema = schema };
-            digest.* = tool_catalog.recordDigest(out);
+            digest.* = tool_record.recordDigest(out);
         }
-        if (!saved.catalog().valid()) return error.CorruptStore;
+        if (!saved.toolSet().valid()) return error.CorruptStore;
         return saved;
     }
 
@@ -456,44 +437,44 @@ pub const Store = struct {
         return texts[used.*..][0..length];
     }
 
-    /// The Host's catalog set and its record count, in one round.
-    pub fn readCatalogSet(self: *Store) !tool_set_domain.SavedCatalog {
-        return self.queue().run(readCatalogSetHeld, .{self});
+    /// The Host's Host tool set and its record count, in one round.
+    pub fn readHostToolSetSet(self: *Store) !tool_set_domain.SavedHostToolSet {
+        return self.queue().run(readHostToolSetSetHeld, .{self});
     }
 
-    /// One round: the catalog set's records from `ordinal`, at most one
+    /// One round: the Host tool set's records from `ordinal`, at most one
     /// batch and `rows.len`; how many it read.
-    pub fn readCatalogRecords(self: *Store, set: u64, ordinal: usize, rows: []tool_set_domain.catalog_records.Row) !usize {
-        return self.queue().run(readCatalogRecordsHeld, .{ self, set, ordinal, rows });
+    pub fn readHostToolSetRecords(self: *Store, set: u64, ordinal: usize, rows: []tool_set_domain.host_tool_records.Row) !usize {
+        return self.queue().run(readHostToolSetRecordsHeld, .{ self, set, ordinal, rows });
     }
 
-    fn readCatalogSetHeld(self: *Store) !tool_set_domain.SavedCatalog {
+    fn readHostToolSetSetHeld(self: *Store) !tool_set_domain.SavedHostToolSet {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.read, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, tool_set_domain.savedCatalogOf(&access));
+        return entry.finish(Ordinary.none, tool_set_domain.savedHostToolSetOf(&access));
     }
 
-    fn readCatalogRecordsHeld(self: *Store, set: u64, ordinal: usize, rows: []tool_set_domain.catalog_records.Row) !usize {
+    fn readHostToolSetRecordsHeld(self: *Store, set: u64, ordinal: usize, rows: []tool_set_domain.host_tool_records.Row) !usize {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.read, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, tool_set_domain.catalogRecordsOf(&access, set, ordinal, rows));
+        return entry.finish(Ordinary.none, tool_set_domain.hostToolRecordsOf(&access, set, ordinal, rows));
     }
 
     /// `destination` from the content row `content_id`, a window at a time.
-    pub fn readCatalogText(self: *Store, content_id: u64, destination: []u8) !void {
+    pub fn readHostToolSetText(self: *Store, content_id: u64, destination: []u8) !void {
         var start: usize = 0;
         while (start < destination.len) {
             const window = destination[start..][0..@min(destination.len - start, content_domain.ContentReader.content_window_bytes)];
-            try self.queue().run(readCatalogTextHeld, .{ self, content_id, start, window });
+            try self.queue().run(readHostToolSetTextHeld, .{ self, content_id, start, window });
             start += window.len;
         }
     }
 
-    fn readCatalogTextHeld(self: *Store, content_id: u64, start: usize, window: []u8) !void {
+    fn readHostToolSetTextHeld(self: *Store, content_id: u64, start: usize, window: []u8) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.read, error{}) = .open(&entry);
@@ -501,20 +482,12 @@ pub const Store = struct {
         return entry.finish(Ordinary.none, access.readRaw(content_id, start, window));
     }
 
-    pub fn sqliteDiagnostic(self: *Store) SqliteDiagnostic {
-        return self.queue().run(sqliteDiagnosticHeld, .{self});
+    pub fn diagnostic(self: *Store) Diagnostic {
+        return self.queue().run(diagnosticHeld, .{self});
     }
 
-    fn sqliteDiagnosticHeld(self: *Store) SqliteDiagnostic {
-        return self.engine.sqlite.diagnostic();
-    }
-
-    pub fn mysqlDiagnostic(self: *Store) Mysql.Diagnostic {
-        return self.queue().run(mysqlDiagnosticHeld, .{self});
-    }
-
-    fn mysqlDiagnosticHeld(self: *Store) Mysql.Diagnostic {
-        return self.engine.mysql.diagnostic();
+    fn diagnosticHeld(self: *Store) Diagnostic {
+        return self.engine.diagnostic();
     }
 
     /// The SQLite connection, for SQLite-only tests and fixtures.
@@ -1098,18 +1071,18 @@ pub const Store = struct {
 
     /// Never inlined: its two Accesses and admission's rows (about 4 KiB)
     /// stay off the frame of a caller that goes on to dispatch the Attempt.
-    pub fn admitModelAttempt(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
-        return self.queue().write(admitModelAttemptHeld, .{ self, kind, faults });
+    pub fn admitModelAttempt(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
+        return self.queue().write(admitModelAttemptHeld, .{ self, admission_kind, faults });
     }
 
-    noinline fn admitModelAttemptHeld(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
+    noinline fn admitModelAttemptHeld(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
         var reader: ReadAccess = .open(&entry);
         defer reader.deinit();
         var writer: Access(.write, error{ SelectionChanged, ProjectionFailed, InstructionSelectionFailed }) = .open(&entry);
         defer writer.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, writer.end(faults, model_admission_domain.admitNextModelAttempt(&reader, &writer, kind, faults)));
+        return entry.finishTransaction(Ordinary.none, faults, writer.end(faults, model_admission_domain.admitNextModelAttempt(&reader, &writer, admission_kind, faults)));
     }
 
     pub fn admitNextActionAttempt(
@@ -1152,7 +1125,7 @@ pub const Store = struct {
     }
     /// `out` is decoded in place and valid only on success. The compile-time
     /// runner selects the adapter's existing read plan, not persisted state.
-    pub fn readActionExecutionInput(self: *Store, comptime runner: tool_catalog.Runner, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
+    pub fn readActionExecutionInput(self: *Store, comptime runner: tool_record.Runner, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
         return switch (runner) {
             .bash => self.queue().run(readBashExecutionInputHeld, .{ self, binding, out }),
             .mcp => self.queue().run(readMcpExecutionInputHeld, .{ self, binding, out }),
@@ -1298,7 +1271,7 @@ pub const Store = struct {
         self.identities().survey.asked = asked;
         // Nothing committed since the survey ran, right after its COMMIT.
         if (survey.kept == .ready and survey.asked == asked and !self.isFenced())
-            return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation };
+            return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation, .retry = survey.retry };
         const entry = try enter(self, .none);
         defer entry.release();
         var access: store_access.Access(.survey, error{}) = .open(&entry);
@@ -1404,11 +1377,11 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.resolveCoreCall(&access, binding, code, result, faults)));
     }
 
-    pub fn nextAction(self: *Store, comptime runner: tool_catalog.Runner) !?ReadyAction {
+    pub fn nextAction(self: *Store, comptime runner: tool_record.Runner) !?ReadyAction {
         if (runner != .bash and runner != .mcp) @compileError("only Action runners can select Actions");
         return self.queue().run(nextActionHeld, .{ self, runner });
     }
-    fn nextActionHeld(self: *Store, runner: tool_catalog.Runner) !?ReadyAction {
+    fn nextActionHeld(self: *Store, runner: tool_record.Runner) !?ReadyAction {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -1698,10 +1671,18 @@ pub const OpenOptions = struct {
     /// Caller-owned evidence retained after a failed open destroys the Store.
     identity_mismatch: ?*store_schema.IdentityMismatch = null,
     /// The tools the Host offers, which it keeps for the Store's life.
-    /// Null saves none: the Host reads the last one back (`readCatalog`)
-    /// and saves its own (`saveCatalog`) before it serves.
-    catalog: ?*const tool_catalog.Catalog = &tool_catalog.built_in,
+    /// Null saves none: the Host reads the last one back (`readHostToolSet`)
+    /// and saves its own (`saveHostToolSet`) before it serves.
+    host_tool_set: ?*const tool_record.HostToolSet = &tool_record.built_in_tool_set,
 };
+
+pub const Target = union(Kind) {
+    sqlite: []const u8,
+    mysql: mysql_connection.Options,
+};
+
+pub const AdmissionDiagnostic = struct { doublewrite: ?[]const u8 };
+pub const Diagnostic = union(Kind) { sqlite: SqliteDiagnostic, mysql: Mysql.Diagnostic };
 
 pub const SqliteDiagnostic = struct {
     process_memory_current_bytes: ?u64 = null,
@@ -2090,6 +2071,7 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype) void {
     kept.bash = found.bash;
     kept.message = found.message;
     kept.tool_continuation = found.tool_continuation;
+    kept.retry = found.retry;
     kept.kept = .fresh;
 }
 
@@ -2269,10 +2251,10 @@ pub const Identity = enum { turn_id, operation_id, action_id, content_id, create
 /// a rolled-back transaction took from. Correct because one Host owns the
 /// Store; the primary or unique key still refuses a duplicate, and a
 /// refused write fences.
-fn saveCatalogStep(a: anytype, offered: *const tool_catalog.Catalog, digest: *const [32]u8, start: ?usize) !?u64 {
+fn saveHostToolSetStep(a: anytype, offered: *const tool_record.HostToolSet, digest: *const [32]u8, start: ?usize) !?u64 {
     const at = start orelse {
-        var set: tool_set_domain.CatalogSet = null;
-        tool_set_domain.lookupCatalog(a, digest, &set);
+        var set: tool_set_domain.ToolSetLookup = null;
+        tool_set_domain.lookupHostToolSet(a, digest, &set);
         try a.run();
         const row = set orelse {
             try a.abandon(.{});
@@ -2281,7 +2263,7 @@ fn saveCatalogStep(a: anytype, offered: *const tool_catalog.Catalog, digest: *co
         if (row.current) {
             try a.abandon(.{});
         } else {
-            tool_set_domain.pointCatalog(a, row.tool_set_id.get());
+            tool_set_domain.pointHostToolSet(a, row.tool_set_id.get());
             try a.commit();
         }
         return row.tool_set_id.get();
@@ -2293,24 +2275,24 @@ fn saveCatalogStep(a: anytype, offered: *const tool_catalog.Catalog, digest: *co
         return null;
     }
     const set_id = try a.identity(.tool_set_id);
-    tool_set_domain.insertCatalog(a, offered, digest, set_id);
-    tool_set_domain.pointCatalog(a, set_id);
+    tool_set_domain.insertHostToolSet(a, offered, digest, set_id);
+    tool_set_domain.pointHostToolSet(a, set_id);
     try a.commit();
     return set_id;
 }
 
-/// A catalog `readCatalog` read back, in its caller's memory.
-pub const SavedCatalog = struct {
-    records: []tool_catalog.Record,
+/// A tool set `readHostToolSet` read back, in its caller's memory.
+pub const SavedHostToolSet = struct {
+    records: []tool_record.Record,
     digests: [][32]u8,
     /// Every name, server and text the records point into.
     texts: []u8,
 
-    pub fn catalog(self: *const SavedCatalog) tool_catalog.Catalog {
+    pub fn toolSet(self: *const SavedHostToolSet) tool_record.HostToolSet {
         return .{ .records = self.records, .digests = self.digests };
     }
 
-    pub fn deinit(self: *SavedCatalog, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *SavedHostToolSet, allocator: std.mem.Allocator) void {
         allocator.free(self.records);
         allocator.free(self.digests);
         allocator.free(self.texts);
@@ -2321,7 +2303,7 @@ pub const SavedCatalog = struct {
 /// The tools the Host offers and the id of their saved set, which
 /// configure resolves a Session's tool names against.
 const HostTools = struct {
-    catalog: *const tool_catalog.Catalog,
+    host_tool_set: *const tool_record.HostToolSet,
     set_id: u64,
 };
 
@@ -2355,7 +2337,8 @@ const Survey = packed struct(u16) {
     bash: bool = false,
     message: bool = false,
     tool_continuation: bool = false,
-    _: u7 = 0,
+    retry: bool = false,
+    _: u6 = 0,
 };
 
 const Admitted = struct {

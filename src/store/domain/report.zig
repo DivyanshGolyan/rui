@@ -19,7 +19,7 @@ const session_id = @import("../../session_id.zig");
 const session_list = @import("../../session_list.zig");
 const ScratchBudget = @import("../../ScratchBudget.zig");
 const model_capability = @import("../../model_capability.zig");
-const tool_catalog = @import("../../tool_record.zig");
+const tool_defs = @import("../../tool_record.zig");
 const tool_set = @import("tool_set.zig");
 const turn_policy = @import("../../turn_policy.zig");
 const session_work = @import("../../session_work.zig");
@@ -303,7 +303,7 @@ pub const first_message = rsql.Read(.{
 /// The names `tool_set.namesSql` joined, in name order, the order
 /// configure gave the set's members. A bad or repeated name, or too many,
 /// is `CorruptStore`.
-pub fn sortedToolNames(names: ?[]const u8, sorted: *[tool_catalog.max_tools][]const u8) ![]const []const u8 {
+pub fn sortedToolNames(names: ?[]const u8, sorted: *[tool_defs.max_tools][]const u8) ![]const []const u8 {
     var count: usize = 0;
     if (names) |joined| {
         var each = std.mem.splitScalar(u8, joined, ',');
@@ -1357,8 +1357,8 @@ fn RevisionChunk(comptime Watcher: type) type {
         failure: ?Failure = null,
         decoded: RevisionRow = undefined,
         /// The row's tool sets in name order, which its settings borrow.
-        tools: [tool_catalog.max_tools][]const u8 = undefined,
-        loaded_tools: [tool_catalog.max_tools][]const u8 = undefined,
+        tools: [tool_defs.max_tools][]const u8 = undefined,
+        loaded_tools: [tool_defs.max_tools][]const u8 = undefined,
 
         const Failure = error{CorruptStore} || RowError(Watcher);
 

@@ -808,7 +808,7 @@ const NativeTurn = struct {
             self.fenced = true;
             return error.Fence;
         };
-        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation };
+        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry };
     }
 
     pub fn scheduledRetry(self: *const NativeTurn) execution_turn.ScheduledRetry {
@@ -1513,7 +1513,7 @@ noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInpu
         break :committed .{ .context = &install, .call = Install.call };
     } else null;
     const parent_skills = host.store.readSkills(arena, input.session.slice()) catch return .retry_later;
-    // The task binds against the catalog the new Session starts with.
+    // The task binds against the tool set the new Session starts with.
     const prepared = @import("session_skills.zig").prepareCreation(arena, host.allocator, host.io, parent_skills.workspace.slice(), host.bash_facts.home, .{ .bytes = start.task }) catch return .retry_later;
     _ = host.store.startAgentWithInitialSkills(input.binding, input.session.slice(), start.task, start.attached, &start.configuration, committed, prepared.initial, if (prepared.captured) |*value| value else null, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         // A stop resolved the call first.
@@ -1679,7 +1679,7 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
         }
 
         fn launch(context: anytype) !void {
-            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_facts, context.base, std.fs.path.dirname(context.host.lease.paths.socket.slice()), context.refused) };
+            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_facts, context.base, context.host.lease.paths.runtimeHint(), context.refused) };
         }
     }.handoff) catch |err| {
         if (err == error.SupersededByControl) {
@@ -4231,10 +4231,10 @@ test "catalog answer slims saves and a 304 keeps its generation and facts" {
 }
 
 test "Host resolves MCP calls without Bash admission and continues the Turn" {
-    // Keep the native catalog complete independently of this Session's
+    // Keep the native tool set complete independently of this Session's
     // deliberately restricted tools and the MCP behavior asserted below.
     const records = comptime blk: {
-        var out = tools.built_in.records[0..tools.built_in.records.len].* ++ [_]tools.Record{.{
+        var out = tools.built_in_tool_set.records[0..tools.built_in_tool_set.records.len].* ++ [_]tools.Record{.{
             .name = "fetch_page",
             .owner = .mcp,
             .server = "docs",
@@ -4254,11 +4254,11 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
         for (&records, &out) |*record, *digest| digest.* = tools.recordDigest(record);
         break :blk out;
     };
-    const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
+    const host_tool_set: tools.HostToolSet = .{ .records = &records, .digests = &digests };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: store_module.Store = undefined;
-    try store_module.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+    try store_module.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try store_module.testingCanonicalCwd(std.testing.io, &workspace_buffer);

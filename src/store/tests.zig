@@ -4,7 +4,7 @@ const std = @import("std");
 const named_scratch = @import("../named_scratch.zig");
 const protocol = @import("../protocol.zig");
 const wire_request = @import("../wire_request.zig");
-const tool_catalog = @import("../tools.zig");
+const tool_defs = @import("../tools.zig");
 const tool_set_domain = @import("domain/tool_set.zig");
 
 /// Asserts exact saved-set membership by names, independent of tool ownership.
@@ -13,12 +13,12 @@ pub fn expectToolSetNames(storage: *Store, set: u64, names: []const []const u8) 
     for (names) |name| try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(storage, "SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=?1 AND tool.name=?2", .{ set, name }));
 }
 
-// A stored Host catalog must contain every native tool. Keep that inventory
+// A stored Host tool set must contain every native tool. Keep that inventory
 // canonical while each fixture independently states its MCP schema and offer.
-pub fn testingCatalogRecords(comptime extras: []const tool_catalog.Record) [tool_catalog.built_in.records.len + extras.len]tool_catalog.Record {
-    var records = tool_catalog.built_in.records[0..tool_catalog.built_in.records.len].* ++ extras[0..extras.len].*;
-    std.sort.heap(tool_catalog.Record, &records, {}, struct {
-        fn lessThan(_: void, left: tool_catalog.Record, right: tool_catalog.Record) bool {
+pub fn testingHostToolRecords(comptime extras: []const tool_defs.Record) [tool_defs.built_in_tool_set.records.len + extras.len]tool_defs.Record {
+    var records = tool_defs.built_in_tool_set.records[0..tool_defs.built_in_tool_set.records.len].* ++ extras[0..extras.len].*;
+    std.sort.heap(tool_defs.Record, &records, {}, struct {
+        fn lessThan(_: void, left: tool_defs.Record, right: tool_defs.Record) bool {
             return std.mem.lessThan(u8, left.name, right.name);
         }
     }.lessThan);
@@ -660,20 +660,20 @@ pub fn checkSessionReportsForTesting(context: anytype) !void {
 
         /// An unresolved MCP call, which names an MCP tool and its server.
         fn mcp(engine: *store_testing.Case, checker: @TypeOf(context), comptime Profiles: type) !void {
-            const records = comptime testingCatalogRecords(&.{
+            const records = comptime testingHostToolRecords(&.{
                 .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a docs page.", .input_schema = "{\"type\":\"object\"}" },
             });
             const digests = comptime blk: {
                 @setEvalBranchQuota(1_000_000);
                 var out: [records.len][32]u8 = undefined;
-                for (&records, &out) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+                for (&records, &out) |*record, *digest| digest.* = tool_defs.recordDigest(record);
                 break :blk out;
             };
-            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
-            try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+            try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
             defer storage.close() catch unreachable;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             var command = try completeConfiguration("schema-mcp", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
@@ -1609,6 +1609,142 @@ pub fn testingListRow(storage: *Store, tmp: *std.testing.TmpDir, session: []cons
         if (std.mem.eql(u8, row.object.get("reference").?.string, session)) return .{ .parsed = parsed, .row = row };
     }
     return error.TestUnexpectedResult;
+}
+
+test "last line follows ended Turns and pending approvals with bounded public text" {
+    try store_testing.forEachEngine(struct {
+        fn expect(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, position: ?u64, text: ?[]const u8, first_action: ?u64) !void {
+            var listed = try testingListRow(storage, tmp, session);
+            defer listed.deinit();
+            if (first_action) |action| {
+                try std.testing.expectEqual(action, try listed.number(&.{ "work", "first_action" }));
+            } else try std.testing.expect(listed.get(&.{ "work", "first_action" }) == .null);
+            if (position) |at| {
+                try std.testing.expectEqual(at, try listed.number(&.{ "last_line", "position" }));
+                const shown = listed.get(&.{ "last_line", "text" });
+                if (text) |line| {
+                    try std.testing.expectEqualStrings(line, shown.string);
+                    try std.testing.expect(shown.string.len <= 200);
+                    try std.testing.expect(std.unicode.utf8ValidateSlice(shown.string));
+                } else try std.testing.expect(shown == .null);
+            } else try std.testing.expect(listed.get(&.{"last_line"}) == .null);
+        }
+
+        fn ended(storage: *Store, session: []const u8) !u64 {
+            return store_testing.queryU64(storage, "SELECT max(outcome_position) FROM turn WHERE session_ref=?1", .{session});
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSessionAsk(&storage, "last-line-config");
+            try expect(&storage, &tmp, session.slice(), null, null, null);
+
+            const first = [_]TestingAnswerPart{.{ .encoded = "First answer\\nnot the preview", .decoded = "First answer\nnot the preview" }};
+            try answerTestTurn(&storage, &tmp, session.slice(), "last-line-first", &first);
+            const first_position = try ended(&storage, session.slice());
+            try expect(&storage, &tmp, session.slice(), first_position, "First answer", null);
+
+            const second = [_]TestingAnswerPart{.{ .encoded = "Later answer", .decoded = "Later answer" }};
+            try answerTestTurn(&storage, &tmp, session.slice(), "last-line-second", &second);
+            const second_position = try ended(&storage, session.slice());
+            try std.testing.expect(second_position > first_position);
+            try expect(&storage, &tmp, session.slice(), second_position, "Later answer", null);
+
+            // While another Turn runs, keep the ended Turn, not its partial output.
+            try submitTestMessage(&storage, &tmp, "last-line-call-input", "last-line-call-key", session.slice(), "propose");
+            const proposing = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try expect(&storage, &tmp, session.slice(), second_position, "Later answer", null);
+            const calls = [_]TestingCall{
+                .{ .item_id = "older", .name = "bash", .encoded_call_id = "older", .decoded_call_id = "older", .encoded_arguments = "{\\\"description\\\":\\\"Older approval\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Older approval\",\"cmd\":\"true\",\"timeout_ms\":null}" },
+                .{ .item_id = "newer", .name = "bash", .encoded_call_id = "newer", .decoded_call_id = "newer", .encoded_arguments = "{\\\"description\\\":\\\"Newer approval\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Newer approval\",\"cmd\":\"true\",\"timeout_ms\":null}" },
+                .{ .item_id = "newest", .name = "bash", .encoded_call_id = "newest", .decoded_call_id = "newest", .encoded_arguments = "{\\\"description\\\":\\\"Newest approval\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Newest approval\",\"cmd\":\"true\",\"timeout_ms\":null}" },
+            };
+            try settleCallsForTesting(&storage, &tmp, proposing, "last-line-calls", &calls);
+            const oldest_position = try store_testing.queryU64(&storage, "SELECT min(approval_position) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+            const middle_position = try store_testing.queryU64(&storage, "SELECT approval_position FROM action_operation WHERE session_ref=?1 AND call_ordinal=1", .{session.slice()});
+            const newest_position = try store_testing.queryU64(&storage, "SELECT max(approval_position) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+            const oldest_action = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+            const middle_action = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation WHERE session_ref=?1 AND call_ordinal=1", .{session.slice()});
+            const newest_action = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+            try std.testing.expect(oldest_position > second_position and middle_position > oldest_position and newest_position > middle_position);
+            try expect(&storage, &tmp, session.slice(), oldest_position, "Older approval", oldest_action);
+
+            var allow: protocol.PermissionDecisionCommand = .{ .action_id = oldest_action, .decision = .allow_once };
+            try allow.key.set("last-line-allow-older");
+            try allow.session.set(session.slice());
+            try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+            try expect(&storage, &tmp, session.slice(), middle_position, "Newer approval", middle_action);
+
+            // first_action still owns the line when work is Bash, not approval:
+            // the allowed Action runs beside two still-awaiting decisions.
+            const running = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            try std.testing.expectEqual(oldest_action, running.action_id);
+            try expect(&storage, &tmp, session.slice(), middle_position, "Newer approval", middle_action);
+            {
+                var mixed = try testingListRow(&storage, &tmp, session.slice());
+                defer mixed.deinit();
+                try std.testing.expectEqualStrings("bash", mixed.get(&.{ "work", "state", "kind" }).string);
+                try std.testing.expectEqual(@as(u64, 1), try mixed.number(&.{ "work", "state", "running" }));
+                try std.testing.expectEqual(@as(u64, 2), try mixed.number(&.{ "work", "state", "approvals" }));
+            }
+
+            // Denying the oldest awaiting Action advances to its sibling,
+            // even while the first allowed Action remains running.
+            var deny: protocol.PermissionDecisionCommand = .{ .action_id = middle_action, .decision = .deny };
+            try deny.key.set("last-line-deny-middle");
+            try deny.session.set(session.slice());
+            try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
+            try expect(&storage, &tmp, session.slice(), newest_position, "Newest approval", newest_action);
+
+            // An allowed but unstarted Action is no longer a pending approval.
+            allow.action_id = newest_action;
+            try allow.key.set("last-line-allow-newest");
+            try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+            try expect(&storage, &tmp, session.slice(), second_position, "Later answer", null);
+            _ = try storage.settleActionAttempt(running, .succeeded, "Bash succeeded.", .{});
+            var stop = try completeSessionStop("last-line-stop", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            try expect(&storage, &tmp, session.slice(), try ended(&storage, session.slice()), null, null);
+
+            try submitTestMessage(&storage, &tmp, "last-line-fail-input", "last-line-fail-key", session.slice(), "fail");
+            const failing = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try storage.settleModelAttemptFailure(failing, .{ .rejected = .{ .code = "provider_quota", .diagnostic = "", .request_id = .{}, .report = "Not an answer" } }, .ordinary, .{});
+            try expect(&storage, &tmp, session.slice(), try ended(&storage, session.slice()), null, null);
+
+            // Independent expected lines cover CR/LF, blank-led multiline,
+            // exact byte bounds, code-point cuts and the 1 KiB read boundary.
+            inline for (.{
+                .{ "blank", "\\r\\n \\t\\n  useful line \\r\\nignored", "\r\n \t\n  useful line \r\nignored", @as(?[]const u8, "useful line") },
+                .{ "long", "\\n" ++ @as([1200]u8, @bitCast(@as([600][2]u8, @splat("é".*)))) ++ "\\nignored", "\n" ++ @as([1200]u8, @bitCast(@as([600][2]u8, @splat("é".*)))) ++ "\nignored", @as(?[]const u8, @as([196]u8, @bitCast(@as([98][2]u8, @splat("é".*)))) ++ "…") },
+                .{ "exact", &@as([200]u8, @splat('x')), &@as([200]u8, @splat('x')), @as(?[]const u8, &@as([200]u8, @splat('x'))) },
+                .{ "empty", " \\t\\n\\r\\n", " \t\n\r\n", @as(?[]const u8, null) },
+                .{ "prefix", @as([1024]u8, @splat(' ')) ++ "not read", @as([1024]u8, @splat(' ')) ++ "not read", @as(?[]const u8, null) },
+                .{ "split", @as([1021]u8, @splat(' ')) ++ "x€", @as([1021]u8, @splat(' ')) ++ "x€", @as(?[]const u8, "x") },
+            }) |answer| {
+                const parts = [_]TestingAnswerPart{.{ .encoded = answer[1], .decoded = answer[2] }};
+                try answerTestTurn(&storage, &tmp, session.slice(), "last-line-" ++ answer[0], &parts);
+                try expect(&storage, &tmp, session.slice(), try ended(&storage, session.slice()), answer[3], null);
+            }
+
+            const private = [_]TestingAnswerPart{.{ .encoded = "Do not disclose", .decoded = "Do not disclose" }};
+            try answerTestTurn(&storage, &tmp, session.slice(), "last-line-private", &private);
+            const private_position = try ended(&storage, session.slice());
+            // Public output cannot normally name private content; substitute
+            // it at the read boundary to prove the preview never discloses it.
+            try store_testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT outcome_content_id FROM turn WHERE session_ref=?1 AND outcome_position=?2)", .{ session.slice(), private_position });
+            try expect(&storage, &tmp, session.slice(), private_position, null, null);
+
+            const active = try configureTestSession(&storage, "last-line-active-config");
+            try submitTestMessage(&storage, &tmp, "last-line-active-input", "last-line-active-key", active.slice(), "first turn");
+            _ = (try storage.admitNextModelAttempt(.{})).?;
+            try expect(&storage, &tmp, active.slice(), null, null, null);
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
 }
 
 test "a list row carries its Session's Label, times, first Message, work and peers" {
@@ -3004,7 +3140,7 @@ test "production turn preserves skipped continuation preference through actual S
                         self.failure = err;
                         return error.Fence;
                     };
-                    return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation };
+                    return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry };
                 }
                 pub fn scheduledRetry(_: *const @This()) turn.ScheduledRetry {
                     return .unknown;
@@ -3455,7 +3591,7 @@ test "historical tool-result EOF revalidates complete canonical coverage" {
     }.run);
 }
 
-test "call classification uses the proposing Operation frozen catalog" {
+test "call classification uses the proposing Operation frozen tool set" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -4248,7 +4384,7 @@ test "configuration pre-Workspace decisions preserve completeness and allow mode
         const current: ?*const CurrentConfiguration = if (case.has_current) &existing else null;
         std.testing.expectEqual(
             case.expected,
-            configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, current, &requested, .codex),
+            configuration_domain.configurationBeforeWorkspace(&tool_defs.built_in_tool_set, current, &requested, .codex),
         ) catch |err| {
             std.debug.print("configuration pre-Workspace case failed: {s}\n", .{case.name});
             return err;
@@ -4256,12 +4392,12 @@ test "configuration pre-Workspace decisions preserve completeness and allow mode
     }
 }
 
-test "configure refuses a tool name the catalog lacks and a provider tool its provider does not run" {
-    const hosted: tool_catalog.Record = .{ .name = "code_interpreter", .owner = .provider };
-    const records = [_]tool_catalog.Record{ tool_catalog.bash_record, hosted, tool_catalog.web_search_record };
-    const digests = [_][32]u8{ tool_catalog.recordDigest(&records[0]), tool_catalog.recordDigest(&records[1]), tool_catalog.recordDigest(&records[2]) };
-    const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
-    try std.testing.expect(catalog.valid());
+test "configure refuses a tool name the tool set lacks and a provider tool its provider does not run" {
+    const hosted: tool_defs.Record = .{ .name = "code_interpreter", .owner = .provider };
+    const records = [_]tool_defs.Record{ tool_defs.bash_record, hosted, tool_defs.web_search_record };
+    const digests = [_][32]u8{ tool_defs.recordDigest(&records[0]), tool_defs.recordDigest(&records[1]), tool_defs.recordDigest(&records[2]) };
+    const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
+    try std.testing.expect(host_tool_set.valid());
     var existing: CurrentConfiguration = .{};
     existing.provider = .codex;
     try existing.model.set("model-a");
@@ -4275,7 +4411,7 @@ test "configure refuses a tool name the catalog lacks and a provider tool its pr
     }) |case| {
         var requested: wire_request.Configuration = .{};
         requested.tools = try .of(case.names);
-        try std.testing.expectEqual(case.expected, configuration_domain.configurationBeforeWorkspace(&catalog, &existing, &requested, .codex));
+        try std.testing.expectEqual(case.expected, configuration_domain.configurationBeforeWorkspace(&host_tool_set, &existing, &requested, .codex));
     }
 }
 
@@ -4600,7 +4736,7 @@ test "model revisions validate retained effort and compactAt against the new cat
     }.run);
 }
 
-test "loaded tools select saved records even after the Host catalog changes or removes them" {
+test "loaded tools select saved records even after the Host tool set changes or removes them" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -4608,14 +4744,14 @@ test "loaded tools select saved records even after the Host catalog changes or r
             var storage: Store = undefined;
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            var records = comptime testingCatalogRecords(&.{
+            var records = comptime testingHostToolRecords(&.{
                 .{ .name = "fetch_page", .owner = .mcp, .server = "original", .read_only = true, .description = "Original page", .input_schema = "{\"type\":\"object\"}" },
                 .{ .name = "other_page", .owner = .mcp, .server = "original", .description = "Other page", .input_schema = "{\"type\":\"object\"}" },
             });
             var digests: [records.len][32]u8 = undefined;
-            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
-            const original: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
-            try storage.saveCatalog(&original);
+            for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            const original: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
+            try storage.saveHostToolSet(&original);
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var create = try completeConfiguration("loaded-records-create", "", workspace, "model-a");
@@ -4630,9 +4766,9 @@ test "loaded tools select saved records even after the Host catalog changes or r
             var changed_records = records;
             changed_records[1] = .{ .name = "fetch_page", .owner = .mcp, .server = "replacement", .description = "New page", .input_schema = "{\"type\":\"object\",\"additionalProperties\":false}" };
             var changed_digests = digests;
-            changed_digests[1] = tool_catalog.recordDigest(&changed_records[1]);
-            const changed: tool_catalog.Catalog = .{ .records = &changed_records, .digests = &changed_digests };
-            try storage.saveCatalog(&changed);
+            changed_digests[1] = tool_defs.recordDigest(&changed_records[1]);
+            const changed: tool_defs.HostToolSet = .{ .records = &changed_records, .digests = &changed_digests };
+            try storage.saveHostToolSet(&changed);
             var update: wire_request.ConfigureCommand = .{};
             try update.key.set("loaded-records-reworded");
             update.session = first;
@@ -4644,18 +4780,18 @@ test "loaded tools select saved records even after the Host catalog changes or r
             const expected_loaded = tool_set_domain.Selection.of(&original, &update.configuration.loaded_tools).?;
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set saved ON saved.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1 AND saved.digest=?2", .{ first.slice(), store_testing.Blob{ .bytes = &expected_loaded.digest } }));
 
-            var removed_records: [records.len - 1]tool_catalog.Record = undefined;
+            var removed_records: [records.len - 1]tool_defs.Record = undefined;
             removed_records[0] = records[0];
             @memcpy(removed_records[1..], records[2..]);
             var removed_digests: [removed_records.len][32]u8 = undefined;
-            for (&removed_records, &removed_digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
-            const removed: tool_catalog.Catalog = .{ .records = &removed_records, .digests = &removed_digests };
-            try storage.saveCatalog(&removed);
+            for (&removed_records, &removed_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            const removed: tool_defs.HostToolSet = .{ .records = &removed_records, .digests = &removed_digests };
+            try storage.saveHostToolSet(&removed);
             try update.key.set("loaded-records-removed");
             update.session = second;
             try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             // Both configurations select the original records and intern
-            // the very same loaded set despite today's catalog contents.
+            // the very same loaded set despite today's tool set contents.
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(DISTINCT loaded_tool_set_id) FROM session WHERE session_ref=?1 OR session_ref=?2", .{ first.slice(), second.slice() }));
             try std.testing.expect(!storage.isFenced());
         }
@@ -5404,22 +5540,21 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try own_ref.set(sender);
             const sender_end = (try store_core.activityPageForTesting(&storage, .{ .session = own_ref })).end;
             const Send = struct {
-                fn make(dir: std.Io.Dir, key: []const u8, target: []const u8, from: ?[]const u8, text: []const u8) !wire_request.MessageCommand {
+                fn make(dir: std.Io.Dir, store_id: []const u8, key: []const u8, target: []const u8, from: ?[]const u8, text: []const u8) !wire_request.MessageCommand {
                     const file = try dir.createFile(std.testing.io, key, .{ .read = true });
                     try file.writeStreamingAll(std.testing.io, text);
                     try file.sync(std.testing.io);
                     var command = try completeMessage(key, target, file, text);
                     if (from) |ref| {
                         command.sender = .{};
-                        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-                        try command.sender.?.store.set(root_buffer[0..try dir.realPath(std.testing.io, &root_buffer)]);
+                        try command.sender.?.store.set(store_id);
                         try command.sender.?.session.set(ref);
                     }
                     return command;
                 }
             };
 
-            var sent = try Send.make(tmp.dir, "peer-send", allocated_session_1.slice(), sender, "look at this\nsecond line");
+            var sent = try Send.make(tmp.dir, storage.storeId(), "peer-send", allocated_session_1.slice(), sender, "look at this\nsecond line");
             sent.sender_handle = handle;
             defer sent.removeTemporaryContent(std.testing.io) catch unreachable;
             var commits: TestingCommits = .{};
@@ -5430,19 +5565,19 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try std.testing.expect(commits.calls[0].from_peer);
             try std.testing.expectEqual(accepted.accepted.admission_id, commits.calls[0].admission_id);
             // The sender is part of the request: the same key without it conflicts.
-            var anonymous = try Send.make(tmp.dir, "peer-send-anonymous", allocated_session_1.slice(), null, "look at this\nsecond line");
+            var anonymous = try Send.make(tmp.dir, storage.storeId(), "peer-send-anonymous", allocated_session_1.slice(), null, "look at this\nsecond line");
             defer anonymous.removeTemporaryContent(std.testing.io) catch unreachable;
             try anonymous.key.set("peer-send");
             try std.testing.expect(storage.submitMessageWithModel(&anonymous, null, .{}) == .conflict);
 
-            var refused = try Send.make(tmp.dir, "peer-refused", "absent", sender, "lost");
+            var refused = try Send.make(tmp.dir, storage.storeId(), "peer-refused", "absent", sender, "lost");
             refused.sender_handle = handle;
             defer refused.removeTemporaryContent(std.testing.io) catch unreachable;
             try std.testing.expectEqual(protocol.MessageRejection.unknown_session, storage.submitMessageWithModel(&refused, commits.callback(), .{}).rejected.code);
             // A rejected Message installs nothing.
             try std.testing.expectEqual(@as(usize, 1), commits.count);
 
-            var forged = try Send.make(tmp.dir, "peer-forged", allocated_session_1.slice(), "f0rged", "forged");
+            var forged = try Send.make(tmp.dir, storage.storeId(), "peer-forged", allocated_session_1.slice(), "f0rged", "forged");
             defer forged.removeTemporaryContent(std.testing.io) catch unreachable;
             try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&forged, null, .{}).rejected.code);
             const forged_replay = storage.submitMessageWithModel(&forged, null, .{});
@@ -5472,7 +5607,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
                 .{ .key = "peer-empty-forged", .from = "f0rged" },
                 .{ .key = "peer-empty-known", .from = sender },
             }) |case| {
-                var empty = try Send.make(tmp.dir, case.key, "", case.from, "nowhere");
+                var empty = try Send.make(tmp.dir, storage.storeId(), case.key, "", case.from, "nowhere");
                 if (std.mem.eql(u8, case.from, sender)) empty.sender_handle = handle;
                 defer empty.removeTemporaryContent(std.testing.io) catch unreachable;
                 try std.testing.expectEqual(protocol.MessageRejection.invalid_session_reference, storage.submitMessageWithModel(&empty, null, .{}).rejected.code);
@@ -5586,8 +5721,7 @@ test "refused peer creation activity keeps invalid targets absent" {
             try creation.configuration.reasoning_effort.value.set("none");
             message.configuration = creation.configuration;
             message.sender = .{};
-            var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-            try message.sender.?.store.set(root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)]);
+            try message.sender.?.store.set(storage.storeId());
             message.sender.?.session = sender;
             message.sender_handle = input.sender_handle;
             var commits: TestingCommits = .{};
@@ -6902,6 +7036,7 @@ test "the dispatch work read answers as each admission owner does, in every stat
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             try WorkParity.idle(&storage);
+            try std.testing.expect(!(try storage.dispatchWork(false)).retry);
 
             // Waiting input: a new Turn takes it unless new Turns are held.
             const session = try configureTestSessionAsk(&storage, "parity-config");
@@ -6910,10 +7045,18 @@ test "the dispatch work read answers as each admission owner does, in every stat
             try std.testing.expect((try WorkParity.model(&storage, .tool_continuation)) == null);
             const first = (try WorkParity.model(&storage, .message)).?;
             try WorkParity.idle(&storage);
+            // Its running Attempt is what a retry scan would read; once it
+            // resolves, neither scan has a row.
+            try std.testing.expect((try storage.dispatchWork(false)).retry);
 
             // Two Bash calls wait on a person: a blocked Operation, no work.
             try settleTwoActionsForTesting(&storage, &tmp, first, "parity-config");
             try WorkParity.idle(&storage);
+            try std.testing.expect(!(try storage.dispatchWork(false)).retry);
+            try std.testing.expect(!try storage.recoverOneExhaustedModelAttempt(ActiveOperationFilter.empty()));
+            var scheduled: ?u64 = 0;
+            try std.testing.expect((try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, &scheduled)) == null);
+            try std.testing.expectEqual(@as(?u64, null), scheduled);
             // Input that arrives now joins the open Turn, held or not, once it continues.
             try submitTestMessage(&storage, &tmp, "parity-more", "parity-more", session.slice(), "more");
             const last_action = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
@@ -8057,9 +8200,9 @@ test "the tool-group scan reads sixteen sources and sixty-four of their calls a 
 test "a tool walk longer than a page reads the rest from its next member, in order" {
     try store_testing.forEachEngine(struct {
         const count = 40;
-        const records = testingCatalogRecords(&extras: {
+        const records = testingHostToolRecords(&extras: {
             @setEvalBranchQuota(400_000);
-            var tools: [count]tool_catalog.Record = undefined;
+            var tools: [count]tool_defs.Record = undefined;
             for (&tools, 0..) |*tool, index| tool.* = .{
                 .name = std.fmt.comptimePrint("tool_{d:0>2}", .{index}),
                 .owner = .mcp,
@@ -8072,16 +8215,16 @@ test "a tool walk longer than a page reads the rest from its next member, in ord
         const digests = blk: {
             @setEvalBranchQuota(4_000_000);
             var out: [records.len][32]u8 = undefined;
-            for (&records, &out) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+            for (&records, &out) |*record, *digest| digest.* = tool_defs.recordDigest(record);
             break :blk out;
         };
 
         fn run(case: *store_testing.Case) !void {
-            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
-            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
             defer storage.close() catch unreachable;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             var command = try completeConfiguration("many-tools", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
@@ -10156,14 +10299,14 @@ test "a fixture's SQL is portable Rui SQL and names no SQLite mechanism" {
 /// separate transition while the Store is held, by the name the source
 /// gives it (less the `Held` of a body an entry point queues).
 const EntryPoint = enum {
-    saveCatalog,
+    saveHostToolSet,
     saveModelFacts,
     readModelCatalogSource,
     modelFact,
     readOpenAiModelIds,
-    readCatalogSet,
-    readCatalogRecords,
-    readCatalogText,
+    readHostToolSetSet,
+    readHostToolSetRecords,
+    readHostToolSetText,
     commandExists,
     readSkills,
     settleSkillTool,
@@ -10301,11 +10444,11 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readModelCatalogSource = 1,
     .modelFact = 1,
     .readOpenAiModelIds = 1,
-    // A Host's tool catalog is saved once; each later open finds it.
-    .saveCatalog = 1,
-    .readCatalogSet = 1,
-    .readCatalogRecords = 1,
-    .readCatalogText = 0,
+    // A Host tool set is saved once; each later open finds it.
+    .saveHostToolSet = 1,
+    .readHostToolSetSet = 1,
+    .readHostToolSetRecords = 1,
+    .readHostToolSetText = 0,
 });
 
 /// Each entry point's content rounds (`readRaw` windows, counted in
@@ -10317,7 +10460,7 @@ fn contentRoundBudget(engine: store_testing.Engine, point: EntryPoint) u16 {
     return switch (engine) {
         // One window holds the driven content.
         .sqlite, .mysql => switch (point) {
-            .readOwnedContent, .readCatalogText, .searchActivity, .findTools, .readSkills => 1,
+            .readOwnedContent, .readHostToolSetText, .searchActivity, .findTools, .readSkills => 1,
             else => 0,
         },
     };
@@ -10534,20 +10677,20 @@ test "each Store entry point takes its round budget on its common path" {
             }
             meter.stop(.readOpenAiModelIds);
             meter.start();
-            try storage.saveCatalog(&tool_catalog.built_in);
-            meter.stop(.saveCatalog);
+            try storage.saveHostToolSet(&tool_defs.built_in_tool_set);
+            meter.stop(.saveHostToolSet);
             meter.start();
-            const saved = (try storage.readCatalogSet()).?;
-            meter.stop(.readCatalogSet);
-            var rows: [tool_catalog.built_in.records.len]tool_set_domain.catalog_records.Row = undefined;
+            const saved = (try storage.readHostToolSetSet()).?;
+            meter.stop(.readHostToolSetSet);
+            var rows: [tool_defs.built_in_tool_set.records.len]tool_set_domain.host_tool_records.Row = undefined;
             meter.start();
-            try std.testing.expectEqual(rows.len, try storage.readCatalogRecords(saved.tool_set_id.get(), 0, &rows));
-            meter.stop(.readCatalogRecords);
-            var text: [tool_catalog.bash_record.description.len]u8 = undefined;
+            try std.testing.expectEqual(rows.len, try storage.readHostToolSetRecords(saved.tool_set_id.get(), 0, &rows));
+            meter.stop(.readHostToolSetRecords);
+            var text: [tool_defs.bash_record.description.len]u8 = undefined;
             meter.start();
-            try storage.readCatalogText(rows[0].description_id.get(), &text);
-            meter.stop(.readCatalogText);
-            try std.testing.expectEqualStrings(tool_catalog.bash_record.description, &text);
+            try storage.readHostToolSetText(rows[0].description_id.get(), &text);
+            meter.stop(.readHostToolSetText);
+            try std.testing.expectEqualStrings(tool_defs.bash_record.description, &text);
             try plainTurn(&storage, &tmp, &meter);
             try toolTurn(&storage, &tmp, &meter);
             try compactedTurn(&storage, &tmp);
@@ -10690,23 +10833,23 @@ test "each Store entry point takes its round budget on its common path" {
             try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
         }
 
-        /// Drive MCP through an actual frozen catalog offer, without changing
-        /// the built-in catalog used by the other entry points' fixtures.
+        /// Drive MCP through an actual frozen tool set offer, without changing
+        /// the built-in tool set used by the other entry points' fixtures.
         fn mcpTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
-            const records = comptime testingCatalogRecords(&.{
+            const records = comptime testingHostToolRecords(&.{
                 .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a docs page.", .input_schema = "{\"type\":\"object\"}" },
             });
             const digests = comptime blk: {
                 @setEvalBranchQuota(1_000_000);
                 var out: [records.len][32]u8 = undefined;
-                for (&records, &out) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+                for (&records, &out) |*record, *digest| digest.* = tool_defs.recordDigest(record);
                 break :blk out;
             };
-            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
-            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
             defer storage.close() catch unreachable;
             const previous_storage = meter.storage;
             meter.storage = &storage;
@@ -12213,6 +12356,30 @@ test "explicit or retained null effort on a listed model refuses a mixed update 
     }.run);
 }
 
+test "a null effort is refused for listed reasoning models and admitted for unlisted models" {
+    var requested: wire_request.Configuration = .{};
+    requested.reasoning_effort.state = .explicit_null;
+    var current: CurrentConfiguration = .{ .reasoning_effort = null, .provider = .codex };
+    try current.model.set("gpt-6.1-sol");
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_defs.built_in_tool_set, &current, &requested, .codex).?);
+    try current.model.set("model-a");
+    try std.testing.expect(configuration_domain.configurationBeforeWorkspace(&tool_defs.built_in_tool_set, &current, &requested, .codex) == null);
+}
+
+test "null effort supports nonreasoning catalog entries but never clears assigned effort" {
+    var requested: wire_request.Configuration = .{};
+    requested.reasoning_effort.state = .explicit_null;
+    var current: CurrentConfiguration = .{ .reasoning_effort = null, .provider = .codex };
+    for ([_][]const u8{ "openai/whisper-1", "unlisted-model" }) |model| {
+        try current.model.set(model);
+        current.reasoning_effort = null;
+        try std.testing.expect(configuration_domain.configurationBeforeWorkspace(&tool_defs.built_in_tool_set, &current, &requested, .codex) == null);
+        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), configuration_domain.effectiveReasoningEffort(&current));
+        current.reasoning_effort = .low;
+        try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_defs.built_in_tool_set, &current, &requested, .codex).?);
+    }
+}
+
 test "configuration validates effective effort across retained requested and target model states" {
     const catalog = @import("../model_catalog.zig");
     const efforts = std.enums.values(protocol.ReasoningEffort);
@@ -12258,7 +12425,7 @@ test "configuration validates effective effort across retained requested and tar
                             @tagName(requested.reasoning_effort.state),
                             if (selected) |value| @tagName(value) else null,
                         });
-                        try std.testing.expectEqual(expected, configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex));
+                        try std.testing.expectEqual(expected, configuration_domain.configurationBeforeWorkspace(&tool_defs.built_in_tool_set, &current, &requested, .codex));
                     }
                 }
             }
@@ -12274,7 +12441,7 @@ test "effective effort carries legacy history without inferring a fresh default"
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .high), configuration_domain.effectiveReasoningEffort(&current));
     var requested: wire_request.Configuration = .{};
     requested.reasoning_effort.state = .explicit_null;
-    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex).?);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_defs.built_in_tool_set, &current, &requested, .codex).?);
     current.reasoning_effort = .low;
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), configuration_domain.effectiveReasoningEffort(&current));
 }
@@ -12355,7 +12522,7 @@ test "loaded tools configure defaults equality membership and reachability" {
     }.run);
 }
 
-test "loaded tools preserve and intersect a saved subset through the catalog" {
+test "loaded tools preserve and intersect a saved subset through the tool set" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -12363,7 +12530,7 @@ test "loaded tools preserve and intersect a saved subset through the catalog" {
             var storage: Store = undefined;
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            // The production catalog now makes strict loaded subsets reachable.
+            // The production tool set now makes strict loaded subsets reachable.
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var initial = try completeConfiguration("loaded-subset-create", "", workspace, "model-a");
@@ -12440,14 +12607,14 @@ test "start_agent narrows configured tool names including unloaded MCP members" 
             var storage: Store = undefined;
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            var records = comptime testingCatalogRecords(&.{
+            var records = comptime testingHostToolRecords(&.{
                 .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page", .input_schema = "{\"type\":\"object\"}" },
                 .{ .name = "other_page", .owner = .mcp, .server = "docs", .description = "Fetch another page", .input_schema = "{\"type\":\"object\"}" },
             });
             var digests: [records.len][32]u8 = undefined;
-            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
-            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
-            try storage.saveCatalog(&catalog);
+            for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
+            try storage.saveHostToolSet(&host_tool_set);
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             var create = try completeConfiguration("names-agent-parent", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
             create.configuration.tools = try .of(&.{ "fetch_page", "find_tools", "start_agent" });
@@ -12455,7 +12622,7 @@ test "start_agent narrows configured tool names including unloaded MCP members" 
             const parent = (try storage.configure(&create, .{})).accepted.session;
             try submitTestMessage(&storage, &tmp, "names-agent-message", "names-agent-key", parent.slice(), "start children");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            const cases = [_]struct { names: []const []const u8, refusal: ?[]const u8 = null, remove_catalog: bool = false }{
+            const cases = [_]struct { names: []const []const u8, refusal: ?[]const u8 = null, remove_tool_set: bool = false }{
                 // Configured, not loaded: narrowing is independent of the offer.
                 .{ .names = &.{"fetch_page"} },
                 .{ .names = &.{ "fetch_page", "start_agent" } },
@@ -12463,9 +12630,9 @@ test "start_agent narrows configured tool names including unloaded MCP members" 
                 .{ .names = &.{"other_page"}, .refusal = "spec.tools: other_page is not one of your tools. Nothing was started." },
                 .{ .names = &.{"bash"}, .refusal = "spec.tools: bash is not one of your tools. Nothing was started." },
                 .{ .names = &.{"fetch"}, .refusal = "spec.tools: fetch is not one of your tools. Nothing was started." },
-                // Parent membership still passes after catalog removal; configure
-                // retains authority to refuse a name absent from today's catalog.
-                .{ .names = &.{"fetch_page"}, .remove_catalog = true, .refusal = "Rui could not start the agent (unknown_tool). Nothing was started." },
+                // Parent membership still passes after tool set removal; configure
+                // retains authority to refuse a name absent from today's tool set.
+                .{ .names = &.{"fetch_page"}, .remove_tool_set = true, .refusal = "Rui could not start the agent (unknown_tool). Nothing was started." },
             };
             var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer memory.deinit();
@@ -12485,7 +12652,7 @@ test "start_agent narrows configured tool names including unloaded MCP members" 
             };
             var started: u64 = 0;
             for (cases) |entry| {
-                if (entry.remove_catalog) try storage.saveCatalog(&tool_catalog.built_in);
+                if (entry.remove_tool_set) try storage.saveHostToolSet(&tool_defs.built_in_tool_set);
                 const action = (try storage.nextCoreWork()).?.action;
                 var spec = try testingAgentSpec(entry.names, "ask");
                 var capture: Capture = .{};
@@ -13964,7 +14131,7 @@ test "inline skills configuration validation borrows one Store-owned plan throug
 test "MCP settlement saves one decoded presentation line or the tool name" {
     try store_testing.forEachEngine(struct {
         fn run(engine: *store_testing.Case) !void {
-            const records = testingCatalogRecords(&.{.{
+            const records = testingHostToolRecords(&.{.{
                 .name = "fetch_page",
                 .owner = .mcp,
                 .server = "docs",
@@ -13973,10 +14140,10 @@ test "MCP settlement saves one decoded presentation line or the tool name" {
             }});
             const digests = blk: {
                 var out: [records.len][32]u8 = undefined;
-                for (records, &out) |record, *digest| digest.* = tool_catalog.recordDigest(&record);
+                for (records, &out) |record, *digest| digest.* = tool_defs.recordDigest(&record);
                 break :blk out;
             };
-            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
             const Case = struct { arguments: []const u8, expected: []const u8 = "fetch_page" };
             const cases = [_]Case{
                 .{ .arguments = "{\"rui_call_description\":\"Fetch page\"}", .expected = "Fetch page" },
@@ -14003,7 +14170,7 @@ test "MCP settlement saves one decoded presentation line or the tool name" {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
                 var storage: Store = undefined;
-                try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
                 defer storage.close() catch unreachable;
                 var workspace: [protocol.max_workspace_bytes]u8 = undefined;
                 var configure = try completeConfiguration("mcp-line-config", "", try canonicalCwd(std.testing.io, &workspace), "model-a");
@@ -14048,12 +14215,12 @@ test "saved MCP call lines survive all work reads pending, running and completed
     try store_testing.forEachEngine(struct {
         fn run(engine: *store_testing.Case) !void {
             var digests: [membership_records.len][32]u8 = undefined;
-            const catalog = membershipCatalog(&digests);
+            const host_tool_set = membershipToolSet(&digests);
             for ([_]usize{ 100, 101, 200 }) |length| {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
                 var storage: Store = undefined;
-                try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
                 defer storage.close() catch unreachable;
                 var workspace: [protocol.max_workspace_bytes]u8 = undefined;
                 var configure = try completeConfiguration("mcp-work-config", "", try canonicalCwd(std.testing.io, &workspace), "model-a");
@@ -14115,9 +14282,9 @@ test "saved MCP call lines survive all work reads pending, running and completed
     }.run);
 }
 
-const membership_records = store_testing.catalogRecordsWith(&.{.{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" }});
-fn membershipCatalog(digests: *[membership_records.len][32]u8) tool_catalog.Catalog {
-    for (&membership_records, digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+const membership_records = store_testing.hostToolRecordsWith(&.{.{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" }});
+fn membershipToolSet(digests: *[membership_records.len][32]u8) tool_defs.HostToolSet {
+    for (&membership_records, digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
     return .{ .records = &membership_records, .digests = digests };
 }
 
@@ -14169,9 +14336,9 @@ fn expectMembershipRemovedOutput(storage: *Store, binding: store_core.AttemptBin
     var output: historical_domain.HistoricalReader = undefined;
     try view.openContent(result.output, &output);
     defer output.close();
-    var buffer: [tool_catalog.removed_tool_result.len + 1]u8 = undefined;
+    var buffer: [tool_defs.removed_tool_result.len + 1]u8 = undefined;
     const count = try output.read(0, &buffer);
-    try std.testing.expectEqualStrings(tool_catalog.removed_tool_result, buffer[0..count]);
+    try std.testing.expectEqualStrings(tool_defs.removed_tool_result, buffer[0..count]);
     try std.testing.expect((try view.nextToolResult()) == null);
 }
 
@@ -14179,7 +14346,7 @@ test "tool membership settlement covers builtin provider MCP withdrawn unknown a
     try store_testing.forEachEngine(struct {
         fn run(engine: *store_testing.Case) !void {
             var digests: [membership_records.len][32]u8 = undefined;
-            const catalog = membershipCatalog(&digests);
+            const host_tool_set = membershipToolSet(&digests);
             const cases = [_]MembershipCase{
                 .{ .name = "read_transcript" },
                 .{ .name = "bash" },
@@ -14195,7 +14362,7 @@ test "tool membership settlement covers builtin provider MCP withdrawn unknown a
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
                 var storage: Store = undefined;
-                try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
                 defer storage.close() catch unreachable;
                 var offered = [_][]const u8{ test_case.name, "find_tools" };
                 if (std.mem.lessThan(u8, offered[1], offered[0])) std.mem.swap([]const u8, &offered[0], &offered[1]);
@@ -14245,12 +14412,12 @@ test "tool membership settlement fences an offered nonbuiltin with a corrupt own
     try store_testing.forEachEngine(struct {
         fn run(engine: *store_testing.Case) !void {
             var digests: [membership_records.len][32]u8 = undefined;
-            const catalog = membershipCatalog(&digests);
+            const host_tool_set = membershipToolSet(&digests);
             for ([_][]const u8{ "rui", "provider" }) |owner| {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
                 var storage: Store = undefined;
-                try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
                 defer storage.close() catch unreachable;
                 const session = try configureMembership(&storage, &.{"fetch_page"}, null);
                 try store_testing.submitTestMessage(&storage, &tmp, "membership-input", "membership-message", session.slice(), "classify");
@@ -14267,7 +14434,7 @@ test "tool membership settlement fences an offered nonbuiltin with a corrupt own
     }.run);
 }
 
-test "tool membership rejects MCP catalog shadows of every builtin name" {
+test "tool membership rejects MCP tool set shadows of every builtin name" {
     try store_testing.forEachEngine(struct {
         fn run(engine: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -14275,15 +14442,15 @@ test "tool membership rejects MCP catalog shadows of every builtin name" {
             var storage: Store = undefined;
             try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            for (tool_catalog.built_in.records, 0..) |builtin, index| {
-                var shadow_records: [tool_catalog.built_in.records.len]tool_catalog.Record = undefined;
-                @memcpy(&shadow_records, tool_catalog.built_in.records);
+            for (tool_defs.built_in_tool_set.records, 0..) |builtin, index| {
+                var shadow_records: [tool_defs.built_in_tool_set.records.len]tool_defs.Record = undefined;
+                @memcpy(&shadow_records, tool_defs.built_in_tool_set.records);
                 shadow_records[index].owner = .mcp;
                 shadow_records[index].server = "docs";
                 var shadow_digests: [shadow_records.len][32]u8 = undefined;
-                for (&shadow_records, &shadow_digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
-                const shadow: tool_catalog.Catalog = .{ .records = &shadow_records, .digests = &shadow_digests };
-                try std.testing.expectError(error.InvalidToolCatalog, storage.saveCatalog(&shadow));
+                for (&shadow_records, &shadow_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+                const shadow: tool_defs.HostToolSet = .{ .records = &shadow_records, .digests = &shadow_digests };
+                try std.testing.expectError(error.InvalidHostToolSet, storage.saveHostToolSet(&shadow));
                 try std.testing.expect(!storage.isFenced());
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE name=?1 AND owner='mcp'", .{builtin.name}));
             }
@@ -14294,25 +14461,25 @@ test "tool membership rejects MCP catalog shadows of every builtin name" {
 test "runner action seam covers selection admission input settlement stop and recovery" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            const records = comptime testingCatalogRecords(&.{
+            const records = comptime testingHostToolRecords(&.{
                 .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a docs page.", .input_schema = "{\"type\":\"object\"}" },
             });
             const digests = comptime blk: {
                 @setEvalBranchQuota(1_000_000);
                 var out: [records.len][32]u8 = undefined;
-                for (&records, &out) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+                for (&records, &out) |*record, *digest| digest.* = tool_defs.recordDigest(record);
                 break :blk out;
             };
-            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
-            // Admission and resolution each read once, then write/commit once.
-            // MySQL conformance rolls back before COMMIT and repeats both rounds.
-            const write_rounds: u16 = if (case.rerun) 4 else 2;
+            const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
+            // The replay fixture executes every write transaction twice.
+            // Keep the exact two-round budget per execution on both passes.
+            const write_rounds: u64 = if (case.rerun) 4 else 2;
             inline for (.{ .bash, .mcp }) |runner| {
                 for (0..4) |scenario| {
                     var tmp = std.testing.tmpDir(.{});
                     defer tmp.cleanup();
                     var storage: Store = undefined;
-                    try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                    try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
                     defer storage.close() catch unreachable;
                     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -14415,17 +14582,17 @@ test "runner action seam covers selection admission input settlement stop and re
 test "MCP read-only ordering uses frozen offers and admits read waves between writes" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            const records = comptime testingCatalogRecords(&.{
+            const records = comptime testingHostToolRecords(&.{
                 .{ .name = "read_page", .owner = .mcp, .server = "docs", .read_only = true, .description = "Read a page.", .input_schema = "{\"type\":\"object\"}" },
                 .{ .name = "write_page", .owner = .mcp, .server = "docs", .description = "Write a page.", .input_schema = "{\"type\":\"object\"}" },
             });
             const digests = comptime blk: {
                 @setEvalBranchQuota(1_000_000);
                 var out: [records.len][32]u8 = undefined;
-                for (&records, &out) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+                for (&records, &out) |*record, *digest| digest.* = tool_defs.recordDigest(record);
                 break :blk out;
             };
-            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
             const patterns = [_]struct { reads: []const bool, waves: []const usize }{
                 .{ .reads = &.{ false, true, true, false }, .waves = &.{ 1, 2, 1 } },
                 .{ .reads = &.{ true, true }, .waves = &.{2} },
@@ -14435,7 +14602,7 @@ test "MCP read-only ordering uses frozen offers and admits read waves between wr
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
                 var storage: Store = undefined;
-                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
                 defer storage.close() catch unreachable;
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                 var configure = try completeConfiguration("read-only-order", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
@@ -14459,35 +14626,35 @@ test "MCP read-only ordering uses frozen offers and admits read waves between wr
                 };
                 try settleCallsForTesting(&storage, &tmp, model, "read-only-calls", calls[0..pattern.reads.len]);
 
-                // Today's catalog now says the opposite. Admission must still
+                // Today's tool set now says the opposite. Admission must still
                 // follow each call's frozen offer, and both record identities
                 // must coexist rather than overwrite one another.
                 var changed_records = records;
                 var changed_digests = digests;
                 for (&changed_records, &changed_digests) |*record, *digest| {
                     if (record.owner == .mcp) record.read_only = !record.read_only;
-                    digest.* = tool_catalog.recordDigest(record);
+                    digest.* = tool_defs.recordDigest(record);
                 }
-                const changed: tool_catalog.Catalog = .{ .records = &changed_records, .digests = &changed_digests };
-                try storage.saveCatalog(&changed);
+                const changed: tool_defs.HostToolSet = .{ .records = &changed_records, .digests = &changed_digests };
+                try storage.saveHostToolSet(&changed);
                 try std.testing.expectEqual(@as(u64, 4), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE owner='mcp'", .{}));
                 for ([_][]const u8{ "read_page", "write_page" }) |name| {
                     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE name=?1 AND read_only=0", .{name}));
                     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE name=?1 AND read_only=1", .{name}));
                 }
-                var saved = (try storage.readCatalog(std.testing.allocator)).?;
+                var saved = (try storage.readHostToolSet(std.testing.allocator)).?;
                 defer saved.deinit(std.testing.allocator);
-                const saved_catalog = saved.catalog();
+                const saved_tool_set = saved.toolSet();
                 for (changed.records, changed.digests) |record, digest| {
-                    const index = saved_catalog.find(record.name).?;
-                    try std.testing.expectEqual(record.read_only, saved_catalog.records[index].read_only);
-                    try std.testing.expectEqualSlices(u8, &digest, &saved_catalog.digests[index]);
+                    const index = saved_tool_set.find(record.name).?;
+                    try std.testing.expectEqual(record.read_only, saved_tool_set.records[index].read_only);
+                    try std.testing.expectEqualSlices(u8, &digest, &saved_tool_set.digests[index]);
                 }
-                // Re-saving the original catalog reuses its set and records.
+                // Re-saving the original tool set reuses its set and records.
                 const sets = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{});
-                try storage.saveCatalog(&catalog);
+                try storage.saveHostToolSet(&host_tool_set);
                 try std.testing.expectEqual(sets, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{}));
-                try storage.saveCatalog(&changed);
+                try storage.saveHostToolSet(&changed);
 
                 var ready: [4]action_domain.ReadyAction = undefined;
                 var bindings: [4]ActionAttemptBinding = undefined;

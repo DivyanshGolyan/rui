@@ -126,7 +126,7 @@ def queued_in_active():
                 assert "Queued" not in frame, frame
                 working = row(frame, "First peer task")
                 queued = row(frame, "Second peer task")
-                assert re.fullmatch(r"  ● First peer task {2,}\d+s", working), working
+                assert re.fullmatch(r"  ⠹ First peer task {2,}\d+s", working), working
                 assert re.fullmatch(r"  ◌ Second peer task {2,}\d+s", queued), queued
                 active = lines.index(" Active · 2")
                 assert lines[active + 1:active + 3] == [working, queued], frame
@@ -160,7 +160,7 @@ def detail_column():
             frame = screen.wait(lambda shown: "retry in" in shown and "Fails every time" in shown,
                                 "the retry countdown and the failed row")
             shown = row(frame, "Rate limited task")
-            match = re.fullmatch(r"  ● Rate limited task {2,}Rate limited · retry in (\d+)s {2,}\d+s", shown)
+            match = re.fullmatch(r"  ⠹ Rate limited task {2,}Rate limited · retry in (\d+)s {2,}\d+s", shown)
             assert match and 0 < int(match[1]) <= 41, (shown, frame)
             failure = row(frame, "Fails every time")
             assert re.fullmatch(r"  × Fails every time {2,}Retries ran out {2,}\d+s", failure), (failure, code)

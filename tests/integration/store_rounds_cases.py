@@ -50,10 +50,10 @@ BUDGET = {
     "commits": 3,
     "write_round_trips": 7,
     # Any operation, upper bound: rescans and the observe loop below make
-    # the total vary (24 for a first operation and 19 for a later one
-    # over four runs once the dispatch survey rode a lone write's COMMIT;
-    # earlier work varied by up to 6).
-    "round_trips": 30,
+    # the total vary (22 for a first operation and 17 for a later one
+    # over four runs once the dispatch survey said when no retry scan
+    # has a row; earlier work varied by up to 6).
+    "round_trips": 28,
     # Over IDLE_SECONDS with no Session, exact: the Host asks again only
     # after a commit, a slot change or a scheduled retry falling due.
     "idle_round_trips": 0,

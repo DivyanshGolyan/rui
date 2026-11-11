@@ -1,4 +1,4 @@
-//! The model-facing resolution of one MCP call, bounded without retaining a copy.
+//! The model-facing excerpt and full rendering of one borrowed MCP answer.
 const std = @import("std");
 const Call = @import("Call.zig");
 const document = @import("document.zig");
@@ -18,6 +18,14 @@ pub const Ending = union(enum) {
 pub const Ended = struct { server_name: []const u8, ended: Ending };
 
 pub fn write(out: *std.Io.Writer, ended: Ended) !Code {
+    return (try writeExcerpt(out, ended)).code;
+}
+
+pub const Excerpt = struct { code: Code, total: usize, omitted: bool };
+
+/// Preserve the existing excerpt bytes; the execution owner may append a
+/// scratch notice when omitted, before releasing the borrowed answer.
+pub fn writeExcerpt(out: *std.Io.Writer, ended: Ended) !Excerpt {
     var bounded: Prefix = .{ .out = out };
     const code = try render(&bounded.writer, ended);
     try bounded.writer.flush();
@@ -25,7 +33,13 @@ pub fn write(out: *std.Io.Writer, ended: Ended) !Code {
     if (bounded.total > bounded.shown) {
         try out.print("\n[{d} more bytes not shown]", .{bounded.total - bounded.shown});
     }
-    return code;
+    return .{ .code = code, .total = bounded.total, .omitted = bounded.total > bounded.shown };
+}
+
+/// A second streaming pass only for omitted output: no full rendered copy is
+/// allocated, and each byte is written to scratch once.
+pub fn writeFull(out: *std.Io.Writer, ended: Ended) !void {
+    _ = try render(out, ended);
 }
 
 /// Streams the prefix, holding only its last four bytes and one lookahead.

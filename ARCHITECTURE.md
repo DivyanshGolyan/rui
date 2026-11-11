@@ -1419,7 +1419,7 @@ Rui runs no DDL on MySQL (D203).
 `rui store schema --engine mysql` prints this build's canonical `schema.ddl(.mysql)` as one SQL file for the DB team to apply to an empty database.
 With `--from N` it instead prints every forward MySQL migration from format N to this build's format, oldest first (D223); the current format prints empty stdout successfully, and formats outside the migration baseline through the current format are usage errors naming that range, with no stdout.
 The composed migration finishes with one update of the saved format and wire version to this build's values; individual steps remain `schema.mysqlMigration(from)`, and this command never applies the SQL.
-The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
+The step to 52 lets tool records name an MCP server and keeps the Host tool set (T1e).
 The step to 53 records a Session's parent (D27).
 The step to 54 records the stops and ending Messages an attached child owes (D38, D39), ancestor feed forwarding in `session_forward` (D135, D180), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
 On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
@@ -1430,6 +1430,7 @@ The step to 58 moves saved wire 9 metadata to wire 10 for nullable failed-send p
 The step to 59 adds immutable skill catalog metadata and its ordinary turnless instruction provenance, retaining unreleased wire 10 without rewriting earlier Conversation content.
 The step to 60 adds `message_skill` and the Conversation's skill entries (kind 4, naming their `message_skill` row), rebuilding `conversation_entry` on both engines, and moves Store wire metadata to 11; earlier rows are unchanged.
 The step to 61 widens saved call descriptions on `model_tool_call` and `model_output_item` to 200 UTF-8 bytes on both engines; existing rows need no rewrite.
+The step to 63 renames `host_catalog` to `host_tool_set` and `action_operation.bash_timeout_ms` to `attempt_timeout_ms`, without changing their contents.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -2159,6 +2160,12 @@ Request fields are `version`, `kind`, canonical `store`, `workspace` (exact cano
 A first page may also carry `since`, an opaque token from an earlier reply.
 Response `session_list` has up to eight `sessions`, then `delta`, a new `since` token, and `next` as either `null` or a continuation.
 Each row has exact `reference`, `workspace`, `provider`, `model`, `tools`, `permission_mode`, and `archive_state`; nullable `parent` (the creator’s six-character Session reference for an attached agent, otherwise `null`); nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
+Rows also carry nullable `last_line`: `{position, text}`, with a string-valued activity position and nullable text.
+It is the later by position of the newest ended Turn's outcome and the oldest pending approval's call.
+Completed Turn text is the first non-blank line from at most the first 1 KiB of public answer content, cut to at most 200 UTF-8 bytes at a code point with “…” when longer.
+Private content and failure or stop outcomes have null text; an approval uses its saved `model_tool_call.description`.
+Deciding an approval removes that candidate, falling back to the newest ended Turn; a Session with neither candidate has null `last_line`.
+These derived facts join the existing row-settings read, adding no list-page round, stored copy, Host cache or write.
 `work` is the same value that activity pages, Current and Message observations carry.
 With `since`, the Host answers one of three `delta` values.
 `not_modified` means no row has changed on this Host since the token; it is answered before any Store entry, lock or scratch, and never while the Store is fenced.
@@ -2954,9 +2961,10 @@ A notice takes that row, and any further rows its text wraps to, until the next 
 The rule names how many draft lines it hides above or below; a conversation drops its Session line when fewer than three rows remain under its status and the rule when fewer than four remain above the line, and an overview narrower or shorter than six cells shows no input.
 The status sits directly above the rule; conversation text starts at the top of the screen, and its tool rows and live line follow its last line (Divyansh approved this on 2026-10-31, front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 A draft wraps between words the same way on both screens: spaces at the edge hang past it rather than start a row, a word wider than the line (a URL or a path) breaks after its last `/`, `.`, `-` or similar mark that fits, and between clusters only when it has none; continuation rows align under the text.
-Presentation-owned ANSI foreground colours reinforce meaning: blue User/input markers, neutral assistant prose and settled outcomes, subdued transient status, yellow permission decisions, and red blocking failures or uncertainty.
-Settled outcomes stay quiet through concise wording and indentation, not a terminal palette's potentially unreadable dark grey.
-Nonempty `NO_COLOR` disables these foreground colours.
+The conversation paints presentation colours from the shared Khadi theme roles: ink for User markers and work under way, quiet for settled outcomes and transient status, attention for permission decisions, and failure for failures.
+Marks come from `src/marks.zig`; CLI reads keep the matching ANSI foreground codes.
+Nonempty `NO_COLOR` disables these presentation colours.
+
 Content cannot select a style, and all escaping, exact permission text and terminal cleanup guarantees remain unchanged.
 
 Historical applied Admissions are suppressed in favor of their User rows; live Admissions display once and their later User projections are suppressed.
@@ -3870,6 +3878,7 @@ No SQLite watcher is required.
 The retry scans use a due-time index that excludes future deadlines, and run at most once per second.
 A scan that found nothing runs again only after a commit, a slot change or the earliest scheduled retry falling due by the wall clock, the clock the Store admits by; the admission scan reads that due time in its own round, and an idle Host sends the Store no query.
 After a commit, one read round says which kinds of dispatch work the Store holds (core and MCP Actions, Bash, waiting Messages, tool continuations), and only those kinds' scans run; the answer is a hint, since each admission reads its own facts again, and a kind it wrongly names costs one empty round.
+That round also reads whether any open Turn's Attempt is unresolved with a retry state; while none is, neither retry scan runs, since a commit is the only thing that makes one.
 Missed ticks do not queue.
 Full capacity or an empty array must not cause spinning.
 
@@ -4019,7 +4028,7 @@ Measure filesystem metadata and cleanup latency separately from logical bytes an
 
 #### Tool excerpts and full output
 
-Tool output has no per-call total capture cap.
+Bash output has no per-call total capture cap.
 Short output is complete; larger output saves status, tail excerpt, omission notice and the path of each truncated stream, preserving combined-stream allowance and valid UTF-8 boundaries before provider JSON framing.
 Failed full capture cannot masquerade as successful preservation.
 Full output is read through ordinary Bash permissions/timeouts/excerpts, not a new Read tool or whole-file context injection.
@@ -4029,6 +4038,13 @@ Canonical permission, Edit intent and outcome evidence are not disposable spillo
 A Bash result names only what carries information: the outcome line, any warnings, a `stdout tail:` section only when stdout is nonempty and a `stderr tail:` section only when stderr is nonempty.
 When either tail omits earlier bytes, `[earlier output omitted]` follows, then `Full stdout: PATH` or `Full stderr: PATH` for each truncated stream, or `Full output was not retained.` when retention is unavailable.
 An untruncated stream is complete in the result and names no file.
+
+MCP answers are bounded by the existing 4 MiB per-call answer buffer.
+Their resolution keeps the first 10,000 rendered bytes, cut at a UTF-8 boundary, and the omitted-byte suffix; fitting answers keep their complete existing bytes and create no retained file.
+When bytes are omitted, stream the whole rendered answer once to optional scratch and append `Full output: PATH`, or `Full output was not retained.` if retention is unavailable.
+MCP uses the Host's same retained-output queue, scratch budget, file capacity, eviction and cleanup as Bash, with no fsync or durable retention index.
+Scratch loss never changes the call's outcome; partial failed captures are not advertised and keep their charge until confirmed removal.
+The Store saves exactly this model-facing resolution, not the full scratch answer; saved results and history rendering are never rewritten when scratch disappears.
 
 #### Exhaustion and cleanup
 

@@ -420,7 +420,7 @@ test "history reopened transcript keeps only the failed numeric header" {
     const prepared = try stagePage(io, page, scratch, Bytes{});
     var sink: Sink = .{};
     try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false, "");
-    try std.testing.expectEqualStrings("\n! Run check — Failed (exit 7)\n", sink.bytes[0..sink.length]);
+    try std.testing.expectEqualStrings("\n× Run check — Failed (exit 7)\n", sink.bytes[0..sink.length]);
 }
 
 test "history preparation binds wire and staged bytes before exposure" {
@@ -711,7 +711,7 @@ test "history tool suffix authenticates discarded prefixes through the productio
                     var retained: [8192]u8 = undefined;
                     try std.testing.expectEqual(item_bytes, try scratch.readPositionalAll(io, &retained, 0));
                     try std.testing.expectEqualSlices(u8, body[body.len - item_bytes ..], &retained);
-                } else try std.testing.expectEqualStrings("\n! Tool call — Failed\n", sink.bytes[0..sink.length]);
+                } else try std.testing.expectEqualStrings("\n× Tool call — Failed\n", sink.bytes[0..sink.length]);
             } else {
                 try std.testing.expectEqual(@as(usize, 0), sink.length);
                 try std.testing.expectError(switch (mode) {

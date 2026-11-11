@@ -382,7 +382,7 @@ fn stringField(object: std.json.ObjectMap, comptime name: []const u8, field: any
 }
 
 /// The tool list `value` names, sorted and checked with configure's name
-/// grammar. Availability is checked by the Store against its tool catalog.
+/// grammar. Availability is checked by the Store against the Host tool set.
 fn toolsField(arena: std.mem.Allocator, value: std.json.Value, tools: *protocol.ToolsField) error{ OutOfMemory, Refused }!void {
     const items = switch (value) {
         .array => |array| array.items,

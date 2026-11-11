@@ -23,7 +23,7 @@ const settings = rsql.Read(.{
 });
 
 /// SQL narrows identities only; the shared Host matcher decides every hit.
-/// Saved records, not the Host's potentially newer catalog, define the search.
+/// Saved records, not the Host's potentially newer tool set, define the search.
 const candidates = rsql.Read(.{
     .sql = "SELECT tool.name,description.content_id,description.byte_length,description.digest " ++
         "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++

@@ -1118,30 +1118,7 @@ export interface components {
             started_at: components["schemas"]["Decimal"];
             custody_occupied: components["schemas"]["Decimal"];
             paused: boolean;
-            capabilities: {
-                /** @constant */
-                bash: true;
-                providers: {
-                    /** @enum {string} */
-                    codex: "unserved" | "endpoint" | "chatgpt_device" | "key_file";
-                    /** @enum {string} */
-                    openai: "unserved" | "endpoint" | "chatgpt_device" | "key_file";
-                };
-            };
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            type: "host_info";
-            store: string;
-            instance: string;
-            active_capacity: components["schemas"]["Decimal"];
-            intake_capacity: components["schemas"]["Decimal"];
-            descriptor_limit: string;
-            started_at: components["schemas"]["Decimal"];
-            custody_occupied: components["schemas"]["Decimal"];
-            paused: boolean;
-            innodb_doublewrite: string;
+            innodb_doublewrite?: string;
             capabilities: {
                 /** @constant */
                 bash: true;
@@ -1298,6 +1275,10 @@ export interface components {
             failed_response: "body" | "metadata";
             operation: components["schemas"]["Decimal"];
             attempt: components["schemas"]["Decimal"];
+        };
+        LastLineFields: {
+            position: components["schemas"]["Decimal"];
+            text: string | null;
         };
         LaunchFrame: {
             /** @constant */
@@ -2937,6 +2918,7 @@ export interface components {
             revision: components["schemas"]["Decimal"];
             end: components["schemas"]["Decimal"];
             first_message: components["schemas"]["FirstMessage"] | null;
+            last_line: components["schemas"]["LastLineFields"] | null;
             work: components["schemas"]["SessionWork"];
             peers: components["schemas"]["PeerFacts"];
         };
