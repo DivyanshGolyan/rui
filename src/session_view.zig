@@ -1182,10 +1182,10 @@ pub fn Answer(comptime Sink: type) type {
         writer: std.Io.Writer,
         renderer: Renderer,
         failure: ?anyerror = null,
-        pub fn init(self: *@This(), sink: Sink, home: []const u8) void {
+        pub fn init(self: *@This(), sink: Sink, home: []const u8, colour: bool) void {
             self.* = .{ .sink = sink, .writer = undefined, .renderer = undefined };
             self.writer = .{ .vtable = &.{ .drain = drain }, .buffer = &self.storage };
-            self.renderer = .{ .out = &self.writer, .home = home };
+            self.renderer = .{ .out = &self.writer, .home = home, .colour = colour };
         }
         pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
             if (self.failure) |err| return err;
@@ -1218,6 +1218,27 @@ pub fn Answer(comptime Sink: type) type {
             return consumed + last.len * splat;
         }
     };
+}
+
+test "answer adapters pass NO_COLOR through inline names tables and fenced code" {
+    const Sink = struct {
+        output: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.output.writeAll(bytes);
+        }
+    };
+    for ([_]bool{ false, true }) |colour| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var answer: Answer(Sink) = undefined;
+        answer.init(.{ .output = &output.writer }, "", colour);
+        for ("`name`\n| A |\n| --- |\n| B |\n```zig\ncode\n\n```\n") |byte| try answer.feed(&.{byte});
+        try answer.finish();
+        try std.testing.expectEqual(colour, std.mem.indexOf(u8, output.written(), "\x1b[94m") != null);
+        try std.testing.expectEqual(colour, std.mem.indexOf(u8, output.written(), "\x1b[90m") != null);
+        try std.testing.expectEqual(colour, std.mem.indexOf(u8, output.written(), "\x1b[40m") != null);
+        if (!colour) try std.testing.expectEqualStrings("name\n  A\n  B\n  code\n  \n", output.written());
+    }
 }
 
 fn print(sink: anytype, comptime format: []const u8, args: anytype) !void {
@@ -1652,7 +1673,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 compact_tools.* = false;
                 try sink.feed("\n");
                 var answer: Answer(@TypeOf(sink)) = undefined;
-                answer.init(sink, home);
+                answer.init(sink, home, colour);
                 try content(requests, store, session, item, assistant.content, &answer);
                 try answer.finish();
                 try sink.feed("\n");

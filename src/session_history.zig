@@ -106,7 +106,7 @@ pub const Prepared = struct {
                 .assistant => {
                     try sink.feed("\n");
                     var answer: View.Answer(@TypeOf(sink)) = undefined;
-                    answer.init(sink, home);
+                    answer.init(sink, home, colour);
                     try staged.read(&answer);
                     try answer.finish();
                 },

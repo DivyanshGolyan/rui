@@ -163,11 +163,14 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
             .optimize = .ReleaseSafe,
         }),
     });
-    renderer_allocation.root_module.addImport("AnswerRenderer", b.createModule(.{
+    const answer_renderer = b.createModule(.{
         .root_source_file = b.path("src/AnswerRenderer.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
-    }));
+    });
+    const terminal = b.dependency("vaxis", .{ .target = target, .optimize = std.builtin.OptimizeMode.ReleaseSafe });
+    answer_renderer.addImport("terminal_width", terminal.module("gwidth"));
+    renderer_allocation.root_module.addImport("AnswerRenderer", answer_renderer);
     const run_renderer_allocation = ci.run(renderer_allocation);
     logic_test_step.dependOn(&run_renderer_allocation.step);
     test_step.dependOn(&run_renderer_allocation.step);

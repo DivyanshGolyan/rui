@@ -107,19 +107,30 @@ pub const Colours = struct {
     user: vaxis.Color = .default,
     attention: vaxis.Color = .default,
     failure: vaxis.Color = .default,
+    band: vaxis.Color = .default,
 };
 
 /// Retained style byte, display-only: bits 0-2 bold, italic and underline,
 /// bits 3-5 a foreground index, bit 6 user text and bit 7 its dim summary.
 /// Bit 7 alone marks a sidenote, drawn in the right margin.
+/// Slot 5 marks code: SGR 40 covers each complete body line, including its
+/// newline, so even an empty line and an evicted prefix need no side storage.
 /// Two foreground indexes no colour uses mark an OSC 8 link: its address,
 /// kept in the text but never drawn, and right after it the text it links.
 const foreground_mask: u8 = 0b111 << 3;
+const code_index: u8 = 5;
 const linked_index: u8 = 6;
 const address_index: u8 = 7;
 
 fn foregroundIndex(value: u8) u8 {
     return (value & foreground_mask) >> 3;
+}
+
+// Only links underline, so a coloured, underlined label can retain its ink
+// or quiet foreground without a second style byte. Other labels use slot 6.
+fn isLinked(value: u8) bool {
+    const index = foregroundIndex(value);
+    return index == linked_index or (index >= 1 and index <= 4 and value & 4 != 0);
 }
 const user_bit: u8 = 1 << 6;
 const summary_bit: u8 = 1 << 7;
@@ -202,7 +213,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     if (byte == 'm') {
                         const code = self.control[0..self.control_length];
                         if (std.mem.eql(u8, code, "\x1b[0m")) self.style = 0 else if (std.mem.eql(u8, code, "\x1b[1m")) self.style |= 1 else if (std.mem.eql(u8, code, "\x1b[3m")) self.style |= 2 else if (std.mem.eql(u8, code, "\x1b[4m")) self.style |= 4 else if (std.mem.eql(u8, code, "\x1b[2m")) self.style |= user_bit else if (std.mem.eql(u8, code, "\x1b[2;8m")) self.style |= user_bit | summary_bit else if (std.mem.eql(u8, code, "\x1b[8m")) self.style = (self.style & ~user_bit) | summary_bit else if (std.mem.eql(u8, code, "\x1b[39m")) self.style &= ~foreground_mask else {
-                            const colour_index: u8 = if (std.mem.eql(u8, code, "\x1b[33m")) 1 else if (std.mem.eql(u8, code, "\x1b[90m")) 2 else if (std.mem.eql(u8, code, "\x1b[91m")) 3 else if (std.mem.eql(u8, code, "\x1b[94m")) 4 else unreachable;
+                            const colour_index: u8 = if (std.mem.eql(u8, code, "\x1b[33m")) 1 else if (std.mem.eql(u8, code, "\x1b[90m")) 2 else if (std.mem.eql(u8, code, "\x1b[91m")) 3 else if (std.mem.eql(u8, code, "\x1b[94m")) 4 else if (std.mem.eql(u8, code, "\x1b[40m")) code_index else unreachable;
                             self.style = (self.style & ~foreground_mask) | (colour_index << 3);
                         }
                         self.control_length = 0;
@@ -258,7 +269,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             const index: u8 = switch (self.link) {
                 .none => return self.style,
                 .address => address_index,
-                .text => linked_index,
+                .text => if (self.style & 4 != 0 and foregroundIndex(self.style) >= 1 and foregroundIndex(self.style) <= 4) return self.style else linked_index,
             };
             return (self.style & ~foreground_mask) | (index << 3);
         }
@@ -267,9 +278,9 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         /// run right before that text. Empty when the text is not a link or
         /// its address began before the retained text.
         fn address(self: *const Self, position: usize) []const u8 {
-            if (foregroundIndex(self.styles[position]) != linked_index) return "";
+            if (!isLinked(self.styles[position])) return "";
             var end = position;
-            while (end > 0 and foregroundIndex(self.styles[end - 1]) == linked_index) end -= 1;
+            while (end > 0 and isLinked(self.styles[end - 1])) end -= 1;
             var start = end;
             while (start > 0 and foregroundIndex(self.styles[start - 1]) == address_index) start -= 1;
             if (start == 0 and self.origin != 0) return "";
@@ -480,6 +491,19 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         /// Measuring and drawing segment identically, so they wrap identically.
         pub fn printLine(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, plain: vaxis.Style, colours: Colours) u16 {
             const end = self.lineEnd(offset);
+            if (styled and offset < self.length and foregroundIndex(self.styles[offset]) == code_index) {
+                // Measure before painting: the band includes blank lines, the
+                // unused cells after text and every wrapped continuation row.
+                // No retained line metadata or marker bytes are needed.
+                const line = window.child(.{ .y_off = row });
+                if (!commit or !colour) return rowsUsed(self.printRange(line, offset, end, .word, false, commit, colour, plain, colours));
+                const rows = rowsUsed(self.printRange(line, offset, end, .word, false, false, colour, plain, colours));
+                const first_row: i32 = @max(row, 0);
+                const last_row: i32 = @min(@as(i32, row) + rows, window.height);
+                if (last_row > first_row) window.child(.{ .y_off = @intCast(first_row), .height = @intCast(last_row - first_row) }).fill(.{ .style = .{ .fg = plain.fg, .bg = colours.band } });
+                _ = self.printRange(line, offset, end, .word, false, true, colour, plain, colours);
+                return rows;
+            }
             var user = false;
             // A line of summary text alone (a peer Message's line) keeps one
             // row, ending in `…` when it does not fit.
@@ -581,7 +605,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     .failure => colours.failure,
                     .user => colours.user,
                 } else if (value.quiet) colours.quiet else plain.fg,
-                .bg = plain.bg,
+                .bg = if (colour and foregroundIndex(self.styles[position]) == code_index) colours.band else plain.bg,
             };
         }
 
@@ -934,7 +958,7 @@ test "viewport retention is finite and split Unicode is not rendered early" {
 }
 
 test "trusted renderer styles survive fragmented output retention" {
-    const input = "plain \x1b[1mbold\x1b[0m \x1b[3mital\x1b[4mcode\x1b[0m \x1b[94muser\x1b[39m!";
+    const input = "plain \x1b[1mbold\x1b[0m \x1b[3mital\x1b[94mcode\x1b[0m \x1b[94muser\x1b[39m!";
     for (0..input.len + 1) |split| {
         var view: Sized(32, true) = .{};
         try view.append(input[0..split]);
@@ -943,7 +967,7 @@ test "trusted renderer styles survive fragmented output retention" {
         try std.testing.expect(cellStyle(view.styles[6], true).bold);
         try std.testing.expect(!cellStyle(view.styles[10], true).bold);
         const nested = cellStyle(view.styles[15], true);
-        try std.testing.expect(nested.italic and nested.underline);
+        try std.testing.expect(nested.italic and !nested.underline and nested.foreground == .user);
         try std.testing.expect(cellStyle(view.styles[20], true).foreground == .user);
         try std.testing.expect(cellStyle(view.styles[20], false).foreground == null);
         try view.append(" extra words that evict the prefix");
@@ -1391,5 +1415,130 @@ test "rendered local path cells carry the file URI but the sentence semicolon do
             try std.testing.expectEqualStrings(if (in_path) uri else "", cell.link.uri);
             try std.testing.expectEqual(in_path, cell.style.ul_style == .single);
         }
+    }
+}
+
+test "code bands cover blank and wrapped rows at every width and append split without retained metadata" {
+    // SGR 40 is a real terminal background and the viewport's code role.
+    // The newline itself carries it: a completely empty code line still
+    // has a style byte, but no added text byte or per-line allocation.
+    const input = "before\n\x1b[40mabcdefghijkl\n\x1b[0m\x1b[40m\n\x1b[0m\x1b[40mz\n\x1b[0mafter\n";
+    const plain: vaxis.Style = .{ .fg = .{ .index = 255 }, .bg = .{ .index = 19 } };
+    const colours: Colours = .{ .band = .{ .rgb = .{ 28, 29, 35 } } };
+    for (0..input.len + 1) |split| {
+        var view: Sized(64, true) = .{};
+        try view.append(input[0..split]);
+        try view.append(input[split..]);
+        try view.prepare();
+        try std.testing.expectEqualStrings("before\nabcdefghijkl\n\nz\nafter\n", view.text());
+        try std.testing.expectEqual(@sizeOf(@TypeOf(view.bytes)), @sizeOf(@TypeOf(view.styles)));
+        for (1..17) |width_value| {
+            const width: u16 = @intCast(width_value);
+            const wrapped: u16 = @intCast((12 + width_value - 1) / width_value);
+            for ([_]bool{ false, true }) |colour| {
+                // Start on every continuation row, including a negative
+                // logical row origin: the band must stop before prose.
+                for (0..wrapped) |skip| {
+                    var screen: TestScreen = undefined;
+                    const window = screen.window(width, 12);
+                    window.fill(.{ .style = plain });
+                    _ = view.draw(window, .{ .offset = 7, .row = @intCast(skip) }, true, colour, plain, colours);
+                    const band_rows = wrapped - skip + 2;
+                    for (0..12) |row| for (0..width) |column| {
+                        const cell = screen.screen.readCell(@intCast(column), @intCast(row)).?;
+                        try std.testing.expectEqual(if (colour and row < band_rows) colours.band else plain.bg, cell.style.bg);
+                        if (view.cellOffset(cell) != null) {
+                            try std.testing.expectEqual(plain.fg, cell.style.fg);
+                            try std.testing.expect(cell.style.ul_style == .off);
+                        }
+                    };
+                }
+            }
+        }
+    }
+    // Evict into a code line, then prepend it to another page: the retained
+    // style alone still carries the band, with no line-marker repair pass.
+    var old: Sized(32, true) = .{};
+    try old.append("\x1b[40m0123456789012345678901234567890123456789\n\x1b[0m");
+    try old.prepare();
+    try std.testing.expect(old.origin != 0);
+    var newer: Sized(32, true) = .{};
+    try newer.append("after\n");
+    _ = try newer.prepend(&old, .{ .width = 16, .method = .unicode }, 4);
+    var screen: TestScreen = undefined;
+    _ = newer.draw(screen.window(16, 4), .{}, true, true, plain, colours);
+    try std.testing.expectEqual(colours.band, screen.screen.readCell(15, 0).?.style.bg);
+}
+
+test "rendered table headers restore quiet around inline styles and only linked text underlines" {
+    const input = "| **Head** `code` *em* [link](https://x.dev) tail | N |\n| --- | --- |\n| plain | z |\n";
+    for ([_]bool{ false, true }) |colour| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: @import("AnswerRenderer.zig") = .{ .out = &output.writer, .colour = colour };
+        for (input) |byte| try renderer.feed(&.{byte});
+        try renderer.finish();
+        var view: Sized(512, true) = .{};
+        for (output.written()) |byte| try view.append(&.{byte});
+        try view.prepare();
+        const words = [_][]const u8{ "Head", "code", "em", "link", "tail", "plain" };
+        for (words, 0..) |word, index| {
+            const at = std.mem.indexOf(u8, view.text(), word).?;
+            const value = cellStyle(view.styles[at], colour);
+            try std.testing.expectEqual(index == 0, value.bold);
+            try std.testing.expectEqual(index == 2, value.italic);
+            try std.testing.expectEqual(index == 3, value.underline);
+            const expected: @TypeOf(value.foreground) = if (!colour or index == 5) null else if (index == 1) .user else .quiet;
+            try std.testing.expectEqual(expected, value.foreground);
+        }
+        const shown = (try view.shownText(std.testing.allocator, 0, view.length, 512)).?;
+        defer std.testing.allocator.free(shown);
+        try std.testing.expectEqualStrings("  Head code em link tail  N\n  plain                   z\n", shown);
+    }
+}
+
+test "rendered fences carry blank and wrapped bands through the real renderer viewport boundary" {
+    const plain: vaxis.Style = .{ .fg = .{ .index = 255 }, .bg = .{ .index = 19 } };
+    const colours: Colours = .{ .band = .{ .index = 61 } };
+    for ([_]bool{ false, true }) |colour| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: @import("AnswerRenderer.zig") = .{ .out = &output.writer, .colour = colour };
+        for ("```zig\nabcdefghijkl\n\nz\n```\nafter\n") |byte| try renderer.feed(&.{byte});
+        try renderer.finish();
+        var view: Sized(128, true) = .{};
+        for (output.written()) |byte| try view.append(&.{byte});
+        try view.prepare();
+        try std.testing.expectEqualStrings(if (colour) "abcdefghijkl\n\nz\nafter\n" else "  abcdefghijkl\n  \n  z\nafter\n", view.text());
+        for (1..17) |width_value| {
+            var screen: TestScreen = undefined;
+            const window = screen.window(@intCast(width_value), 12);
+            window.fill(.{ .style = plain });
+            _ = view.draw(window, .{}, true, colour, plain, colours);
+            const band_rows = (12 + width_value - 1) / width_value + 2;
+            for (0..12) |row| for (0..width_value) |column| {
+                const cell = screen.screen.readCell(@intCast(column), @intCast(row)).?;
+                try std.testing.expectEqual(if (colour and row < band_rows) colours.band else plain.bg, cell.style.bg);
+            };
+        }
+    }
+}
+
+test "one link keeps its address across plain quiet and ink labels without storing another style byte" {
+    const uri = "https://x.dev/a";
+    const input = "!" ++ TerminalText.link_open ++ uri ++ TerminalText.link_end ++ "\x1b[4mp\x1b[90mq\x1b[94mc\x1b[0mn" ++ TerminalText.link_close ++ ".";
+    for (0..input.len + 1) |split| {
+        var view: Sized(128, true) = .{};
+        try view.append(input[0..split]);
+        try view.append(input[split..]);
+        try view.prepare();
+        try expectLinks(&view, .{}, 8, &.{ "-", uri, uri, uri, uri, "-" });
+        const text = std.mem.indexOf(u8, view.text(), "pqcn").?;
+        try std.testing.expect(cellStyle(view.styles[text + 1], true).foreground == .quiet);
+        try std.testing.expect(cellStyle(view.styles[text + 2], true).foreground == .user);
+        // Losing any part of the retained address makes every style of
+        // its label unlinked, rather than pointing to a truncated target.
+        view.discardFront(3);
+        try expectLinks(&view, .{}, 8, &.{ "-", "-", "-", "-", "-" });
     }
 }

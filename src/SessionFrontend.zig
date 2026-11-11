@@ -712,6 +712,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .user = style.of(self.app_caps, .{ .colour = .ink }).fg,
         .attention = attention.fg,
         .failure = failure.fg,
+        .band = style.of(self.app_caps, .{ .background = .bar }).bg,
     };
     const facts_style = style.of(self.app_caps, .{ .colour = .quiet, .background = .bar });
     self.app_screen.style = normal;
