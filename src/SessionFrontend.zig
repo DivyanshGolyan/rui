@@ -834,7 +834,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const now_ms = self.nowMs();
     const work = self.live.work.state.asOf(now_ms);
     const said = self.lender.line(self.lender.context, work);
-    const browsing = screen.view == .feed and !screen.anchor.following();
+    const browsing = screen.view != .feed or !screen.anchor.following();
     if (screen.anchor.following()) self.new_below = 0;
     const chrome = &self.chrome;
     chrome.activity.live = self.live.view;
