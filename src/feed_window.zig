@@ -1,5 +1,5 @@
 //! Rui's resident feed text. Feed owns the anchor; this owner owns text,
-//! page-edge facts and the bounded set of opened tools. No reader is wired yet.
+//! page-edge facts and the bounded set of opened tools.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const unicode = @import("terminal_unicode");
