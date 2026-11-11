@@ -834,8 +834,8 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     var surface = try self.app_screen.widget().draw(ctx);
     const size = if (self.app_consent.request != null) self.app_preview.size else if (screen.view == .feed) self.app_content.size else self.app_document.size;
     screen.height = size.height;
-    self.observeFeed();
     screen.vx.screen.width = size.width;
+    self.observeFeed();
     if (screen.view != .feed) screen.drawn = .{ .first = if (self.app_consent.request != null) self.app_preview.first else self.app_document.first, .rows = screen.height };
     surface.widget = self.widget();
     self.dirty = false;
