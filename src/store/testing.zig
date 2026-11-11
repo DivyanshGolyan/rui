@@ -52,7 +52,7 @@ pub fn testingStoreCatalog(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io
     const root = root_buffer[0..root_length];
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
-    return storage.openWithOptions(io, database, root, .{ .catalog = catalog });
+    return storage.openTarget(io, .{ .sqlite = database }, root, .{ .catalog = catalog });
 }
 
 pub fn testingSqliteStore(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io) !void {
@@ -76,7 +76,7 @@ fn openSqlite(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: Te
         error.FileNotFound => try copyTemplate(tmp, io, database, selector),
         else => return err,
     };
-    return storage.openWithOptions(io, database, selector, .{ .served = options.served, .catalog = options.catalog }) catch |err| {
+    return storage.openTarget(io, .{ .sqlite = database }, selector, .{ .served = options.served, .catalog = options.catalog }) catch |err| {
         std.debug.print("testing Store open failed: {s}\n", .{@errorName(err)});
         return err;
     };

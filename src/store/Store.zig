@@ -46,6 +46,7 @@ const Access = store_access.Access;
 const ReadAccess = reads_domain.ReadAccess;
 const Engine = @import("engine.zig").Engine;
 const Sqlite = @import("engine/Sqlite.zig");
+const Kind = @import("../store_target.zig").Kind;
 const Mysql = @import("engine/Mysql.zig");
 const mysql_connection = @import("wire/mysql_connection.zig");
 const ActionAttemptAdmission = action_domain.ActionAttemptAdmission;
@@ -103,7 +104,7 @@ pub const Store = struct {
     /// the generation the commit advances to.
     touched: change_ring.Touched = .{},
     /// Which Sessions changed at recent generations: Session listing's
-    /// `since` hint, touched only by the Store's holder. Owned: `openWithOptions` maps it
+    /// `since` hint, touched only by the Store's holder. Owned: `openTarget` maps it
     /// and `close` unmaps it.
     changes: *change_ring.Ring,
     /// This opening's identity: a `since` token from any other opening
@@ -195,43 +196,53 @@ pub const Store = struct {
         try self.engine.sqlite.damageOutputBagForTesting(binding.operation_id);
     }
 
-    /// Opens in place: the Host holds exactly one Store, never a copy. It
-    /// runs once per process; noinline keeps its work off the caller's
-    /// frame, which lives as long as the Host.
-    pub noinline fn openWithOptions(
+    /// Opens in final storage. Admission borrows `target` and `selector` only
+    /// for this call; the Store owns its public selector and served routes.
+    /// Startup scratch must not live on the resident Host frame.
+    pub noinline fn openTarget(
         self: *Store,
         io: std.Io,
-        database_path: []const u8,
+        target: Target,
         selector: []const u8,
         options: OpenOptions,
     ) !void {
         errdefer self.* = undefined;
-        const opened = try Sqlite.open(io, database_path, selector, options);
-        errdefer opened.abandon();
+        var opened: Engine = switch (target) {
+            .sqlite => |path| .{ .sqlite = try Sqlite.open(io, path, selector, options) },
+            .mysql => |connection| .{ .mysql = try Mysql.open(io, connection, selector, options) },
+        };
+        // Preserve the admission error. Closing here only releases the partly
+        // opened connection and prepared statements; there is no caller to retry.
+        var opening: *Engine = &opened;
+        errdefer opening.close() catch {};
 
         var stored_selector: Bounded(store_path.max_bytes) = .{};
-        try stored_selector.set(selector);
+        try stored_selector.set(opened.publicSelector(selector));
         const changes = try createRing();
         errdefer destroyRing(changes);
         const ids: *HostValues = &@as(*OutOfLine, @fieldParentPtr("ring", changes)).ids;
         ids.* = .{ .next = undefined };
-        self.* = .{ .io = io, .engine = .{ .sqlite = opened }, .selector = stored_selector, .changes = changes };
-        self.served = options.served;
+        self.* = .{ .io = io, .engine = opened, .selector = stored_selector, .changes = changes, .served = options.served };
+        // Cleanup follows the final engine too: its statement cache is populated
+        // below, after the admitted value has moved to its only stable address.
+        opening = &self.engine;
         self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .closed = batchClosed, .arm = armRerun, .recover = recoverRerun });
-        // The Store is in final storage, so the function may keep its address.
-        try self.engine.sqlite.serve(&self.served);
-        // Tells this opening's `since` tokens from another's. It grants
-        // nothing, so the process CSPRNG serves, and Session IDs keep sole
-        // use of secure draws.
+        try self.engine.serve(&self.served);
+        // This opening's since tokens grant nothing; Session IDs alone use
+        // secure draws. Draw before identity and catalog initialization.
         io.random(&self.instance);
-        errdefer self.engine.sqlite.statements.deinit();
-        try self.engine.sqlite.prepareRollback();
+        try self.engine.prepareRollback();
         try loadIdentities(self, .full);
         self.queue().opened();
         if (options.catalog) |offered| try self.saveCatalog(offered) else {
             const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
             owned.tools = .{ .catalog = &tool_catalog.built_in, .set_id = 0 };
         }
+    }
+
+    /// Compatibility convenience; all initialization belongs to openTarget.
+    pub fn openWithOptions(self: *Store, io: std.Io, database_path: []const u8, selector: []const u8, options: OpenOptions) !void {
+        return self.openTarget(io, .{ .sqlite = database_path }, selector, options);
     }
 
     /// Atomically replaces the saved models.dev generation. Access flushes
@@ -306,54 +317,24 @@ pub const Store = struct {
         return ids.items.toOwnedSlice(allocator);
     }
 
-    /// Opens the network engine in place. Its buffers live out of line;
-    /// SQLite never allocates them. The existing holder remains the sole owner.
-    pub noinline fn openMysql(
-        self: *Store,
-        io: std.Io,
-        connection: mysql_connection.Options,
-        selector: []const u8,
-        options: OpenOptions,
-    ) !void {
-        errdefer self.* = undefined;
-        var opened = try Mysql.open(io, connection, selector, options);
-        errdefer opened.close() catch {};
-        var stored_selector: Bounded(store_path.max_bytes) = .{};
-        try stored_selector.set(selector);
-        const changes = try createRing();
-        errdefer destroyRing(changes);
-        const ids: *HostValues = &@as(*OutOfLine, @fieldParentPtr("ring", changes)).ids;
-        ids.* = .{ .next = undefined };
-        self.* = .{ .io = io, .engine = .{ .mysql = opened }, .selector = stored_selector, .changes = changes };
-        self.served = options.served;
-        self.engine.mysql.state.served = &self.served;
-        if (@import("builtin").is_test) {
-            if (connection.database.len >= self.engine.mysql.state.testing_database.len) return error.MysqlConfigTooLong;
-            @memcpy(self.engine.mysql.state.testing_database[0..connection.database.len], connection.database);
-        }
-        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .closed = batchClosed, .arm = armRerun, .recover = recoverRerun });
-        io.random(&self.instance);
-        try loadIdentities(self, .full);
-        self.queue().opened();
-        if (options.catalog) |offered| try self.saveCatalog(offered) else {
-            const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
-            owned.tools = .{ .catalog = &tool_catalog.built_in, .set_id = 0 };
-        }
+    /// Compatibility convenience; all initialization belongs to openTarget.
+    pub fn openMysql(self: *Store, io: std.Io, connection: mysql_connection.Options, selector: []const u8, options: OpenOptions) !void {
+        return self.openTarget(io, .{ .mysql = connection }, selector, options);
     }
 
-    /// Stable opaque identity read at MySQL admission; never the URL or the
-    /// location selector used to validate the database's metadata.
-    pub fn mysqlStoreId(self: *const Store) []const u8 {
-        return &self.engine.mysql.state.store_id;
+    pub fn kind(self: *const Store) Kind {
+        return std.meta.activeTag(self.engine);
     }
 
-    /// The immutable admission diagnostic; safe at readiness without queuing
-    /// work on the holder. SQLite has no MySQL setting to report.
-    pub fn mysqlDoublewrite(self: *const Store) ?[]const u8 {
-        return switch (self.engine) {
-            .sqlite => null,
-            .mysql => |mysql| mysql.state.doublewrite.slice(),
-        };
+    /// Borrowed until close: canonical path on SQLite, admitted opaque id on
+    /// MySQL. SQLite's persisted random id is not its protocol selector.
+    pub fn storeId(self: *const Store) []const u8 {
+        return self.selector.slice();
+    }
+
+    /// Immutable admission facts only: safe on the nonblocking host-info path.
+    pub fn admissionDiagnostic(self: *const Store) AdmissionDiagnostic {
+        return .{ .doublewrite = self.engine.admissionDoublewrite() };
     }
 
     /// The tools the Host offers, and the id of their saved set.
@@ -503,20 +484,12 @@ pub const Store = struct {
         return entry.finish(Ordinary.none, access.readRaw(content_id, start, window));
     }
 
-    pub fn sqliteDiagnostic(self: *Store) SqliteDiagnostic {
-        return self.queue().run(sqliteDiagnosticHeld, .{self});
+    pub fn diagnostic(self: *Store) Diagnostic {
+        return self.queue().run(diagnosticHeld, .{self});
     }
 
-    fn sqliteDiagnosticHeld(self: *Store) SqliteDiagnostic {
-        return self.engine.sqlite.diagnostic();
-    }
-
-    pub fn mysqlDiagnostic(self: *Store) Mysql.Diagnostic {
-        return self.queue().run(mysqlDiagnosticHeld, .{self});
-    }
-
-    fn mysqlDiagnosticHeld(self: *Store) Mysql.Diagnostic {
-        return self.engine.mysql.diagnostic();
+    fn diagnosticHeld(self: *Store) Diagnostic {
+        return self.engine.diagnostic();
     }
 
     /// The SQLite connection, for SQLite-only tests and fixtures.
@@ -1100,18 +1073,18 @@ pub const Store = struct {
 
     /// Never inlined: its two Accesses and admission's rows (about 4 KiB)
     /// stay off the frame of a caller that goes on to dispatch the Attempt.
-    pub fn admitModelAttempt(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
-        return self.queue().write(admitModelAttemptHeld, .{ self, kind, faults });
+    pub fn admitModelAttempt(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
+        return self.queue().write(admitModelAttemptHeld, .{ self, admission_kind, faults });
     }
 
-    noinline fn admitModelAttemptHeld(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
+    noinline fn admitModelAttemptHeld(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
         var reader: ReadAccess = .open(&entry);
         defer reader.deinit();
         var writer: Access(.write, error{ SelectionChanged, ProjectionFailed, InstructionSelectionFailed }) = .open(&entry);
         defer writer.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, writer.end(faults, model_admission_domain.admitNextModelAttempt(&reader, &writer, kind, faults)));
+        return entry.finishTransaction(Ordinary.none, faults, writer.end(faults, model_admission_domain.admitNextModelAttempt(&reader, &writer, admission_kind, faults)));
     }
 
     pub fn admitNextActionAttempt(
@@ -1693,6 +1666,14 @@ pub const OpenOptions = struct {
     /// and saves its own (`saveCatalog`) before it serves.
     catalog: ?*const tool_catalog.Catalog = &tool_catalog.built_in,
 };
+
+pub const Target = union(Kind) {
+    sqlite: []const u8,
+    mysql: mysql_connection.Options,
+};
+
+pub const AdmissionDiagnostic = struct { doublewrite: ?[]const u8 };
+pub const Diagnostic = union(Kind) { sqlite: SqliteDiagnostic, mysql: Mysql.Diagnostic };
 
 pub const SqliteDiagnostic = struct {
     process_memory_current_bytes: ?u64 = null,
@@ -2348,14 +2329,12 @@ fn IdentityCeiling(comptime column: Identity) type {
 }
 
 fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
-    if (self.engine == .mysql) {
+    if (self.engine.batches()) {
         inline for (comptime std.enums.values(Identity)) |column| if (columns.contains(column)) {
             const Ceiling = IdentityCeiling(column);
             try self.engine.bind(null, Ceiling, &.{}, 0);
         };
-        if (@import("builtin").is_test) {
-            if (columns.count() != 0) self.engine.mysql.state.testing_shape.identity_passes += 1;
-        }
+        if (columns.count() != 0) self.engine.noteIdentityPass();
         try self.engine.startPass();
     }
     errdefer self.engine.finishPass() catch {};
