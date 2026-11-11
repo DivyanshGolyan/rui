@@ -587,6 +587,12 @@ The Operation's admission position fixes its historical boundary.
 Accepted model output, call rejection and Action Resolution become available at their acceptance positions, not a producing Operation's earlier admission position.
 Historical visibility does not bypass pending-input applicability, expose an incomplete Tool Result group or change Conversation/tool-call order.
 
+If the transport answer exceeds 4 MiB, retain the received JSON prefix through the optional scratch path with a larger-than-limit note, not a claim that the complete answer was saved.
+`mcp/result_text.zig` owns MCP certainty: an unsent request is failed-not-run; a definite tool result follows `isError`, a JSON-RPC error or HTTP 4xx fails, and HTTP 5xx or a lost sent request is indeterminate, without retry.
+For an over-limit JSON answer, a matching JSON-RPC envelope and an explicit `isError`, a completed result object with the default false flag, or an error code and complete message establish the outcome; otherwise it is indeterminate.
+Session stop before send cancels the call; after send, closing the connection leaves the remote outcome indeterminate.
+Shared Action settlement preserves MCP adapter evidence, including a definite answer when stop races settlement; Bash's confirmed local stop remains cancelled.
+
 Replacement Attempts retain that historical view.
 With unchanged adapter rules, they reconstruct equivalent request semantics; meaningless JSON spelling need not match.
 The caller may deliberately change adapter selection/rendering rules between Attempts, so identical requests across such a change are not promised.
