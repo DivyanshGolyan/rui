@@ -13358,6 +13358,7 @@ test "MCP settlement saves one decoded presentation line or the tool name" {
                 .{ .arguments = "{\"rui_call_description\":\"" ++ @as([200]u8, @splat('a')) ++ "\"}", .expected = &@as([200]u8, @splat('a')) },
                 .{ .arguments = "{\"rui_call_description\":\"" ++ @as([200]u8, @bitCast(@as([100][2]u8, @splat("é".*)))) ++ "\"}", .expected = &@as([200]u8, @bitCast(@as([100][2]u8, @splat("é".*)))) },
                 .{ .arguments = "{\"rui_call_description\":\"Fetch \\u00e9 page\"}", .expected = "Fetch é page" },
+                .{ .arguments = "{\"padding\":\"" ++ @as([4100]u8, @splat('x')) ++ "\",\"rui_call_description\":\"Fetch after padding\"}", .expected = "Fetch after padding" },
                 .{ .arguments = "{\"rui_call_\\u0064escription\":\"" ++ @as([1200]u8, @bitCast(@as([200][6]u8, @splat("\\u0061".*)))) ++ "\"}", .expected = &@as([200]u8, @splat('a')) },
                 .{ .arguments = "{\"rui_call_description\":\"" ++ @as([201]u8, @splat('a')) ++ "\"}" },
                 .{ .arguments = "{\"rui_call_description\":\"" ++ @as([202]u8, @bitCast(@as([101][2]u8, @splat("é".*)))) ++ "\"}" },

@@ -903,7 +903,7 @@ const PresentationRead = struct {
 
     fn finish(read: *PresentationRead) !void {
         try read.proposal.found();
-        read.out.* = try presentationOf(read.out.description, read.code, read.authorized, read.out.publication_position);
+        try finishPresentation(read.out, read.code, read.authorized);
     }
 };
 
@@ -919,15 +919,19 @@ pub fn presentationOf(
     publication_position: ?u64,
 ) error{CorruptStore}!tool_presentation.ToolPresentation {
     var result: tool_presentation.ToolPresentation = .{ .description = description, .code = .unresolved, .publication_position = publication_position };
-    if (description) |line| if (!tool_presentation.ToolPresentation.validDescription(line.slice())) return error.CorruptStore;
-    if (code) |value| {
-        result.code = value;
-    } else if (!(authorized orelse false)) result.code = .pending_permission;
-    if (description == null) switch (result.code) {
+    try finishPresentation(&result, code, authorized);
+    return result;
+}
+
+/// Judge the saved line in its final storage: batched reads already wrote it
+/// there, so finishing a row needs no description argument or returned copy.
+fn finishPresentation(result: *tool_presentation.ToolPresentation, code: ?tool_presentation.ToolPresentation.Code, authorized: ?bool) error{CorruptStore}!void {
+    if (result.description) |*line| if (!tool_presentation.ToolPresentation.validDescription(line.slice())) return error.CorruptStore;
+    result.code = code orelse if (authorized orelse false) .unresolved else .pending_permission;
+    if (result.description == null) switch (result.code) {
         .unknown_tool, .invalid_arguments => {},
         else => return error.CorruptStore,
     };
-    return result;
 }
 
 /// `PresentationRead` alone, in rounds of its own.

@@ -1736,16 +1736,24 @@ fn Settlement(comptime A: type) type {
                 }
                 break :id row.id;
             } else null;
+            try s.recordCall(&fields, .{ name_content_id, call_id_content_id, arguments_content_id }, &call_facts, rejection_code, rejection_content_id);
+        }
+
+        /// All content sinks have closed before saving the certificate and
+        /// line. Keep their bounded row-binding scratch off those sink paths.
+        noinline fn recordCall(s: *Self, fields: *const [3]OutputMetadataRecord, content_ids: [3]u64, call_facts: *const tool_catalog.CallFacts, rejection_code: ?tool_proposal.Rejection, rejection_content_id: ?u64) !void {
+            const record = fields[2];
+            const name_content_id, const call_id_content_id, const arguments_content_id = content_ids;
             // The call's certificate: (little-endian length, SHA-256) for its
             // name, call_id and arguments, in ProposalField order.
             var field_metadata: [120]u8 = undefined;
-            for (fields, 0..) |field, at| {
+            for (fields.*, 0..) |field, at| {
                 std.mem.writeInt(u64, field_metadata[at * 40 ..][0..8], field.decoded_length, .little);
                 @memcpy(field_metadata[at * 40 + 8 ..][0..32], &field.content_digest);
             }
             // A Bash call keeps its valid line even when not offered; malformed
             // Bash arguments have none. MCP uses its saved line or tool name.
-            const description = try callDescription(&call_facts, s.io, s.output.source, record);
+            const description = try callDescription(call_facts, s.io, s.output.source, record);
 
             s.a.write(insert_call, .{
                 .operation_id = s.binding.operation_id,
@@ -1758,7 +1766,7 @@ fn Settlement(comptime A: type) type {
                 .rejection_content_id = rejection_content_id,
                 .acceptance_position = if (rejection_code != null) try s.positions.take(1) else null,
                 .action_kind = if (rejection_code == null) 1 else null,
-                .description = if (description) |text| if (text.len != 0) text else null else null,
+                .description = description,
                 .field_metadata = field_metadata,
                 .session = s.session,
             });
