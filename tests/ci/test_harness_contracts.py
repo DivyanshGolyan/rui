@@ -827,6 +827,84 @@ class ProcessCensusTest(unittest.TestCase):
                 self.semantics.processes_executing("/bin/sh")
 
 
+class ChatGutterTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Import fixture parts only: no Host, terminal or entrypoint is run.
+        with patch.object(sys, "path", [str(ROOT / "tests/integration"), *sys.path]), \
+                patch.object(sys, "argv", ["gutter-test", str(ROOT / "zig-out/bin/rui")]):
+            import human_cli_fixture
+            import human_cli_integration
+            import session_chrome_cases
+        cls.fixture = human_cli_fixture
+        cls.human = human_cli_integration
+        cls.chrome = session_chrome_cases
+
+    def frame_rows(self):
+        return [" "] * 19 + ["─" * 80, " › keep", "─" * 80, " ‹ sample · model",
+                             " " * (79 - len("ctrl+x stop")) + "ctrl+x stop"]
+
+    def test_projection_removes_only_one_column_not_content_indentation(self):
+        for physical, content in ((" ⠹ Held call · 1s", "⠹ Held call · 1s"),
+                                  (" ◌ 3 · WAITING-2", "◌ 3 · WAITING-2"),
+                                  ("   line2", "  line2"), (" ", ""), ("", "")):
+            with self.subTest(physical=physical):
+                self.assertEqual(self.fixture.chat_content_row(physical), content)
+
+    def test_activity_tail_and_page_rows_use_content_coordinates(self):
+        rows = self.frame_rows()
+        rows[17:19] = [" ⠹ Held call · 1s", " ◌ 3 · WAITING-2"]
+        frame = "\n".join(rows)
+        self.assertEqual(self.chrome.tail_rows(frame), ["⠹ Held call · 1s", "◌ 3 · WAITING-2"])
+        self.assertTrue(self.chrome.composing(frame, "keep"))
+        # The status right edge and input prompt have NOT been shifted.
+        self.assertEqual(len(self.chrome.rows(frame)[23]), 79)
+        self.assertEqual(self.chrome.rows(frame)[20], " › keep")
+        for heading in ("Start of conversation", "Status · sample", "Marks", "Message · 40 lines", "Browsing"):
+            with self.subTest(heading=heading):
+                rows[0] = " " + heading
+                self.assertEqual(self.chrome.transcript_rows("\n".join(rows))[0], heading)
+        rows[18] = " " * 78 + "↓"
+        self.assertEqual(self.chrome.marker("\n".join(rows)), "↓")
+
+    def test_multiline_transcript_projection_in_narrow_and_wide_shells(self):
+        chat = [" › line1", "   line2", " edited 2"]
+        for left in ("", "list │"):
+            with self.subTest(left=left):
+                frame = "\n".join(left + row for row in chat)
+                self.assertEqual(self.fixture.conversation_text(frame), "› line1\n  line2\nedited 2")
+
+    def test_status_page_adapter_matches_projected_heading_and_work_row(self):
+        frame = " Status · sample\n\n Work\n details"
+
+        def command(master, text, accept, timeout):
+            self.assertTrue(accept(frame))
+            self.assertFalse(accept(frame.replace("sample", "other")))
+            self.assertFalse(accept(frame.replace(" Work", " Other")))
+            return frame
+
+        with patch.object(self.human, "command_frame", command):
+            self.assertEqual(self.human.status_frame(None, "sample"), frame)
+
+    def test_export_soft_and_full_width_breaks_exclude_the_gutter(self):
+        columns = 32
+        store_prefix = "read --store "
+        store_first = "a" * (columns - 1 - len(store_prefix))
+        store_last = "a" * 12
+        rows = ["Raw export: rui request", store_prefix + store_first, store_last, "--ordinal 4"]
+        frame = "\n".join(" " + row for row in rows)
+        capture = SimpleNamespace(screen=SimpleNamespace(columns=columns))
+        with patch.object(self.human, "terminal_capture", return_value=capture):
+            self.assertEqual(self.human.raw_export(None, frame),
+                             "rui request read --store " + store_first + store_last + " --ordinal 4")
+
+    def test_permission_overlay_retains_its_own_inset(self):
+        capture = SimpleNamespace(screen=SimpleNamespace(columns=80,
+            display=["", "  $ true", "  │ printf done", " Allow once "]))
+        with patch.object(self.human, "terminal_capture", return_value=capture):
+            self.assertEqual(self.human.shown_bash_command(None), "true\nprintf done")
+
+
 class ImportSafetyTest(unittest.TestCase):
     def test_session_list_support_imports_ignore_process_arguments_and_workspace(self):
         source = """

@@ -72,7 +72,7 @@ from terminal_process import close_pty, answers_to, open_pty, spawn, terminal_pr
 import model_fixture as fixture
 import codex_fixture
 import os_semantics
-from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, command_frame, composer_ready, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
+from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
 
 
 def terminal_safe_json(text):
@@ -502,10 +502,10 @@ def status_frame(master, session, command="/status", timeout=15):
     """The /status page for exactly `session` (escaped as /status shows it)."""
     escaped = session.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
     def page(frame):
-        rows = frame.split("\n")
-        # App draws the page from the first row, with no browsing heading.
-        return (rows[0].startswith(" Status · ")
-            and (rows[0] == " Status · " + escaped or rows[0].endswith(" · " + escaped)) and "\n Work\n" in frame)
+        rows = [chat_content_row(row) for row in frame.split("\n")]
+        # App draws the page from the first feed row, with no browsing heading.
+        return (rows[0].startswith("Status · ")
+            and (rows[0] == "Status · " + escaped or rows[0].endswith(" · " + escaped)) and "Work" in rows)
     return command_frame(master, command, page, timeout)
 
 
@@ -522,8 +522,8 @@ def configured_frame(master, command):
     notice; Esc then returns to the conversation, so a later /status page is
     the one that request reads, not the page already shown."""
     frame = command_frame(master, command, lambda frame: "Configured." in frame.split("\n"))
-    if frame.startswith(" Status · "):
-        command_frame(master, "\x1b", lambda frame: not frame.startswith(" Status · "), end="")
+    if chat_content_row(frame.split("\n", 1)[0]).startswith("Status · "):
+        command_frame(master, "\x1b", lambda frame: not chat_content_row(frame.split("\n", 1)[0]).startswith("Status · "), end="")
     return frame
 
 
@@ -555,7 +555,7 @@ def overview_store(notice):
 
 def permanent_tool_count(screen, heading):
     """Count a call heading's rows in one frame (not repeated frames)."""
-    return len(re.findall(r"(?m)^" + re.escape(heading) + r"$", screen))
+    return len(re.findall(r"(?m)^" + re.escape(heading) + r"$", "\n".join(chat_content_row(row) for row in screen.split("\n"))))
 
 
 def pipe_wait_oracles():
@@ -675,6 +675,7 @@ def shown_bash_command(master):
     """
     capture = terminal_capture(master)
     width = capture.screen.columns
+    # PermissionCard is an overlay with its own two-column inset, not feed content.
     rows = [line.rstrip() for line in capture.screen.display]
     start = next(index for index, line in enumerate(rows) if line.startswith("  $ "))
     command = rows[start][4:]
@@ -726,8 +727,8 @@ def raw_export(master, screen):
     Word wrap consumes the space at a soft break; a row filled to the edge
     broke inside a word instead (a long hex identity), so it joins directly.
     """
-    columns = terminal_capture(master).screen.columns
-    lines = screen.split("\n")
+    columns = terminal_capture(master).screen.columns - 1  # Feed width, without its gutter.
+    lines = [chat_content_row(line) for line in screen.split("\n")]
     start = next(index for index, line in enumerate(lines) if line.lstrip(" ").startswith("Raw export: "))
     command = lines[start].lstrip(" ").removeprefix("Raw export: ")
     previous = lines[start]
