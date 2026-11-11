@@ -738,6 +738,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
             if (ignored) {
                 self.notice = prior_notice;
                 self.shown_notice = prior_shown_notice;
+                ctx.redraw = ctx.redraw or shortcut == .close_and_act;
                 ctx.consumeEvent();
                 return;
             }
@@ -3581,18 +3582,34 @@ fn sendKeys(frontend: *Self, bytes: []const u8) !void {
     try held.keys(bytes);
 }
 
-test "unbound chat input leaves notice and draft alone" {
-    var drafts: session_drafts.Drafts = .{};
-    defer drafts.deinit(std.testing.allocator);
-    const held = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
-    defer held.destroy();
-    try held.keys("abc\x1bx");
-    try std.testing.expectEqualStrings("abc", held.self.input.composition().bytes);
-    try std.testing.expect(held.self.shown_notice.current(held.self.nowMs()) == null);
-    held.self.shown_notice.show("existing", held.self.nowMs());
-    try held.keys("\x1bx");
-    try std.testing.expectEqualStrings("existing", held.self.shown_notice.current(held.self.nowMs()).?);
-    try std.testing.expectEqualStrings("abc", held.self.input.composition().bytes);
+test "unbound chat input preserves draft and notice while closing shortcuts redraws" {
+    for ([_]bool{ false, true }) |shortcuts_open| {
+        for ([_]bool{ false, true }) |notice_present| {
+            const held = try HeldFrontend.create();
+            defer held.destroy();
+            if (shortcuts_open) {
+                try held.keys("?");
+                try std.testing.expect(held.self.shortcuts_open);
+            } else {
+                try held.keys("abc");
+            }
+            if (notice_present) held.self.shown_notice.show("existing", held.self.nowMs());
+            var parser: vaxis.Parser = .{};
+            const parsed = try parser.parse("\x1bx", null);
+            var ctx = held.context();
+            ctx.redraw = false;
+            try held.deliver(&ctx, .{ .key_press = parsed.event.?.key_press });
+            try std.testing.expectEqual(shortcuts_open, ctx.redraw);
+            try std.testing.expect(!held.self.shortcuts_open);
+            try std.testing.expectEqualStrings(if (shortcuts_open) "" else "abc", held.self.input.composition().bytes);
+            const notice = held.self.shown_notice.current(held.self.nowMs());
+            if (notice_present) {
+                try std.testing.expectEqualStrings("existing", notice.?);
+            } else {
+                try std.testing.expect(notice == null);
+            }
+        }
+    }
 }
 
 test "App Session draft storage still guards pending originals Actions and commands" {
