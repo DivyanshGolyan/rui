@@ -7582,11 +7582,13 @@ test "a Current report's presentation reads answer their list's name" {
 
 test "a failed context read answers its reader's name and fences" {
     // The report's `admission_context` names a failed step CorruptStore,
-    // as main named the estimate's. Admission reads the context within
-    // `admission_facts`, whose failed step is SessionReadFailed. The second
+    // as main named the estimate's. Admission reads the context with its
+    // facts in selection's round, whose failed step is SessionReadFailed. The second
     // Message follows a Turn with usage under a trigger, so admission
-    // weighs the context, and the report estimates it. Both readers name a
-    // failed uncovered-byte read CorruptStore, after selecting the recipe.
+    // weighs the context, and the report estimates it. The report names a
+    // failed uncovered-byte read CorruptStore, after selecting the recipe;
+    // admission counts the bytes in its guard write, whose failed step is
+    // a write's StatementFailed.
     for ([_]struct { report: bool, bytes: bool }{
         .{ .report = false, .bytes = false },
         .{ .report = true, .bytes = false },
@@ -7610,18 +7612,20 @@ test "a failed context read answers its reader's name and fences" {
         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two");
         try settleCallsForTestingWithFaults(&storage, &tmp, first, "context-fold-output", &.{}, .{}, "{\"input_tokens\":10,\"output_tokens\":0}");
-        var fault: TestingStatementFault = .{ .sql = if (case.bytes)
+        var fault: TestingStatementFault = .{ .sql = if (case.bytes and !report)
+            model_admission_domain.within_pressure_sql
+        else if (case.bytes)
             namedStatementForTesting(model_admission_domain.compaction_failures, null, " AS uncovered_bytes")
         else if (report)
             namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT")
         else
-            model_admission_domain.admission_facts_sql };
+            model_admission_domain.selected_context_sql };
         fault.arm(storage.sqliteDatabase());
         defer fault.disarm(storage.sqliteDatabase());
         if (report)
             try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024))
         else
-            try std.testing.expectError(if (case.bytes) error.CorruptStore else error.SessionReadFailed, storage.admitNextModelAttempt(.{}));
+            try std.testing.expectError(if (case.bytes) error.StatementFailed else error.SessionReadFailed, storage.admitNextModelAttempt(.{}));
         try std.testing.expect(fault.failed > 0);
         try std.testing.expect(storage.isFenced());
     }
@@ -10977,13 +10981,13 @@ test "Bash admission entry points agree on readiness" {
     }
 }
 
-test "schema 63 migration freezes each Operation offer and conservatively adopts current Session intent" {
+test "schema 64 migration freezes each Operation offer and conservatively adopts current Session intent" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "{s}/offers-62.sqlite3", .{root});
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/offers-63.sqlite3", .{root});
     {
         const raw = try openRaw(path);
         defer _ = c.sqlite3_close(raw);
@@ -10991,12 +10995,12 @@ test "schema 63 migration freezes each Operation offer and conservatively adopts
         try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
         try sqlite.exec(raw, store_testing.baseline_rows);
         for (store_schema.migrations) |step| {
-            if (step.from >= 62) break;
+            if (step.from >= 63) break;
             for (step.sqlite) |statement| try sqlite.exec(raw, statement);
         }
         try sqlite.exec(raw, store_testing.operation_offer_migration_seed);
-        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=62", .{store_schema.application_id}));
-        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','62')");
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=63", .{store_schema.application_id}));
+        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','63')");
         defer _ = c.sqlite3_finalize(meta);
         try sqlite.bindText(meta, 1, protocol.wire_version);
         try sqlite.bindText(meta, 2, root);

@@ -765,7 +765,7 @@ pub fn observeCommandForTesting(storage: *Store, key: []const u8) !command_domai
     return out.full.observation;
 }
 
-/// A format-62 Session whose latest loaded subset differs from its first
+/// A format-63 Session whose latest loaded subset differs from its first
 /// Operation's full offer. Shared by the SQLite and live MySQL migration tests.
 pub const operation_offer_migration_seed: [:0]const u8 =
     "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) " ++
