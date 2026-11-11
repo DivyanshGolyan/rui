@@ -667,11 +667,6 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 /// A click the screen's widgets name steps the core as a key does.
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (click == .open and self.root.session != null) {
-        try self.app_session.?.frontend.?.openPeer(ctx, &click.open);
-        ctx.redraw = true;
-        return;
-    }
     try self.appNext(ctx, try self.event(.{ .clicked = click }));
     ctx.redraw = true;
 }
