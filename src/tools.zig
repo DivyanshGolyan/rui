@@ -13,9 +13,9 @@ pub const max_tools = @import("tool_record.zig").max_tools;
 pub const recordDigest = @import("tool_record.zig").recordDigest;
 pub const RecordIdentity = @import("tool_record.zig").RecordIdentity;
 pub const SetDigest = @import("tool_record.zig").SetDigest;
-pub const Catalog = @import("tool_record.zig").Catalog;
+pub const HostToolSet = @import("tool_record.zig").HostToolSet;
 pub const validServer = @import("tool_record.zig").validServer;
-pub const max_catalog_records = @import("tool_record.zig").max_catalog_records;
+pub const max_host_tool_records = @import("tool_record.zig").max_host_tool_records;
 pub const bash_record = @import("tool_record.zig").bash_record;
 pub const find_tools_record = @import("tool_record.zig").find_tools_record;
 pub const message_agent_record = @import("tool_record.zig").message_agent_record;
@@ -25,13 +25,13 @@ pub const start_agent_record = @import("tool_record.zig").start_agent_record;
 pub const web_search_record = @import("tool_record.zig").web_search_record;
 pub const Runner = @import("tool_record.zig").Runner;
 pub const record = @import("tool_record.zig").record;
-pub const built_in = @import("tool_record.zig").built_in;
+pub const built_in_tool_set = @import("tool_record.zig").built_in_tool_set;
 pub const Offered = @import("tool_record.zig").Offered;
 
 /// Every tool call is shown as one line, its description: what the call
 /// set out to do, in the base-verb form of "Run parser tests". `describe`
 /// is the one place a call becomes that line, and its switch covers every
-/// tool, so a tool cannot join the catalog without one. A function tool
+/// tool, so a tool cannot join the tool set without one. A function tool
 /// asks the model for it (Bash's required `description` argument); a tool
 /// the provider hosts takes no arguments of ours, so its line is written
 /// from what the provider reports the call did.
@@ -402,7 +402,7 @@ test "MCP calls check only one JSON object and derive their runner" {
     };
     const records = [_]Record{.{ .name = "fetch_page", .owner = .mcp, .server = "docs" }};
     const offered: Offered = .{ .names = "bash,fetch_page" };
-    // Native names resolve to their built-in records. The Store's catalog
+    // Native names resolve to their built-in records. The Store's tool set
     // admission tests refuse MCP records that try to shadow those names.
     try std.testing.expectEqual(Runner.mcp, records[0].runner());
     try std.testing.expectEqual(Runner.bash, record(.bash).runner());

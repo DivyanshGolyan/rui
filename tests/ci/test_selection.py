@@ -47,6 +47,200 @@ def covered(target, targets):
             or target == "stack-frames" and "check" in targets)
 
 
+class AssertedTextSelectionTest(unittest.TestCase):
+    def test_fixture_reader_collects_python_fstring_and_shell_literals(self):
+        from select_tests import tree_fixture_literals
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "fixture.py").write_text(dedent('''
+                import helper
+                # "Comments are not asserted text"
+                expected = "A plain Python literal"
+                screen = f"Waiting for session: {session_id} has finished drawing"
+                ignored = b"Bytes are not string literals"
+            '''))
+            (root / "fixture.sh").write_text(
+                "printf '%s' \"A shell double-quoted literal\"\n"
+                "test \"$output\" = 'A shell single-quoted literal'\n")
+            (root / "helper.py").write_text('import nested\nmessage = "A helper waits for this message"\n')
+            (root / "nested.py").write_text('message = "A nested helper checks this message"\n')
+            fixtures = {"sample-integration": (("fixture.py", "fixture.sh", "absent.py"), (), ()),
+                        "other-integration": (("fixture.py",), (), ())}
+            graph = Graph.__new__(Graph)
+            graph.python = {"fixture.py": {"helper.py"}, "helper.py": {"nested.py"}}
+            with (patch("select_tests.ROOT", root), patch("select_tests.FIXTURES", fixtures),
+                  patch("select_tests.tree_graph", return_value=graph)):
+                # Bypass the cache so the miniature tree cannot poison the real reader.
+                literals = tree_fixture_literals.__wrapped__()
+            python = {"A plain Python literal", "Waiting for session:", "has finished drawing",
+                      "A helper waits for this message", "A nested helper checks this message"}
+            self.assertEqual(literals, {"other-integration": python,
+                                       "sample-integration": python | {"A shell double-quoted literal",
+                                                                        "A shell single-quoted literal"}})
+
+    def test_session_chrome_text_selects_human_cli_integration(self):
+        path = "src/session_chrome.zig"
+        text = (Path(__file__).resolve().parents[2] / path).read_text()
+        self.assertIn("shift+enter or ctrl+j new line", text)
+        result = select([path], "review", AVAILABLE, contents={path: (text, text)})
+        self.assertIn("human-cli-integration", result["targets"])
+        self.assertIn("Asserted text: a fixture waits for text this file draws", result["reasons"])
+
+    def test_fixture_reader_bounds_shared_text_by_production_file_count(self):
+        from select_tests import tree_uncommon_texts
+
+        text = "A fixture waits for this message"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            # Multiple occurrences count once; test-code files do not count.
+            (root / "src/source_test.zig").write_text(json.dumps(text))
+            (root / "src/other_tests.zig").write_text(json.dumps(text))
+            for count in range(5):
+                with self.subTest(production_files=count):
+                    names = ["src/source_test.zig", "src/other_tests.zig"]
+                    for index in range(count):
+                        name = f"src/owner{index}.zig"
+                        (root / name).write_text(json.dumps(text) + "\n" + json.dumps(text))
+                        names.append(name)
+                    tracked = "\0".join(names).encode() + b"\0"
+                    with (patch("select_tests.ROOT", root),
+                          patch("select_tests.subprocess.check_output", return_value=tracked)):
+                        uncommon = tree_uncommon_texts.__wrapped__((text,))
+                    self.assertEqual(uncommon, {text} if count < 3 else set())
+
+    def test_asserted_text_ownership_domain(self):
+        from select_tests import script_literals
+
+        graph = SimpleNamespace(targets=lambda path: {"test-logic"}, host=set(),
+                                live_conformance=set(), reached={"test-store": set()},
+                                compiled=set(), live_mysql=set())
+        text = "A fixture waits for this message"
+        path = "src/render.zig"
+        cases = [
+            ("removed", path, repr(text), (text, "Replacement message"), True, True),
+            ("still present elsewhere", path, repr(text), (text + text, text), True, True),
+            ("added", path, repr(text), ("", text), True, True),
+            ("unchanged occurrence, other lines changed", path, repr(text),
+             (text + " old line", text + " new line"), True, True),
+            ("absent both", path, repr(text), ("old line", "new line"), True, False),
+            ("identifier", path, repr("long_identifier"), ("long_identifier", ""), True, False),
+            ("no contents", path, repr(text), (text, ""), False, False),
+            ("deleted file", path, repr(text), (text, None), True, True),
+            ("added file", path, repr(text), (None, text), True, True),
+            ("non-source", "tests/render.zig", repr(text), (text, ""), True, False),
+            ("f-string constant", path, 'f"Waiting for session: {session_id}"',
+             ("Waiting for session: ", ""), True, True),
+        ]
+        # Exercise the exact bound, including whitespace that must not count.
+        cases += [(f"length {length}", path, repr("  " + "x" * (length - 2) + " y  "),
+                   ("x" * (length - 2) + " y", ""), True, length >= 12) for length in range(3, 14)]
+        cases += [(f"test code {name}", name, repr(text), (text, ""), True, False)
+                  for name in named_paths(TEST_CODE)]
+        for label, changed, script, texts, supplied, expected in cases:
+            with self.subTest(case=label):
+                strings = script_literals(script, ".py")
+                table = {"host-launch-integration": strings, "login-signal-integration": strings}
+                contents = {changed: tuple(json.dumps(value) if value is not None else None for value in texts)} if supplied else {}
+                baseline = select([changed], "review", AVAILABLE, graph, contents, fixture_literals={})
+                result = select([changed], "review", AVAILABLE, graph, contents, fixture_literals=table)
+                self.assertEqual(set(result["targets"]) - set(baseline["targets"]),
+                                 {"host-launch-integration", "login-signal-integration"} if expected else set())
+                self.assertEqual(set(result["native_targets"]) - set(baseline["native_targets"]),
+                                 {"host-launch-integration"} if expected else set())
+                reason = "Asserted text: a fixture waits for text this file draws"
+                self.assertEqual(set(result["reasons"]) - set(baseline["reasons"]),
+                                 {reason} if expected else set())
+                self.assertTrue(set(baseline["targets"]) <= set(result["targets"]))
+                self.assertTrue(set(baseline["native_targets"]) <= set(result["native_targets"]))
+
+    def test_source_strings_include_quotes_and_multiline_but_not_comments(self):
+        from select_tests import source_strings
+
+        source = '\n'.join([
+            '// "Comment text is not drawn"',
+            'const label = "A quoted screen message";',
+            r'const escaped = "A quote: \" and a path: \\";',
+            r'    \\First multiline screen line',
+            r'    \\Second multiline screen line',
+            'identifier_text_is_not_drawn',
+        ])
+        self.assertEqual(source_strings(source), '\n'.join([
+            "A quoted screen message", r'A quote: \" and a path: \\',
+            "First multiline screen line", "Second multiline screen line",
+        ]))
+
+    def test_only_changed_source_prose_gets_a_prevalence_scan(self):
+        graph = SimpleNamespace(targets=lambda path: {"test-logic"}, host=set(),
+                                live_conformance=set(), reached={"test-store": set()},
+                                compiled=set(), live_mysql=set())
+        text = "A fixture waits for this message"
+        table = {"host-launch-integration": {text, "Other unrelated screen prose"}}
+        with (patch("select_tests.tree_fixture_literals", return_value=table) as scripts,
+              patch("select_tests.tree_uncommon_texts", return_value={text}) as prevalence):
+            result = select(["src/render.zig"], "review", AVAILABLE, graph,
+                            {"src/render.zig": (json.dumps(text), json.dumps(text))})
+            self.assertIn("host-launch-integration", result["targets"])
+            prevalence.assert_called_once_with((text,))
+            scripts.assert_called_once_with()
+            for path in ("tests/ci/policy.py", "src/render.zig", "src/render_test.zig"):
+                scripts.reset_mock()
+                prevalence.reset_mock()
+                select([path], "review", AVAILABLE, graph)
+                scripts.assert_not_called()
+                prevalence.assert_not_called()
+        # Shared prose may match a changed file but cannot grant ownership.
+        with (patch("select_tests.tree_fixture_literals", return_value=table),
+              patch("select_tests.tree_uncommon_texts", return_value=set())):
+            result = select(["src/render.zig"], "review", AVAILABLE, graph,
+                            {"src/render.zig": (json.dumps(text), json.dumps(text))})
+            self.assertNotIn("host-launch-integration", result["targets"])
+
+    def test_main_reads_changed_source_text(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from select_tests import main
+
+        path = "src/render.zig"
+        with (patch.object(sys, "argv", ["select_tests.py", "--base", "base", "--head", "head"]),
+              patch("select_tests.build_files.steps", return_value=AVAILABLE),
+              patch("select_tests.changed_paths", return_value=([path], "base-commit")),
+              patch("select_tests.subprocess.check_output", return_value="head-commit\n"),
+              patch("select_tests.revision_text", side_effect=["Old fixture message", "New fixture message"]) as read,
+              patch("select_tests.select", return_value={}) as selected,
+              redirect_stdout(StringIO())):
+            main()
+        self.assertEqual(read.call_args_list,
+                         [unittest.mock.call("base-commit", path), unittest.mock.call("head-commit", path)])
+        self.assertEqual(selected.call_args.kwargs["contents"],
+                         {path: ("Old fixture message", "New fixture message")})
+
+    def test_pr_1290_overview_text_selects_host_launch(self):
+        base, head = "7648d81", "c1fc02c545521fb2c2017cf2b488aa5e4f723872"
+        for ref in (base, head):
+            if subprocess.run(["git", "cat-file", "-e", f"{ref}^{{commit}}"],
+                              capture_output=True).returncode:
+                self.skipTest(f"#1290 replay requires historical commit {ref}; object is absent")
+        paths = ["src/overview_view.zig", "src/Overview.zig"]
+        contents = {path: tuple(subprocess.check_output(["git", "show", f"{ref}:{path}"], text=True)
+                                for ref in (base, head)) for path in paths}
+        from select_tests import fixture_text, script_literals
+
+        scripts = FIXTURES["host-launch-integration"][0]
+        literals = {text for script in scripts if Path(script).suffix in {".py", ".sh"}
+                    for literal in script_literals(
+                        subprocess.check_output(["git", "show", f"{base}:{script}"], text=True),
+                        Path(script).suffix)
+                    if (text := fixture_text(literal))}
+        result = select(paths, "review", AVAILABLE, contents=contents,
+                        fixture_literals={"host-launch-integration": literals})
+        for field in ("targets", "native_targets"):
+            self.assertIn("host-launch-integration", result[field])
+        self.assertEqual(result["reasons"].count(
+            "Asserted text: a fixture waits for text this file draws"), 1)
+
+
 class WorkflowEntrypointsTest(unittest.TestCase):
     def test_workflows_have_no_scheduled_triggers_or_branches(self):
         workflows = sorted(Path(".github/workflows").glob("*.y*ml"))
@@ -677,7 +871,7 @@ class SelectionTest(unittest.TestCase):
                 actual = 'skipped'
                 if admitted:
                     result = subprocess.run(['bash', '-e', '-c', script], capture_output=True,
-                                            env={**os.environ, 'TARGETS': targets, 'PLAN_RESULT': plan,
+                                            env={**os.environ, 'DRAFT_RUN': 'false', 'TARGETS': targets, 'PLAN_RESULT': plan,
                                                  'POLICY_RESULT': policy, 'BUILD_RESULT': build,
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
                                                  'TYPECHECK': typecheck_selected,

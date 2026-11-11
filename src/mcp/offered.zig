@@ -21,7 +21,7 @@ const post = @import("post.zig");
 pub const list_timeout_ms = 10_000;
 
 /// Room for one server's listing, taken from the scratch allocator.
-const entries_per_server = tools.max_catalog_records;
+const entries_per_server = tools.max_host_tool_records;
 const arena_bytes = 4 * 1024 * 1024;
 const answer_bytes = 512 * 1024;
 const request_bytes = 8 * 1024;
@@ -56,9 +56,9 @@ fn before(_: void, a: Item, b: Item) bool {
 /// The built-ins plus each source's tools, sorted by name. A listed source
 /// contributes what it listed; an unlisted one, its records in `saved`.
 /// Everything the result points to is `listed`'s, `saved`'s or `arena`'s.
-pub noinline fn merge(arena: std.mem.Allocator, saved: ?*const tools.Catalog, sources: []const Source, collision: *Collision) Error!tools.Catalog {
+pub noinline fn merge(arena: std.mem.Allocator, saved: ?*const tools.HostToolSet, sources: []const Source, collision: *Collision) Error!tools.HostToolSet {
     var items: std.ArrayList(Item) = .empty;
-    for (tools.built_in.records) |record| try items.append(arena, .{ .record = record, .source = built_in_source });
+    for (tools.built_in_tool_set.records) |record| try items.append(arena, .{ .record = record, .source = built_in_source });
     for (sources) |source| {
         if (source.listed) |entries| {
             for (entries) |entry| try items.append(arena, .{ .source = source.server, .record = .{
@@ -69,14 +69,14 @@ pub noinline fn merge(arena: std.mem.Allocator, saved: ?*const tools.Catalog, so
                 .server = source.server,
                 .read_only = entry.read_only,
             } });
-        } else if (saved) |catalog| {
-            for (catalog.records) |record| {
+        } else if (saved) |tool_set| {
+            for (tool_set.records) |record| {
                 if (record.owner == .mcp and std.mem.eql(u8, record.server, source.server))
                     try items.append(arena, .{ .record = record, .source = source.server });
             }
         }
     }
-    if (items.items.len > tools.max_catalog_records) return error.TooManyTools;
+    if (items.items.len > tools.max_host_tool_records) return error.TooManyTools;
     // Insertion sort: stable (so a collision names its sources in order), and
     // std's block sort puts a 45 KiB frame on the Host's main thread.
     for (1..items.items.len) |at| {
@@ -171,10 +171,10 @@ pub noinline fn collect(
     arena: std.mem.Allocator,
     scratch: std.mem.Allocator,
     servers: []const launch_frame.Frame.McpServer,
-    saved: ?*const tools.Catalog,
+    saved: ?*const tools.HostToolSet,
     collision: *Collision,
     stop: ?std.posix.fd_t,
-) Error!tools.Catalog {
+) Error!tools.HostToolSet {
     const sources = try arena.alloc(Source, servers.len);
     for (servers, sources) |server, *source| {
         const name = try arena.dupe(u8, server.name.slice());
@@ -202,7 +202,7 @@ test "listed tools join the built-ins in name order" {
     const found = [_]Listing.Entry{ listed("search"), listed("alpha") };
     const merged = try merge(memory.allocator(), null, &.{.{ .server = "docs", .listed = &found }}, &collision);
     try std.testing.expect(merged.valid());
-    try std.testing.expectEqual(tools.built_in.records.len + 2, merged.records.len);
+    try std.testing.expectEqual(tools.built_in_tool_set.records.len + 2, merged.records.len);
     const at = merged.find("search").?;
     try std.testing.expectEqual(tools.Owner.mcp, merged.records[at].owner);
     try std.testing.expectEqualStrings("docs", merged.records[at].server);
@@ -236,7 +236,7 @@ test "a server removed from the frame loses its saved tools" {
     const found = [_]Listing.Entry{listed("gone")};
     const saved = try merge(memory.allocator(), null, &.{.{ .server = "old", .listed = &found }}, &collision);
     const again = try merge(memory.allocator(), &saved, &.{}, &collision);
-    try std.testing.expectEqual(tools.built_in.records.len, again.records.len);
+    try std.testing.expectEqual(tools.built_in_tool_set.records.len, again.records.len);
 }
 
 test "a name two servers share fails the start and names both" {
@@ -300,7 +300,7 @@ test "MCP missing tools distinguish empty servers from saved copies without gues
     var collision: Collision = .{};
     const entries = [_]Listing.Entry{listed("kept")};
     const saved = try merge(memory.allocator(), null, &.{.{ .server = "notes", .listed = &entries }}, &collision);
-    for ([_]struct { sources: []const Source, previous: ?*const tools.Catalog = null, unavailable: bool }{
+    for ([_]struct { sources: []const Source, previous: ?*const tools.HostToolSet = null, unavailable: bool }{
         .{ .sources = &.{}, .unavailable = false },
         .{ .sources = &.{.{ .server = "notes", .listed = &entries }}, .unavailable = false },
         .{ .sources = &.{.{ .server = "notes", .listed = null }}, .unavailable = true },
@@ -308,16 +308,16 @@ test "MCP missing tools distinguish empty servers from saved copies without gues
         .{ .sources = &.{.{ .server = "notes", .listed = null }}, .previous = &saved, .unavailable = false },
         .{ .sources = &.{ .{ .server = "notes", .listed = null }, .{ .server = "other", .listed = null } }, .previous = &saved, .unavailable = true },
     }) |case| {
-        const catalog = try merge(memory.allocator(), case.previous, case.sources, &collision);
-        try std.testing.expectEqualStrings(if (case.unavailable) "mcp_server_unavailable" else "unknown_tool", @tagName(catalog.resolve("lookup")));
-        try std.testing.expect(catalog.resolve("bash") == .found);
-        if (case.previous != null) try std.testing.expect(catalog.resolve("kept") == .found);
+        const host_tool_set = try merge(memory.allocator(), case.previous, case.sources, &collision);
+        try std.testing.expectEqualStrings(if (case.unavailable) "mcp_server_unavailable" else "unknown_tool", @tagName(host_tool_set.resolve("lookup")));
+        try std.testing.expect(host_tool_set.resolve("bash") == .found);
+        if (case.previous != null) try std.testing.expect(host_tool_set.resolve("kept") == .found);
     }
 
-    const catalog = try merge(memory.allocator(), null, &.{ .{ .server = "notes", .listed = null }, .{ .server = "other", .listed = null } }, &collision);
-    var buffer: [tools.Catalog.max_refusal_message_bytes]u8 = undefined;
+    const host_tool_set = try merge(memory.allocator(), null, &.{ .{ .server = "notes", .listed = null }, .{ .server = "other", .listed = null } }, &collision);
+    var buffer: [tools.HostToolSet.max_refusal_message_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try catalog.writeMissingTool("lookup", &writer);
+    try host_tool_set.writeMissingTool("lookup", &writer);
     try std.testing.expectEqualStrings("spec.tools: lookup is not a known tool; MCP servers notes, other are unavailable and may provide it", writer.buffered());
 }
 
@@ -331,11 +331,11 @@ test "MCP missing tools maximum launch names fit the request and start_agent dia
         @memset(name, @as(u8, 'a') + @as(u8, @intCast(index)));
         source.* = .{ .server = name, .listed = null };
     }
-    const catalog = try merge(memory.allocator(), null, &sources, &collision);
+    const host_tool_set = try merge(memory.allocator(), null, &sources, &collision);
     const tool = @as([@import("../tool_name.zig").max_bytes]u8, @splat('z'));
-    var buffer: [tools.Catalog.max_refusal_message_bytes]u8 = undefined;
+    var buffer: [tools.HostToolSet.max_refusal_message_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try catalog.writeMissingTool(&tool, &writer);
+    try host_tool_set.writeMissingTool(&tool, &writer);
     try writer.writeAll(" (mcp_server_unavailable). Nothing was started.");
     for (names) |name| try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), &name) != null);
 }
