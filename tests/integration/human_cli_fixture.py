@@ -16,18 +16,18 @@ import terminal_process as terminal_process_module
 from terminal_process import answers_to
 
 
-# The permission card's choice row: its buttons " Allow once " and " Deny ",
-# two cells apart, inside the card's border. The highlighted one is drawn in
-# reverse video only (see `highlighted`). Enter answers with the
-# highlighted button, Allow once at first.
+# The approval's input row sits between the composer's rules, below the
+# borderless request. Its buttons " Allow once " and " Deny " are two cells
+# apart; the highlighted one uses reverse video only (see `highlighted`).
+# Enter answers with the highlighted button, Allow once at first.
 CHOICE = "Allow once    Deny"
 
 
 ALLOW = b"\r"
 
 
-# The choice row at any width; a card too small for its border drops it.
-CHOICE_ROW = re.compile(r"^(?:│ )? Allow", re.M)
+# The input prompt is omitted when the choice has only a few cells.
+CHOICE_ROW = re.compile(r"^(?: [›>])? Allow", re.M)
 
 
 def highlighted(capture):

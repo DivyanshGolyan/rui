@@ -132,6 +132,16 @@ def editor(fixture, row):
     fixture.answer("TD4 exact answer")
     tty = fixture.terminal()
     chunks(tty, row["chunks"])
+    if "reopen_draft" in row:
+        # The expired standalone Esc leaves the chat, saving its draft. The
+        # fixture creates exactly one Session, so Enter must reopen that row.
+        # If Esc merged with a later byte, this overview observation must fail.
+        tty.marker("new Session · ")
+        tty.marker(f"○ {fixture.session}")
+        tty.send(b"\r")
+        tty.marker(f"‹ {fixture.session} · ")
+        tty.draft(row["reopen_draft"], 2 + len(row["reopen_draft"]))
+        chunks(tty, row["submit_chunks"])
     # Each vector supplies its own submit byte(s). This makes wrong Enter,
     # swallowed suffix and accidental multi-Message behavior observable.
     tty.marker("TD4 exact answer")

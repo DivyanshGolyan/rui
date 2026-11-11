@@ -80,7 +80,8 @@ def inventory():
         {"name": "mouse-x10-split", "scenario": "editor", "chunks":
             [chunk(b"a\x1b[M"), chunk(b" isZ\r", 0.02)], "expected": "aZ"},
         {"name": "bare-esc-expiry", "scenario": "editor", "chunks":
-            [chunk(b"ab\x1b"), chunk(b"Z\r", 0.15)], "expected": "abZ"},
+            [chunk(b"ab\x1b"), chunk(b"", 0.15)],
+            "reopen_draft": "ab", "submit_chunks": [chunk(b"Z\r")], "expected": "abZ"},
         {"name": "resize", "scenario": "editor", "chunks":
             [chunk("A中bc\x1b[D".encode()), {"resize": [32, 12]}, chunk(b"Z\r", 0.1)], "expected": "A中bZc"},
     ]
