@@ -220,7 +220,7 @@ def openai_base_url_run(*, catalog_available=False):
     endpoint.models_release = threading.Event()
     endpoint.max_streams = 1
     if catalog_available:
-        endpoint.catalog = b'{"openai":{"models":{"catalog-only":{"limit":{"context":123}}}}}'
+        endpoint.catalog = b'{"openai":{"models":{"catalog-only":{"limit":{"context":123}},"gpt-6-sol":{}}}}'
     endpoint.models = json.dumps({"object": "list", "data": [
         {"id": "gpt-6-sol", "object": "model", "created": 1, "owned_by": "openai"},
         {"id": "custom-model", "object": "model", "created": 2, "owned_by": "you"},
@@ -304,6 +304,9 @@ def openai_base_url_run(*, catalog_available=False):
             "the OpenAI catalog fallback", timeout=20)
         assert fallback[0]["source"] == "catalog_fallback", fallback
         assert fallback[0]["models"] and all(model["known"] for model in fallback[0]["models"]), fallback
+        if catalog_available:
+            assert fallback == [{"provider": "openai", "source": "catalog_fallback", "models": [
+                {"id": "catalog-only", "known": True}, {"id": "gpt-6-sol", "known": True}]}], fallback
         print("openai catalog fallback passed: failed live list exposes catalog_fallback with known catalog models")
         complete = True
     finally:
@@ -321,3 +324,223 @@ def openai_base_url_run(*, catalog_available=False):
                 shutil.rmtree(root)
             else:
                 retain_failure_state("OpenAI base URL failure state", root)
+
+
+def saved_catalog_run():
+    """Production Host reads one saved generation, not a shipped/Host copy."""
+    from product_defaults import CATALOG, DEFAULTS, EFFORTS
+
+    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-saved-catalog.")).resolve()
+    key_file = root / "openai.key"
+    key_file.write_text(codex.OPENAI_KEY + "\n")
+    key_file.chmod(0o600)
+    subprocess.run([
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", str(root / "key.pem"), "-out", str(root / "cert.pem"),
+        "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost",
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(root / "cert.pem", root / "key.pem")
+    tls.set_alpn_protocols(["h2"])
+    endpoint = h2_fixture.Endpoint(tls, 1, sse=True, eager_sse=True)
+    endpoint.catalog_release = threading.Event()
+    endpoint.models = b'{"error":"unavailable"}'
+    shipped = DEFAULTS.recommended_model
+    changed_effort = next(effort for effort in EFFORTS if effort not in CATALOG[shipped].efforts)
+    refused_effort = CATALOG[shipped].efforts[0]
+    saved = "saved-only-d237"
+    other = "non-openai-d237"
+    window = 77777
+
+    def body(models, extra=None):
+        value = {"openai": {"models": models}}
+        if extra is not None:
+            value["another-provider"] = {"models": extra}
+        return json.dumps(value, separators=(",", ":")).encode()
+
+    endpoint.catalog = body({
+        saved: {"limit": {"context": 12345}},
+        shipped: {"limit": {"context": window},
+                  "reasoning_options": [{"type": "effort", "values": [changed_effort]}]},
+    }, {other: {}})
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    store = root / "store"
+    host = None
+    complete = False
+    env = {**os.environ, "RUI_OPENAI_KEY_FILE": str(key_file),
+           **os_semantics.system_trust(root / "cert.pem"),
+           "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/v1/"}
+    arguments = [fixture.RUI, "host", "serve", "--store", store, "--provider", "openai",
+                 "--active-capacity", "1", "--test-models-dev-url",
+                 f"https://localhost:{endpoint.server_address[1]}/api.json"]
+
+    def listed():
+        return h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
+
+    def expected(source, ids, known=None):
+        return [{"provider": "openai", "source": source,
+                 "models": [{"id": model, "known": True if known is None else model in known} for model in ids]}]
+
+    def await_list(wanted, description):
+        value = fixture.wait_for(lambda: (value if (value := listed()) == wanted else None), description, timeout=30)
+        assert value == wanted, (description, value, wanted)
+        return value
+
+    def catalog_requests():
+        with endpoint.lock:
+            return [headers for headers in endpoint.request_headers if headers[b":path"] == b"/api.json"]
+
+    def await_response(status, etag):
+        def observed():
+            listed()  # The public operation requests refresh; no test scheduler authority.
+            with endpoint.lock:
+                return next((reply for reply in endpoint.catalog_responses
+                             if reply["status"] == status and reply["etag"] == etag), None)
+        return fixture.wait_for(observed, f"catalog {status} {etag}", timeout=30)
+
+    def change_catalog(payload, etag):
+        # Gate the next refresh before changing its inputs. An existing held
+        # request reads these values only when explicitly released below.
+        with endpoint.lock:
+            endpoint.catalog_release.clear()
+            endpoint.catalog = payload
+            endpoint.catalog_etag = etag
+        before = len(catalog_requests())
+        with endpoint.lock:
+            already_held = before > len(endpoint.catalog_responses)
+        listed()
+        if not already_held:
+            fixture.wait_for(lambda: len(catalog_requests()) > before, "held catalog refresh", timeout=20)
+
+    try:
+        host, ready = start_ready_process(arguments, env=env)
+        shipped_ids = [model for model, facts in CATALOG.items() if facts.openai_listed]
+        await_list(expected("catalog_fallback", shipped_ids), "shipped fallback before any saved source")
+        endpoint.catalog_release.set()
+        first = expected("catalog_fallback", sorted([saved, shipped]))
+        await_list(first, "saved-only ID replaces shipped fallback and removed IDs")
+        # A source-only read must retain a successfully published generation
+        # on conditional refresh, including its changed capability facts.
+        conditional = await_response("304", '"catalog-v1"')
+        assert conditional["headers"][b"if-none-match"] == b'"catalog-v1"', conditional
+        assert listed() == first
+
+        configured = fixture.command(
+            "session", "configure", "--store", store, "--record", root / "changed.json", "--key", "changed",
+            "--workspace", fixture.ROOT, "--provider", "openai", "--model", shipped, "--tools", "none",
+            "--reasoning-effort", changed_effort, "--compaction-trigger", str(window),
+        )
+        assert configured["answer"]["status"] == "accepted", configured
+        session = configured["answer"]["session"]
+        for key, options, code in (
+            ("effort", ["--reasoning-effort", refused_effort], "unsupported_reasoning_effort"),
+            ("window", ["--compaction-trigger", str(window + 1)], "compact_at_too_large"),
+        ):
+            refused = fixture.command(
+                "session", "configure", "--store", store, "--session", session,
+                "--record", root / f"{key}.json", "--key", key, *options, expect=3,
+            )
+            assert refused["answer"]["code"] == code, refused
+
+        # A live provider's IDs and order are independent of catalog membership;
+        # non-OpenAI facts still mark a live ID known.
+        live_ids = [other, saved, shipped, "provider-only-d237"]
+        with endpoint.lock:
+            endpoint.models = json.dumps({"data": [{"id": model} for model in live_ids]}).encode()
+        live_first = expected("live", live_ids, {other, saved, shipped})
+        await_list(live_first, "live provider order and selected known facts")
+
+        change_catalog(body({"provider-only-d237": {}}), '"catalog-v2"')
+        for _ in range(8):
+            assert listed() == live_first, "an in-flight refresh changed selected facts"
+        endpoint.catalog_release.set()
+        live_second = expected("live", live_ids, {"provider-only-d237"})
+        # Every read across publication must be a whole old or new generation.
+        def coherent_publication():
+            value = listed()
+            assert value in (live_first, live_second), value
+            return value if value == live_second else None
+        fixture.wait_for(coherent_publication, "one-generation live known flags", timeout=30)
+
+        # Malformed refreshes leave the published source authoritative.
+        change_catalog(b'{"openai":{"models":', '"catalog-invalid"')
+        endpoint.catalog_release.set()
+        await_response("200", '"catalog-invalid"')
+        def retried_invalid():
+            listed()
+            with endpoint.lock:
+                return sum(reply["etag"] == '"catalog-invalid"' for reply in endpoint.catalog_responses) >= 2
+        fixture.wait_for(retried_invalid, "failed refresh retires and retries without replacing the saved source", timeout=30)
+        with endpoint.lock:
+            invalid_replies = [reply for reply in endpoint.catalog_responses if reply["etag"] == '"catalog-invalid"']
+        assert all(reply["headers"][b"if-none-match"] == b'"catalog-v2"' for reply in invalid_replies), invalid_replies
+        assert listed() == live_second
+        fixture.stop_host(host)
+        host = None
+        # Hold discovery on restart: saved facts are visible before any fetch
+        # can complete; the live provider starts its own pending/fetch lifecycle.
+        endpoint.catalog_release.clear()
+        with endpoint.lock:
+            endpoint.models = b'{"error":"unavailable"}'
+        host, ready = start_ready_process(arguments, env=env)
+        await_list(expected("catalog_fallback", ["provider-only-d237"]), "saved facts survive restart and malformed refresh")
+
+        # A valid empty source is authoritative, not absence of a source.
+        change_catalog(body({}), '"catalog-empty"')
+        endpoint.catalog_release.set()
+        await_list(expected("catalog_fallback", []), "empty saved generation suppresses shipped IDs")
+        await_response("304", '"catalog-empty"')
+        fixture.stop_host(host)
+        host = None
+        endpoint.catalog_release.clear()
+        host, ready = start_ready_process(arguments, env=env)
+        await_list(expected("catalog_fallback", []), "empty saved generation survives restart")
+        # An absent ID in a saved source is genuinely unlisted for admission:
+        # neither its old saved window nor its shipped window may reappear.
+        absent = fixture.command(
+            "session", "configure", "--store", store, "--session", session,
+            "--record", root / "absent.json", "--key", "absent",
+            "--reasoning-effort", changed_effort,
+            "--compaction-trigger", str(max(window, CATALOG[shipped].context_window or 0) + 1),
+        )
+        assert absent["answer"]["status"] == "accepted", absent
+
+        # This complete semantic reply exceeds the former shipped-derived
+        # static bound, not just the small resident JSON buffer.
+        large_ids = [f"saved-{index:04d}-" + "x" * 160 for index in range(4096)]
+        change_catalog(body({model: {} for model in reversed(large_ids)}), '"catalog-large"')
+        endpoint.catalog_release.set()
+        large = await_list(expected("catalog_fallback", large_ids), "untruncated large saved catalog in sorted order")
+        assert len(json.dumps(large).encode()) > 512 * 1024
+        fixture.stop_host(host)
+        host = None
+        endpoint.catalog_release.clear()
+        credential = root / "codex.json"
+        codex.credentials(credential)
+        codex_arguments = arguments.copy()
+        codex_arguments[codex_arguments.index("--provider") + 1] = "codex"
+        host, ready = start_ready_process(codex_arguments, env={**env, "RUI_CODEX_CREDENTIAL_FILE": str(credential)})
+        codex_list = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
+        assert codex_list == [{"provider": "codex", "source": "catalog",
+                               "models": [{"id": model, "known": True} for model in large_ids]}], codex_list
+        for headers in catalog_requests():
+            assert b"authorization" not in headers and b"chatgpt-account-id" not in headers, headers
+            assert headers[b"accept-encoding"] == b"identity", headers
+        print("saved catalog passed: source authority, changed effort/window admission, live order/known, coherent refresh, 304/failure, empty/restart and >512-KiB reply")
+        complete = True
+    finally:
+        endpoint.catalog_release.set()
+        def retire():
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "saved catalog endpoint thread did not retire"
+        cleaned = False
+        try:
+            dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
+                        endpoint.shutdown, endpoint.server_close, retire)
+            cleaned = True
+        finally:
+            if complete and cleaned:
+                shutil.rmtree(root)
+            else:
+                retain_failure_state("saved catalog failure state", root)

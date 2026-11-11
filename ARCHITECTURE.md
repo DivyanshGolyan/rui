@@ -124,7 +124,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Temporary storage | `src/ScratchBudget.zig` accounts for bytes; `src/named_scratch.zig` retains failed reclamation; `src/output_retention.zig` owns disposable-output retention and eviction. |
 | Product defaults | `src/product_defaults.zig`: values supplied for omitted settings, namely default Active and intake capacity, fresh-Session tools and permission mode, the recommended model and compaction policy. |
 | Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name a person knows it by, its sign-in name, whether its credential is a sign-in or a key, and whether its model list is Rui's catalog or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
-| Model capability | `src/model_catalog.zig`: identifier syntax, the reasoning-effort grammar and the shipped models.dev facts (listed efforts and optional context window); `src/model_capability.zig` derives capability from that catalog. |
+| Model capability | `src/model_catalog.zig`: identifier syntax, the reasoning-effort grammar and the shipped models.dev facts; the Store selects saved facts when a source exists, otherwise shipped facts. `src/model_capability.zig` derives capability from the operation's supplied facts (listed efforts and optional context window). |
 | Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
 | Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
 | Session overview | `src/Overview.zig` owns the terminal surface and its reader; `src/overview_view.zig` is its presentation core. |
@@ -2584,8 +2584,14 @@ Full's existing streaming consumer and inventory remain unchanged.
 `model_catalog.shipped` is the single compiled-in catalog of model facts, generated from a models.dev snapshot.
 Each exact ID has its listed efforts, optional context window and OpenAI membership; there is no catalog default effort or per-Adapter context cap.
 For duplicate IDs, models.dev's OpenAI entry wins, otherwise the first provider's entry wins.
-`rui session configure --help`, invalid-model errors and ChatGPT's model list render the catalog's OpenAI IDs in catalog order; help's effort exceptions derive from the same entries.
-The model-list source is `catalog` on the wire for the shipped catalog and `catalog_fallback` when a live fetch fails.
+For each Host consumer operation, the Store selects the saved source's generation and facts together; only absence of a saved source selects shipped facts.
+A saved generation is authoritative even when empty, or when the requested ID is absent: neither case merges in or resurrects a shipped entry.
+Capability and list renderers take the caller's selected facts explicitly; they do not own a mutable catalog or read the Store themselves.
+`rui session configure --help` and offline CLI configuration/default calculations use shipped facts, need no Host or credentials, and do not claim to show a Host's saved facts.
+There is no Host help request or fact-discovery extension to the wire.
+Help and invalid-model errors render shipped OpenAI IDs in catalog order; help's effort exceptions derive from those same entries.
+ChatGPT's Host model list instead renders the selected generation's OpenAI IDs in catalog order.
+The model-list source is `catalog` on the wire for a catalog list (saved or shipped), and `catalog_fallback` when a live provider-list fetch fails.
 `product_defaults.recommended_model` must name an OpenAI entry; a catalog test checks this.
 IDs are exact and case-sensitive, without aliases, prefix matching or inferred providers.
 Inclusion claims neither account entitlement nor cross-model continuation qualification.
@@ -2603,8 +2609,12 @@ This keeps 244,800 tokens for large windows but uses 115,200 for a 128,000-token
 Other providers default to 90% of the catalog window, or 115,200 tokens for a missing or null window.
 These client choices do not change existing Sessions, the Host's fixed fallback for stored null thresholds, or frozen Operations.
 
-The only fetched live list is a Host's OpenAI key list behind [`/v1/model-list`](#public-session-activity); ChatGPT uses the shipped OpenAI IDs because it has no public list.
-The Host also refreshes the models.dev fact catalog and saves it across Host runs; help, CLI configuration and Session admission/compaction still read the shipped catalog in this step.
+The only fetched live list is a Host's OpenAI key list behind [`/v1/model-list`](#public-session-activity); ChatGPT uses the selected catalog's OpenAI IDs because it has no public list.
+The Host refreshes the models.dev fact catalog and saves it across Host runs.
+Host Session configuration admission uses operation-scoped selected facts for effort support and known-window bounds; successful refreshes affect later configuration admissions, not existing Session settings or frozen Operations.
+Historical compaction escalation for an already frozen Operation deliberately uses shipped windows: settlement and later admission independently recompute the same deeper floor, and no Store field freezes a saved catalog window between those calls.
+Using a refreshed window there could make their decisions disagree and produce `CorruptStore`; changing that historical rule requires an explicit freeze/format decision.
+Offline CLI defaults can therefore be refused by Host admission when its saved facts differ; the CLI does not silently substitute another model, effort or threshold.
 There is no model-list command.
 Help needs no Host or credentials.
 Clients do not read credentials for peer configuration.
@@ -3281,7 +3291,9 @@ Neither fetch waits behind or reserves a model slot.
 The provider IDs (at most 512, 16 KiB together) stay in Host memory and are replaced on refresh.
 While that fetch runs the source is `pending` with the catalog's OpenAI IDs; after it, `live` with the provider's IDs in its order (IDs Rui cannot select are dropped), or `catalog_fallback` with the catalog's OpenAI IDs when it failed, answered with something else or listed more than that bound.
 A refresh keeps the previous provider source while in flight; the initial provider fetch alone starts `pending`.
-The reply only signals refresh and reads known Host memory: it waits for neither SQLite nor the network.
+The reply signals refresh, then reads one selected fact generation from the Store and renders it with the independently retained provider list; it does not wait for the network.
+Its operation-owned facts and reply storage are released after the request; the Host retains no fact snapshot between requests.
+Reply capacity derives from that selected generation, not the shipped snapshot's model count or ID bytes; the independent live-provider bounds remain unchanged.
 
 The models.dev GET asks for identity encoding and sends `If-None-Match` with the saved ETag when present.
 A 304 leaves the saved generation untouched.
@@ -3299,8 +3311,9 @@ Bounded SQL batches share one queued write transaction, with source publication 
 Readers therefore see the old or new catalog whole.
 Removed IDs retain their older rows but current-generation reads ignore them; runtime SQL never deletes them.
 ETags are nullable and bounded to 512 bytes; an oversized or duplicate response ETag refuses that refresh.
-Queued reads expose one model's current facts and the current OpenAI IDs for later catalog consumers.
-In this step these reads are only exercised by tests; Session admission, effort validation and compaction are unchanged.
+One Store read selects source presence and the corresponding generation's facts in the same statement, including a source-only result for an empty generation or absent requested ID.
+Single-model admission reads and complete-catalog model-list reads share this selection rule; no consumer separately tests source existence before reading facts.
+304 responses, failed refreshes and failed publication preserve the previously committed source; restart reads that same authority without waiting for discovery.
 
 Each row has position/ordinal, `at`, and one closed tagged `value`.
 `at` is the Host Unix second the row's owning fact committed: the admission for Message admission and sent Message rows, which is the same time on both rows of one Message; the Conversation entry for User and assistant rows; the producing Operation's resolution for a Tool Call; the group's last acceptance, the one at its greatest position, for a Tool Result (an Action's resolution, or the producing Operation's for a rejected call); and the fact itself for a Turn outcome, Session stop and refused send.
