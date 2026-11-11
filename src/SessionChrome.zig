@@ -142,7 +142,8 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     document.* = .{};
     try document.append("› Port the overview\nI'll start.\n");
     var transcript: @import("DocumentView.zig") = .{ .document = document };
-    var screen: AppScreen.Session = .{ .content = &transcript, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
+    var facade: AppScreen.Content = .{ .shown = transcript.widget() };
+    var screen: AppScreen.Session = .{ .content = &facade, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
     self.activity.work = .{ .mark = "⠹", .tone = .normal, .words = "Waiting", .clock = .{ .elapsed = 12 } };
     self.activity.live.count = 0;
     self.activity.live.total = 5;
@@ -184,7 +185,8 @@ test "the status row shows the notice under what needs the person, and the ? sho
     defer std.testing.allocator.destroy(document);
     document.* = .{};
     var transcript: @import("DocumentView.zig") = .{ .document = document };
-    var screen: AppScreen.Session = .{ .content = &transcript, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
+    var facade: AppScreen.Content = .{ .shown = transcript.widget() };
+    var screen: AppScreen.Session = .{ .content = &facade, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
     const palette: vxfw.Text = .{ .text = "/model" };
 
     self.place(&screen, .{ .width = 80, .notice = "Copied 12 lines", .overlay = palette.widget() });
