@@ -4780,6 +4780,49 @@ test "content reader owns the bounded result-delivery window" {
     }.run);
 }
 
+test "content prefix readers bound source reads and read-ahead without changing identity" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "prefix-config");
+            const text = try std.testing.allocator.alloc(u8, ContentReader.content_window_bytes + 17);
+            defer std.testing.allocator.free(text);
+            @memset(text, 'x');
+            try submitTestMessage(&storage, &tmp, "prefix-message", "prefix-message", session.slice(), text);
+            const reference = (try store_testing.observeCommandForTesting(&storage, "prefix-message")).kind.message.?.content;
+            for ([_]usize{ 0, 1, 17, text.len, text.len + 1 }) |maximum| {
+                for ([_]usize{ 7, 4096, ContentReader.content_window_bytes }) |chunk| {
+                    var reader: ContentReader = undefined;
+                    reader.open(try storage.openContent(reference));
+                    defer reader.close();
+                    reader.limitToPrefix(maximum);
+                    const end = @min(maximum, text.len);
+                    var buffer: [ContentReader.content_window_bytes]u8 = undefined;
+                    var offset: usize = 0;
+                    while (offset < end) {
+                        const count = try reader.read(offset, buffer[0..chunk]);
+                        try std.testing.expectEqual(@min(chunk, end - offset), count);
+                        try std.testing.expectEqualSlices(u8, text[offset..][0..count], buffer[0..count]);
+                        if (reader.prefetch) |bytes| try std.testing.expect(bytes.len <= end);
+                        try std.testing.expect(reader.prefetch_length <= end);
+                        offset += count;
+                    }
+                    try std.testing.expectEqual(@as(usize, 0), try reader.read(end, buffer[0..chunk]));
+                    try std.testing.expectError(error.RangeOutOfBounds, reader.read(end + 1, buffer[0..chunk]));
+                    try std.testing.expectEqual(reference.length, reader.reference.length);
+                    try std.testing.expectEqual(reference.digest, reader.reference.digest);
+                    try std.testing.expectEqual(end == text.len, reader.check.verified);
+                }
+            }
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
 test "core preserves empty and NUL keys while Session references stay canonical" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

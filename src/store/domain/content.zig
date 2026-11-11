@@ -96,6 +96,9 @@ pub const ContentReader = struct {
     /// Where its reads begin: a message part's reader reads only its range,
     /// so read-ahead is sized to that range, not the whole row.
     first: u64 = 0,
+    /// A prefix consumer never reads or prefetches beyond this end. The
+    /// canonical reference stays whole; a partial read cannot verify it.
+    prefix_end: ?u64 = null,
     /// The content's whole bytes, borrowed from an owner that already read
     /// them and outlives this reader: its reads copy from here and enter
     /// no Store.
@@ -106,13 +109,24 @@ pub const ContentReader = struct {
         self.* = .{ .content_id = location.content_id, .store = location.store, .reference = location.reference };
     }
 
+    /// Restrict a fresh reader to a prefix, including its read-ahead. Does
+    /// not change the canonical identity or claim to verify omitted bytes.
+    pub fn limitToPrefix(self: *ContentReader, maximum: u64) void {
+        std.debug.assert(self.active and self.prefetch == null and self.check.position == 0 and self.first == 0);
+        self.prefix_end = @min(maximum, self.reference.length);
+    }
+
+    fn readEnd(self: *const ContentReader) u64 {
+        return self.prefix_end orelse self.reference.length;
+    }
+
     // Allocate outside Store access. Read-ahead is optional: allocation failure
     // keeps the original bounded read path, not a canonical/Host fault. A
     // value the caller's window holds whole reads straight into it; one that
     // runs past it is read ahead, in a window no larger than what is left,
     // so each later window is not a round of its own.
     fn prepareRead(self: *ContentReader, start: u64, wanted: usize) void {
-        const left = self.reference.length - start;
+        const left = self.readEnd() - start;
         if (self.prefetch == null and left > wanted) {
             const size: usize = @intCast(@min(content_prefetch_bytes, left));
             // Raw: a read fills the window before any byte of it is used;
@@ -134,8 +148,8 @@ pub const ContentReader = struct {
     pub fn readWithAccess(self: *ContentReader, a: anytype, start: u64, destination: []u8) !usize {
         std.debug.assert(self.active and a.store == self.store);
         if (destination.len > content_window_bytes) return error.WindowTooLarge;
-        if (start > self.reference.length) return error.RangeOutOfBounds;
-        const wanted: usize = @intCast(@min(destination.len, self.reference.length - start));
+        if (start > self.readEnd()) return error.RangeOutOfBounds;
+        const wanted: usize = @intCast(@min(destination.len, self.readEnd() - start));
         try readWindow(a, self, start, destination[0..wanted]);
         if (!self.absorb(start, destination[0..wanted])) return error.CorruptStore;
         if (@import("builtin").is_test) _ = self.store.testing_content_work.read.fetchAdd(wanted, .monotonic);
@@ -151,7 +165,7 @@ pub const ContentReader = struct {
     pub fn readRange(self: *ContentReader, start: u64, destination: []u8) !usize {
         std.debug.assert(self.active and destination.len > 0);
         if (destination.len > content_window_bytes) return error.WindowTooLarge;
-        if (start > self.reference.length) return error.RangeOutOfBounds;
+        if (start > self.readEnd()) return error.RangeOutOfBounds;
         return self.read(start, destination);
     }
 
@@ -321,8 +335,8 @@ pub fn contentIdOf(a: anytype, reference: ContentReference, private: bool) !i64 
 
 fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !usize {
     if (destination.len > ContentReader.content_window_bytes) return error.WindowTooLarge;
-    if (start > reader.reference.length) return error.RangeOutOfBounds;
-    const wanted: usize = @intCast(@min(destination.len, reader.reference.length - start));
+    if (start > reader.readEnd()) return error.RangeOutOfBounds;
+    const wanted: usize = @intCast(@min(destination.len, reader.readEnd() - start));
     if (reader.inline_bytes) |bytes| {
         @memcpy(destination[0..wanted], bytes[@intCast(start)..][0..wanted]);
     } else {
@@ -356,7 +370,7 @@ fn readWindow(a: anytype, reader: *ContentReader, start: u64, destination: []u8)
             position >= reader.prefetch_start + reader.prefetch_length)
         {
             reader.prefetch_length = 0;
-            const wanted: usize = @intCast(@min(window.len, reader.reference.length - position));
+            const wanted: usize = @intCast(@min(window.len, reader.readEnd() - position));
             try a.readRaw(content_id, position, window[0..wanted]);
             reader.prefetch_source = reader.content_id;
             reader.prefetch_start = position;

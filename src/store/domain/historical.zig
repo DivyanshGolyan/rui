@@ -500,6 +500,15 @@ pub const HistoricalView = struct {
         self.readers += 1;
     }
 
+    /// Open only a content prefix without another metadata read. The
+    /// canonical handle remains whole for public reads; only this reader's
+    /// read extent and read-ahead are limited.
+    pub fn openContentPrefix(self: *HistoricalView, reference: HistoricalContent, maximum: u64, out: *HistoricalReader) !void {
+        std.debug.assert(reference.text_start == null);
+        try self.openContent(reference, out);
+        out.reader.limitToPrefix(maximum);
+    }
+
     /// Once, outside Store access. Raw: a read fills what it serves
     /// before any of it is used; create would first write 0xAA over all
     /// of it in ReleaseSafe.
