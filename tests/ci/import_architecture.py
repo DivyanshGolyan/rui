@@ -147,6 +147,21 @@ def tests_reached(root, test_only=TEST_ONLY_ROOTS, modules=MODULE_TEST_ROOTS):
                          + "\n".join(f"  {name}" for name in unreached))
 
 
+def widgets_boundary(root):
+    """Every widget import, including tests, stays inside the generic folder."""
+    directory = root / "src/widgets"
+    resolved = directory.resolve()
+    for path in sorted(directory.rglob("*.zig")):
+        for imported in production_imports(path.read_text(), tests=True):
+            if imported in ("std", "vaxis"):
+                continue
+            target = (path.parent / imported).resolve()
+            if (Path(imported).is_absolute() or not imported.endswith(".zig")
+                    or not target.is_relative_to(resolved)):
+                raise ValueError(f"{path.relative_to(root)} imports {imported}; widgets import only "
+                                 "std, vaxis or files inside src/widgets/")
+
+
 def store_boundary(root):
     """Across every file under src/, test declarations included: outside
     src/store/ only the facade imports a Store file, no Store file imports
@@ -274,6 +289,7 @@ def main():
     parser.add_argument("--baseline", type=Path, default=BASELINE)
     args = parser.parse_args()
     try:
+        widgets_boundary(args.root)
         store_boundary(args.root)
         store_access_sources(args.root)
         tests_reached(args.root)

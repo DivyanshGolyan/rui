@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from import_architecture import (check, cyclic_edges, production_imports, store_access_sources, store_boundary,
                                  tests_reached,
-                                 store_unit)
+                                 store_unit, widgets_boundary)
 
 
 class ImportArchitectureTest(unittest.TestCase):
@@ -21,6 +21,44 @@ class ImportArchitectureTest(unittest.TestCase):
 
     def test_repository_tests_are_all_named_by_a_test(self):
         tests_reached(Path(__file__).resolve().parents[2])
+
+    def test_repository_widgets_are_independent(self):
+        widgets_boundary(Path(__file__).resolve().parents[2])
+
+    def test_widgets_boundary_covers_unreached_files_and_test_imports(self):
+        clean = {
+            "src/widgets/One.zig": 'const std = @import("std"); const vaxis = @import("vaxis"); '
+                                   'test { _ = @import("nested/Two.zig"); }',
+            "src/widgets/nested/Two.zig": 'const one = @import("../One.zig");',
+            "src/Root.zig": 'const value = 1;',
+        }
+        for imported in ("../Root.zig", "../../Root.zig", "root", "sqlite", "/tmp/Outside.zig"):
+            for declaration in ('const x = @import("{}");', 'test {{ _ = @import("{}"); }}'):
+                with self.subTest(imported=imported, declaration=declaration), tempfile.TemporaryDirectory() as directory:
+                    root = self.store_tree(directory, clean)
+                    widgets_boundary(root)
+                    self.store_tree(root, {"src/widgets/Unreached.zig": declaration.format(imported)})
+                    with self.assertRaisesRegex(ValueError, "widgets import only"):
+                        widgets_boundary(root)
+
+    def test_widgets_boundary_rejects_symlink_escape_and_nonliteral_import(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.store_tree(directory, {"src/Root.zig": 'const x = 1;',
+                                               "src/widgets/One.zig": 'const x = @import("Alias.zig");'})
+            (root / "src/widgets/Alias.zig").symlink_to(root / "src/Root.zig")
+            with self.assertRaisesRegex(ValueError, "widgets import only"):
+                widgets_boundary(root)
+            (root / "src/widgets/Alias.zig").unlink()
+            (root / "src/widgets/One.zig").write_text('const x = @import(target);')
+            with self.assertRaisesRegex(ValueError, "requires literal"):
+                widgets_boundary(root)
+
+    def test_widget_paths_select_the_import_policy_before_builds(self):
+        from prepush import policy_tests
+
+        for path in ("src/widgets/One.zig", "src/widgets/nested/Two.zig"):
+            with self.subTest(path=path):
+                self.assertEqual(policy_tests([path])["test_import_architecture.py"], {"*"})
 
     def test_a_production_import_alone_does_not_reach_a_files_tests(self):
         with tempfile.TemporaryDirectory() as directory:
