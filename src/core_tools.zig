@@ -186,7 +186,7 @@ pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8, out: *StartA
 /// Resolve a named seed and its explicit overrides, then check one whole spec.
 pub fn checkStartAgentWithPresets(arena: std.mem.Allocator, bytes: []const u8, presets: []const Preset, out: *StartAgent) error{OutOfMemory}!StartAgentCheck {
     if (bytes.len > start_agent_max_argument_bytes) return refused(std.fmt.comptimePrint("the arguments take more than {d} bytes", .{start_agent_max_argument_bytes}));
-    // Bound nesting before the DOM and recursive outputSchema serialization.
+    // Bound nesting before allocating the arguments DOM.
     var scanner = std.json.Scanner.initCompleteInput(arena, bytes);
     defer scanner.deinit();
     try scanner.ensureTotalStackCapacity(protocol.max_json_depth);
@@ -199,7 +199,7 @@ pub fn checkStartAgentWithPresets(arena: std.mem.Allocator, bytes: []const u8, p
             return refused("the arguments exceed the maximum JSON nesting depth");
         if (token == .end_of_document) break;
     }
-    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .duplicate_field_behavior = .@"error" }) catch |err| switch (err) {
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .duplicate_field_behavior = .@"error", .parse_numbers = false }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.DuplicateField => return refused("a field appears more than once"),
         else => return refused("the arguments are not one well-formed JSON object"),
@@ -248,96 +248,39 @@ pub fn checkStartAgentWithPresets(arena: std.mem.Allocator, bytes: []const u8, p
     return .accepted;
 }
 
-/// The single agent-spec parser for start_agent, launch presets and creation
-/// seeds. It writes in place; content borrows `arena` through Store admission.
+/// Applies creation admission to the shared protocol parser for launch presets
+/// and creation seeds. Content borrows `arena` through Store admission.
 pub fn parseAgentSpec(arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *wire_request.Configuration) error{OutOfMemory}!StartAgentCheck {
     return parseAgentSpecFor(arena, spec, configuration, false);
 }
 
 fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *wire_request.Configuration, comptime inherits_parent: bool) error{OutOfMemory}!StartAgentCheck {
+    if (spec.contains("parent")) return refused("spec.parent: parent is only valid on Session creation");
     // D221 applies after preset resolution too: no preset can change these.
     if (inherits_parent) {
         if (spec.contains("workspace")) return refused("spec.workspace: an agent always works in your Workspace");
         if (spec.contains("provider")) return refused("spec.provider: an agent always uses your provider");
     }
-    // D113/D133: provider defaults at the Host; workspace is required for Bash.
-    if (unknownField(spec, &.{ "model", "effort", "compactAt", "tools", "permissionMode", "label", "instructions", "outputSchema", "provider", "workspace" })) |name|
-        return refusedField(arena, name, "is not a spec field");
-    configuration.* = .{};
-    if (spec.contains("provider")) {
-        if (!stringField(spec, "provider", &configuration.provider)) return refused("spec.provider must be a provider name");
-        if (std.meta.stringToEnum(protocol.Provider, configuration.provider.value.slice()) == null)
-            return refused("spec.provider must be a provider name");
-    }
-    if (spec.contains("workspace") and !stringField(spec, "workspace", &configuration.workspace))
+    if (try protocol.parseAgentSpec(wire_request.Custody, arena, spec, configuration)) |reason|
+        return .{ .rejected = reason };
+    if (protocol.missingCreatingSetting(configuration, inherits_parent)) |name|
+        return .{ .rejected = try std.fmt.allocPrint(arena, "spec.{s} is required", .{name}) };
+    // These are semantic admission checks, not a second spec grammar. The
+    // Store still owns tool set availability and parent permission/tool narrowing.
+    if (configuration.provider.state == .value and std.meta.stringToEnum(protocol.Provider, configuration.provider.value.slice()) == null)
+        return refused("spec.provider must be a provider name");
+    if (configuration.workspace.state == .value and configuration.workspace.value.len == 0)
         return refused("spec.workspace must be a Workspace path");
-    if (!stringField(spec, "model", &configuration.model)) return refused("spec.model must be a model name");
-    switch (spec.get("effort") orelse return refused("spec.effort is required")) {
-        .null => configuration.reasoning_effort.state = .explicit_null,
-        .string => {
-            if (!stringField(spec, "effort", &configuration.reasoning_effort))
-                return refused("spec.effort must be null, none, low, medium, high, xhigh or max");
-            if (std.meta.stringToEnum(protocol.ReasoningEffort, configuration.reasoning_effort.value.slice()) == null)
-                return refused("spec.effort must be null, none, low, medium, high, xhigh or max");
-        },
-        else => return refused("spec.effort must be null, none, low, medium, high, xhigh or max"),
-    }
-    const tokens: u64 = switch (spec.get("compactAt") orelse return refused("spec.compactAt is required")) {
-        .integer => |value| if (value > 0) @intCast(value) else return refused("spec.compactAt must be a positive number of tokens"),
-        .number_string => |value| std.fmt.parseInt(u64, value, 10) catch return refused("spec.compactAt must be a positive number of tokens"),
-        else => return refused("spec.compactAt must be a positive number of tokens"),
-    };
+    if (configuration.model.value.len == 0) return refused("spec.model must be a model name");
+    if (configuration.reasoning_effort.state == .value and std.meta.stringToEnum(protocol.ReasoningEffort, configuration.reasoning_effort.value.slice()) == null)
+        return refused("spec.effort must be null, none, low, medium, high, xhigh or max");
+    const tokens = std.fmt.parseInt(u64, configuration.compaction_trigger.value.slice(), 10) catch return refused("spec.compactAt must be a positive number of tokens");
     if (tokens == 0) return refused("spec.compactAt must be a positive number of tokens");
-    configuration.compaction_trigger.state = .value;
-    configuration.compaction_trigger.value.set(std.fmt.allocPrint(arena, "{d}", .{tokens}) catch return error.OutOfMemory) catch unreachable;
-    toolsField(arena, spec.get("tools") orelse return refused("spec.tools is required"), &configuration.tools) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Refused => return refused("spec.tools must be a list of distinct tool names"),
-    };
-    var selected_tools = configuration.tools.iterator();
-    while (selected_tools.next()) |name| {
-        if (!inherits_parent and std.mem.eql(u8, name, "bash") and configuration.workspace.state != .value)
-            return refused("spec.workspace is required when spec.tools includes bash");
-    }
-    if (!stringField(spec, "permissionMode", &configuration.permission_mode)) return refused("spec.permissionMode must be ask or bypass");
     if (!configuration.permission_mode.value.eql("ask") and !configuration.permission_mode.value.eql("bypass"))
         return refused("spec.permissionMode must be ask or bypass");
-    switch (spec.get("label") orelse .null) {
-        .null => if (spec.contains("label")) {
-            configuration.label.state = .explicit_null;
-        },
-        .string => |label| {
-            configuration.label.state = .value;
-            configuration.label.value.set(label) catch return refused(std.fmt.comptimePrint("spec.label takes at most {d} bytes", .{protocol.max_label_bytes}));
-            if (!protocol.validLabel(label)) return refused("spec.label must be one nonblank line of UTF-8");
-        },
-        else => return refused("spec.label must be a string or null"),
-    }
-    const instructions = switch (spec.get("instructions") orelse .null) {
-        .null => if (spec.contains("instructions")) return refused("spec.instructions must be a string") else null,
-        .string => |text| if (std.unicode.utf8ValidateSlice(text)) text else return refused("spec.instructions must be UTF-8 text"),
-        else => return refused("spec.instructions must be a string"),
-    };
-    const output_schema = switch (spec.get("outputSchema") orelse .null) {
-        .null => value: {
-            if (spec.contains("outputSchema")) configuration.output_schema.state = .explicit_null;
-            break :value null;
-        },
-        .object => |object| std.json.Stringify.valueAlloc(arena, std.json.Value{ .object = object }, .{}) catch return error.OutOfMemory,
-        else => return refused("spec.outputSchema must be a JSON object or null"),
-    };
-    if (instructions) |bytes_value| configuration.instructions = .{
-        .state = .value,
-        .borrowed = bytes_value.ptr,
-        .length = bytes_value.len,
-        .digest = protocol.contentDigest(bytes_value),
-    };
-    if (output_schema) |bytes_value| configuration.output_schema = .{
-        .state = .value,
-        .borrowed = bytes_value.ptr,
-        .length = bytes_value.len,
-        .digest = protocol.contentDigest(bytes_value),
-    };
+    if (configuration.label.state == .value and !protocol.validLabel(configuration.label.value.slice()))
+        return refused("spec.label must be one nonblank line of UTF-8");
+
     return .accepted;
 }
 
@@ -364,44 +307,6 @@ fn unknownField(object: std.json.ObjectMap, comptime known: []const []const u8) 
         return entry.key_ptr.*;
     }
     return null;
-}
-
-/// A nonempty string field as the Configuration field type `T`, or null
-/// when it is absent, not a string, or too long.
-/// Sets `field` in place from the nonempty string `name`, since a returned
-/// copy of a path-sized field would sit in the caller's frame.
-fn stringField(object: std.json.ObjectMap, comptime name: []const u8, field: anytype) bool {
-    const text = switch (object.get(name) orelse return false) {
-        .string => |value| value,
-        else => return false,
-    };
-    if (text.len == 0) return false;
-    field.value.set(text) catch return false;
-    field.state = .value;
-    return true;
-}
-
-/// The tool list `value` names, sorted and checked with configure's name
-/// grammar. Availability is checked by the Store against the Host tool set.
-fn toolsField(arena: std.mem.Allocator, value: std.json.Value, tools: *protocol.ToolsField) error{ OutOfMemory, Refused }!void {
-    const items = switch (value) {
-        .array => |array| array.items,
-        else => return error.Refused,
-    };
-    const names = try arena.alloc([]const u8, items.len);
-    for (items, names) |item, *name| {
-        name.* = switch (item) {
-            .string => |text| text,
-            else => return error.Refused,
-        };
-    }
-    std.sort.insertion([]const u8, names, {}, struct {
-        fn less(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.order(u8, a, b) == .lt;
-        }
-    }.less);
-    tools.* = .{ .state = .value };
-    for (names) |name| tools.append(name) catch return error.Refused;
 }
 
 pub const MessageAgentArguments = @import("message_agent_arguments.zig").MessageAgentArguments;
@@ -591,7 +496,10 @@ test "core_tools start_agent optional instructions and output schema" {
         .{ .extra = ",\"instructions\":null", .refusal = "spec.instructions" },
         .{ .extra = ",\"instructions\":123", .refusal = "spec.instructions" },
         .{ .extra = ",\"outputSchema\":[]", .refusal = "spec.outputSchema" },
-        .{ .extra = ",\"outputSchema\":\"{}\"", .refusal = "spec.outputSchema" },
+        .{ .extra = ",\"instructions\":\"\",\"outputSchema\":{}" },
+        .{ .extra = ",\"outputSchema\":\"[]\"", .refusal = "spec.outputSchema" },
+        .{ .extra = ",\"outputSchema\":\"false\"", .refusal = "spec.outputSchema" },
+        .{ .extra = ",\"outputSchema\":\"not JSON\"", .refusal = "spec.outputSchema" },
     }) |case| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
@@ -617,7 +525,7 @@ test "core_tools start_agent optional instructions and output schema" {
             if (start.instructions.?.len != 0) {
                 try std.testing.expectEqualStrings("Be helpful", start.instructions.?);
                 try std.testing.expectEqualStrings("{\"type\":\"object\"}", start.output_schema.?);
-            } else try std.testing.expect(start.output_schema == null);
+            } else if (start.output_schema) |schema| try std.testing.expectEqualStrings("{}", schema);
         }
     }
 }
@@ -898,4 +806,67 @@ test "skills model arguments separate invoke and reload without authority fields
         "{\"operation\":\"reload\",\"name\":\"demo\"}",   "{\"operation\":\"reload\",\"tools\":[\"bash\"]}", "{\"operation\":\"reload\",\"operation\":\"reload\"}",
         "{\"operation\":\"activate\",\"name\":\"demo\"}",
     }) |invalid| try std.testing.expect(try checkSkill(allocator, invalid, &out) == .rejected);
+}
+
+// The exact same spec text crosses the model-tool and native request doors.
+// Independent expected names include both fields absent from the old tool schema.
+test "start_agent and configure parse the same plain agent spec into the same Configuration" {
+    const spec =
+        \\{"model":"custom","effort":null,"compactAt":1000,"tools":["web_search","start_agent"],"loadedTools":["web_search"],"permissionMode":"ask","outputReservation":123,"label":"one spec","instructions":"Follow this","outputSchema":{"type":"object","description":"caf\u00e9\/","state":"value","value":{},"bytes":"0","sha256":"not a reference"}}
+    ;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const start = try allocator.create(StartAgent);
+    const arguments = try std.fmt.allocPrint(allocator, "{{\"task\":\"read\",\"attached\":true,\"spec\":{s}}}", .{spec});
+    try std.testing.expect(try checkStartAgent(allocator, arguments, start) == .accepted);
+    try std.testing.expectEqualStrings("web_search", start.configuration.loaded_tools.names.slice());
+    try std.testing.expectEqualStrings("123", start.configuration.output_reservation.value.slice());
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root);
+    var retained: ?@import("named_scratch.zig").Owner = null;
+    const body = try std.fmt.allocPrint(allocator, "{{\"version\":\"{s}\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"configuration\":{s}}}", .{ protocol.wire_version, spec });
+    const ingress = try allocator.create(wire_request.Ingress);
+    ingress.init(allocator, .{ .io = std.testing.io, .content_length = body.len, .scratch_path = root[0..root_len], .request_number = 1, .retained_scratch = &retained, .expected_kind = .configure });
+    defer ingress.deinit();
+    try ingress.feed(body);
+    const request = try ingress.finish();
+    defer request.removeTemporaryContent(std.testing.io) catch unreachable;
+    const configuration = &request.configure.configuration;
+    inline for (@import("session_settings.zig").entries) |entry| {
+        const name = entry.field;
+        const a = &@field(start.configuration, name);
+        const b = &@field(configuration, name);
+        try std.testing.expectEqual(a.state, b.state);
+        if (a.state == .value) switch (entry.kind) {
+            .text, .choice, .decimal_policy => try std.testing.expectEqualStrings(a.value.slice(), b.value.slice()),
+            .tools => {
+                try std.testing.expectEqual(a.count, b.count);
+                try std.testing.expectEqualStrings(a.names.slice(), b.names.slice());
+            },
+            .content => {
+                try std.testing.expectEqual(a.length, b.length);
+                try std.testing.expectEqualSlices(u8, &a.digest, &b.digest);
+                try std.testing.expect(b.hasFile());
+                try std.testing.expect(a.borrowedBytes() != null);
+            },
+        };
+    }
+}
+
+test "start_agent spec schema covers every noninherited Session setting" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const schema = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), start_agent_schema, .{});
+    const properties = schema.object.get("properties").?.object.get("spec").?.object.get("properties").?.object;
+    try std.testing.expect(!properties.contains("workspace") and !properties.contains("provider"));
+    try std.testing.expect(properties.contains("loadedTools") and properties.contains("outputReservation"));
+    inline for (@import("session_settings.zig").entries) |entry| {
+        if (comptime !std.mem.eql(u8, entry.field, "workspace") and !std.mem.eql(u8, entry.field, "provider"))
+            try std.testing.expect(properties.contains(entry.spec));
+    }
+    try std.testing.expectEqual(@import("session_settings.zig").entries.len - 2, properties.count());
 }

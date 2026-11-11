@@ -65,6 +65,23 @@ pub const Cancellation = struct {
     }
 };
 
+/// Provenance of an escaping failure, not a guess from its OS error name.
+/// Only concrete socket effects (including premature EOF) stamp transport.
+pub const FailureOrigin = enum { local, host_transport };
+
+/// An in-app read adapter cannot omit its pinned result's provenance. Project
+/// this whole context into Requests; never rebuild a borrower from io alone.
+pub const ReadContext = struct {
+    io: std.Io,
+    origin: *FailureOrigin,
+    cancellation: ?*const Cancellation = null,
+    read_failure: ?*?protocol_reply.ReadFailure = null,
+
+    pub fn requests(self: ReadContext) Requests {
+        return .{ .io = self.io, .cancellation = self.cancellation, .read_failure = self.read_failure, .failure_origin = self.origin };
+    }
+};
+
 /// Borrows io, token, inputs, captures, sinks and reply storage through return.
 /// A worker owns each socket; no socket escapes or closes from another thread.
 pub const Requests = struct {
@@ -72,6 +89,9 @@ pub const Requests = struct {
     cancellation: ?*const Cancellation = null,
     /// One borrower writes; the caller reads/resets only after return or join.
     read_failure: ?*?protocol_reply.ReadFailure = null,
+    /// Optional reader-owned result, pinned through return/join. Successful
+    /// requests and local preparation, source and sink errors never stamp it.
+    failure_origin: ?*FailureOrigin = null,
     /// Test hook for mutation sends only: asks the Host to drop its reply at
     /// this point.
     drop_reply: ?[]const u8 = null,
@@ -91,6 +111,13 @@ pub const Requests = struct {
             slot.* = failure;
         };
         return failure;
+    }
+
+    fn transportFailure(self: Requests, err: anytype) @TypeOf(err) {
+        if (@as(anyerror, err) != error.Cancelled) if (self.failure_origin) |origin| {
+            origin.* = .host_transport;
+        };
+        return err;
     }
 
     fn check(self: Requests) error{Cancelled}!void {
@@ -289,21 +316,7 @@ pub const Requests = struct {
         try body.appendShape(protocol.model_list_request, .{paths.store.slice()});
         const fd = try openRead(self, &paths, "/v1/model-list", body.slice());
         defer closeSocket(self.io, fd);
-        const Sink = struct {
-            bytes: std.ArrayList(u8) = .empty,
-            gpa: std.mem.Allocator,
-            pub fn feed(s: *@This(), bytes: []const u8) !void {
-                if (s.bytes.items.len + bytes.len > protocol.model_list_reply.max_bytes) return error.ResponseTooLarge;
-                try s.bytes.appendSlice(s.gpa, bytes);
-            }
-        };
-        var sink: Sink = .{ .gpa = gpa };
-        errdefer sink.bytes.deinit(gpa);
-        var buffer: ReplyBuffer = .{};
-        return switch (try readReportResponse(self, fd, &sink, &buffer)) {
-            .report => try sink.bytes.toOwnedSlice(gpa),
-            .command => error.InvalidResponse,
-        };
+        return readModelListResponse(self, fd, gpa);
     }
 
     /// Bounded owned metadata only; scope strings are borrowed until return.
@@ -394,7 +407,7 @@ fn readFirstLine(requests: Requests, fd: std.posix.fd_t, buffer: []u8) !protocol
     var filled: usize = 0;
     const line = while (filled != wanted) {
         const count = try readRequest(requests, fd, buffer[filled..wanted], ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, null, true));
-        if (count == 0) return error.TruncatedResponse;
+        if (count == 0) return requests.transportFailure(error.TruncatedResponse);
         if (std.mem.indexOfScalar(u8, buffer[filled..][0..count], '\n')) |index| break buffer[0 .. filled + index];
         filled += count;
     } else if (wanted < head.content_length) wholeScalars(buffer[0..wanted]) else buffer[0..wanted];
@@ -432,7 +445,7 @@ fn readPublicContentResponse(requests: Requests, fd: std.posix.fd_t, expected: ?
         var filled: usize = 0;
         while (filled != wanted) {
             const count = try readRequest(requests, fd, window[filled..wanted], ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, null, true));
-            if (count == 0) return error.TruncatedResponse;
+            if (count == 0) return requests.transportFailure(error.TruncatedResponse);
             filled += count;
         }
         hash.update(window[0..wanted]);
@@ -1421,7 +1434,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     var reader = std.json.Reader.init(fixed.allocator(), &file_reader.interface);
     defer reader.deinit();
     const fields = std.json.parseFromTokenSourceLeaky(Fields, fixed.allocator(), &reader, .{ .allocate = .alloc_if_needed, .max_value_len = protocol.max_store_bytes }) catch return file_reader.err orelse error.InvalidRequestRecord;
-    if (!fields.version.eql(protocol.wire_version)) return error.InvalidRequestRecord;
+    if (!fields.version.eql(protocol.wire_version)) return error.SavedRequestWireVersionMismatch;
     const kind = std.meta.stringToEnum(protocol.CommandKind, fields.kind.slice()) orelse return error.InvalidRequestRecord;
     var saved: protocol_reply.MutationIdentity = .{ .store = fields.store.value, .key = fields.key.value, .kind = kind };
     if (kind == .model_interruption) {
@@ -1784,61 +1797,41 @@ const Capture = struct {
         try self.writeRequest(protocol.permission_decision_request, .{ store, key, input.session, input.action_id, input.decision });
     }
 
-    fn writeOptionalPolicy(self: *Capture, value: OptionalPolicy) !void {
-        if (!value.present) return self.write("{\"state\":\"omitted\"}");
-        const text = value.value orelse return self.write("{\"state\":\"null\"}");
-        try self.writeOptionalText(.{ .present = true, .value = text });
-    }
-
-    fn writeOptionalText(self: *Capture, value: OptionalText) !void {
-        if (!value.present) return self.write("{\"state\":\"omitted\"}");
-        try self.write("{\"state\":\"value\",\"value\":");
-        try self.writeJsonString(value.value);
-        try self.write("}");
-    }
-
-    fn writeOptionalFile(self: *Capture, value: OptionalFile, allow_null: bool) !void {
-        switch (value.state) {
-            .omitted => try self.write("{\"state\":\"omitted\"}"),
-            .explicit_null => {
-                if (!allow_null) return error.NullNotAllowed;
-                try self.write("{\"state\":\"null\"}");
-            },
-            .value => {
-                try self.write("{\"state\":\"value\",\"value\":");
-                try self.writeJsonFile(value.path);
-                try self.write("}");
-            },
-        }
-    }
-
     fn writeConfiguration(self: *Capture, input: ConfigureInput) !void {
-        try self.write("{\"workspace\":");
-        try self.writeOptionalText(input.workspace);
-        try self.write(",\"provider\":");
-        try self.writeOptionalText(input.provider);
-        try self.write(",\"model\":");
-        try self.writeOptionalText(input.model);
-        try self.write(",\"instructions\":");
-        try self.writeOptionalFile(input.instructions, false);
-        try self.write(",\"tools\":");
-        try self.writeTools(input.tools);
-        if (input.loaded_tools != null) {
-            try self.write(",\"loaded_tools\":");
-            try self.writeTools(input.loaded_tools);
+        try self.write("{");
+        var separator: []const u8 = "";
+        inline for (@import("session_settings.zig").entries) |entry| {
+            const value = @field(input, entry.field);
+            const present = switch (entry.kind) {
+                .content => value.state != .omitted,
+                .tools => value != null,
+                else => value.present,
+            };
+            if (present) {
+                try self.write(separator);
+                try self.write("\"" ++ entry.spec ++ "\":");
+                separator = ",";
+                switch (entry.kind) {
+                    .text, .choice => if (comptime entry.nullable) {
+                        if (value.value) |text| try self.writeJsonString(text) else try self.write("null");
+                    } else try self.writeJsonString(value.value),
+                    .content => switch (value.state) {
+                        .omitted => unreachable,
+                        .explicit_null => {
+                            if (!entry.nullable) return error.NullNotAllowed;
+                            try self.write("null");
+                        },
+                        .value => if (entry.json_object) try self.writeInputFile(value.path, protocol.max_sqlite_content_bytes, false, true) else try self.writeJsonFile(value.path),
+                    },
+                    .tools => try self.writeTools(value.?),
+                    .decimal_policy => if (value.value) |text| {
+                        const tokens = try std.fmt.parseInt(u64, text, 10);
+                        var digits: [20]u8 = undefined;
+                        try self.write(try std.fmt.bufPrint(&digits, "{d}", .{tokens}));
+                    } else try self.write("null"),
+                }
+            }
         }
-        try self.write(",\"permission_mode\":");
-        try self.writeOptionalText(input.permission_mode);
-        try self.write(",\"output_schema\":");
-        try self.writeOptionalFile(input.output_schema, true);
-        try self.write(",\"compaction_trigger\":");
-        try self.writeOptionalPolicy(input.compaction_trigger);
-        try self.write(",\"output_reservation\":");
-        try self.writeOptionalPolicy(input.output_reservation);
-        try self.write(",\"reasoning_effort\":");
-        try self.writeOptionalPolicy(input.reasoning_effort);
-        try self.write(",\"label\":");
-        try self.writeOptionalPolicy(input.label);
         try self.write("}");
     }
 
@@ -1847,6 +1840,10 @@ const Capture = struct {
     }
 
     fn writeJsonFileBounded(self: *Capture, path: []const u8, limit: u64, require_text: bool) !void {
+        return self.writeInputFile(path, limit, require_text, false);
+    }
+
+    fn writeInputFile(self: *Capture, path: []const u8, limit: u64, require_text: bool, comptime schema: bool) !void {
         const stdin = std.mem.eql(u8, path, "-");
         const read: Step = if (stdin) .stdin_read else .input_file_read;
         var file = if (stdin)
@@ -1854,7 +1851,18 @@ const Capture = struct {
         else
             std.Io.Dir.cwd().openFile(self.io, path, .{}) catch |err| return self.failInput(read, err);
         defer if (!stdin) file.close(self.io);
-        self.write("\"") catch |err| return self.failInput(read, err);
+        if (!schema) self.write("\"") catch |err| return self.failInput(read, err);
+        // Reject malformed schema files before publishing a capture. Schema
+        // bytes have the same bounded streaming normalization as wire ingress.
+        const SchemaEncoder = @import("schema_json.zig").Encoder;
+        var encoder: SchemaEncoder = if (schema) .init(std.heap.page_allocator) else undefined;
+        defer if (schema) encoder.deinit();
+        const Sink = struct {
+            capture: *Capture,
+            pub fn write(sink: @This(), bytes: []const u8) !void {
+                try sink.capture.write(bytes);
+            }
+        };
         var buffer: [protocol.content_window_bytes]u8 = undefined;
         var validator = Utf8Validator{};
         var decoded_bytes: u64 = 0;
@@ -1870,12 +1878,24 @@ const Capture = struct {
             validator.feed(buffer[0..count]) catch |err| return self.failInput(.input_parse, err);
             // Default encoding copies non-ASCII bytes unchanged, including a UTF-8
             // sequence split across reads; the streaming validator owns validity.
-            std.json.Stringify.encodeJsonStringChars(buffer[0..count], .{}, &self.writer.interface) catch
+            if (schema) {
+                for (buffer[0..count]) |byte| {
+                    if (encoder.done) {
+                        if (std.mem.indexOfScalar(u8, " \t\r\n", byte) == null)
+                            return self.failInput(.input_parse, error.InvalidOutputSchema);
+                    } else _ = encoder.feed(byte, Sink{ .capture = self }) catch |err| {
+                        if (self.writer.err) |failure| return failure;
+                        if (err == error.OutOfMemory) return error.OutOfMemory;
+                        return self.failInput(.input_parse, error.InvalidOutputSchema);
+                    };
+                }
+            } else std.json.Stringify.encodeJsonStringChars(buffer[0..count], .{}, &self.writer.interface) catch
                 return self.writer.err orelse error.WriteFailed;
         }
         if (!validator.complete()) return self.failInput(.input_parse, error.InvalidUtf8);
+        if (schema and !encoder.done) return self.failInput(.input_parse, error.InvalidOutputSchema);
         if (require_text and decoded_bytes == 0) return self.failInput(.input_parse, error.EmptyMessageInput);
-        try self.write("\"");
+        if (!schema) try self.write("\"");
     }
 
     fn failInput(self: *Capture, step: Step, err: anytype) @TypeOf(err) {
@@ -1883,9 +1903,8 @@ const Capture = struct {
         return err;
     }
 
-    fn writeTools(self: *Capture, tools: ?[]const u8) !void {
-        const value = tools orelse return self.write("{\"state\":\"omitted\"}");
-        try self.write("{\"state\":\"value\",\"value\":[");
+    fn writeTools(self: *Capture, value: []const u8) !void {
+        try self.write("[");
         // A comma list such as `bash,web_search`, each name once, written
         // sorted by bytes as the wire asks; `none` is the empty list. Which
         // names the Host offers is the Host's to check.
@@ -1912,7 +1931,7 @@ const Capture = struct {
                 try self.writeJsonString(name);
             }
         }
-        try self.write("]}");
+        try self.write("]");
     }
 };
 
@@ -2106,6 +2125,10 @@ fn closeSocket(io: std.Io, fd: std.posix.fd_t) void {
 }
 
 fn connectRequest(requests: Requests, address: std.Io.net.UnixAddress, until: ?i128) !std.posix.fd_t {
+    return connectSocket(requests, address, until) catch |err| return requests.transportFailure(err);
+}
+
+fn connectSocket(requests: Requests, address: std.Io.net.UnixAddress, until: ?i128) !std.posix.fd_t {
     try requests.check();
     if (until != null or requests.cancellation != null) return connectUntil(requests, address.path, until);
     // Keep ordinary connection errors and std.Io acquisition semantics.
@@ -2222,13 +2245,13 @@ fn readResponseHeadForProfileUntil(requests: Requests, fd: std.posix.fd_t, timin
     var header_buffer: [protocol.max_header_bytes]u8 = undefined;
     const first_deadline = timing.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, until, false);
     const first_count = try readRequest(requests, fd, header_buffer[0..1], first_deadline);
-    if (first_count == 0) return error.TruncatedResponse;
+    if (first_count == 0) return requests.transportFailure(error.TruncatedResponse);
     var used: usize = first_count;
     while (used < header_buffer.len) {
         if (used >= 4 and std.mem.eql(u8, header_buffer[used - 4 .. used], "\r\n\r\n")) break;
         const deadline = timing.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, until, true);
         const count = try readRequest(requests, fd, header_buffer[used .. used + 1], deadline);
-        if (count == 0) return error.TruncatedResponse;
+        if (count == 0) return requests.transportFailure(error.TruncatedResponse);
         used += count;
     } else return error.ResponseHeaderTooLarge;
     return parseResponseHeadForProfile(header_buffer[0..used], profile);
@@ -2347,6 +2370,26 @@ fn readResultResponseSink(
     return .{ .answer = .{ .bytes = head.content_length } };
 }
 
+/// The Host bounds a catalog reply from its selected generation. A client
+/// cannot infer that size from its own shipped snapshot; retain the complete
+/// framed body in the caller's allocation rather than applying a stale cap.
+fn readModelListResponse(requests: Requests, fd: std.posix.fd_t, gpa: std.mem.Allocator) ![]u8 {
+    const Sink = struct {
+        bytes: std.ArrayList(u8) = .empty,
+        gpa: std.mem.Allocator,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.bytes.appendSlice(self.gpa, bytes);
+        }
+    };
+    var sink: Sink = .{ .gpa = gpa };
+    errdefer sink.bytes.deinit(gpa);
+    var buffer: ReplyBuffer = .{};
+    return switch (try readReportResponse(requests, fd, &sink, &buffer)) {
+        .report => try sink.bytes.toOwnedSlice(gpa),
+        .command => error.InvalidResponse,
+    };
+}
+
 fn readReportResponse(
     requests: Requests,
     fd: std.posix.fd_t,
@@ -2378,7 +2421,7 @@ fn readResponseBody(requests: Requests, fd: std.posix.fd_t, length: u64, sink: a
         var filled: usize = 0;
         while (filled != wanted) {
             const count = try readRequest(requests, fd, buffer[filled..wanted], ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds, null, true));
-            if (count == 0) return error.TruncatedResponse;
+            if (count == 0) return requests.transportFailure(error.TruncatedResponse);
             filled += count;
             if (delivery == .stream) break;
         }
@@ -2400,7 +2443,7 @@ fn readCommandBodyUntil(requests: Requests, fd: std.posix.fd_t, head: ResponseHe
     while (offset < body_length) {
         const deadline = timing.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, until, true);
         const count = try readRequest(requests, fd, reply_buffer.bytes[offset..body_length], deadline);
-        if (count == 0) return error.TruncatedResponse;
+        if (count == 0) return requests.transportFailure(error.TruncatedResponse);
         offset += count;
     }
     reply_buffer.len = body_length;
@@ -2433,6 +2476,10 @@ fn waitRequest(requests: Requests, fd: std.posix.fd_t, events: i16, deadline: ?i
 }
 
 fn readRequest(requests: Requests, fd: std.posix.fd_t, buffer: []u8, deadline: ?i128) !usize {
+    return readSocket(requests, fd, buffer, deadline) catch |err| return requests.transportFailure(err);
+}
+
+fn readSocket(requests: Requests, fd: std.posix.fd_t, buffer: []u8, deadline: ?i128) !usize {
     while (true) {
         if (!try waitRequest(requests, fd, std.posix.POLL.IN, deadline)) return error.ResponseInactive;
         const count = std.c.read(fd, buffer.ptr, buffer.len);
@@ -2458,6 +2505,10 @@ fn writeAll(fd: std.posix.fd_t, value: []const u8) !void {
 }
 
 fn writeAllRequest(requests: Requests, fd: std.posix.fd_t, value: []const u8, until: ?i128) !void {
+    return writeSocket(requests, fd, value, until) catch |err| return requests.transportFailure(err);
+}
+
+fn writeSocket(requests: Requests, fd: std.posix.fd_t, value: []const u8, until: ?i128) !void {
     const io = requests.io;
     var offset: usize = 0;
     var deadline = ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds, until, true).?;
@@ -2553,6 +2604,40 @@ fn socketPair() ![2]std.posix.fd_t {
         return error.SocketPairFailed;
     }
     return sockets;
+}
+
+test "transport failure provenance excludes local sinks, valid physical EOF and cancellation" {
+    const Sink = struct {
+        fail: bool,
+        bytes: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            if (self.fail) return error.FileNotFound;
+            self.bytes += bytes.len;
+        }
+    };
+    for (std.enums.values(enum { complete, truncated, local_sink, cancelled })) |mode| {
+        const sockets = try socketPair();
+        defer closeSocket(std.testing.io, sockets[0]);
+        {
+            defer closeSocket(std.testing.io, sockets[1]);
+            try writeAll(sockets[1], "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 3\r\nX-Rui-Content-Bytes: 3\r\nX-Rui-Next-Offset: 3\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n");
+            try writeAll(sockets[1], if (mode == .truncated) "a" else "abc");
+        }
+        var origin: FailureOrigin = .local;
+        var cancellation: Cancellation = .{};
+        if (mode == .cancelled) cancellation.requestStop();
+        const requests: Requests = .{ .io = std.testing.io, .cancellation = &cancellation, .failure_origin = &origin };
+        var sink: Sink = .{ .fail = mode == .local_sink };
+        const result = readPublicContentResponse(requests, sockets[0], .{ .bytes = 3, .digest = protocol.contentDigest("abc") }, &sink);
+        switch (mode) {
+            .complete => try std.testing.expect(try result == null),
+            .truncated => try std.testing.expectError(error.TruncatedResponse, result),
+            .local_sink => try std.testing.expectError(error.FileNotFound, result),
+            .cancelled => try std.testing.expectError(error.Cancelled, result),
+        }
+        try std.testing.expectEqual(if (mode == .truncated) FailureOrigin.host_transport else .local, origin);
+        try std.testing.expectEqual(@as(usize, if (mode == .complete) 3 else 0), sink.bytes);
+    }
 }
 
 test "observation transport owns a larger buffer without growing ordinary replies" {
@@ -2941,7 +3026,7 @@ test "capture creating Messages writes configuration and optional model admissio
         const object = parsed.value.object;
         try std.testing.expectEqualStrings("", object.get("session").?.string);
         try std.testing.expect(object.get("sender").? == .null);
-        try std.testing.expectEqualStrings("custom", object.get("configuration").?.object.get("model").?.object.get("value").?.string);
+        try std.testing.expectEqualStrings("custom", object.get("configuration").?.object.get("model").?.string);
         try std.testing.expectEqualStrings("hello", object.get("text").?.object.get("value").?.string);
         try std.testing.expectEqual(require_model, object.contains("require_model"));
         if (require_model) try std.testing.expect(object.get("require_model").?.bool);
@@ -2985,16 +3070,16 @@ test "capture configure requests a Store allocated Session and retains model adm
         try std.testing.expectEqualStrings("", parsed.value.object.get("session").?.string);
         try std.testing.expect(parsed.value.object.get("require_model").?.bool);
         const settings = parsed.value.object.get("configuration").?.object;
-        try std.testing.expect(settings.contains("reasoning_effort"));
-        const effort = settings.get("reasoning_effort").?.object;
-        try std.testing.expectEqualStrings(if (!case.effort.present) "omitted" else if (case.effort.value == null) "null" else "value", effort.get("state").?.string);
-        if (case.effort.value) |_| try std.testing.expectEqualStrings("high", effort.get("value").?.string);
+        try std.testing.expectEqual(case.effort.present, settings.contains("effort"));
+        if (case.effort.present) {
+            if (case.effort.value) |_| try std.testing.expectEqualStrings("high", settings.get("effort").?.string) else try std.testing.expect(settings.get("effort").? == .null);
+        }
         if (trigger != null) {
-            try std.testing.expectEqualStrings("100000", settings.get("compaction_trigger").?.object.get("value").?.string);
-            try std.testing.expectEqualStrings("16384", settings.get("output_reservation").?.object.get("value").?.string);
+            try std.testing.expectEqual(@as(i64, 100000), settings.get("compactAt").?.integer);
+            try std.testing.expectEqual(@as(i64, 16384), settings.get("outputReservation").?.integer);
         } else {
-            try std.testing.expectEqualStrings("null", settings.get("compaction_trigger").?.object.get("state").?.string);
-            try std.testing.expectEqualStrings("null", settings.get("output_reservation").?.object.get("state").?.string);
+            try std.testing.expect(settings.get("compactAt").? == .null);
+            try std.testing.expect(settings.get("outputReservation").? == .null);
         }
         var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = saved.key.slice() } });
         defer recovered.close(io);
@@ -4100,6 +4185,59 @@ test "result response streams 100,000 bytes into an explicit file" {
     try std.testing.expect(context.failure == null);
 }
 
+test "runtime catalog model list client accepts a reply larger than its shipped snapshot bound" {
+    const allocator = std.testing.allocator;
+    const count = protocol.model_list_reply.max_bytes / protocol.max_model_bytes + 1;
+    var body: std.Io.Writer.Allocating = .init(allocator);
+    defer body.deinit();
+    try body.writer.writeAll(protocol.model_list_reply.head);
+    try body.writer.writeAll("[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[");
+    for (0..count) |index| {
+        var digits_buffer: [20]u8 = undefined;
+        const digits = try std.fmt.bufPrint(&digits_buffer, "{d}", .{index});
+        try body.writer.print("{s}{{\"id\":\"", .{if (index == 0) "" else ","});
+        try body.writer.splatByteAll('0', protocol.max_model_bytes - digits.len);
+        try body.writer.print("{s}\",\"known\":true}}", .{digits});
+    }
+    try body.writer.writeAll("]}]");
+    try body.writer.writeAll(protocol.model_list_reply.tail);
+    try std.testing.expect(body.written().len > protocol.model_list_reply.max_bytes);
+    const response = try std.fmt.allocPrint(
+        allocator,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n{s}",
+        .{ body.written().len, body.written() },
+    );
+    defer allocator.free(response);
+    const descriptors = try testPipe();
+    const Peer = struct {
+        fd: std.posix.fd_t,
+        response: []const u8,
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            writeTestResponse(self.fd, self.response) catch |err| {
+                self.failure = err;
+            };
+        }
+    };
+    var peer: Peer = .{ .fd = descriptors[1], .response = response };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    var joined = false;
+    defer {
+        closeTestDescriptor(descriptors[0]);
+        if (!joined) thread.join();
+    }
+    const received = try readModelListResponse(.{ .io = std.testing.io }, descriptors[0], allocator);
+    defer allocator.free(received);
+    thread.join();
+    joined = true;
+    try std.testing.expect(peer.failure == null);
+    try std.testing.expectEqualStrings(body.written(), received);
+    var menu = try @import("model_picker.zig").read(allocator, try protocol_reply.modelListProviders(received));
+    defer menu.deinit(allocator);
+    try std.testing.expectEqual(count, menu.entries.len);
+    for (menu.entries) |entry| try std.testing.expect(entry.known);
+}
+
 test "Session list client streams a page larger than the resident reply buffer" {
     const page_bytes = 100_000;
     const descriptors = try testPipe();
@@ -4715,9 +4853,7 @@ test "capture loaded tools uses the tools comma-list grammar" {
         const length = try captured.file.readPositionalAll(io, &bytes, 0);
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
         defer parsed.deinit();
-        const loaded = parsed.value.object.get("configuration").?.object.get("loaded_tools").?.object;
-        try std.testing.expectEqualStrings("value", loaded.get("state").?.string);
-        const chosen = loaded.get("value").?.array.items;
+        const chosen = parsed.value.object.get("configuration").?.object.get("loadedTools").?.array.items;
         if (std.mem.eql(u8, names, "none")) {
             try std.testing.expectEqual(@as(usize, 0), chosen.len);
         } else {
@@ -4925,4 +5061,49 @@ test "Session settings client writes every setting and the Host parser preserves
     try std.testing.expectEqualStrings("Every setting", configuration.label.value.slice());
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Follow the test instructions."), &configuration.instructions.digest);
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest("{}"), &configuration.output_schema.digest);
+}
+
+test "saved request wire mismatch refuses recovery before returning a captured owner" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const handle = "01234567-89ab-4cde-8012-3456789abcde";
+    try tmp.dir.writeFile(io, .{ .sub_path = handle ++ ".json", .data = "{\"version\":\"" ++ protocol.previous_wire_version ++ "\",\"kind\":\"configure\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"configuration\":{}}" });
+    try std.testing.expectError(error.SavedRequestWireVersionMismatch, openCaptured(io, .{ .generated = .{ .directory = root, .handle = handle } }));
+}
+
+test "schema file capture writes an object and refuses invalid input before publication" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const record = try std.fmt.bufPrint(&record_buffer, "{s}/record", .{root[0..root_len]});
+    var source_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const source = try std.fmt.bufPrint(&source_buffer, "{s}/source", .{root[0..root_len]});
+    for ([_][]const u8{ "", "{invalid", "[]", "\"{}\"", "true", "{}false" }) |invalid| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "source", .data = invalid });
+        var buffer: [32]u8 = undefined;
+        var capture = try Capture.open(io, record, &buffer);
+        defer capture.abort();
+        try std.testing.expectError(error.InvalidOutputSchema, capture.writeInputFile(source, protocol.max_sqlite_content_bytes, false, true));
+        capture.abort();
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "record", .{}));
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "source", .data = " { \"type\" : \"object\" } \n" });
+    var buffer: [32]u8 = undefined;
+    var capture = try Capture.open(io, record, &buffer);
+    defer capture.abort();
+    try capture.writeInputFile(source, protocol.max_sqlite_content_bytes, false, true);
+    try capture.commit();
+    const saved = try tmp.dir.openFile(io, "record", .{});
+    defer saved.close(io);
+    var bytes: [64]u8 = undefined;
+    const count = try saved.readPositionalAll(io, &bytes, 0);
+    try std.testing.expectEqualStrings("{\"type\":\"object\"}", bytes[0..count]);
 }

@@ -157,6 +157,163 @@ class FramesTest(unittest.TestCase):
         self.assertEqual(default["sizes"], [(140, 40), (46, 30)])
         self.assertGreater(len(default["states"]), 25)
 
+    def test_settings_frame_opens_the_list_row_and_waits_for_the_page(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        state = next(state for state in scenario["states"] if state["name"] == "settings")
+        self.assertEqual(state["open"], "overview")
+        self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
+        self.assertEqual(state["steps"], [
+            {"keys": ["End", "Enter"]},
+            {"wait": "Rui"}, {"wait": "Notifications"},
+        ])
+        self.assertEqual(state["expect"], ["Rui", "Notifications", "Sign-in", "Version"])
+
+    def test_markdown_frames_show_the_compact_answer_at_both_sizes_and_colours(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        for name in ("markdown", "day-chat", "no-color"):
+            with self.subTest(state=name):
+                state = states[name]
+                self.assertEqual(state["open"], "Markdown retry")
+                self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
+                for text in ("What I changed", "retry.zig", "pub fn next",
+                             "Late request  waits 30 s  fails at once", "retry policy notes"):
+                    self.assertIn(text, state["expect"])
+        self.assertEqual(states["day-chat"]["theme"], "day")
+        self.assertEqual(states["no-color"]["env"]["NO_COLOR"], "1")
+        text = states["markdown"]["cast"][0]["messages"][0]
+        for mode in ("echo", "realistic"):
+            answer = self.helper["fixture_answer"](text, 1, mode)
+            for marker in ("## What I changed", "1. `retry.zig`", "```zig", "| Case |",
+                           "return null; // expired\n\n", "[retry policy notes](https://"):
+                self.assertIn(marker, answer)
+        for name in ("chat", "chat-scrolled", "chat-top"):
+            self.assertEqual(states[name]["open"], "Fix retry deadline")
+            self.assertTrue(states[name]["expect"])
+
+    def test_markdown_frame_pins_narrow_code_indent_before_the_split_layout(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        state = next(state for state in scenario["states"] if state["name"] == "markdown-wrapped")
+        self.assertEqual(state["open"], "Markdown retry")
+        self.assertEqual(state["sizes"], [(46, 30), (140, 40)])
+        self.assertIn({"wait": "return null; //\n    expired"}, state["steps"])
+        for text in ("return null; //", "expired", "Late request  waits 30 s  fails at once", "retry policy notes"):
+            self.assertIn(text, state["expect"])
+
+    def test_busy_frame_waits_for_work_text_not_a_rotating_spinner(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        state = next(state for state in scenario["states"] if state["name"] == "start-busy")
+        self.assertIn({"wait": "Run the slow tests"}, state["steps"])
+        self.assertEqual(state["expect"], ["Docs build", "Run the slow tests"])
+
+    def test_default_frames_use_plain_endings_and_active_tool_marks(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        for name, words in (("stopped", "■ Stopped"),
+                            ("chat-failed", "× Model reply unreadable")):
+            with self.subTest(state=name):
+                self.assertEqual(states[name]["steps"], [{"wait": words}])
+                self.assertEqual(states[name]["expect"], [words])
+        self.assertEqual(states["tools-running"]["expect"],
+                         ["⠹ Build the docs", "Run the slow tests", "ctrl+x stop"])
+
+    def test_default_frames_cover_inline_tool_folds(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        self.assertEqual(self.helper["KEYS"]["C-o"], b"\x0f")
+        self.assertEqual(self.helper["KEYS"]["S-Up"], b"\x1b[1;2A")
+        for name in ("tool-open", "tool-open-two", "tool-open-long", "tool-open-nocolor"):
+            with self.subTest(state=name):
+                self.assertIn(name, states)
+                state = states[name]
+                keys = [key for step in state["steps"] for key in step.get("keys", [])]
+                self.assertIn("C-o", keys)
+                self.assertTrue(any(text.startswith(("✓ ", "× ")) for text in state["expect"]))
+                self.assertIn({"gone": "▸"}, state["steps"])
+                status = "    Bash succeeded. Exit code: 0." if name == "tool-open-long" else "    Bash failed. Exit code: 1."
+                label = "    stdout tail:" if name == "tool-open-long" else "    stderr tail:"
+                self.assertIn(status, state["expect"])
+                self.assertIn(label, state["expect"])
+                self.assertFalse(any(step.get("gone", "").startswith(("Bash ", "stdout tail:", "stderr tail:")) for step in state["steps"]))
+                self.assertTrue(any(text.startswith("    ") for text in state["expect"]))
+                # Do not capture the asynchronous opening notice as the finished fold.
+                self.assertIn({"gone": "Opening tool output…"}, state["steps"])
+        self.assertEqual(states["tool-open-nocolor"]["env"], {"NO_COLOR": "1"})
+        for name in ("tool-open", "tool-open-two", "tool-open-long", "tool-open-nocolor"):
+            self.assertEqual(states[name]["sizes"], [(46, 30), (140, 40)])
+        keys = [key for step in states["tool-open-two"]["steps"] for key in step.get("keys", [])]
+        self.assertEqual(keys.count("C-o"), 2)
+        self.assertIn("    output line 18", states["tool-open-long"]["expect"])
+        self.assertIn("    … 14 more lines", states["tool-open-long"]["expect"])
+        for name in ("help", "slash"):
+            self.assertIn({"gone": "/details"}, states[name]["steps"])
+        self.assertIn("ctrl+o                 open", states["help"]["expect"])
+        self.assertIn("× Fail with exit 127 · exit 127", states["chat"]["expect"])
+
+    def test_two_open_folds_select_list_before_resizing_to_the_split_layout(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        state = next(state for state in scenario["states"] if state["name"] == "tool-open-two")
+        self.assertEqual(state["sizes"], [(46, 30), (140, 40)])
+        # Reach a known narrow tail, then move rows rather than four half-pages:
+        # the wider terminal now gives only 99 columns to the chat beside the list.
+        self.assertEqual(state["steps"][:11], [
+            {"wait": "The project has a README"},
+            {"keys": ["C-o"]},
+            {"gone": "Opening tool output…"},
+            {"keys": ["PgDn"]},
+            {"wait": "    unknown option --help"},
+            {"keys": ["Up"] * 12},
+            {"wait": "✓ List project files"},
+            {"gone": "× Fail with exit 127"},
+            {"keys": ["C-o"]},
+            {"gone": "Opening tool output…"},
+            {"keys": ["PgDn"] * 3},
+        ])
+        for text in ("✓ List project files", "    README.md", "    src",
+                     "× Fail with exit 127 · exit 127", "× Fail with an excerpt · exit 1",
+                     "    Bash succeeded. Exit code: 0.", "    stdout tail:", "    Bash failed. Exit code: 1.", "    stderr tail:",
+                     "    usage: example", "    unknown option --help"):
+            self.assertIn(text, state["expect"])
+
+    def test_stop_frame_owns_work_and_waits_for_the_stable_ending(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        self.assertNotIn("stopping", states)
+        state = states["stop"]
+        self.assertEqual(state["open"], "Stop the slow job")
+        self.assertEqual(state["cast"][0]["label"], state["open"])
+        self.assertEqual(state["cast"][0]["messages"], ["Ready."])
+        self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
+        self.assertEqual(state["steps"], [
+            {"send": {"to": state["open"], "text": "long bash", "wait": False}},
+            {"wait": "⠹ Sleep eight seconds"}, {"keys": ["C-x"]},
+            {"wait": "■ Stopped", "timeout": 60},
+        ])
+        self.assertEqual(state["expect"], ["■ Stopped"])
+        self.assertEqual(state["absent"], ["Stopping"])
+        stopped = states["stopped"]
+        self.assertEqual(stopped["open"], "Profile the Host under load")
+        seeded = next(entry for state in scenario["states"] for entry in state.get("cast", [])
+                      if entry["label"] == stopped["open"])
+        self.assertEqual(seeded["settle"], "stop")
+        self.assertIn("long bash", seeded["messages"][-1])
+
+    def test_live_chat_frames_do_not_borrow_or_mutate_retry_work(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        labels = set()
+        for name in ("chat-working", "chat-queued", "tools-running"):
+            with self.subTest(state=name):
+                state = states[name]
+                self.assertNotEqual(state["open"], "Fix retry deadline")
+                self.assertNotIn(state["open"], labels)
+                labels.add(state["open"])
+                self.assertEqual(state["cast"][0]["label"], state["open"])
+                if name != "chat-working":
+                    self.assertEqual(state["steps"][0]["send"]["to"], state["open"])
+                    self.assertFalse(state["steps"][0]["send"]["wait"])
+        self.assertIn("slow", states["chat-queued"]["steps"][0]["send"]["text"])
+
     def test_cumulative_cast_and_counted_labels(self):
         data = self.scenario()
         data["states"][1]["cast"].append({"label": "Batch {n}", "count": 3, "workspace": "code/batch",
@@ -203,6 +360,19 @@ class FramesTest(unittest.TestCase):
             with self.subTest(mutation=i), self.assertRaises(ValueError):
                 self.helper["validate_scenario"](data)
 
+    def test_absent_requires_a_list_of_nonempty_text_markers(self):
+        for value in (None, "Stopping", "", 1, {}, [""], ["Stopping", 42], ["bad\0marker"]):
+            with self.subTest(absent=value):
+                data = self.scenario()
+                data["states"][1]["absent"] = value
+                with self.assertRaisesRegex(ValueError, "chat: absent"):
+                    self.helper["validate_scenario"](data)
+        for value in ([], ["Stopping"], ["Stopping", "Loading"]):
+            with self.subTest(absent=value):
+                data = self.scenario()
+                data["states"][1]["absent"] = value
+                self.assertEqual(self.helper["validate_scenario"](data)["states"][1]["absent"], value)
+
     def test_answer_choices_preserve_echo_and_realistic_prose(self):
         answer = self.helper["fixture_answer"]
         self.assertEqual(answer('a "quote"', 7), 'Fixture answer 7: received "a \\"quote\\""'.replace('\\\\', '\\'))
@@ -221,6 +391,8 @@ class FramesTest(unittest.TestCase):
         summary = self.helper["fixture_summary"]
         self.assertEqual(summary("hello", 4, 3), 'Fixture tool summary 4: 3 tool results for "hello".')
         self.assertIn("Two of the three commands failed", summary("hello", 4, 3, "realistic"))
+        self.assertEqual(summary("Show long tool output.", 4, 1, "realistic"),
+                         "Printed thirty-two numbered lines.")
 
     def test_ansi_sgr_and_html_escaping(self):
         render = self.helper["ansi_render"]
@@ -309,7 +481,7 @@ class FramesTest(unittest.TestCase):
                 command(args)
             self.assertEqual(err.getvalue(), "verify-rui: this build has no screen library\n")
 
-    def run_frames_scenario(self, scenario, sizes=None, capture_ok=True):
+    def run_frames_scenario(self, scenario, sizes=None, capture_ok=True, only=None, failing_state=None):
         """Run the real loader/orchestrator with an inert OS and capture adapter."""
         command = self.helper["cmd_frames"]
         calls = []
@@ -322,7 +494,7 @@ class FramesTest(unittest.TestCase):
                                         sock=root / "tmux.sock", meta={"sha": "a" * 40},
                                         env=lambda **extra: extra, own=lambda *_args, **_kw: None)
             run.tmux = lambda *argv, **_kw: (calls.append(argv) or types.SimpleNamespace(returncode=0, stdout="999\n", stderr=""))
-            args = types.SimpleNamespace(sha="a" * 40, scenario=str(source), only=None, sizes=sizes,
+            args = types.SimpleNamespace(sha="a" * 40, scenario=str(source), only=only, sizes=sizes,
                                          out=str(root / "out"), no_png=True, keep=False)
 
             def capture(_run, _target, _out, state, size, reason):
@@ -331,9 +503,14 @@ class FramesTest(unittest.TestCase):
                         "ok": capture_ok, "status": "ok" if capture_ok else "failed", "note": "",
                         "reason": reason if capture_ok else "state left before capture: Working"}
 
+            def steps(_run, target, _steps, **_kwargs):
+                calls.append(("steps",))
+                if target == f"=frames:={failing_state}":
+                    raise self.helper["FrameFailure"]("fixture state failed")
+
             replacements = {"Run": lambda _path: run, "cmd_new": lambda _args: print(root),
                             "cmd_cleanup": lambda _args: None, "frame_wait": lambda *_args, **_kw: None,
-                            "frame_steps": lambda *_args, **_kw: calls.append(("steps",)), "frame_capture": capture}
+                            "frame_steps": steps, "frame_capture": capture}
             with patch.dict(command.__globals__, replacements), patch("shutil.which", return_value="/bin/tmux"), \
                     patch("time.sleep", side_effect=lambda seconds: calls.append(("sleep", seconds))), \
                     contextlib.redirect_stdout(io.StringIO()):
@@ -371,6 +548,25 @@ class FramesTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result:
             self.run_frames_scenario(scenario, capture_ok=False)
         self.assertEqual(result.exception.code, 1)
+
+    def test_only_warns_for_failed_unselected_predecessor_and_records_selected_states(self):
+        scenario = {"sizes": ["100x30"], "states": [
+            {"name": "earlier", "open": "overview", "steps": []},
+            {"name": "selected", "open": "overview", "steps": []},
+        ]}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            calls, records = self.run_frames_scenario(scenario, only="selected", failing_state="earlier")
+        self.assertIn("warning: earlier: fixture state failed", err.getvalue())
+        self.assertIn("not selected; its failure does not fail this run", err.getvalue())
+        self.assertEqual([r["name"] for r in records], ["selected"])
+        self.assertTrue(records[0]["ok"])
+        self.assertEqual(calls.count(("steps",)), 2)  # Still drive the predecessor for side effects.
+        for only in (None, "earlier,selected", "earlier"):
+            with self.subTest(only=only), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as result:
+                self.run_frames_scenario(scenario, only=only, failing_state="earlier")
+            self.assertEqual(result.exception.code, 1)
 
     def test_expectation_defaults_to_last_wait_without_a_later_action(self):
         policy = self.helper["frame_expectations"]
@@ -439,6 +635,11 @@ class FramesTest(unittest.TestCase):
     def test_capture_expectations_over_sizes_and_state_transitions(self):
         capture = self.helper["frame_capture"]
         cases = [
+            ("stop-clean", {"steps": [{"wait": "■ Stopped"}], "absent": ["Stopping"]},
+             ["■ Stopped", "■ Stopped"], [None, None]),
+            ("stop-stale", {"steps": [{"wait": "■ Stopped"}], "absent": ["Stopping"]},
+             ["■ Stopped  Stopping…", "■ Stopped  Stopping…"],
+             ["unexpected on screen: Stopping", "unexpected on screen: Stopping"]),
             ("stable", {"steps": [{"wait": "earlier"}, {"wait": "Ready"}]},
              ["Ready", "Ready"], [None, None]),
             ("transient", {"steps": [{"wait": "Working"}]},
@@ -477,6 +678,29 @@ class FramesTest(unittest.TestCase):
                 self.helper["frames_index"](out, records, False)
                 self.assertEqual([r["ok"] for r in json.loads((out / "frames.json").read_text())],
                                  [reason is None for reason in reasons])
+
+    def test_delayed_stop_ending_with_stale_stopping_fails_saved_captures(self):
+        state = next(state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
+                     if state["name"] == "stop")
+        stale = "■ Stopped  Stopping…\n"
+        run = types.SimpleNamespace(meta={"sha": "a" * 40}, store="/unused/store", sid=lambda _label: "session",
+                                    rui_cmd=lambda *_args, **_kw: types.SimpleNamespace(returncode=0))
+        run.tmux = lambda *argv, **_kw: types.SimpleNamespace(
+            returncode=0, stderr="", stdout=stale if argv[0] == "capture-pane" else "0 0 0\n")
+        steps = self.helper["frame_steps"]
+        panes = unittest.mock.Mock(side_effect=["⠹ Sleep eight seconds", "⠹ Sleep eight seconds", stale])
+        with patch.dict(steps.__globals__, {"frame_pane": panes, "frame_dead": lambda *_args: False,
+                                            "frame_request": lambda *_args: None}), patch("time.sleep"):
+            steps(run, "pane", state["steps"])
+        self.assertEqual(panes.call_count, 3)  # Running, still running, then the ending with stale text.
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            for size in state["sizes"]:
+                with self.subTest(size=size):
+                    record = self.helper["frame_capture"](run, "pane", out, state, size, None)
+                    self.assertFalse(record["ok"])
+                    self.assertEqual(record["reason"], "unexpected on screen: Stopping")
+                    self.assertEqual((out / record["files"]["txt"]).read_text(), stale)
 
     def test_stop_waits_for_a_running_bash_not_an_approval(self):
         running = self.helper["frame_bash_running"]

@@ -815,3 +815,14 @@ pub fn observeCommandForTesting(storage: *Store, key: []const u8) !command_domai
     try storage.observeCommand(key, null, &out);
     return out.full.observation;
 }
+
+/// A format-64 Session whose latest loaded subset differs from its first
+/// Operation's full offer. Shared by the SQLite and live MySQL migration tests.
+pub const operation_offer_migration_seed: [:0]const u8 =
+    "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) " ++
+    "SELECT 'offer-migration-update',1,'d8mv7p',input_digest,1,'',2,0,100 FROM core_command WHERE command_key='fixture-answer-config';" ++
+    "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label) " ++
+    "SELECT session_ref,2,'offer-migration-update',workspace,provider,model,instructions_content_id,0,tool_set_id,2,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label FROM session_revision WHERE session_ref='d8mv7p' AND revision=1;" ++
+    "UPDATE session SET revision=2,loaded_tool_set_id=2,next_position=100 WHERE session_ref='d8mv7p';" ++
+    "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+    "VALUES(99,1,'d8mv7p',2,1,99,0,1,'failed',1)";

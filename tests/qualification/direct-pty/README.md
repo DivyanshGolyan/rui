@@ -33,6 +33,10 @@ input, rejection, resize, and raw Ctrl-R recovery. Seeded-history rows cover
 PgUp/PgDn, Shift-PgUp, CSI/SS3 Up, three End forms, Esc and Ctrl-G return,
 alternate-scroll wheel Up/Down encodings, and `/status`. Unsolicited SGR/X10
 wheel and split-X10 reports must leave submitted text unchanged.
+The bare ESC expiry row waits 150 ms, observes the overview, then reopens the
+fixture's only Session with Enter and checks its identity and restored `ab`
+draft before typing `Z` and submitting `abZ`. Esc-with-text leaves the chat;
+it does not discard the draft or stay in the chat with a notice.
 Navigation checks exact seeded-history ranges after entry, intermediate
 Down/PgDn steps and return, distinguishing one-line movement from page movement.
 It observes a later printable composer marker before checking each range, then
@@ -61,6 +65,8 @@ terminal behavior.
 `name`, a `scenario`, and `chunks`. An input chunk contains `hex` and an optional
 `delay_before` in seconds. A resize chunk contains `resize: [columns, rows]`.
 An `editor` row supplies `expected`, the exact submitted Unicode text.
+With `reopen_draft`, it first checks that `chunks` returned to the overview,
+reopens the sole Session and checks that restored draft, then runs `submit_chunks`.
 
 ```json
 [

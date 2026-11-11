@@ -77,6 +77,7 @@ pub const Kind = @import("store_target.zig").Kind;
 pub const Diagnostic = store_core.Diagnostic;
 pub const AdmissionDiagnostic = store_core.AdmissionDiagnostic;
 pub const IdentityMismatch = store_schema.IdentityMismatch;
+pub const MigrationNotice = store_schema.MigrationNotice;
 pub const SavedHostToolSet = store_core.SavedHostToolSet;
 pub const PermissionDecisionReply = command_domain.PermissionDecisionReply;
 pub const PrefixSeal = historical_domain.PrefixSeal;

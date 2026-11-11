@@ -17,15 +17,15 @@ export type RequestErrorCode = RequestRejectionCode | Schemas["ErrorReply"]["cod
 type RequestErrorType = Schemas["ErrorReply"]["type"] | Status<Extract<RequestAnswer, { code: string }>>;
 type StartErrorCode = Schemas["StartError"]["rui_start_error"]["code"];
 
-/** Rui rejected one request. `code` is the Host's rejection code. */
+/** Rui rejected one request. `code` is the Host's rejection code; `message` preserves advisory detail when provided. */
 export class RuiRequestError extends Error {
 	override readonly name = "RuiRequestError";
 	readonly code: RequestErrorCode;
 	/** The Host's error class, such as `invocation_error` or `busy`. */
 	readonly type: RequestErrorType;
 
-	constructor(type: RequestErrorType, code: RequestErrorCode) {
-		super(`Rui rejected the request: ${code}`);
+	constructor(type: RequestErrorType, code: RequestErrorCode, message?: string | null) {
+		super(message ?? `Rui rejected the request: ${code}`);
 		this.type = type;
 		this.code = code;
 	}

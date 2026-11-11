@@ -264,9 +264,7 @@ def hostile_discovery(root):
         discovery_released(diagnostics, began_ns)
         baseline = wait_for_descriptors(host.pid) if os_semantics.PROC_FS else None
         for kind, extra in (("message", {"key": "hostile", "session": "hostile/session", "sender": None, "sender_handle": None, "text": {"state": "value", "value": "x" * 128}}),
-                            ("configure", {"key": "hostile", "session": "hostile/session", "configuration": {
-                                "workspace": {"state": "omitted"}, "provider": {"state": "omitted"},
-                                "model": {"state": "omitted"}, "instructions": {"state": "value", "value": "x" * 128}}})):
+                            ("configure", {"key": "hostile", "session": "hostile/session", "configuration": {"instructions": "x" * 128}})):
             for route in ("host-info", "control/host-stop"):
                 began_ns = time.monotonic_ns()
                 response = raw_info(socket_path(store), store, route=route, kind=kind, extra=extra)
@@ -350,7 +348,7 @@ def mysql_host_info():
         assert "mysql" not in os.environ.get(live_engines.REQUIRE, "").split(","), "required MySQL host-info fixture has no server"
         print("MySQL host-info: skipped (no RUI_TEST_MYSQL_* server)")
         return
-    admin = pathlib.Path(sys.argv[3]).resolve()
+    admin = pathlib.Path(os.environ["RUI_TEST_MYSQL_ADMIN"]).resolve()
     database = "rui_host_info_" + secrets.token_hex(6)
 
     def sql(text):

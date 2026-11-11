@@ -4,6 +4,7 @@ const std = @import("std");
 const client_defaults = @import("client_defaults.zig");
 const product_defaults = @import("product_defaults.zig");
 const ReasoningEffort = @import("model_catalog.zig").ReasoningEffort;
+const PermissionMode = @import("cli_value.zig").PermissionMode;
 const Provider = @import("provider_name.zig").Provider;
 
 pub const OptionalText = struct {
@@ -46,13 +47,13 @@ pub const ConfigureInput = struct {
     /// A fresh Session sends every setting its caller left to the client
     /// defaults concretely, for the provider and model it starts on. The
     /// saved effort applies only where the caller named no effort; "default"
-    /// takes the model's own.
-    pub fn completeCreation(self: *ConfigureInput, provider: Provider, model: []const u8, saved_effort: ?ReasoningEffort, compaction: *[20]u8) void {
+    /// takes the model's own. Saved permissions apply only when not named.
+    pub fn completeCreation(self: *ConfigureInput, provider: Provider, model: []const u8, saved_effort: ?ReasoningEffort, saved_permission: ?PermissionMode, compaction: *[20]u8) void {
         if (!self.reasoning_effort.present) self.reasoning_effort = startEffort(model, saved_effort);
         if (self.reasoning_effort.present and self.reasoning_effort.value == null) self.reasoning_effort = startEffort(model, null);
         if (!self.compaction_trigger.present or self.compaction_trigger.value == null) self.compaction_trigger = .{ .present = true, .value = compactionTrigger(provider, model, compaction) };
         if (self.tools == null) self.tools = product_defaults.tools;
-        if (!self.permission_mode.present) self.permission_mode = .{ .present = true, .value = product_defaults.permission_mode };
+        if (!self.permission_mode.present) self.permission_mode = .{ .present = true, .value = if (saved_permission) |mode| @tagName(mode) else product_defaults.permission_mode };
     }
 
     /// An update resets a named setting to the client default for the
@@ -93,7 +94,7 @@ test "a policy argument resets with default and keeps any other spelling" {
 test "a fresh Session sends concrete defaults where its caller named none" {
     var compaction: [20]u8 = undefined;
     var input: ConfigureInput = .{ .store = "", .session = .create };
-    input.completeCreation(.openai, "unlisted-model", null, &compaction);
+    input.completeCreation(.openai, "unlisted-model", null, null, &compaction);
     try std.testing.expectEqualStrings("115200", input.compaction_trigger.value.?);
     try std.testing.expectEqualStrings(product_defaults.reasoning_effort, input.reasoning_effort.value.?);
     try std.testing.expectEqualStrings(product_defaults.tools, input.tools.?);
@@ -101,14 +102,14 @@ test "a fresh Session sends concrete defaults where its caller named none" {
     try std.testing.expect(!input.workspace.present and !input.output_reservation.present and !input.label.present);
 
     input = .{ .store = "", .session = .create };
-    input.completeCreation(.openai, "gpt-6.1-sol", null, &compaction);
+    input.completeCreation(.openai, "gpt-6.1-sol", null, null, &compaction);
     try std.testing.expectEqualStrings("945000", input.compaction_trigger.value.?);
     input = .{ .store = "", .session = .create };
-    input.completeCreation(.codex, "gpt-6.1-sol", null, &compaction);
+    input.completeCreation(.codex, "gpt-6.1-sol", null, null, &compaction);
     try std.testing.expectEqualStrings("244800", input.compaction_trigger.value.?);
     // A model that takes no effort sends an explicit null, not an omission.
     input = .{ .store = "", .session = .create };
-    input.completeCreation(.openai, "openai/whisper-1", .high, &compaction);
+    input.completeCreation(.openai, "openai/whisper-1", .high, null, &compaction);
     try std.testing.expect(input.reasoning_effort.present and input.reasoning_effort.value == null);
 }
 
@@ -124,7 +125,7 @@ test "a fresh Session takes the saved effort only where its caller named none" {
     };
     for (cases) |case| {
         var input: ConfigureInput = .{ .store = "", .session = .create, .reasoning_effort = case.effort };
-        input.completeCreation(.openai, "gpt-6.1-sol", case.saved, &compaction);
+        input.completeCreation(.openai, "gpt-6.1-sol", case.saved, null, &compaction);
         try std.testing.expectEqualStrings(case.sent, input.reasoning_effort.value.?);
     }
 }
@@ -139,7 +140,7 @@ test "a fresh Session keeps every setting its caller named" {
         .compaction_trigger = policy("00042"),
         .reasoning_effort = policy("high"),
     };
-    input.completeCreation(.openai, "gpt-6.1-sol", .max, &compaction);
+    input.completeCreation(.openai, "gpt-6.1-sol", .max, null, &compaction);
     try std.testing.expectEqualStrings("", input.tools.?);
     try std.testing.expectEqualStrings("plan", input.permission_mode.value);
     try std.testing.expectEqualStrings("00042", input.compaction_trigger.value.?);
@@ -147,7 +148,7 @@ test "a fresh Session keeps every setting its caller named" {
 
     input.compaction_trigger = policy("default");
     try std.testing.expect(input.compaction_trigger.value == null);
-    input.completeCreation(.openai, "gpt-6.1-sol", .max, &compaction);
+    input.completeCreation(.openai, "gpt-6.1-sol", .max, null, &compaction);
     try std.testing.expectEqualStrings("945000", input.compaction_trigger.value.?);
 }
 

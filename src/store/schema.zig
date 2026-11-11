@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 64;
+pub const schema_version: u32 = 66;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -49,8 +49,10 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 60, .digest = 0x6b696b3423202987 },
     .{ .schema_version = 61, .digest = 0xec460e03aa080495 },
     .{ .schema_version = 62, .digest = 0x3d68029b9bcbfdd0 },
-    .{ .schema_version = 63, .digest = 0xf9b030030b692841 },
-    .{ .schema_version = 64, .digest = 0x8bfa69b5fb011eb0 },
+    .{ .schema_version = 63, .digest = 0x7a09d94b6ba24eea },
+    .{ .schema_version = 64, .digest = 0xba89834313d6181f },
+    .{ .schema_version = 65, .digest = 0x78987c40a911dee5 },
+    .{ .schema_version = 66, .digest = 0xb0e4bd5fd2894714 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -371,14 +373,42 @@ pub const migrations = [_]Migration{
             "ALTER TABLE tool_record ADD CHECK(read_only IN (0,1) AND (read_only=0 OR owner='mcp'))",
         },
     },
-    // Schema 63: name the Host tool set and runner-independent timeout.
+    // Schema 63: the Store keeps the four usage counts, not the provider's
+    // raw usage report. Reports no other row shares are deleted with it;
+    // the file keeps the freed pages until it is vacuumed. MySQL's
+    // usage_content_id foreign key is its third and the counts' CHECK its
+    // 28th, as the baseline created them.
     .{
         .from = 62,
         .sqlite = &.{
-            "ALTER TABLE host_catalog RENAME TO host_catalog_62",
+            "ALTER TABLE model_operation RENAME TO model_operation_62",
+            "CREATE TABLE model_operation(\n operation_id INTEGER PRIMARY KEY NOT NULL CHECK(operation_id>0),\n turn_id INTEGER NOT NULL REFERENCES turn(turn_id),\n session_ref TEXT NOT NULL,\n settings_revision INTEGER NOT NULL CHECK(settings_revision>0),\n input_cutoff INTEGER NOT NULL CHECK(input_cutoff>0),\n admission_position INTEGER NOT NULL CHECK(admission_position>0),\n purpose INTEGER NOT NULL DEFAULT 0 CHECK(purpose IN (0,1)),\n compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),\n output_reservation INTEGER NOT NULL CHECK(output_reservation>=0),\n reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR (reasoning_effort='none' OR reasoning_effort='low' OR reasoning_effort='medium' OR reasoning_effort='high' OR reasoning_effort='xhigh' OR reasoning_effort='max')),\n output_item_count INTEGER CHECK(output_item_count IS NULL OR output_item_count>=0),\n attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal BETWEEN 1 AND 4),\n auth_refresh_claimed INTEGER NOT NULL DEFAULT 0 CHECK(auth_refresh_claimed IN (0,1)),\n retry_due_at_ms INTEGER CHECK(retry_due_at_ms IS NULL OR retry_due_at_ms>=0),\n last_failure_code TEXT CHECK(last_failure_code IS NULL OR length(CAST(last_failure_code AS BLOB)) BETWEEN 1 AND 96),\n resolution_code TEXT CHECK(resolution_code IS NULL OR length(CAST(resolution_code AS BLOB)) BETWEEN 1 AND 96),\n resolution_content_id INTEGER REFERENCES content(content_id),\n response_id TEXT CHECK(response_id IS NULL OR length(CAST(response_id AS BLOB))<=256),\n model_evidence BLOB CHECK(model_evidence IS NULL OR length(model_evidence) BETWEEN 7 AND 775),\n request_id TEXT CHECK(request_id IS NULL OR length(CAST(request_id AS BLOB))<=256),\n usage_uncached_tokens INTEGER CHECK(usage_uncached_tokens IS NULL OR usage_uncached_tokens>=0),\n usage_cache_read_tokens INTEGER CHECK(usage_cache_read_tokens IS NULL OR usage_cache_read_tokens>=0),\n usage_cache_write_tokens INTEGER CHECK(usage_cache_write_tokens IS NULL OR usage_cache_write_tokens>=0),\n usage_output_tokens INTEGER CHECK(usage_output_tokens IS NULL OR usage_output_tokens>=0),\n interrupted_by_command_key TEXT REFERENCES core_command(command_key),\n attempt_at INTEGER CHECK(attempt_at IS NULL OR attempt_at>0),\n retry_scheduled_at INTEGER CHECK(retry_scheduled_at IS NULL OR retry_scheduled_at>0),\n resolved_at INTEGER CHECK(resolved_at IS NULL OR resolved_at>0),\n history_floor INTEGER CHECK(history_floor IS NULL OR history_floor>0),\n history_level INTEGER CHECK(history_level IS NULL OR history_level BETWEEN 1 AND 3),\n history_dropped INTEGER CHECK(history_dropped IS NULL OR history_dropped>=0),\n UNIQUE(operation_id,session_ref),\n FOREIGN KEY(session_ref,settings_revision) REFERENCES session_revision(session_ref,revision),\n CHECK((usage_uncached_tokens IS NULL AND usage_cache_read_tokens IS NULL AND usage_cache_write_tokens IS NULL AND usage_output_tokens IS NULL) OR (usage_uncached_tokens IS NOT NULL AND usage_cache_read_tokens IS NOT NULL AND usage_cache_write_tokens IS NOT NULL AND usage_output_tokens IS NOT NULL)),\n CHECK((resolution_code IS NULL AND retry_due_at_ms IS NOT NULL) OR (resolution_code IS NOT NULL AND retry_due_at_ms IS NULL)),\n CHECK((resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_at IS NOT NULL AND retry_scheduled_at IS NULL AND resolved_at IS NULL) OR (resolution_code IS NULL AND retry_due_at_ms>0 AND attempt_at IS NULL AND retry_scheduled_at IS NOT NULL AND resolved_at IS NULL) OR (resolution_code IS NOT NULL AND attempt_at IS NULL AND retry_scheduled_at IS NULL AND resolved_at IS NOT NULL)),\n CHECK(((resolution_code IS 'interrupted') AND interrupted_by_command_key IS NOT NULL) OR (coalesce(resolution_code,'')!='interrupted' AND interrupted_by_command_key IS NULL)),\n CHECK((history_floor IS NULL AND history_level IS NULL AND history_dropped IS NULL) OR (history_floor IS NOT NULL AND purpose=1 AND ((history_level IS NULL AND history_dropped IS NULL) OR (history_level IS NOT NULL AND history_dropped IS NOT NULL))))\n) STRICT",
+            "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,history_floor,history_level,history_dropped) SELECT operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,history_floor,history_level,history_dropped FROM model_operation_62",
+            "DELETE FROM content WHERE content_id IN (SELECT usage_content_id FROM model_operation_62) AND content_id NOT IN (SELECT description_content_id FROM tool_record WHERE description_content_id IS NOT NULL) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record WHERE input_schema_content_id IS NOT NULL) AND content_id NOT IN (SELECT instructions_content_id FROM session WHERE instructions_content_id IS NOT NULL) AND content_id NOT IN (SELECT output_schema_content_id FROM session WHERE output_schema_content_id IS NOT NULL) AND content_id NOT IN (SELECT primary_content_id FROM core_command WHERE primary_content_id IS NOT NULL) AND content_id NOT IN (SELECT secondary_content_id FROM core_command WHERE secondary_content_id IS NOT NULL) AND content_id NOT IN (SELECT instructions_content_id FROM session_revision WHERE instructions_content_id IS NOT NULL) AND content_id NOT IN (SELECT output_schema_content_id FROM session_revision WHERE output_schema_content_id IS NOT NULL) AND content_id NOT IN (SELECT content_id FROM message_admission WHERE content_id IS NOT NULL) AND content_id NOT IN (SELECT outcome_content_id FROM turn WHERE outcome_content_id IS NOT NULL) AND content_id NOT IN (SELECT resolution_content_id FROM model_operation WHERE resolution_content_id IS NOT NULL) AND content_id NOT IN (SELECT content_id FROM message_skill WHERE content_id IS NOT NULL) AND content_id NOT IN (SELECT catalog_content_id FROM session_skill_catalog WHERE catalog_content_id IS NOT NULL) AND content_id NOT IN (SELECT content_id FROM conversation_entry WHERE content_id IS NOT NULL) AND content_id NOT IN (SELECT message_content_id FROM model_output_item WHERE message_content_id IS NOT NULL) AND content_id NOT IN (SELECT extras_content_id FROM model_output_item WHERE extras_content_id IS NOT NULL) AND content_id NOT IN (SELECT text_content_id FROM model_output_part WHERE text_content_id IS NOT NULL) AND content_id NOT IN (SELECT extras_content_id FROM model_output_part WHERE extras_content_id IS NOT NULL) AND content_id NOT IN (SELECT name_content_id FROM model_tool_call WHERE name_content_id IS NOT NULL) AND content_id NOT IN (SELECT call_id_content_id FROM model_tool_call WHERE call_id_content_id IS NOT NULL) AND content_id NOT IN (SELECT arguments_content_id FROM model_tool_call WHERE arguments_content_id IS NOT NULL) AND content_id NOT IN (SELECT rejection_content_id FROM model_tool_call WHERE rejection_content_id IS NOT NULL) AND content_id NOT IN (SELECT resolution_content_id FROM action_operation WHERE resolution_content_id IS NOT NULL)",
+            "DROP TABLE model_operation_62",
+            "CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND attempt_ordinal<4",
+            "CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=4",
+            "CREATE INDEX model_operation_session_history ON model_operation(session_ref,operation_id)",
+            "CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id)",
+            "CREATE INDEX model_operation_admission ON model_operation(session_ref,admission_position)",
+            "CREATE INDEX model_operation_context_history ON model_operation(session_ref,admission_position) WHERE (resolution_code='answer' OR resolution_code='compacted' OR resolution_code='tool_proposals')",
+            "CREATE INDEX model_operation_compaction_bases ON model_operation(session_ref,admission_position) WHERE purpose=1 AND resolution_code='compacted'",
+        },
+        .mysql = &.{
+            "ALTER TABLE model_operation DROP FOREIGN KEY model_operation_ibfk_3, DROP CHECK model_operation_chk_28, ADD CHECK((usage_uncached_tokens IS NULL AND usage_cache_read_tokens IS NULL AND usage_cache_write_tokens IS NULL AND usage_output_tokens IS NULL) OR (usage_uncached_tokens IS NOT NULL AND usage_cache_read_tokens IS NOT NULL AND usage_cache_write_tokens IS NOT NULL AND usage_output_tokens IS NOT NULL))",
+            "DELETE FROM content_chunk WHERE content_id IN (SELECT usage_content_id FROM model_operation) AND content_id NOT IN (SELECT description_content_id FROM tool_record WHERE description_content_id IS NOT NULL) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record WHERE input_schema_content_id IS NOT NULL) AND content_id NOT IN (SELECT instructions_content_id FROM session WHERE instructions_content_id IS NOT NULL) AND content_id NOT IN (SELECT output_schema_content_id FROM session WHERE output_schema_content_id IS NOT NULL) AND content_id NOT IN (SELECT primary_content_id FROM core_command WHERE primary_content_id IS NOT NULL) AND content_id NOT IN (SELECT secondary_content_id FROM core_command WHERE secondary_content_id IS NOT NULL) AND content_id NOT IN (SELECT instructions_content_id FROM session_revision WHERE instructions_content_id IS NOT NULL) AND content_id NOT IN (SELECT output_schema_content_id FROM session_revision WHERE output_schema_content_id IS NOT NULL) AND content_id NOT IN (SELECT content_id FROM message_admission WHERE content_id IS NOT NULL) AND content_id NOT IN (SELECT outcome_content_id FROM turn WHERE outcome_content_id IS NOT NULL) AND content_id NOT IN (SELECT resolution_content_id FROM model_operation WHERE resolution_content_id IS NOT NULL) AND content_id NOT IN (SELECT content_id FROM message_skill WHERE content_id IS NOT NULL) AND content_id NOT IN (SELECT catalog_content_id FROM session_skill_catalog WHERE catalog_content_id IS NOT NULL) AND content_id NOT IN (SELECT content_id FROM conversation_entry WHERE content_id IS NOT NULL) AND content_id NOT IN (SELECT message_content_id FROM model_output_item WHERE message_content_id IS NOT NULL) AND content_id NOT IN (SELECT extras_content_id FROM model_output_item WHERE extras_content_id IS NOT NULL) AND content_id NOT IN (SELECT text_content_id FROM model_output_part WHERE text_content_id IS NOT NULL) AND content_id NOT IN (SELECT extras_content_id FROM model_output_part WHERE extras_content_id IS NOT NULL) AND content_id NOT IN (SELECT name_content_id FROM model_tool_call WHERE name_content_id IS NOT NULL) AND content_id NOT IN (SELECT call_id_content_id FROM model_tool_call WHERE call_id_content_id IS NOT NULL) AND content_id NOT IN (SELECT arguments_content_id FROM model_tool_call WHERE arguments_content_id IS NOT NULL) AND content_id NOT IN (SELECT rejection_content_id FROM model_tool_call WHERE rejection_content_id IS NOT NULL) AND content_id NOT IN (SELECT resolution_content_id FROM action_operation WHERE resolution_content_id IS NOT NULL)",
+            "DELETE FROM content WHERE content_id IN (SELECT usage_content_id FROM model_operation) AND content_id NOT IN (SELECT description_content_id FROM tool_record WHERE description_content_id IS NOT NULL) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record WHERE input_schema_content_id IS NOT NULL) AND content_id NOT IN (SELECT instructions_content_id FROM session WHERE instructions_content_id IS NOT NULL) AND content_id NOT IN (SELECT output_schema_content_id FROM session WHERE output_schema_content_id IS NOT NULL) AND content_id NOT IN (SELECT primary_content_id FROM core_command WHERE primary_content_id IS NOT NULL) AND content_id NOT IN (SELECT secondary_content_id FROM core_command WHERE secondary_content_id IS NOT NULL) AND content_id NOT IN (SELECT instructions_content_id FROM session_revision WHERE instructions_content_id IS NOT NULL) AND content_id NOT IN (SELECT output_schema_content_id FROM session_revision WHERE output_schema_content_id IS NOT NULL) AND content_id NOT IN (SELECT content_id FROM message_admission WHERE content_id IS NOT NULL) AND content_id NOT IN (SELECT outcome_content_id FROM turn WHERE outcome_content_id IS NOT NULL) AND content_id NOT IN (SELECT resolution_content_id FROM model_operation WHERE resolution_content_id IS NOT NULL) AND content_id NOT IN (SELECT content_id FROM message_skill WHERE content_id IS NOT NULL) AND content_id NOT IN (SELECT catalog_content_id FROM session_skill_catalog WHERE catalog_content_id IS NOT NULL) AND content_id NOT IN (SELECT content_id FROM conversation_entry WHERE content_id IS NOT NULL) AND content_id NOT IN (SELECT message_content_id FROM model_output_item WHERE message_content_id IS NOT NULL) AND content_id NOT IN (SELECT extras_content_id FROM model_output_item WHERE extras_content_id IS NOT NULL) AND content_id NOT IN (SELECT text_content_id FROM model_output_part WHERE text_content_id IS NOT NULL) AND content_id NOT IN (SELECT extras_content_id FROM model_output_part WHERE extras_content_id IS NOT NULL) AND content_id NOT IN (SELECT name_content_id FROM model_tool_call WHERE name_content_id IS NOT NULL) AND content_id NOT IN (SELECT call_id_content_id FROM model_tool_call WHERE call_id_content_id IS NOT NULL) AND content_id NOT IN (SELECT arguments_content_id FROM model_tool_call WHERE arguments_content_id IS NOT NULL) AND content_id NOT IN (SELECT rejection_content_id FROM model_tool_call WHERE rejection_content_id IS NOT NULL) AND content_id NOT IN (SELECT resolution_content_id FROM action_operation WHERE resolution_content_id IS NOT NULL)",
+            "ALTER TABLE model_operation DROP COLUMN usage_content_id",
+        },
+    },
+    // Schema 64: name the Host tool set and runner-independent timeout.
+    .{
+        .from = 63,
+        .sqlite = &.{
+            "ALTER TABLE host_catalog RENAME TO host_catalog_63",
             "CREATE TABLE host_tool_set(\n slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id)\n) STRICT",
-            "INSERT INTO host_tool_set(slot,tool_set_id) SELECT slot,tool_set_id FROM host_catalog_62",
-            "DROP TABLE host_catalog_62",
+            "INSERT INTO host_tool_set(slot,tool_set_id) SELECT slot,tool_set_id FROM host_catalog_63",
+            "DROP TABLE host_catalog_63",
             "ALTER TABLE action_operation RENAME COLUMN bash_timeout_ms TO attempt_timeout_ms",
         },
         .mysql = &.{
@@ -388,15 +418,38 @@ pub const migrations = [_]Migration{
             "ALTER TABLE action_operation ADD CHECK(attempt_timeout_ms IS NULL OR attempt_timeout_ms>0), ADD CHECK((attempt_ordinal=0 AND attempt_timeout_ms IS NULL) OR (attempt_ordinal=1 AND attempt_timeout_ms IS NOT NULL))",
         },
     },
-    // Schema 64 (D39, D180): the first ending hop is the sole owed fact.
+    // Schema 65: Session sets become intent, conservatively retaining current
+    // names. Each old Operation keeps the offer of its own settings revision.
     .{
-        .from = 63,
+        .from = 64,
         .sqlite = &.{
-            "ALTER TABLE session_forward RENAME TO session_forward_before_64",
+            "ALTER TABLE model_operation RENAME TO model_operation_64",
+            "CREATE TABLE model_operation(\n operation_id INTEGER PRIMARY KEY NOT NULL CHECK(operation_id>0),\n turn_id INTEGER NOT NULL REFERENCES turn(turn_id),\n session_ref TEXT NOT NULL,\n settings_revision INTEGER NOT NULL CHECK(settings_revision>0),\n input_cutoff INTEGER NOT NULL CHECK(input_cutoff>0),\n admission_position INTEGER NOT NULL CHECK(admission_position>0),\n purpose INTEGER NOT NULL DEFAULT 0 CHECK(purpose IN (0,1)),\n compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),\n output_reservation INTEGER NOT NULL CHECK(output_reservation>=0),\n reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR (reasoning_effort='none' OR reasoning_effort='low' OR reasoning_effort='medium' OR reasoning_effort='high' OR reasoning_effort='xhigh' OR reasoning_effort='max')),\n output_item_count INTEGER CHECK(output_item_count IS NULL OR output_item_count>=0),\n attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal BETWEEN 1 AND 4),\n auth_refresh_claimed INTEGER NOT NULL DEFAULT 0 CHECK(auth_refresh_claimed IN (0,1)),\n retry_due_at_ms INTEGER CHECK(retry_due_at_ms IS NULL OR retry_due_at_ms>=0),\n last_failure_code TEXT CHECK(last_failure_code IS NULL OR length(CAST(last_failure_code AS BLOB)) BETWEEN 1 AND 96),\n resolution_code TEXT CHECK(resolution_code IS NULL OR length(CAST(resolution_code AS BLOB)) BETWEEN 1 AND 96),\n resolution_content_id INTEGER REFERENCES content(content_id),\n response_id TEXT CHECK(response_id IS NULL OR length(CAST(response_id AS BLOB))<=256),\n model_evidence BLOB CHECK(model_evidence IS NULL OR length(model_evidence) BETWEEN 7 AND 775),\n request_id TEXT CHECK(request_id IS NULL OR length(CAST(request_id AS BLOB))<=256),\n usage_uncached_tokens INTEGER CHECK(usage_uncached_tokens IS NULL OR usage_uncached_tokens>=0),\n usage_cache_read_tokens INTEGER CHECK(usage_cache_read_tokens IS NULL OR usage_cache_read_tokens>=0),\n usage_cache_write_tokens INTEGER CHECK(usage_cache_write_tokens IS NULL OR usage_cache_write_tokens>=0),\n usage_output_tokens INTEGER CHECK(usage_output_tokens IS NULL OR usage_output_tokens>=0),\n interrupted_by_command_key TEXT REFERENCES core_command(command_key),\n attempt_at INTEGER CHECK(attempt_at IS NULL OR attempt_at>0),\n retry_scheduled_at INTEGER CHECK(retry_scheduled_at IS NULL OR retry_scheduled_at>0),\n resolved_at INTEGER CHECK(resolved_at IS NULL OR resolved_at>0),\n history_floor INTEGER CHECK(history_floor IS NULL OR history_floor>0),\n history_level INTEGER CHECK(history_level IS NULL OR history_level BETWEEN 1 AND 3),\n history_dropped INTEGER CHECK(history_dropped IS NULL OR history_dropped>=0),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id) CHECK(tool_set_id>0),\n UNIQUE(operation_id,session_ref),\n FOREIGN KEY(session_ref,settings_revision) REFERENCES session_revision(session_ref,revision),\n CHECK((usage_uncached_tokens IS NULL AND usage_cache_read_tokens IS NULL AND usage_cache_write_tokens IS NULL AND usage_output_tokens IS NULL) OR (usage_uncached_tokens IS NOT NULL AND usage_cache_read_tokens IS NOT NULL AND usage_cache_write_tokens IS NOT NULL AND usage_output_tokens IS NOT NULL)),\n CHECK((resolution_code IS NULL AND retry_due_at_ms IS NOT NULL) OR (resolution_code IS NOT NULL AND retry_due_at_ms IS NULL)),\n CHECK((resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_at IS NOT NULL AND retry_scheduled_at IS NULL AND resolved_at IS NULL) OR (resolution_code IS NULL AND retry_due_at_ms>0 AND attempt_at IS NULL AND retry_scheduled_at IS NOT NULL AND resolved_at IS NULL) OR (resolution_code IS NOT NULL AND attempt_at IS NULL AND retry_scheduled_at IS NULL AND resolved_at IS NOT NULL)),\n CHECK(((resolution_code IS 'interrupted') AND interrupted_by_command_key IS NOT NULL) OR (coalesce(resolution_code,'')!='interrupted' AND interrupted_by_command_key IS NULL)),\n CHECK((history_floor IS NULL AND history_level IS NULL AND history_dropped IS NULL) OR (history_floor IS NOT NULL AND purpose=1 AND ((history_level IS NULL AND history_dropped IS NULL) OR (history_level IS NOT NULL AND history_dropped IS NOT NULL))))\n) STRICT",
+            "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,history_floor,history_level,history_dropped,tool_set_id) SELECT operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,history_floor,history_level,history_dropped, (SELECT coalesce(r.loaded_tool_set_id,r.tool_set_id) FROM session_revision r WHERE r.session_ref=model_operation_64.session_ref AND r.revision=model_operation_64.settings_revision) FROM model_operation_64",
+            "DROP TABLE model_operation_64",
+            "CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND attempt_ordinal<4",
+            "CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=4",
+            "CREATE INDEX model_operation_session_history ON model_operation(session_ref,operation_id)",
+            "CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id)",
+            "CREATE INDEX model_operation_admission ON model_operation(session_ref,admission_position)",
+            "CREATE INDEX model_operation_context_history ON model_operation(session_ref,admission_position) WHERE (resolution_code='answer' OR resolution_code='compacted' OR resolution_code='tool_proposals')",
+            "CREATE INDEX model_operation_compaction_bases ON model_operation(session_ref,admission_position) WHERE purpose=1 AND resolution_code='compacted'",
+        },
+        .mysql = &.{
+            "ALTER TABLE model_operation ADD COLUMN tool_set_id BIGINT AFTER history_dropped",
+            "UPDATE model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision SET o.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id)",
+            "ALTER TABLE model_operation MODIFY tool_set_id BIGINT NOT NULL,ADD CHECK(tool_set_id>0),ADD FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id)",
+        },
+    },
+    // Schema 66 (D39, D180): the first ending hop is the sole owed fact.
+    .{
+        .from = 65,
+        .sqlite = &.{
+            "ALTER TABLE session_forward RENAME TO session_forward_before_66",
             "CREATE TABLE session_forward(\n forward_id INTEGER PRIMARY KEY NOT NULL CHECK(forward_id>0),\n target_ref TEXT NOT NULL REFERENCES session(session_ref),\n child_ref TEXT NOT NULL REFERENCES session(session_ref),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 2),\n source_id INTEGER NOT NULL CHECK(source_id>0),\n position INTEGER CHECK(position IS NULL OR position>0),\n ordinal INTEGER NOT NULL CHECK(ordinal=0),\n delivered_at INTEGER CHECK(delivered_at IS NULL OR delivered_at>0),\n message_delivered INTEGER CHECK(message_delivered IS NULL OR message_delivered IN (0,1)),\n suppress_message INTEGER NOT NULL DEFAULT 0 CHECK(suppress_message IN (0,1)),\n UNIQUE(target_ref,kind,source_id),\n CHECK((position IS NULL)=(delivered_at IS NULL)),\n CHECK(target_ref<>child_ref)\n) STRICT",
-            "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at,message_delivered,suppress_message) SELECT f.forward_id,f.target_ref,f.child_ref,f.kind,f.source_id,f.position,f.ordinal,f.delivered_at,e.delivered,COALESCE(e.suppress_message,0) FROM session_forward_before_64 f JOIN session child ON child.session_ref=f.child_ref LEFT JOIN session_ending_owed e ON f.kind=2 AND e.turn_id=f.source_id AND f.target_ref=child.parent_ref",
-            "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at,message_delivered,suppress_message) SELECT COALESCE((SELECT max(forward_id) FROM session_forward_before_64),0)+ROW_NUMBER() OVER(ORDER BY e.turn_id),child.parent_ref,t.session_ref,2,e.turn_id,NULL,0,NULL,e.delivered,e.suppress_message FROM session_ending_owed e JOIN turn t ON t.turn_id=e.turn_id JOIN session child ON child.session_ref=t.session_ref WHERE child.parent_ref IS NOT NULL AND NOT EXISTS(SELECT 1 FROM session_forward_before_64 f WHERE f.target_ref=child.parent_ref AND f.kind=2 AND f.source_id=e.turn_id)",
-            "DROP TABLE session_forward_before_64",
+            "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at,message_delivered,suppress_message) SELECT f.forward_id,f.target_ref,f.child_ref,f.kind,f.source_id,f.position,f.ordinal,f.delivered_at,e.delivered,COALESCE(e.suppress_message,0) FROM session_forward_before_66 f JOIN session child ON child.session_ref=f.child_ref LEFT JOIN session_ending_owed e ON f.kind=2 AND e.turn_id=f.source_id AND f.target_ref=child.parent_ref",
+            "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at,message_delivered,suppress_message) SELECT COALESCE((SELECT max(forward_id) FROM session_forward_before_66),0)+ROW_NUMBER() OVER(ORDER BY e.turn_id),child.parent_ref,t.session_ref,2,e.turn_id,NULL,0,NULL,e.delivered,e.suppress_message FROM session_ending_owed e JOIN turn t ON t.turn_id=e.turn_id JOIN session child ON child.session_ref=t.session_ref WHERE child.parent_ref IS NOT NULL AND NOT EXISTS(SELECT 1 FROM session_forward_before_66 f WHERE f.target_ref=child.parent_ref AND f.kind=2 AND f.source_id=e.turn_id)",
+            "DROP TABLE session_forward_before_66",
             "DROP TABLE session_ending_owed",
             "CREATE INDEX session_forward_message ON session_forward(message_delivered,source_id)",
             "CREATE INDEX session_forward_open ON session_forward(forward_id) WHERE position IS NULL",
@@ -1155,7 +1208,6 @@ pub const tables = [_]Table{
             .{ .name = "response_id", .type = .{ .text = .{ .max = 256 } }, .nullable = true },
             .{ .name = "model_evidence", .type = .{ .bytes = .{ .min = 7, .max = 775 } }, .nullable = true },
             .{ .name = "request_id", .type = .{ .text = .{ .max = 256 } }, .nullable = true },
-            .{ .name = "usage_content_id", .type = .int, .nullable = true },
             .{ .name = "usage_uncached_tokens", .type = .int, .nullable = true, .check = "usage_uncached_tokens IS NULL OR usage_uncached_tokens>=0" },
             .{ .name = "usage_cache_read_tokens", .type = .int, .nullable = true, .check = "usage_cache_read_tokens IS NULL OR usage_cache_read_tokens>=0" },
             .{ .name = "usage_cache_write_tokens", .type = .int, .nullable = true, .check = "usage_cache_write_tokens IS NULL OR usage_cache_write_tokens>=0" },
@@ -1174,21 +1226,23 @@ pub const tables = [_]Table{
             // or the compaction before it; the feed's `compacted` row shows
             // it, and zero for a compaction without a floor.
             .{ .name = "history_dropped", .type = .int, .nullable = true, .check = "history_dropped IS NULL OR history_dropped>=0" },
+            // Effective offer frozen at admission; Session sets are intent.
+            tool_set_column,
         },
         .primary_key = &.{"operation_id"},
         .uniques = &.{&.{ "operation_id", "session_ref" }},
         .foreign_keys = &.{
+            references("tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("turn_id", "turn", &.{"turn_id"}),
             references("resolution_content_id", "content", content_reference),
-            references("usage_content_id", "content", content_reference),
             references("interrupted_by_command_key", "core_command", command_reference),
             .{ .columns = &.{ "session_ref", "settings_revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
         },
         .checks = &.{
-            // Usage counts are all present or all absent, and only beside the report.
+            // Usage counts are all present or all absent.
             "(usage_uncached_tokens IS NULL AND usage_cache_read_tokens IS NULL AND usage_cache_write_tokens IS NULL AND usage_output_tokens IS NULL) OR " ++
                 "(usage_uncached_tokens IS NOT NULL AND usage_cache_read_tokens IS NOT NULL AND usage_cache_write_tokens IS NOT NULL AND " ++
-                "usage_output_tokens IS NOT NULL AND usage_content_id IS NOT NULL)",
+                "usage_output_tokens IS NOT NULL)",
             "(resolution_code IS NULL AND retry_due_at_ms IS NOT NULL) OR (resolution_code IS NOT NULL AND retry_due_at_ms IS NULL)",
             // The second the current state began: exactly the time its state owns.
             "(resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_at IS NOT NULL AND retry_scheduled_at IS NULL AND resolved_at IS NULL) OR " ++
@@ -2278,14 +2332,27 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     try sqlite.exec(database, "COMMIT");
 }
 
+/// Told when `openExisting` begins migrating a Store, with the format it
+/// moves from, and when the migration commits. The backup a migration
+/// writes first is as large as the Store, so a caller waiting on the open
+/// can learn why it takes long.
+pub const MigrationNotice = struct {
+    context: *anyopaque,
+    notify: *const fn (context: *anyopaque, event: Event) void,
+
+    pub const Event = union(enum) { begin: u32, end };
+};
+
 /// Opens a Store of this application at schema_version, or moves one at a
 /// format from migration_baseline on to it first (`migrate`).
-pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8, identity_mismatch: ?*IdentityMismatch) !void {
+pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8, identity_mismatch: ?*IdentityMismatch, notice: ?MigrationNotice) !void {
     if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
     const found = try sqlite.pragmaInt(database, "PRAGMA user_version");
     if (found == schema_version) return validateCurrent(database, selector, identity_mismatch);
     if (found < migration_baseline or found > schema_version) return error.WrongStoreVersion;
-    return migrate(io, database, selector, found, migrations[found - migration_baseline ..], identity_mismatch);
+    if (notice) |told| told.notify(told.context, .{ .begin = found });
+    try migrate(io, database, selector, found, migrations[found - migration_baseline ..], identity_mismatch);
+    if (notice) |told| told.notify(told.context, .end);
 }
 
 /// First writes `migrationBackup`; a Store whose backup fails is refused
@@ -2316,6 +2383,10 @@ pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, 
     }
     try sqlite.exec(database, version_sql);
     try sqlite.exec(database, "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format'");
+    // v0.60 shipped format 60 / wire 11. Format 61 is already a forward
+    // migration, so finalize its wire label without rewriting shipped steps
+    // or taking another format number. Unknown labels still fail validation.
+    try sqlite.exec(database, "UPDATE store_meta SET meta_value='" ++ wire_version ++ "' WHERE meta_key='wire_version' AND meta_value='11'");
     try validateCurrent(database, selector, identity_mismatch);
     try sqlite.exec(database, "COMMIT");
 }
@@ -2683,6 +2754,29 @@ test "schema 57 migration creates the canonical archive objects on SQLite and My
     }
 }
 
+const MigrationRecorder = struct {
+    begun: ?u32 = null,
+    ended: bool = false,
+
+    fn notice(self: *@This()) MigrationNotice {
+        return .{ .context = self, .notify = notify };
+    }
+
+    fn notify(context: *anyopaque, event: MigrationNotice.Event) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        switch (event) {
+            .begin => |from| {
+                std.debug.assert(self.begun == null and !self.ended);
+                self.begun = from;
+            },
+            .end => {
+                std.debug.assert(self.begun != null and !self.ended);
+                self.ended = true;
+            },
+        }
+    }
+};
+
 test "schema 57 preserves Commands and stop references while adding nullable archive intent" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2743,7 +2837,15 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try sqlite.exec(database, "INSERT INTO session_ending_owed(turn_id,delivered) VALUES(1,0),(2,1)");
     try sqlite.exec(database, "CREATE TEMP TABLE original_endings AS SELECT * FROM session_ending_owed");
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE core_command SET kind=6 WHERE command_key='fixture-stop'"));
-    try openExisting(std.testing.io, database, root, null);
+    var told: MigrationRecorder = .{};
+    try openExisting(std.testing.io, database, root, null, told.notice());
+    try std.testing.expectEqual(@as(?u32, 56), told.begun);
+    try std.testing.expect(told.ended);
+    // A Store already at schema_version opens without a migration to announce.
+    var reopened: MigrationRecorder = .{};
+    try openExisting(std.testing.io, database, root, null, reopened.notice());
+    try std.testing.expectEqual(@as(?u32, null), reopened.begun);
+    try std.testing.expect(!reopened.ended);
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
     try std.testing.expect(try metaEquals(database, "wire_version", wire_version));
@@ -2802,7 +2904,7 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive WHERE session_ref='rhvzwc' AND command_key IS NULL"));
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='archive-request'"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='restore-request'"));
-    try openExisting(std.testing.io, database, root, null);
+    try openExisting(std.testing.io, database, root, null, null);
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT suppress_message FROM session_forward WHERE source_id=1"));
 }
 
@@ -2857,7 +2959,7 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
     inline for (.{ "model_output_item", "model_tool_call", "model_output_part", "action_operation", "conversation_entry" }) |name| {
         try sqlite.exec(database, "CREATE TEMP TABLE original_" ++ name ++ " AS SELECT * FROM " ++ name);
     }
-    try openExisting(std.testing.io, database, root, null);
+    try openExisting(std.testing.io, database, root, null, null);
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
     try std.testing.expect(try metaEquals(database, "wire_version", wire_version));
@@ -2884,7 +2986,7 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_output_item WHERE operation_id=2 AND item_ordinal=2 AND length(CAST(description AS BLOB))=200 AND description='" ++ utf8_line ++ "'"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
     // The widened lines and canonical table/index shapes survive reopening.
-    try openExisting(std.testing.io, database, root, null);
+    try openExisting(std.testing.io, database, root, null, null);
 }
 
 test "MySQL index hints require a named real-column index on that engine" {

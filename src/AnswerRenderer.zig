@@ -1,5 +1,7 @@
 const std = @import("std");
 const TerminalText = @import("TerminalText.zig");
+const gwidth = @import("terminal_width");
+const display_text = @import("display_text.zig");
 const Renderer = @This();
 
 // A complete bounded fenced block may hide its delimiters. Unclosed or
@@ -11,6 +13,8 @@ const Style = packed struct {
     bold: bool = false,
     italic: bool = false,
     underline: bool = false,
+    code: bool = false,
+    quiet: bool = false,
 };
 const InlineKind = enum { none, emphasis, strong, code };
 const InlineRetention = enum { candidate, literal };
@@ -21,7 +25,13 @@ const InlineRetention = enum { candidate, literal };
 const Link = enum { none, text, text_closed, target, bare, local, local_literal };
 const Boundary = enum { word, prose, other };
 
+/// Only the viewport consumes private presentation markers. A real terminal
+/// must keep its own background, regardless of foreground colour support.
+pub const Destination = display_text.Target;
+
 out: *std.Io.Writer,
+destination: Destination = .terminal,
+colour: bool = true,
 /// Borrowed process HOME; only a valid absolute path enables `~/` links.
 home: []const u8 = "",
 prefix: [prefix_limit]u8 = undefined,
@@ -44,8 +54,12 @@ escape_next: bool = false,
 literal_run: ?u8 = null,
 fence_pending: bool = false,
 fence_literal: bool = false,
-/// A pending fenced block's bytes, or a pending link's.
+/// A pending fence, link or pipe-run. These never overlap; table formatting
+/// borrows a stack copy so cells can reuse the link recognizer whole.
 held: [fence_limit]u8 = undefined,
+table_len: usize = 0,
+table_literal: bool = false,
+table_header: bool = false,
 link: Link = .none,
 link_len: usize = 0,
 link_depth: u16 = 0,
@@ -68,46 +82,79 @@ terminal_text: TerminalText = .{ .mode = .multiline },
 
 pub fn feed(self: *Renderer, bytes: []const u8) !void {
     for (bytes) |byte| {
-        if (self.fence_pending and self.fence_body_start != 0) {
-            try self.fencedByte(byte);
-            continue;
+        if (self.table_len != 0) {
+            if (self.held[self.table_len - 1] == '\n' and byte != '|') {
+                try self.flushTable();
+            } else if (self.table_len < self.held.len) {
+                self.held[self.table_len] = byte;
+                self.table_len += 1;
+                continue;
+            } else {
+                // Never interpret a suffix of an over-bound table as new
+                // markup. Flush all held bytes, then stream the pipe-run.
+                try self.literalBlock(self.held[0..self.table_len]);
+                self.table_len = 0;
+                self.table_literal = true;
+            }
         }
-        if (self.line_start) {
-            if (byte != '\n' and self.prefix_len < prefix_limit) {
-                self.prefix[self.prefix_len] = byte;
-                self.prefix_len += 1;
-                // The longest accepted ordered marker needs three spaces,
-                // five digits, a dot and its following space.
-                if (self.prefix_len < 10 or (self.prefix_len < prefix_limit and fenceCandidate(self.prefix[0..self.prefix_len]))) continue;
-                if (self.prefix_len == prefix_limit and fenceCandidate(self.prefix[0..self.prefix_len])) self.literal_line = true;
-                try self.flushPrefix();
+        if (self.table_literal) {
+            if (self.line_start and byte != '|') {
+                self.table_literal = false;
+            } else {
+                try self.literalBlock(&.{byte});
                 continue;
             }
-            try self.flushPrefix();
         }
-        if (byte == '\n') {
-            try self.endLink();
-            self.boundary = .prose;
-            try self.flushSpan();
-            self.escape_next = false;
-            self.literal_run = null;
-            if (self.line_style) try self.transition(.{});
-            self.line_style = false;
-            if (self.fence_pending) {
-                self.held[self.fence_len] = byte;
-                self.fence_len += 1;
-                self.fence_body_start = self.fence_len;
-                self.fence_line_start = self.fence_len;
-            } else try self.safe(byte);
-            self.literal_line = false;
-            self.line_start = true;
+        if (self.line_start and self.prefix_len == 0 and !self.fence_pending and byte == '|') {
+            self.held[0] = byte;
+            self.table_len = 1;
             continue;
         }
-        try self.prose(byte);
+        try self.markdownByte(byte);
     }
 }
 
+fn markdownByte(self: *Renderer, byte: u8) !void {
+    if (self.fence_pending and self.fence_body_start != 0) {
+        try self.fencedByte(byte);
+        return;
+    }
+    if (self.line_start) {
+        if (byte != '\n' and self.prefix_len < prefix_limit) {
+            self.prefix[self.prefix_len] = byte;
+            self.prefix_len += 1;
+            // The longest accepted ordered marker needs three spaces,
+            // five digits, a dot and its following space.
+            if (self.prefix_len < 10 or (self.prefix_len < prefix_limit and fenceCandidate(self.prefix[0..self.prefix_len]))) return;
+            if (self.prefix_len == prefix_limit and fenceCandidate(self.prefix[0..self.prefix_len])) self.literal_line = true;
+            try self.flushPrefix();
+            return;
+        }
+        try self.flushPrefix();
+    }
+    if (byte == '\n') {
+        try self.endLink();
+        self.boundary = .prose;
+        try self.flushSpan();
+        self.escape_next = false;
+        self.literal_run = null;
+        if (self.line_style) try self.transition(.{});
+        self.line_style = false;
+        if (self.fence_pending) {
+            self.held[self.fence_len] = byte;
+            self.fence_len += 1;
+            self.fence_body_start = self.fence_len;
+            self.fence_line_start = self.fence_len;
+        } else try self.safe(byte);
+        self.literal_line = false;
+        self.line_start = true;
+        return;
+    }
+    try self.prose(byte);
+}
+
 pub fn finish(self: *Renderer) !void {
+    if (self.table_len != 0) try self.flushTable();
     if (self.line_start and self.prefix_len != 0) {
         // A delimiter without its line ending is not a complete block marker.
         if (fenceCandidate(self.prefix[0..self.prefix_len])) self.literal_line = true;
@@ -115,7 +162,7 @@ pub fn finish(self: *Renderer) !void {
     }
     if (self.fence_pending and !self.fence_literal) {
         if (closingFence(self.held[self.fence_line_start..self.fence_len])) {
-            try self.literalBlock(self.held[self.fence_body_start..self.fence_line_start]);
+            try self.codeBlock(self.held[self.fence_body_start..self.fence_line_start]);
         } else try self.literalBlock(self.held[0..self.fence_len]);
     }
     try self.endLink();
@@ -274,7 +321,7 @@ fn fencedByte(self: *Renderer, byte: u8) !void {
     self.fence_len += 1;
     if (byte == '\n') {
         if (closingFence(self.held[self.fence_line_start .. self.fence_len - 1])) {
-            try self.literalBlock(self.held[self.fence_body_start..self.fence_line_start]);
+            try self.codeBlock(self.held[self.fence_body_start..self.fence_line_start]);
             self.fence_pending = false;
             self.fence_len = 0;
             self.fence_body_start = 0;
@@ -289,6 +336,223 @@ fn fenceCloserByte(self: *Renderer, byte: u8) void {
     } else if (byte == '`' and self.fence_closer_ticks < 3) {
         self.fence_closer_ticks += 1;
     } else self.fence_closer_possible = false;
+}
+
+/// The pending pipe-run shares `held` with fences and links. Borrow one
+/// bounded stack copy while formatting so the existing link parser can use
+/// its own buffer; neither the parser nor the document gains a payload bank.
+fn flushTable(self: *Renderer) !void {
+    var storage: [fence_limit]u8 = undefined;
+    const length = self.table_len;
+    @memcpy(storage[0..length], self.held[0..length]);
+    self.table_len = 0;
+    const bytes = storage[0..length];
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    const header = lines.next().?;
+    const separator = lines.next() orelse return self.replayProse(bytes);
+    if (!tableSeparator(header, separator)) return self.replayProse(bytes);
+
+    // At most one cell begins per input byte. Widths live only during this
+    // bounded flush, not once per retained line or per document byte.
+    var widths: [fence_limit]u16 = @splat(0);
+    lines.reset();
+    var row: usize = 0;
+    while (lines.next()) |line| : (row += 1) {
+        if (row == 1 or line.len == 0) continue;
+        var cells: Cells = .{ .line = line };
+        var column: usize = 0;
+        while (cells.next()) |cell| : (column += 1) {
+            widths[column] = @max(widths[column], try self.tableCell(cell, false));
+        }
+    }
+    var start: usize = 0;
+    row = 0;
+    while (start < bytes.len) : (row += 1) {
+        const end = std.mem.indexOfScalarPos(u8, bytes, start, '\n') orelse bytes.len;
+        if (row != 1) {
+            self.table_header = row == 0;
+            try self.transition(self.base());
+            try self.safeSlice("  ");
+            try self.transition(.{});
+            var cells: Cells = .{ .line = bytes[start..end] };
+            var column: usize = 0;
+            while (cells.next()) |cell| : (column += 1) {
+                const width = try self.tableCell(cell, true);
+                if (!cells.done) {
+                    try self.transition(self.base());
+                    for (0..widths[column] - width + 2) |_| try self.safe(' ');
+                    try self.transition(.{});
+                }
+            }
+            self.table_header = false;
+            if (end < bytes.len) try self.safe('\n');
+            self.line_start = end < bytes.len;
+        }
+        start = end + 1;
+    }
+}
+
+fn replayProse(self: *Renderer, bytes: []const u8) !void {
+    for (bytes) |byte| try self.markdownByte(byte);
+}
+
+/// Splits only structural pipes: escaped pipes and pipes inside code stay
+/// in their cell. A final pipe closes the last cell, not another empty one.
+const Cells = struct {
+    line: []const u8,
+    at: usize = 1,
+    done: bool = false,
+
+    fn next(self: *Cells) ?[]const u8 {
+        if (self.done) return null;
+        const start = self.at;
+        var code = false;
+        var escaped = false;
+        while (self.at < self.line.len) : (self.at += 1) {
+            const byte = self.line[self.at];
+            if (escaped) {
+                escaped = false;
+            } else if (byte == '\\' and !code) {
+                escaped = true;
+            } else if (byte == '`') {
+                if (code) {
+                    code = false;
+                } else if ((self.at == 0 or self.line[self.at - 1] != '`') and
+                    (self.at + 1 == self.line.len or self.line[self.at + 1] != '`'))
+                {
+                    if (std.mem.indexOfScalarPos(u8, self.line, self.at + 1, '`')) |close| {
+                        code = close > self.at + 1 and (close + 1 == self.line.len or self.line[close + 1] != '`');
+                    }
+                }
+            } else if (byte == '|' and !code) {
+                const end = self.at;
+                self.at += 1;
+                self.done = std.mem.trim(u8, self.line[self.at..], " \t\r").len == 0;
+                return std.mem.trim(u8, self.line[start..end], " \t\r");
+            }
+        }
+        self.done = true;
+        return std.mem.trim(u8, self.line[start..], " \t\r");
+    }
+};
+
+fn tableSeparator(header: []const u8, separator: []const u8) bool {
+    if (separator.len == 0 or separator[0] != '|') return false;
+    var heads: Cells = .{ .line = header };
+    var cells: Cells = .{ .line = separator };
+    while (cells.next()) |cell| {
+        if (heads.next() == null) return false;
+        var marks = cell;
+        if (std.mem.startsWith(u8, marks, ":")) marks = marks[1..];
+        if (std.mem.endsWith(u8, marks, ":")) marks = marks[0 .. marks.len - 1];
+        if (marks.len == 0) return false;
+        for (marks) |byte| if (byte != '-') return false;
+    }
+    return heads.next() == null;
+}
+
+/// Format each cell through the one inline owner, with fresh line-local
+/// state. The first pass measures; the second also forwards its SGR/OSC 8.
+/// Collect visible UTF-8 before measuring, never sum widths per write: a
+/// write may split a scalar, combining sequence or ZWJ cluster anywhere.
+fn tableCell(self: *Renderer, bytes: []const u8, forward: bool) !u16 {
+    var measured: CellWidth = undefined;
+    const output = self.out;
+    measured.init(if (forward) output else null);
+    self.out = &measured.writer;
+    defer self.out = output;
+    try self.transition(self.base());
+    try self.proseSlice(bytes);
+    try self.endLink();
+    try self.flushSpan();
+    try self.transition(.{});
+    try self.terminal_text.finish(self.out);
+    self.escape_next = false;
+    self.literal_run = null;
+    self.boundary = .prose;
+    // Bordering padding is grapheme context on both sides: combining and
+    // prepend characters can join it. Padding itself contributes four cells.
+    @memcpy(measured.bytes[measured.length..][0..2], "  ");
+    return display_text.width(measured.bytes[0 .. measured.length + 2], self.destination) - 4;
+}
+
+const CellWidth = struct {
+    writer: std.Io.Writer,
+    output: ?*std.Io.Writer,
+    // A cell cannot exceed the held run. TerminalText expands at most four
+    // bytes per source byte; presentation controls and addresses are omitted.
+    bytes: [4 + fence_limit * TerminalText.max_bytes_per_byte]u8 = undefined,
+    length: usize = 0,
+    control: enum { text, escape, sgr, osc, osc_escape } = .text,
+
+    fn init(self: *CellWidth, output: ?*std.Io.Writer) void {
+        self.* = .{ .writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} }, .output = output };
+        // Every cell follows at least two padding spaces. Include that
+        // grapheme context: an initial combining mark can attach to a space.
+        @memcpy(self.bytes[0..2], "  ");
+        self.length = 2;
+    }
+
+    fn consume(self: *CellWidth, bytes: []const u8) std.Io.Writer.Error!void {
+        if (self.output) |output| {
+            // A table tab is one separator space in both destinations, not
+            // a position-dependent terminal tab stop (or eight Vaxis cells).
+            var parts = std.mem.splitScalar(u8, bytes, '\t');
+            try output.writeAll(parts.next().?);
+            while (parts.next()) |part| {
+                try output.writeByte(' ');
+                try output.writeAll(part);
+            }
+        }
+        for (bytes) |byte| switch (self.control) {
+            .text => if (byte == 0x1b) {
+                self.control = .escape;
+            } else {
+                std.debug.assert(self.length < self.bytes.len);
+                self.bytes[self.length] = if (byte == '\t') ' ' else byte;
+                self.length += 1;
+            },
+            .escape => self.control = if (byte == '[') .sgr else .osc,
+            .sgr => if (byte == 'm') {
+                self.control = .text;
+            },
+            .osc => if (byte == 0x1b) {
+                self.control = .osc_escape;
+            },
+            .osc_escape => self.control = if (byte == '\\') .text else .osc,
+        };
+    }
+
+    fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *CellWidth = @fieldParentPtr("writer", writer);
+        try self.consume(writer.buffered());
+        writer.end = 0;
+        var consumed: usize = 0;
+        for (data[0 .. data.len - 1]) |bytes| {
+            try self.consume(bytes);
+            consumed += bytes.len;
+        }
+        const last = data[data.len - 1];
+        for (0..splat) |_| try self.consume(last);
+        return consumed + last.len * splat;
+    }
+};
+
+/// The viewport-only marker stays on the newline, whose existing style
+/// byte identifies even a completely blank code row. Terminal output uses
+/// indentation instead: SGR 40 would paint an unreadable black background
+/// with dark default text on a light theme.
+fn codeBlock(self: *Renderer, bytes: []const u8) !void {
+    const band = self.destination == .viewport and self.colour;
+    var start: usize = 0;
+    while (start < bytes.len) {
+        const end = if (std.mem.indexOfScalarPos(u8, bytes, start, '\n')) |at| at + 1 else bytes.len;
+        if (band) try self.out.writeAll("\x1b[40m") else try self.safeSlice("  ");
+        try self.literalBlock(bytes[start..end]);
+        try self.terminal_text.finish(self.out);
+        if (band) try self.out.writeAll("\x1b[0m");
+        start = end;
+    }
 }
 
 fn literalBlock(self: *Renderer, bytes: []const u8) !void {
@@ -442,9 +706,9 @@ fn renderInline(self: *Renderer) !void {
     const marker_len: usize = if (self.inline_kind == .strong) 2 else 1;
     const parent = self.base();
     const outer: Style = if (self.inline_kind == .code)
-        .{ .bold = parent.bold, .underline = true }
+        .{ .bold = parent.bold, .underline = parent.underline, .code = true, .quiet = parent.quiet }
     else
-        .{ .bold = parent.bold or self.inline_kind == .strong, .italic = self.inline_kind == .emphasis, .underline = parent.underline };
+        .{ .bold = parent.bold or self.inline_kind == .strong, .italic = self.inline_kind == .emphasis, .underline = parent.underline, .quiet = parent.quiet };
     try self.transition(outer);
     var i = marker_len;
     const end = self.span_len - marker_len;
@@ -453,7 +717,7 @@ fn renderInline(self: *Renderer) !void {
             try self.transition(outer);
             continue;
         }
-        const style: Style = .{ .bold = outer.bold, .italic = outer.italic, .underline = outer.underline or bit(&self.code_bytes, i) };
+        const style: Style = .{ .bold = outer.bold, .italic = outer.italic, .underline = outer.underline, .code = outer.code or bit(&self.code_bytes, i), .quiet = outer.quiet };
         try self.transition(style);
         try self.safe(self.span[i]);
     }
@@ -463,7 +727,7 @@ fn renderInline(self: *Renderer) !void {
 
 /// The style of plain text here: a heading's bold, a link's underline.
 fn base(self: *const Renderer) Style {
-    return .{ .bold = self.line_style, .underline = self.in_link };
+    return .{ .bold = self.line_style, .underline = self.in_link, .quiet = self.table_header };
 }
 
 /// Takes one byte into the pending link: it completes the link, stays
@@ -716,14 +980,25 @@ fn addressEnds(byte: u8) bool {
     return byte <= ' ' or byte >= 0x7f or std.mem.indexOfScalar(u8, "<>\"`[", byte) != null;
 }
 
-fn transition(self: *Renderer, next: Style) !void {
-    if (std.meta.eql(self.active_style, next)) return;
+fn transition(self: *Renderer, requested: Style) !void {
+    if (std.meta.eql(self.active_style, requested)) return;
+    // Syntax boundaries still finish partial UTF-8 when colour is off;
+    // only their visual foreground, not their parsing boundary, disappears.
     try self.terminal_text.finish(self.out);
-    if (!std.meta.eql(self.active_style, Style{})) try self.out.writeAll("\x1b[0m");
+    var previous = self.active_style;
+    var next = requested;
+    if (!self.colour) {
+        previous.code = false;
+        previous.quiet = false;
+        next.code = false;
+        next.quiet = false;
+    }
+    if (!std.meta.eql(previous, Style{})) try self.out.writeAll("\x1b[0m");
     if (next.bold) try self.out.writeAll("\x1b[1m");
     if (next.italic) try self.out.writeAll("\x1b[3m");
     if (next.underline) try self.out.writeAll("\x1b[4m");
-    self.active_style = next;
+    if (next.code) try self.out.writeAll("\x1b[94m") else if (next.quiet) try self.out.writeAll("\x1b[90m");
+    self.active_style = requested;
 }
 
 fn bit(bits: *const [span_limit / 8]u8, index: usize) bool {
@@ -787,13 +1062,13 @@ test "outer code closer owns its complete run at retained and streaming bounds" 
                 defer expected.deinit();
                 const styled = payload == 254 or payload == 5;
                 if (styled and ticks == 1) {
-                    try expected.writer.writeAll("\x1b[4m");
+                    try expected.writer.writeAll("\x1b[94m");
                     try expected.writer.writeAll(input[1..][0..payload]);
                     try expected.writer.writeAll("\x1b[0m");
                 } else try expected.writer.writeAll(input[0 .. 1 + payload + ticks]);
                 if (comptime std.mem.endsWith(u8, tail, "`ok`")) {
                     try expected.writer.writeAll(tail[0 .. tail.len - 4]);
-                    try expected.writer.writeAll("\x1b[4mok\x1b[0m");
+                    try expected.writer.writeAll("\x1b[94mok\x1b[0m");
                 } else try expected.writer.writeAll(tail);
                 for (0..input.len + 1) |split| {
                     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -816,7 +1091,7 @@ test "streaming literal outer code owns double closer before independent code" {
     input[0] = '`';
     @memset(input[1..256], 'x');
     @memcpy(input[256..], suffix);
-    const rendered_suffix = "`` then \x1b[4mok\x1b[0m";
+    const rendered_suffix = "`` then \x1b[94mok\x1b[0m";
     var expected: [256 + rendered_suffix.len]u8 = undefined;
     @memcpy(expected[0..256], input[0..256]);
     @memcpy(expected[256..], rendered_suffix);
@@ -840,7 +1115,7 @@ test "single opener with double closer recovers before independent code" {
         try renderer.feed(input[0..split]);
         try renderer.feed(input[split..]);
         try renderer.finish();
-        try std.testing.expectEqualStrings("`value`` then \x1b[4mok\x1b[0m", output.written());
+        try std.testing.expectEqualStrings("`value`` then \x1b[94mok\x1b[0m", output.written());
     }
 }
 
@@ -853,7 +1128,7 @@ test "multi-tick opener recovers locally before independent code" {
         try renderer.feed(input[0..split]);
         for (input[split..]) |byte| try renderer.feed(&.{byte});
         try renderer.finish();
-        try std.testing.expectEqualStrings("``value`` then \x1b[4mok\x1b[0m", output.written());
+        try std.testing.expectEqualStrings("``value`` then \x1b[94mok\x1b[0m", output.written());
     }
 }
 
@@ -881,15 +1156,15 @@ test "provisional closers finalize at boundaries and leave lookahead to prose" {
         .{ "*v**", "*v**" },
         .{ "**v***\n", "**v***\n" },
         .{ "**a*b**", "\x1b[1ma*b\x1b[0m" },
-        .{ "*v*`ok`", "\x1b[3mv\x1b[0m\x1b[4mok\x1b[0m" },
+        .{ "*v*`ok`", "\x1b[3mv\x1b[0m\x1b[94mok\x1b[0m" },
         .{ "**v**\\*literal*", "\x1b[1mv\x1b[0m\\*literal*" },
         .{ "**v**\x1b\xe2\x82", "\x1b[1mv\x1b[0m\\x1b\\xe2\\x82" },
         .{ "# **v*** then **ok**\n", "\x1b[1m**v*** then ok\x1b[0m\n" },
-        .{ "``\n`ok`", "``\n\x1b[4mok\x1b[0m" },
+        .{ "``\n`ok`", "``\n\x1b[94mok\x1b[0m" },
         .{ "``*ok*", "``\x1b[3mok\x1b[0m" },
         .{ "**a ``**", "\x1b[1ma ``\x1b[0m" },
-        .{ "**`a``b`**", "\x1b[1m\x1b[0m\x1b[1m\x1b[4ma\x1b[0m\x1b[1m\x1b[0m\x1b[1m\x1b[4mb\x1b[0m\x1b[1m\x1b[0m" },
-        .{ "**`a```**", "\x1b[1m\x1b[0m\x1b[1m\x1b[4ma\x1b[0m\x1b[1m``\x1b[0m" },
+        .{ "**`a``b`**", "\x1b[1m\x1b[0m\x1b[1m\x1b[94ma\x1b[0m\x1b[1m\x1b[0m\x1b[1m\x1b[94mb\x1b[0m\x1b[1m\x1b[0m" },
+        .{ "**`a```**", "\x1b[1m\x1b[0m\x1b[1m\x1b[94ma\x1b[0m\x1b[1m``\x1b[0m" },
         .{ "**a\\***", "\x1b[1ma\\*\x1b[0m" },
     }) |case| {
         for (0..case[0].len + 1) |split| {
@@ -920,7 +1195,7 @@ test "provisional closer at exact and overflowing bounds owns all run bytes" {
                 try expected.writer.writeAll(if (fits) (if (marker.len == 1) "\x1b[3m" else "\x1b[1m") else marker);
                 for (0..payload) |_| try expected.writer.writeByte('a');
                 try expected.writer.writeAll(if (fits) "\x1b[0m" else marker ++ (if (extra_star == 1) "*" else ""));
-                try expected.writer.writeAll(" then \x1b[4mok\x1b[0m");
+                try expected.writer.writeAll(" then \x1b[94mok\x1b[0m");
                 for (0..input.len + 1) |split| {
                     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
                     defer output.deinit();
@@ -955,13 +1230,13 @@ test "long unsupported delimiter runs stream literally and recover locally" {
 test "chunked subset, malformed markup and terminal controls" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var renderer: Renderer = .{ .out = &output.writer };
+    var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     const input = "# Heading\n- *item* and `code`\n**bold**\n```zig\n  x\t= 1\n```\nunfinished *mark\n\\*literal*\n" ++
         "bad \x1b]2;title\x07 \r \x7f \xe2\x80\xae café\n";
     for (input) |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[1mHeading\x1b[0m\n\x1b[1m-\x1b[0m \x1b[3mitem\x1b[0m and \x1b[4mcode\x1b[0m\n" ++
-        "\x1b[1mbold\x1b[0m\n  x\t= 1\nunfinished *mark\n\\*literal*\n" ++
+    try std.testing.expectEqualStrings("\x1b[1mHeading\x1b[0m\n\x1b[1m-\x1b[0m \x1b[3mitem\x1b[0m and \x1b[94mcode\x1b[0m\n" ++
+        "\x1b[1mbold\x1b[0m\n\x1b[40m  x\t= 1\n\x1b[0munfinished *mark\n\\*literal*\n" ++
         "bad \\x1b]2;title\\x07 \\x0d \\x7f \\u202e café\n", output.written());
 }
 
@@ -1002,8 +1277,8 @@ test "inline closing delimiter counts toward the 256-byte candidate bound" {
     inline for (.{
         .{ .marker = "*", .payload = 254, .style = "\x1b[3m", .fits = true },
         .{ .marker = "*", .payload = 255, .style = "\x1b[3m", .fits = false },
-        .{ .marker = "`", .payload = 254, .style = "\x1b[4m", .fits = true },
-        .{ .marker = "`", .payload = 255, .style = "\x1b[4m", .fits = false },
+        .{ .marker = "`", .payload = 254, .style = "\x1b[94m", .fits = true },
+        .{ .marker = "`", .payload = 255, .style = "\x1b[94m", .fits = false },
         .{ .marker = "**", .payload = 252, .style = "\x1b[1m", .fits = true },
         .{ .marker = "**", .payload = 253, .style = "\x1b[1m", .fits = false },
     }) |case| {
@@ -1042,7 +1317,7 @@ test "strong overflow boundaries retain their closer and resume after every clos
             var expected = std.Io.Writer.Allocating.init(std.testing.allocator);
             defer expected.deinit();
             try expected.writer.writeAll(source[0 .. 2 + payload]);
-            try expected.writer.writeAll("** then \x1b[4mok\x1b[0m\n");
+            try expected.writer.writeAll("** then \x1b[94mok\x1b[0m\n");
             try std.testing.expectEqualSlices(u8, expected.written(), output.written());
         }
     }
@@ -1085,9 +1360,9 @@ test "payload overflow does not turn its closer into an opener" {
 
 test "outer code preserves literal backslashes across every feed split and finish" {
     const cases = .{
-        .{ "`C:\\`", "\x1b[4mC:\\\x1b[0m" },
-        .{ "`C:\\` tail\n", "\x1b[4mC:\\\x1b[0m tail\n" },
-        .{ "`C:\\tmp` then *ok*", "\x1b[4mC:\\tmp\x1b[0m then \x1b[3mok\x1b[0m" },
+        .{ "`C:\\`", "\x1b[94mC:\\\x1b[0m" },
+        .{ "`C:\\` tail\n", "\x1b[94mC:\\\x1b[0m tail\n" },
+        .{ "`C:\\tmp` then *ok*", "\x1b[94mC:\\tmp\x1b[0m then \x1b[3mok\x1b[0m" },
         .{ "`C:\\", "`C:\\" },
     };
     inline for (cases) |case| {
@@ -1131,8 +1406,8 @@ test "nested code composes with strong and heading without exposing delimiters" 
     var renderer: Renderer = .{ .out = &output.writer };
     for ("- **`README.md`** — after\n# **before `a**b` after** tail\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[1m-\x1b[0m \x1b[1m\x1b[0m\x1b[1m\x1b[4mREADME.md\x1b[0m\x1b[1m\x1b[0m — after\n" ++
-        "\x1b[1mbefore \x1b[0m\x1b[1m\x1b[4ma**b\x1b[0m\x1b[1m after tail\x1b[0m\n", output.written());
+    try std.testing.expectEqualStrings("\x1b[1m-\x1b[0m \x1b[1m\x1b[0m\x1b[1m\x1b[94mREADME.md\x1b[0m\x1b[1m\x1b[0m — after\n" ++
+        "\x1b[1mbefore \x1b[0m\x1b[1m\x1b[94ma**b\x1b[0m\x1b[1m after tail\x1b[0m\n", output.written());
 }
 
 test "unsupported asterisk runs preserve bytes and later supported markup" {
@@ -1153,8 +1428,8 @@ test "italic code restores parent style and flushes incomplete UTF-8 at transiti
     var renderer: Renderer = .{ .out = &output.writer };
     for ("*before `x**y` after*\n**bad \xe2\x82`code` good**\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[3mbefore \x1b[0m\x1b[3m\x1b[4mx**y\x1b[0m\x1b[3m after\x1b[0m\n" ++
-        "\x1b[1mbad \\xe2\\x82\x1b[0m\x1b[1m\x1b[4mcode\x1b[0m\x1b[1m good\x1b[0m\n", output.written());
+    try std.testing.expectEqualStrings("\x1b[3mbefore \x1b[0m\x1b[3m\x1b[94mx**y\x1b[0m\x1b[3m after\x1b[0m\n" ++
+        "\x1b[1mbad \\xe2\\x82\x1b[0m\x1b[1m\x1b[94mcode\x1b[0m\x1b[1m good\x1b[0m\n", output.written());
 }
 
 test "unclosed nested code and full candidate retain every original byte" {
@@ -1182,8 +1457,8 @@ test "overflow closing backtick stays literal and later code resumes after outer
     var expected: [span_limit + 32]u8 = undefined;
     @memcpy(expected[0..3], "**`");
     @memset(expected[3 .. span_limit + 1], 'a');
-    @memcpy(expected[span_limit + 1 ..][0.."`** then \x1b[4mok\x1b[0m\n".len], "`** then \x1b[4mok\x1b[0m\n");
-    try std.testing.expectEqualStrings(expected[0 .. span_limit + 1 + "`** then \x1b[4mok\x1b[0m\n".len], output.written());
+    @memcpy(expected[span_limit + 1 ..][0.."`** then \x1b[94mok\x1b[0m\n".len], "`** then \x1b[94mok\x1b[0m\n");
+    try std.testing.expectEqualStrings(expected[0 .. span_limit + 1 + "`** then \x1b[94mok\x1b[0m\n".len], output.written());
 }
 
 test "overflow before nested opener preserves both abandoned delimiter pairs" {
@@ -1195,11 +1470,11 @@ test "overflow before nested opener preserves both abandoned delimiter pairs" {
     for ("`x`** then `ok`\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
 
-    var expected: [span_limit + "`x`** then ".len + "\x1b[4mok\x1b[0m\n".len]u8 = undefined;
+    var expected: [span_limit + "`x`** then ".len + "\x1b[94mok\x1b[0m\n".len]u8 = undefined;
     @memcpy(expected[0..2], "**");
     @memset(expected[2..span_limit], 'a');
     @memcpy(expected[span_limit..][0.."`x`** then ".len], "`x`** then ");
-    @memcpy(expected[span_limit + "`x`** then ".len ..], "\x1b[4mok\x1b[0m\n");
+    @memcpy(expected[span_limit + "`x`** then ".len ..], "\x1b[94mok\x1b[0m\n");
     try std.testing.expectEqualStrings(&expected, output.written());
 }
 
@@ -1232,7 +1507,7 @@ test "escaped star interrupts a strong closer and backslash in code does not esc
     var renderer: Renderer = .{ .out = &output.writer };
     try renderer.feed("**a*\\**\n**`a\\`b**\n");
     try renderer.finish();
-    try std.testing.expectEqualStrings("**a*\\**\n\x1b[1m\x1b[0m\x1b[1m\x1b[4ma\\\x1b[0m\x1b[1mb\x1b[0m\n", output.written());
+    try std.testing.expectEqualStrings("**a*\\**\n\x1b[1m\x1b[0m\x1b[1m\x1b[94ma\\\x1b[0m\x1b[1mb\x1b[0m\n", output.written());
 }
 
 test "overflow recovery requires adjacent unescaped strong closer" {
@@ -1262,8 +1537,8 @@ test "adjacent nonempty nested code spans close and reopen" {
     var renderer: Renderer = .{ .out = &output.writer };
     for ("**`a``b`**\n*`x``y`*\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[1m\x1b[0m\x1b[1m\x1b[4ma\x1b[0m\x1b[1m\x1b[0m\x1b[1m\x1b[4mb\x1b[0m\x1b[1m\x1b[0m\n" ++
-        "\x1b[3m\x1b[0m\x1b[3m\x1b[4mx\x1b[0m\x1b[3m\x1b[0m\x1b[3m\x1b[4my\x1b[0m\x1b[3m\x1b[0m\n", output.written());
+    try std.testing.expectEqualStrings("\x1b[1m\x1b[0m\x1b[1m\x1b[94ma\x1b[0m\x1b[1m\x1b[0m\x1b[1m\x1b[94mb\x1b[0m\x1b[1m\x1b[0m\n" ++
+        "\x1b[3m\x1b[0m\x1b[3m\x1b[94mx\x1b[0m\x1b[3m\x1b[0m\x1b[3m\x1b[94my\x1b[0m\x1b[3m\x1b[0m\n", output.written());
 }
 
 test "empty pair after nonempty nested code stays in the outer style" {
@@ -1272,35 +1547,35 @@ test "empty pair after nonempty nested code stays in the outer style" {
     var renderer: Renderer = .{ .out = &output.writer };
     for ("**`a```**\n*`b```*\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[1m\x1b[0m\x1b[1m\x1b[4ma\x1b[0m\x1b[1m``\x1b[0m\n" ++
-        "\x1b[3m\x1b[0m\x1b[3m\x1b[4mb\x1b[0m\x1b[3m``\x1b[0m\n", output.written());
+    try std.testing.expectEqualStrings("\x1b[1m\x1b[0m\x1b[1m\x1b[94ma\x1b[0m\x1b[1m``\x1b[0m\n" ++
+        "\x1b[3m\x1b[0m\x1b[3m\x1b[94mb\x1b[0m\x1b[3m``\x1b[0m\n", output.written());
 }
 
 test "indented fences render code without marker lines or reverse video" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var renderer: Renderer = .{ .out = &output.writer };
+    var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     for ("   ```sh\n  echo `hello`\n   ```\n`inline`\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("  echo `hello`\n\x1b[4minline\x1b[0m\n", output.written());
+    try std.testing.expectEqualStrings("\x1b[40m  echo `hello`\n\x1b[0m\x1b[94minline\x1b[0m\n", output.written());
 }
 
 test "closing fence at end of answer needs no final newline" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var renderer: Renderer = .{ .out = &output.writer };
+    var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     for ("   ```sh\n  echo hi\n   ```") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("  echo hi\n", output.written());
+    try std.testing.expectEqualStrings("\x1b[40m  echo hi\n\x1b[0m", output.written());
 }
 
 test "rendered content and unsupported fence syntax stay visible without a gutter" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var renderer: Renderer = .{ .out = &output.writer };
+    var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     for ("# Title\n```zig\n  call\n```\n```bad info\ntrailing `open\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[1mTitle\x1b[0m\n  call\n```bad info\ntrailing `open\n", output.written());
+    try std.testing.expectEqualStrings("\x1b[1mTitle\x1b[0m\n\x1b[40m  call\n\x1b[0m```bad info\ntrailing `open\n", output.written());
 }
 
 test "oversized fence candidate is literal and does not enter code state" {
@@ -1448,7 +1723,7 @@ fn expectRenderedHome(input: []const u8, expected: []const u8, home: []const u8)
         if (!windowEdge(input, split)) continue;
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
-        var renderer: Renderer = .{ .out = &output.writer, .home = home };
+        var renderer: Renderer = .{ .out = &output.writer, .home = home, .destination = .{ .viewport = .wcwidth } };
         try renderer.feed(input[0..split]);
         for (input[split..]) |byte| try renderer.feed(&.{byte});
         try renderer.finish();
@@ -1477,7 +1752,7 @@ test "a Markdown link shows its text as an OSC 8 link and hides its address" {
     try expectRendered("See [github.com](https://github.com/a/b).", "See " ++ comptime linked("https://github.com/a/b", "github.com") ++ ".");
     // How answers cite sources: the parentheses around the link stay.
     try expectRendered("Zig 0.17 ([ziglang.org](https://ziglang.org/download/))\n", "Zig 0.17 (" ++ comptime linked("https://ziglang.org/download/", "ziglang.org") ++ ")\n");
-    try expectRendered("[`main.zig`](https://x.dev/m) and [*a* b](http://y.dev/(1))", comptime linked("https://x.dev/m", "main.zig") ++ " and " ++
+    try expectRendered("[`main.zig`](https://x.dev/m) and [*a* b](http://y.dev/(1))", TerminalText.link_open ++ "https://x.dev/m" ++ TerminalText.link_end ++ "\x1b[4m\x1b[0m\x1b[4m\x1b[94mmain.zig\x1b[0m\x1b[4m\x1b[0m" ++ TerminalText.link_close ++ " and " ++
         TerminalText.link_open ++ "http://y.dev/(1)" ++ TerminalText.link_end ++ "\x1b[4m\x1b[0m\x1b[3m\x1b[4ma\x1b[0m\x1b[4m b\x1b[0m" ++ TerminalText.link_close);
     try expectRendered("# [Rui](https://r.dev)\n", "\x1b[1m" ++ TerminalText.link_open ++ "https://r.dev" ++ TerminalText.link_end ++ "\x1b[0m\x1b[1m\x1b[4mRui\x1b[0m\x1b[1m" ++ TerminalText.link_close ++ "\x1b[0m\n");
 }
@@ -1528,7 +1803,7 @@ test "text that is not a complete web link shows every byte as written" {
     // A control ends an address and stays visible.
     try expectRendered("[a](https://x\x1b)", "[a](" ++ comptime linked("https://x", "https://x") ++ "\\x1b)");
     // Code is never a link.
-    try expectRendered("`https://x.dev` ok", "\x1b[4mhttps://x.dev\x1b[0m ok");
+    try expectRendered("`https://x.dev` ok", "\x1b[94mhttps://x.dev\x1b[0m ok");
     // A bare address ends with its line.
     try expectRendered("[a](https://x\nnext", "[a](" ++ comptime linked("https://x", "https://x") ++ "\nnext");
 }
@@ -1570,7 +1845,7 @@ test "bare local paths are prose tokens not relative paths or Markdown targets" 
         "\\/tmp/a \\~/a",
     }) |input| try expectRenderedHome(input, input, "/home/test");
     try expectRenderedHome("~user/a;/tmp/b //host/~/b /tmp/ok;", "~user/a;/tmp/b //host/~/b " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";", "/home/test");
-    try expectRenderedHome("`~/a` *~/b* **/tmp/c**\n```\n/tmp/d ~/e\n```\n", "\x1b[4m~/a\x1b[0m \x1b[3m~/b\x1b[0m \x1b[1m/tmp/c\x1b[0m\n/tmp/d ~/e\n", "/home/test");
+    try expectRenderedHome("`~/a` *~/b* **/tmp/c**\n```\n/tmp/d ~/e\n```\n", "\x1b[94m~/a\x1b[0m \x1b[3m~/b\x1b[0m \x1b[1m/tmp/c\x1b[0m\n\x1b[40m/tmp/d ~/e\n\x1b[0m", "/home/test");
     try expectRendered("[a](https://x y)", "[a](" ++ comptime linked("https://x", "https://x") ++ " y)");
 }
 
@@ -1620,4 +1895,195 @@ test "local path filename suffixes survive trimming the sentence semicolon" {
 
 test "a lone slash or tilde slash is not a local path link" {
     try expectRenderedHome("/ ~/ /; ~/;", "/ ~/ /; ~/;", "/home/test");
+}
+
+test "tables buffer complete runs and retain every inline style at every feed split with and without colour" {
+    const input = "| **Heading** `name` *soft* [docs](https://x.dev) | 值 |\n" ++
+        "| --- | :-: |\n" ++
+        "| `retry.zig` **bold** *em* [link](https://example.test/a) | 雪 |\n" ++
+        "| short | abc |\n";
+    const expected = "  Heading name soft docs  值\n  retry.zig bold em link  雪\n  short" ++ @as([19]u8, @splat(' ')) ++ "abc\nafter\n";
+    for ([_]bool{ false, true }) |colour| for (0..input.len + 1) |split| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: Renderer = .{ .out = &output.writer, .colour = colour };
+        try renderer.feed(input[0..split]);
+        try renderer.feed(input[split..]);
+        try std.testing.expectEqualStrings("", output.written());
+        try renderer.feed("after\n");
+        try renderer.finish();
+        var shown = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer shown.deinit();
+        try visible(output.written(), &shown.writer);
+        try std.testing.expectEqualStrings(expected, shown.written());
+        try std.testing.expectEqual(colour, std.mem.indexOf(u8, output.written(), "\x1b[94m") != null);
+        try std.testing.expectEqual(colour, std.mem.indexOf(u8, output.written(), "\x1b[90m") != null);
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, output.written(), "\x1b[4m"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output.written(), "https://example.test/a"));
+        try std.testing.expect(std.mem.indexOf(u8, output.written(), "\x1b[1m") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output.written(), "\x1b[3m") != null);
+    };
+}
+
+test "tables at answer end align CJK and complete graphemes and isolate malformed cells" {
+    const cases = .{
+        .{ "| A | B |\n| --- | --- |\n| 雪 | x |\n| abc | y |", "  A    B\n  雪   x\n  abc  y" },
+        .{ "| e\u{301} | X |\n| --- | --- |\n| yy | Z |\n", "  e\u{301}   X\n  yy  Z\n" },
+        .{ "| A | B |\n| --- | --- |\n| `a|b` | c |\n| d | e |\n", "  A    B\n  a|b  c\n  d    e\n" },
+        .{ "| A | B |\n| --- | --- |\n| *open | **closed** | extra |\n| [bad | `ok` |", "  A      B\n  *open  closed  extra\n  [bad   ok" },
+        .{ "| **A** | *B* |\n| --- | --- |", "  A  B\n" },
+        .{ "| A | B |\n| --- | --- |\n| `open | **ok** |", "  A      B\n  `open  ok" },
+        // A complete separator, not a matching prefix; non-tables retain
+        // their existing inline prose behavior and all structural bytes.
+        .{ "| a | b |\n| --- nope | --- |\n", "| a | b |\n| --- nope | --- |\n" },
+        .{ "| a | b |\n| --- |\n", "| a | b |\n| --- |\n" },
+        .{ "| **a** |\n", "| a |\n" },
+    };
+    inline for (cases) |case| for ([_]bool{ false, true }) |colour| {
+        for ([_]gwidth.Method{ .wcwidth, .unicode, .no_zwj }) |method| {
+            for (0..case[0].len + 1) |split| {
+                var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+                defer output.deinit();
+                var renderer: Renderer = .{ .out = &output.writer, .colour = colour, .destination = .{ .viewport = method } };
+                try renderer.feed(case[0][0..split]);
+                try renderer.feed(case[0][split..]);
+                try renderer.finish();
+                var shown = std.Io.Writer.Allocating.init(std.testing.allocator);
+                defer shown.deinit();
+                try visible(output.written(), &shown.writer);
+                try std.testing.expectEqualStrings(case[1], shown.written());
+            }
+        }
+    };
+}
+
+test "table overflow replays every byte and stays literal until the first non-pipe line" {
+    const head = "| a | b |\n| --- | --- |\n| ";
+    const tail = " | `literal` |\n| **still literal** | x |\n";
+    for ([_]bool{ false, true }) |colour| for ([_]bool{ false, true }) |line_boundary| {
+        var input = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer input.deinit();
+        try input.writer.writeAll(head);
+        // Exercise both a bound crossing inside a cell and the next pipe
+        // after a table run that exactly fills the existing held buffer.
+        const payload = fence_limit - head.len - (if (line_boundary) @as(usize, 1) else 0);
+        try input.writer.splatByteAll('x', payload);
+        if (line_boundary) try input.writer.writeAll("\n| next ");
+        try input.writer.writeAll(tail);
+        const run = input.written().len;
+        try input.writer.writeAll("# after\n");
+        var expected = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer expected.deinit();
+        try expected.writer.writeAll(input.written()[0..run]);
+        try expected.writer.writeAll("\x1b[1mafter\x1b[0m\n");
+        for (0..input.written().len + 1) |split| {
+            if (!windowEdge(input.written(), split)) continue;
+            var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer output.deinit();
+            var renderer: Renderer = .{ .out = &output.writer, .colour = colour };
+            try renderer.feed(input.written()[0..split]);
+            try renderer.feed(input.written()[split..]);
+            try renderer.finish();
+            try std.testing.expectEqualStrings(expected.written(), output.written());
+        }
+    };
+}
+
+test "code foreground and complete fenced rows distinguish only links by underline without colour too" {
+    const input = "`name` **bold** *soft* [link](https://x.dev)\n```zig\nabc defghijklmnop\n\nz\n```\nafter\n";
+    for ([_]bool{ false, true }) |colour| for (0..input.len + 1) |split| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer, .colour = colour };
+        try renderer.feed(input[0..split]);
+        try renderer.feed(input[split..]);
+        try renderer.finish();
+        var shown = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer shown.deinit();
+        try visible(output.written(), &shown.writer);
+        try std.testing.expectEqualStrings(if (colour) "name bold soft link\nabc defghijklmnop\n\nz\nafter\n" else "name bold soft link\n  abc defghijklmnop\n  \n  z\nafter\n", shown.written());
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output.written(), "\x1b[4m"));
+        try std.testing.expectEqual(colour, std.mem.indexOf(u8, output.written(), "\x1b[94m") != null);
+        try std.testing.expectEqual(if (colour) @as(usize, 3) else 0, std.mem.count(u8, output.written(), "\x1b[40m"));
+        if (colour) try std.testing.expect(std.mem.indexOf(u8, output.written(), "\x1b[40m\n\x1b[0m") != null);
+    };
+}
+
+test "tables exactly at the held bound format but the next byte falls back without loss" {
+    const head = "| a |\n| --- |\n| ";
+    const tail = " |\n";
+    for ([_]usize{ fence_limit - 1, fence_limit, fence_limit + 1 }) |size| for ([_]bool{ false, true }) |colour| {
+        var input = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer input.deinit();
+        try input.writer.writeAll(head);
+        try input.writer.splatByteAll('x', size - head.len - tail.len);
+        try input.writer.writeAll(tail);
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: Renderer = .{ .out = &output.writer, .colour = colour };
+        for (input.written()) |byte| try renderer.feed(&.{byte});
+        try renderer.finish();
+        var shown = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer shown.deinit();
+        try visible(output.written(), &shown.writer);
+        if (size > fence_limit) {
+            try std.testing.expectEqualStrings(input.written(), shown.written());
+        } else {
+            var expected = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer expected.deinit();
+            try expected.writer.writeAll("  a\n  ");
+            try expected.writer.splatByteAll('x', size - head.len - tail.len);
+            try expected.writer.writeByte('\n');
+            try std.testing.expectEqualStrings(expected.written(), shown.written());
+        }
+    };
+}
+
+test "NO_COLOR keeps terminal escaping boundaries around hidden inline code syntax" {
+    for ([_]bool{ false, true }) |colour| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: Renderer = .{ .out = &output.writer, .colour = colour };
+        for ("\xe2`\x82`\xac") |byte| try renderer.feed(&.{byte});
+        try renderer.finish();
+        var shown = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer shown.deinit();
+        try visible(output.written(), &shown.writer);
+        try std.testing.expectEqualStrings("\\xe2\\x82\\xac", shown.written());
+    }
+}
+
+test "plain fenced code never emits a background with or without colour at every split" {
+    const long = @as([130]u8, @splat('x'));
+    const cases = .{
+        .{ "before\n```zig\nbody\n\n  indented\n```\nafter\n", "before\n  body\n  \n    indented\nafter\n" },
+        .{ "```\n" ++ long ++ "\n```", "  " ++ long ++ "\n" },
+        .{ "```sh\n\x1b[40mnot a marker\n```\n", "  \\x1b[40mnot a marker\n" },
+        .{ "```\n```\n", "" },
+    };
+    inline for (cases) |case| for ([_]bool{ false, true }) |colour| {
+        for (0..case[0].len + 1) |split| {
+            var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer output.deinit();
+            // This is the CLI's construction: terminal-safe by default,
+            // even when foreground colours are enabled on a light theme.
+            var renderer: Renderer = .{ .out = &output.writer, .colour = colour };
+            try renderer.feed(case[0][0..split]);
+            try renderer.feed(case[0][split..]);
+            try renderer.finish();
+            try std.testing.expectEqualStrings(case[1], output.written());
+            // Stronger than checking just SGR 40: no background escape of
+            // any kind (or other presentation control) may reach this sink.
+            try std.testing.expectEqual(@as(?usize, null), std.mem.indexOfScalar(u8, output.written(), 0x1b));
+        }
+    };
+}
+
+test "terminal table padding measures emitted safe text without viewport-only escapes" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var renderer: Renderer = .{ .out = &output.writer, .colour = false, .destination = .terminal };
+    try renderer.feed("| A | X |\n| --- | --- |\n| \u{200b} | X |\n| 雪 | X |\n| \x01 | X |\n");
+    try renderer.finish();
+    try std.testing.expectEqualStrings("  A     X\n  \u{200b}      X\n  雪    X\n  \\x01  X\n", output.written());
 }

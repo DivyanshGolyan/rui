@@ -37,7 +37,7 @@ pub const Outcome = union(enum) {
 
 const Reading = union(enum) {
     head,
-    body: reply.Body,
+    body: struct { kind: reply.Body, status: u16 },
     failed: u16,
 };
 
@@ -77,12 +77,38 @@ pub fn requestSent(self: *const Request) bool {
     return self.exchange.requestSent();
 }
 
+/// Borrow all response evidence, including status when its body was cut.
+pub fn answerEvidence(self: *const Request, extent: reply.Extent) reply.Answer {
+    return switch (self.reading) {
+        .head => unreachable,
+        .body => |body| .{ .bytes = self.answer.buffered(), .id = self.id, .status = body.status, .format = body.kind, .extent = extent },
+        .failed => |status| .{ .bytes = self.answer.buffered(), .id = self.id, .status = status, .format = null, .extent = extent },
+    };
+}
+
 pub fn advance(self: *Request) Error!Outcome {
+    return self.advanceInner() catch |err| {
+        // The classifier must inspect the retained JSON prefix even when it
+        // came with an HTTP error: it may already establish a JSON-RPC error.
+        if (err == error.AnswerTooLarge) return err;
+        return switch (self.reading) {
+            // Even a malformed/truncated error body cannot undo the HTTP answer.
+            .failed => |status| .{ .failed = .{ .status = status, .body = self.answer.buffered() } },
+            .body => |body| if (body.status >= 400)
+                .{ .failed = .{ .status = body.status, .body = self.answer.buffered() } }
+            else
+                return err,
+            .head => return err,
+        };
+    };
+}
+
+fn advanceInner(self: *Request) Error!Outcome {
     while (true) {
         switch (try self.exchange.advance()) {
             .waiting => return .waiting,
             .head => |head| self.reading = switch (reply.reading(head.status, head.field("Content-Type"))) {
-                .body => |body| .{ .body = body },
+                .body => |body| .{ .body = .{ .kind = body, .status = head.status } },
                 .failed => |status| .{ .failed = status },
             },
             .body => |bytes| if (try self.take(bytes)) |outcome| {
@@ -102,11 +128,14 @@ fn take(self: *Request, bytes: []const u8) Error!?Outcome {
             // Keep what fits: it is only the start of the server's words.
             const room = self.answer.unusedCapacityLen();
             self.answer.writeAll(bytes[0..@min(room, bytes.len)]) catch unreachable;
+            if (bytes.len > room) return error.AnswerTooLarge;
             return null;
         },
-        .body => |body| switch (body) {
+        .body => |body| switch (body.kind) {
             .json => {
-                self.answer.writeAll(bytes) catch return error.AnswerTooLarge;
+                const room = self.answer.unusedCapacityLen();
+                self.answer.writeAll(bytes[0..@min(room, bytes.len)]) catch unreachable;
+                if (bytes.len > room) return error.AnswerTooLarge;
                 return null;
             },
             .event_stream => {
@@ -129,7 +158,7 @@ fn ended(self: *Request) Error!Outcome {
     return switch (self.reading) {
         .head => unreachable,
         .failed => |status| .{ .failed = .{ .status = status, .body = self.answer.buffered() } },
-        .body => |body| switch (body) {
+        .body => |body| switch (body.kind) {
             .json => json: {
                 const message = try reply.readMessage(self.answer.buffered(), self.id);
                 // A body of only a notification answers nothing.
@@ -215,12 +244,19 @@ test "an error status with JSON carries the server's JSON-RPC error" {
     try std.testing.expectEqual(@as(i64, -32022), outcome.answered.rpc_error.code);
 }
 
-test "any other status keeps the start of the server's words" {
-    var script: Script = .{ .reply = "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\nbad token now" };
-    var buffer: [8]u8 = undefined;
-    const outcome = try run(&script, &buffer);
-    try std.testing.expectEqual(@as(u16, 401), outcome.failed.status);
-    try std.testing.expectEqualStrings("bad toke", outcome.failed.body);
+test "HTTP refusals keep body bytes and signal overflow" {
+    for ([_]usize{ 8, 16 }) |size| {
+        var script: Script = .{ .reply = "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\nbad token now" };
+        var buffer: [16]u8 = undefined;
+        if (size == 8) {
+            try std.testing.expectError(error.AnswerTooLarge, run(&script, buffer[0..size]));
+            try std.testing.expectEqualStrings("bad toke", buffer[0..size]);
+        } else {
+            const outcome = try run(&script, buffer[0..size]);
+            try std.testing.expectEqual(@as(u16, 401), outcome.failed.status);
+            try std.testing.expectEqualStrings("bad token now", outcome.failed.body);
+        }
+    }
 }
 
 test "an answer larger than the buffer is refused" {

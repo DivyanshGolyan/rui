@@ -67,7 +67,7 @@ def counts_by_mark():
                  **{name: (answer(name), held) for name, held in holds.items()}}
     with world("counts-marks", responses, active_capacity=2) as w, released(*holds.values()):
         with w.overview() as screen:
-            frame = screen.contains("No unarchived Sessions")
+            frame = screen.contains("+ New Session")
             assert counts(frame) == WORDMARK, frame
 
             asking = w.session("--label", "Asking", "--tools", "bash", "--permission-mode", "ask")
@@ -129,8 +129,8 @@ def view_name():
                 screen.keys(b"\r")
                 # The wordmark, no counts (nothing works, queues or failed),
                 # and the view's name on the right, after live memory.
-                frame = screen.wait(lambda f, name=name: re.fullmatch(rf"{WORDMARK}(?: {{2,}}{MEMORY.pattern})? {{2,}}{name}", top(f).rstrip())
-                                    and "Loading…" not in f, name)
+                frame = screen.wait(lambda f, name=name, view=view: re.fullmatch(rf"{WORDMARK}(?: {{2,}}{MEMORY.pattern})? {{2,}}{name}", top(f).rstrip())
+                                    and (view != "all" or "✓ Talk" in f), name)
                 assert ("Talk" in frame) == (view == "all"), frame
             screen.keys(b"/sessions unarchived")
             screen.contains("/sessions unarchived")
@@ -190,7 +190,7 @@ def memory():
     hold = threading.Event()
     with world("counts-memory", {"work": (answer("work"), hold)}) as w, released(hold):
         send(w, w.session("--label", "Work"), "work")
-        with w.overview(columns=100) as screen:
+        with w.overview(columns=99) as screen:
             screen.wait(lambda f: counts(f) == f"{WORDMARK}  ⠹ 1", "⠹ 1")
             frame = screen.wait(lambda f: re.search(rf"  {MEMORY.pattern}$", top(f).rstrip()), "rui N MB on the right")
             assert counts(frame) == f"{WORDMARK}  ⠹ 1", frame

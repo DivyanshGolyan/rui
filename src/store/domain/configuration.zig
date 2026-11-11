@@ -17,6 +17,7 @@ const provider_name = @import("../../provider_name.zig");
 const session_id = @import("../../session_id.zig");
 const content_custody = @import("../../content_custody.zig");
 const model_catalog = @import("../../model_catalog.zig");
+const model_facts = @import("model_facts.zig");
 const model_capability = @import("../../model_capability.zig");
 const product_defaults = @import("../../product_defaults.zig");
 const tool_defs = @import("../../tool_record.zig");
@@ -78,8 +79,22 @@ fn defaultProvider(routes: provider_route.Routes) ?provider_name.Provider {
 fn toolsRejection(host_tool_set: *const tool_defs.HostToolSet, provider: provider_name.Provider, tools: *const command_input.ToolsField) ?configuration_admission.Rejection {
     var names = tools.iterator();
     while (names.next()) |name| {
-        const index = host_tool_set.find(name) orelse return .unknown_tool;
+        const index = switch (host_tool_set.resolve(name)) {
+            .found => |index| index,
+            .unknown_tool => return .unknown_tool,
+            .mcp_server_unavailable => return .mcp_server_unavailable,
+        };
         if (host_tool_set.records[index].owner == .provider and !provider.runsTool(name)) return .provider_tool_missing;
+    }
+    return null;
+}
+
+/// Rejection codes are durable; this advisory detail describes the current
+/// Host's launch-only MCP configuration, also on replay. No Store read is needed.
+pub fn missingToolMessage(host_tool_set: *const tool_defs.HostToolSet, tools: *const command_input.ToolsField) ?tool_defs.HostToolSet.MissingTool {
+    var names = tools.iterator();
+    while (names.next()) |name| {
+        if (host_tool_set.resolve(name) != .found) return host_tool_set.missingTool(name);
     }
     return null;
 }
@@ -111,9 +126,9 @@ pub const CurrentConfiguration = struct {
     provider: provider_name.Provider = undefined,
     model: Bounded(model_capability.max_model_bytes) = .{},
     instructions_id: ?i64 = null,
-    /// The saved tool set; 0 until a creation saves its first.
+    /// Configured name intent; 0 until a creation saves its first.
     tool_set_id: u64 = 0,
-    /// Null means every configured tool is loaded.
+    /// Loaded name intent. Null means every configured name.
     loaded_tool_set_id: ?u64 = null,
     permission_mode: u8 = 0,
     output_schema_id: ?i64 = null,
@@ -192,6 +207,7 @@ fn tokenCount(text: []const u8, allow_zero: bool) !u64 {
 }
 
 pub fn configurationBeforeWorkspace(
+    selected_facts: []const model_catalog.Entry,
     host_tool_set: *const tool_defs.HostToolSet,
     current: ?*const CurrentConfiguration,
     requested: *const content_custody.Configuration,
@@ -214,7 +230,7 @@ pub fn configurationBeforeWorkspace(
     if (current == null and
         (requested.model.state != .value or requested.reasoning_effort.state == .omitted or
             requested.compaction_trigger.state != .value or requested.tools.state != .value or
-            requested.permission_mode.state != .value or (requestsBash(requested) and requested.workspace.state != .value) or
+            requested.permission_mode.state != .value or (requestsBash(requested) and requested.workspace.state != .value and requested.parent.state == .omitted) or
             (provider == null and default_provider == null)))
     {
         return .incomplete_initial_configuration;
@@ -228,7 +244,7 @@ pub fn configurationBeforeWorkspace(
     if (requested.tools.state == .value) if (toolsRejection(host_tool_set, provider orelse (if (current) |existing| existing.provider else default_provider.?), &requested.tools)) |rejection| return rejection;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     // D166: an unlisted model has no known window to enforce.
-    if (compact_at) |tokens| if (model_catalog.find(model_catalog.shipped, model)) |known| {
+    if (compact_at) |tokens| if (model_catalog.find(selected_facts, model)) |known| {
         if (known.context_window) |window| if (tokens > window) return .compact_at_too_large;
     };
     if (compact_at) |tokens| if (tokens > std.math.maxInt(i64)) return .invalid_compaction_trigger;
@@ -245,8 +261,8 @@ pub fn configurationBeforeWorkspace(
     // The codec cannot encode a boundary back to unspecified effort.
     if (requested.reasoning_effort.state == .explicit_null and retained_effort != null) return .unsupported_reasoning_effort;
     if (effort) |value| {
-        if (!model_capability.supportsReasoningEffort(model, value)) return .unsupported_reasoning_effort;
-    } else if (model_catalog.find(model_catalog.shipped, model)) |known| {
+        if (!model_capability.supportsReasoningEffort(selected_facts, model, value)) return .unsupported_reasoning_effort;
+    } else if (model_catalog.find(selected_facts, model)) |known| {
         if (known.efforts.count() != 0) return .unsupported_reasoning_effort;
     }
     return null;
@@ -333,7 +349,7 @@ pub fn planConfigurationUpdate(
 /// write round (`importSealed`). The
 /// decision is `applyConfiguration`; the write round saves the Session,
 /// the command and its revision, then commits.
-pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const content_custody.ConfigureCommand, preset: ?*const PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, allocator: std.mem.Allocator, faults: Faults) !ConfigureReply {
+pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const content_custody.ConfigureCommand, preset: ?*const PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, allocator: std.mem.Allocator, committed: ?Store.CreationCommitted, faults: Faults) !ConfigureReply {
     // The captured creation intent has no ID. Save its original digest
     // alongside the allocated target so a lost reply never creates twice.
     const command = request;
@@ -364,7 +380,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const conten
     if (preset) |decision| if (decision.rejection) |code| switch (code) {
         inline else => |tag| return saveConfigurationRejection(a, command, digest, @field(configuration_admission.Rejection, @tagName(tag)), faults),
     };
-    if (command.require_model and !servesProviderOf(served, &command.configuration, if (reads.found.get()) reads.next.provider else null)) {
+    if (command.require_model and !servesProviderOf(served, &command.configuration, if (reads.found.get()) reads.next.provider else if (reads.inherits_parent and reads.parent_found.get()) reads.inherited.provider else null)) {
         return saveConfigurationRejection(a, command, digest, .model_capability_unavailable, faults);
     }
     if (command.reload_skills) return reloadSkills(a, command, creating, reads, reload_capture, allocator, digest, faults);
@@ -376,6 +392,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const conten
     try queueConfiguredCommand(a, &applied, command.key.slice(), .configure, digest, applied.instructions_id, applied.output_schema_id, &reads.command_answer);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
+    if (creating) if (committed) |callback| store_core.created(a.store, callback, applied.session.slice());
     return .{ .accepted = .{ .replayed = false, .revision = applied.revision, .created = creating, .session = applied.session } };
 }
 
@@ -511,6 +528,81 @@ pub const Application = union(enum) {
     rejected: configuration_admission.Rejection,
 };
 
+/// Skills discovery already asks whether this key exists. Fold its inherited
+/// Workspace into that same read, rather than adding a parent preflight round.
+pub const creation_hint = rsql.Read(.{
+    .sql = "SELECT EXISTS(SELECT 1 FROM core_command WHERE command_key=?1) AS replay,coalesce((SELECT workspace FROM session WHERE session_ref=?2),'/') AS workspace",
+    .Args = struct { key: []const u8, parent: []const u8 },
+    .Row = struct { replay: bool, workspace: *Bounded(workspace_path.max_bytes) },
+    .cardinality = .optional,
+});
+
+/// Parent inheritance has one admission owner for start_agent and native create.
+/// Its ceiling is configured intent, not loaded intent or an Operation offer;
+/// the ordinary configuration validation still checks Host tool set availability.
+const parent_settings = rsql.Read(.{
+    .sql = "SELECT workspace,provider,coalesce(" ++ tool_set.namesSql("session.tool_set_id") ++ ",'') AS tools,permission_mode FROM session WHERE session_ref=?1 " ++
+        "AND NOT EXISTS(SELECT 1 FROM session_archive archived WHERE archived.session_ref=session.session_ref AND archived.command_key IS NOT NULL)",
+    .Args = struct { session: []const u8 },
+    .Row = struct { workspace: *Bounded(workspace_path.max_bytes), provider: provider_name.Provider, tools: *Bounded(tool_set.max_names_bytes), permission_mode: u8 },
+    .cardinality = .optional,
+});
+
+pub const ParentFailure = struct {
+    code: configuration_admission.Rejection,
+    tool: ?[]const u8 = null,
+
+    /// Same diagnostic at both doors; only the final effect differs.
+    pub fn text(failure: ParentFailure, buffer: []u8, comptime effect: []const u8) []const u8 {
+        return switch (failure.code) {
+            .tools_not_in_parent => std.fmt.bufPrint(buffer, "spec.tools: {s} is not one of your tools. Nothing was " ++ effect ++ ".", .{failure.tool.?}) catch unreachable,
+            .permission_mode_wider_than_parent => "spec.permissionMode: you ask before running commands, so your agents ask too. Nothing was " ++ effect ++ ".",
+            .parent_provider_forbidden => "spec.provider: an agent always uses your provider",
+            .parent_workspace_forbidden => "spec.workspace: an agent always works in your Workspace",
+            else => unreachable,
+        };
+    }
+};
+
+fn prepareParent(a: anytype, reference: []const u8, reads: *ConfigurationReads) void {
+    reads.inherits_parent = true;
+    reads.inherited = .{ .workspace = &reads.next.workspace, .provider = undefined, .tools = &reads.saved_tools.names, .permission_mode = undefined };
+    a.readInto(parent_settings, .{ .session = reference }, &reads.inherited, &reads.parent_found);
+}
+
+/// Consumes the parent read from the existing first round, without a query or
+/// a second path-sized configuration. Nothing is silently intersected.
+pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) !?configuration_admission.Rejection {
+    if (!reads.inherits_parent) return null;
+    if (!reads.parent_found.get()) return .unknown_session;
+    if (reads.parent_checked) return if (reads.parent_failure) |failure| failure.code else null;
+    const failure: ?ParentFailure = refusal: {
+        if (configuration.workspace.state != .omitted) break :refusal .{ .code = .parent_workspace_forbidden };
+        if (configuration.provider.state != .omitted) break :refusal .{ .code = .parent_provider_forbidden };
+        // Missing tool names keep the same refusal at both child doors,
+        // before narrowing known tools against the parent's saved selection.
+        if (toolsRejection(host_tool_set, reads.inherited.provider, &configuration.tools)) |code| return code;
+        var requested = configuration.tools.iterator();
+        while (requested.next()) |name| {
+            var allowed = std.mem.splitScalar(u8, reads.inherited.tools.slice(), ',');
+            while (allowed.next()) |member| {
+                if (std.mem.eql(u8, name, member)) break;
+            } else break :refusal .{ .code = .tools_not_in_parent, .tool = name };
+        }
+        if (try permissionMode(reads.inherited.permission_mode) == .ask and
+            configuration.permission_mode.state == .value and !configuration.permission_mode.value.eql("ask"))
+            break :refusal .{ .code = .permission_mode_wider_than_parent };
+        break :refusal null;
+    };
+    reads.parent_checked = true;
+    reads.parent_failure = failure;
+    if (failure) |refused| return refused.code;
+    reads.next.provider = reads.inherited.provider;
+    reads.workspace_digest = store_core.workspaceDigest(reads.next.workspace.slice());
+    if (reads.attach_parent) reads.parent = configuration.parent.value.slice()[0..session_id.bytes].*;
+    return null;
+}
+
 /// What `prepareConfiguration` reads in a round, and where the round
 /// leaves it; its owner keeps it until the transaction ends. Declared with
 /// a literal that names `next`'s big fields' lengths, so their bytes stay
@@ -552,6 +644,12 @@ pub const ConfigurationReads = struct {
     saved_loaded: command_input.ToolsField = undefined,
     /// The Session a creation starts as the child of, when it has one.
     parent: ?[session_id.bytes]u8 = null,
+    inherits_parent: bool = false,
+    attach_parent: bool = true,
+    inherited: parent_settings.Row = undefined,
+    parent_found: store_access.Found = .missing,
+    parent_checked: bool = false,
+    parent_failure: ?ParentFailure = null,
 
     /// The value the instructions import through: the requested content,
     /// or the empty default a creation imports.
@@ -713,6 +811,7 @@ fn newReference(io: std.Io, reference: *[session_id.bytes]u8) !void {
 pub fn prepareConfiguration(a: anytype, session: []const u8, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) void {
     const creating = session.len == 0;
     if (!creating) readSaved(a, session, &reads.next, &reads.found);
+    if (creating and configuration.parent.state == .value) prepareParent(a, configuration.parent.value.slice(), reads);
     if (creating or configuration.tools.state == .value) {
         reads.tools = .of(a.store.hostTools().host_tool_set, requestedNames(configuration));
         if (reads.tools) |*tools| tool_set.lookupSelection(a, tools);
@@ -877,8 +976,13 @@ pub fn validateConfiguration(
     }
     if (reads.found.get()) try checkSaved(next);
     const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
-    const default_provider = defaultProvider(a.store.served);
-    if (configurationBeforeWorkspace(a.store.hostTools().host_tool_set, current_configuration, configuration, default_provider)) |rejection| {
+    if (!creating and configuration.parent.state != .omitted) return .{ .rejected = .parent_on_update };
+    if (creating) if (try inheritParent(a.store.hostTools().host_tool_set, configuration, reads)) |code| return .{ .rejected = code };
+    const default_provider = if (reads.inherits_parent) reads.next.provider else defaultProvider(a.store.served);
+    var selected: model_facts.Model = .{};
+    selected.read(a, if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice());
+    try a.run();
+    if (configurationBeforeWorkspace(selected.facts(), a.store.hostTools().host_tool_set, current_configuration, configuration, default_provider)) |rejection| {
         return .{ .rejected = rejection };
     }
 
@@ -889,7 +993,11 @@ pub fn validateConfiguration(
     };
     // An existing Session's Workspace is only compared, in sameWorkspace's
     // own frame; a created one's was canonicalized into `next`.
-    const workspace_matches: ?bool = if (creating and configuration.workspace.state != .value) unused: {
+    const workspace_matches: ?bool = if (creating and reads.inherits_parent) inherited: {
+        validateWorkspace(io, next.workspace.slice(), &next.workspace) catch return .{ .rejected = .invalid_workspace };
+        reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
+        break :inherited null;
+    } else if (creating and configuration.workspace.state != .value) unused: {
         saveUnusedWorkspace(configuration, next, reads);
         break :unused null;
     } else if (configuration.workspace.state == .value) matches: {
@@ -1037,7 +1145,9 @@ fn saveConfigurationRejectionWithFailure(
     failure: ?skills_domain.Failure,
     faults: Faults,
 ) !ConfigureReply {
-    const outcome_id = if (failure) |diagnostic| try skills_domain.importFailure(a, diagnostic.bytes, faults) else null;
+    var parent_buffer: [256]u8 = undefined;
+    const parent_failure = a.store.configurationReads().parent_failure;
+    const outcome_id = if (failure) |diagnostic| try skills_domain.importFailure(a, diagnostic.bytes, faults) else if (parent_failure) |diagnostic| try skills_domain.importFailure(a, diagnostic.text(&parent_buffer, "created"), faults) else null;
     var answer = StoredAnswer{ .accepted = false };
     try answer.code.set(@tagName(code));
     try command_domain.queueCommand(a, command.key.slice(), .configure, command.session.slice(), digest, outcome_id, null, &answer);
@@ -1164,6 +1274,7 @@ test "Session settings changed detects each mutable value without comparing boun
     try current.label.?.set("label");
     const before = Settings.of(&current);
     inline for (.{
+        session_field.SessionField.model,
         session_field.SessionField.instructions,
         session_field.SessionField.tools,
         session_field.SessionField.loaded_tools,
@@ -1176,6 +1287,7 @@ test "Session settings changed detects each mutable value without comparing boun
     }) |field| {
         var next = current;
         switch (field) {
+            .model => try next.model.set("gpt-5.5"),
             .instructions => next.instructions_id = 1,
             .tools => next.tool_set_id = 2,
             .loaded_tools => next.loaded_tool_set_id = 1,

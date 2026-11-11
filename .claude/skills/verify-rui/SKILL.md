@@ -61,7 +61,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
 $V frames FULLSHA [--scenario FILE] [--only NAME,...] [--sizes 140x40,46x30] [--out DIR] [--no-png] [--keep]
 ```
 
-Renders the named states in `scripts/frames.json` to text, ANSI, HTML and 2× PNG using realistic fixture answers and private tmux windows, without a screen library. Prints `RUN/evidence/frames/` (or `--out`), with ordered `index.html` and `frames.json` results; cleans up unless `--keep`. Requires tmux and Node/Playwright/Chromium unless `--no-png`. See [scenario format and selection](features/frames.md). These are L2 layout captures, not physical-input proof.
+Renders the named states in `scripts/frames.json` to text, ANSI, HTML and 2× PNG using realistic fixture answers and private tmux windows, without a screen library. Prints `RUN/evidence/frames/` (or `--out`), with ordered `index.html` and `frames.json` results; cleans up unless `--keep`. Requires tmux and Node/Playwright/Chromium unless `--no-png`. See [scenario format and selection](features/frames.md). These are L2 layout captures, not physical-input proof. State `expect` markers must be present and optional `absent: ["TEXT", ...]` markers must be absent from every saved capture at every size.
 
 ## Doctor
 
@@ -120,6 +120,7 @@ Fixture policy, chosen by the latest user text:
 - `slow`: the answer streams for about 10 s.
 - `rate limit`: HTTP 429 with `Retry-After: 8` the first time that text arrives, then an echo. The Session retries for 8 s.
 - `invalid output`: a stream that is not JSON, so the Turn fails.
+- `compact rich answer`: a short markdown answer that fits a heading, inline code, a fenced block (including a blank and wrapped row), table and link in both frame sizes; used by `markdown`, `day-chat` and `no-color`.
 - `rich answer`: a markdown answer with a heading, list, code block, table and link, in both answer modes.
 - `long answer`: the fourteen-step Host explanation, in both answer modes.
 - Anything else: an exact echo by default, or believable prose with `--answers realistic`. Tool summaries follow the same answer-mode choice.

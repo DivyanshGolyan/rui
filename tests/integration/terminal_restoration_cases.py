@@ -1044,16 +1044,20 @@ def consent_boundary_cases(state):
             human.action_ready(read_ready, master)
             before = set(records.glob("*.json"))
             if case == "paste":
-                # A paste, even one holding an Enter, is never a decision.
-                os.write(master, b"\x1b[200~\r\x1b[201~")
-                human.settle_screen(master, quiet=0.5)
-                assert set(records.glob("*.json")) == before, "paste at the card captured a decision"
-                assert not (root / "effect").exists(), "paste at the card ran Bash"
+                # A paste, even one holding an Enter, edits the draft but
+                # never decides. Esc must restore the choice before Deny.
+                human.keyed_frame(master, b"\x1b[200~pasted\r\ntext\x1b[201~",
+                    lambda screen, x, y: " › pasted" in screen and "   text" in screen and human.CHOICE not in screen)
+                assert set(records.glob("*.json")) == before, "paste at the choice captured a decision"
+                assert not (root / "effect").exists(), "paste at the choice ran Bash"
+                human.keyed_frame(master, b"\x1b",
+                    lambda screen, x, y: human.highlighted(human.terminal_capture(master)) == "Allow once")
+                human.pick_deny(master)
             if case == "cancel":
                 os.write(master, b"\x03")
             else:
-                os.write(master, human.ALLOW if case == "allow" else b"\x1b[C" + human.ALLOW)
-                human.read_terminal(master, "Allowed." if case == "allow" else "■ Write consent effect marker — Denied")
+                os.write(master, human.ALLOW)
+                human.read_terminal(master, "Allowed." if case == "allow" else "■ Write consent effect marker · denied")
                 assert len(set(records.glob("*.json")) - before) == 1, "the fresh choice was not captured once"
                 os.write(master, b"\x03")
             output, errors = human.terminal_exit(caller, master)
