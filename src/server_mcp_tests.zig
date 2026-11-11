@@ -13,7 +13,7 @@ const poll = @import("test_poll");
 // Compose the fixture with the canonical built-ins so a new core tool cannot
 // make every MCP Host test fail before it reaches the runner.
 const records = blk: {
-    var out = tools.built_in.records[0..tools.built_in.records.len].* ++ [_]tools.Record{
+    var out = tools.built_in_tool_set.records[0..tools.built_in_tool_set.records.len].* ++ [_]tools.Record{
         .{ .name = "fetch_other", .owner = .mcp, .server = "other", .description = "Fetch elsewhere.", .input_schema = "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}" },
         .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}" },
     };
@@ -30,7 +30,7 @@ const digests = blk: {
     for (&records, &out) |*record, *digest| digest.* = tools.recordDigest(record);
     break :blk out;
 };
-const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
+const catalog: tools.HostToolSet = .{ .records = &records, .digests = &digests };
 const reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"page payload\"}]}}");
 const arguments = "{\"q\":\"first\",\"rui_call_description\":\"Read docs\",\"unexpected\":\"must not leave Host\"}";
 const second_arguments = "{\"q\":\"second\",\"rui_call_description\":\"Read next\"}";
@@ -70,7 +70,7 @@ fn run(case: Case) !void {
     defer tmp.cleanup();
     const storage = try allocator.create(store.Store);
     defer allocator.destroy(storage);
-    try store.testingStoreWith(&.{ .engine = .sqlite }, storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+    try store.testingStoreWith(&.{ .engine = .sqlite }, storage, &tmp, std.testing.io, .{ .host_tool_set = &catalog });
     defer storage.close() catch unreachable;
     const workspace_buffer = try allocator.create([protocol.max_workspace_bytes]u8);
     defer allocator.destroy(workspace_buffer);

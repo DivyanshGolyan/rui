@@ -171,11 +171,11 @@ test "find_tools caps eight sorted matches skips loaded and out of set and rolls
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             const alloc = arena.allocator();
-            const records = try alloc.alloc(tools.Record, tools.built_in.records.len + 12);
-            @memcpy(records[0..tools.built_in.records.len], tools.built_in.records);
+            const records = try alloc.alloc(tools.Record, tools.built_in_tool_set.records.len + 12);
+            @memcpy(records[0..tools.built_in_tool_set.records.len], tools.built_in_tool_set.records);
             var names: [12][]const u8 = undefined;
             names[0] = "find_tools";
-            for (records[tools.built_in.records.len..], 0..) |*record, index| {
+            for (records[tools.built_in_tool_set.records.len..], 0..) |*record, index| {
                 const name = try std.fmt.allocPrint(alloc, "match_{d:0>2}", .{index});
                 record.* = .{ .name = name, .owner = .mcp, .server = "test", .description = "MATCH first line\nNot part of the preview.", .input_schema = "{}" };
                 if (index < 11) names[index + 1] = name;
@@ -187,11 +187,11 @@ test "find_tools caps eight sorted matches skips loaded and out of set and rolls
             }.less);
             const digests = try alloc.alloc([32]u8, records.len);
             for (records, digests) |*record, *digest| digest.* = tools.recordDigest(record);
-            const catalog: tools.Catalog = .{ .records = records, .digests = digests };
-            try storage.saveCatalog(&catalog);
+            const catalog: tools.HostToolSet = .{ .records = records, .digests = digests };
+            try storage.saveHostToolSet(&catalog);
             const session = try configure(&storage, "find-cap", &names, &.{ "find_tools", "match_00" });
             // Today's catalog no longer has the descriptions used by this Session.
-            try storage.saveCatalog(&tools.built_in);
+            try storage.saveHostToolSet(&tools.built_in_tool_set);
             try testing.submitTestMessage(&storage, &tmp, "find-cap-input", "find-cap-input", session.slice(), "find tools");
             const input = try call(&storage, &tmp, session.slice(), "{\"words\":\"match\"}", "find-cap-call", alloc);
             try std.testing.expectError(error.InjectedCommitFailure, loader.run(&storage, alloc, &input, .{ .before_commit = true }));
@@ -244,9 +244,9 @@ test "find_tools searches saved descriptions across MySQL chunk boundaries with 
             // A NUL and non-ASCII letters do not stop or broaden ASCII folding.
             description[chunk_bytes + 10] = 0;
             @memcpy(description[chunk_bytes + 11 ..][0..5], "CAFÉ");
-            var records: [tools.built_in.records.len + 1]tools.Record = undefined;
-            @memcpy(records[0..tools.built_in.records.len], tools.built_in.records);
-            records[tools.built_in.records.len] = .{ .name = "probe", .owner = .mcp, .server = "test", .description = description, .input_schema = "{}" };
+            var records: [tools.built_in_tool_set.records.len + 1]tools.Record = undefined;
+            @memcpy(records[0..tools.built_in_tool_set.records.len], tools.built_in_tool_set.records);
+            records[tools.built_in_tool_set.records.len] = .{ .name = "probe", .owner = .mcp, .server = "test", .description = description, .input_schema = "{}" };
             std.mem.sort(tools.Record, &records, {}, struct {
                 fn less(_: void, a: tools.Record, b: tools.Record) bool {
                     return std.mem.lessThan(u8, a.name, b.name);
@@ -254,8 +254,8 @@ test "find_tools searches saved descriptions across MySQL chunk boundaries with 
             }.less);
             var digests: [records.len][32]u8 = undefined;
             for (&records, &digests) |*record, *digest| digest.* = tools.recordDigest(record);
-            const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
-            try storage.saveCatalog(&catalog);
+            const catalog: tools.HostToolSet = .{ .records = &records, .digests = &digests };
+            try storage.saveHostToolSet(&catalog);
             const cases = [_]struct { words: []const u8, match: bool }{
                 .{ .words = "boundary", .match = true },
                 .{ .words = &@as([64]u8, @splat('x')), .match = true },

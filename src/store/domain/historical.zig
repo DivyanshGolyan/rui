@@ -10,7 +10,7 @@ const session_id = @import("../../session_id.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const model_capability = @import("../../model_capability.zig");
 const provider_name = @import("../../provider_name.zig");
-const tool_catalog = @import("../../tool_record.zig");
+const tool_defs = @import("../../tool_record.zig");
 const output_format = @import("../../output_format.zig");
 const prefix_seal = @import("../../prefix_seal.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
@@ -91,8 +91,8 @@ pub const HistoricalSettings = struct {
 /// One tool record the frozen settings offer, as saved: its texts are
 /// rendered from the Store, never from the Host's built-ins.
 pub const HistoricalTool = struct {
-    name: Bounded(tool_catalog.max_name_bytes) = .{},
-    owner: tool_catalog.Owner = undefined,
+    name: Bounded(tool_defs.max_name_bytes) = .{},
+    owner: tool_defs.Owner = undefined,
     description: HistoricalContent = undefined,
     input_schema: HistoricalContent = undefined,
 };
@@ -637,8 +637,8 @@ const tool_texts = "JOIN content description ON description.content_id=tool.desc
 
 const ToolRow = struct {
     ordinal: u64,
-    name: Bounded(tool_catalog.max_name_bytes),
-    owner: tool_catalog.Owner,
+    name: Bounded(tool_defs.max_name_bytes),
+    owner: tool_defs.Owner,
     description_content_id: rsql.Positive,
     description_length: u64,
     description_digest: [32]u8,
@@ -702,7 +702,7 @@ const historical_provider_tool = rsql.Read(.{
     .sql = "SELECT member.ordinal,tool.name FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE member.tool_set_id=?1 AND member.ordinal>=?2 AND tool.owner='provider' ORDER BY member.ordinal LIMIT 1",
     .Args = struct { set: u64, ordinal: u64 },
-    .Row = struct { ordinal: u64, name: *Bounded(tool_catalog.max_name_bytes) },
+    .Row = struct { ordinal: u64, name: *Bounded(tool_defs.max_name_bytes) },
     .cardinality = .optional,
 });
 
@@ -819,7 +819,7 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
         try sources.finish();
     }
     page.keep(.batch, row.instructions_content_id, &row.instructions_bytes);
-    if (row.member_count > tool_catalog.max_tools or row.provider_count > row.member_count) return error.CorruptStore;
+    if (row.member_count > tool_defs.max_tools or row.provider_count > row.member_count) return error.CorruptStore;
     view.tool_set_id = row.tool_set_id.get();
     view.tool_count = row.member_count;
     view.provider_tool_count = row.provider_count;
@@ -1631,8 +1631,8 @@ const Page = struct {
     /// A tool row without its texts' bytes.
     const Tool = struct {
         ordinal: u64,
-        name: Bounded(tool_catalog.max_name_bytes),
-        owner: tool_catalog.Owner,
+        name: Bounded(tool_defs.max_name_bytes),
+        owner: tool_defs.Owner,
         description_content_id: rsql.Positive,
         description_length: u64,
         description_digest: [32]u8,

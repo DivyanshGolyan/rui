@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const platform = @import("../store_path.zig");
-const tool_catalog = @import("../tools.zig");
+const tool_defs = @import("../tools.zig");
 const named_scratch = @import("../named_scratch.zig");
 const protocol = @import("../protocol.zig");
 const wire_request = @import("../wire_request.zig");
@@ -30,36 +30,36 @@ pub const OutputMetadataWriter = output_format.OutputMetadataWriter;
 pub const offeredSetSql = @import("domain/tool_set.zig").offeredSetSql;
 
 /// Compose fixture records with the canonical required runners.
-pub fn catalogRecordsWith(comptime extra: []const tool_catalog.Record) [tool_catalog.built_in.records.len + extra.len]tool_catalog.Record {
-    var records: [tool_catalog.built_in.records.len + extra.len]tool_catalog.Record = undefined;
-    @memcpy(records[0..tool_catalog.built_in.records.len], tool_catalog.built_in.records);
-    @memcpy(records[tool_catalog.built_in.records.len..], extra);
-    sortCatalogRecords(&records);
+pub fn hostToolRecordsWith(comptime extra: []const tool_defs.Record) [tool_defs.built_in_tool_set.records.len + extra.len]tool_defs.Record {
+    var records: [tool_defs.built_in_tool_set.records.len + extra.len]tool_defs.Record = undefined;
+    @memcpy(records[0..tool_defs.built_in_tool_set.records.len], tool_defs.built_in_tool_set.records);
+    @memcpy(records[tool_defs.built_in_tool_set.records.len..], extra);
+    sortHostToolRecords(&records);
     return records;
 }
 
-pub fn sortCatalogRecords(records: []tool_catalog.Record) void {
-    std.mem.sort(tool_catalog.Record, records, {}, struct {
-        fn lessThan(_: void, left: tool_catalog.Record, right: tool_catalog.Record) bool {
+pub fn sortHostToolRecords(records: []tool_defs.Record) void {
+    std.mem.sort(tool_defs.Record, records, {}, struct {
+        fn lessThan(_: void, left: tool_defs.Record, right: tool_defs.Record) bool {
             return std.mem.lessThan(u8, left.name, right.name);
         }
     }.lessThan);
 }
 
-pub fn testingStoreCatalog(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, catalog: ?*const tool_catalog.Catalog) !void {
+pub fn testingStoreToolSet(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, host_tool_set: ?*const tool_defs.HostToolSet) !void {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(io, &root_buffer);
     const root = root_buffer[0..root_length];
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
-    return storage.openWithOptions(io, database, root, .{ .catalog = catalog });
+    return storage.openWithOptions(io, database, root, .{ .host_tool_set = host_tool_set });
 }
 
 pub fn testingSqliteStore(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io) !void {
     return openSqlite(storage, tmp, io, .{});
 }
 
-/// Opens the SQLite Store in `tmp`. A new Store with the default catalog and
+/// Opens the SQLite Store in `tmp`. A new Store with the default tool set and
 /// providers starts as a copy of one built once per process, with its own
 /// selector and Store id: building one runs the whole schema bootstrap,
 /// about five times the cost of writing and reopening a copy.
@@ -70,13 +70,13 @@ fn openSqlite(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: Te
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
     const selector = options.identity orelse root;
-    const default = options.catalog == &tool_catalog.built_in and
+    const default = options.host_tool_set == &tool_defs.built_in_tool_set and
         std.meta.eql(options.served, (TestingStoreOptions{}).served);
     if (default) if (tmp.dir.statFile(io, "store.sqlite3", .{})) |_| {} else |err| switch (err) {
         error.FileNotFound => try copyTemplate(tmp, io, database, selector),
         else => return err,
     };
-    return storage.openWithOptions(io, database, selector, .{ .served = options.served, .catalog = options.catalog }) catch |err| {
+    return storage.openWithOptions(io, database, selector, .{ .served = options.served, .host_tool_set = options.host_tool_set }) catch |err| {
         std.debug.print("testing Store open failed: {s}\n", .{@errorName(err)});
         return err;
     };
@@ -205,7 +205,7 @@ pub fn testingStore(case: *const Case, storage: *Store, tmp: *std.testing.TmpDir
 /// How `testingStoreWith` opens a Store beyond `testingStore`'s defaults.
 pub const TestingStoreOptions = struct {
     /// The tools the Host offers.
-    catalog: *const tool_catalog.Catalog = &tool_catalog.built_in,
+    host_tool_set: *const tool_defs.HostToolSet = &tool_defs.built_in_tool_set,
     /// The canonical identity the Store is opened under, when not `tmp`'s
     /// real path.
     identity: ?[]const u8 = null,

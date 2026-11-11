@@ -140,7 +140,7 @@ pub fn open(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: test
     };
     const name = std.mem.sliceTo(&name_buffer, 0);
     const config = (try dialect.rootConfig()).?;
-    try storage.openMysql(io, .{ .address = .{ .unix_socket = config.socket }, .user = "rui_conformance", .password = "rui_conformance", .database = name }, options.identity orelse path, .{ .served = options.served, .catalog = options.catalog });
+    try storage.openMysql(io, .{ .address = .{ .unix_socket = config.socket }, .user = "rui_conformance", .password = "rui_conformance", .database = name }, options.identity orelse path, .{ .served = options.served, .host_tool_set = options.host_tool_set });
     storage.engine.mysql.state.testing_database = name_buffer;
 }
 

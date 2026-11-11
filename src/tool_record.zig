@@ -1,4 +1,4 @@
-//! Persisted tool records, their identities and built-in catalog.
+//! Persisted tool records, their identities and built-in tool set.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const built_in_tool = @import("built_in_tool.zig");
@@ -174,13 +174,13 @@ fn hashField(hash: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
 /// Session's tool names resolve against. The Store saves it as one set
 /// when it opens, and a Session's set takes its members from that one.
 /// Today the built-ins; MCP tools join it at Host start (M3a).
-pub const Catalog = struct {
+pub const HostToolSet = struct {
     records: []const Record,
     /// Each record's `recordDigest`, in the same order.
     digests: []const [32]u8,
 
     /// The index of the record named `name`.
-    pub fn find(self: *const Catalog, name: []const u8) ?usize {
+    pub fn find(self: *const HostToolSet, name: []const u8) ?usize {
         var low: usize = 0;
         var high = self.records.len;
         while (low < high) {
@@ -196,8 +196,8 @@ pub const Catalog = struct {
 
     /// Whether the records are sorted by name, each named once, and each
     /// digest is its record's.
-    pub fn valid(self: *const Catalog) bool {
-        if (self.records.len != self.digests.len or self.records.len > max_catalog_records) return false;
+    pub fn valid(self: *const HostToolSet) bool {
+        if (self.records.len != self.digests.len or self.records.len > max_host_tool_records) return false;
         for (self.records, self.digests, 0..) |*each, digest, index| {
             if (!tool_name.valid(each.name) or !validServer(each)) return false;
             if (index != 0 and std.mem.order(u8, self.records[index - 1].name, each.name) != .lt) return false;
@@ -213,8 +213,8 @@ pub fn validServer(each: *const Record) bool {
     return if (each.owner == .mcp) tool_name.valid(each.server) else each.server.len == 0 and !each.read_only;
 }
 
-/// The most records a Host's catalog holds; its saved set holds as many.
-pub const max_catalog_records = 1024;
+/// The most records a Host tool set holds; its saved set holds as many.
+pub const max_host_tool_records = 1024;
 
 pub const bash_record: Record = .{
     .name = "bash",
@@ -343,8 +343,8 @@ pub fn record(tool: Tool) *const Record {
     return built_in_rows.get(tool).record;
 }
 
-/// The built-ins, as the catalog of a Host with no other tools.
-pub const built_in: Catalog = .{ .records = &built_in_records, .digests = &built_in_digests };
+/// The built-ins, as the tool set of a Host with no other tools.
+pub const built_in_tool_set: HostToolSet = .{ .records = &built_in_records, .digests = &built_in_digests };
 
 const built_in_records = blk: {
     var out: [std.enums.values(Tool).len]Record = undefined;
@@ -359,11 +359,11 @@ const built_in_digests = blk: {
     break :blk out;
 };
 
-test "the built-in catalog is valid and finds each built-in by name" {
-    try std.testing.expect(built_in.valid());
-    for (std.enums.values(Tool), 0..) |tool, index| try std.testing.expectEqual(@as(?usize, index), built_in.find(@tagName(tool)));
-    try std.testing.expectEqual(@as(?usize, null), built_in.find("bas"));
-    try std.testing.expectEqual(@as(?usize, null), built_in.find("edit"));
+test "the built-in tool set is valid and finds each built-in by name" {
+    try std.testing.expect(built_in_tool_set.valid());
+    for (std.enums.values(Tool), 0..) |tool, index| try std.testing.expectEqual(@as(?usize, index), built_in_tool_set.find(@tagName(tool)));
+    try std.testing.expectEqual(@as(?usize, null), built_in_tool_set.find("bas"));
+    try std.testing.expectEqual(@as(?usize, null), built_in_tool_set.find("edit"));
 }
 
 comptime {

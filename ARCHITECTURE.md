@@ -1406,7 +1406,7 @@ Rui runs no DDL on MySQL (D203).
 `rui store schema --engine mysql` prints this build's canonical `schema.ddl(.mysql)` as one SQL file for the DB team to apply to an empty database.
 With `--from N` it instead prints every forward MySQL migration from format N to this build's format, oldest first (D223); the current format prints empty stdout successfully, and formats outside the migration baseline through the current format are usage errors naming that range, with no stdout.
 The composed migration finishes with one update of the saved format and wire version to this build's values; individual steps remain `schema.mysqlMigration(from)`, and this command never applies the SQL.
-The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
+The step to 52 lets tool records name an MCP server and keeps the Host tool set (T1e).
 The step to 53 records a Session's parent (D27).
 The step to 54 records the stops and ending Messages an attached child owes (D38, D39), ancestor feed forwarding in `session_forward` (D135, D180), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
 On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
@@ -1417,6 +1417,7 @@ The step to 58 moves saved wire 9 metadata to wire 10 for nullable failed-send p
 The step to 59 adds immutable skill catalog metadata and its ordinary turnless instruction provenance, retaining unreleased wire 10 without rewriting earlier Conversation content.
 The step to 60 adds `message_skill` and the Conversation's skill entries (kind 4, naming their `message_skill` row), rebuilding `conversation_entry` on both engines, and moves Store wire metadata to 11; earlier rows are unchanged.
 The step to 61 widens saved call descriptions on `model_tool_call` and `model_output_item` to 200 UTF-8 bytes on both engines; existing rows need no rewrite.
+The step to 63 renames `host_catalog` to `host_tool_set` and `action_operation.bash_timeout_ms` to `attempt_timeout_ms`, without changing their contents.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
