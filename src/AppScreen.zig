@@ -241,3 +241,90 @@ test "App screens render the same cells as the original composition" {
     // narrow and wide terminals. Hash visible graphemes, widths and styles.
     try std.testing.expectEqual(@as(u64, 13927979314281808809), hash.final());
 }
+
+test "App screens update layout state through exhausted resizes for every optional row combination" {
+    const GroupedList = @import("GroupedList.zig");
+    const Row = struct {
+        text: vxfw.Text,
+        calls: usize = 0,
+        max: vxfw.Size = .{},
+
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .drawFn = draw };
+        }
+
+        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            self.max = ctx.max.size();
+            return self.text.widget().draw(ctx);
+        }
+
+        fn event(_: *anyopaque, _: *vxfw.EventContext, _: vxfw.Event) !void {}
+    };
+    var bytes = "draft".*;
+    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 2 };
+    var input: InputArea = .{ .composer = .{ .editor = &editor } };
+    const document = try std.testing.allocator.create(@import("ConversationViewport.zig").Document);
+    defer std.testing.allocator.destroy(document);
+    document.* = .{};
+    const rows: [4]GroupedList.Row = @splat(.{ .segments = &.{.{ .text = "Session", .style = .{} }} });
+
+    // The original composition (c347313) draws header, tail and content even
+    // at zero remaining height; only the marker needs a free row. Sweep both
+    // exhaustion boundaries (input/header and tail/marker) and partial layouts.
+    for (0..8) |flags| for (1..11) |small_height| {
+        var all: []const GroupedList.Row = rows[0..3];
+        var list: GroupedList = .{ .rows = .of(&all) };
+        var transcript: @import("Transcript.zig") = .{ .document = document };
+        var overview: Overview = .{ .content = &list, .input = &input, .userdata = &list, .on_event = Row.event };
+        var session: Session = .{ .content = &transcript, .input = &input, .userdata = &transcript, .on_event = Row.event };
+        inline for (.{ &overview, &session }) |screen| {
+            var header: Row = .{ .text = .{ .text = "Header" } };
+            var tail: Row = .{ .text = .{ .text = "Tail\nSecond" } };
+            var marker: Row = .{ .text = .{ .text = "Up" } };
+            screen.header = if (flags & 1 != 0) header.widget() else null;
+            screen.tail = if (flags & 2 != 0) tail.widget() else null;
+            screen.marker = if (flags & 4 != 0) marker.widget() else null;
+            const heights = [_]u16{ 24, @intCast(small_height), @intCast(small_height), @intCast(small_height), @intCast(small_height), 24 };
+            // Remove, replace and grow the list while the terminal stays small.
+            for (heights, [_]usize{ 3, 3, 0, 1, 4, 4 }) |height, count| {
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                all = rows[0..count];
+                list.rows = .of(&all);
+                const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = height }, .cell_size = .{} };
+                // InputArea still owns input height. The rest is the original
+                // screen's allocation rule, independent of the Stack tree.
+                const input_height = (try input.widget().draw(ctx)).size.height;
+                const header_room = height - input_height;
+                const header_height = if (screen.header != null) @min(1, header_room) else 0;
+                const tail_room = header_room - header_height;
+                const tail_height = if (screen.tail != null) @min(2, tail_room) else 0;
+                const marker_room = tail_room - tail_height;
+                const marker_height: u16 = if (screen.marker != null and marker_room > 0) 1 else 0;
+                const content_height = marker_room - marker_height;
+                header.calls = 0;
+                tail.calls = 0;
+                marker.calls = 0;
+                _ = try screen.widget().draw(ctx);
+                try std.testing.expectEqual(@intFromBool(screen.header != null), header.calls);
+                try std.testing.expectEqual(@intFromBool(screen.tail != null), tail.calls);
+                try std.testing.expectEqual(marker_height, marker.calls);
+                if (screen.header != null) try std.testing.expectEqual(vxfw.Size{ .width = 80, .height = header_room }, header.max);
+                if (screen.tail != null) try std.testing.expectEqual(vxfw.Size{ .width = 80, .height = tail_room }, tail.max);
+                if (marker_height > 0) try std.testing.expectEqual(vxfw.Size{ .width = 80, .height = 1 }, marker.max);
+                if (@TypeOf(screen) == *Session) {
+                    try std.testing.expectEqual(vxfw.Size{ .width = 80, .height = content_height }, transcript.size);
+                } else {
+                    try std.testing.expectEqual(@as(?u32, @intCast(count)), list.list.item_count);
+                    try std.testing.expectEqual(@as(u32, 0), list.shown.first);
+                    try std.testing.expectEqual(@as(u32, @intCast(@min(count, content_height))), list.shown.end);
+                    try std.testing.expectEqual(@min(count, content_height), list.shown_at.len);
+                }
+                try std.testing.expectEqualStrings("draft", editor.buffer[0..editor.length]);
+                try std.testing.expectEqual(@as(usize, 2), editor.cursor);
+            }
+        }
+    };
+}
