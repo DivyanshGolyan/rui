@@ -141,9 +141,9 @@ fn run(case: Case) !void {
         try expectHere(@src(), work == .mcp);
         try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(host, work.mcp));
         if (case != .down) {
-            const input = try allocator.create(store.McpExecutionInput);
+            const input = try allocator.create(store.ActionExecutionInput);
             defer allocator.destroy(input);
-            try storage.readMcpExecutionInput(.{ .action_id = work.mcp.action_id, .parent_operation_id = binding.operation_id, .turn_id = binding.turn_id }, input);
+            try storage.readActionExecutionInput(.mcp, .{ .action_id = work.mcp.action_id, .parent_operation_id = binding.operation_id, .turn_id = binding.turn_id }, input);
             try std.testing.expectEqual(servers[0].timeout_ms, input.timeout_ms);
         }
         if (case == .serial) try expectHere(@src(), (try storage.nextCoreWork()) == null);

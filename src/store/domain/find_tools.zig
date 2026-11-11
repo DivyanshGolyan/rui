@@ -243,7 +243,7 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
     } else {
         try command.queueCommand(a, key, .configure, &found.session.ref, &digest, null, null, &answer);
     }
-    try action.queueCoreResolution(a, binding, found.session, if (refusal == null) .succeeded else .failed, outcome_id);
+    try action.queueResolution(a, binding, found.session, if (refusal == null) .succeeded else .failed, outcome_id);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
     return true;

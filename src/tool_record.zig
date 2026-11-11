@@ -258,14 +258,40 @@ pub const start_agent_record: Record = .{
 
 pub const web_search_record: Record = .{ .name = "web_search", .owner = .provider };
 
-/// Who carries out an accepted call to a tool Rui owns, derived from its
-/// name and never stored (D46): Bash runs as an Action process; a core tool
-/// runs as a core command (D24).
+/// Who carries out an accepted call, derived from its frozen record and
+/// never stored (D46). The two Action adapters run Rui-run Actions; core
+/// tools run core commands (D24), and provider tools remain provider-owned.
 pub const Runner = enum {
     bash,
     core,
     mcp,
     provider,
+
+    pub fn beforeAdmissionStopText(self: Runner) []const u8 {
+        return switch (self) {
+            .bash => @import("bash_action_text.zig").stopped_before_admission,
+            .mcp => @import("mcp/action_text.zig").stopped_before_admission,
+            .core => @import("action_text.zig").stopped_before_admission,
+            .provider => unreachable,
+        };
+    }
+
+    /// Adapter-owned wording, not Store policy or persisted runner state.
+    pub fn stoppedText(self: Runner, code: anytype, result: []const u8) []const u8 {
+        return switch (self) {
+            .bash => @import("bash_action_text.zig").stopped,
+            .mcp => @import("mcp/action_text.zig").stopped(code, result),
+            .core, .provider => unreachable,
+        };
+    }
+
+    pub fn indeterminateText(self: Runner) []const u8 {
+        return switch (self) {
+            .bash => @import("bash_action_text.zig").indeterminate,
+            .mcp => @import("mcp/action_text.zig").indeterminate,
+            .core, .provider => unreachable,
+        };
+    }
 
     pub fn of(tool: *const Record) Runner {
         if (tool.owner == .mcp) return .mcp;

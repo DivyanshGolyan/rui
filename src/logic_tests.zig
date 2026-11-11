@@ -6,12 +6,14 @@ const core_boundary = @import("core_boundary.zig");
 /// each one listed here and runs its tests, and selector tests require each
 /// to select test-logic. Add entries in alphabetical order by path, ignoring case.
 const cores = .{
+    .{ "action_text.zig", @import("action_text.zig") },
     .{ "ActionConsent.zig", @import("ActionConsent.zig") },
     .{ "activity_facts.zig", @import("activity_facts.zig") },
     .{ "activity_read.zig", @import("activity_read.zig") },
     .{ "activity_reply.zig", @import("activity_reply.zig") },
     .{ "attempt.zig", @import("attempt.zig") },
     .{ "attention.zig", @import("attention.zig") },
+    .{ "bash_action_text.zig", @import("bash_action_text.zig") },
     .{ "BashLifecycle.zig", @import("BashLifecycle.zig") },
     .{ "bounded.zig", @import("bounded.zig") },
     .{ "built_in_tool.zig", @import("built_in_tool.zig") },
@@ -51,6 +53,7 @@ const cores = .{
     .{ "json_limits.zig", @import("json_limits.zig") },
     .{ "json_scalar.zig", @import("json_scalar.zig") },
     .{ "keymap.zig", @import("keymap.zig") },
+    .{ "mcp/action_text.zig", @import("mcp/action_text.zig") },
     .{ "mcp/arguments.zig", @import("mcp/arguments.zig") },
     .{ "mcp/document.zig", @import("mcp/document.zig") },
     .{ "mcp/EventStream.zig", @import("mcp/EventStream.zig") },
@@ -70,6 +73,7 @@ const cores = .{
     .{ "models_dev.zig", @import("models_dev.zig") },
     .{ "mutation_answer.zig", @import("mutation_answer.zig") },
     .{ "outcome_code.zig", @import("outcome_code.zig") },
+    .{ "output_item.zig", @import("output_item.zig") },
     .{ "overview_style.zig", @import("overview_style.zig") },
     .{ "overview_view.zig", @import("overview_view.zig") },
     .{ "path_list.zig", @import("path_list.zig") },
@@ -82,6 +86,7 @@ const cores = .{
     .{ "queued_line.zig", @import("queued_line.zig") },
     .{ "request_wait.zig", @import("request_wait.zig") },
     .{ "retention_capacity.zig", @import("retention_capacity.zig") },
+    .{ "replay_recipe.zig", @import("replay_recipe.zig") },
     .{ "retry_policy.zig", @import("retry_policy.zig") },
     .{ "serve_grammar.zig", @import("serve_grammar.zig") },
     .{ "session_archive.zig", @import("session_archive.zig") },

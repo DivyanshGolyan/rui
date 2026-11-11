@@ -48,7 +48,7 @@ pub const Calls = struct {
         return false;
     }
 
-    pub noinline fn admit(self: *Calls, host: *Host, call: store.McpAction) @import("execution_turn.zig").Admission {
+    pub noinline fn admit(self: *Calls, host: *Host, call: store.ReadyAction) @import("execution_turn.zig").Admission {
         var place: ?*?*Active = null;
         for (&self.entries) |*entry| if (entry.* == null) {
             place = entry;
@@ -62,7 +62,7 @@ pub const Calls = struct {
         const timeout_ms = for (host.mcp_servers.entries) |*server| {
             if (std.mem.eql(u8, server.name, call.server.slice())) break server.timeout_ms;
         } else @import("mcp/servers.zig").default_timeout_ms;
-        const binding = (host.store.admitMcpActionAttempt(call.action_id, timeout_ms, host.hooks.storeFaults(.attempt_admission)) catch |err| {
+        const admission = (host.store.admitActionAttempt(call, timeout_ms, host.hooks.storeFaults(.attempt_admission)) catch |err| {
             active.destroy(host.allocator);
             fenceDispatch(host, "MCP admission", err);
             return .retry_later;
@@ -70,6 +70,7 @@ pub const Calls = struct {
             active.destroy(host.allocator);
             return .admitted;
         };
+        const binding = admission.permit.binding;
         active.binding = binding;
         prepare(host, active) catch |err| {
             // A canonical read fault fences dispatch; a local resource failure
@@ -199,12 +200,12 @@ noinline fn prepare(host: *Host, active: *Active) !void {
     const arena = active.arena.allocator();
     // This input is canonical and potentially kilobytes; keep its one address
     // with the call rather than copying it through the Host thread's frame.
-    const input = try arena.create(store.McpExecutionInput);
-    try host.store.readMcpExecutionInput(active.binding, input);
+    const input = try arena.create(store.ActionExecutionInput);
+    try host.store.readActionExecutionInput(.mcp, active.binding, input);
     const config = for (host.mcp_servers.entries) |*server| {
-        if (std.mem.eql(u8, server.name, input.server.slice())) break server;
+        if (std.mem.eql(u8, server.name, input.runner.mcp.server.slice())) break server;
     } else {
-        const text = try std.fmt.allocPrint(arena, "Failed, not run: MCP server {s} is not available (mcp_server_unavailable).", .{input.server.slice()});
+        const text = try std.fmt.allocPrint(arena, "Failed, not run: MCP server {s} is not available (mcp_server_unavailable).", .{input.runner.mcp.server.slice()});
         settle(host, active.binding, .spawn_failed, text);
         return;
     };
@@ -216,13 +217,13 @@ noinline fn prepare(host: *Host, active: *Active) !void {
     try active.running.start(host.allocator, .{
         .server = .{ .target = config.target, .bearer_token = config.token },
         .client = offered.client,
-        .name = input.name.slice(),
-        .input_schema = try readContent(host, arena, input.input_schema),
+        .name = input.runner.mcp.name.slice(),
+        .input_schema = try readContent(host, arena, input.runner.mcp.input_schema),
         .arguments = arguments,
         .caller = .{
             .session_id = input.session.slice(),
-            .parent_session_id = if (input.parent) |*parent| parent.slice() else null,
-            .root_session_id = input.root.slice(),
+            .parent_session_id = if (input.runner.mcp.parent) |*parent| parent.slice() else null,
+            .root_session_id = input.runner.mcp.root.slice(),
             .turn_id = turn.written(),
         },
         // JSON-RPC only correlates one request on this private connection.
@@ -253,9 +254,9 @@ fn cancel(host: *Host, active: *Active) void {
     const sent = active.running.requestSent();
     active.running.deinit();
     settle(host, active.binding, .cancelled, if (sent)
-        store.mcp_stop_unknown_text
+        @import("mcp/action_text.zig").stop_unknown
     else
-        store.mcp_stop_not_sent_text);
+        @import("mcp/action_text.zig").stop_not_sent);
 }
 
 test "MCP Host call bound refuses admission before touching the Store" {
@@ -265,7 +266,7 @@ test "MCP Host call bound refuses admission before touching the Store" {
     // There is deliberately no Host/Store to consult when every local place
     // is occupied. A full scan cannot record a seventeenth attempt.
     try std.testing.expect(calls.full());
-    try std.testing.expectEqual(@import("execution_turn.zig").Admission.retry_later, calls.admit(undefined, .{ .action_id = 17, .server = .{} }));
+    try std.testing.expectEqual(@import("execution_turn.zig").Admission.retry_later, calls.admit(undefined, .{ .action_id = 17, .runner = .mcp, .server = .{} }));
     calls.entries[0] = null;
     try std.testing.expect(!calls.full());
 }
