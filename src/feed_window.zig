@@ -303,9 +303,9 @@ pub const Window = struct {
                 self.document.bytes[offset + p.head] = '\n';
                 self.document.styles[offset + p.head] = 0;
             }
-            // Always end link/style runs at an entry seam, even if the source
-            // renderer included its own styled trailing newline.
-            self.document.styles[offset + p.length - 1] = 0;
+            // End link runs at the seam, but preserve a code newline's band.
+            const last = offset + p.length - 1;
+            self.document.styles[last] = viewport.seamStyle(self.document.styles[last]);
             self.entries[first + i] = .{ .key = entry.key, .offset = offset, .length = p.length, .tight = entry.tight, .provisional = entry.provisional };
             offset += p.length;
         }
@@ -663,5 +663,49 @@ test "feed_window preserves every Document foreground slot through prepend repla
         window.trim(1, 0);
         const text = window.text(.{ .position = 20 });
         try testing.expectEqualDeep(case[1], viewport.cellStyle(text.styles[0], true));
+    }
+}
+
+test "feed_window styled newline drawing parity for every splice" {
+    const plain: vaxis.Style = .{ .bg = .{ .index = 19 } };
+    const colours: viewport.Colours = .{ .band = .{ .rgb = .{ 28, 29, 35 } } };
+    for ([_][]const u8{ "\x1b[40m\n\x1b[0m", "\x1b[40mcode\n\x1b[0m" }) |input| {
+        var source: viewport.Sized(256, true) = .{};
+        try source.append(input);
+        try source.prepare();
+        for (0..4) |operation| {
+            var window: Window = .{};
+            const entry: Entry = .{ .key = .{ .position = 10 }, .text = Text.fromDocument(&source) };
+            switch (operation) {
+                0 => try window.append(&.{entry}),
+                1 => try window.prepend(&.{entry}),
+                2 => {
+                    try window.append(&.{testEntry(10, "old")});
+                    try window.replace(entry.key, entry.text);
+                },
+                3 => {
+                    var old = testEntry(10, "old");
+                    old.provisional = true;
+                    try window.append(&.{old});
+                    try window.replaceFrom(entry.key, &.{entry});
+                },
+                else => unreachable,
+            }
+            _ = window.heights(.{ .width = 8, .method = .unicode });
+            for ([_]bool{ false, true }) |colour| {
+                var expected: TestScreen = .{};
+                const target = expected.window(8, 3);
+                target.fill(.{ .style = plain });
+                _ = source.draw(target, .{}, true, colour, plain, colours);
+                var actual: TestScreen = .{};
+                window.draw(.{ .first = 0 }, actual.window(8, 3), colour, plain, colours);
+                for (0..3) |row| for (0..8) |column| {
+                    const a = actual.screen.readCell(@intCast(column), @intCast(row)).?;
+                    const b = expected.screen.readCell(@intCast(column), @intCast(row)).?;
+                    try testing.expectEqualStrings(b.char.grapheme, a.char.grapheme);
+                    try testing.expectEqualDeep(b.style, a.style);
+                };
+            }
+        }
     }
 }
