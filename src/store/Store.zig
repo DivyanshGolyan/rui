@@ -1665,7 +1665,8 @@ pub const Store = struct {
     ) !void {
         const entry = try enter(self, .fromSettlement(faults.settlement_trace));
         defer entry.release();
-        var access: Access(.write, Ordinary.model_success) = .open(&entry);
+        var access: Access(.settlement, Ordinary.model_success) = undefined;
+        access.init(&entry);
         defer access.deinit();
         return entry.finishTransaction(Ordinary.model_success, faults, access.end(faults, model_settlement_domain.settleModelSuccess(&access, self.io, binding, output, faults)));
     }
