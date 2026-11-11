@@ -699,10 +699,13 @@ pub const Store = struct {
         defer access.deinit();
         // Running out of memory, the caller's for a reload or the engine's,
         // rolls the write back cleanly and is the caller's to answer.
-        return entry.finishTransaction(error{OutOfMemory}, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, initial_skills, reload_capture, allocator, committed, faults))) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
+        var reply = entry.finishTransaction(error{OutOfMemory}, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, initial_skills, reload_capture, allocator, committed, faults))) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
             else => .infrastructure_failure,
         };
+        if (reply == .rejected and reply.rejected.code == .mcp_server_unavailable)
+            reply.rejected.message = configuration_domain.missingToolMessage(self.catalog().catalog, &command.configuration.tools);
+        return reply;
     }
 
     /// A fresh Message admission, as `MessageCommitted` receives it.
@@ -755,7 +758,10 @@ pub const Store = struct {
         defer entry.release();
         var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.submitMessage(&access, self.io, self.served, self.selector.slice(), command, committed, initial_skills, captured_skill, faults))) catch .infrastructure_failure;
+        var reply = entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.submitMessage(&access, self.io, self.served, self.selector.slice(), command, committed, initial_skills, captured_skill, faults))) catch .infrastructure_failure;
+        if (reply == .rejected and reply.rejected.code == .mcp_server_unavailable)
+            reply.rejected.message = configuration_domain.missingToolMessage(self.catalog().catalog, &command.configuration.?.tools);
+        return reply;
     }
 
     pub fn stopSession(

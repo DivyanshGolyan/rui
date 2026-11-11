@@ -153,7 +153,7 @@ function parse<T>(reply: Buffer): T {
 
 /** Throws the Host's rejection or conflict; returns the accepted answer. */
 function accepted<A extends RequestAnswer>(answer: A): Extract<A, { status: "accepted" }> {
-	if (answer.status !== "accepted") throw new RuiRequestError(answer.status, answer.code);
+	if (answer.status !== "accepted") throw new RuiRequestError(answer.status, answer.code, "message" in answer ? answer.message : undefined);
 	return answer as Extract<A, { status: "accepted" }>;
 }
 
