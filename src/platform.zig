@@ -678,8 +678,9 @@ test "startup cleanup recognizes only owned ingress names" {
     try std.testing.expect(named_scratch.isOwned("response-metadata-12-2.tmp"));
     try std.testing.expect(named_scratch.isOwned("bash-stdout-12-2.tmp"));
     try std.testing.expect(named_scratch.isOwned("bash-stderr-12-2.tmp"));
+    try std.testing.expect(named_scratch.isOwned("mcp-output-12-2.tmp"));
     try std.testing.expect(named_scratch.isOwned("report-12-2.tmp"));
-    inline for (.{ "request-", "provider-request-", "response-", "response-metadata-", "bash-stdout-", "bash-stderr-", "report-" }) |prefix| {
+    inline for (.{ "request-", "provider-request-", "response-", "response-metadata-", "bash-stdout-", "bash-stderr-", "mcp-output-", "report-" }) |prefix| {
         var name_buffer: [64]u8 = undefined;
         try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}-2.tmp", .{prefix})));
         try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}2-.tmp", .{prefix})));
@@ -712,6 +713,7 @@ test "startup cleanup removes owned files and preserves lookalikes" {
         "response-metadata-2-1.tmp",
         "bash-stdout-3-1.tmp",
         "bash-stderr-3-1.tmp",
+        "mcp-output-4-1.tmp",
         "report-0-1.tmp",
     };
     const preserved = [_][]const u8{
@@ -724,6 +726,10 @@ test "startup cleanup removes owned files and preserves lookalikes" {
         "provider-request-0-1.tmp",
         "provider-request-01-1.tmp",
         "provider-request-1-1.tmp.extra",
+        "mcp-output-0-1.tmp",
+        "mcp-output-01-1.tmp",
+        "mcp-output-1-0.tmp",
+        "mcp-output-1-1.tmp.extra",
         "diagnostic.log",
         "canonical.sqlite3",
     };
