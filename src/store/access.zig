@@ -199,6 +199,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         failed_sql: ?[*:0]const u8 = null,
         queue: [max_queued]Queued = undefined,
         queued: u8 = 0,
+        /// The queued writes a guard's answer follows (`Mysql.guard`), a
+        /// bit for each queue slot.
+        guarded: u16 = 0,
         /// Engine passes. Rounds, each one round trip on a network
         /// engine, count on the Store (`testing_content_work.rounds` for
         /// `run` and `commit`, `.content_rounds` for `readRaw`).
@@ -252,9 +255,6 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 counted: u64,
                 none: void,
             },
-            /// Whether a guard's answer follows the write's
-            /// (`Mysql.guard`).
-            guarded: bool = false,
             /// What it reads in place when its pass steps it, in Debug and
             /// test builds.
             borrowed: Borrowed = .{},
@@ -706,11 +706,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             slot.borrowed = .of(S.Args, args);
             if (comptime S.kind == .write and mode == .write and S.guarded) if (a.store.engine == .mysql) {
                 const mysql = &a.store.engine.mysql;
-                slot.guarded = switch (S.expect) {
+                const bound = switch (S.expect) {
                     .exact => |exact| mysql.guard(false, exact.rows),
                     .at_most => |rows| mysql.guard(true, rows),
                     .counted => mysql.guard(false, target.counted),
                 };
+                if (bound) a.guarded |= @as(u16, 1) << @intCast(a.queued);
             };
             a.queued += 1;
             return true;
@@ -739,6 +740,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         fn resetQueued(a: *Self) Failure!void {
             for (a.queue[0..a.queued]) |entry| a.store.engine.discard(entry.statement);
             a.queued = 0;
+            a.guarded = 0;
             try a.store.engine.discardBatch();
         }
 
@@ -842,7 +844,8 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                         .at_most => |rows| if (changed > rows) return error.CorruptStore,
                         .counted => |guard| if (changed != entry.target.counted) return comptime @as(Error, @errorCast(guard.otherwise)),
                     }
-                    if (entry.guarded) _ = try a.store.engine.stepWrite(entry.statement);
+                    const slot = entry - @as([*]const Queued, &a.queue);
+                    if (a.guarded >> @intCast(slot) & 1 != 0) _ = try a.store.engine.stepWrite(entry.statement);
                 }
             }.run);
         }
