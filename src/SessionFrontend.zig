@@ -5941,3 +5941,115 @@ test "SessionFrontend fixed and growing end replay cycles count arrivals once ac
         try std.testing.expectEqual(@as(usize, if (growing) 6 else 0), self.new_below);
     }
 }
+
+test "SessionFrontend huge person source keeps the following short answer bottom aligned through the reader handoff" {
+    const Host = struct {
+        fn respond(listener: *std.Io.net.Server, route: []const u8, kind: []const u8, body: []const u8) !void {
+            const io = std.testing.io;
+            var fds = [_]std.posix.pollfd{.{ .fd = listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            if (try std.posix.poll(&fds, 2000) == 0) return error.TestUnexpectedResult;
+            const peer = try listener.accept(io);
+            defer peer.close(io);
+            var request: [4096]u8 = undefined;
+            var used: usize = 0;
+            while (true) {
+                const got = try std.posix.read(peer.socket.handle, request[used..]);
+                if (got == 0) return error.UnexpectedEof;
+                used += got;
+                if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| {
+                    const start = std.mem.indexOf(u8, request[0..end], "Content-Length: ").? + "Content-Length: ".len;
+                    const finish = std.mem.indexOfScalarPos(u8, request[0..end], start, '\r').?;
+                    if (used == end + 4 + try std.fmt.parseInt(usize, request[start..finish], 10)) break;
+                }
+            }
+            var prefix: [96]u8 = undefined;
+            try std.testing.expectStringStartsWith(request[0..used], try std.fmt.bufPrint(&prefix, "POST {s} HTTP/1.1\r\n", .{route}));
+            var header: [512]u8 = undefined;
+            var writer = peer.writer(io, &.{});
+            try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{ kind, body.len, body.len, body.len }));
+            try writer.interface.writeAll(body);
+        }
+        fn complete(frontend: *Self) !bool {
+            return frontend.reader.completed();
+        }
+    };
+    const io = std.testing.io;
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    const paths = lease.paths;
+    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+    defer {
+        listener.deinit(io);
+        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    }
+    const scratch = try held.tmp.dir.createFile(io, "person-source", .{ .read = true });
+    defer scratch.close(io);
+    const inspection = try held.tmp.dir.createFile(io, "person-answer-page", .{ .read = true });
+    defer inspection.close(io);
+    self.files = .{ .scratch = scratch, .inspection = inspection, .action = inspection, .status = inspection, .actions = .{ inspection, inspection } };
+    self.store = root;
+    self.session = "k7m2qx";
+    self.line.read = .{ .revision = 1, .end = 2 };
+    self.reading.opening = true;
+    defer {
+        self.reader.cancel();
+        self.reader.join() catch |err| switch (err) {
+            error.Cancelled => {},
+            else => @panic(@errorName(err)),
+        };
+    }
+    // A huge person SOURCE collapses before the row byte cap: production
+    // UserBody keeps two bounded preview lines, not an unbounded rendered row.
+    const person = try std.testing.allocator.alloc(u8, feed_window.row_capacity + 500);
+    defer std.testing.allocator.free(person);
+    @memset(person, 'x');
+    const answer = "SHORT ANSWER done.";
+    const person_reference: protocol.ActivityItem.Content = .{ .length = person.len, .digest = protocol.contentDigest(person) };
+    const answer_reference: protocol.ActivityItem.Content = .{ .length = answer.len, .digest = protocol.contentDigest(answer) };
+    var facts: protocol.ActivityFacts = .{ .end = 2, .direction = .backward, .count = 2, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    try facts.work.workspace.set("/");
+    facts.items[0] = .{ .position = 2, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = answer_reference, .final = true } } };
+    facts.items[1] = .{ .position = 1, .ordinal = 0, .at = 1, .value = .{ .user = .{ .admission = 1, .key = .{}, .turn = 1, .state = .applied, .content = person_reference, .admitted_at = 1 } } };
+    var buffer: [4096]u8 = undefined;
+    var page = std.Io.Writer.fixed(&buffer);
+    try activity_reply.writePage(&page, &facts);
+    _ = try self.update();
+    try Host.respond(&listener, "/v1/activity-page", "application/json", page.buffered());
+    try Host.respond(&listener, "/v1/activity-content", "application/octet-stream", person);
+    try Host.respond(&listener, "/v1/activity-content", "application/octet-stream", answer);
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), self, Host.complete);
+    try self.settleReader();
+    self.poll_at = std.math.maxInt(i96);
+    try std.testing.expectEqual(@as(usize, 2), self.job.result.row_count);
+    const person_row = self.job.result.rows[0];
+    const answer_row = self.job.result.rows[1];
+    try std.testing.expect(person_row.length < feed_window.row_capacity);
+    try std.testing.expectEqual(person_row.length, answer_row.offset);
+    try std.testing.expectEqual(@as(usize, 1), person_row.collapsed_count);
+    try std.testing.expectEqualDeep(person_reference, person_row.collapsed_targets[0].content);
+    try std.testing.expectEqual(@as(u64, 1), person_row.collapsed_targets[0].position);
+    try std.testing.expectEqual(@as(u64, 2), answer_row.key.position);
+    try std.testing.expectEqual(@as(usize, 2), held.screen.feed.count);
+    try std.testing.expect(held.screen.feed.at_start and held.screen.feed.at_end);
+    for ([_]vxfw.MaxSize{ .{ .width = 80, .height = 24 }, .{ .width = 30, .height = 12 } }) |size| {
+        held.size = size;
+        const frame = try held.shown();
+        errdefer std.debug.print("huge person and short answer frame:\n{s}\n", .{frame});
+        try std.testing.expect(held.screen.anchor.following());
+        var rows = std.mem.splitScalar(u8, frame, '\n');
+        var answer_line: ?usize = null;
+        var row: usize = 0;
+        while (rows.next()) |line| : (row += 1) {
+            if (std.mem.eql(u8, std.mem.trimEnd(u8, line, " "), answer)) answer_line = row;
+        }
+        try std.testing.expectEqual(@as(?usize, held.screen.height - 1), answer_line);
+        try std.testing.expect(std.mem.indexOf(u8, frame, "› ") != null);
+    }
+}
