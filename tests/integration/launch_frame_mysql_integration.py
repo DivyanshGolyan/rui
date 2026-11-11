@@ -99,6 +99,16 @@ def main():
 
     try:
         sql(f"CREATE DATABASE {database} CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin")
+        wrong_password = secrets.token_hex(24)
+        wrong_login = f"mysql://root:{wrong_password}@{quote(socket, safe='')}/{database}"
+        login_refusal = frame_host.refusal(launch(dict(good, store=wrong_login)))
+        assert login_refusal["code"] == "mysql_login", login_refusal
+        assert wrong_password not in login_refusal["message"] and password not in login_refusal["message"]
+        missing_socket = str(root / "missing-mysql.sock")
+        unreachable_url = f"mysql://root:{quote(password, safe='')}@{quote(missing_socket, safe='')}/{database}"
+        unreachable = frame_host.refusal(launch(dict(good, store=unreachable_url)))
+        assert unreachable["code"] == "mysql_unreachable", unreachable
+        assert missing_socket not in unreachable["message"] and password not in unreachable["message"]
         missing = launch(good)
         assert frame_host.refusal(missing)["code"] == "store_schema_missing"
         released()
@@ -168,7 +178,7 @@ def main():
         lines = out.decode().splitlines()
         assert len(lines) == 2 and lines[0].startswith("ready ") and json.loads(lines[1])["rui_start_error"]["code"] == "store_fenced", \
             f"missing named store_fenced exit: stdout={out!r} stderr={err[-4000:]!r}"
-        print("MySQL launch frame: readiness, Session round trip, stable id, private credentials, store_locked, stdin close, store_fenced")
+        print("MySQL launch frame: readiness, Session round trip, stable id, private credentials, mysql_login, mysql_unreachable, store_locked, stdin close, store_fenced")
     finally:
         primary = sys.exception()
         cleanup_errors = []
