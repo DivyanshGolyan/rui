@@ -1017,7 +1017,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = self.emptyComposer(0);
-    self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend() } };
+    self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version } };
     self.paintDivider();
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" } };
     self.app_screen = .{ .content = &self.app_sessions, .input = &self.app_input, .userdata = self, .on_event = appEvent };
@@ -5576,6 +5576,12 @@ test "App root navigation derives the visible pane across settings and Session s
             }
         }
     }
+}
+
+test "App settings receives the build version from its Overview owner" {
+    const rig = try openComposer();
+    defer rig.close();
+    try std.testing.expectEqualStrings(@import("transport_options").version, rig.overview.root.settings_page.version);
 }
 
 test "App settings typed saves own their strings and settle through the Overview worker" {

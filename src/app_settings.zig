@@ -41,7 +41,8 @@ saving_row: ?usize = null,
 failures: [5]?[]const u8 = @splat(null),
 effort_choices: [std.enums.values(catalog.ReasoningEffort).len + 1][]const u8 = undefined,
 effort_count: usize = 0,
-version: []const u8 = @import("transport_options").version,
+/// Supplied by the application owner, not a dependency of UI-only roots.
+version: []const u8 = "",
 upgrade_buffer: [upgrade_status.max_line_bytes]u8 = undefined,
 
 pub fn widget(self: *Self) vxfw.Widget {
