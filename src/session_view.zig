@@ -6,6 +6,7 @@ const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
 const Text = @import("TerminalText.zig");
 const Renderer = @import("AnswerRenderer.zig");
+pub const Destination = Renderer.Destination;
 const tools = @import("tools.zig");
 const failure_class = @import("failure_class.zig");
 const marks = @import("marks.zig");
@@ -1182,10 +1183,10 @@ pub fn Answer(comptime Sink: type) type {
         writer: std.Io.Writer,
         renderer: Renderer,
         failure: ?anyerror = null,
-        pub fn init(self: *@This(), sink: Sink, home: []const u8, colour: bool) void {
+        pub fn init(self: *@This(), sink: Sink, home: []const u8, colour: bool, destination: Destination) void {
             self.* = .{ .sink = sink, .writer = undefined, .renderer = undefined };
             self.writer = .{ .vtable = &.{ .drain = drain }, .buffer = &self.storage };
-            self.renderer = .{ .out = &self.writer, .home = home, .colour = colour };
+            self.renderer = .{ .out = &self.writer, .home = home, .colour = colour, .destination = destination };
         }
         pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
             if (self.failure) |err| return err;
@@ -1227,18 +1228,18 @@ test "answer adapters pass NO_COLOR through inline names tables and fenced code"
             try self.output.writeAll(bytes);
         }
     };
-    for ([_]bool{ false, true }) |colour| {
+    for ([_]Destination{ .terminal, .viewport }) |destination| for ([_]bool{ false, true }) |colour| {
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
         var answer: Answer(Sink) = undefined;
-        answer.init(.{ .output = &output.writer }, "", colour);
+        answer.init(.{ .output = &output.writer }, "", colour, destination);
         for ("`name`\n| A |\n| --- |\n| B |\n```zig\ncode\n\n```\n") |byte| try answer.feed(&.{byte});
         try answer.finish();
         try std.testing.expectEqual(colour, std.mem.indexOf(u8, output.written(), "\x1b[94m") != null);
         try std.testing.expectEqual(colour, std.mem.indexOf(u8, output.written(), "\x1b[90m") != null);
-        try std.testing.expectEqual(colour, std.mem.indexOf(u8, output.written(), "\x1b[40m") != null);
+        try std.testing.expectEqual(destination == .viewport and colour, std.mem.indexOf(u8, output.written(), "\x1b[40m") != null);
         if (!colour) try std.testing.expectEqualStrings("name\n  A\n  B\n  code\n  \n", output.written());
-    }
+    };
 }
 
 fn print(sink: anytype, comptime format: []const u8, args: anytype) !void {
@@ -1634,7 +1635,7 @@ test "a waiting Message shows at its Admission only when nothing holds it and no
 /// sink learns each one as it shows (`drew`).
 /// `provider` is the Session's, for the words of a failed Turn; null until
 /// its settings are read.
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, provider: ?protocol.Provider, sink: anytype, colour: bool, compact_tools: *bool, taking: Taking, home: []const u8) !queued_line.Drawn {
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, provider: ?protocol.Provider, sink: anytype, colour: bool, compact_tools: *bool, taking: Taking, home: []const u8, destination: Destination) !queued_line.Drawn {
     const historical = page.facts.direction == .backward;
     var from = taking.from;
     var drawn = taking.drawn;
@@ -1673,7 +1674,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 compact_tools.* = false;
                 try sink.feed("\n");
                 var answer: Answer(@TypeOf(sink)) = undefined;
-                answer.init(sink, home, colour);
+                answer.init(sink, home, colour, destination);
                 try content(requests, store, session, item, assistant.content, &answer);
                 try answer.finish();
                 try sink.feed("\n");

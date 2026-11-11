@@ -1503,7 +1503,7 @@ test "rendered fences carry blank and wrapped bands through the real renderer vi
     for ([_]bool{ false, true }) |colour| {
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
-        var renderer: @import("AnswerRenderer.zig") = .{ .out = &output.writer, .colour = colour };
+        var renderer: @import("AnswerRenderer.zig") = .{ .out = &output.writer, .colour = colour, .destination = .viewport };
         for ("```zig\nabcdefghijkl\n\nz\n```\nafter\n") |byte| try renderer.feed(&.{byte});
         try renderer.finish();
         var view: Sized(128, true) = .{};

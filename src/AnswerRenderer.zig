@@ -24,7 +24,12 @@ const InlineRetention = enum { candidate, literal };
 const Link = enum { none, text, text_closed, target, bare, local, local_literal };
 const Boundary = enum { word, prose, other };
 
+/// Only the viewport consumes private presentation markers. A real terminal
+/// must keep its own background, regardless of foreground colour support.
+pub const Destination = enum { terminal, viewport };
+
 out: *std.Io.Writer,
+destination: Destination = .terminal,
 colour: bool = true,
 width_method: gwidth.Method = .wcwidth,
 /// Borrowed process HOME; only a valid absolute path enables `~/` links.
@@ -517,16 +522,19 @@ const CellWidth = struct {
     }
 };
 
-/// SGR 40 is also a valid plain-terminal band. Keep it on the newline,
-/// whose existing style byte identifies even a completely blank code row.
+/// The viewport-only marker stays on the newline, whose existing style
+/// byte identifies even a completely blank code row. Terminal output uses
+/// indentation instead: SGR 40 would paint an unreadable black background
+/// with dark default text on a light theme.
 fn codeBlock(self: *Renderer, bytes: []const u8) !void {
+    const band = self.destination == .viewport and self.colour;
     var start: usize = 0;
     while (start < bytes.len) {
         const end = if (std.mem.indexOfScalarPos(u8, bytes, start, '\n')) |at| at + 1 else bytes.len;
-        if (self.colour) try self.out.writeAll("\x1b[40m") else try self.safeSlice("  ");
+        if (band) try self.out.writeAll("\x1b[40m") else try self.safeSlice("  ");
         try self.literalBlock(bytes[start..end]);
         try self.terminal_text.finish(self.out);
-        if (self.colour) try self.out.writeAll("\x1b[0m");
+        if (band) try self.out.writeAll("\x1b[0m");
         start = end;
     }
 }
@@ -1206,7 +1214,7 @@ test "long unsupported delimiter runs stream literally and recover locally" {
 test "chunked subset, malformed markup and terminal controls" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var renderer: Renderer = .{ .out = &output.writer };
+    var renderer: Renderer = .{ .destination = .viewport, .out = &output.writer };
     const input = "# Heading\n- *item* and `code`\n**bold**\n```zig\n  x\t= 1\n```\nunfinished *mark\n\\*literal*\n" ++
         "bad \x1b]2;title\x07 \r \x7f \xe2\x80\xae café\n";
     for (input) |byte| try renderer.feed(&.{byte});
@@ -1530,7 +1538,7 @@ test "empty pair after nonempty nested code stays in the outer style" {
 test "indented fences render code without marker lines or reverse video" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var renderer: Renderer = .{ .out = &output.writer };
+    var renderer: Renderer = .{ .destination = .viewport, .out = &output.writer };
     for ("   ```sh\n  echo `hello`\n   ```\n`inline`\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
     try std.testing.expectEqualStrings("\x1b[40m  echo `hello`\n\x1b[0m\x1b[94minline\x1b[0m\n", output.written());
@@ -1539,7 +1547,7 @@ test "indented fences render code without marker lines or reverse video" {
 test "closing fence at end of answer needs no final newline" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var renderer: Renderer = .{ .out = &output.writer };
+    var renderer: Renderer = .{ .destination = .viewport, .out = &output.writer };
     for ("   ```sh\n  echo hi\n   ```") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
     try std.testing.expectEqualStrings("\x1b[40m  echo hi\n\x1b[0m", output.written());
@@ -1548,7 +1556,7 @@ test "closing fence at end of answer needs no final newline" {
 test "rendered content and unsupported fence syntax stay visible without a gutter" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var renderer: Renderer = .{ .out = &output.writer };
+    var renderer: Renderer = .{ .destination = .viewport, .out = &output.writer };
     for ("# Title\n```zig\n  call\n```\n```bad info\ntrailing `open\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
     try std.testing.expectEqualStrings("\x1b[1mTitle\x1b[0m\n\x1b[40m  call\n\x1b[0m```bad info\ntrailing `open\n", output.written());
@@ -1699,7 +1707,7 @@ fn expectRenderedHome(input: []const u8, expected: []const u8, home: []const u8)
         if (!windowEdge(input, split)) continue;
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
-        var renderer: Renderer = .{ .out = &output.writer, .home = home };
+        var renderer: Renderer = .{ .out = &output.writer, .home = home, .destination = .viewport };
         try renderer.feed(input[0..split]);
         for (input[split..]) |byte| try renderer.feed(&.{byte});
         try renderer.finish();
@@ -1970,7 +1978,7 @@ test "code foreground and complete fenced rows distinguish only links by underli
     for ([_]bool{ false, true }) |colour| for (0..input.len + 1) |split| {
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
-        var renderer: Renderer = .{ .out = &output.writer, .colour = colour };
+        var renderer: Renderer = .{ .destination = .viewport, .out = &output.writer, .colour = colour };
         try renderer.feed(input[0..split]);
         try renderer.feed(input[split..]);
         try renderer.finish();
@@ -2027,4 +2035,30 @@ test "NO_COLOR keeps terminal escaping boundaries around hidden inline code synt
         try visible(output.written(), &shown.writer);
         try std.testing.expectEqualStrings("\\xe2\\x82\\xac", shown.written());
     }
+}
+
+test "plain fenced code never emits a background with or without colour at every split" {
+    const long = @as([130]u8, @splat('x'));
+    const cases = .{
+        .{ "before\n```zig\nbody\n\n  indented\n```\nafter\n", "before\n  body\n  \n    indented\nafter\n" },
+        .{ "```\n" ++ long ++ "\n```", "  " ++ long ++ "\n" },
+        .{ "```sh\n\x1b[40mnot a marker\n```\n", "  \\x1b[40mnot a marker\n" },
+        .{ "```\n```\n", "" },
+    };
+    inline for (cases) |case| for ([_]bool{ false, true }) |colour| {
+        for (0..case[0].len + 1) |split| {
+            var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer output.deinit();
+            // This is the CLI's construction: terminal-safe by default,
+            // even when foreground colours are enabled on a light theme.
+            var renderer: Renderer = .{ .out = &output.writer, .colour = colour };
+            try renderer.feed(case[0][0..split]);
+            try renderer.feed(case[0][split..]);
+            try renderer.finish();
+            try std.testing.expectEqualStrings(case[1], output.written());
+            // Stronger than checking just SGR 40: no background escape of
+            // any kind (or other presentation control) may reach this sink.
+            try std.testing.expectEqual(@as(?usize, null), std.mem.indexOfScalar(u8, output.written(), 0x1b));
+        }
+    };
 }

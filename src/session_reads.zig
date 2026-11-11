@@ -523,7 +523,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     // A stop searches only from the oldest Message that waited at the last
     // read: queued input joins the work at its next input boundary, so that
     // is at most one model step back, never the history.
-    job.drawn = try View.render(requests, job.store, job.session, &page, if (job.result.line) |line| line.provider else job.provider, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued) }, job.home);
+    job.drawn = try View.render(requests, job.store, job.session, &page, if (job.result.line) |line| line.provider else job.provider, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued) }, job.home, .viewport);
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
@@ -569,7 +569,7 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     try job.files.inspection.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed };
     if (latest) try output.feed("\nRecent conversation — tool details\n");
-    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour, job.home);
+    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour, job.home, .viewport);
     if (!latest) job.result.history_cursor = prepared.page.continuation();
 }
 
