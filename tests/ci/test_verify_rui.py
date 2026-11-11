@@ -204,6 +204,44 @@ class FramesTest(unittest.TestCase):
         self.assertEqual(states["tools-running"]["expect"],
                          ["⠹ Build the docs", "Run the slow tests", "ctrl+x stop"])
 
+    def test_stop_frame_owns_work_and_waits_for_the_stable_ending(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        self.assertNotIn("stopping", states)
+        state = states["stop"]
+        self.assertEqual(state["open"], "Stop the slow job")
+        self.assertEqual(state["cast"][0]["label"], state["open"])
+        self.assertEqual(state["cast"][0]["messages"], ["Ready."])
+        self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
+        self.assertEqual(state["steps"], [
+            {"send": {"to": state["open"], "text": "long bash", "wait": False}},
+            {"wait": "⠹ Sleep eight seconds"}, {"keys": ["C-x"]},
+            {"gone": "Stopping", "timeout": 60}, {"wait": "■ Stopped", "timeout": 60},
+        ])
+        self.assertEqual(state["expect"], ["■ Stopped"])
+        stopped = states["stopped"]
+        self.assertEqual(stopped["open"], "Profile the Host under load")
+        seeded = next(entry for state in scenario["states"] for entry in state.get("cast", [])
+                      if entry["label"] == stopped["open"])
+        self.assertEqual(seeded["settle"], "stop")
+        self.assertIn("long bash", seeded["messages"][-1])
+
+    def test_live_chat_frames_do_not_borrow_or_mutate_retry_work(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        labels = set()
+        for name in ("chat-working", "chat-queued", "tools-running"):
+            with self.subTest(state=name):
+                state = states[name]
+                self.assertNotEqual(state["open"], "Fix retry deadline")
+                self.assertNotIn(state["open"], labels)
+                labels.add(state["open"])
+                self.assertEqual(state["cast"][0]["label"], state["open"])
+                if name != "chat-working":
+                    self.assertEqual(state["steps"][0]["send"]["to"], state["open"])
+                    self.assertFalse(state["steps"][0]["send"]["wait"])
+        self.assertIn("slow", states["chat-queued"]["steps"][0]["send"]["text"])
+
     def test_cumulative_cast_and_counted_labels(self):
         data = self.scenario()
         data["states"][1]["cast"].append({"label": "Batch {n}", "count": 3, "workspace": "code/batch",
