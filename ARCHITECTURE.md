@@ -1475,13 +1475,14 @@ MySQL schema application and backup remain operator-owned.
 
 `rui upgrade` replaces an eligible managed released selection with the latest published stable release and conditionally activates it for the selected Store only when its Host was already running.
 `rui upgrade --check` is read-only and starts no Host.
-On the overview, `/upgrade` runs inline on the status bar, with no page, without sending `/upgrade` to the model or adding an updater service.
-In a conversation, `/upgrade` says `Run rui upgrade in the shell` and never reaches the model, until the conversation reuses the inline status row.
+On the overview and in a conversation, `/upgrade` runs inline on the status row, with no page, without sending `/upgrade` to the model or adding an updater service.
+It is one run whichever screen asked for it: a conversation hands `/upgrade` and Esc to the overview, which runs the worker once its own and the conversation's Client work has settled.
 It checks (`Checking for updates…`), then installs a found release at once, with no Enter step even while Sessions work, and its first line says what the restart will do: `Upgrading to 0.60.0 · restarts the Host (2 Sessions working) · esc cancels`.
 Esc cancels while it checks or prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting the Host…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
 A release the running client cannot use leaves `Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave` on the status bar until another `/upgrade`; longer text, such as PATH warnings, the full check and retained cleanup paths, prints with the departure message.
 Esc cancels the check as it cancels an install still preparing, and so does leaving rui.
-The Upgrade worker says where the whole run stands (checking, installing and its step, cancelling, ended) each time that changes, and the overview stores that one value: Host requests wait, Esc is the run's and another `/upgrade` is a no-op by it alone.
+The Upgrade worker says where the whole run stands (checking, installing and its step, cancelling, ended) each time that changes, and the overview stores that one value (`session_upgrade.Upgrade`), which both screens read: Host requests wait, Esc is the run's and another `/upgrade` is a no-op by it alone.
+A conversation keeps only that its own reading of the Session predates a run: after the run it says `Reading this Session again after the Upgrade…` and holds its Host requests until that read settles, then shows the run's ending.
 One pure core, `upgrade_status`, turns that value into the status bar's line for both screens.
 Divyansh chose this on 2026-11-09 (TUI rework plan, "/upgrade without a page"), replacing the `UpgradePanel` page and its Install step.
 It retains the draft, selected Session and unresolved capture handles through handoff and never replays indeterminate effects.

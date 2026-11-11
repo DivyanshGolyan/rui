@@ -37,6 +37,8 @@ const app_events = @import("testing/app_events.zig");
 const view = @import("overview_view.zig");
 const ClientTask = @import("ClientTask.zig");
 const UpgradeJob = @import("UpgradeJob.zig");
+const session_upgrade = @import("session_upgrade.zig");
+const upgrade_status = @import("upgrade_status.zig");
 const session_chrome = @import("session_chrome.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const session_reads = @import("session_reads.zig");
@@ -359,6 +361,8 @@ upgrade_job: UpgradeJob = .{},
 /// The serving Host's pid, read once per Host start.
 host_process: ?struct { started_at: u64, pid: i32 } = null,
 upgrade_report: ?std.Io.Writer.Allocating = null,
+/// What the overview last said under the open conversation.
+conversation_said: [upgrade_status.max_line_bytes]u8 = undefined,
 /// The terminal title as last set: the open Session's name, if any, and how
 /// many Sessions need the person.
 title: session_chrome.Title = .{},
@@ -480,8 +484,9 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             }
             if (self.root.session != null) {
                 // Under a Session the overview serves as it did when lending:
-                // a failure there is the overview's, not the Session's.
-                _ = try service(self);
+                // a failure there is the overview's, not the Session's. An
+                // Upgrade holds Host work here as it does on the overview.
+                if (self.state.upgrading()) try self.appUpgrade(ctx) else _ = try service(self);
             } else {
                 if (self.worker.thread != null and self.worker.completed()) {
                     drain(self.done[0]);
@@ -567,9 +572,9 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     }
     const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2], .status = opened[3], .actions = opened[4..6].* };
     const frontend = try self.init.gpa.create(SessionFrontend);
-    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeHandoff };
+    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
-    const child = frontend.attach(.{ .root = &self.root, .context = self, .leave = appSessionLeft, .upgrade = appSessionUpgrade, .copy = appCopy, .on_open = appSessionFollow }, self.caps);
+    const child = frontend.attach(.{ .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow }, self.caps);
     // Custody transfers before focus delivery: on failure the exit
     // path cancels and joins the same frontend before freeing it.
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
@@ -617,12 +622,6 @@ fn followNext(self: *Self, ctx: *vxfw.EventContext, from: view.Reference) !void 
     if (self.follow.next(from)) |target| try self.appNext(ctx, try self.event(.{ .open = target }));
 }
 
-fn appSessionUpgrade(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    self.app_session.?.frontend.?.notice = "Run rui upgrade in the shell";
-    ctx.redraw = true;
-}
-
 fn appCopy(raw: *anyopaque, file: std.Io.File, start: u64, length: u64) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const bytes = try self.init.gpa.alloc(u8, @intCast(length));
@@ -639,14 +638,21 @@ fn appCopy(raw: *anyopaque, file: std.Io.File, start: u64, length: u64) !void {
 fn appUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
     const job = &self.upgrade_job;
     // A failed start finishes the run, which the core is told below.
-    if (!job.started and try self.quiesceUpgrade()) job.begin(self.init, self.options.store) catch {};
+    if (!job.started and try self.quiesceUpgrade() and self.conversationSettled()) job.begin(self.init, self.options.store) catch {};
     const done = job.started and try job.advance();
     const stands = job.status(self.state.summary.counts.working);
-    if (!std.meta.eql(stands, self.state.upgrade.?)) {
+    if (!std.meta.eql(stands, self.state.upgrade.run.?)) {
         try self.appNext(ctx, try self.event(.{ .upgrade = stands }));
         ctx.redraw = true;
     }
     if (done) try self.keepUpgrade();
+}
+
+/// The open conversation, if any, has no Client work of its own in flight.
+fn conversationSettled(self: *const Self) bool {
+    const shown = self.app_session orelse return true;
+    const frontend = shown.frontend orelse return true;
+    return self.root.session == null or frontend.atRest();
 }
 
 /// Keeps a finished run's receipt for exit, the full report when it
@@ -1379,7 +1385,7 @@ fn observed(raw: *anyopaque, read: protocol.session_work.Work, opening: bool) !v
 fn service(raw: *anyopaque) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
-    if (self.state.upgrade_after == .blocked) return false;
+    if (self.state.upgrade.after == .blocked) return false;
     const now_ms = self.realMs();
     if (self.state.wakeAt()) |at| if (now_ms >= at) {
         _ = try self.event(.{ .tick = now_ms });
@@ -1425,24 +1431,16 @@ fn quiesceUpgrade(self: *Self) !bool {
     return self.worker.thread == null and self.job_count == 0;
 }
 
-fn upgradeHandoff(raw: *anyopaque, handoff: SessionFrontend.UpgradeHandoff) !bool {
+/// The Upgrade, as the open conversation reads it.
+fn upgradeValue(raw: *anyopaque) session_upgrade.Upgrade {
     const self: *Self = @ptrCast(@alignCast(raw));
-    switch (handoff) {
-        .quiesce => {
-            self.state.holdForSessionUpgrade();
-            return self.quiesceUpgrade();
-        },
-        .ready, .incompatible => {
-            self.state.upgraded(if (handoff == .ready) .compatible else .incompatible);
-            return true;
-        },
-    }
+    return self.state.upgrade;
 }
 
 /// What the overview says under the opened Session's conversation.
 fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Said {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const said = view.conversation(&self.state, self.opened, kind);
+    const said = view.conversation(&self.state, self.opened, kind, self.caps, &self.conversation_said);
     return .{ .text = said.text, .stoppable = said.stoppable };
 }
 

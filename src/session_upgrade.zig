@@ -1,22 +1,24 @@
-//! Where an Upgrade leaves a conversation: whether it holds Host requests,
-//! whether the overview may run between frames, what the loop does next
-//! and what it says. Values in, decisions out; the shell quiesces Client
-//! work, runs the panel and reattaches.
+//! The Upgrade, as the overview and a conversation both read it: the run
+//! /upgrade started, what the last run left Host requests, and from those
+//! alone whether requests wait, whose Esc is, and what a conversation's
+//! loop does next. Values in, decisions out; the overview owns the one
+//! value, its worker says where the run stands, and a conversation reads it.
 
 const std = @import("std");
+const upgrade_status = @import("upgrade_status.zig");
 
-/// How the Upgrade panel closed: nothing installed, the selected Rui speaks
-/// this Host's protocol, or it does not.
-pub const Outcome = enum { unchanged, compatible, incompatible };
+/// How a run ended: nothing installed, the selected Rui speaks this Host's
+/// protocol, or it does not.
+pub const Outcome = upgrade_status.Outcome;
 
-/// What the last Upgrade left: requests open, held until the conversation is
+/// What the last Upgrade left: requests open, held until the listing is
 /// read again under the selected Rui, or blocked until /upgrade or a new
 /// terminal.
 pub const After = enum { open, reobserving, blocked };
 
-/// What the loop does on this pass.
+/// What a conversation's loop does on this pass.
 pub const Phase = enum {
-    /// Settle Client work, then show the panel.
+    /// Settle Client work so the run can start, then wait for its end.
     quiescing,
     /// Redraw and wait; nothing reaches the Host.
     blocked,
@@ -26,103 +28,133 @@ pub const Phase = enum {
 };
 
 pub const recovery = "! Host requests paused after Upgrade; draft and original retained. /upgrade or use the selected Rui in a new terminal.";
-pub const closed = "Upgrade closed; draft and original retained. No work was resent.";
+/// What a conversation's status row says while it reads itself again.
+pub const rereading = "Reading this Session again after the Upgrade…";
+
+/// What a conversation says of a Host request a hold refused.
+pub fn refusal(phase: Phase) []const u8 {
+    return switch (phase) {
+        .quiescing => "! Upgrade running; nothing sent. Draft and original retained.",
+        .reobserving => "! Reading this Session again after the Upgrade; nothing sent. Draft and original retained.",
+        .blocked => recovery,
+        .active => unreachable, // Nothing holds.
+    };
+}
 
 pub const Upgrade = struct {
-    /// /upgrade was asked for and the panel has not yet closed.
-    requested: bool = false,
+    /// The run /upgrade started, as its worker last said it stands; null
+    /// before the first.
+    run: ?upgrade_status.Run = null,
     after: After = .open,
 
-    /// Host requests wait while an Upgrade is asked for or not yet safe.
+    /// The run has not ended: its worker runs once Client work has settled.
+    pub fn going(self: Upgrade) bool {
+        return if (self.run) |run| run.going() else false;
+    }
+
+    /// Host requests wait: a run goes on, or the last one left them held.
     pub fn held(self: Upgrade) bool {
-        return self.requested or self.after != .open;
+        return self.going() or self.after != .open;
     }
 
-    /// The overview runs between frames unless an Upgrade is asked for or
-    /// blocked; while reobserving its listing goes on.
-    pub fn lends(self: Upgrade) bool {
-        return !self.requested and self.after != .blocked;
+    /// Esc is the run's: it can still change nothing.
+    pub fn takesEscape(self: Upgrade) bool {
+        return if (self.run) |run| run.takesEscape() else false;
     }
 
-    pub fn phase(self: Upgrade) Phase {
-        if (self.requested) return .quiescing;
-        return switch (self.after) {
-            .blocked => .blocked,
-            .reobserving => .reobserving,
-            .open => .active,
+    /// /upgrade checks at once. False while a run goes on, which keeps its
+    /// progress and its Esc.
+    pub fn start(self: *Upgrade) bool {
+        if (self.going()) return false;
+        self.run = .checking;
+        return true;
+    }
+
+    /// The worker said where the run stands. Its end leaves Host requests
+    /// what its outcome says: an unchanged one keeps a block, and unless
+    /// blocked the listing is read again first.
+    pub fn stand(self: *Upgrade, run: upgrade_status.Run) void {
+        std.debug.assert(self.going());
+        self.run = run;
+        if (run == .ended) self.after = switch (run.ended.outcome) {
+            .unchanged => if (self.after == .blocked) .blocked else .reobserving,
+            .compatible => .reobserving,
+            .incompatible => .blocked,
         };
     }
 
-    /// The panel closed: a compatible Rui reobserves, an incompatible one
-    /// blocks, and an unchanged one leaves what an earlier Upgrade left.
-    pub fn close(self: *Upgrade, outcome: Outcome) void {
-        self.requested = false;
-        switch (outcome) {
-            .unchanged => {},
-            .compatible => self.after = .reobserving,
-            .incompatible => self.after = .blocked,
-        }
-    }
-
-    /// Settling Client work or reattaching failed: blocked until /upgrade.
-    pub fn fail(self: *Upgrade) void {
-        self.requested = false;
+    /// A conversation could not settle its Client work for the run, or
+    /// read itself again after it: blocked until /upgrade.
+    pub fn block(self: *Upgrade) void {
         self.after = .blocked;
     }
 
-    /// A read settled under the selected Rui. It does not lift a block.
+    /// The listing was read under the selected Rui. It does not lift a block.
     pub fn reobserved(self: *Upgrade) void {
         if (self.after == .reobserving) self.after = .open;
     }
 
-    /// What the conversation says once the panel closes.
-    pub fn notice(self: Upgrade) []const u8 {
-        return if (self.after == .blocked) recovery else closed;
+    /// A conversation's pass. `stale` says its own reading of the Session
+    /// predates a run, so it reads again whatever the listing has done.
+    pub fn phase(self: Upgrade, stale: bool) Phase {
+        if (self.going()) return .quiescing;
+        return switch (self.after) {
+            .blocked => .blocked,
+            .reobserving => .reobserving,
+            .open => if (stale) .reobserving else .active,
+        };
     }
 };
 
-test "an Upgrade holds Host requests from /upgrade until a read under the selected Rui settles" {
+const ended_unchanged: upgrade_status.Run = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } };
+const ended_compatible: upgrade_status.Run = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 61, .patch = 0 }, .restarted = true } }, .outcome = .compatible } };
+const ended_incompatible: upgrade_status.Run = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } };
+
+test "an Upgrade holds Host requests from /upgrade until the listing is read under the selected Rui" {
     var upgrade: Upgrade = .{};
-    try std.testing.expect(!upgrade.held() and upgrade.lends() and upgrade.phase() == .active);
-    upgrade.requested = true;
-    try std.testing.expect(upgrade.held() and !upgrade.lends() and upgrade.phase() == .quiescing);
-    upgrade.close(.compatible);
-    try std.testing.expectEqual(Upgrade{ .after = .reobserving }, upgrade);
-    try std.testing.expect(upgrade.held() and upgrade.lends() and upgrade.phase() == .reobserving);
-    try std.testing.expectEqualStrings(closed, upgrade.notice());
+    try std.testing.expect(!upgrade.held() and !upgrade.takesEscape() and upgrade.phase(false) == .active);
+    try std.testing.expect(upgrade.start());
+    try std.testing.expect(upgrade.held() and upgrade.takesEscape() and upgrade.phase(false) == .quiescing);
+    // The run going on keeps its progress: another /upgrade starts nothing.
+    upgrade.stand(.{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none }, .step = .publishing } });
+    try std.testing.expect(!upgrade.start() and upgrade.run.? == .installing and !upgrade.takesEscape());
+    upgrade.stand(ended_compatible);
+    try std.testing.expect(upgrade.held() and !upgrade.going() and upgrade.phase(false) == .reobserving);
     upgrade.reobserved();
-    try std.testing.expectEqual(Upgrade{}, upgrade);
+    try std.testing.expect(!upgrade.held());
+    // A conversation whose reading predates the run reads again all the same.
+    try std.testing.expectEqual(Phase.reobserving, upgrade.phase(true));
+    try std.testing.expectEqual(Phase.active, upgrade.phase(false));
 }
 
-test "a block lasts until another Upgrade, and a settled read does not lift it" {
-    var upgrade: Upgrade = .{ .requested = true };
-    upgrade.close(.incompatible);
-    try std.testing.expectEqual(Upgrade{ .after = .blocked }, upgrade);
-    try std.testing.expect(upgrade.held() and !upgrade.lends() and upgrade.phase() == .blocked);
-    try std.testing.expectEqualStrings(recovery, upgrade.notice());
+test "a block lasts until another Upgrade, and a listing does not lift it" {
+    var upgrade: Upgrade = .{};
+    _ = upgrade.start();
+    upgrade.stand(ended_incompatible);
+    try std.testing.expect(upgrade.held() and upgrade.phase(false) == .blocked and upgrade.phase(true) == .blocked);
     upgrade.reobserved();
     try std.testing.expectEqual(After.blocked, upgrade.after);
-    // /upgrade again quiesces first, and an unchanged panel keeps the block.
-    upgrade.requested = true;
-    try std.testing.expectEqual(Phase.quiescing, upgrade.phase());
-    upgrade.close(.unchanged);
-    try std.testing.expectEqual(Upgrade{ .after = .blocked }, upgrade);
-    upgrade.requested = true;
-    upgrade.close(.compatible);
+    // /upgrade again quiesces first, and an unchanged run keeps the block.
+    try std.testing.expect(upgrade.start());
+    try std.testing.expectEqual(Phase.quiescing, upgrade.phase(false));
+    upgrade.stand(ended_unchanged);
+    try std.testing.expectEqual(After.blocked, upgrade.after);
+    _ = upgrade.start();
+    upgrade.stand(ended_compatible);
     try std.testing.expectEqual(After.reobserving, upgrade.after);
 }
 
-test "an unchanged panel leaves requests open or still reobserving, and a failure blocks" {
-    var upgrade: Upgrade = .{ .requested = true };
-    upgrade.close(.unchanged);
-    try std.testing.expectEqual(Upgrade{}, upgrade);
-    upgrade = .{ .requested = true, .after = .reobserving };
-    try std.testing.expect(!upgrade.lends());
-    upgrade.close(.unchanged);
-    try std.testing.expectEqual(Upgrade{ .after = .reobserving }, upgrade);
-    upgrade.fail();
-    try std.testing.expectEqual(Upgrade{ .after = .blocked }, upgrade);
-    upgrade = .{ .requested = true };
-    upgrade.fail();
-    try std.testing.expectEqual(Upgrade{ .after = .blocked }, upgrade);
+test "an unchanged run reads the listing again, and a conversation's failure blocks" {
+    var upgrade: Upgrade = .{};
+    _ = upgrade.start();
+    upgrade.stand(ended_unchanged);
+    try std.testing.expectEqual(After.reobserving, upgrade.after);
+    upgrade.reobserved();
+    try std.testing.expectEqual(After.open, upgrade.after);
+    // A block made while the run goes on outlasts its unchanged end.
+    _ = upgrade.start();
+    upgrade.block();
+    try std.testing.expectEqual(Phase.quiescing, upgrade.phase(true));
+    upgrade.stand(ended_unchanged);
+    try std.testing.expectEqual(Phase.blocked, upgrade.phase(true));
 }
