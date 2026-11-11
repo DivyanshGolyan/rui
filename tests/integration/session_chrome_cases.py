@@ -4,7 +4,7 @@ the last row, the `↓` marker, pages without a heading and the send state.
 human_cli_integration.py runs these cases in its full and renderer modes, and
 alone as `session-chrome`. Each case judges the screen the person sees, at
 80×24 unless it says otherwise: the transcript fills rows 0–18, the input sits
-between rules on rows 20–22, the state slot is 19 and the identity/keys footer is 23."""
+between rules on rows 19–21, the identity/keys footer is 22 and the state slot is 23."""
 import json
 import os
 import select
@@ -27,8 +27,8 @@ from terminal_process import close_pty, open_pty, spawn
 
 ROWS = 24
 BOTTOM = ROWS - 6  # The transcript's last row, where the marker sits.
-LAST = ROWS - 1
-NOTICE = ROWS - 5
+FOOTER = ROWS - 2
+NOTICE = ROWS - 1
 
 
 def rows(screen):
@@ -123,8 +123,8 @@ class Chrome:
 def composing(screen, draft):
     """The composer shows `draft` on its row between the rules."""
     shown = rows(screen)
-    return len(shown) == ROWS and (set(shown[ROWS - 4]) == {"─"} and set(shown[ROWS - 2]) == {"─"}
-            and shown[ROWS - 3].rstrip() == (" › " + draft).rstrip())
+    return len(shown) == ROWS and (set(shown[ROWS - 5]) == {"─"} and set(shown[ROWS - 3]) == {"─"}
+            and shown[ROWS - 4].rstrip() == (" › " + draft).rstrip())
 
 
 def latest(screen, text):
@@ -170,7 +170,7 @@ def activity_case():
         try:
             # Idle: no tail or stop key; the footer keeps the chat identity.
             idle = settle_screen(master, quiet=0.5)
-            assert rows(idle)[LAST].strip().startswith("‹ ") and "ctrl+x stop" not in rows(idle)[LAST] and "⠹" not in idle, idle
+            assert rows(idle)[FOOTER].strip().startswith("‹ ") and "ctrl+x stop" not in rows(idle)[FOOTER] and "⠹" not in idle, idle
             os.write(master, b"HOLD-QUESTION\r")
             release.set()
             running = chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
@@ -178,7 +178,7 @@ def activity_case():
             assert tail == [tail[-1]] and tail[-1].startswith("⠹ Held call · "), running
             assert tail[-1].removeprefix("⠹ Held call · ").rstrip("s").isdigit(), running
             # At the right of the footer, beside the chat identity.
-            last = rows(running)[LAST]
+            last = rows(running)[FOOTER]
             assert last.strip().startswith("‹ ") and last.endswith("ctrl+x stop") and len(last.rstrip()) == 80, running
             # Waiting Messages: one row, the newest's first line, counted, never called queued.
             for index in range(3):
@@ -189,12 +189,12 @@ def activity_case():
             tail = tail_rows(waiting)
             assert tail[-2].startswith("⠹ Held call · ") and tail[-1] == "◌ 3 · WAITING-2", waiting
             assert "second line" not in waiting and "queued" not in waiting.lower(), waiting
-            assert rows(waiting)[LAST].endswith("ctrl+x stop"), waiting
+            assert rows(waiting)[FOOTER].endswith("ctrl+x stop"), waiting
             (chrome.workspace / "release").write_text("")
             # The waiting Messages join the turn when its call ends.
             done = chrome.frame(master, b"", lambda screen: "HELD-DONE" in screen
                 and "◌" not in screen and "⠹" not in screen, timeout=30)
-            assert rows(done)[LAST].strip().startswith("‹ ") and "ctrl+x stop" not in rows(done)[LAST], done
+            assert rows(done)[FOOTER].strip().startswith("‹ ") and "ctrl+x stop" not in rows(done)[FOOTER], done
             # Each waiting Message is its own row once, in the order sent.
             order = [done.count(f"› WAITING-{i}") for i in range(3)]
             assert order == [1, 1, 1], done
@@ -260,7 +260,7 @@ def scroll_marker_case():
         for keys in (b"\x1b[1;2A", b"\x1b[5~"):
             scrolled = chrome.frame(master, keys, lambda screen: marker(screen) == "↓")
             assert "second row 07" not in scrolled and composing(scrolled, "keep"), (keys, scrolled)
-            assert rows(scrolled)[NOTICE].strip() == "" and rows(scrolled)[LAST].strip().startswith("‹ "), (keys, "no heading or hint", scrolled)
+            assert rows(scrolled)[NOTICE].strip() == "" and rows(scrolled)[FOOTER].strip().startswith("‹ "), (keys, "no heading or hint", scrolled)
             assert not any(row.startswith("Browsing") for row in rows(scrolled)), scrolled
             # End leaves the view where it is; only Esc or the marker return.
             # Older pages may still join above; End is judged on the settled view.
@@ -312,7 +312,7 @@ def pages_case():
             release.set()
             chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
             working = chrome.frame(master, b"/status\r", lambda screen: rows(screen)[0].strip() == f"Status · {session}")
-            assert rows(working)[LAST].endswith("ctrl+x stop"), working
+            assert rows(working)[FOOTER].endswith("ctrl+x stop"), working
             chrome.frame(master, b"\x1b", lambda screen: "⠹ Held call · " in screen and marker(screen) is None)
             (chrome.workspace / "release").write_text("")
             chrome.frame(master, b"", lambda screen: latest(screen, "PAGES-DONE"), timeout=30)
@@ -346,7 +346,7 @@ def opening_case():
             master, caller, opened = chrome.open(session, lambda screen: "◌ 2 · WAITING-1" in screen and "⠹ Held call · " in screen)
             tail = tail_rows(opened)
             assert tail[-2].startswith("⠹ Held call · ") and tail[-1] == "◌ 2 · WAITING-1", opened
-            assert rows(opened)[LAST].endswith("ctrl+x stop"), opened
+            assert rows(opened)[FOOTER].endswith("ctrl+x stop"), opened
             (chrome.workspace / "release").write_text("")
             chrome.frame(master, b"", lambda screen: latest(screen, "HELD-DONE") and "◌" not in screen, timeout=30)
             chrome.leave(master, caller)
@@ -364,7 +364,7 @@ def opening_case():
 
 
 def notice_case():
-    """A notice shows above the input until the next key; `?` on an empty
+    """A notice shows in the bottom state slot until the next key; `?` on an empty
     draft shows the shortcuts and the next key closes them."""
     with Chrome("rui-chrome-notice.", []) as chrome:
         session = chrome.session()
@@ -372,7 +372,7 @@ def notice_case():
         unknown = chrome.frame(master, b"/nosuch\r", lambda screen: rows(screen)[NOTICE].startswith("! Unknown command /nosuch"))
         assert composing(unknown, ""), unknown
         gone = chrome.frame(master, b"a", lambda screen: composing(screen, "a"))
-        assert rows(gone)[NOTICE].strip() == "" and rows(gone)[LAST].strip().startswith("‹ "), gone
+        assert rows(gone)[NOTICE].strip() == "" and rows(gone)[FOOTER].strip().startswith("‹ "), gone
         os.write(master, b"\x15")
         chrome.frame(master, b"", lambda screen: composing(screen, ""))
         shortcuts = chrome.frame(master, b"?", lambda screen: "shift+enter or ctrl+j new line" in screen)

@@ -845,7 +845,6 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     chrome.shortcuts.style = normal;
     const held = self.heldOriginal();
     const send = session_chrome.send(session_notice.status(self.reading.opening, self.app_consent.request != null, held), self.reading.opening or (held != null and held.?.state == .submitting));
-    const facts_buffer = try ctx.arena.create([session_chrome.facts_bytes]u8);
     chrome.place(&self.app_screen, .{
         .browsing = browsing,
         .new_entries = if (self.browsed_from) |from| self.live.entries - from else 0,
@@ -854,9 +853,8 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         // A conversation reading itself again says so until Host requests go on.
         .progress = if (self.upgradePhase() == .reobserving) session_upgrade.rereading else send.progress,
         .stoppable = said.stoppable,
-        .facts = SessionChrome.identity(facts_buffer, self.line.facts(&self.hint, self.session), self.session, self.line.archive_state),
+        .facts = .{ .current = self.line.facts(&self.hint, self.session), .name = self.session, .archive = self.line.archive_state },
         .list_visible = self.app_hooks.root.listVisible(),
-        .archived = self.line.archive_state == .archived,
         .notice = self.shown_notice.current(now_ms),
         .overview = said.text,
         .shortcuts = self.shortcuts_open,
@@ -935,8 +933,8 @@ test "App Session retains the draft across a permission card arriving during pas
         try std.testing.expectEqual(style.of(case.caps, .{ .colour = .quiet }).fg, user.style.fg);
         try std.testing.expect(!user.style.dim);
         try std.testing.expectEqual(case.ground, rendered.readCell(79, 10).?.style.bg);
-        try std.testing.expectEqual(case.ground, rendered.readCell(79, 22).?.style.bg);
-        try std.testing.expectEqual(case.band, rendered.readCell(79, 23).?.style.bg);
+        try std.testing.expectEqual(case.band, rendered.readCell(79, 22).?.style.bg);
+        try std.testing.expectEqual(case.ground, rendered.readCell(79, 23).?.style.bg);
     }
     self.app_caps = .{ .depth = .none };
     _ = self.input.append("headTAIL");
@@ -3559,7 +3557,7 @@ test "a held frontend stops a read still running and joins it before it is freed
 }
 
 /// Terminal bytes into the frontend's App, as `HeldFrontend.keys`.
-/// What the state notice above the input shows.
+/// What the state notice below the footer shows.
 fn barShows(held: *HeldFrontend) ![]const u8 {
     _ = try held.draw();
     return held.self.chrome.state.text;
@@ -5366,7 +5364,7 @@ test "App Session shows running calls in order above the input, with +N more run
     // No shown call carries the clock, so the work line follows, once.
     try std.testing.expect(std.mem.eql(u8, shown[first + 4], "⠹ Waiting · 12s") or std.mem.eql(u8, shown[first + 4], "⠹ Waiting · 13s"));
     // The tail sits right above the input's top rule.
-    try std.testing.expect(std.mem.startsWith(u8, shown[first + 6], "─"));
+    try std.testing.expect(std.mem.startsWith(u8, shown[first + 5], "─"));
     var waiting: usize = 0;
     for (shown) |line| waiting += @intFromBool(std.mem.startsWith(u8, line, "⠹ Waiting"));
     try std.testing.expectEqual(@as(usize, 1), waiting);
@@ -5391,7 +5389,7 @@ test "App Session shows the newest waiting Message as ◌ [N ·] its first line,
     try std.testing.expectEqualStrings("◌ 3 · also update docs/using-rui.md", three[row]);
     // The waiting row is the tail's last, under the work line.
     try std.testing.expect(std.mem.startsWith(u8, three[row - 1], "⠹ Waiting"));
-    try std.testing.expect(std.mem.startsWith(u8, three[row + 2], "─"));
+    try std.testing.expect(std.mem.startsWith(u8, three[row + 1], "─"));
     for (three) |line| try std.testing.expect(std.ascii.findIgnoreCase(line, "queued") == null);
     // One waiting: no count. A first line read for an older Message shows nothing.
     self.live.queued.count = 1;
@@ -5431,7 +5429,7 @@ test "App Session's status bar never says Sent: an accepted Message's row is its
     const self = fixture.self;
     // Accepted with no original held: the bar is empty, so the overview's
     // line shows there.
-    try std.testing.expectEqualStrings("‹ k7m2qx", (try fixture.rows())[23]);
+    try std.testing.expectEqualStrings("‹ k7m2qx", (try fixture.rows())[22]);
     ChromeFixture.overview_says = "Port overview to vxfw finished";
     defer ChromeFixture.overview_says = null;
     try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Port overview to vxfw finished") != null);
@@ -5499,8 +5497,8 @@ test "App Session Footer clips identity in terminal cells" {
     try self.line.label.?.set("Port the overview to vxfw and keep its key table");
     try self.line.model.set("gpt-6-sol");
     const shown = try fixture.rows();
-    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹ Port the overview to vxfw and keep its key table · gpt-6-sol · low"));
-    try std.testing.expect(session_line.cells(shown[23], .unicode) <= 80);
+    try std.testing.expect(std.mem.startsWith(u8, shown[22], "‹ Port the overview to vxfw and keep its key table · gpt-6-sol · low"));
+    try std.testing.expect(session_line.cells(shown[22], .unicode) <= 80);
 }
 
 test "App Session's last row offers ctrl+x stop at the right while work runs, beside the overview's notice" {
@@ -5513,8 +5511,8 @@ test "App Session's last row offers ctrl+x stop at the right while work runs, be
     defer ChromeFixture.overview_says = null;
     const shown = try fixture.rows();
     try std.testing.expect(ChromeFixture.find(&shown, "Port overview to vxfw finished") != null);
-    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹ k7m2qx"));
-    try std.testing.expect(std.mem.endsWith(u8, shown[23], " ctrl+x stop"));
+    try std.testing.expect(std.mem.startsWith(u8, shown[22], "‹ k7m2qx"));
+    try std.testing.expect(std.mem.endsWith(u8, shown[22], " ctrl+x stop"));
     // Work ends: the stop key goes; the overview's notice stays its own.
     self.live.work.state = .{ .idle = .{ .since = 0 } };
     try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Port overview to vxfw finished") != null);
@@ -5535,7 +5533,7 @@ test "App Session's last row says the send state, which stays past a key and fiv
     try fixture.press(.{ .codepoint = 'a', .text = "a" });
     const unconfirmed = try fixture.rows();
     try std.testing.expect(ChromeFixture.find(&unconfirmed, "! Not confirmed") != null);
-    try std.testing.expect(std.mem.endsWith(u8, unconfirmed[23], "ctrl+r retries original"));
+    try std.testing.expect(std.mem.endsWith(u8, unconfirmed[22], "ctrl+r retries original"));
     try std.testing.expectEqualStrings("ctrl+r retries original", self.chrome.status.key.label);
 }
 
@@ -5554,7 +5552,7 @@ test "App Session's last row keeps a rejection's code until /discard, past a key
     self.shown_notice.show("Copied 3 lines", ChromeFixture.now() - 6_000);
     const rejected = try fixture.rows();
     try std.testing.expect(ChromeFixture.find(&rejected, "! Input rejected: message_too_long") != null);
-    try std.testing.expect(std.mem.endsWith(u8, rejected[23], "/discard"));
+    try std.testing.expect(std.mem.endsWith(u8, rejected[22], "/discard"));
     try std.testing.expectEqualStrings("/discard", self.chrome.status.key.label);
     // Another original rejected keeps its own code, not this one's.
     self.submission.key = @splat('L');
@@ -5693,7 +5691,7 @@ test "App Session's ↓ marker takes a row of its own while scrolled back, so no
     const shown = try fixture.rows();
     // The marker alone at the right of the row above the input's rule.
     try std.testing.expectEqualStrings("↓", std.mem.trim(u8, shown[18], " "));
-    try std.testing.expect(std.mem.startsWith(u8, shown[20], "─"));
+    try std.testing.expect(std.mem.startsWith(u8, shown[19], "─"));
     // Every Message the transcript drew keeps its whole time.
     var drawn: usize = 0;
     for (shown[0..18]) |row| if (std.mem.startsWith(u8, row, "› Row ")) {
@@ -5874,9 +5872,10 @@ test "App Session footer takes list visibility from Root across desktop and phon
         surface.render(window, fixture.self.app_input.composer.widget());
         const chat_col: u16 = if (case.list) Root.list_width + 1 else 0;
         var row: std.Io.Writer.Allocating = .init(arena);
-        for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 29).?.char.grapheme);
+        for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 28).?.char.grapheme);
         try std.testing.expectEqual(@as(usize, if (case.list) 0 else 1), std.mem.count(u8, row.written(), "‹"));
         try std.testing.expect(std.mem.indexOf(u8, row.written(), "k7m2qx") != null);
-        try std.testing.expectEqualStrings("─", screen.readCell(chat_col, 28).?.char.grapheme);
+        try std.testing.expectEqualStrings("─", screen.readCell(chat_col, 27).?.char.grapheme);
+        for (chat_col..case.width) |col| try std.testing.expectEqualStrings(" ", screen.readCell(@intCast(col), 29).?.char.grapheme);
     }
 }

@@ -3014,10 +3014,13 @@ The chat footer shows `ctrl+x stop` only while there is work to stop (Divyansh a
 It shows while Ctrl-X would ask to stop the work the conversation shows, so not while a stop of that work is open.
 The name is the Label, else the first line of the first Message, else the reference, as in overview rows.
 `N% left` is how far Current's `context_estimate` is from the compaction trigger, rounded up, so `0% left` means the next model call compacts; without a trigger it is omitted.
-The chat footer clips identity before its right-aligned keys, in terminal cells; the overview keeps its own line-fitting policy.
-A chat notice keeps its separate single-row state slot above the composer and never replaces identity; it uses the failure colour when it starts with `!`. An unresolved send takes priority there, then the newest local notice, send progress and the overview's state. A transient notice goes after five seconds or the next key; an unresolved send remains. Overview notices keep their own policy.
+The chat footer reserves its one-space input gutter even beside the list; the hidden-list variant adds `‹ ` after that gutter.
+Identity fits whole items before its right-aligned keys, marking omitted items with ` · …`; only an oversized name is shortened at a word boundary.
+The overview keeps its own line-fitting policy.
+The footer keeps its previous placement above the bottom single-row state slot, which is blank while idle.
+A chat notice occupies that bottom state slot and never replaces identity; it uses the failure colour when it starts with `!`. An unresolved send takes priority there, then the newest local notice, send progress and the overview's state. A transient notice goes after five seconds or the next key; an unresolved send remains. Overview notices keep their own policy.
 The rule names how many draft lines it hides above or below; a conversation drops its Session line when fewer than three rows remain under its status and the rule when fewer than four remain above the line, and an overview narrower or shorter than six cells shows no input.
-The status sits directly above the rule; conversation text starts at the top of the screen, and its tool rows and live line follow its last line (Divyansh approved this on 2026-10-31, front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
+The chat state slot stays below the footer; conversation text starts at the top of the screen, and its tool rows and live line follow its last line (Divyansh approved this on 2026-10-31, front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 A draft wraps between words the same way on both screens: spaces at the edge hang past it rather than start a row, a word wider than the line (a URL or a path) breaks after its last `/`, `.`, `-` or similar mark that fits, and between clusters only when it has none; continuation rows align under the text.
 The conversation paints presentation colours from the shared Khadi theme roles: ink for User markers and work under way, quiet for settled outcomes and transient status, attention for permission decisions, and failure for failures.
 Marks come from `src/marks.zig`; CLI reads keep the matching ANSI foreground codes.

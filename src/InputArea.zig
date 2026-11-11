@@ -1,5 +1,5 @@
-//! Shared input stack. Chat notices sit above the composer; its lower rule
-//! and identity/keys line form the footer. The overview retains its own rows.
+//! Shared input stack. The composer's lower rule and identity/keys line form
+//! the chat footer; the bottom state slot stays below it, blank while idle.
 //! The floating palette belongs to the content above this area.
 const std = @import("std");
 const vaxis = @import("vaxis");
@@ -15,8 +15,6 @@ composer: Composer,
 permission: ?*PermissionCard = null,
 facts: vxfw.Widget = empty.widget(),
 status: vxfw.Widget = empty.widget(),
-/// The chat keeps notices above its input, leaving one footer line below.
-status_above: bool = false,
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = draw };
@@ -40,11 +38,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     else
         try self.composer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = @min(room, @import("draft_layout.zig").cap(size.height) + 2) }));
     const row = ctx.withConstraints(.{ .width = size.width, .height = 1 }, .{ .width = size.width, .height = 1 });
-    const status_height: u16 = if (status) |drawn| drawn.size.height else 0;
-    const above: u16 = if (self.status_above) status_height else 0;
-    children[0] = .{ .origin = .{ .row = above, .col = 0 }, .surface = content };
-    if (facts_rows == 1) children[1] = .{ .origin = .{ .row = above + content.size.height, .col = 0 }, .surface = try self.facts.draw(row) };
-    if (status) |drawn| children[1 + facts_rows] = .{ .origin = .{ .row = if (self.status_above) 0 else content.size.height + facts_rows, .col = 0 }, .surface = drawn };
+    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = content };
+    if (facts_rows == 1) children[1] = .{ .origin = .{ .row = content.size.height, .col = 0 }, .surface = try self.facts.draw(row) };
+    if (status) |drawn| children[1 + facts_rows] = .{ .origin = .{ .row = content.size.height + facts_rows, .col = 0 }, .surface = drawn };
     return .{ .widget = self.widget(), .size = .{ .width = size.width, .height = content.size.height + footer_rows }, .buffer = &.{}, .children = children };
 }
 
@@ -227,12 +223,12 @@ test "InputArea approval has one document title above a choice between composer 
     }
 }
 
-test "InputArea chat keeps a two-row footer and state notices above the composer" {
+test "InputArea chat keeps a two-row footer above the unchanged bottom state slot" {
     var bytes: [16]u8 = undefined;
     const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
     const footer: @import("widgets/Footer.zig") = .{ .left = "Chat · model", .right = "ctrl+x stop" };
     var notice: vxfw.Text = .{ .text = "" };
-    var input: Self = .{ .composer = .{ .editor = &editor }, .facts = footer.widget(), .status = notice.widget(), .status_above = true };
+    var input: Self = .{ .composer = .{ .editor = &editor }, .facts = footer.widget(), .status = notice.widget() };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
@@ -242,13 +238,14 @@ test "InputArea chat keeps a two-row footer and state notices above the composer
         try std.testing.expectEqual(@as(u16, 5), idle.size.height);
         try std.testing.expectEqual(@as(usize, 3), idle.children.len);
         try std.testing.expectEqualStrings("─", idle.children[0].surface.readCell(0, 2).char.grapheme);
-        try std.testing.expectEqual(@as(i17, 4), idle.children[1].origin.row);
+        try std.testing.expectEqual(@as(i17, 3), idle.children[1].origin.row);
+        try std.testing.expectEqual(@as(i17, 4), idle.children[2].origin.row);
 
         notice.text = "Copied 12 lines";
         const noticed = try input.widget().draw(ctx);
         try std.testing.expectEqual(@as(u16, 5), noticed.size.height);
-        try std.testing.expectEqual(@as(i17, 0), noticed.children[2].origin.row);
-        try std.testing.expectEqual(@as(i17, 1), noticed.children[0].origin.row);
+        try std.testing.expectEqual(@as(i17, 4), noticed.children[2].origin.row);
+        try std.testing.expectEqual(@as(i17, 0), noticed.children[0].origin.row);
         try std.testing.expectEqualDeep(idle.children[1].surface.buffer, noticed.children[1].surface.buffer);
         notice.text = "";
     }
