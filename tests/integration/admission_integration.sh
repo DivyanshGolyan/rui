@@ -224,7 +224,7 @@ finally:
 assert temporary.exists()
 recovered = subprocess.run(args, input=b'new capture', capture_output=True, timeout=10)
 assert recovered.returncode == 0, recovered.stderr
-assert json.loads(record.read_text())['configuration']['instructions']['value'] == 'new capture'
+assert json.loads(record.read_text())['configuration']['instructions'] == 'new capture'
 assert not temporary.exists()
 saved = record.read_bytes()
 duplicate = subprocess.run(args, input=b'replacement', capture_output=True, timeout=5)
@@ -489,7 +489,7 @@ printf '{"type":"object"}' >"$state/rejected-schema.json"
 unknown_configuration=$(python3 - "$root" "$state/rejected-instructions.txt" "$state/rejected-schema.json" <<'PY'
 import json, pathlib, sys
 print(json.dumps({'workspace': sys.argv[1], 'provider': 'anthropic', 'model': 'gpt-6-sol',
-    'instructions': pathlib.Path(sys.argv[2]).read_text(), 'output_schema': pathlib.Path(sys.argv[3]).read_text(), 'tools': []}))
+    'instructions': pathlib.Path(sys.argv[2]).read_text(), 'output_schema': json.loads(pathlib.Path(sys.argv[3]).read_text()), 'tools': []}))
 PY
 )
 unknown_provider=$(not_accepted wire_configure unknown-provider "$records/unknown-provider.json" "$unknown_configuration")
@@ -632,12 +632,17 @@ contains "$partial_message" '"status":"absent"'
 partial_session=$($rui session inspect --store "$store" --session "$main_session")
 contains "$partial_session" '"pending_messages":"0"'
 
-# Invalid schemas are definite saved rejections. A known-Session message keeps
+# A malformed schema cannot be a plain object spec: refuse it before capture.
+# A known-Session message keeps
 # its original captured bytes and queue admission through lost reply, source
 # mutation, client exit and Host restart.
 printf '{invalid' >"$state/invalid-schema.json"
-invalid_schema=$(not_accepted "$rui" session configure --store "$store" --record "$records/schema.json" --key schema-key --session "$main_session" --output-schema "$state/invalid-schema.json")
-contains "$invalid_schema" '"code":"invalid_output_schema"'
+status=0
+"$rui" session configure --store "$store" --record "$records/schema.json" --key schema-key --session "$main_session" --output-schema "$state/invalid-schema.json" >"$state/schema.out" 2>"$state/schema.err" || status=$?
+require_test 'malformed schema is a caller refusal' "$status" -eq 2
+contains "$(cat "$state/schema.err")" '[invalid_output_schema]'
+require_test 'malformed schema publishes no capture' ! -e "$records/schema.json"
+require_test 'malformed schema admits no command' "$("$rui" request inspect --store "$store" --key schema-key | python3 -c 'import json,sys; print(json.load(sys.stdin)["observation"]["status"])')" = absent
 printf 'original message with "quotes", slash \\, newline\nand emoji 🙂\n' >"$state/message-source.txt"
 if "$rui" session send --store "$store" --to "$main_session" --record "$records/known-message.json" --key msg-known --test-drop-reply after-commit <"$state/message-source.txt" >"$state/drop.out" 2>"$state/drop.err"; then
     echo "lost message acceptance unexpectedly produced a complete reply" >&2

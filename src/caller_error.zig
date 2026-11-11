@@ -283,6 +283,7 @@ fn mapped(err: anyerror) ?Code {
         error.InvalidHome => .home_unavailable,
         error.InvalidSession => .invalid_session_reference,
         error.InvalidModel => .model_id_malformed,
+        error.InvalidOutputSchema => .invalid_output_schema,
         error.InteractiveTerminalRequired => .terminal_required,
         error.EmptyMessageInput => .message_empty,
         error.InvalidArguments, error.InvalidPrefix => .invocation_invalid,

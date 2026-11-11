@@ -107,6 +107,7 @@ for (const outputSchema of ["[]", "false", "not JSON"]) {
 		await assert.rejects(Rui.connect({
 			database: join(root, "store"), binary: binary ?? "rui",
 			provider: { baseUrl: "https://api.openai.com/v1", key: "sk-ts-presets" },
+			// @ts-expect-error Deliberately exercise runtime refusal of non-object schemas.
 			presets: { review: { model: "m", effort: "low", compactAt: 1000, tools: [], permissionMode: "ask", outputSchema } },
 		}), (error: unknown) => error instanceof RuiStartError && error.code === "invalid_preset" && /review.*outputSchema/.test(error.message));
 	});

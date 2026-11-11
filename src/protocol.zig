@@ -41,7 +41,7 @@ pub const reserved_key_prefix = idempotency_key.reserved_prefix;
 pub const max_session_bytes = session_id.max_reference_bytes;
 pub const max_store_bytes = store_path.max_bytes;
 pub const max_workspace_bytes = workspace_path.max_bytes;
-/// Content strings one request carries at most: a configure command's
+/// Content values one request carries at most: a configure command's
 /// instructions and output schema, plus a creating Message's text.
 const spec_content_count = count: {
     var total: usize = 0;
@@ -655,7 +655,7 @@ pub const contentHasher = content_string.hasher;
 pub const contentDigest = content_string.digest;
 
 /// The metadata an Ingress has received so far, the Parser's only input.
-/// Content strings never reach it: the Ingress captures them.
+/// Content bodies never reach it: the Ingress captures them.
 pub const MetadataSource = struct {
     input: []const u8,
     start: usize = 0,
@@ -880,11 +880,11 @@ fn ParserOf(comptime Custody: type) type {
                         if (entry.kind == .content) {
                             // Suspend at the colon, before the first content
                             // byte. Ingress may resume with a quote or null.
-                            self.skipWhitespace() catch |err| return if (err == error.NeedInput and self.content_ordinal >= self.captured.len) error.NeedContent else err;
+                            self.skipWhitespace() catch |err| return if (err == error.NeedInput and self.content_ordinal >= self.captured.len) (if (entry.json_object) error.NeedSchema else error.NeedContent) else err;
                             if (!try self.readNull()) {
                                 if (self.content_ordinal == max_request_contents) return error.UnexpectedField;
                                 var counted: ContentField = .{};
-                                try self.readContentString(&counted);
+                                if (entry.json_object) try self.readSchema(&counted) else try self.readContentString(&counted);
                             }
                         } else try self.skipValue();
                     },
@@ -1063,7 +1063,7 @@ fn ParserOf(comptime Custody: type) type {
                         value.state = .value;
                         switch (entry.kind) {
                             .text, .choice => try self.readSmallString(&value.value),
-                            .content => try self.readContentString(value),
+                            .content => if (entry.json_object) try self.readSchema(value) else try self.readContentString(value),
                             .tools => try self.readToolList(value),
                             .decimal_policy => try self.readSpecDecimal(&value.value),
                         }
@@ -1547,6 +1547,20 @@ fn ParserOf(comptime Custody: type) type {
             if (!std.unicode.utf8ValidateSlice(destination.slice())) return error.InvalidUtf8;
         }
 
+        /// Schema custody is out of band. Only the ingress/DOM adapter writes
+        /// this array marker; a wire schema is always an object, never an array.
+        fn readSchema(self: *Parser, field: *ContentField) !void {
+            self.content_ordinal += 1;
+            if (self.content_ordinal > self.captured.len) return error.NeedSchema;
+            try self.expectByte('[');
+            try self.expectByte(']');
+            const original = self.captured[self.content_ordinal - 1];
+            field.length = original.length;
+            field.digest = original.digest;
+            field.capture = self.content_ordinal;
+            field.borrowed = original.borrowed;
+        }
+
         /// Reads the empty placeholder the Ingress left for a captured string.
         fn readContentString(self: *Parser, field: *ContentField) !void {
             self.content_ordinal += 1;
@@ -1649,12 +1663,21 @@ pub fn parseAgentSpec(comptime Custody: type, arena: std.mem.Allocator, spec: st
     while (fields.next()) |field| {
         var value = field.value_ptr.*;
         inline for (session_settings.entries) |entry| {
-            if (entry.kind == .content and std.mem.eql(u8, entry.spec, field.key_ptr.*) and value == .string) {
-                const bytes = value.string;
-                if (!std.unicode.utf8ValidateSlice(bytes)) return try std.fmt.allocPrint(arena, "spec.{s} must be UTF-8 text", .{entry.spec});
-                captured[content_count] = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = contentDigest(bytes) };
-                content_count += 1;
-                value = .{ .string = "" };
+            if (entry.kind == .content and std.mem.eql(u8, entry.spec, field.key_ptr.*)) {
+                if (entry.json_object and value != .object and value != .null)
+                    return try std.fmt.allocPrint(arena, "spec.{s} must be a JSON object or null", .{entry.spec});
+                const content: ?[]const u8 = if (entry.json_object and value == .object)
+                    try std.json.Stringify.valueAlloc(arena, value, .{})
+                else if (!entry.json_object and value == .string)
+                    value.string
+                else
+                    null;
+                if (content) |bytes| {
+                    if (!std.unicode.utf8ValidateSlice(bytes)) return try std.fmt.allocPrint(arena, "spec.{s} must be UTF-8 text", .{entry.spec});
+                    captured[content_count] = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = contentDigest(bytes) };
+                    content_count += 1;
+                    value = if (entry.json_object) .{ .array = std.json.Array.init(arena) } else .{ .string = "" };
+                }
             }
         }
         try metadata.put(arena, field.key_ptr.*, value);
@@ -2979,8 +3002,8 @@ test "the request parser refuses what each command's grammar forbids" {
         .{ .json = v ++ "\"kind\":\"host_info\",\"store\":\"s\"}", .failure = error.RouteKindMismatch, .route = .host_stop },
         .{ .json = v ++ "\"kind\":\"host_info\",\"store\":\"s\"}", .route = .host_info },
         // Content can arrive before the kind, but configure cannot carry text.
-        .{ .json = "{\"text\":" ++ value ++ ",\"configuration\":{\"instructions\":\"\"" ++ ",\"outputSchema\":\"\"" ++ "}," ++ "\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\"}", .failure = error.UnexpectedField },
-        .{ .json = configure ++ "\"instructions\":\"\"" ++ ",\"outputSchema\":\"\"" ++ "}}" },
+        .{ .json = "{\"text\":" ++ value ++ ",\"configuration\":{\"instructions\":\"\"" ++ ",\"outputSchema\":[]" ++ "}," ++ "\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\"}", .failure = error.UnexpectedField },
+        .{ .json = configure ++ "\"instructions\":\"\"" ++ ",\"outputSchema\":[]" ++ "}}" },
         .{ .json = configure ++ "\"instructions\":\"\"" ++ ",\"instructions\":\"\"" ++ "}}", .failure = error.UnexpectedField },
         // A Message to an existing Session carries no configuration and no
         // capability condition.

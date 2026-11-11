@@ -5,6 +5,7 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const named_scratch = @import("named_scratch.zig");
+const SchemaEncoder = @import("schema_json.zig").Encoder;
 const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const Custody = @import("content_custody.zig");
@@ -45,10 +46,11 @@ pub const Ingress = struct {
     lexical: enum { plain, string, escape } = .plain,
     /// Where the next byte goes: the metadata, the opening quote of a
     /// content string, or `capture`.
-    content_state: enum { metadata, awaiting_quote, capturing } = .metadata,
+    content_state: enum { metadata, awaiting_quote, awaiting_schema, capturing, capturing_schema } = .metadata,
     /// Live while `content_state` is `.capturing`.
     capture: ContentCapture = undefined,
     decoder: protocol.StringDecoder = .{},
+    schema_encoder: SchemaEncoder = undefined,
     contents: [protocol.max_request_contents]ContentField = @splat(.{}),
     content_count: usize = 0,
     complete: bool = false,
@@ -70,7 +72,8 @@ pub const Ingress = struct {
     }
 
     pub fn deinit(self: *Ingress) void {
-        if (self.content_state == .capturing) self.capture.deinit();
+        if (self.content_state == .capturing_schema) self.schema_encoder.deinit();
+        if (self.content_state == .capturing or self.content_state == .capturing_schema) self.capture.deinit();
         self.content_state = .metadata;
         for (&self.contents) |*field| field.removeTemporaryContent(self.options.io) catch unreachable;
         self.metadata.deinit(self.allocator);
@@ -84,13 +87,21 @@ pub const Ingress = struct {
             self.received += 1;
             switch (self.content_state) {
                 .metadata => {},
-                .awaiting_quote => {
+                .awaiting_quote, .awaiting_schema => {
                     switch (byte) {
                         ' ', '\t', '\r', '\n' => continue,
-                        '"' => {
+                        '"', '{' => {
+                            const schema = self.content_state == .awaiting_schema;
+                            if (byte != (if (schema) @as(u8, '{') else '"')) return error.InvalidJsonShape;
                             try self.capture.init(self.options, @intCast(self.content_count + 1));
-                            self.content_state = .capturing;
-                            self.decoder = .{};
+                            if (schema) {
+                                self.content_state = .capturing_schema;
+                                self.schema_encoder = SchemaEncoder.init(self.allocator);
+                                _ = try self.schema_encoder.feed(byte, &self.capture.sink);
+                            } else {
+                                self.content_state = .capturing;
+                                self.decoder = .{};
+                            }
                             continue;
                         },
                         // A plain nullable spec value needs no capture. Keep
@@ -99,14 +110,17 @@ pub const Ingress = struct {
                         else => return error.InvalidJsonShape,
                     }
                 },
-                .capturing => {
-                    if (try self.decoder.feed(byte, &self.capture.sink)) {
+                .capturing, .capturing_schema => {
+                    const schema = self.content_state == .capturing_schema;
+                    const done = if (schema) try self.schema_encoder.feed(byte, &self.capture.sink) else try self.decoder.feed(byte, &self.capture.sink);
+                    if (done) {
                         self.contents[self.content_count] = try self.capture.seal();
                         self.content_count += 1;
                         self.capture.deinit();
+                        if (schema) self.schema_encoder.deinit();
                         self.content_state = .metadata;
-                        try self.append('"');
-                        try self.append('"');
+                        try self.append(if (schema) '[' else '"');
+                        try self.append(if (schema) ']' else '"');
                         try self.preview();
                     }
                     continue;
@@ -159,9 +173,9 @@ pub const Ingress = struct {
     fn preview(self: *Ingress) !void {
         self.parse() catch |err| switch (err) {
             error.NeedInput => return,
-            error.NeedContent => {
+            error.NeedContent, error.NeedSchema => {
                 std.debug.assert(self.content_count < self.contents.len);
-                self.content_state = .awaiting_quote;
+                self.content_state = if (err == error.NeedSchema) .awaiting_schema else .awaiting_quote;
                 return;
             },
             else => return err,
@@ -175,7 +189,7 @@ pub const Ingress = struct {
     pub fn finish(self: *Ingress) !*Request {
         if (self.received != self.options.content_length) return error.UnexpectedEndOfBody;
         self.parse() catch |err| switch (err) {
-            error.NeedInput, error.NeedContent => return error.UnexpectedEndOfBody,
+            error.NeedInput, error.NeedContent, error.NeedSchema => return error.UnexpectedEndOfBody,
             else => return err,
         };
         const request = &self.request;
@@ -651,7 +665,7 @@ test "initial Message ingress streams the plain spec and transfers all three con
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const large = try std.testing.allocator.alloc(u8, 256 * 1024);
+    const large = try std.testing.allocator.alloc(u8, Ingress.metadata_limit + 1);
     defer std.testing.allocator.free(large);
     @memset(large, 'x');
     for ([_]bool{ false, true }) |text_first| {
@@ -663,7 +677,13 @@ test "initial Message ingress streams the plain spec and transfers all three con
             try body.writer.writeAll("\"configuration\":{\"model\":\"custom\",\"effort\":null,\"compactAt\":1000,\"tools\":[],\"permissionMode\":\"ask\",\"instructions\":");
             try std.json.Stringify.value(large, .{}, &body.writer);
             try body.writer.writeAll(",\"outputSchema\":");
-            if (null_schema) try body.writer.writeAll("null") else try std.json.Stringify.value(large, .{}, &body.writer);
+            if (null_schema) {
+                try body.writer.writeAll("null");
+            } else {
+                try body.writer.writeAll("{\"description\":");
+                try std.json.Stringify.value(large, .{}, &body.writer);
+                try body.writer.writeAll("}");
+            }
             try body.writer.writeAll("}");
             if (!text_first) try body.writer.writeAll(",\"text\":{\"state\":\"value\",\"value\":\"task\"}");
             try body.writer.writeAll("}");
@@ -677,7 +697,7 @@ test "initial Message ingress streams the plain spec and transfers all three con
                 .scratch_path = root[0..root_len],
                 .request_number = 43,
                 .retained_scratch = &retained,
-                .scratch_budget = .{ .used = &used, .limit = 2 * large.len + 4 },
+                .scratch_budget = .{ .used = &used, .limit = 2 * large.len + 64 },
                 .expected_kind = .message,
             });
             defer ingress.deinit();
@@ -692,12 +712,16 @@ test "initial Message ingress streams the plain spec and transfers all three con
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest(large), &configuration.instructions.digest);
             if (null_schema) try std.testing.expectEqual(.explicit_null, configuration.output_schema.state) else {
                 try std.testing.expect(configuration.output_schema.hasFile());
-                try std.testing.expectEqual(large.len, configuration.output_schema.length);
-                try std.testing.expectEqualSlices(u8, &protocol.contentDigest(large), &configuration.output_schema.digest);
+                try std.testing.expectEqual(large.len + "{\"description\":\"\"}".len, configuration.output_schema.length);
+                var hash = protocol.contentHasher();
+                hash.update("{\"description\":\"");
+                hash.update(large);
+                hash.update("\"}");
+                try std.testing.expectEqualSlices(u8, &hash.finalResult(), &configuration.output_schema.digest);
             }
             try std.testing.expect(request.message.text.hasFile());
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest("task"), &request.message.text.digest);
-            try std.testing.expectEqual(@as(u64, large.len * @as(usize, if (null_schema) 1 else 2) + 4), used.load(.acquire));
+            try std.testing.expectEqual(@as(u64, large.len * @as(usize, if (null_schema) 1 else 2) + 4 + @as(usize, if (null_schema) 0 else "{\"description\":\"\"}".len)), used.load(.acquire));
             try request.removeTemporaryContent(io);
             try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
             try std.testing.expect(retained == null);
@@ -761,7 +785,7 @@ test "incremental ingress preserves grammar and releases both captures after lat
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const configure = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{\"instructions\":\"first\\n\",\"outputSchema\":\"{}\"}";
+    const configure = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{\"instructions\":\"first\\n\",\"outputSchema\":{}}";
     const cases = [_]struct { bytes: []const u8, kind: protocol.Kind = .configure, failure: ?anyerror = null }{
         .{ .bytes = configure ++ "}" },
         .{ .bytes = configure ++ ",\"require_model\":true}" },
@@ -823,8 +847,8 @@ test "a request's members may come in any order, and its content lands in its ow
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
     // Content fields can arrive in either order, before or after the header.
-    const reordered = "{\"configuration\":{\"outputSchema\":\"{}\",\"label\":\"Map\",\"tools\":[\"bash\"],\"instructions\":\"first\\n\"},\"require_model\":true,\"session\":\"peer\",\"key\":\"k\",\"store\":\"s\",\"kind\":\"configure\",\"version\":\"" ++ protocol.wire_version ++ "\"}";
-    const ordered = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{\"instructions\":\"first\\n\",\"tools\":[\"bash\"],\"outputSchema\":\"{}\",\"label\":\"Map\"},\"require_model\":true}";
+    const reordered = "{\"configuration\":{\"outputSchema\":{},\"label\":\"Map\",\"tools\":[\"bash\"],\"instructions\":\"first\\n\"},\"require_model\":true,\"session\":\"peer\",\"key\":\"k\",\"store\":\"s\",\"kind\":\"configure\",\"version\":\"" ++ protocol.wire_version ++ "\"}";
+    const ordered = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{\"instructions\":\"first\\n\",\"tools\":[\"bash\"],\"outputSchema\":{},\"label\":\"Map\"},\"require_model\":true}";
     var used = std.atomic.Value(u64).init(0);
     var retained: ?named_scratch.Owner = null;
     var digests: [2][32]u8 = undefined;
@@ -892,8 +916,8 @@ test "an order-free request still names each member once, carries every required
         .{ .json = "{\"kind\":\"message\",\"text\":{\"state\":\"value\"},\"sender_handle\":null,\"sender\":null,\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.InvalidFieldState },
         // Creating Messages carry the same content spec in either field order.
         .{ .json = "{\"kind\":\"message\",\"configuration\":" ++ configuration ++ ",\"outputSchema\":null,\"instructions\":\"x\"},\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":null,\"session\":\"\",\"key\":\"k\"," ++ header ++ "}" },
-        .{ .json = "{\"configuration\":" ++ configuration ++ ",\"outputSchema\":\"x\",\"instructions\":\"x\"},\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":null,\"session\":\"\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}" },
-        .{ .json = "{\"configuration\":" ++ configuration ++ ",\"outputSchema\":\"x\",\"instructions\":\"x\"},\"text\":" ++ value ++ ",\"key\":\"k\",\"session\":\"x\"," ++ header ++ ",\"kind\":\"configure\"}", .failure = error.UnexpectedField },
+        .{ .json = "{\"configuration\":" ++ configuration ++ ",\"outputSchema\":{},\"instructions\":\"x\"},\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":null,\"session\":\"\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}" },
+        .{ .json = "{\"configuration\":" ++ configuration ++ ",\"outputSchema\":{},\"instructions\":\"x\"},\"text\":" ++ value ++ ",\"key\":\"k\",\"session\":\"x\"," ++ header ++ ",\"kind\":\"configure\"}", .failure = error.UnexpectedField },
         .{ .json = "{\"configuration\":" ++ configuration ++ "},\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":null,\"session\":\"x\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}", .failure = error.UnexpectedField },
     };
     var used = std.atomic.Value(u64).init(0);
@@ -940,4 +964,58 @@ test "observation needs no scratch at a full budget" {
     try std.testing.expect(request.* == .observe_command);
     try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
     try std.testing.expect(retained == null);
+}
+
+// Every object is a schema, not a reference. The [] custody marker exists
+// only after ingress has captured an object and must not be accepted on wire.
+test "schema object custody is canonical and cannot collide with reference-shaped objects" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    const cases = [_]struct { wire: []const u8, canonical: ?[]const u8 = null, invalid: bool = false }{
+        .{ .wire = "null" },
+        .{ .wire = "{}", .canonical = "{}" },
+        .{ .wire = "{ \"description\": \"caf\\u00e9\\/\" }", .canonical = "{\"description\":\"caf\xc3\xa9/\"}" },
+        .{ .wire = "{\"description\":\"caf\xc3\xa9/\"}", .canonical = "{\"description\":\"caf\xc3\xa9/\"}" },
+        .{ .wire = "{\"state\":\"value\",\"value\":{},\"bytes\":\"0\",\"sha256\":\"not a reference\"}", .canonical = "{\"state\":\"value\",\"value\":{},\"bytes\":\"0\",\"sha256\":\"not a reference\"}" },
+        .{ .wire = "[]", .invalid = true },
+        .{ .wire = "\"{}\"", .invalid = true },
+        .{ .wire = "true", .invalid = true },
+        .{ .wire = "5", .invalid = true },
+        .{ .wire = "{\"bad\":tru e}", .invalid = true },
+    };
+    var equivalent: ?[32]u8 = null;
+    for (cases, 0..) |case, index| {
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":\"{s}\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"configuration\":{{\"outputSchema\":{s}}}}}", .{ protocol.wire_version, case.wire });
+        defer std.testing.allocator.free(body);
+        var retained: ?named_scratch.Owner = null;
+        var used = std.atomic.Value(u64).init(0);
+        const ingress = try std.testing.allocator.create(Ingress);
+        defer std.testing.allocator.destroy(ingress);
+        ingress.init(std.testing.allocator, .{ .io = io, .content_length = body.len, .scratch_path = root[0..root_len], .request_number = index, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 1024 } });
+        defer ingress.deinit();
+        const result = blk: {
+            for (body) |byte| ingress.feed(&.{byte}) catch |err| break :blk err;
+            break :blk ingress.finish();
+        };
+        if (case.invalid) {
+            if (result) |_| return error.TestUnexpectedResult else |_| {}
+        } else {
+            const request = try result;
+            defer request.removeTemporaryContent(io) catch unreachable;
+            const field = &request.configure.configuration.output_schema;
+            if (case.canonical) |expected| {
+                try std.testing.expect(field.hasFile());
+                try std.testing.expectEqual(expected.len, field.length);
+                try std.testing.expectEqualSlices(u8, &protocol.contentDigest(expected), &field.digest);
+                if (index == 2) equivalent = request.configure.semanticDigest();
+                if (index == 3) try std.testing.expectEqualSlices(u8, &equivalent.?, &request.configure.semanticDigest());
+            } else try std.testing.expectEqual(.explicit_null, field.state);
+        }
+        ingress.deinit();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
 }

@@ -2526,10 +2526,10 @@
           },
           "outputSchema": {
             "type": [
-              "string",
+              "object",
               "null"
             ],
-            "description": "Optional JSON output schema, encoded as JSON text."
+            "description": "Optional JSON output schema object; null clears it."
           },
           "compactAt": {
             "type": [
@@ -2672,8 +2672,8 @@
           "outputSchema": {
             "anyOf": [
               {
-                "type": "string",
-                "description": "Text of any length, saved as content."
+                "type": "object",
+                "additionalProperties": true
               },
               {
                 "type": "null"

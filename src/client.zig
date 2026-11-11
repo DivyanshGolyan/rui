@@ -1801,7 +1801,7 @@ const Capture = struct {
                             if (!entry.nullable) return error.NullNotAllowed;
                             try self.write("null");
                         },
-                        .value => try self.writeJsonFile(value.path),
+                        .value => if (entry.json_object) try self.writeInputFile(value.path, protocol.max_sqlite_content_bytes, false, true) else try self.writeJsonFile(value.path),
                     },
                     .tools => try self.writeTools(value.?),
                     .decimal_policy => if (value.value) |text| {
@@ -1820,6 +1820,10 @@ const Capture = struct {
     }
 
     fn writeJsonFileBounded(self: *Capture, path: []const u8, limit: u64, require_text: bool) !void {
+        return self.writeInputFile(path, limit, require_text, false);
+    }
+
+    fn writeInputFile(self: *Capture, path: []const u8, limit: u64, require_text: bool, comptime schema: bool) !void {
         const stdin = std.mem.eql(u8, path, "-");
         const read: Step = if (stdin) .stdin_read else .input_file_read;
         var file = if (stdin)
@@ -1827,7 +1831,18 @@ const Capture = struct {
         else
             std.Io.Dir.cwd().openFile(self.io, path, .{}) catch |err| return self.failInput(read, err);
         defer if (!stdin) file.close(self.io);
-        self.write("\"") catch |err| return self.failInput(read, err);
+        if (!schema) self.write("\"") catch |err| return self.failInput(read, err);
+        // Reject malformed schema files before publishing a capture. Schema
+        // bytes have the same bounded streaming normalization as wire ingress.
+        const SchemaEncoder = @import("schema_json.zig").Encoder;
+        var encoder: SchemaEncoder = if (schema) .init(std.heap.page_allocator) else undefined;
+        defer if (schema) encoder.deinit();
+        const Sink = struct {
+            capture: *Capture,
+            pub fn write(sink: @This(), bytes: []const u8) !void {
+                try sink.capture.write(bytes);
+            }
+        };
         var buffer: [protocol.content_window_bytes]u8 = undefined;
         var validator = Utf8Validator{};
         var decoded_bytes: u64 = 0;
@@ -1843,12 +1858,24 @@ const Capture = struct {
             validator.feed(buffer[0..count]) catch |err| return self.failInput(.input_parse, err);
             // Default encoding copies non-ASCII bytes unchanged, including a UTF-8
             // sequence split across reads; the streaming validator owns validity.
-            std.json.Stringify.encodeJsonStringChars(buffer[0..count], .{}, &self.writer.interface) catch
+            if (schema) {
+                for (buffer[0..count]) |byte| {
+                    if (encoder.done) {
+                        if (std.mem.indexOfScalar(u8, " \t\r\n", byte) == null)
+                            return self.failInput(.input_parse, error.InvalidOutputSchema);
+                    } else _ = encoder.feed(byte, Sink{ .capture = self }) catch |err| {
+                        if (self.writer.err) |failure| return failure;
+                        if (err == error.OutOfMemory) return error.OutOfMemory;
+                        return self.failInput(.input_parse, error.InvalidOutputSchema);
+                    };
+                }
+            } else std.json.Stringify.encodeJsonStringChars(buffer[0..count], .{}, &self.writer.interface) catch
                 return self.writer.err orelse error.WriteFailed;
         }
         if (!validator.complete()) return self.failInput(.input_parse, error.InvalidUtf8);
+        if (schema and !encoder.done) return self.failInput(.input_parse, error.InvalidOutputSchema);
         if (require_text and decoded_bytes == 0) return self.failInput(.input_parse, error.EmptyMessageInput);
-        try self.write("\"");
+        if (!schema) try self.write("\"");
     }
 
     fn failInput(self: *Capture, step: Step, err: anytype) @TypeOf(err) {
@@ -4907,4 +4934,37 @@ test "saved request wire mismatch refuses recovery before returning a captured o
     const handle = "01234567-89ab-4cde-8012-3456789abcde";
     try tmp.dir.writeFile(io, .{ .sub_path = handle ++ ".json", .data = "{\"version\":\"" ++ protocol.previous_wire_version ++ "\",\"kind\":\"configure\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"configuration\":{}}" });
     try std.testing.expectError(error.SavedRequestWireVersionMismatch, openCaptured(io, .{ .generated = .{ .directory = root, .handle = handle } }));
+}
+
+test "schema file capture writes an object and refuses invalid input before publication" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const record = try std.fmt.bufPrint(&record_buffer, "{s}/record", .{root[0..root_len]});
+    var source_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const source = try std.fmt.bufPrint(&source_buffer, "{s}/source", .{root[0..root_len]});
+    for ([_][]const u8{ "", "{invalid", "[]", "\"{}\"", "true", "{}false" }) |invalid| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "source", .data = invalid });
+        var buffer: [32]u8 = undefined;
+        var capture = try Capture.open(io, record, &buffer);
+        defer capture.abort();
+        try std.testing.expectError(error.InvalidOutputSchema, capture.writeInputFile(source, protocol.max_sqlite_content_bytes, false, true));
+        capture.abort();
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "record", .{}));
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "source", .data = " { \"type\" : \"object\" } \n" });
+    var buffer: [32]u8 = undefined;
+    var capture = try Capture.open(io, record, &buffer);
+    defer capture.abort();
+    try capture.writeInputFile(source, protocol.max_sqlite_content_bytes, false, true);
+    try capture.commit();
+    const saved = try tmp.dir.openFile(io, "record", .{});
+    defer saved.close(io);
+    var bytes: [64]u8 = undefined;
+    const count = try saved.readPositionalAll(io, &bytes, 0);
+    try std.testing.expectEqualStrings("{\"type\":\"object\"}", bytes[0..count]);
 }

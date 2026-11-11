@@ -664,8 +664,8 @@ export interface components {
             loadedTools?: string[];
             /** @enum {string} */
             permissionMode: "ask" | "bypass";
-            /** @description Optional JSON output schema, encoded as JSON text. */
-            outputSchema?: string | null;
+            /** @description Optional JSON output schema object; null clears it. */
+            outputSchema?: Record<string, never> | null;
             compactAt: number | null;
             outputReservation?: number | null;
             /** @enum {string|null} */
@@ -694,7 +694,9 @@ export interface components {
             /** @description None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
             loadedTools?: string[];
             permissionMode?: string;
-            outputSchema?: string | null;
+            outputSchema?: {
+                [key: string]: unknown;
+            } | null;
             compactAt?: number | null;
             outputReservation?: number | null;
             effort?: string | null;

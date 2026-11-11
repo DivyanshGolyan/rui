@@ -2198,6 +2198,10 @@ pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, 
     }
     try sqlite.exec(database, version_sql);
     try sqlite.exec(database, "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format'");
+    // v0.60 shipped format 60 / wire 11. Format 61 is already a forward
+    // migration, so finalize its wire label without rewriting shipped steps
+    // or taking another format number. Unknown labels still fail validation.
+    try sqlite.exec(database, "UPDATE store_meta SET meta_value='" ++ wire_version ++ "' WHERE meta_key='wire_version' AND meta_value='11'");
     try validateCurrent(database, selector, identity_mismatch);
     try sqlite.exec(database, "COMMIT");
 }

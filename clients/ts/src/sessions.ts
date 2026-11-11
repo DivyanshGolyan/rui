@@ -26,8 +26,8 @@ export interface AgentSpec {
 	/** May change within the Session's fixed provider. */
 	model: string;
 	instructions?: string;
-	/** JSON output schema, or its JSON text; `null` clears it. */
-	outputSchema?: Record<string, unknown> | string | null;
+	/** JSON output schema object; `null` clears it. */
+	outputSchema?: Record<string, unknown> | null;
 	/** Tool names the Host offers, such as `bash` and `web_search`. */
 	tools: readonly string[];
 	/** Tools loaded from the first model request. */
@@ -120,7 +120,7 @@ export function agentSpec(spec: Partial<SessionSpec>): Schemas["Configuration"] 
 		...(spec.tools === undefined ? {} : { tools: [...new Set(spec.tools)].sort() }),
 		...(spec.loadedTools === undefined ? {} : { loadedTools: [...new Set(spec.loadedTools)].sort() }),
 		...(spec.permissionMode === undefined ? {} : { permissionMode: spec.permissionMode }),
-		...(spec.outputSchema === undefined ? {} : { outputSchema: typeof spec.outputSchema === "object" && spec.outputSchema !== null ? JSON.stringify(spec.outputSchema) : spec.outputSchema }),
+		...(spec.outputSchema === undefined ? {} : { outputSchema: spec.outputSchema }),
 		...(spec.compactAt === undefined ? {} : { compactAt: spec.compactAt }),
 		...(spec.outputReservation === undefined ? {} : { outputReservation: spec.outputReservation }),
 		...(spec.effort === undefined ? {} : { effort: spec.effort }),

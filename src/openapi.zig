@@ -421,13 +421,23 @@ fn configurationMembers(comptime index: usize) type {
         .text, .choice => |capacity| Plain(Hole{ .string = capacity }, entry.nullable),
         .decimal_policy => Plain(TokenCount, entry.nullable),
         .tools => Plain(ToolNameList, entry.nullable),
-        .content => Plain(Content, entry.nullable),
+        .content => Plain(if (entry.json_object) SchemaObject else Content, entry.nullable),
     };
     const member = .{ (if (index == 0) "" else ",") ++ "\"" ++ entry.spec ++ "\":", value };
     return struct {
         const shape = .{Optional(member)} ++ configurationMembers(index + 1).shape;
     };
 }
+
+/// Schemas have arbitrary JSON members; no object is a content reference.
+const SchemaObject = struct {
+    pub fn openapi_inline(d: *Document) !Value {
+        return d.object(.{ .type = Value{ .string = "object" }, .additionalProperties = Value{ .bool = true } });
+    }
+    pub fn openapi_example(out: *std.Io.Writer) !void {
+        try out.writeAll("{}");
+    }
+};
 
 const Configuration = configurationShape("Configuration");
 const MessageConfiguration = Configuration;
@@ -1235,7 +1245,7 @@ test "every launch Wire field parses and conforms to its component schema" {
     var document: Document = .init(allocator);
     _ = try document.build();
     const preset = try std.json.parseFromSliceLeaky(Value, allocator,
-        \\{"review":{"model":"custom","effort":"low","compactAt":1000,"tools":[],"permissionMode":"ask","provider":"openai","workspace":"/tmp","instructions":"Review","outputSchema":"{\"type\":\"object\"}","label":null}}
+        \\{"review":{"model":"custom","effort":"low","compactAt":1000,"tools":[],"permissionMode":"ask","provider":"openai","workspace":"/tmp","instructions":"Review","outputSchema":{"type":"object"},"label":null}}
     , .{});
     const wire: launch_frame.Wire = .{
         .v = launch_frame.version,

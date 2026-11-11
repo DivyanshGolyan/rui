@@ -60,6 +60,7 @@ const agent_spec_properties = blk: {
         const kind = switch (entry.kind) {
             .tools => "array",
             .decimal_policy => "integer",
+            .content => if (entry.json_object) "object" else "string",
             else => "string",
         };
         const json_type = if (entry.nullable) "[\"" ++ kind ++ "\",\"null\"]" else "\"" ++ kind ++ "\"";
@@ -70,7 +71,7 @@ const agent_spec_properties = blk: {
             else if (std.mem.eql(u8, entry.field, "permission_mode"))
                 ",\"enum\":[\"ask\",\"bypass\"]"
             else if (std.mem.eql(u8, entry.field, "output_schema"))
-                ",\"description\":\"Optional JSON output schema, encoded as JSON text.\""
+                ",\"description\":\"Optional JSON output schema object; null clears it.\""
             else
                 "",
         };
