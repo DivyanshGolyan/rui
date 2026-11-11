@@ -2,6 +2,7 @@
 //! name, argument shape and one-line description. The screen's parser, the
 //! list typing "/" shows, Tab and /help all read it.
 const std = @import("std");
+const session_settings = @import("session_settings.zig");
 const cli_args = @import("cli_args.zig");
 const model_capability = @import("model_capability.zig");
 const TerminalText = @import("TerminalText.zig");
@@ -96,7 +97,34 @@ comptime {
 
 /// The settings a live Session changes. Its model and sign-in never change,
 /// and its instructions come only from a shell.
-const live_options: Options = .of(cli_args.live_configure, &.{ "permission-mode", "tools", "loaded-tools", "reasoning-effort", "label", "workspace", "compaction-trigger", "output-reservation", "output-schema", "text-output" }, false, true);
+const live_options: Options = .of(cli_args.live_configure, settingNames(false), false, true);
+
+/// Completion has its own presentation order, independent of protocol and
+/// help order. Membership and spellings still come from the setting table.
+fn settingNames(comptime on_start: bool) []const []const u8 {
+    @setEvalBranchQuota(20_000);
+    var names: []const []const u8 = &.{};
+    for (0..session_settings.entries.len) |rank| {
+        for (session_settings.entries) |entry| {
+            const cli = entry.cli orelse continue;
+            if (std.mem.eql(u8, entry.field, "instructions")) continue;
+            if (on_start) {
+                if (!cli.on_start) continue;
+            } else if (cli.group == .binding) continue;
+            if (completionRank(entry.field) != rank) continue;
+            names = names ++ .{cli.name};
+            if (std.mem.eql(u8, entry.field, "output_schema")) names = names ++ .{"text-output"};
+        }
+    }
+    return names;
+}
+
+fn completionRank(comptime field: []const u8) usize {
+    // Presentation only: changing this order must not change CLI membership.
+    const order = .{ "permission_mode", "tools", "loaded_tools", "reasoning_effort", "label", "workspace", "compaction_trigger", "output_reservation", "output_schema", "model", "provider", "instructions" };
+    inline for (order, 0..) |name, rank| if (std.mem.eql(u8, field, name)) return rank;
+    @compileError("choose a completion presentation order for " ++ field);
+}
 
 /// Future defaults, as /setup saves them; /setup alone shows them.
 const setup_options: Options = .of(cli_args.live_setup, &.{ "model", "provider", "reasoning-effort", "notifications", "clear-model", "store" }, true, false);
@@ -156,7 +184,7 @@ pub const conversation = Commands(ConversationName, .{
 
 /// What the overview's /configure holds for the next Session: a fresh
 /// Session's settings.
-const start_options: Options = .of(cli_args.live_configure, &.{ "permission-mode", "tools", "loaded-tools", "reasoning-effort", "label", "workspace", "compaction-trigger", "output-reservation", "model", "provider" }, false, true);
+const start_options: Options = .of(cli_args.live_configure, settingNames(true), false, true);
 
 /// The overview's commands. /rename and /setup run as a conversation runs
 /// them; /rename names the selected Session.
@@ -1018,5 +1046,15 @@ test "archive and upgrade retain separate local command identities after merge" 
             try std.testing.expectEqualStrings(name, list.shown()[0].word);
             try std.testing.expect(list.enter(0).runs);
         }
+    }
+}
+
+test "Session settings slash options retain both screens membership and order" {
+    inline for (.{
+        .{ live_options, &[_][]const u8{ "--permission-mode ", "--tools ", "--loaded-tools ", "--reasoning-effort ", "--label ", "--workspace ", "--compaction-trigger ", "--output-reservation ", "--output-schema ", "--text-output " } },
+        .{ start_options, &[_][]const u8{ "--permission-mode ", "--tools ", "--loaded-tools ", "--reasoning-effort ", "--label ", "--workspace ", "--compaction-trigger ", "--output-reservation ", "--model ", "--provider " } },
+    }) |case| {
+        try std.testing.expectEqual(case[1].len, case[0].entries.len);
+        for (case[0].entries, 0..) |entry, index| try std.testing.expectEqualStrings(case[1][index], entry.word);
     }
 }
