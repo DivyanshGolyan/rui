@@ -90,9 +90,14 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             ctx.consumeEvent();
         },
         .key_release => ctx.consumeEvent(),
-        // Esc closes the topmost thing only: an open choice, else the page.
+        // Esc closes the topmost thing only: an open choice, then an Upgrade
+        // that can still be cancelled, which the overview owns, else the page.
         .key_press => |key| if (self.settings_open and key.matches(vaxis.Key.escape, .{})) {
-            if (self.settings_page.hasChoice()) self.settings_page.cancelChoice() else try self.showMain(ctx);
+            if (self.settings_page.hasChoice()) {
+                self.settings_page.cancelChoice();
+            } else if (self.settings_page.upgradeTakesEscape()) {
+                try self.overview.handleEvent(ctx, input);
+            } else try self.showMain(ctx);
             ctx.consumeAndRedraw();
         },
         else => {},
@@ -398,6 +403,91 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         try std.testing.expectEqual(width >= split_at, root.listVisible());
         try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(session.widget()));
     }
+}
+
+test "App root gives Escape to a cancellable Upgrade after a choice and before closing settings" {
+    const upgrade_status = @import("upgrade_status.zig");
+    const Fixture = struct {
+        run: ?upgrade_status.Run = null,
+        escapes: usize = 0,
+        fn read(_: *anyopaque) !@import("preferences.zig").Values {
+            return .{};
+        }
+        fn save(_: *anyopaque, _: @import("preferences.zig").Edit) !void {}
+        fn saveState(_: *anyopaque) AppSettings.SaveState {
+            return .idle;
+        }
+        fn upgrade(_: *anyopaque) !void {}
+        fn running(raw: *anyopaque) ?upgrade_status.Run {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.run;
+        }
+        fn caps(_: *anyopaque) @import("overview_view.zig").Caps {
+            return .{};
+        }
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .eventHandler = @This().event, .drawFn = @This().draw };
+        }
+        fn event(raw: *anyopaque, _: *vxfw.EventContext, input: vxfw.Event) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (input == .key_press and input.key_press.matches(vaxis.Key.escape, .{})) self.escapes += 1;
+        }
+        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return .{ .widget = self.widget(), .size = ctx.max.size(), .buffer = &.{}, .children = &.{} };
+        }
+    };
+    const found: upgrade_status.Found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none };
+    const runs = [_]?upgrade_status.Run{
+        null,
+        .checking,
+        .cancelling,
+        .{ .installing = .{ .found = found } },
+        .{ .installing = .{ .found = found, .step = .publishing } },
+        .{ .installing = .{ .found = found, .step = .restarting } },
+        .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } },
+    };
+    const escape: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.escape } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for (runs) |run| for ([_]bool{ false, true }) |choice| {
+        var fixture: Fixture = .{ .run = run };
+        var root: Self = .{ .overview = fixture.widget(), .list = fixture.widget(), .compose = fixture.widget(), .settings_page = .{ .backend = .{
+            .context = &fixture,
+            .read = Fixture.read,
+            .save = Fixture.save,
+            .save_state = Fixture.saveState,
+            .upgrade = Fixture.upgrade,
+            .run = Fixture.running,
+            .caps = Fixture.caps,
+        } } };
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
+        try root.openSettings(&ctx);
+        if (choice) {
+            try root.settings_page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+            try std.testing.expect(root.settings_page.hasChoice());
+            ctx.consume_event = false;
+            try root.widget().captureEvent(&ctx, escape);
+            try std.testing.expect(ctx.consume_event);
+            try std.testing.expect(!root.settings_page.hasChoice());
+            try std.testing.expect(root.settings_open);
+            try std.testing.expectEqual(@as(usize, 0), fixture.escapes);
+        }
+        // The run's own rule, not this table, says which phases take Escape.
+        const cancels = if (run) |value| value.takesEscape() else false;
+        ctx.consume_event = false;
+        try root.widget().captureEvent(&ctx, escape);
+        try std.testing.expect(ctx.consume_event);
+        try std.testing.expectEqual(@as(usize, @intFromBool(cancels)), fixture.escapes);
+        try std.testing.expectEqual(cancels, root.settings_open);
+    };
+    // With settings closed Root leaves Escape to the focused screen.
+    var fixture: Fixture = .{ .run = .checking };
+    var root: Self = .{ .overview = fixture.widget(), .list = fixture.widget(), .compose = fixture.widget() };
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
+    try root.widget().captureEvent(&ctx, escape);
+    try std.testing.expect(!ctx.consume_event);
+    try std.testing.expectEqual(@as(usize, 0), fixture.escapes);
 }
 
 test "App root keeps settings focus while a hidden Session ticks and retains other commands" {

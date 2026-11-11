@@ -61,6 +61,14 @@ pub fn cancelChoice(self: *Self) void {
     self.panel.closeChoice();
 }
 
+/// Esc is the Upgrade's while it can still change nothing, as on the
+/// overview and in a conversation.
+pub fn upgradeTakesEscape(self: *const Self) bool {
+    const backend = self.backend orelse return false;
+    const run = backend.run(backend.context) orelse return false;
+    return run.takesEscape();
+}
+
 pub fn select(self: *Self, row: Row) void {
     self.panel.selected = @backingInt(row);
 }
