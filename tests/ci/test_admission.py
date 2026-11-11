@@ -1,4 +1,5 @@
 """Execute candidate planning and fail-closed PR admission without native builds."""
+from functools import cache
 import json
 import os
 from pathlib import Path
@@ -7,11 +8,10 @@ import subprocess
 import tempfile
 import textwrap
 import shlex
-import shutil
 import unittest
 
 import build_files
-from select_tests import select
+from select_tests import Graph, select
 import steps
 from strict_paths import STRICT, strict
 
@@ -49,6 +49,31 @@ def documentation_env():
                 LINUX_SPLIT='false', MACOS_SPLIT='false', CODEGEN='false', LINUX_MEMORY='false')
 
 
+@cache
+def plan_sources():
+    """One immutable input snapshot; plan tests need topology, not Rui's sources.
+
+    The selector's real-repository mappings are exercised in test_selection.
+    Here the real Git/selector/workflow handoff runs on a small source graph.
+    """
+    names = ['tests/ci/' + name for name in (
+        'select_tests.py', 'docs_only.py', 'qualification.py', 'strict_paths.py', 'platform_boundary.py',
+        'import_architecture.py', 'build_files.py', 'release_numbers.py', 'stack_frames.json')]
+    names += [path.relative_to(ROOT).as_posix() for path in build_files.files()]
+    names += ['src/store/schema.zig']  # The format/digest tests mutate this real owner.
+    return {name: (ROOT / name).read_text() for name in names} | {
+        'src/logic_tests.zig': 'const cores = .{\n    .{ "history_memo.zig", @import("history_memo.zig") },\n};\n',
+        'src/history_memo.zig': '',
+        'src/cli.zig': '',
+        'src/store.zig': '',
+        'src/tests.zig': '',
+        'src/os/descriptor_limit.zig': '',
+        'tests/integration/host_status_integration.py': 'import mysql_case\n',
+        'tests/integration/mysql_case.py': 'import live_engines\nsocket = env.get(live_engines.MYSQL_SOCKET)\n',
+        'tests/integration/live_engines.py': 'MYSQL_SOCKET = "RUI_TEST_MYSQL_SOCKET"\n',
+    }
+
+
 class PlanFixture:
     def __enter__(self):
         self.scratch = tempfile.TemporaryDirectory()
@@ -57,15 +82,8 @@ class PlanFixture:
         self.repo.mkdir()
         self.git('init', '-q', '-b', 'main')
         self.write('.git/info/exclude', 'selection.json\n__pycache__/\n')
-        for name in ('select_tests.py', 'docs_only.py', 'qualification.py', 'strict_paths.py', 'platform_boundary.py',
-                     'import_architecture.py', 'build_files.py', 'release_numbers.py', 'stack_frames.json'):
-            self.write('tests/ci/' + name, (ROOT / 'tests/ci' / name).read_text())
-        # The selector's import graph reads the source tree.
-        for name in subprocess.check_output(['git', 'ls-files', '-z', 'src', 'tests/integration', 'build'], cwd=ROOT).decode().split('\0'):
-            if name and (ROOT / name).is_file():
-                (self.repo / name).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(ROOT / name, self.repo / name)
-        shutil.copyfile(ROOT / 'build.zig', self.repo / 'build.zig')
+        for name, source in plan_sources().items():
+            self.write(name, source)
         self.write('README.md', 'Base. Another sentence on one line.\n')
         self.base = self.commit()
         return self
@@ -396,11 +414,21 @@ class StrictPathTest(unittest.TestCase):
             self.assertTrue(select([path], 'review', available)['native_required'], path)
 
 class CandidatePlanTest(unittest.TestCase):
+    def test_plan_input_snapshot_is_shared_but_worktrees_are_isolated(self):
+        self.assertIs(plan_sources(), plan_sources())
+        self.assertLess(sum(name.startswith(("src/", "tests/integration/")) for name in plan_sources()), 20)
+        with PlanFixture() as first, PlanFixture() as second:
+            first.write('src/history_memo.zig', 'changed in first fixture\n')
+            self.assertEqual((second.repo / 'src/history_memo.zig').read_text(), '')
+            self.assertEqual(plan_sources()['src/history_memo.zig'], '')
+
     def test_ready_plan_preserves_owner_selection_and_core_superset(self):
         from qualification import shards, split_build
         from select_tests import CHECK_COVERS
         available = set(build_files.steps())
         with PlanFixture() as fixture:
+            names = fixture.git('ls-files', '-z').split('\0')
+            graph = Graph(names, lambda name: (fixture.repo / name).read_text())
             for path in ('README.md', 'docs/guide.md', 'docs/assets/diagram.svg',
                          'src/store.zig', 'build.zig', 'src/os/descriptor_limit.zig',
                          'src/AnswerRenderer.zig', 'tests/ci/unknown_policy.py',
@@ -418,7 +446,7 @@ class CandidatePlanTest(unittest.TestCase):
                         except subprocess.CalledProcessError:
                             before = None
                         # The plan judges content-keyed paths by both revisions, as here.
-                        selection = select([path], phase, available, contents={path: (before, content.rstrip('\n'))})
+                        selection = select([path], phase, available, graph, contents={path: (before, content.rstrip('\n'))})
                         output = fixture.plan(self, candidate=candidate, event=event, phase=phase)
                         docs = event == 'pull_request' and path in (
                             'README.md', 'docs/guide.md', 'docs/assets/diagram.svg')
@@ -430,7 +458,7 @@ class CandidatePlanTest(unittest.TestCase):
                         codegen = event == 'pull_request' and bool({'check', 'stack-frames'} & set(selection['targets']))
                         linux = [t for t in selection['targets'] if not (codegen and t == 'stack-frames')]
                         self.assertEqual(json.loads(output['targets']), linux)
-                        self.assertEqual(json.loads(output['linux_matrix']), shards(linux))
+                        self.assertEqual(json.loads(output['linux_matrix']), shards(linux, mysql_suites=selection['mysql_suites']))
                         self.assertEqual(output['linux_split'], str(split_build(linux)).lower())
                         self.assertEqual(output['linux_codegen'], str(codegen).lower())
                         self.assertEqual(output['cache_execution'], str(selection['cache_execution_checks']).lower())
