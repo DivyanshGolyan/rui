@@ -956,7 +956,7 @@ pub fn serve(
         if (err == error.DescriptorCapacityInsufficient) {
             stderr.print(
                 "rui: Host cannot start: descriptor soft limit {d} is below the minimum intake requirement {d} (10 ordinary clients). Rui already tried raising it. Inspect limits with ulimit -Sn and ulimit -Hn; raise the hard limit in your system/session settings (ask your administrator if needed), then retry rui host start.\n",
-                .{ descriptor_observation.soft_limit.?, descriptor_requirement.total - 4 * (product_defaults.intake_capacity - descriptor_capacity.minimum_intake) },
+                .{ descriptor_observation.soft_limit.?, descriptor_requirement.total - descriptor_capacity.ordinary_exchange_descriptors * (product_defaults.intake_capacity - descriptor_capacity.minimum_intake) },
             );
             stderr.print(
                 "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d} (required is for default intake; RLIMIT_NOFILE).\n",
@@ -1857,11 +1857,18 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             defer page.deinit(host.allocator);
             try fd.jsonGrowing(200, protocol.skill_suggestions_reply.max_bytes, host_reply.renderSkillSuggestions, .{&page});
         },
-        // Host memory only: never SQLite or the network.
-        // Sized as written: the bound is tens of KiB, a reply mostly far less.
+        // Refresh is asynchronous; the selected facts are an operation-scoped
+        // Store read, never retained beside the provider's live account list.
         .model_list => {
             host.listings_requested.store(true, .release);
-            try fd.jsonGrowing(200, protocol.model_list_reply.max_bytes, renderModelList, .{host});
+            var arena: std.heap.ArenaAllocator = .init(host.allocator);
+            defer arena.deinit();
+            const facts = host.store.readModelCatalog(arena.allocator()) catch |err| {
+                if (err == error.OutOfMemory) return error.OutOfMemory;
+                fenceDispatch(host, "model catalog", err);
+                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+            };
+            try fd.jsonGrowing(200, protocol.model_list_reply.maxBytes(facts), renderModelList, .{ host, facts });
         },
     }
 }
@@ -1877,9 +1884,9 @@ fn readSkillSuggestions(host: *Host, allocator: std.mem.Allocator, scope: @impor
     };
 }
 
-fn renderModelList(out: protocol.JsonOut, host: *Host) error{BufferTooLarge}!void {
+fn renderModelList(out: protocol.JsonOut, host: *Host, facts: []const @import("model_catalog.zig").Entry) error{BufferTooLarge}!void {
     out.writer.writeAll(protocol.model_list_reply.head) catch return error.BufferTooLarge;
-    host.model_lists.render(out.writer) catch return error.BufferTooLarge;
+    host.model_lists.render(out.writer, facts) catch return error.BufferTooLarge;
     out.writer.writeAll(protocol.model_list_reply.tail) catch return error.BufferTooLarge;
 }
 
@@ -2352,7 +2359,7 @@ const Reply = struct {
     }
 
     /// As `json`, growing from empty: for a bound far above most replies.
-    fn jsonGrowing(self: *Reply, status: u16, comptime max_bytes: usize, comptime render: anytype, args: anytype) !void {
+    fn jsonGrowing(self: *Reply, status: u16, max_bytes: usize, comptime render: anytype, args: anytype) !void {
         return self.jsonInto(.init(self.allocator), status, max_bytes, render, args);
     }
 
@@ -4335,8 +4342,10 @@ test "MySQL Host readiness reports doublewrite OFF while SQLite stays unchanged"
     info.doublewrite = null;
     try response.render(host_reply.renderHostInfo, .{info});
     try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
-    // MySQL's bounded opaque id fits within SQLite's existing reply budget.
-    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_reply), protocol.max_host_info_response_bytes);
+    // The common public bound includes the optional diagnostic even beside
+    // a maximum-width selector; SQLite omits that entire fragment.
+    const shape = protocol.host_info_reply;
+    try std.testing.expectEqual(protocol.shapeBytes(shape.head) + protocol.shapeBytes(shape.doublewrite) + protocol.shapeBytes(shape.tail), protocol.max_host_info_response_bytes);
 }
 
 test "MCP socket capacity is reserved beside model and Bash descriptors" {

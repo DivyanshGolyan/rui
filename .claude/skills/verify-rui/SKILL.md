@@ -18,7 +18,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
    $V build FULLSHA --source ../rui-verify-pin-SHORT --pkg-dir "$ZIG_LOCAL_PKG_DIR"
    ```
 
-   The build refuses a dirty or mismatched checkout. It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. A build made before the library existed has none; rebuild it with `--force`.
+   The build refuses a dirty or mismatched checkout. It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` in containers that cannot build libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term` and `wait` refuse such builds with one line; direct tmux terminals and `frames` work. A build made before the library existed has none; rebuild it with `--force` to add it.
 
 2. **New run, one per experiment.**
 
@@ -33,6 +33,8 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
    - seeds N answered messages into `demo`. Use `--seed 3` or more when you need PgUp history.
 
    `--host-setenv NAME=VALUE` (repeatable) adds a variable to the Host's own environment, for example a Host-only secret Bash must not see.
+
+   `--answers echo|realistic` selects the fixture prose and is saved in `run.json`; `echo` is the default and preserves journey handles. `realistic` uses believable fallback answers and tool summaries from the same fixture.
 
    `--no-sessions` skips `demo` and `approve` for an empty Store. `--active-capacity N` sets the Host's Active Capacity; it defaults to 2.
 
@@ -52,6 +54,14 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
    - `--no-tap` (tmux only): runs Rui directly in the pane, as a control for harness effects. It records no input bytes.
 
    Each Rui runs under the tap: an inner PTY proxy that records every byte Rui receives and emits.
+
+## Frames
+
+```sh
+$V frames FULLSHA [--scenario FILE] [--only NAME,...] [--sizes 140x40,46x30] [--out DIR] [--no-png] [--keep]
+```
+
+Renders the named states in `scripts/frames.json` to text, ANSI, HTML and 2× PNG using realistic fixture answers and private tmux windows, without a screen library. Prints `RUN/evidence/frames/` (or `--out`), with ordered `index.html` and `frames.json` results; cleans up unless `--keep`. Requires tmux and Node/Playwright/Chromium unless `--no-png`. See [scenario format and selection](features/frames.md). These are L2 layout captures, not physical-input proof.
 
 ## Doctor
 
@@ -78,7 +88,7 @@ It also prints macOS Accessibility and Screen Recording status for information o
 | Action | Command |
 | --- | --- |
 | Type text | `$V send "$RUN" NAME --text 'hello'` (tmux: `send-keys -l`; pty: FIFO) |
-| Keys | `$V send "$RUN" NAME --keys Enter`. Names: `Enter Esc C-c C-g C-r BSpace PgUp PgDn S-PgUp Up Down End Home Tab SGRWheelUp SGRWheelDown`. Through tmux these are sent as exact bytes with `send-keys -H`. The SGR names send unsolicited mouse reports; a real wheel reaches Rui as `Up`/`Down`. |
+| Keys | `$V send "$RUN" NAME --keys Enter`. Names: `Enter Esc C-c C-g C-r C-x BSpace PgUp PgDn S-PgUp Up Down Left Right End Home Tab SGRWheelUp SGRWheelDown`. Through tmux these are sent as exact bytes with `send-keys -H`. The SGR names send unsolicited mouse reports; a real wheel reaches Rui as `Up`/`Down`. |
 | Raw bytes | `$V send "$RUN" NAME --hex 1b5b4d2069730a` (tmux: `send-keys -H`) |
 | Through the attached client | add `--via client` (bytes enter tmux as terminal input, not `send-keys`) |
 | Signal Rui | `$V signal "$RUN" NAME INT\|TERM\|HUP` (verifies the PID is this terminal's Rui) |
@@ -110,7 +120,10 @@ Fixture policy, chosen by the latest user text:
 - `slow`: the answer streams for about 10 s.
 - `rate limit`: HTTP 429 with `Retry-After: 8` the first time that text arrives, then an echo. The Session retries for 8 s.
 - `invalid output`: a stream that is not JSON, so the Turn fails.
-- Anything else: an echo.
+- `compact rich answer`: a short markdown answer that fits a heading, inline code, a fenced block (including a blank and wrapped row), table and link in both frame sizes; used by `markdown`, `day-chat` and `no-color`.
+- `rich answer`: a markdown answer with a heading, list, code block, table and link, in both answer modes.
+- `long answer`: the fourteen-step Host explanation, in both answer modes.
+- Anything else: an exact echo by default, or believable prose with `--answers realistic`. Tool summaries follow the same answer-mode choice.
 
 The fixture never runs out of replies, so an extra submission shows up as an extra request and doesn't fail.
 

@@ -57,7 +57,7 @@ def send_reason(master, ready, description):
     beside the Action; return the frames up to the Action's denial."""
     shown = action_ready(ready, master, shows=reason_shown)
     os.write(master, b"\r")
-    return shown + read_terminal(master, f"■ {description} — Denied")
+    return shown + read_terminal(master, f"■ {description} · denied")
 
 
 def time_limit(milliseconds):
@@ -317,7 +317,7 @@ def compiled_model_cases():
     windows = {model: CATALOG[model].context_window for model in models}
     assert DEFAULTS.recommended_model in models
     listing = "Supported model IDs: " + ", ".join(models) + "\n"
-    unlisted_note = "it uses default limits"
+    unlisted_note = "client defaults use estimated limits"
     root = canonical_fixture_root(pathlib.Path(tempfile.mkdtemp(prefix="rui-compiled-models.")))
     home, store = root / "home", root / "host-store"
     home.mkdir(mode=0o700)

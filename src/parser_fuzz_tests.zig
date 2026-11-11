@@ -397,7 +397,7 @@ test "fuzz protocol request metadata parser" {
     }.one, .{ .corpus = &.{
         seed(v ++ "\"kind\":\"host_info\",\"store\":\"s\"}", &.{}),
         seed(v ++ "\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":" ++ value ++ "}", &.{}),
-        seed(v ++ "\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{\"model\":{\"state\":\"value\",\"value\":\"m\"},\"instructions\":" ++ value ++ "}}", &.{}),
+        seed(v ++ "\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{\"model\":\"m\",\"instructions\":\"\"}}", &.{}),
         seed(v ++ "\"kind\":\"inspect_session\",\"store\":\"s\",\"session\":\"peer\",\"failed_response\":\"body\",\"operation\":\"1\",\"attempt\":\"1\"}", &.{}),
         seed(v ++ "\"kind\":\"activity_content\",\"store\":\"s\",\"session\":\"peer\",\"position\":\"1\",\"ordinal\":\"0\"}", &.{}),
     } });
