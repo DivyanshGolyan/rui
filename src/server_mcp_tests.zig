@@ -34,10 +34,21 @@ const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
 const reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"page payload\"}]}}");
 const arguments = "{\"q\":\"first\",\"rui_call_description\":\"Read docs\",\"unexpected\":\"must not leave Host\"}";
 const second_arguments = "{\"q\":\"second\",\"rui_call_description\":\"Read next\"}";
-const Case = enum { success, serial, timeout, down, stop, shutdown, concurrent };
+const oversized_text = blk: {
+    var bytes: [16 * 1024 + 65]u8 = @splat('x');
+    @memcpy(bytes[@import("bash.zig").excerpt_bytes - 1 ..][0..2], "é");
+    @memcpy(bytes[16383..][0..4], "😀");
+    break :blk bytes;
+};
+const oversized_reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"" ++ oversized_text ++ "\"}]}}");
+const Case = enum { success, oversized, serial, timeout, down, stop, shutdown, concurrent };
 
 test "Host MCP forwards schema-only arguments and metadata into a historical continuation" {
     try run(.success);
+}
+
+test "Host MCP keeps full oversized results for transcript windows and bounds model history" {
+    try run(.oversized);
 }
 
 test "Host MCP serializes two calls from one model reply in recorded order" {
@@ -78,7 +89,7 @@ fn run(case: Case) !void {
     const command = try allocator.create(wire_request.ConfigureCommand);
     defer allocator.destroy(command);
     command.* = try store.testingCompleteConfiguration("mcp-config", "", workspace, "model-a");
-    command.configuration.tools = try .of(&.{"fetch_page"});
+    command.configuration.tools = try .of(if (case == .oversized) &.{ "fetch_page", "read_transcript" } else &.{"fetch_page"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("bypass");
     const configured = try storage.configure(command, .{});
@@ -97,7 +108,7 @@ fn run(case: Case) !void {
 
     const script = try allocator.create(Script);
     defer allocator.destroy(script);
-    script.* = .{ .reply = reply, .more = if (case == .serial) &.{reply} else &.{}, .hold_reply = case == .timeout or case == .stop or case == .shutdown or case == .concurrent };
+    script.* = .{ .reply = if (case == .oversized) oversized_reply else reply, .more = if (case == .serial) &.{reply} else &.{}, .hold_reply = case == .timeout or case == .stop or case == .shutdown or case == .concurrent };
     if (case != .down) try script.start();
     defer if (case != .down) script.stop();
     if (case == .down) script.port = try @import("socket_fixture.zig").refusedPort();
@@ -233,6 +244,7 @@ fn run(case: Case) !void {
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     const expected = switch (case) {
         .success, .serial => "page payload",
+        .oversized => &oversized_text,
         .timeout, .stop => "Outcome unknown",
         .shutdown, .concurrent => "Outcome unknown",
         .down => "Failed, not run",
@@ -249,9 +261,11 @@ fn run(case: Case) !void {
     defer if (view.isActive()) view.close();
     var position: u64 = 0;
     var found: usize = 0;
+    var result_position: u64 = 0;
     while (try view.nextEntry(position)) |entry| {
         position = entry.position;
         if (entry.kind != .tool_results) continue;
+        result_position = entry.position;
         while (try view.nextToolResult()) |result| {
             var reader: store.HistoricalReader = undefined;
             try view.openContent(result.output, &reader);
@@ -259,18 +273,27 @@ fn run(case: Case) !void {
             const bytes = try allocator.alloc(u8, @intCast(result.output.length));
             defer allocator.free(bytes);
             try std.testing.expectEqual(bytes.len, try reader.read(0, bytes));
-            try expectHere(@src(), std.mem.indexOf(u8, bytes, expected) != null);
+            if (case == .oversized) {
+                try std.testing.expectEqualStrings(&oversized_text, bytes);
+            } else try expectHere(@src(), std.mem.indexOf(u8, bytes, expected) != null);
             found += 1;
         }
     }
     try std.testing.expectEqual(count, found);
     view.close();
-    try expectNextRequest(storage, &tmp, continuation, expected, count);
+    if (case == .oversized) {
+        const kept = @import("bash.zig").excerpt_bytes - 1;
+        const excerpt = try std.fmt.allocPrint(allocator, "{s}\n[{d} more bytes not shown; read_transcript full on this call's result]", .{ oversized_text[0..kept], oversized_text.len - kept });
+        defer allocator.free(excerpt);
+        try expectNextRequest(storage, &tmp, continuation, excerpt, count, true);
+        try expectNextRequest(storage, &tmp, continuation, excerpt, count, true);
+        try expectFullWindows(storage, &tmp, continuation, session.slice(), result_position);
+    } else try expectNextRequest(storage, &tmp, continuation, expected, count, false);
 }
 
 // Assert the sealed provider request, not merely a report projection: the
 // model's next input must include each MCP Tool Result and its original id.
-fn expectNextRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: store.AttemptBinding, expected: []const u8, count: usize) !void {
+fn expectNextRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: store.AttemptBinding, expected: []const u8, count: usize, exact: bool) !void {
     const allocator = std.testing.allocator;
     const adapter = @import("model_adapter.zig");
     const preparation = try allocator.create(adapter.Preparation);
@@ -309,7 +332,9 @@ fn expectNextRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: s
                     try expectHere(@src(), found < count);
                     try std.testing.expectEqualStrings(if (found == 0) "call-1" else "call-2", item.object.get("call_id").?.string);
                     const output = item.object.get("output").?.string;
-                    try expectHere(@src(), std.mem.indexOf(u8, output, expected) != null);
+                    if (exact) {
+                        try std.testing.expectEqualStrings(expected, output);
+                    } else try expectHere(@src(), std.mem.indexOf(u8, output, expected) != null);
                     found += 1;
                 }
                 try std.testing.expectEqual(count, found);
@@ -318,6 +343,42 @@ fn expectNextRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: s
         }
     }
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+// Follow the full transcript windows through the production core runner,
+// then read each saved resolution. Neither history's excerpt nor a report
+// projection can substitute for the complete public result.
+fn expectFullWindows(storage: *store.Store, tmp: *std.testing.TmpDir, binding: store.AttemptBinding, session: []const u8, position: u64) !void {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const window_arguments = [_][]const u8{
+        try std.fmt.allocPrint(arena, "{{\"full\":\"{d}.1\"}}", .{position}),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.1\",\"offset\":16383}}", .{ session, position }),
+    };
+    var calls: [window_arguments.len]store.TestingCall = undefined;
+    for (&calls, window_arguments, [_][]const u8{ "window-1", "window-2" }) |*call, args, id| {
+        const quoted = try std.json.Stringify.valueAlloc(arena, args, .{});
+        call.* = .{ .item_id = id, .name = "read_transcript", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = args };
+    }
+    try store.settleCallsForTesting(storage, tmp, binding, "mcp-window-calls", &calls);
+    for (0..window_arguments.len) |index| {
+        const work = (try storage.nextCoreWork()).?.action;
+        try std.testing.expect(work.tool == .read_transcript);
+        try @import("read_transcript.zig").run(storage, arena, &work, .{});
+        const result_id = try store.testing.sqlite_only.queryU64(storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{work.binding.action_id});
+        const reference = try store.testingContentReference(storage, result_id);
+        const bytes = try arena.alloc(u8, @intCast(reference.length));
+        var reader: store.ContentReader = undefined;
+        reader.open(try storage.openContent(reference));
+        defer reader.close();
+        try std.testing.expectEqual(bytes.len, try reader.read(0, bytes));
+        const expected = if (index == 0)
+            try std.fmt.allocPrint(arena, "Entry {d}.1 tool_result, bytes 0 to 16383 of {d}:\n{s}\nMore: call read_transcript with {s}.\n", .{ position, oversized_text.len, oversized_text[0..16383], window_arguments[1] })
+        else
+            try std.fmt.allocPrint(arena, "Entry {d}.1 tool_result, bytes 16383 to {d} of {d}:\n{s}", .{ position, oversized_text.len, oversized_text.len, oversized_text[16383..] });
+        try std.testing.expectEqualStrings(expected, bytes);
+    }
 }
 
 fn expectHere(source: std.builtin.SourceLocation, condition: bool) !void {

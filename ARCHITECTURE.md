@@ -584,6 +584,12 @@ The Operation's admission position fixes its historical boundary.
 Accepted model output, call rejection and Action Resolution become available at their acceptance positions, not a producing Operation's earlier admission position.
 Historical visibility does not bypass pending-input applicability, expose an incomplete Tool Result group or change Conversation/tool-call order.
 
+The Store keeps the complete rendered MCP answer as its Action Resolution, within the MCP transport's 4 MiB answer limit.
+Model history derives an excerpt from every Action Resolution and rejected call, regardless of runner: at most Bash's 10,000 excerpt bytes, cut back to a UTF-8 boundary, then an omitted-byte count and `read_transcript full on this call's result` pointer when anything was cut.
+This deterministic rendering preserves fitting results byte for byte and keeps repeated history writes cache-prefix stable.
+The historical result handle has no public entry address, so the pointer does not name one; `read_transcript(full)` reads the complete saved result through the public activity feed.
+Bash's existing status, tail and retention-path rendering is unchanged before this shared history bound.
+
 Replacement Attempts retain that historical view.
 With unchanged adapter rules, they reconstruct equivalent request semantics; meaningless JSON spelling need not match.
 The caller may deliberately change adapter selection/rendering rules between Attempts, so identical requests across such a change are not promised.
@@ -3978,10 +3984,10 @@ Measure filesystem metadata and cleanup latency separately from logical bytes an
 
 #### Tool excerpts and full output
 
-Tool output has no per-call total capture cap.
+Bash output has no per-call total capture cap.
 Short output is complete; larger output saves status, tail excerpt, omission notice and the path of each truncated stream, preserving combined-stream allowance and valid UTF-8 boundaries before provider JSON framing.
 Failed full capture cannot masquerade as successful preservation.
-Full output is read through ordinary Bash permissions/timeouts/excerpts, not a new Read tool or whole-file context injection.
+Full Bash output is read through ordinary Bash permissions/timeouts/excerpts, not a new Read tool or whole-file context injection.
 FIFO or Host exit/crash may remove it; unavailability leaves saved results unchanged.
 Canonical permission, Edit intent and outcome evidence are not disposable spillover.
 
@@ -4036,6 +4042,7 @@ Allocation happens outside Store access; allocation failure keeps the original b
 Closing the reader frees its window.
 One hundred such readers own at most 12.5 MiB of additional copied payload, with no inline Store or worker-stack window.
 Reopening across windows still repeats overflow-page traversal; synchronous work within one entry point needs no heap window and reuses SQLite's overflow-page index.
+A prefix-only historical reader limits both source reads and read-ahead to its requested extent without changing the complete canonical reference or verifying omitted bytes.
 Closing a reader invalidates its cursor, not previously delivered caller-owned bytes or the reference.
 Close readers before their parent view.
 Scratch ranges/view-scoped handles cannot be stored as canonical references.

@@ -1,10 +1,8 @@
-//! The model-facing resolution of one MCP call, bounded without retaining a copy.
+//! The complete resolution text of one MCP call; history owns model excerpts.
 const std = @import("std");
 const Call = @import("Call.zig");
 const document = @import("document.zig");
 
-// Kept equal to bash.zig's excerpt_bytes; the test below checks both owners.
-pub const excerpt_bytes = 10_000;
 pub const max_answer_bytes = 4 * 1024 * 1024;
 pub const Code = enum { succeeded, failed, spawn_failed, indeterminate };
 pub const Ending = union(enum) {
@@ -18,63 +16,6 @@ pub const Ending = union(enum) {
 pub const Ended = struct { server_name: []const u8, ended: Ending };
 
 pub fn write(out: *std.Io.Writer, ended: Ended) !Code {
-    var bounded: Prefix = .{ .out = out };
-    const code = try render(&bounded.writer, ended);
-    try bounded.writer.flush();
-    try bounded.finish();
-    if (bounded.total > bounded.shown) {
-        try out.print("\n[{d} more bytes not shown]", .{bounded.total - bounded.shown});
-    }
-    return code;
-}
-
-/// Streams the prefix, holding only its last four bytes and one lookahead.
-/// The lookahead identifies a cut inside a UTF-8 sequence without changing
-/// the server's bytes when the whole output fits (including non-UTF-8 bodies).
-const Prefix = struct {
-    writer: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
-    out: *std.Io.Writer,
-    total: usize = 0,
-    shown: usize = 0,
-    tail: [5]u8 = undefined,
-    tail_len: usize = 0,
-
-    fn append(self: *Prefix, bytes: []const u8) std.Io.Writer.Error!void {
-        self.total += bytes.len;
-        const direct = @min(bytes.len, excerpt_bytes - 4 - self.shown);
-        try self.out.writeAll(bytes[0..direct]);
-        self.shown += direct;
-        const saved = @min(bytes.len - direct, self.tail.len - self.tail_len);
-        @memcpy(self.tail[self.tail_len..][0..saved], bytes[direct..][0..saved]);
-        self.tail_len += saved;
-    }
-
-    fn finish(self: *Prefix) std.Io.Writer.Error!void {
-        var take = self.tail_len;
-        if (self.total > excerpt_bytes) {
-            take = 4;
-            while (take > 0 and self.tail[take] & 0xc0 == 0x80) take -= 1;
-        }
-        try self.out.writeAll(self.tail[0..take]);
-        self.shown += take;
-    }
-
-    fn drain(writer: *std.Io.Writer, parts: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const self: *Prefix = @fieldParentPtr("writer", writer);
-        var count: usize = 0;
-        for (parts[0 .. parts.len - 1]) |part| {
-            try self.append(part);
-            count += part.len;
-        }
-        for (0..splat) |_| {
-            try self.append(parts[parts.len - 1]);
-            count += parts[parts.len - 1].len;
-        }
-        return count;
-    }
-};
-
-fn render(out: *std.Io.Writer, ended: Ended) !Code {
     const name = ended.server_name;
     switch (ended.ended) {
         .outcome => |outcome| switch (outcome) {
@@ -146,7 +87,6 @@ fn writeBlock(out: *std.Io.Writer, block: []const u8) !void {
 }
 
 test "result_text renders blocks and structured content with resolution codes" {
-    comptime std.debug.assert(excerpt_bytes == @import("../bash.zig").excerpt_bytes);
     var buffer: [1024]u8 = undefined;
     var out: std.Io.Writer = .fixed(&buffer);
     const result = @import("reply.zig");
@@ -161,21 +101,16 @@ test "result_text renders blocks and structured content with resolution codes" {
     try std.testing.expectEqualStrings("{\"type\":\"text\",\"text\":7}", out.buffered());
 }
 
-test "result_text keeps a UTF-8 prefix and counts omitted bytes" {
+test "result_text retains the whole rendered answer beyond the model excerpt" {
     const gpa = std.testing.allocator;
-    const content = try gpa.alloc(u8, excerpt_bytes + 100);
+    const content = try gpa.alloc(u8, @import("../bash.zig").excerpt_bytes + 100);
     defer gpa.free(content);
-    // Use structured JSON so the boundary crosses a multibyte character.
     @memset(content, 'x');
-    content[0] = '"';
-    @memcpy(content[excerpt_bytes - 1 ..][0..2], "é");
-    content[content.len - 1] = '"';
-    const buffer = try gpa.alloc(u8, excerpt_bytes + 100);
-    defer gpa.free(buffer);
-    var out: std.Io.Writer = .fixed(buffer);
-    _ = try write(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = "[]", .structured = content, .is_error = false } } } });
-    try std.testing.expect(std.unicode.utf8ValidateSlice(out.buffered()));
-    try std.testing.expectEqualStrings("\n[101 more bytes not shown]", out.buffered()[excerpt_bytes - 1 ..]);
+    @memcpy(content[content.len - 2 ..], "é");
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try std.testing.expectEqual(Code.succeeded, try write(&out.writer, .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = "[]", .structured = content, .is_error = false } } } }));
+    try std.testing.expectEqualStrings(content, out.written());
 }
 
 test "result_text transport endings and server failures resolve by certainty" {
@@ -195,35 +130,5 @@ test "result_text transport endings and server failures resolve by certainty" {
         var out: std.Io.Writer = .fixed(&buffer);
         try std.testing.expectEqual(case.code, try write(&out, .{ .server_name = "test", .ended = case.ending }));
         try std.testing.expect(std.mem.indexOf(u8, out.buffered(), case.contains) != null);
-    }
-}
-
-test "result_text truncates at every UTF-8 offset and preserves exact-fit output" {
-    const gpa = std.testing.allocator;
-    const content = try gpa.alloc(u8, excerpt_bytes + 32);
-    defer gpa.free(content);
-    const buffer = try gpa.alloc(u8, excerpt_bytes + 100);
-    defer gpa.free(buffer);
-    for ([_][]const u8{ "é", "€", "😀" }) |character| {
-        for (excerpt_bytes - 4..excerpt_bytes + 2) |at| {
-            @memset(content, 'x');
-            content[0] = '"';
-            content[content.len - 1] = '"';
-            @memcpy(content[at..][0..character.len], character);
-            var out: std.Io.Writer = .fixed(buffer);
-            _ = try write(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = "[]", .structured = content, .is_error = false } } } });
-            const kept = if (at < excerpt_bytes and at + character.len > excerpt_bytes) at else excerpt_bytes;
-            try std.testing.expect(std.unicode.utf8ValidateSlice(out.buffered()));
-            try std.testing.expectEqualSlices(u8, content[0..kept], out.buffered()[0..kept]);
-            var suffix: [64]u8 = undefined;
-            const expected = try std.fmt.bufPrint(&suffix, "\n[{d} more bytes not shown]", .{content.len - kept});
-            try std.testing.expectEqualStrings(expected, out.buffered()[kept..]);
-        }
-    }
-    for ([_]usize{ excerpt_bytes - 4, excerpt_bytes - 1, excerpt_bytes }) |length| {
-        @memset(content, 'x');
-        var out: std.Io.Writer = .fixed(buffer);
-        _ = try write(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .refused = .{ .status = 502, .body = content[0 .. length - "The MCP server answered HTTP 502: ".len] } } } });
-        try std.testing.expectEqual(length, out.buffered().len);
     }
 }
