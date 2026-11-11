@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import build_files
 from select_tests import (BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES,
-                          POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, Graph, execution_batches, matches, select,
+                          POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, UPGRADE, UPGRADE_CHECK_PATHS, UPGRADE_PATHS, Graph, execution_batches, matches, select,
                           setup_requirements, tree_graph)
 from qualification import NATIVE, RESOURCES, qualification, shards
 
@@ -185,20 +185,22 @@ class SelectionTest(unittest.TestCase):
         self.assertNotIn("test-store", store)
 
     def test_upgrade_owners_select_standalone_fixture_in_both_phases(self):
-        paths = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
-                 "src/upgrade_process.zig", "src/HostLifecycle.zig", "src/host_identity.zig",
-                 "src/host_identity.c", "src/UpgradeJob.zig", "src/upgrade_status.zig", "src/stderr.zig", "src/host_launch.c",
-                 "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/slash_commands.zig",
-                 "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
-                 "tests/integration/upgrade_integration.py", "release/publish.sh", "release/install.sh",
-                 "install.sh", "build.zig")
-        for path in paths:
+        tracked = subprocess.run(["git", "ls-files"], check=True, capture_output=True, text=True,
+                                 cwd=Path(__file__).resolve().parents[2]).stdout.split()
+        paths = [path for path in tracked if matches(path, UPGRADE_PATHS)]
+        own = [path for path in paths if matches(path, [UPGRADE])]
+        # The rule, not a list: every file named for the Upgrade owns the
+        # fixture, and so does one that does not exist yet.
+        self.assertEqual(set(own), {path for path in tree_graph().owners["upgrade-integration"] if "pgrade" in path})
+        self.assertGreater(len(own), 3)
+        for path in [*paths, "src/upgrade_new.zig", "src/UpgradeNew.zig"]:
             for phase in ("development", "review"):
                 with self.subTest(path=path, phase=phase):
                     result = select([path], phase, AVAILABLE)
                     self.assertIn("upgrade-integration", result["targets"])
                     if phase == "review":
                         self.assertIn("upgrade-integration", result["native_targets"])
+                        self.assertEqual(result["upgrade_required"], matches(path, UPGRADE_CHECK_PATHS))
 
     def test_installer_owners_select_standalone_fixture_in_both_phases(self):
         paths = ("tests/integration/installer_integration.py", "tests/ci/fake_rui.py",
@@ -376,7 +378,7 @@ class SelectionTest(unittest.TestCase):
                 reached = graph.targets(core) or set()
                 # What compiles the core or reads it, as fixtures read owned values.
                 compiled = {target for target, files in graph.reached.items() if core in files}
-                named = {target for target, (_, _, owners) in FIXTURES.items() if core in owners}
+                named = {target for target, owners in graph.owners.items() if core in owners}
                 self.assertTrue(named <= reached)
                 self.assertEqual(reached - compiled - named, set())
         for path in ("src/cli_value.zig", "src/draft_layout.zig", "src/keymap.zig"):
