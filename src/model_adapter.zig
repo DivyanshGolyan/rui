@@ -5168,3 +5168,56 @@ test "historical preparation fences a served call that does not match its certif
         try std.testing.expect(retained == null);
     }
 }
+
+test "MCP refresh revisions preserve request prefixes and memo rebuilds" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const testing = store.testing;
+    var records = testing.catalogRecordsWith(&.{.{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "original page", .input_schema = "{}" }});
+    var digests: [records.len][32]u8 = undefined;
+    for (&records, &digests) |*record, *digest| digest.* = tools.recordDigest(record);
+    const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
+    try setup.storage.saveCatalog(&catalog);
+    const session = try setup.configure("refresh-memo-config");
+    var update: wire_request.ConfigureCommand = .{};
+    try update.key.set("refresh-memo-tools");
+    update.session = session;
+    update.configuration.tools = try .of(&.{"fetch_page"});
+    try std.testing.expect(try setup.storage.configure(&update, .{}) == .accepted);
+    var entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    var previous: ?[]u8 = null;
+    defer if (previous) |bytes| std.testing.allocator.free(bytes);
+    for (0..4) |round| {
+        if (round == 1) {
+            records[catalog.find("fetch_page").?].description = "reworded page";
+            records[catalog.find("fetch_page").?].input_schema = "{\"type\":\"object\"}";
+            for (&records, &digests) |*record, *digest| digest.* = tools.recordDigest(record);
+            try setup.storage.saveCatalog(&catalog);
+        } else if (round == 2) {
+            try setup.storage.saveCatalog(&tools.built_in);
+        } else if (round == 3) {
+            try setup.storage.saveCatalog(&catalog);
+        }
+        var key: [32]u8 = undefined;
+        const message_key = try std.fmt.bufPrint(&key, "refresh-memo-{d}", .{round});
+        try setup.submit(message_key, message_key, session.slice(), "next");
+        const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+        const request = try prepareMemoForTesting(&setup, binding, null, .{});
+        defer std.testing.allocator.free(request.bytes);
+        const input_end = std.mem.indexOf(u8, request.bytes, "],\"tools\":[").?;
+        if (previous) |earlier| {
+            try std.testing.expectStringStartsWith(request.bytes, earlier);
+            std.testing.allocator.free(earlier);
+        }
+        previous = try std.testing.allocator.dupe(u8, request.bytes[0..input_end]);
+        try std.testing.expectEqual(@as(usize, if (round == 0) 1 else if (round < 3) 2 else 3), std.mem.count(u8, request.bytes, "additional_tools"));
+        try std.testing.expectEqual(round > 0, std.mem.indexOf(u8, request.bytes, "reworded page") != null);
+        // The original declaration stays byte-for-byte even after removal.
+        try std.testing.expect(std.mem.indexOf(u8, request.bytes, "original page") != null);
+        try testing.settleItemsForTesting(&setup.storage, &setup.tmp, binding, &.{"{\"type\":\"message\",\"id\":\"done\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
+    }
+}

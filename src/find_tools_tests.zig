@@ -190,10 +190,11 @@ test "find_tools caps eight sorted matches skips loaded and out of set and rolls
             const catalog: tools.Catalog = .{ .records = records, .digests = digests };
             try storage.saveCatalog(&catalog);
             const session = try configure(&storage, "find-cap", &names, &.{ "find_tools", "match_00" });
-            // Today's catalog no longer has the descriptions used by this Session.
-            try storage.saveCatalog(&tools.built_in);
             try testing.submitTestMessage(&storage, &tmp, "find-cap-input", "find-cap-input", session.slice(), "find tools");
             const input = try call(&storage, &tmp, session.slice(), "{\"words\":\"match\"}", "find-cap-call", alloc);
+            // An already admitted Operation keeps its saved tools even when the
+            // Host catalog changes; reconciliation belongs to the next admission.
+            try storage.saveCatalog(&tools.built_in);
             try std.testing.expectError(error.InjectedCommitFailure, loader.run(&storage, alloc, &input, .{ .before_commit = true }));
             try storage.close();
             open = false;

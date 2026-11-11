@@ -4670,3 +4670,48 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
     }
     try std.testing.expect(fail_index > 0);
 }
+
+test "Host startup refreshes saved MCP offers after a changed listing and restart" {
+    const Script = @import("mcp/test_server.zig");
+    const testing = store_module.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+    const replies = [_][]const u8{
+        Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"fetch_page\",\"description\":\"old page\",\"inputSchema\":{\"type\":\"object\"}}]}}"),
+        Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"fetch_page\",\"description\":\"new page\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"readOnlyHint\":true}}]}}"),
+    };
+    for (replies, 0..) |reply, round| {
+        var script: Script = .{ .reply = reply };
+        try script.start();
+        defer script.stop();
+        var catalog_memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer catalog_memory.deinit();
+        var storage: store_module.Store = undefined;
+        try testing.testingStoreCatalog(&storage, &tmp, std.testing.io, null);
+        defer storage.close() catch unreachable;
+        var server: launch_frame.Frame.McpServer = .{};
+        try server.name.set("docs");
+        @memcpy(server.bearer_token.bytes[0..6], "secret");
+        server.bearer_token.len = 6;
+        var url: [128]u8 = undefined;
+        try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
+        try offerMcpTools(std.testing.io, catalog_memory.allocator(), std.testing.allocator, &storage, &.{server}, null);
+        if (round == 0) {
+            var cwd: [protocol.max_workspace_bytes]u8 = undefined;
+            var configure = try testing.completeConfiguration("restart-mcp-config", "", try testing.canonicalCwd(std.testing.io, &cwd), "model-a");
+            configure.configuration.tools = try .of(&.{"fetch_page"});
+            session = (try storage.configure(&configure, .{})).accepted.session;
+        }
+        const key = if (round == 0) "restart-mcp-first" else "restart-mcp-next";
+        try testing.submitTestMessage(&storage, &tmp, key, key, session.slice(), "read page");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try std.testing.expectEqual(@as(u64, round + 1), try testing.queryU64(&storage, "SELECT settings_revision FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
+        const description = protocol.contentDigest(if (round == 0) "old page" else "new page");
+        try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation m JOIN session_revision r ON r.session_ref=m.session_ref AND r.revision=m.settings_revision JOIN tool_set_member tm ON tm.tool_set_id=r.tool_set_id JOIN tool_record t ON t.tool_record_id=tm.tool_record_id JOIN content c ON c.content_id=t.description_content_id WHERE m.operation_id=?1 AND c.digest=?2 AND t.read_only=?3", .{ binding.operation_id, testing.Blob{ .bytes = &description }, @intFromBool(round == 1) }));
+        try testing.settleItemsForTesting(&storage, &tmp, binding, &.{"{\"type\":\"message\",\"id\":\"done\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
+        try std.testing.expect(script.request_received.load(.acquire));
+        try std.testing.expect(std.mem.indexOf(u8, script.seen[0..script.seen_len], "tools/list") != null);
+        try std.testing.expect(!storage.isFenced());
+    }
+}

@@ -354,3 +354,38 @@ pub fn finishSelection(a: anytype, selection: *const Selection, source_set: u64)
     while (names.next()) |name| : (ordinal += 1) a.writeCount(insert_selected_member, .{ .set = set_id, .ordinal = ordinal, .source = source_set, .name = name }, 1);
     return set_id;
 }
+
+/// An already saved record, named within its source set. Mixed-source sets
+/// preserve frozen built-ins while selecting today's MCP records.
+pub const Member = struct {
+    name: Bounded(tool_catalog.max_name_bytes),
+    source: u64,
+    digest: [32]u8,
+    loaded: bool,
+};
+
+/// Intern a name-ordered selection, optionally only its loaded members. All
+/// members and their names must outlive the Access's next round.
+pub fn internMembers(a: anytype, members: []const Member, loaded_only: bool) !u64 {
+    var digest: tool_catalog.SetDigest = .init();
+    var count: usize = 0;
+    for (members) |*member| {
+        if (loaded_only and !member.loaded) continue;
+        digest.add(&member.digest);
+        count += 1;
+    }
+    const value = digest.final();
+    var saved: lookup_set.Result = null;
+    a.read(lookup_set, .{ .digest = value }, &saved);
+    try a.run();
+    if (saved) |row| return row.tool_set_id.get();
+    const id = try a.identity(.tool_set_id);
+    a.write(insert_set, .{ .id = id, .digest = value, .count = count });
+    var ordinal: u64 = 0;
+    for (members) |*member| {
+        if (loaded_only and !member.loaded) continue;
+        a.writeCount(insert_selected_member, .{ .set = id, .ordinal = ordinal, .source = member.source, .name = member.name.slice() }, 1);
+        ordinal += 1;
+    }
+    return id;
+}

@@ -1008,6 +1008,16 @@ A removed tool stays declared in the history, and a call to it gets the tool res
 The top-level `tools` holds only the provider-run tools (web search), which OpenAI ignores inside the history ([live check](research/responses-tools-probe/README.md)); turning one on or off changes the top and costs that one request the cache.
 Under `openai-responses/1` the top-level `tools` holds the Operation's whole set, as before.
 
+The Host lists each MCP server only at startup; it never re-lists or handles list-change notifications while running (D110).
+Before admitting a new model Operation, `store/domain/tool_revision.zig` reconciles that startup catalog with the Session's saved configured and loaded name sets.
+It replaces each permitted MCP record with today's identity (including server and read-only hint), drops unavailable names, and leaves frozen built-ins unchanged.
+The configured names remain a ceiling, including for a K1-narrowed child: a new Host tool with an unpermitted name is not granted automatically.
+Core refresh revisions change availability, not that ceiling or loaded-name intent; the last explicit settings changes in saved revisions retain them, so a removed permitted name can return without widening permission.
+The derived core command key and its saved digest identify a refresh; a caller-chosen key with the same spelling is still an explicit configuration and cannot bypass narrowing.
+An unchanged offer appends nothing; all changes for the next Operation share one core-keyed Session revision and its change rows, atomically with admission.
+Refresh and `find_tools` share the core tool-revision writer and ordinary configured-command path; the existing history declaration and withdrawn-call check need no new encoder or Store format.
+A cheap current-MCP check shares admission's existing facts round; built-in-only Hosts and Sessions need no extra round, and reconciliation uses the Store's existing fixed scratch, not text-sized allocations.
+
 ### Codex wire binding
 
 Every request sets `text.verbosity` to `low` and `parallel_tool_calls` to `true`, for every model.

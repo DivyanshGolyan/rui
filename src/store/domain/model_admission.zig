@@ -457,6 +457,7 @@ fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []con
 const admission_facts = rsql.Read(.{
     .sql = "SELECT " ++ rsql.session_head_columns ++ ",s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation,s.reasoning_effort," ++
         configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
+        "EXISTS(SELECT 1 FROM tool_set_member tm JOIN tool_record tool ON tool.tool_record_id=tm.tool_record_id WHERE tm.tool_set_id=s.tool_set_id AND tool.owner='mcp') AS has_mcp," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
         "current.operation_id AS latest_operation,current.purpose AS latest_compaction,current.resolution_code AS latest_resolution,latest_revision.model AS latest_model," ++
         "(SELECT count(*) FROM session_revision r WHERE " ++ pendingInstructionsSql("?1", "s.revision") ++ ") AS instructions " ++
@@ -475,6 +476,7 @@ const admission_facts = rsql.Read(.{
         output_reservation: ?u64,
         reasoning_effort: ?model_capability.ReasoningEffort,
         previous_reasoning_effort: ?model_capability.ReasoningEffort,
+        has_mcp: bool,
         latest_turn: ?rsql.Positive,
         latest_active: bool,
         latest_first: ?rsql.Positive,
@@ -732,9 +734,19 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
     const coverage = try takeContext(&compaction, context, context_model, session_ref);
     var facts: admission_facts.Result = undefined;
     var bytes: context_bytes.Result = undefined;
+    const tool_revision = @import("tool_revision.zig");
+    var tool_intent: tool_revision.Intent = undefined;
     writer.read(admission_facts, .{ .session = session_ref }, &facts);
     if (coverage) |args| writer.read(context_bytes, args, &bytes);
     try store_access.runNamed(writer, .{.{ context_bytes, error.CorruptStore }}, error.SessionReadFailed);
+    if (tool_revision.needed(facts.has_mcp, writer.store.catalog().catalog)) {
+        tool_revision.prepare(writer, session_ref, &tool_intent);
+        try writer.run();
+        if (try tool_revision.refresh(writer, selection.session, &tool_intent)) {
+            writer.read(admission_facts, .{ .session = session_ref }, &facts);
+            try writer.run();
+        }
+    }
     if (facts.session.next_position != selection.session.next_position or !facts.model.eql(context_model)) return error.SelectionChanged;
 
     const policy = model_capability.compactionPolicy(facts.model.slice(), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);

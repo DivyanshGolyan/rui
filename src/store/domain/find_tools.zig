@@ -10,15 +10,15 @@ const word_search = @import("../../word_search.zig");
 const rsql = @import("../rsql.zig");
 const action = @import("action.zig");
 const command = @import("command.zig");
-const configuration = @import("configuration.zig");
 const content = @import("content.zig");
 const tool_set = @import("tool_set.zig");
+const tool_revision = @import("tool_revision.zig");
 const Faults = @import("../Store.zig").Faults;
 
 const settings = rsql.Read(.{
-    .sql = "SELECT revision,tool_set_id," ++ tool_set.offeredSetSql("session") ++ " AS loaded_set FROM session WHERE session_ref=?1",
+    .sql = "SELECT revision,tool_set_id," ++ tool_set.offeredSetSql("session") ++ " AS loaded_set,loaded_tool_set_id FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { revision: rsql.Positive, tool_set_id: rsql.Positive, loaded_set: rsql.Positive },
+    .Row = struct { revision: rsql.Positive, tool_set_id: rsql.Positive, loaded_set: rsql.Positive, loaded_tool_set_id: ?rsql.Positive },
     .cardinality = .one,
 });
 
@@ -131,12 +131,6 @@ fn includeLoadedNames(a: anytype, arena: std.mem.Allocator, loaded_set: u64, mat
     }
 }
 
-const update_loaded = rsql.Write(.{
-    .sql = "UPDATE session SET loaded_tool_set_id=?2,revision=?3 WHERE session_ref=@session(?1)",
-    .Args = struct { session: rsql.SessionHead, loaded: ?u64, revision: u64 },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
-});
-
 const FirstLine = struct {
     writer: *std.Io.Writer,
     ended: bool = false,
@@ -228,18 +222,10 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
             try a.run();
             loaded = try tool_set.finishSelection(a, &selected, current.tool_set_id.get());
         }
-        a.write(update_loaded, .{ .session = found.session, .loaded = loaded, .revision = revision });
-        var applied: configuration.Applied = .{
-            .session = .{},
-            .head = found.session,
-            .revision = revision,
-            .instructions_id = null,
-            .output_schema_id = null,
-            .instructions_updated = false,
-            .changes = .initOne(.loaded_tools),
-        };
-        try applied.session.set(&found.session.ref);
-        try configuration.queueConfiguredCommand(a, &applied, key, .configure, &digest, null, null, &answer);
+        try tool_revision.queue(a, found.session, revision, .{
+            .tools = current.tool_set_id.get(),
+            .loaded = if (current.loaded_tool_set_id) |id| id.get() else null,
+        }, .{ .tools = current.tool_set_id.get(), .loaded = loaded }, key, &answer);
     } else {
         try command.queueCommand(a, key, .configure, &found.session.ref, &digest, null, null, &answer);
     }
