@@ -11,7 +11,7 @@ const protocol = @import("../protocol.zig");
 const wire_request = @import("../wire_request.zig");
 const model_capability = @import("../model_capability.zig");
 const product_defaults = @import("../product_defaults.zig");
-const tool_catalog = @import("../tools.zig");
+const tool_defs = @import("../tools.zig");
 const output_format = @import("../output_format.zig");
 const output_decode = @import("../output_decode.zig");
 const retry_policy = @import("../retry_policy.zig");
@@ -140,21 +140,21 @@ const testingSessionReport = tests.testingSessionReport;
 const testingSessionReportWithProfile = tests.testingSessionReportWithProfile;
 const touchForTesting = tests.touchForTesting;
 
-const catalogRecordsWith = store_testing.catalogRecordsWith;
-const sortCatalogRecords = store_testing.sortCatalogRecords;
+const hostToolRecordsWith = store_testing.hostToolRecordsWith;
+const sortHostToolRecords = store_testing.sortHostToolRecords;
 
-/// A catalog with one tool beyond the built-ins, between them by name.
-const testing_record: tool_catalog.Record = .{ .name = "test_tool", .owner = .rui, .description = "A tool only tests offer.", .input_schema = "{\"type\":\"object\"}" };
-const testing_records = catalogRecordsWith(&.{testing_record});
+/// A tool set with one tool beyond the built-ins, between them by name.
+const testing_record: tool_defs.Record = .{ .name = "test_tool", .owner = .rui, .description = "A tool only tests offer.", .input_schema = "{\"type\":\"object\"}" };
+const testing_records = hostToolRecordsWith(&.{testing_record});
 const testing_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [testing_records.len][32]u8 = undefined;
-    for (&testing_records, &out) |*each, *digest| digest.* = tool_catalog.recordDigest(each);
+    for (&testing_records, &out) |*each, *digest| digest.* = tool_defs.recordDigest(each);
     break :blk out;
 };
-const testing_catalog: tool_catalog.Catalog = .{ .records = &testing_records, .digests = &testing_digests };
+const testing_tool_set: tool_defs.HostToolSet = .{ .records = &testing_records, .digests = &testing_digests };
 
-const testingStoreCatalog = store_testing.testingStoreCatalog;
+const testingStoreToolSet = store_testing.testingStoreToolSet;
 const testingStore = store_testing.testingSqliteStore;
 
 test "Store open failures return typed errors without unwinding panics" {
@@ -190,7 +190,7 @@ test "Store target owns SQLite identity routes and neutral diagnostics" {
     const diagnostic = storage.diagnostic();
     try std.testing.expect(diagnostic == .sqlite);
     try std.testing.expectEqualStrings("wal", diagnostic.sqlite.journal_mode.?.slice());
-    try std.testing.expect(storage.catalog().set_id != 0);
+    try std.testing.expect(storage.hostTools().set_id != 0);
     // The SQL callback must borrow final Store storage, not the opening's
     // temporary options or the admitted engine value.
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT rui_served('openai')"));
@@ -201,16 +201,16 @@ test "Store target owns SQLite identity routes and neutral diagnostics" {
 test "Store target SQLite tail failure closes statements and releases the heap limit" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const empty_catalog: tool_catalog.Catalog = .{ .records = &.{}, .digests = &.{} };
+    const empty_tool_set: tool_defs.HostToolSet = .{ .records = &.{}, .digests = &.{} };
     var refused: Store = undefined;
-    try std.testing.expectError(error.InvalidToolCatalog, testingStoreCatalog(&refused, &tmp, std.testing.io, &empty_catalog));
+    try std.testing.expectError(error.InvalidHostToolSet, testingStoreToolSet(&refused, &tmp, std.testing.io, &empty_tool_set));
     try std.testing.expectEqual(@as(i64, 0), c.sqlite3_hard_heap_limit64(-1));
     // Reopening the same file proves statement finalization and connection
     // cleanup, not merely that the error made it to the caller.
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    try std.testing.expect(storage.catalog().set_id != 0);
+    try std.testing.expect(storage.hostTools().set_id != 0);
 }
 
 fn createMaximumCanonicalStore(tmp: *std.testing.TmpDir, path_buffer: []u8) ![]const u8 {
@@ -635,7 +635,7 @@ test "a rolled-back transaction's identities are handed out again, a committed o
 
     // Committing the given-back values in every column: none is handed out
     // again. A Host offering one more tool saves its record at open.
-    try testingStoreCatalog(&storage, &tmp, std.testing.io, &testing_catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &testing_tool_set);
     defer storage.close() catch unreachable;
     const second_session = try configureTestSessionAsk(&storage, "identity-later");
     try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ before.parent.slice(), second_session.slice() });
@@ -1341,7 +1341,7 @@ test "a fresh Store creates a Session with instructions, an output schema and th
     // empty texts share one row); configure has imported nothing yet.
     var texts: std.StringHashMapUnmanaged(void) = .empty;
     defer texts.deinit(std.testing.allocator);
-    for (tool_catalog.built_in.records) |record| for ([_][]const u8{ record.description, record.input_schema }) |text|
+    for (tool_defs.built_in_tool_set.records) |record| for ([_][]const u8{ record.description, record.input_schema }) |text|
         try texts.put(std.testing.allocator, text, {});
     const tool_texts: u64 = texts.count();
     try std.testing.expectEqual(tool_texts, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
@@ -1377,20 +1377,20 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
             };
         }
     };
-    // The Host's catalog: one set of every built-in, saved at open.
-    const built_ins: u64 = tool_catalog.built_in.records.len;
+    // The Host tool set: one set of every built-in, saved at open.
+    const built_ins: u64 = tool_defs.built_in_tool_set.records.len;
     const all_names = comptime names: {
-        var names: [tool_catalog.built_in.records.len][]const u8 = undefined;
-        for (tool_catalog.built_in.records, &names) |record, *name| name.* = record.name;
+        var names: [tool_defs.built_in_tool_set.records.len][]const u8 = undefined;
+        for (tool_defs.built_in_tool_set.records, &names) |record, *name| name.* = record.name;
         const final = names;
         break :names final;
     };
     try std.testing.expectEqual([3]u64{ 1, built_ins, built_ins }, try Tools.counts(&storage));
-    // Two Sessions offering Bash share one set, of the catalog's record.
+    // Two Sessions offering Bash share one set, of the tool set's record.
     const first = try configureTestSessionAsk(&storage, "saved-tools-first");
     const second = try configureTestSessionAsk(&storage, "saved-tools-second");
     try std.testing.expectEqual([3]u64{ 2, built_ins, built_ins + 1 }, try Tools.counts(&storage));
-    // A set with the catalog's members is the catalog's set.
+    // A set with the tool set's members is the Host tool set.
     try Tools.set(&storage, "saved-tools-all", first, &all_names);
     try std.testing.expectEqual([3]u64{ 2, built_ins, built_ins + 1 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-both", second, &.{ "bash", "web_search" });
@@ -1416,12 +1416,12 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
     var tool: historical_domain.HistoricalTool = .{};
     try std.testing.expect(try view.nextTool(&tool));
     try std.testing.expectEqualStrings("bash", tool.name.slice());
-    try std.testing.expectEqual(tool_catalog.Owner.rui, tool.owner);
+    try std.testing.expectEqual(tool_defs.Owner.rui, tool.owner);
     try std.testing.expectEqual(protocol.contentDigest(reworded), tool.description.digest);
-    try std.testing.expectEqual(protocol.contentDigest(tool_catalog.bash_record.input_schema), tool.input_schema.digest);
+    try std.testing.expectEqual(protocol.contentDigest(tool_defs.bash_record.input_schema), tool.input_schema.digest);
     try std.testing.expect(try view.nextTool(&tool));
     try std.testing.expectEqualStrings("web_search", tool.name.slice());
-    try std.testing.expectEqual(tool_catalog.Owner.provider, tool.owner);
+    try std.testing.expectEqual(tool_defs.Owner.provider, tool.owner);
     try std.testing.expect(!try view.nextTool(&tool));
 }
 
@@ -1548,9 +1548,9 @@ test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itse
         },
         // A denied Action never started an Attempt.
         .{
-            .valid = "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,bash_timeout_ms=1,resolution_code='failed'," ++
+            .valid = "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,attempt_timeout_ms=1,resolution_code='failed'," ++
                 "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1,resolved_at=1 WHERE call_ordinal=0",
-            .invalid = "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,bash_timeout_ms=1,resolution_code='denied'," ++
+            .invalid = "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,attempt_timeout_ms=1,resolution_code='denied'," ++
                 "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1,resolved_at=1 WHERE call_ordinal=0",
         },
         // An authorized Action is never denied.
@@ -1700,8 +1700,8 @@ test "each state-bearing row keeps exactly the time its state owns" {
             .invalid = "UPDATE turn SET outcome_code='cancelled',outcome_position=99",
         },
         .{
-            .valid = "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,bash_timeout_ms=1",
-            .invalid = "UPDATE action_operation SET attempt_ordinal=1,bash_timeout_ms=1",
+            .valid = "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,attempt_timeout_ms=1",
+            .invalid = "UPDATE action_operation SET attempt_ordinal=1,attempt_timeout_ms=1",
         },
         .{
             .valid = "UPDATE action_operation SET authorized=1,decided_at=1",
@@ -1817,7 +1817,7 @@ test "a stale Action settlement leaves the Store byte-identical" {
         }
         pub fn commit(self: *@This()) Inner.Error!void {
             var sql: [160]u8 = undefined;
-            const unattempt = std.fmt.bufPrintSentinel(&sql, "UPDATE action_operation SET attempt_ordinal=0,bash_timeout_ms=NULL,attempt_at=NULL,sender_handle=NULL WHERE action_id={d}", .{self.action_id}, 0) catch unreachable;
+            const unattempt = std.fmt.bufPrintSentinel(&sql, "UPDATE action_operation SET attempt_ordinal=0,attempt_timeout_ms=NULL,attempt_at=NULL,sender_handle=NULL WHERE action_id={d}", .{self.action_id}, 0) catch unreachable;
             sqlite.exec(self.inner.store.sqliteDatabase(), unattempt) catch unreachable;
             return self.inner.commit();
         }
@@ -5112,7 +5112,7 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqual(protocol.Provider.codex, settings.provider);
     try std.testing.expectEqualStrings("model-a", settings.model.slice());
     // The frozen tools come back as the Store saved them, in set order.
-    const offered = [_]*const tool_catalog.Record{ tool_catalog.record(.bash), tool_catalog.record(.web_search) };
+    const offered = [_]*const tool_defs.Record{ tool_defs.record(.bash), tool_defs.record(.web_search) };
     try std.testing.expectEqual(@as(u64, offered.len), settings.tool_count);
     var tool: historical_domain.HistoricalTool = .{};
     for (offered) |expected| {
@@ -8519,8 +8519,8 @@ fn freshStoreWithExpectedRows(path: []const u8, root: []const u8) !void {
         const raw = try openRaw(path);
         defer _ = c.sqlite3_close(raw);
         try sqlite.exec(raw, "PRAGMA foreign_keys=OFF");
-        // The rows hold the catalog the open saved, under their own ids.
-        try sqlite.exec(raw, "DELETE FROM host_catalog; DELETE FROM tool_set_member; DELETE FROM tool_set; DELETE FROM tool_record; DELETE FROM content");
+        // The rows hold the tool set the open saved, under their own ids.
+        try sqlite.exec(raw, "DELETE FROM host_tool_set; DELETE FROM tool_set_member; DELETE FROM tool_set; DELETE FROM tool_record; DELETE FROM content");
         try sqlite.exec(raw, store_testing.expected_rows);
         const violations = try sqlite.prepare(raw, "PRAGMA foreign_key_check");
         defer _ = c.sqlite3_finalize(violations);
@@ -9131,7 +9131,7 @@ test "a message_agent call of the longest escaped text is read back past one con
     const gpa = std.testing.allocator;
     // Every byte of the text is a quote, so the arguments hold twice the
     // text and are read in more than one window.
-    const text = try gpa.alloc(u8, tool_catalog.core_tools.message_agent_max_text_bytes);
+    const text = try gpa.alloc(u8, tool_defs.core_tools.message_agent_max_text_bytes);
     defer gpa.free(text);
     @memset(text, '"');
     var decoded: std.ArrayList(u8) = .empty;
@@ -9155,7 +9155,7 @@ test "a message_agent call of the longest escaped text is read back past one con
     defer gpa.free(bytes);
     try storage.readCoreArguments(&input, bytes);
     try std.testing.expectEqualStrings(decoded.items, bytes);
-    var source: tool_catalog.core_tools.SliceSource = .{ .bytes = bytes };
+    var source: tool_defs.core_tools.SliceSource = .{ .bytes = bytes };
     const Text = struct {
         list: std.ArrayList(u8) = .empty,
 
@@ -9165,7 +9165,7 @@ test "a message_agent call of the longest escaped text is read back past one con
     };
     var read_text: Text = .{};
     defer read_text.list.deinit(gpa);
-    const check = try tool_catalog.core_tools.checkMessageAgent(&source, &read_text);
+    const check = try tool_defs.core_tools.checkMessageAgent(&source, &read_text);
     try std.testing.expect(check == .accepted);
     try std.testing.expectEqualStrings(text, read_text.list.items);
     try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(input.binding, check.accepted.id.slice(), read_text.list.items, .{}));
@@ -9528,43 +9528,43 @@ test "a start_agent call creates its agent where its caller works, with the task
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE CAST(c.payload AS TEXT) LIKE 'spec.permissionMode:%'", .{}));
 }
 
-test "a catalog at its bound saves and opens again" {
+test "a tool set at its bound saves and opens again" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     // Reserve all required built-ins (including skill), then fill the rest
-    // with independent synthetic records up to the catalog's declared bound.
-    const count = tool_catalog.max_catalog_records - tool_catalog.built_in.records.len;
+    // with independent synthetic records up to the tool set's declared bound.
+    const count = tool_defs.max_host_tool_records - tool_defs.built_in_tool_set.records.len;
     var names: [count][9]u8 = undefined;
-    var records: [tool_catalog.max_catalog_records]tool_catalog.Record = undefined;
-    var digests: [tool_catalog.max_catalog_records][32]u8 = undefined;
-    @memcpy(records[0..tool_catalog.built_in.records.len], tool_catalog.built_in.records);
-    for (&names, records[tool_catalog.built_in.records.len..], 0..) |*name, *record, index| {
+    var records: [tool_defs.max_host_tool_records]tool_defs.Record = undefined;
+    var digests: [tool_defs.max_host_tool_records][32]u8 = undefined;
+    @memcpy(records[0..tool_defs.built_in_tool_set.records.len], tool_defs.built_in_tool_set.records);
+    for (&names, records[tool_defs.built_in_tool_set.records.len..], 0..) |*name, *record, index| {
         _ = try std.fmt.bufPrint(name, "tool_{d:0>4}", .{index});
         record.* = .{ .name = name, .owner = .rui, .description = "A tool among many.", .input_schema = "{\"type\":\"object\"}" };
     }
-    sortCatalogRecords(&records);
-    for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
-    const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+    sortHostToolRecords(&records);
+    for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+    const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
     var storage: Store = undefined;
-    try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &host_tool_set);
     try storage.close();
-    try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &host_tool_set);
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(u64, tool_catalog.max_catalog_records), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
+    try std.testing.expectEqual(@as(u64, tool_defs.max_host_tool_records), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
 }
 
-/// The testing catalog with an MCP server's tool beside it.
-const mcp_record: tool_catalog.Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page from the docs server.", .input_schema = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}}}" };
-const mcp_records = catalogRecordsWith(&.{ mcp_record, testing_record });
+/// The testing tool set with an MCP server's tool beside it.
+const mcp_record: tool_defs.Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page from the docs server.", .input_schema = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}}}" };
+const mcp_records = hostToolRecordsWith(&.{ mcp_record, testing_record });
 const mcp_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [mcp_records.len][32]u8 = undefined;
-    for (&mcp_records, &out) |*each, *digest| digest.* = tool_catalog.recordDigest(each);
+    for (&mcp_records, &out) |*each, *digest| digest.* = tool_defs.recordDigest(each);
     break :blk out;
 };
-const mcp_catalog: tool_catalog.Catalog = .{ .records = &mcp_records, .digests = &mcp_digests };
+const mcp_tool_set: tool_defs.HostToolSet = .{ .records = &mcp_records, .digests = &mcp_digests };
 
-fn expectCatalog(expected: *const tool_catalog.Catalog, saved: *const store_core.SavedCatalog) !void {
+fn expectHostToolSet(expected: *const tool_defs.HostToolSet, saved: *const store_core.SavedHostToolSet) !void {
     try std.testing.expectEqual(expected.records.len, saved.records.len);
     for (expected.records, saved.records, expected.digests, saved.digests) |want, got, want_digest, got_digest| {
         try std.testing.expectEqualStrings(want.name, got.name);
@@ -9576,59 +9576,59 @@ fn expectCatalog(expected: *const tool_catalog.Catalog, saved: *const store_core
     }
 }
 
-test "a Store opened without a catalog reads back the last one saved, an MCP server's tools included" {
+test "a Store opened without a tool set reads back the last one saved, an MCP server's tools included" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
-    try testingStoreCatalog(&storage, &tmp, std.testing.io, null);
-    try std.testing.expect(try storage.readCatalog(std.testing.allocator) == null);
-    try storage.saveCatalog(&mcp_catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+    try std.testing.expect(try storage.readHostToolSet(std.testing.allocator) == null);
+    try storage.saveHostToolSet(&mcp_tool_set);
     try storage.close();
 
-    try testingStoreCatalog(&storage, &tmp, std.testing.io, null);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, null);
     {
-        var saved = (try storage.readCatalog(std.testing.allocator)).?;
+        var saved = (try storage.readHostToolSet(std.testing.allocator)).?;
         defer saved.deinit(std.testing.allocator);
-        try expectCatalog(&mcp_catalog, &saved);
+        try expectHostToolSet(&mcp_tool_set, &saved);
         // The Host saves what it read when it reaches no server.
-        const read = saved.catalog();
-        try storage.saveCatalog(&read);
+        const read = saved.toolSet();
+        try storage.saveHostToolSet(&read);
     }
-    // A later catalog without the server's tool replaces it, and saving
+    // A later tool set without the server's tool replaces it, and saving
     // the earlier one again finds its set.
-    try storage.saveCatalog(&testing_catalog);
+    try storage.saveHostToolSet(&testing_tool_set);
     {
-        var saved = (try storage.readCatalog(std.testing.allocator)).?;
+        var saved = (try storage.readHostToolSet(std.testing.allocator)).?;
         defer saved.deinit(std.testing.allocator);
-        try expectCatalog(&testing_catalog, &saved);
+        try expectHostToolSet(&testing_tool_set, &saved);
     }
     const sets = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{});
-    try storage.saveCatalog(&mcp_catalog);
+    try storage.saveHostToolSet(&mcp_tool_set);
     try std.testing.expectEqual(sets, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{}));
-    var saved = (try storage.readCatalog(std.testing.allocator)).?;
+    var saved = (try storage.readHostToolSet(std.testing.allocator)).?;
     defer saved.deinit(std.testing.allocator);
-    try expectCatalog(&mcp_catalog, &saved);
+    try expectHostToolSet(&mcp_tool_set, &saved);
     try storage.close();
 }
 
-test "a saved catalog whose text no longer matches its digest fences the Store" {
+test "a saved tool set whose text no longer matches its digest fences the Store" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
-    try testingStoreCatalog(&storage, &tmp, std.testing.io, null);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, null);
     defer storage.close() catch unreachable;
-    try storage.saveCatalog(&mcp_catalog);
+    try storage.saveHostToolSet(&mcp_tool_set);
     try sqlite.exec(storage.sqliteDatabase(), "UPDATE content SET payload=CAST(upper(CAST(payload AS TEXT)) AS BLOB) WHERE content_id=(SELECT description_content_id FROM tool_record WHERE owner='mcp')");
-    try std.testing.expectError(error.CorruptStore, storage.readCatalog(std.testing.allocator));
+    try std.testing.expectError(error.CorruptStore, storage.readHostToolSet(std.testing.allocator));
     try std.testing.expect(storage.isFenced());
-    try std.testing.expectError(error.StoreFenced, storage.readCatalog(std.testing.allocator));
+    try std.testing.expectError(error.StoreFenced, storage.readHostToolSet(std.testing.allocator));
 }
 
 test "a Session offering an MCP server's tool is listed, reported and settled" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
-    try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -9678,14 +9678,14 @@ test "a Session offering an MCP server's tool is listed, reported and settled" {
 }
 
 test "a record names a server exactly when an MCP server owns it" {
-    try std.testing.expect(tool_catalog.validServer(&mcp_record));
-    try std.testing.expect(!tool_catalog.validServer(&.{ .name = "fetch_page", .owner = .mcp }));
-    try std.testing.expect(!tool_catalog.validServer(&.{ .name = "fetch_page", .owner = .mcp, .server = "docs server" }));
-    try std.testing.expect(!tool_catalog.validServer(&.{ .name = "bash", .owner = .rui, .server = "docs" }));
+    try std.testing.expect(tool_defs.validServer(&mcp_record));
+    try std.testing.expect(!tool_defs.validServer(&.{ .name = "fetch_page", .owner = .mcp }));
+    try std.testing.expect(!tool_defs.validServer(&.{ .name = "fetch_page", .owner = .mcp, .server = "docs server" }));
+    try std.testing.expect(!tool_defs.validServer(&.{ .name = "bash", .owner = .rui, .server = "docs" }));
     // Moving servers makes another record.
     var moved = mcp_record;
     moved.server = "wiki";
-    try std.testing.expect(!std.mem.eql(u8, &tool_catalog.recordDigest(&mcp_record), &tool_catalog.recordDigest(&moved)));
+    try std.testing.expect(!std.mem.eql(u8, &tool_defs.recordDigest(&mcp_record), &tool_defs.recordDigest(&moved)));
 }
 
 test "MCP Actions follow ask and bypass permission and continue after resolution" {
@@ -9693,7 +9693,7 @@ test "MCP Actions follow ask and bypass permission and continue after resolution
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
-        try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+        try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
         defer storage.close() catch unreachable;
         var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
         const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -9754,7 +9754,7 @@ test "MCP and Bash admission seek each Action's call without scanning calls" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
-    try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
     defer storage.close() catch unreachable;
     inline for ([_][:0]const u8{ next_action_attempt_sql, action_domain.next_mcp_action_sql }, 0..) |sql, index| {
         const statement = try sqlite.prepare(storage.sqliteDatabase(), "EXPLAIN QUERY PLAN " ++ sql);
@@ -9793,7 +9793,7 @@ test "MCP invalid and removed calls share their batch rejection lookup rounds" {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
-            try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+            try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
             defer storage.close() catch unreachable;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             var command = try completeConfiguration("mcp-rounds-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
@@ -9842,7 +9842,7 @@ test "MCP permission and core authorization coexist in one Turn" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
-    try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     var command = try completeConfiguration("mixed-core-mcp", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
@@ -9897,7 +9897,7 @@ test "MCP work selected before its parent stops yields to the owed child stop" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
-    try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
     defer storage.close() catch unreachable;
     const parent = try configureTestSession(&storage, "mcp-parent");
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -9954,7 +9954,7 @@ test "an empty MCP selection does not visit queued Bash Actions from a Bash-only
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
-        try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+        try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
         defer storage.close() catch unreachable;
         var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
         var configuration = try completeConfiguration("bash-population", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
@@ -9985,7 +9985,7 @@ test "MCP attempts serialize Sessions and recover without replay" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
-    try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
     defer storage.close() catch unreachable;
     var sessions: [2]protocol.Bounded(protocol.max_session_bytes) = undefined;
     for (&sessions, 0..) |*session, index| {
@@ -10014,9 +10014,9 @@ test "MCP attempts serialize Sessions and recover without replay" {
         record.input_schema = "{}";
     }
     var replacement_digests: [mcp_records.len][32]u8 = undefined;
-    for (&replacement_records, &replacement_digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
-    const replacement_catalog: tool_catalog.Catalog = .{ .records = &replacement_records, .digests = &replacement_digests };
-    try storage.saveCatalog(&replacement_catalog);
+    for (&replacement_records, &replacement_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+    const replacement_tool_set: tool_defs.HostToolSet = .{ .records = &replacement_records, .digests = &replacement_digests };
+    try storage.saveHostToolSet(&replacement_tool_set);
     const first = (try storage.nextCoreWork()).?.mcp.action_id;
     // Selection repeats until admission: later calls cannot overtake it.
     try std.testing.expectEqual(first, (try storage.nextCoreWork()).?.mcp.action_id);
@@ -10993,7 +10993,7 @@ test "Bash admission entry points agree on readiness" {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
-            try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+            try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
             defer storage.close() catch unreachable;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             var configuration = try completeConfiguration("bash-matrix", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
@@ -11011,7 +11011,7 @@ test "Bash admission entry points agree on readiness" {
                 .ready => {},
                 .unauthorized => try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET authorized=0,decided_at=NULL", .{}),
                 .resolved => try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET resolution_code='failed',resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1,resolved_at=1", .{}),
-                .attempted => try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,bash_timeout_ms=1", .{}),
+                .attempted => try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,attempt_timeout_ms=1", .{}),
                 .closed => try store_testing.sqlite_only.exec(&storage, "UPDATE turn SET outcome_code='cancelled',outcome_at=1", .{}),
                 .stopped => try store_testing.sqlite_only.exec(&storage, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) SELECT 'bash-matrix',session_ref,turn_id,0,1 FROM turn", .{}),
             }

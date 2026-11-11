@@ -266,7 +266,7 @@ fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configu
     if (protocol.missingCreatingSetting(configuration, inherits_parent)) |name|
         return .{ .rejected = try std.fmt.allocPrint(arena, "spec.{s} is required", .{name}) };
     // These are semantic admission checks, not a second spec grammar. The
-    // Store still owns catalog availability and parent permission/tool narrowing.
+    // Store still owns tool set availability and parent permission/tool narrowing.
     if (configuration.provider.state == .value and std.meta.stringToEnum(protocol.Provider, configuration.provider.value.slice()) == null)
         return refused("spec.provider must be a provider name");
     if (configuration.workspace.state == .value and configuration.workspace.value.len == 0)

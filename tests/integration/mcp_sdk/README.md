@@ -7,8 +7,8 @@ Pass the bearer token as the first argument (or `MCP_TOKEN`).
 Every route requires that token.
 
 The launch-frame suite runs `npm ci --ignore-scripts` once and verifies that
-Host startup catalogs `echo`, `fail`, `slow` and `progress` under `drift-sdk`.
-The current public API has no catalog-list route, so each name and owning server
+Host startup adds `echo`, `fail`, `slow` and `progress` to the tool set under `drift-sdk`.
+The current public API has no tool-set listing route, so each name and owning server
 is verified through the Host's structured tool-name collision refusal.
 Build-driven runs require Node; direct local runs may skip when Node/npm is absent.
 
